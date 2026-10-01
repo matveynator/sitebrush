@@ -9550,7 +9550,7 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	}
 	// Unlocking a public protected page does not mutate the administrator account.
 	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions &&
-		hasSitebrushSessionCookie(r) && r.URL.RawQuery != "page_password_unlock" &&
+		hasSitebrushSessionCookie(r) && !publicPagePasswordUnlockRequest(r) &&
 		!adminMutationSourceAllowed(r) && !adminMultipartMutationRequest(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
@@ -14915,6 +14915,15 @@ func hasQueryFlag(r *http.Request, flagName string) bool {
 	}
 	_, hasFlag := r.URL.Query()[flagName]
 	return hasFlag
+}
+
+func publicPagePasswordUnlockRequest(r *http.Request) bool {
+	if r == nil || r.Method != http.MethodPost {
+		return false
+	}
+	query := r.URL.Query()
+	unlockValues, found := query["page_password_unlock"]
+	return len(query) == 1 && found && len(unlockValues) == 1 && unlockValues[0] == ""
 }
 
 func sessionCSRFMutationAllowed(r *http.Request) bool {

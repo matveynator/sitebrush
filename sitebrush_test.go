@@ -6526,17 +6526,19 @@ func TestPagePasswordUnlockWithAdminSessionAndOpaqueOrigin(t *testing.T) {
 	}
 	adminCookie := newAdminSessionCookie(t, application, "admin@example.com")
 	form := url.Values{"password": {"secret"}}
-	unlockRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?page_password_unlock", strings.NewReader(form.Encode()))
-	unlockRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	unlockRequest.Header.Set("Origin", "null")
-	unlockRequest.AddCookie(adminCookie)
-	unlockResponse := httptest.NewRecorder()
-	application.route(unlockResponse, unlockRequest)
-	if unlockResponse.Code != http.StatusFound {
-		t.Fatalf("unlock with admin cookie status=%d body=%q", unlockResponse.Code, unlockResponse.Body.String())
-	}
-	if len(unlockResponse.Result().Cookies()) == 0 {
-		t.Fatal("unlock did not set a protected-page cookie")
+	for _, unlockQuery := range []string{"page_password_unlock", "page_password_unlock="} {
+		unlockRequest := httptest.NewRequest(http.MethodPost, "http://localhost/?"+unlockQuery, strings.NewReader(form.Encode()))
+		unlockRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		unlockRequest.Header.Set("Origin", "null")
+		unlockRequest.AddCookie(adminCookie)
+		unlockResponse := httptest.NewRecorder()
+		application.route(unlockResponse, unlockRequest)
+		if unlockResponse.Code != http.StatusFound {
+			t.Fatalf("unlock query=%q with admin cookie status=%d body=%q", unlockQuery, unlockResponse.Code, unlockResponse.Body.String())
+		}
+		if len(unlockResponse.Result().Cookies()) == 0 {
+			t.Fatalf("unlock query=%q did not set a protected-page cookie", unlockQuery)
+		}
 	}
 
 	mixedRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?page_password_unlock&freeze", strings.NewReader(form.Encode()))
