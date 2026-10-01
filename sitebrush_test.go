@@ -18662,6 +18662,65 @@ func TestSecurityBoundaryMultipartAdminFormAcceptsSessionCSRFWithOpaqueOrigin(t 
 	}
 }
 
+func TestSecurityBoundaryFileUploadAcceptsSessionCSRFWithOpaqueOrigin(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "password"); err != nil {
+		t.Fatal(err)
+	}
+	adminCookie := newAdminSessionCookie(t, application, "admin@example.com")
+	csrfRequest := httptest.NewRequest(http.MethodGet, "http://localhost/?files", nil)
+	csrfRequest.AddCookie(adminCookie)
+	for _, testCase := range []struct {
+		name   string
+		token  string
+		status int
+	}{
+		{name: "missing token", status: http.StatusForbidden},
+		{name: "valid token", token: accountCSRF(csrfRequest), status: http.StatusOK},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			var body bytes.Buffer
+			writer := multipart.NewWriter(&body)
+			if err := writer.WriteField("action", "upload"); err != nil {
+				t.Fatal(err)
+			}
+			if testCase.token != "" {
+				if err := writer.WriteField("account_csrf", testCase.token); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fileWriter, err := writer.CreateFormFile("upload_files", "opaque-origin.txt")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fileWriter.Write([]byte("uploaded content")); err != nil {
+				t.Fatal(err)
+			}
+			if err := writer.Close(); err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodPost, "http://localhost/?files", &body)
+			request.Header.Set("Content-Type", writer.FormDataContentType())
+			request.Header.Set("Accept", "application/json")
+			request.Header.Set("Origin", "null")
+			request.AddCookie(adminCookie)
+			response := httptest.NewRecorder()
+			application.route(response, request)
+			if response.Code != testCase.status {
+				t.Fatalf("upload status=%d want=%d body=%q", response.Code, testCase.status, response.Body.String())
+			}
+			if testCase.status == http.StatusOK {
+				var uploaded struct {
+					Files []string `json:"files"`
+				}
+				if err := json.Unmarshal(response.Body.Bytes(), &uploaded); err != nil || len(uploaded.Files) != 1 {
+					t.Fatalf("uploaded files=%v error=%v", uploaded.Files, err)
+				}
+			}
+		})
+	}
+}
+
 func TestSecurityBoundaryFreezeAcceptsSessionCSRFWithOpaqueOrigin(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "password"); err != nil {
