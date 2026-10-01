@@ -681,6 +681,7 @@
       const request = new XMLHttpRequest();
       const body = new FormData();
       body.append('action', 'upload');
+      body.append('account_csrf', uploadFormElement.elements.namedItem('account_csrf').value);
       for (const selectedFile of selectedFiles) {
         appendUploadFile(body, selectedFile);
       }

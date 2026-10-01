@@ -4865,6 +4865,31 @@ func TestLocalhostWithoutSiteDatabaseOpensRegistration(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(siteDatabaseRootPath(dbPath), domainStorageName("localhost")+".db")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("registration redirect created site database: %v", err)
 	}
+	staleCookie := &http.Cookie{Name: "sitebrush_session", Value: "stale"}
+	setupRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?register", nil)
+	setupRequest.RemoteAddr = "[::1]:1234"
+	setupRequest.AddCookie(staleCookie)
+	setupResponse := httptest.NewRecorder()
+	application.route(setupResponse, setupRequest)
+	csrfToken := accountCSRF(setupRequest)
+	if setupResponse.Code != http.StatusOK || !strings.Contains(setupResponse.Body.String(), `name="account_csrf" value="`+csrfToken+`"`) {
+		t.Fatalf("local setup with stale cookie status=%d token_present=%t", setupResponse.Code, strings.Contains(setupResponse.Body.String(), csrfToken))
+	}
+	form := url.Values{"email": {"admin@example.com"}, "password": {"test-password"}, "password_confirm": {"test-password"}, "account_csrf": {csrfToken}}
+	registerRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?register", strings.NewReader(form.Encode()))
+	registerRequest.RemoteAddr = "[::1]:1234"
+	registerRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	registerRequest.Header.Set("Origin", "null")
+	registerRequest.AddCookie(staleCookie)
+	registerResponse := httptest.NewRecorder()
+	application.route(registerResponse, registerRequest)
+	if registerResponse.Code != http.StatusSeeOther {
+		t.Fatalf("local registration with stale cookie status=%d body=%q", registerResponse.Code, registerResponse.Body.String())
+	}
+	var adminCount int
+	if err := application.db.QueryRowContext(contextWithDomain(context.Background(), "localhost"), `SELECT COUNT(1) FROM users WHERE domain=? AND is_admin=1`, "localhost").Scan(&adminCount); err != nil || adminCount != 1 {
+		t.Fatalf("local administrator count=%d error=%v", adminCount, err)
+	}
 }
 
 func TestRegisterCreatesSiteDatabaseOnlyAfterConfirmedVerifiedDomain(t *testing.T) {
@@ -13226,6 +13251,7 @@ func TestFilesPageUploadButtonOpensPickerAndSelectedFilesUploadImmediately(t *te
 		"requestFileSelection();",
 		"uploadInputElement.addEventListener('change'",
 		"uploadSelectedFiles(Array.from(uploadInputElement.files));",
+		"body.append('account_csrf', uploadFormElement.elements.namedItem('account_csrf').value);",
 		"request.open('POST', currentFilesPath + '?files');",
 		"currentFilesPath + '?native_pick_files'",
 	}

@@ -12433,6 +12433,10 @@ func (a *App) enforceAdminIPAllowlist(w http.ResponseWriter, r *http.Request, do
 	if errors.Is(err, sql.ErrNoRows) {
 		return true
 	}
+	if errors.Is(err, errSiteDatabaseMissing) && a.isRegistrationOnboardingRequest(r, domain) {
+		// A deleted site database cannot contain the cookie's former session.
+		return true
+	}
 	if err != nil {
 		http.Error(w, "account access temporarily unavailable", http.StatusServiceUnavailable)
 		return false
