@@ -9548,8 +9548,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.awaitAccountHTTPS(w, r)
 		return
 	}
+	// Unlocking a public protected page does not mutate the administrator account.
 	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions &&
-		hasSitebrushSessionCookie(r) && !adminMutationSourceAllowed(r) && !adminMultipartMutationRequest(r) {
+		hasSitebrushSessionCookie(r) && r.URL.RawQuery != "page_password_unlock" &&
+		!adminMutationSourceAllowed(r) && !adminMultipartMutationRequest(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}

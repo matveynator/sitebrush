@@ -6516,6 +6516,40 @@ func TestUnlockedProtectedGuestCanUsePublishedPageFallback(t *testing.T) {
 	}
 }
 
+func TestPagePasswordUnlockWithAdminSessionAndOpaqueOrigin(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "password"); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.setPagePasswordRule(context.Background(), "localhost", "/", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	adminCookie := newAdminSessionCookie(t, application, "admin@example.com")
+	form := url.Values{"password": {"secret"}}
+	unlockRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?page_password_unlock", strings.NewReader(form.Encode()))
+	unlockRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	unlockRequest.Header.Set("Origin", "null")
+	unlockRequest.AddCookie(adminCookie)
+	unlockResponse := httptest.NewRecorder()
+	application.route(unlockResponse, unlockRequest)
+	if unlockResponse.Code != http.StatusFound {
+		t.Fatalf("unlock with admin cookie status=%d body=%q", unlockResponse.Code, unlockResponse.Body.String())
+	}
+	if len(unlockResponse.Result().Cookies()) == 0 {
+		t.Fatal("unlock did not set a protected-page cookie")
+	}
+
+	mixedRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?page_password_unlock&freeze", strings.NewReader(form.Encode()))
+	mixedRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	mixedRequest.Header.Set("Origin", "https://attacker.example")
+	mixedRequest.AddCookie(adminCookie)
+	mixedResponse := httptest.NewRecorder()
+	application.route(mixedResponse, mixedRequest)
+	if mixedResponse.Code != http.StatusForbidden {
+		t.Fatalf("mixed query bypassed admin origin check: status=%d body=%q", mixedResponse.Code, mixedResponse.Body.String())
+	}
+}
+
 func TestPagePasswordProtectionCanBeAddedAndRemovedFromMenuAction(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old"); err != nil {
