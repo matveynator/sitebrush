@@ -32,7 +32,7 @@
   {{if .IsAdmin}}
   <section class="missing-page-secondary-actions">
   <div class="missing-page-actions">
-  <form method="post" action="{{.Path}}?grab" data-grab-form class="card card-body missing-page-form missing-page-copy-form">
+  <form method="post" action="{{.Path}}?grab" data-grab-form class="card card-body missing-page-form missing-page-copy-form"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
     <div class="missing-page-form-title">
       <img src="/p/static/copy.png" class="section-icon" alt="">
       <label class="form-label" for="source_url">{{index .T "missing_copy_from_site_label"}}</label>
@@ -88,7 +88,7 @@
     </div>
   </form>
 
-  <form class="card card-body missing-page-form missing-page-backup-form" method="post" enctype="multipart/form-data" action="{{.Path}}?backup_import">
+  <form class="card card-body missing-page-form missing-page-backup-form" method="post" enctype="multipart/form-data" action="{{.Path}}?backup_import"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
     <div class="missing-page-form-title">
       <img src="/p/static/backup.png" class="section-icon" alt="">
       <label class="form-label" for="backup_zip">{{index .T "missing_restore_zip_label"}}</label>

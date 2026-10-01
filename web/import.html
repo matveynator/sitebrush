@@ -17,7 +17,7 @@
   <header class="page-header">
     <h1 class="section-heading"><img src="/p/static/copy.png" class="section-icon" alt=""><span>{{index .T "import_page_title"}}</span></h1>
   </header>
-  <form class="card card-body authentication-card edit-mode-copy-form" method="post" action="?import">
+  <form class="card card-body authentication-card edit-mode-copy-form" method="post" action="?import"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
     <input class="form-control" type="url" inputmode="url" name="url" placeholder="https://example.com" required>
     <input class="form-control" type="text" inputmode="numeric" name="source_ip" placeholder="{{index .T "import_source_ip_placeholder"}}">
     <input class="form-control" type="text" name="path" placeholder="/imported">

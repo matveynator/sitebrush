@@ -363,7 +363,7 @@
 
             <td data-label="{{index $.T "revisions_table_action"}}">
               <div class="revision-action-list">
-                <form method="post" action="{{$.Path}}?revision_toggle" class="d-inline">
+                <form method="post" action="{{$.Path}}?revision_toggle" class="d-inline"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
                   <input type="hidden" name="id" value="{{.ID}}"/>
                   <input type="hidden" name="path" value="{{.PagePath}}"/>
 

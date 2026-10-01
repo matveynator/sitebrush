@@ -4832,6 +4832,41 @@ func TestRegisterRejectsUnverifiedDomainBeforeCreatingSiteDatabase(t *testing.T)
 	}
 }
 
+func TestLocalhostWithoutSiteDatabaseOpensRegistration(t *testing.T) {
+	storagePath := t.TempDir()
+	dbPath := filepath.Join(storagePath, defaultDBPath)
+	router := newPerSiteDBRouter(siteDatabaseRootPath(dbPath), "localhost", func(ctx context.Context, rawDB *sql.DB, domain string) error {
+		application := &App{db: rawDB, storagePath: storagePath, dbPath: dbPath, grabTracker: newGrabProgressTracker()}
+		return application.migrate(contextWithDomain(ctx, domain))
+	}, false)
+	t.Cleanup(func() { _ = router.Close() })
+	waitSiteDBRouterStartup(t, router)
+	application := &App{db: router, siteDatabaseRouter: router, storagePath: storagePath, dbPath: dbPath}
+	staticPath := filepath.Join(application.domainStaticDir("localhost"), staticRelativePathForPage("/"))
+	if err := os.MkdirAll(filepath.Dir(staticPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(staticPath, []byte("old published page"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, staleSession := range []bool{false, true} {
+		request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/", nil)
+		request.RemoteAddr = "[::1]:1234"
+		if staleSession {
+			request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "stale"})
+		}
+		response := httptest.NewRecorder()
+		application.route(response, request)
+		if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/?register" {
+			t.Fatalf("missing local database stale_session=%t status=%d location=%q body=%q", staleSession, response.Code, response.Header().Get("Location"), response.Body.String())
+		}
+	}
+	if _, err := os.Stat(filepath.Join(siteDatabaseRootPath(dbPath), domainStorageName("localhost")+".db")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("registration redirect created site database: %v", err)
+	}
+}
+
 func TestRegisterCreatesSiteDatabaseOnlyAfterConfirmedVerifiedDomain(t *testing.T) {
 	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
 	const domain = "a.sitebrush.com"
@@ -11943,7 +11978,6 @@ func TestAIUnscopedCapabilityKeepsFullSiteAccess(t *testing.T) {
 	}
 }
 
-
 func TestAppAIStoreStopsAlreadyCanceledTaskBeforeDatabaseAccess(t *testing.T) {
 	application, _ := newTestApplication(t)
 	store := &appAIStore{application: application}
@@ -18196,9 +18230,9 @@ func TestSecurityBoundaryAuthenticatedMutationSaveAllowsSessionCSRFWhenBrowserOr
 	csrfToken := accountCSRF(csrfRequest)
 
 	form := url.Values{
-		"path": {"/"},
-		"title": {"Home"},
-		"html": {"<p>saved</p>"},
+		"path":         {"/"},
+		"title":        {"Home"},
+		"html":         {"<p>saved</p>"},
 		"account_csrf": {csrfToken},
 	}
 	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?save", strings.NewReader(form.Encode()))
@@ -18428,6 +18462,133 @@ func TestSecurityBoundaryAuthenticatedMutationAllowsSameOrigin(t *testing.T) {
 
 	if response.Code == http.StatusForbidden {
 		t.Fatalf("same-origin admin mutation was rejected: %q", response.Body.String())
+	}
+}
+
+func TestSecurityBoundaryRevisionToggleAcceptsSessionCSRFWithOpaqueOrigin(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "password"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := rawDB.Exec(`INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, "localhost", "/", "<p>revision</p>", time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		t.Fatal(err)
+	}
+	revisionID, _ := result.LastInsertId()
+	adminCookie := newAdminSessionCookie(t, application, "admin@example.com")
+	csrfRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/", nil)
+	csrfRequest.AddCookie(adminCookie)
+	csrfToken := accountCSRF(csrfRequest)
+
+	for _, testCase := range []struct {
+		name   string
+		token  string
+		status int
+		active int
+	}{
+		{name: "missing token", status: http.StatusForbidden, active: 1},
+		{name: "wrong token", token: "wrong", status: http.StatusForbidden, active: 1},
+		{name: "valid token", token: csrfToken, status: http.StatusFound, active: 0},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			form := url.Values{"id": {strconv.FormatInt(revisionID, 10)}, "path": {"/"}, "enable": {"0"}}
+			if testCase.token != "" {
+				form.Set("account_csrf", testCase.token)
+			}
+			request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?revision_toggle", strings.NewReader(form.Encode()))
+			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			request.Header.Set("Origin", "null")
+			request.AddCookie(adminCookie)
+			response := httptest.NewRecorder()
+			application.route(response, request)
+			if response.Code != testCase.status {
+				t.Fatalf("status=%d want=%d body=%q", response.Code, testCase.status, response.Body.String())
+			}
+			var active int
+			if err := rawDB.QueryRow(`SELECT is_active FROM revisions WHERE id=?`, revisionID).Scan(&active); err != nil {
+				t.Fatal(err)
+			}
+			if active != testCase.active {
+				t.Fatalf("revision active=%d want=%d", active, testCase.active)
+			}
+		})
+	}
+}
+
+func TestSecurityBoundaryMultipartAdminFormAcceptsSessionCSRFWithOpaqueOrigin(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "password"); err != nil {
+		t.Fatal(err)
+	}
+	adminCookie := newAdminSessionCookie(t, application, "admin@example.com")
+	csrfRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/", nil)
+	csrfRequest.AddCookie(adminCookie)
+	csrfToken := accountCSRF(csrfRequest)
+	for _, testCase := range []struct {
+		name   string
+		token  string
+		status int
+	}{
+		{name: "missing token", status: http.StatusForbidden},
+		{name: "valid token", token: csrfToken, status: http.StatusFound},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			var body bytes.Buffer
+			writer := multipart.NewWriter(&body)
+			_ = writer.WriteField("action", "delete_selected")
+			if testCase.token != "" {
+				_ = writer.WriteField("account_csrf", testCase.token)
+			}
+			if err := writer.Close(); err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?files", &body)
+			request.Header.Set("Content-Type", writer.FormDataContentType())
+			request.Header.Set("Origin", "null")
+			request.AddCookie(adminCookie)
+			response := httptest.NewRecorder()
+			application.route(response, request)
+			if response.Code != testCase.status {
+				t.Fatalf("status=%d want=%d body=%q", response.Code, testCase.status, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestSecurityBoundaryFreezeAcceptsSessionCSRFWithOpaqueOrigin(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "password"); err != nil {
+		t.Fatal(err)
+	}
+	adminCookie := newAdminSessionCookie(t, application, "admin@example.com")
+	csrfRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/", nil)
+	csrfRequest.AddCookie(adminCookie)
+	csrfToken := accountCSRF(csrfRequest)
+
+	for _, testCase := range []struct {
+		name   string
+		token  string
+		status int
+		frozen bool
+	}{
+		{name: "missing token", status: http.StatusForbidden},
+		{name: "valid token", token: csrfToken, status: http.StatusFound, frozen: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			form := url.Values{}
+			if testCase.token != "" {
+				form.Set("account_csrf", testCase.token)
+			}
+			request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?freeze", strings.NewReader(form.Encode()))
+			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			request.Header.Set("Origin", "null")
+			request.AddCookie(adminCookie)
+			response := httptest.NewRecorder()
+			application.route(response, request)
+			if response.Code != testCase.status || application.isDomainFrozen(request.Context(), "localhost") != testCase.frozen {
+				t.Fatalf("status=%d frozen=%t want status=%d frozen=%t", response.Code, application.isDomainFrozen(request.Context(), "localhost"), testCase.status, testCase.frozen)
+			}
+		})
 	}
 }
 
@@ -19168,7 +19329,6 @@ func TestHTTPServerRejectsConflictingContentLengthBeforeHandler(t *testing.T) {
 
 // END HTTP request parsing security tests.
 
-
 func TestAIEditorUploadsFilesBeforeInferenceAndKeepsStoredReferences(t *testing.T) {
 	templateBytes, err := embeddedWebFiles.ReadFile("web/edit_ai.html")
 	if err != nil {
@@ -19291,7 +19451,6 @@ func TestAIPageScopedCapabilityCanListRevisionsAndForceRollbackPath(t *testing.T
 	}
 }
 
-
 func TestSafeAIProviderErrorMessageIncludes413Reason(t *testing.T) {
 	err := &aiprovider.HTTPError{StatusCode: http.StatusRequestEntityTooLarge, Message: "request body exceeds provider limit"}
 	message := safeAIProviderErrorMessage(err)
@@ -19299,7 +19458,6 @@ func TestSafeAIProviderErrorMessageIncludes413Reason(t *testing.T) {
 		t.Fatalf("message=%q", message)
 	}
 }
-
 
 func TestAIEditorTaskProtocolRejectsChatAndSupportsClarification(t *testing.T) {
 	edited, err := parseAIEditorModelResult("SITEBRUSH_EDIT\n<!doctype html><html><head><title>Changed</title></head><body><h1>Done</h1></body></html>")
@@ -19458,7 +19616,6 @@ func TestAIEditorTemplateTreatsClarificationAsEditingFlow(t *testing.T) {
 	}
 }
 
-
 func TestAIPageScopedManifestDescribesAnEditingJob(t *testing.T) {
 	application, _ := newTestApplication(t)
 	application.aiCapabilities = aicapability.NewManager()
@@ -19493,7 +19650,6 @@ func TestAIPageScopedManifestDescribesAnEditingJob(t *testing.T) {
 	}
 }
 
-
 func TestAIEditorLargePageKeepsEditingTaskAtPromptTail(t *testing.T) {
 	largeHTML := "<html><body>" + strings.Repeat("<article>product</article>", 20000) + "</body></html>"
 	task := "Поставь фотографию /p/photo.jpg в карточку первого товара"
@@ -19521,7 +19677,6 @@ func TestAIEditorLargePageKeepsEditingTaskAtPromptTail(t *testing.T) {
 		}
 	}
 }
-
 
 func TestAIEditorPatchProtocolAppliesMultipleCompactChanges(t *testing.T) {
 	currentHTML := "<html><head><title>Catalog</title></head><body><h1>Old title</h1><p class=\"price\">100</p><footer>Keep</footer></body></html>"

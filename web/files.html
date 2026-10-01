@@ -147,7 +147,7 @@
     <a class="btn btn-outline-secondary manager-back-button" href="{{.Path}}">{{index .T "back_to_uri"}}</a>
   </div>
 
-  <form id="uploadForm" class="bg-body-tertiary border rounded-3 p-3 mb-3 upload-panel" method="post" action="{{.Path}}?files" enctype="multipart/form-data">
+  <form id="uploadForm" class="bg-body-tertiary border rounded-3 p-3 mb-3 upload-panel" method="post" action="{{.Path}}?files" enctype="multipart/form-data"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
     <input type="hidden" name="action" value="upload">
     <label class="form-label fw-semibold section-heading" for="upload_files"><img src="/p/static/files.png" class="section-icon" alt="">{{index .T "files_upload_for_uri"}}</label>
     <div class="upload-controls">
@@ -156,7 +156,7 @@
     </div>
   </form>
 
-  <form id="selectedFilesForm" class="file-delete-form" method="post" action="{{.Path}}?files">
+  <form id="selectedFilesForm" class="file-delete-form" method="post" action="{{.Path}}?files"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
     <input type="hidden" name="action" value="delete_selected">
     <button class="btn btn-outline-danger" id="deleteSelectedFiles" type="submit" hidden>{{index .T "files_delete_selected"}}</button>
   </form>
@@ -200,7 +200,7 @@
               <details class="file-access-details" data-file-access-details>
                 <summary><span>{{index $.T "files_col_access"}}</span><strong>{{if eq .AccessMode "timer"}}{{index $.T "files_access_timer"}}{{else if eq .AccessMode "token"}}{{index $.T "files_access_token"}}{{else}}{{index $.T "files_access_public"}}{{end}}</strong></summary>
                 <div class="file-access-body">
-                  <form method="post" action="{{$.Path}}?files" class="access-grid" data-access-form>
+                  <form method="post" action="{{$.Path}}?files" class="access-grid" data-access-form><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
                     <input type="hidden" name="action" value="save_access">
                     <input type="hidden" name="name" value="{{.Name}}">
                     <select name="access_mode" class="form-select form-select-sm" data-access-mode>
@@ -221,7 +221,7 @@
               </details>
             </td>
             <td>
-              <form method="post" action="{{$.Path}}?files" class="file-delete-form">
+              <form method="post" action="{{$.Path}}?files" class="file-delete-form"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
                 <input type="hidden" name="name" value="{{.Name}}">
                 <button class="btn btn-outline-danger btn-sm file-icon-button" type="submit" title="{{index $.T "files_delete"}}" aria-label="{{index $.T "files_delete"}}"><img src="/p/static/cross.png" alt=""></button>
               </form>
@@ -262,7 +262,7 @@
           <div class="preview-detail"><span class="preview-detail-label">{{index .T "files_col_date"}}</span><span class="preview-detail-value" id="imagePreviewDate"></span></div>
           <div class="preview-detail"><span class="preview-detail-label">{{index .T "files_col_access"}}</span><span class="preview-detail-value" id="imagePreviewAccess"></span></div>
           <div class="preview-detail" id="imagePreviewPathRow" hidden><span class="preview-detail-label">{{index .T "files_uri_label"}}</span><span class="preview-detail-value" id="imagePreviewPath"></span></div>
-          <form method="post" action="{{.Path}}?files" class="file-delete-form preview-delete-form" id="imagePreviewDeleteForm">
+          <form method="post" action="{{.Path}}?files" class="file-delete-form preview-delete-form" id="imagePreviewDeleteForm"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
             <input type="hidden" name="name" id="imagePreviewDeleteName">
             <button class="btn btn-outline-danger" type="submit"><img src="/p/static/cross.png" width="16" height="16" alt=""> {{index .T "files_delete"}}</button>
           </form>
