@@ -13301,6 +13301,51 @@ func TestFilesPageUploadButtonOpensPickerAndSelectedFilesUploadImmediately(t *te
 	}
 }
 
+func TestFilesPageDeletesUploadedFileFromURLEncodedForm(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "password"); err != nil {
+		t.Fatal(err)
+	}
+	filesDirectory := application.domainFilesDirForDomain("localhost")
+	if err := os.MkdirAll(filesDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	filePath := filepath.Join(filesDirectory, "uploaded.txt")
+	if err := os.WriteFile(filePath, []byte("test file"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	application.rebuildDomainStorageUsage(context.Background(), "localhost")
+	adminCookie := newAdminSessionCookie(t, application, "admin@example.com")
+	csrfRequest := httptest.NewRequest(http.MethodGet, "http://localhost/?files", nil)
+	csrfRequest.AddCookie(adminCookie)
+	missingTokenForm := url.Values{"name": {"uploaded.txt"}}
+	missingTokenRequest := httptest.NewRequest(http.MethodPost, "http://localhost/?files", strings.NewReader(missingTokenForm.Encode()))
+	missingTokenRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	missingTokenRequest.Header.Set("Origin", "null")
+	missingTokenRequest.AddCookie(adminCookie)
+	missingTokenResponse := httptest.NewRecorder()
+	application.route(missingTokenResponse, missingTokenRequest)
+	if missingTokenResponse.Code != http.StatusForbidden {
+		t.Fatalf("file deletion without token status=%d", missingTokenResponse.Code)
+	}
+	if _, err := os.Stat(filePath); err != nil {
+		t.Fatalf("file deletion without token changed file: %v", err)
+	}
+	form := url.Values{"name": {"uploaded.txt"}, "account_csrf": {accountCSRF(csrfRequest)}}
+	deleteRequest := httptest.NewRequest(http.MethodPost, "http://localhost/?files", strings.NewReader(form.Encode()))
+	deleteRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	deleteRequest.Header.Set("Origin", "null")
+	deleteRequest.AddCookie(adminCookie)
+	deleteResponse := httptest.NewRecorder()
+	application.route(deleteResponse, deleteRequest)
+	if deleteResponse.Code != http.StatusFound {
+		t.Fatalf("delete uploaded file status=%d body=%q", deleteResponse.Code, deleteResponse.Body.String())
+	}
+	if _, err := os.Stat(filePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("uploaded file still exists after deletion: %v", err)
+	}
+}
+
 func TestUploadFilesRejectsWhenDomainStorageLimitIsExceeded(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	_, err := rawDB.Exec(`INSERT OR REPLACE INTO domain_storage_usage(domain,page_bytes,published_page_bytes,revision_bytes,file_bytes,published_static_bytes,limit_bytes,updated_at) VALUES(?,?,?,?,?,?,?,?)`,

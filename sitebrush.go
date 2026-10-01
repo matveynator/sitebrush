@@ -29574,18 +29574,30 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 	}
 	currentPath := currentFilesPath(r)
 	if r.Method == http.MethodPost {
-		usage := a.domainStorageUsage(r.Context(), a.siteDomain(r.Context(), r))
-		freeBytes := usage.LimitBytes - usage.totalBytes()
-		if freeBytes < 0 {
-			freeBytes = 0
-		}
-		r.Body = http.MaxBytesReader(w, r.Body, freeBytes+fileUploadMultipartOverheadBytes)
-		if err := r.ParseMultipartForm(fileUploadMultipartMemoryBytes); err != nil {
-			if strings.Contains(strings.ToLower(err.Error()), "too large") {
-				http.Error(w, "uploaded files exceed available site storage", http.StatusRequestEntityTooLarge)
+		contentType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		switch contentType {
+		case "multipart/form-data":
+			usage := a.domainStorageUsage(r.Context(), a.siteDomain(r.Context(), r))
+			freeBytes := usage.LimitBytes - usage.totalBytes()
+			if freeBytes < 0 {
+				freeBytes = 0
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, freeBytes+fileUploadMultipartOverheadBytes)
+			if err := r.ParseMultipartForm(fileUploadMultipartMemoryBytes); err != nil {
+				if strings.Contains(strings.ToLower(err.Error()), "too large") {
+					http.Error(w, "uploaded files exceed available site storage", http.StatusRequestEntityTooLarge)
+					return
+				}
+				http.Error(w, "failed to parse uploaded files", http.StatusBadRequest)
 				return
 			}
-			http.Error(w, "failed to parse uploaded files", http.StatusBadRequest)
+		case "application/x-www-form-urlencoded":
+			if err := r.ParseForm(); err != nil {
+				http.Error(w, "failed to parse file action", http.StatusBadRequest)
+				return
+			}
+		default:
+			http.Error(w, "unsupported form encoding", http.StatusUnsupportedMediaType)
 			return
 		}
 		if !adminMutationSourceAllowed(r) {
