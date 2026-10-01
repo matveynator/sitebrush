@@ -9467,6 +9467,13 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	guestStaticRequest := isGuestStaticRequest(r)
 	requestDomain := domainFromRequest(r)
 	localGuestStaticRequest := guestStaticRequest && canonicalLocalDomain(requestDomain) == "localhost"
+	if localGuestStaticRequest && pagePath == "/" && localAccountRequest(r) && a.siteDatabaseRouter != nil {
+		databasePath := filepath.Join(siteDatabaseRootPath(a.serverControlDBPath()), "localhost.db")
+		if _, err := os.Stat(databasePath); errors.Is(err, os.ErrNotExist) {
+			httpsecurity.RedirectLocal(w, r, "/?register", http.StatusSeeOther)
+			return
+		}
+	}
 	aiCapabilityRequest := strings.TrimSpace(r.URL.Query().Get("ai_token")) != ""
 	if !localGuestStaticRequest || aiCapabilityRequest {
 		requestDomain = a.siteDomain(r.Context(), r)
@@ -9477,7 +9484,7 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	}
 	if hasQueryFlag(r, "security_incident_report") {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions &&
-			hasSitebrushSessionCookie(r) && !httpsecurity.SameOriginMutationAllowed(r) {
+			hasSitebrushSessionCookie(r) && !adminMutationSourceAllowed(r) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
@@ -9541,8 +9548,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.awaitAccountHTTPS(w, r)
 		return
 	}
+	// Unlocking a public protected page does not mutate the administrator account.
 	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions &&
-		hasSitebrushSessionCookie(r) && !httpsecurity.SameOriginMutationAllowed(r) && !sessionCSRFMutationAllowed(r) {
+		hasSitebrushSessionCookie(r) && !publicPagePasswordUnlockRequest(r) &&
+		!adminMutationSourceAllowed(r) && !adminMultipartMutationRequest(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -10686,7 +10695,7 @@ func (a *App) saveAIProviderCredentialEndpoint(w http.ResponseWriter, r *http.Re
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !a.isAdminRequest(r) || (!httpsecurity.SameOriginMutationAllowed(r) && !sessionCSRFMutationAllowed(r)) {
+	if !a.isAdminRequest(r) || !adminMutationSourceAllowed(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -10787,7 +10796,7 @@ func (a *App) deleteAIProviderCredentialEndpoint(w http.ResponseWriter, r *http.
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !a.isAdminRequest(r) || (!httpsecurity.SameOriginMutationAllowed(r) && !sessionCSRFMutationAllowed(r)) {
+	if !a.isAdminRequest(r) || !adminMutationSourceAllowed(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -10953,7 +10962,7 @@ type aiEditorModelResult struct {
 // Internal editing is authorized by the administrator session. ai_token is reserved
 // for external AI capability links and is deliberately not accepted here.
 func (a *App) executeAIEditorRequest(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost || !a.isAdminRequest(r) || (!httpsecurity.SameOriginMutationAllowed(r) && !sessionCSRFMutationAllowed(r)) {
+	if r.Method != http.MethodPost || !a.isAdminRequest(r) || !adminMutationSourceAllowed(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -11133,7 +11142,7 @@ func (a *App) executeAIEditorWebSocket(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
-			if websocket.JSON.Send(connection, aiEditorWebSocketEvent{Type: "status", Text: "AI provider is editing the current page…" }) != nil {
+			if websocket.JSON.Send(connection, aiEditorWebSocketEvent{Type: "status", Text: "AI provider is editing the current page…"}) != nil {
 				return
 			}
 
@@ -11169,7 +11178,7 @@ func (a *App) executeAIEditorWebSocket(w http.ResponseWriter, r *http.Request) {
 					diagnosticlog.SafeLogValue(domain), diagnosticlog.SafeLogValue(request.PagePath),
 					diagnosticlog.SafeLogValue(request.Provider), diagnosticlog.SafeLogValue(request.Model),
 					diagnosticlog.SafeLogValue(parseErr.Error()), len(modelResponse.Text))
-				if websocket.JSON.Send(connection, aiEditorWebSocketEvent{Type: "status", Text: "AI ответил как чат-бот. Повторяю задачу в строгом режиме редактирования HTML…" }) != nil {
+				if websocket.JSON.Send(connection, aiEditorWebSocketEvent{Type: "status", Text: "AI ответил как чат-бот. Повторяю задачу в строгом режиме редактирования HTML…"}) != nil {
 					return
 				}
 				if websocket.JSON.Send(connection, aiEditorWebSocketEvent{Type: "reset_stream"}) != nil {
@@ -11662,7 +11671,7 @@ func (a *App) executeAIEditorPageRequest(w http.ResponseWriter, r *http.Request,
 }
 
 func (a *App) applyAIEditorDraft(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost || !a.isAdminRequest(r) || (!httpsecurity.SameOriginMutationAllowed(r) && !sessionCSRFMutationAllowed(r)) {
+	if r.Method != http.MethodPost || !a.isAdminRequest(r) || !adminMutationSourceAllowed(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -12055,7 +12064,7 @@ func (a *App) writeAICapabilityDocumentation(w http.ResponseWriter, r *http.Requ
 }
 
 func (a *App) issueAICapability(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost || !a.isAdminRequest(r) || !httpsecurity.SameOriginMutationAllowed(r) {
+	if r.Method != http.MethodPost || !a.isAdminRequest(r) || !adminMutationSourceAllowed(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -12155,11 +12164,11 @@ func (a *App) aiContentEndpoint(w http.ResponseWriter, r *http.Request, domain, 
 		files := make([]map[string]any, 0, len(fileList))
 		for _, managedFile := range fileList {
 			files = append(files, map[string]any{
-				"name": managedFile.Name,
-				"url": "/p/" + managedFile.Name,
-				"mime_type": managedFile.MimeType,
-				"size": managedFile.Size,
-				"page_path": managedFile.PagePath,
+				"name":       managedFile.Name,
+				"url":        "/p/" + managedFile.Name,
+				"mime_type":  managedFile.MimeType,
+				"size":       managedFile.Size,
+				"page_path":  managedFile.PagePath,
 				"created_at": managedFile.CreatedAt,
 			})
 		}
@@ -12195,11 +12204,11 @@ func (a *App) aiContentEndpoint(w http.ResponseWriter, r *http.Request, domain, 
 				return
 			}
 			revisions = append(revisions, map[string]any{
-				"id": revision.ID,
-				"path": revision.PagePath,
-				"html": revision.HTML,
+				"id":         revision.ID,
+				"path":       revision.PagePath,
+				"html":       revision.HTML,
 				"created_at": revision.CreatedAt,
-				"is_active": revision.IsActive,
+				"is_active":  revision.IsActive,
 			})
 		}
 		if rowsErr := revisionRows.Err(); rowsErr != nil {
@@ -12326,6 +12335,11 @@ func (a *App) serveStealthStaticForBlockedAdminIP(w http.ResponseWriter, r *http
 		if errors.Is(err, errSiteDatabaseMissing) && a.isRegistrationOnboardingRequest(r, domain) {
 			return false
 		}
+		if errors.Is(err, errSiteDatabaseMissing) && canonicalLocalDomain(domain) == "localhost" && localAccountRequest(r) &&
+			(r.Method == http.MethodGet || r.Method == http.MethodHead) {
+			httpsecurity.RedirectLocal(w, r, r.URL.Path+"?register", http.StatusSeeOther)
+			return true
+		}
 		w.Header().Set("Cache-Control", "no-store")
 		http.Error(w, "site security settings temporarily unavailable", http.StatusServiceUnavailable)
 		return true
@@ -12419,6 +12433,10 @@ func (a *App) enforceAdminIPAllowlist(w http.ResponseWriter, r *http.Request, do
 	var email string
 	err = a.db.QueryRowContext(r.Context(), `SELECT u.email FROM sessions s JOIN users u ON (u.domain||'|'||u.email)=s.user_email WHERE s.token=? AND u.domain=? AND u.is_admin=1 LIMIT 1`, cookie.Value, strings.TrimSpace(domain)).Scan(&email)
 	if errors.Is(err, sql.ErrNoRows) {
+		return true
+	}
+	if errors.Is(err, errSiteDatabaseMissing) && a.isRegistrationOnboardingRequest(r, domain) {
+		// A deleted site database cannot contain the cookie's former session.
 		return true
 	}
 	if err != nil {
@@ -14899,6 +14917,15 @@ func hasQueryFlag(r *http.Request, flagName string) bool {
 	return hasFlag
 }
 
+func publicPagePasswordUnlockRequest(r *http.Request) bool {
+	if r == nil || r.Method != http.MethodPost {
+		return false
+	}
+	query := r.URL.Query()
+	unlockValues, found := query["page_password_unlock"]
+	return len(query) == 1 && found && len(unlockValues) == 1 && unlockValues[0] == ""
+}
+
 func sessionCSRFMutationAllowed(r *http.Request) bool {
 	if r == nil || !hasSitebrushSessionCookie(r) {
 		return false
@@ -14908,13 +14935,28 @@ func sessionCSRFMutationAllowed(r *http.Request) bool {
 		return false
 	}
 	providedCSRF := strings.TrimSpace(r.Header.Get("X-SiteBrush-CSRF"))
-	if providedCSRF == "" && (hasQueryFlag(r, "save") || strings.TrimSpace(r.URL.Query().Get("delete")) != "") {
+	if providedCSRF == "" && !strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "multipart/form-data") {
 		providedCSRF = strings.TrimSpace(r.FormValue("account_csrf"))
+	}
+	if providedCSRF == "" && r.PostForm != nil {
+		providedCSRF = strings.TrimSpace(r.PostForm.Get("account_csrf"))
 	}
 	if providedCSRF == "" {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(providedCSRF), []byte(expectedCSRF)) == 1
+}
+
+func adminMutationSourceAllowed(r *http.Request) bool {
+	return httpsecurity.SameOriginMutationAllowed(r) || sessionCSRFMutationAllowed(r)
+}
+
+// Multipart handlers apply their own size limits before parsing the session token.
+func adminMultipartMutationRequest(r *http.Request) bool {
+	if r == nil || r.Method != http.MethodPost || !strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "multipart/form-data") {
+		return false
+	}
+	return r.URL.RawQuery == "files" || r.URL.RawQuery == "backup_import"
 }
 
 func requestWithSensitiveCookieRequiresHTTPS(r *http.Request) bool {
@@ -15118,13 +15160,9 @@ func (a *App) savePage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	if !httpsecurity.SameOriginMutationAllowed(r) {
-		providedCSRF := strings.TrimSpace(r.FormValue("account_csrf"))
-		expectedCSRF := accountCSRF(r)
-		if providedCSRF == "" || expectedCSRF == "" || subtle.ConstantTimeCompare([]byte(providedCSRF), []byte(expectedCSRF)) != 1 {
-			http.Error(w, "forbidden", http.StatusForbidden)
-			return
-		}
+	if !adminMutationSourceAllowed(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
 	}
 	pagePath := cleanPath(r.FormValue("path"))
 	previousPath := pagePath
@@ -22670,14 +22708,9 @@ func (a *App) deleteRevisionByQuery(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	if !httpsecurity.SameOriginMutationAllowed(r) {
-		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
-		providedCSRF := strings.TrimSpace(r.FormValue("account_csrf"))
-		expectedCSRF := accountCSRF(r)
-		if providedCSRF == "" || expectedCSRF == "" || subtle.ConstantTimeCompare([]byte(providedCSRF), []byte(expectedCSRF)) != 1 {
-			http.Error(w, "forbidden", http.StatusForbidden)
-			return
-		}
+	if !adminMutationSourceAllowed(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
 	}
 	revisionID, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("delete")))
 	if revisionID <= 0 {
@@ -22697,7 +22730,7 @@ func (a *App) deleteRevisionByQuery(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) toggleRevision(w http.ResponseWriter, r *http.Request) {
-	if !a.isAdminRequest(r) || r.Method != http.MethodPost || !httpsecurity.SameOriginMutationAllowed(r) {
+	if !a.isAdminRequest(r) || r.Method != http.MethodPost || !adminMutationSourceAllowed(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -29541,22 +29574,34 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 	}
 	currentPath := currentFilesPath(r)
 	if r.Method == http.MethodPost {
-		if !httpsecurity.SameOriginMutationAllowed(r) {
-			http.Error(w, "forbidden", http.StatusForbidden)
-			return
-		}
-		usage := a.domainStorageUsage(r.Context(), a.siteDomain(r.Context(), r))
-		freeBytes := usage.LimitBytes - usage.totalBytes()
-		if freeBytes < 0 {
-			freeBytes = 0
-		}
-		r.Body = http.MaxBytesReader(w, r.Body, freeBytes+fileUploadMultipartOverheadBytes)
-		if err := r.ParseMultipartForm(fileUploadMultipartMemoryBytes); err != nil {
-			if strings.Contains(strings.ToLower(err.Error()), "too large") {
-				http.Error(w, "uploaded files exceed available site storage", http.StatusRequestEntityTooLarge)
+		contentType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		switch contentType {
+		case "multipart/form-data":
+			usage := a.domainStorageUsage(r.Context(), a.siteDomain(r.Context(), r))
+			freeBytes := usage.LimitBytes - usage.totalBytes()
+			if freeBytes < 0 {
+				freeBytes = 0
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, freeBytes+fileUploadMultipartOverheadBytes)
+			if err := r.ParseMultipartForm(fileUploadMultipartMemoryBytes); err != nil {
+				if strings.Contains(strings.ToLower(err.Error()), "too large") {
+					http.Error(w, "uploaded files exceed available site storage", http.StatusRequestEntityTooLarge)
+					return
+				}
+				http.Error(w, "failed to parse uploaded files", http.StatusBadRequest)
 				return
 			}
-			http.Error(w, "failed to parse uploaded files", http.StatusBadRequest)
+		case "application/x-www-form-urlencoded":
+			if err := r.ParseForm(); err != nil {
+				http.Error(w, "failed to parse file action", http.StatusBadRequest)
+				return
+			}
+		default:
+			http.Error(w, "unsupported form encoding", http.StatusUnsupportedMediaType)
+			return
+		}
+		if !adminMutationSourceAllowed(r) {
+			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
 		fileName := safeRelativeAssetPath(r.PostFormValue("name"))
@@ -32293,7 +32338,7 @@ func (a *App) currentAdminEmailForDomain(r *http.Request, domain string) (string
 }
 
 func (a *App) pagePasswordAction(w http.ResponseWriter, r *http.Request) {
-	if !a.isAdminRequest(r) || !httpsecurity.SameOriginMutationAllowed(r) {
+	if !a.isAdminRequest(r) || !adminMutationSourceAllowed(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -33013,6 +33058,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
   const isDomainFrozen = ` + strconv.FormatBool(isFrozen) + `;
   const mutationCSRFToken = "` + escapedMutationCSRFToken + `";
   const siteCopyConfig = JSON.parse(new TextDecoder().decode(Uint8Array.from([` + siteCopyMenuConfigByteList(pagePath, translations) + `])));
+  siteCopyConfig.csrfToken = mutationCSRFToken;
   const actionConfigByName = {
     delete: { path: "?delete=` + strconv.Itoa(revisionID) + `", message: "` + confirmDeletePrompt + `", icon: "delete" },
     freeze: { path: "?freeze", message: "` + confirmFreezePrompt + `", icon: "freeze" },
@@ -33336,7 +33382,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
       actionFormElement.setAttribute("data-sitebrush-owned", "true");
       actionFormElement.method = "POST";
       actionFormElement.action = selectedActionConfig.path;
-      if (actionName === "delete" && mutationCSRFToken !== "") {
+      if (mutationCSRFToken !== "") {
         const csrfInputElement = document.createElement("input");
         csrfInputElement.type = "hidden";
         csrfInputElement.name = "account_csrf";
@@ -33358,6 +33404,13 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
       actionFormElement.setAttribute("data-sitebrush-owned", "true");
       actionFormElement.method = "POST";
       actionFormElement.action = actionPath;
+      if (mutationCSRFToken !== "") {
+        const csrfInputElement = document.createElement("input");
+        csrfInputElement.type = "hidden";
+        csrfInputElement.name = "account_csrf";
+        csrfInputElement.value = mutationCSRFToken;
+        actionFormElement.appendChild(csrfInputElement);
+      }
       const passwordInputElement = document.createElement("input");
       passwordInputElement.type = "hidden";
       passwordInputElement.name = "password";
@@ -39087,7 +39140,7 @@ func (a *App) domainSettingsPage(w http.ResponseWriter, r *http.Request) {
 		returnPath = requestedReturnPath(r)
 	}
 	if r.Method == http.MethodPost {
-		if !httpsecurity.SameOriginMutationAllowed(r) {
+		if !adminMutationSourceAllowed(r) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
@@ -39168,7 +39221,7 @@ func (a *App) freezeDomain(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !a.isAdminRequest(r) || !httpsecurity.SameOriginMutationAllowed(r) {
+	if !a.isAdminRequest(r) || !adminMutationSourceAllowed(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -39182,7 +39235,7 @@ func (a *App) publishDomain(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !a.isAdminRequest(r) || !httpsecurity.SameOriginMutationAllowed(r) {
+	if !a.isAdminRequest(r) || !adminMutationSourceAllowed(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -39449,7 +39502,7 @@ func backupFileName(domain string) string {
 }
 
 func (a *App) importBackup(w http.ResponseWriter, r *http.Request) {
-	if !a.isAdminRequest(r) || !httpsecurity.SameOriginMutationAllowed(r) {
+	if !a.isAdminRequest(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -39464,6 +39517,10 @@ func (a *App) importBackup(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		http.Error(w, "failed to parse upload", http.StatusBadRequest)
+		return
+	}
+	if !adminMutationSourceAllowed(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 	backupFile, backupFileHeader, err := r.FormFile("backup_zip")

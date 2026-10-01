@@ -812,7 +812,7 @@
       <div id="analytics-server-hour-chart" class="hourly-chart" aria-label="Requests by server local hour"></div>
     </div></section>
   </div>
-  <details id="analytics-goals" class="card mb-4"><summary class="card-body d-flex align-items-center justify-content-between gap-3"><span><strong>{{index .T "ax_goals"}}</strong><span class="small text-muted d-block">{{if .Experience.GoalsConfigured}}{{index .T "ax_meaningful"}}: {{.Experience.GoalRate}} · {{.Experience.GoalSessions}} / {{.Experience.Sessions}}{{else}}{{index .T "ax_goals_not_configured"}}{{end}}</span></span><span class="small text-nowrap">{{index .T "ax_goals_edit"}}</span></summary><div class="card-body border-top"><p>{{index .T "ax_goals_hint"}}</p><p>{{index .T "ax_goals_examples_hint"}}</p><pre class="border rounded p-3">{{index .T "ax_goals_examples"}}</pre><p class="small">{{index .T "ax_goals_action_example"}}</p><pre class="border rounded p-3"><code>&lt;a href="/download/" sitebrush-data-analytics-action="download"&gt;Download&lt;/a&gt;</code></pre><form method="post" action="?analytics"><textarea class="form-control" name="goals" rows="5" maxlength="12000" placeholder="Download | action | download">{{.GoalsText}}</textarea><button class="btn btn-outline-secondary mt-2">{{index .T "ax_save"}}</button></form></div></details>
+  <details id="analytics-goals" class="card mb-4"><summary class="card-body d-flex align-items-center justify-content-between gap-3"><span><strong>{{index .T "ax_goals"}}</strong><span class="small text-muted d-block">{{if .Experience.GoalsConfigured}}{{index .T "ax_meaningful"}}: {{.Experience.GoalRate}} · {{.Experience.GoalSessions}} / {{.Experience.Sessions}}{{else}}{{index .T "ax_goals_not_configured"}}{{end}}</span></span><span class="small text-nowrap">{{index .T "ax_goals_edit"}}</span></summary><div class="card-body border-top"><p>{{index .T "ax_goals_hint"}}</p><p>{{index .T "ax_goals_examples_hint"}}</p><pre class="border rounded p-3">{{index .T "ax_goals_examples"}}</pre><p class="small">{{index .T "ax_goals_action_example"}}</p><pre class="border rounded p-3"><code>&lt;a href="/download/" sitebrush-data-analytics-action="download"&gt;Download&lt;/a&gt;</code></pre><form method="post" action="?analytics"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}"><textarea class="form-control" name="goals" rows="5" maxlength="12000" placeholder="Download | action | download">{{.GoalsText}}</textarea><button class="btn btn-outline-secondary mt-2">{{index .T "ax_save"}}</button></form></div></details>
   <section id="sources" class="card mb-4"><div class="card-body">
     <h2 class="h5">{{index .T "ax_sources"}}</h2><p class="small">{{index .T "ax_attribution_hint"}}</p>
     <div class="table-responsive"><table class="table"><thead><tr><th>{{index .T "ax_source"}}</th><th>{{index .T "ax_sessions"}}</th><th>{{index .T "ax_views"}}</th><th>{{index .T "ax_actions"}}</th>{{if .Experience.GoalsConfigured}}<th>{{index .T "ax_meaningful"}}</th>{{end}}<th>{{index .T "ax_returns"}}</th></tr></thead><tbody>
@@ -978,14 +978,14 @@
       <div class="col-md-4"><div class="security-status-card security-danger"><strong>Blocked</strong><div class="small">Confirmed malicious activity is rejected before expensive processing.</div></div></div>
     </div>
 
-    <form method="post" action="?analytics&amp;tab=security" class="d-flex flex-wrap align-items-center gap-3 border rounded p-3 mb-3">
+    <form method="post" action="?analytics&amp;tab=security" class="d-flex flex-wrap align-items-center gap-3 border rounded p-3 mb-3"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
       <input type="hidden" name="security_action" value="settings">
       <label class="form-check"><input class="form-check-input" type="checkbox" name="auto_block" {{if .SecuritySettings.AutoBlock}}checked{{end}}> <span class="form-check-label">Automatic blocking</span></label>
       <label class="form-check"><input class="form-check-input" type="checkbox" name="global_sync" {{if .SecuritySettings.GlobalSync}}checked{{end}}> <span class="form-check-label">Global reputation sync</span></label>
       <button class="btn btn-outline-secondary btn-sm">Save security settings</button>
     </form>
 
-    <form method="post" action="?analytics&amp;tab=security" class="row g-2 border rounded p-3 mb-3 security-status-card security-safe">
+    <form method="post" action="?analytics&amp;tab=security" class="row g-2 border rounded p-3 mb-3 security-status-card security-safe"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
       <input type="hidden" name="security_action" value="allow">
       <div class="col-md-3"><input class="form-control" name="ip" placeholder="Trusted IP address" required></div>
       <div class="col-md-7"><input class="form-control" name="comment" placeholder="Why this IP must never be blocked"></div>
@@ -1003,7 +1003,7 @@
             <td>{{.Comment}}</td>
             <td><time data-relative-time="{{.AddedAt.Format "2006-01-02T15:04:05Z07:00"}}">{{.AddedAt.Format "02 Jan 2006 15:04"}}</time></td>
             <td>
-              <form method="post" action="?analytics&amp;tab=security">
+              <form method="post" action="?analytics&amp;tab=security"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
                 <input type="hidden" name="security_action" value="disallow">
                 <input type="hidden" name="ip" value="{{.IP}}">
                 <button class="btn btn-outline-secondary btn-sm">Remove</button>
@@ -1017,7 +1017,7 @@
       </table>
     </div>
 
-    <form method="post" action="?analytics&amp;tab=security" class="row g-2 border rounded p-3 mb-3">
+    <form method="post" action="?analytics&amp;tab=security" class="row g-2 border rounded p-3 mb-3"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
       <input type="hidden" name="security_action" value="add">
       <div class="col-md-2"><input class="form-control" name="ip" placeholder="IP address" required></div>
       <div class="col-md-2"><input class="form-control" name="reason" placeholder="Reason" value="manual"></div>
@@ -1041,7 +1041,7 @@
             <td><time data-relative-time="{{.ExpiresAt.Format "2006-01-02T15:04:05Z07:00"}}" data-countdown>{{.ExpiresAt.Format "02 Jan 2006 15:04"}}</time></td>
             <td>{{.Episodes}}</td>
             <td>
-              <form method="post" action="?analytics&amp;tab=security">
+              <form method="post" action="?analytics&amp;tab=security"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
                 <input type="hidden" name="security_action" value="unthrottle">
                 <input type="hidden" name="ip" value="{{.IP}}">
                 <button class="btn btn-outline-secondary btn-sm">Stop throttle</button>
@@ -1067,7 +1067,7 @@
           <tr class="security-row-danger" data-security-incident-row>
             <td><code>{{.IP}}</code><div class="small text-muted">Incident {{.IncidentID}}</div>{{if .Domain}}<div class="small"><strong>Domain:</strong> {{.Domain}}</div>{{end}}{{if or .Country .City .ClientClass}}<div class="small mt-1">{{if .Country}}{{.Country}}{{if .City}} · {{.City}}{{end}}{{end}}{{if .ClientClass}}{{if or .Country .City}} · {{end}}{{.ClientClass}}{{end}}</div>{{end}}{{if .Agent}}<div class="small text-muted text-break">{{.Agent}}</div>{{end}}</td>
             <td>
-              <form method="post" action="?analytics&amp;tab=security" class="d-flex flex-column gap-1">
+              <form method="post" action="?analytics&amp;tab=security" class="d-flex flex-column gap-1"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
                 <input type="hidden" name="security_action" value="update">
                 <input type="hidden" name="ip" value="{{.IP}}">
                 <input class="form-control form-control-sm" name="reason" value="{{.Reason}}">
@@ -1082,7 +1082,7 @@
             <td><time data-relative-time="{{.ExpiresAt.Format "2006-01-02T15:04:05Z07:00"}}" data-countdown>{{.ExpiresAt.Format "02 Jan 2006 15:04"}}</time></td>
             <td>{{.Violations}}</td>
             <td>
-              <form method="post" action="?analytics&amp;tab=security">
+              <form method="post" action="?analytics&amp;tab=security"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
                 <input type="hidden" name="security_action" value="remove">
                 <input type="hidden" name="ip" value="{{.IP}}">
                 <button class="btn btn-outline-secondary btn-sm">Unblock</button>

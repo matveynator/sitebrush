@@ -34,7 +34,7 @@
     </div>
 
     {{if .CanAddAlias}}
-    <form class="add-form custom-domain-add-form" method="post" action="?settings">
+    <form class="add-form custom-domain-add-form" method="post" action="?settings"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
       <input type="hidden" name="return" value="{{.ReturnPath}}">
       <input type="hidden" name="action" value="add_alias">
       <input type="text" name="alias_domain" placeholder="{{index .T "domain_settings_alias_placeholder"}}" autocomplete="off">
@@ -78,13 +78,13 @@
 
     {{if .Aliases}}
     <div class="domain-bulk-actions">
-      <form method="post" action="?settings">
+      <form method="post" action="?settings"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
         <input type="hidden" name="return" value="{{.ReturnPath}}">
         <input type="hidden" name="action" value="check_all">
         <button type="submit">{{index .T "domain_settings_check_dns_now"}}</button>
       </form>
 
-      <form method="post" action="?settings">
+      <form method="post" action="?settings"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
         <input type="hidden" name="return" value="{{.ReturnPath}}">
         <input type="hidden" name="action" value="select_primary">
         <button type="submit">{{index .T "domain_settings_use_primary"}}</button>
@@ -101,21 +101,21 @@
             {{if .IsSelected}}<div class="status-ok">{{index $.T "domain_settings_selected"}}</div>{{end}}
           </div>
           <div class="alias-actions">
-            <form method="post" action="?settings">
+            <form method="post" action="?settings"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
               <input type="hidden" name="return" value="{{$.ReturnPath}}">
               <input type="hidden" name="action" value="check_alias">
               <input type="hidden" name="alias_domain" value="{{.Domain}}">
               <button type="submit">{{index $.T "domain_settings_check"}}</button>
             </form>
             {{if and .IsActive (not .IsSelected)}}
-            <form method="post" action="?settings">
+            <form method="post" action="?settings"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
               <input type="hidden" name="return" value="{{$.ReturnPath}}">
               <input type="hidden" name="action" value="select_alias">
               <input type="hidden" name="alias_domain" value="{{.Domain}}">
               <button type="submit">{{index $.T "domain_settings_use_domain"}}</button>
             </form>
             {{end}}
-            <form method="post" action="?settings">
+            <form method="post" action="?settings"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
               <input type="hidden" name="return" value="{{$.ReturnPath}}">
               <input type="hidden" name="action" value="delete_alias">
               <input type="hidden" name="alias_domain" value="{{.Domain}}">
@@ -175,7 +175,7 @@
         <span class="{{.AutomaticSSLStatus.CertificateClass}}">{{index .T .AutomaticSSLStatus.CertificateTextKey}}</span>
       </div>
     </div>
-    <form method="post" action="?settings" style="margin: 0;">
+    <form method="post" action="?settings" style="margin: 0;"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
       <input type="hidden" name="return" value="{{.ReturnPath}}">
       <input type="hidden" name="action" value="update_auto_ssl">
       <input type="hidden" name="ssl_domain" value="{{.AutomaticSSLDomain}}">
@@ -208,7 +208,7 @@
       <button type="button" id="copy_backup_link_button">{{index .T "domain_settings_copy_link"}}</button>
     </div>
     <p class="hint">{{index .T "domain_settings_relative_path"}} <code>{{.BackupDownloadPath}}</code></p>
-    <form method="post" action="?settings" style="margin: 0;">
+    <form method="post" action="?settings" style="margin: 0;"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
       <input type="hidden" name="return" value="{{.ReturnPath}}">
       <input type="hidden" name="action" value="rotate_backup_token">
       <button type="submit">{{index .T "domain_settings_regen_backup_token"}}</button>
@@ -217,7 +217,7 @@
 
   <section class="dns-box">
     <p><strong>{{index .T "domain_settings_chroot_title"}}</strong></p>
-    <form class="add-form static-folder-form" method="post" action="?settings">
+    <form class="add-form static-folder-form" method="post" action="?settings"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
       <input type="hidden" name="return" value="{{.ReturnPath}}">
       <input type="hidden" name="action" value="save_chroot_location">
       <label class="static-folder-field">
@@ -235,7 +235,7 @@
             <div class="hint">{{index $.T "domain_settings_chroot_copy_hint"}} <code>{{.DirectoryPath}}</code></div>
           </div>
           <div class="alias-actions">
-            <form method="post" action="?settings">
+            <form method="post" action="?settings"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
               <input type="hidden" name="return" value="{{$.ReturnPath}}">
               <input type="hidden" name="action" value="delete_chroot_location">
               <input type="hidden" name="location_url_path" value="{{.URLPath}}">
@@ -330,7 +330,7 @@
       setBackupDownloadLabel(defaultLabel + '...');
       fetch('/?native_save_backup', {
         method: 'POST',
-        headers: { 'Accept': 'application/json' }
+        headers: { 'Accept': 'application/json', 'X-SiteBrush-CSRF': {{printf "%q" .AccountCSRF}} }
       }).then(function handleNativeBackupResponse(response) {
         if (!response.ok) { throw new Error('native backup save failed'); }
         return response.json();

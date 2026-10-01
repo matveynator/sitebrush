@@ -72,7 +72,7 @@
         {{if eq .EmailChange.Step 1}}<p>{{index .T "profile_email_release_help"}}</p>
         {{if .EmailChange.CurrentProvider.URL}}<a class="btn btn-primary" href="{{.EmailChange.CurrentProvider.URL}}" target="_blank" rel="noopener noreferrer">{{index .T "setup_confirmation_open"}} {{.EmailChange.CurrentProvider.Name}}</a>{{else}}<p class="hint">{{index .T "profile_email_open_manually"}}</p>{{end}}
   {{if .ShowPasswordCodeForm}}
-  <form class="profile-form profile-code-form profile-email-release-form" method="post" action="{{.ProfileCodeAction}}">
+  <form class="profile-form profile-code-form profile-email-release-form" method="post" action="{{.ProfileCodeAction}}"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
     <input type="hidden" name="password_confirmation_token" value="{{.PasswordConfirmationToken}}">
     <label>
       {{.PasswordCodeLabel}}
@@ -98,7 +98,7 @@
   </section>
   {{end}}
   {{if and .ShowPasswordCodeForm (not .EmailChange.Step)}}
-  <form class="profile-form profile-code-form" method="post" action="{{.ProfileCodeAction}}">
+  <form class="profile-form profile-code-form" method="post" action="{{.ProfileCodeAction}}"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
     <input type="hidden" name="password_confirmation_token" value="{{.PasswordConfirmationToken}}">
     <div class="profile-form-header">
       <h2>{{.PasswordFormTitle}}</h2>
@@ -115,7 +115,7 @@
   </form>
   {{else if and .ShowPasswordForm (not .EmailChange.Step)}}
   <div class="profile-form-grid">
-    <form class="authentication-card profile-form profile-account-card" method="post" action="?profile" data-profile-send-form data-profile-email-form data-current-email="{{.Email}}">
+    <form class="authentication-card profile-form profile-account-card" method="post" action="?profile" data-profile-send-form data-profile-email-form data-current-email="{{.Email}}"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
       <input type="hidden" name="profile_action" value="email">
       <div class="profile-form-header">
         <h2>{{.EmailFormTitle}}</h2>
@@ -127,7 +127,7 @@
       </label>
       <div><button type="submit" data-profile-email-submit>{{.EmailSubmitLabel}}</button></div>
     </form>
-    <form class="authentication-card profile-form profile-account-card" method="post" action="?profile" data-profile-send-form data-profile-password-form>
+    <form class="authentication-card profile-form profile-account-card" method="post" action="?profile" data-profile-send-form data-profile-password-form><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
       <input type="hidden" name="profile_action" value="password">
       <div class="profile-form-header">
         <h2>{{.PasswordFormTitle}}</h2>
@@ -173,7 +173,7 @@
   {{if not .PasskeyOffer}}<p id="SiteBrushPasskeyCreateStatus" class="text-danger" role="status"></p>
   <button type="button" data-passkey-create data-account-csrf="{{.AccountCSRF}}" data-passkey-start="?profile&passkey_begin" data-passkey-finish="?profile&passkey_finish" data-passkey-status="#SiteBrushPasskeyCreateStatus" data-passkey-error="{{index .T "auth_passkey_failed"}}" data-passkey-unavailable="{{index .T "auth_passkey_unavailable"}}">{{index .T "auth_passkey_create"}}</button>{{end}}
   {{range .Passkeys}}
-  <form method="post" action="?profile" class="auth-trusted-row">
+  <form method="post" action="?profile" class="auth-trusted-row"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
     <input type="hidden" name="profile_action" value="passkey_delete">
     <input type="hidden" name="passkey_id" value="{{.ID}}">
     <input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
@@ -210,7 +210,7 @@
 
   {{if .TOTPEnabled}}
     <div class="account-status account-status-success">{{index .T "auth_totp_enabled"}}</div>
-    <form method="post" action="?profile" class="profile-account-card-actions">
+    <form method="post" action="?profile" class="profile-account-card-actions"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
       <input type="hidden" name="profile_action" value="totp_disable">
       <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
       <button type="submit">{{index .T "auth_totp_disable"}}</button>
@@ -233,7 +233,7 @@
       <p class="hint">{{index .T "auth_totp_secret_help"}}</p>
     </div>
 
-    <form method="post" action="?profile" class="authenticator-code-form">
+    <form method="post" action="?profile" class="authenticator-code-form"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
       <input type="hidden" name="profile_action" value="totp_enable">
       <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
       <input type="hidden" name="totp_secret" value="{{.TOTPSetupSecret}}">
@@ -245,7 +245,7 @@
       <button type="submit">{{index .T "auth_totp_enable"}}</button>
     </form>
   {{else}}
-    <form method="post" action="?profile" class="profile-account-card-actions">
+    <form method="post" action="?profile" class="profile-account-card-actions"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
       <input type="hidden" name="profile_action" value="totp_setup">
       <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
       <button type="submit">{{index .T "auth_totp_setup_title"}}</button>
@@ -260,7 +260,7 @@
   </div>
   <div class="profile-account-list">
   {{range .ProfileSessions}}
-    <form method="post" action="?profile" class="auth-trusted-row profile-ip-row">
+    <form method="post" action="?profile" class="auth-trusted-row profile-ip-row"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
       <input type="hidden" name="profile_action" value="revoke_session">
       <input type="hidden" name="session_token" value="{{.Token}}">
       <input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
@@ -277,7 +277,7 @@
   {{else}}
     <p class="hint">{{index .T "auth_no_trusted"}}</p>
   {{end}}
-  {{if .ProfileSessionsMore}}<details class="profile-account-more"><summary>{{index .T "account_show_more"}} ({{len .ProfileSessionsMore}})</summary>{{range .ProfileSessionsMore}}<form method="post" action="?profile" class="auth-trusted-row profile-ip-row">
+  {{if .ProfileSessionsMore}}<details class="profile-account-more"><summary>{{index .T "account_show_more"}} ({{len .ProfileSessionsMore}})</summary>{{range .ProfileSessionsMore}}<form method="post" action="?profile" class="auth-trusted-row profile-ip-row"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
     <input type="hidden" name="profile_action" value="revoke_session"><input type="hidden" name="session_token" value="{{.Token}}"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
     <div class="profile-ip-details"><strong>{{.Device}} · {{.OperatingSystem}} · {{.Browser}}</strong>{{if .Current}}<span class="account-status-inline">{{index $.T "auth_current_session"}}</span>{{end}}<span class="profile-ip-location">{{.Location}}{{if .GeoIPAttribution}} · {{.GeoIPAttribution}}{{end}} · <bdi dir="ltr">{{.IP}}</bdi></span><p>{{index $.T "auth_session_language"}}: {{.Language}}<br>{{index $.T "auth_session_started"}}: {{.CreatedAt.Format "2006-01-02 15:04 UTC"}}<br>{{index $.T "auth_session_lifetime"}}</p></div><button type="submit">{{index $.T "auth_revoke"}}</button>
   </form>{{end}}</details>{{end}}
@@ -298,7 +298,7 @@
         <p>Scopes: {{.Scopes}}<br>Created: {{.Created.Format "2006-01-02 15:04 UTC"}}</p>
       </div>
       <div class="profile-account-controls">
-        <form method="post" action="?profile">
+        <form method="post" action="?profile"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
           <input type="hidden" name="profile_action" value="ai_capability_revoke">
           <input type="hidden" name="ai_capability_id" value="{{.ID}}">
           <input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
@@ -318,21 +318,21 @@
         <p>Scopes: {{.Scopes}}<br>Created: {{.Created.Format "2006-01-02 15:04 UTC"}}<br>Expires: {{.Expires.Format "2006-01-02 15:04 UTC"}}</p>
       </div>
       <div class="profile-account-controls">
-        <form method="post" action="?profile">
+        <form method="post" action="?profile"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
           <input type="hidden" name="profile_action" value="ai_session_extend">
           <input type="hidden" name="ai_session_id" value="{{.ID}}">
           <input type="hidden" name="ai_session_duration" value="1h">
           <input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
           <button type="submit">Extend 1 hour</button>
         </form>
-        <form method="post" action="?profile">
+        <form method="post" action="?profile"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
           <input type="hidden" name="profile_action" value="ai_session_restrict">
           <input type="hidden" name="ai_session_id" value="{{.ID}}">
           <input type="hidden" name="ai_scope_read" value="on">
           <input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
           <button type="submit">Restrict to read</button>
         </form>
-        <form method="post" action="?profile">
+        <form method="post" action="?profile"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
           <input type="hidden" name="profile_action" value="ai_session_revoke">
           <input type="hidden" name="ai_session_id" value="{{.ID}}">
           <input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
@@ -351,7 +351,7 @@
     <p>{{index .T "admin_ip_allowlist_help"}}</p>
   </div>
   <div class="profile-account-controls">
-    <form method="post" action="?profile" class="auth-trusted-row">
+    <form method="post" action="?profile" class="auth-trusted-row"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
       <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
       {{if .AdminIPProtectionEnabled}}
       <input type="hidden" name="profile_action" value="admin_ip_disable">
@@ -363,7 +363,7 @@
       <button type="submit">{{index .T "admin_ip_enable"}}</button>
       {{end}}
     </form>
-    <form method="post" action="?profile" class="auth-trusted-row">
+    <form method="post" action="?profile" class="auth-trusted-row"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
       <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
       {{if .AdminStealthEnabled}}
       <input type="hidden" name="profile_action" value="admin_stealth_disable">
@@ -377,19 +377,19 @@
     </form>
   </div>
   <div class="profile-account-list">
-    {{range .AdminAllowedIPs}}<form method="post" action="?profile" class="auth-trusted-row profile-ip-row">
+    {{range .AdminAllowedIPs}}<form method="post" action="?profile" class="auth-trusted-row profile-ip-row"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
       <input type="hidden" name="profile_action" value="admin_ip_remove">
       <input type="hidden" name="admin_ip" value="{{.Rule}}">
       <input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
       <div class="profile-ip-details"><strong dir="ltr">{{.Rule}}</strong>{{if .Current}} <span class="account-status-inline">{{index $.T "auth_current"}}</span>{{end}}<span class="profile-ip-location">{{.Location}}{{if .GeoIPAttribution}} · {{.GeoIPAttribution}}{{end}}</span></div>
       <button type="submit" {{if not .Removable}}disabled{{end}}>{{index $.T "admin_ip_remove"}}</button>
     </form>{{else}}<p class="hint">{{index .T "admin_ip_none"}}</p>{{end}}
-    {{if .AdminAllowedIPMore}}<details class="profile-account-more"><summary>{{index .T "account_show_more"}} ({{len .AdminAllowedIPMore}})</summary>{{range .AdminAllowedIPMore}}<form method="post" action="?profile" class="auth-trusted-row profile-ip-row">
+    {{if .AdminAllowedIPMore}}<details class="profile-account-more"><summary>{{index .T "account_show_more"}} ({{len .AdminAllowedIPMore}})</summary>{{range .AdminAllowedIPMore}}<form method="post" action="?profile" class="auth-trusted-row profile-ip-row"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
       <input type="hidden" name="profile_action" value="admin_ip_remove"><input type="hidden" name="admin_ip" value="{{.Rule}}"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
       <div class="profile-ip-details"><strong dir="ltr">{{.Rule}}</strong>{{if .Current}} <span class="account-status-inline">{{index $.T "auth_current"}}</span>{{end}}<span class="profile-ip-location">{{.Location}}{{if .GeoIPAttribution}} · {{.GeoIPAttribution}}{{end}}</span></div><button type="submit" {{if not .Removable}}disabled{{end}}>{{index $.T "admin_ip_remove"}}</button>
     </form>{{end}}</details>{{end}}
   </div>
-  <form method="post" action="?profile" class="auth-trusted-row">
+  <form method="post" action="?profile" class="auth-trusted-row"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
     <input type="hidden" name="profile_action" value="admin_ip_add">
     <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
     <label>{{index .T "admin_ip_candidate"}}

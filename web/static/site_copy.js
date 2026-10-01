@@ -404,6 +404,9 @@
 
     const formElement = createElement('form', 'SiteBrushCopySiteForm');
     appendHiddenField(formElement, 'path', targetPath);
+    if (configuration && configuration.csrfToken) {
+      appendHiddenField(formElement, 'account_csrf', configuration.csrfToken);
+    }
     if (publicTrialMode) {
       appendHiddenField(formElement, 'unified_copy', '1');
     }
