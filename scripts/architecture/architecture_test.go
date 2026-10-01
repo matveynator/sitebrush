@@ -29,6 +29,41 @@ func TestGitHubActionsUseImmutableCommitReferences(t *testing.T) {
 	}
 }
 
+func TestStableReleaseWorkflowFailsClosedAndUsesArtifactAllowlist(t *testing.T) {
+	moduleRoot, err := findModuleRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflowPath := filepath.Join(moduleRoot, ".github", "workflows", "release.yml")
+	workflowBytes, err := os.ReadFile(workflowPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := string(workflowBytes)
+
+	if !strings.Contains(workflow, "set -euo pipefail") {
+		t.Fatal("release assembly must fail on an unchecked command")
+	}
+	if strings.Count(workflow, "if-no-files-found: error") != 3 {
+		t.Fatal("release workflow must fail when each of the three build artifact sets is empty")
+	}
+	if !strings.Contains(workflow, "-name 'sitebrush_*'") ||
+		!strings.Contains(workflow, "-name '*.zip'") ||
+		!strings.Contains(workflow, "-name '*.dmg'") {
+		t.Fatal("release assembly must copy only known binary artifact formats")
+	}
+	if strings.Contains(workflow, "-name '*'") || strings.Contains(workflow, "-name \"*\"") {
+		t.Fatal("release assembly must not copy arbitrary downloaded artifact files")
+	}
+	if !strings.Contains(workflow, "md5sum sitebrush_* > MD5SUMS") {
+		t.Fatal("release assembly must produce checksums for server binaries")
+	}
+	if !strings.Contains(workflow, "tag_name: stable-release") ||
+		!strings.Contains(workflow, "overwrite_files: true") {
+		t.Fatal("release must publish through the stable release tag")
+	}
+}
+
 func TestActionPinCheckRejectsMutableTagsAndBranches(t *testing.T) {
 	directory := t.TempDir()
 	workflow := "steps:\n  - uses: actions/checkout@v6\n  - uses: owner/action@main\n  - uses: ./local-action\n  - uses: docker://alpine:3.22\n"
