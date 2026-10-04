@@ -37,16 +37,18 @@ type findingSummary struct {
 }
 
 type validatedFinding struct {
-	RuleID        string
-	URI           string
-	LineHash      string
-	StartLine     int
-	Justification string
+	RuleID              string
+	URI                 string
+	LineHash            string
+	StartLine           int
+	FunctionDeclaration string
+	RelativeLine        int
+	Justification       string
 }
 
 var validatedBaseline = []validatedFinding{
-	{RuleID: "go/bad-redirect-check", URI: "pkg/crawler/whole_site.go", StartLine: 101, Justification: "Crawler paths are local-only and pass through LocalRedirectTarget, which rejects network-path, host, credential, backslash, and control-character forms."},
-	{RuleID: "go/bad-redirect-check", URI: "sitebrush.go", StartLine: 14540, Justification: "Application paths are local-only and pass through LocalRedirectTarget, which independently enforces same-origin redirect syntax."},
+	{RuleID: "go/bad-redirect-check", URI: "pkg/crawler/whole_site.go", FunctionDeclaration: "func CleanPath(rawPath string) string {", RelativeLine: 9, Justification: "Crawler paths are local-only and pass through LocalRedirectTarget, which rejects network-path, host, credential, backslash, and control-character forms."},
+	{RuleID: "go/bad-redirect-check", URI: "sitebrush.go", FunctionDeclaration: "func cleanPath(rawPath string) string {", RelativeLine: 10, Justification: "Application paths are local-only and pass through LocalRedirectTarget, which independently enforces same-origin redirect syntax."},
 	{RuleID: "go/path-injection", URI: "sitebrush.go", LineHash: "a2e340fc87446ad4:1", Justification: "Path starts under the site storage root and is revalidated after symlink resolution."},
 	{RuleID: "go/path-injection", URI: "sitebrush.go", LineHash: "d47546112b0da682:1", Justification: "The existing parent is derived only by walking parents of a storage-root-derived candidate."},
 	{RuleID: "go/path-injection", URI: "sitebrush.go", LineHash: "b38a944104bd3220:1", Justification: "writablePathInsideStorageSubtree constrains the directory to the domain storage root before creation."},
@@ -178,11 +180,33 @@ func baselineJustification(ruleID, uri, lineHash string, startLine int) (string,
 		if finding.LineHash != "" && finding.LineHash == lineHash {
 			return finding.Justification, true
 		}
-		if finding.LineHash == "" && finding.StartLine > 0 && finding.StartLine == startLine {
+		if finding.LineHash == "" && finding.FunctionDeclaration != "" &&
+			matchesRelativeSourceLocation(uri, startLine, finding.FunctionDeclaration, finding.RelativeLine) {
+			return finding.Justification, true
+		}
+		if finding.LineHash == "" && finding.FunctionDeclaration == "" && finding.StartLine > 0 && finding.StartLine == startLine {
 			return finding.Justification, true
 		}
 	}
 	return "", false
+}
+
+func matchesRelativeSourceLocation(uri string, startLine int, declaration string, relativeLine int) bool {
+	if startLine <= 0 || relativeLine < 0 || strings.TrimSpace(declaration) == "" {
+		return false
+	}
+	data, err := os.ReadFile(filepath.FromSlash(uri))
+	if err != nil {
+		return false
+	}
+	lines := strings.Split(string(data), "\n")
+	for lineIndex, line := range lines {
+		if strings.TrimSpace(line) != strings.TrimSpace(declaration) {
+			continue
+		}
+		return startLine == lineIndex+1+relativeLine
+	}
+	return false
 }
 
 func scanFile(path string) (findingSummary, error) {
