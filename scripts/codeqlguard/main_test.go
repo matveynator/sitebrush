@@ -121,6 +121,35 @@ func TestScanDirectoryAcceptsOnlyExactValidatedBaselineFingerprint(t *testing.T)
 	}
 }
 
+
+func TestValidatedRedirectBaselineSurvivesLineMovement(t *testing.T) {
+	root := repositoryRoot(t)
+	previousDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Chdir(previousDirectory); err != nil {
+			t.Fatalf("restore working directory: %v", err)
+		}
+	}()
+
+	for _, tc := range []struct {
+		uri       string
+		startLine int
+	}{
+		{uri: "pkg/crawler/whole_site.go", startLine: 101},
+		{uri: "sitebrush.go", startLine: 14811},
+	} {
+		if justification, ok := baselineJustification("go/bad-redirect-check", tc.uri, "", tc.startLine); !ok || justification == "" {
+			t.Fatalf("validated redirect baseline did not match %s at moved line %d", tc.uri, tc.startLine)
+		}
+	}
+}
+
 // --- Workflow integration enforcement ---
 
 func TestSecurityWorkflowRequiresCleanCodeQLResult(t *testing.T) {
