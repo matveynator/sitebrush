@@ -150,6 +150,34 @@ func TestValidatedRedirectBaselineSurvivesLineMovement(t *testing.T) {
 	}
 }
 
+func TestValidatedRedirectBaselineRejectsNearbyNewFinding(t *testing.T) {
+	root := repositoryRoot(t)
+	previousDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Chdir(previousDirectory); err != nil {
+			t.Fatalf("restore working directory: %v", err)
+		}
+	}()
+
+	for _, tc := range []struct {
+		uri       string
+		startLine int
+	}{
+		{uri: "pkg/crawler/whole_site.go", startLine: 102},
+		{uri: "sitebrush.go", startLine: 14812},
+	} {
+		if _, ok := baselineJustification("go/bad-redirect-check", tc.uri, "", tc.startLine); ok {
+			t.Fatalf("nearby new redirect finding was incorrectly accepted for %s at line %d", tc.uri, tc.startLine)
+		}
+	}
+}
+
 // --- Workflow integration enforcement ---
 
 func TestSecurityWorkflowRequiresCleanCodeQLResult(t *testing.T) {
