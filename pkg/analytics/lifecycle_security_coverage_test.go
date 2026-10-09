@@ -285,7 +285,7 @@ func TestAnalyticsTargetAndAttributionSecurityBranches(t *testing.T) {
 		{Campaign{Facebook: true}, "", "example.org", "Meta"},
 		{Campaign{}, "https://chatgpt.com/share/x", "example.org", "ChatGPT"},
 		{Campaign{}, "https://sub.reddit.com/r/test", "example.org", "Reddit"},
-		{Campaign{}, "https://example.org/page", "example.org", "direct-hidden"},
+		{Campaign{}, "https://example.org/page", "example.org", "direct"},
 	}
 	for _, tc := range cases {
 		if got := SourceAttribution(tc.campaign, tc.referrer, tc.host); got.Name != tc.want {
