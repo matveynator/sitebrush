@@ -170,17 +170,31 @@ func TestExperienceSourceEvidenceAndCleaning(t *testing.T) {
 		campaign       Campaign
 		name, evidence string
 	}{
-		{"https://chatgpt.com/c/private?token=secret", Campaign{}, "ChatGPT", "referrer"},
-		{"https://google.com.attacker.example/", Campaign{}, "google.com.attacker.example", "referrer"},
+		{"https://chatgpt.com/c/private?from=answer&token=secret#fragment", Campaign{}, "ChatGPT", "referrer"},
+		{"https://google.com.attacker.example/path?q=1", Campaign{}, "google.com.attacker.example", "referrer"},
 		{"", Campaign{Source: "telegram", Name: "launch"}, "telegram", "utm"},
 		{"", Campaign{Google: true}, "Google Ads", "click-parameter"},
-		{"https://site.example/page", Campaign{}, "direct-hidden", "absent"},
+		{"https://site.example/page", Campaign{}, "direct", "absent"},
 	}
 	for _, test := range cases {
 		actual := SourceAttribution(test.campaign, test.ref, "site.example")
-		if actual.Name != test.name || actual.Evidence != test.evidence || strings.Contains(actual.Detail, "secret") {
+		if actual.Name != test.name || actual.Evidence != test.evidence || strings.Contains(actual.Detail, "secret") || strings.Contains(actual.Detail, "fragment") {
 			t.Fatalf("attribution %+v", actual)
 		}
+	}
+	chatGPT := SourceAttribution(Campaign{}, "https://chatgpt.com/c/private?from=answer&token=secret#fragment", "site.example")
+	if chatGPT.Detail != "https://chatgpt.com/c/private?from=answer" {
+		t.Fatalf("precise safe referrer = %q", chatGPT.Detail)
+	}
+	unknown := SourceAttribution(Campaign{}, "https://example.org/news?id=42&session=private", "site.example")
+	if unknown.Detail != "https://example.org/news?id=42" {
+		t.Fatalf("unknown referrer detail = %q", unknown.Detail)
+	}
+	if safe := SafeReferrer("https://user:password@example.org/news?mode=feed&token=private#section"); safe != "https://example.org/news?mode=feed" {
+		t.Fatalf("safe referrer = %q", safe)
+	}
+	if safe := SafeReferrer("ftp://example.org/file"); safe != "" {
+		t.Fatalf("non-http referrer accepted: %q", safe)
 	}
 	if target := SafeTarget("https://example.org/download?token=secret#credentials"); target != "example.org/download" {
 		t.Fatal(target)
