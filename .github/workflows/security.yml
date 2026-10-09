@@ -29,7 +29,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.26.6"
+          go-version: "1.26.9"
           cache: true
       - name: Database coverage details
         run: |
@@ -97,7 +97,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.26.6"
+          go-version: "1.26.9"
           cache: true
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
@@ -113,7 +113,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.26.6"
+          go-version: "1.26.9"
           cache: true
       - name: Install gosec
         run: go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0
@@ -146,7 +146,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.26.6"
+          go-version: "1.26.9"
           cache: true
       - name: Initialize CodeQL
         uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
