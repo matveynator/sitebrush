@@ -5,6 +5,12 @@
     window.SiteBrushAnalyticsStarted = true;
     const storageKey = 'sitebrush.analytics.browser.v1';
     const lifetime = 90 * 86400000;
+    const sensitiveParameters = new Set([
+        'login_challenge', 'profile_resume', 'recovery_token', 'email_confirm', 'registration_form_token',
+        'recovery_code', 'login_code', 'password_confirmation_code', 'token', 'access_token', 'id_token',
+        'secret', 'password', 'passwd', 'auth', 'authorization', 'session', 'sessionid', 'session_id',
+        'api_key', 'apikey', 'key', 'code', 'gclid', 'yclid', 'fbclid'
+    ]);
     const model = {
         tab: '', session: '', actions: [], sentActions: '', sentURI: '', visitor: '', persistent: false, view: '', sequence: 0,
         activeMilliseconds: 0, maximumScroll: 0, lastSample: 0,
@@ -20,6 +26,14 @@
             result += character;
         }
         return result;
+    }
+
+    function removeSensitiveParameters(parameters, removeCampaignParameters) {
+        for (const key of Array.from(parameters.keys())) {
+            const lower = key.toLowerCase();
+            if (sensitiveParameters.has(lower) || (removeCampaignParameters && lower.startsWith('utm_'))) parameters.delete(key);
+        }
+        parameters.sort();
     }
 
     function createIdentity() {
@@ -65,12 +79,7 @@
 
     function currentURI() {
         const parameters = new URLSearchParams(location.search);
-        const sensitive = new Set(['token', 'access_token', 'id_token', 'secret', 'password', 'passwd', 'auth', 'authorization', 'session', 'sessionid', 'session_id', 'api_key', 'apikey', 'key', 'code', 'gclid', 'yclid', 'fbclid']);
-        for (const key of Array.from(parameters.keys())) {
-            const lower = key.toLowerCase();
-            if (sensitive.has(lower) || lower.startsWith('utm_')) parameters.delete(key);
-        }
-        parameters.sort();
+        removeSensitiveParameters(parameters, true);
         const query = parameters.toString();
         const fragment = /^#[A-Za-z0-9._~-]{1,64}$/.test(location.hash || '') ? location.hash : '';
         const pathname = boundedText(location.pathname || '/', 256) || '/';
@@ -150,15 +159,25 @@
         return boundedText('utm:' + campaignSource + '/' + (parameters.get('utm_medium') || '') + '/' + (parameters.get('utm_campaign') || ''), 128);
     }
 
-    function referrerHost() {
+    function referrerAddress() {
         if (!document.referrer) return '';
-        try { return (new URL(document.referrer).origin + new URL(document.referrer).pathname).slice(0, 256); }
-        catch (referrerError) { console.debug('SiteBrush analytics: invalid referrer', referrerError.name); return ''; }
+        try {
+            const referrer = new URL(document.referrer);
+            if (referrer.protocol !== 'http:' && referrer.protocol !== 'https:') return '';
+            referrer.username = '';
+            referrer.password = '';
+            referrer.hash = '';
+            removeSensitiveParameters(referrer.searchParams, false);
+            return boundedText(referrer.href, 256);
+        } catch (referrerError) {
+            console.debug('SiteBrush analytics: invalid referrer', referrerError.name);
+            return '';
+        }
     }
 
     function retainPendingAction() {
         if (!model.actions.length) return;
-        try { sessionStorage.setItem('sitebrush.analytics.pending', JSON.stringify({expires: Date.now() + 1800000, visitor: model.visitor, view: model.view, sequence: model.sequence + 1, path: location.pathname.slice(0, 512), uri: currentURI(), tab: model.tab, session: model.session, persistent: model.persistent, actions: model.actions, active_ms: Math.floor(model.activeMilliseconds), scroll: model.maximumScroll, language: (navigator.language || '').slice(0,32), page_language: document.documentElement.lang.slice(0,32), source: sourceDescription(), referrer: referrerHost(), campaign: campaignFields()})); }
+        try { sessionStorage.setItem('sitebrush.analytics.pending', JSON.stringify({expires: Date.now() + 1800000, visitor: model.visitor, view: model.view, sequence: model.sequence + 1, path: location.pathname.slice(0, 512), uri: currentURI(), tab: model.tab, session: model.session, persistent: model.persistent, actions: model.actions, active_ms: Math.floor(model.activeMilliseconds), scroll: model.maximumScroll, language: (navigator.language || '').slice(0,32), page_language: document.documentElement.lang.slice(0,32), source: sourceDescription(), referrer: referrerAddress(), campaign: campaignFields()})); }
         catch (pendingError) { console.debug('SiteBrush analytics: pending action unavailable', pendingError.name); }
     }
 
@@ -205,7 +224,7 @@
             campaign: campaignFields(),
             view: model.view, sequence: model.sequence,
             path: location.pathname.slice(0, 512), uri: uri,
-            referrer: referrerHost(), source: sourceDescription(),
+            referrer: referrerAddress(), source: sourceDescription(),
             active_ms: Math.floor(model.activeMilliseconds), scroll: model.maximumScroll
         };
         try {

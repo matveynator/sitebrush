@@ -194,6 +194,31 @@ func SafeTarget(raw string) string {
 	}
 	return SafePath(raw)
 }
+func SafeReferrer(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {
+		return ""
+	}
+	query := parsed.Query()
+	for key := range query {
+		lower := strings.ToLower(key)
+		sensitive := map[string]bool{"login_challenge": true, "profile_resume": true, "recovery_token": true, "email_confirm": true, "registration_form_token": true, "recovery_code": true, "login_code": true, "password_confirmation_code": true, "token": true, "access_token": true, "id_token": true, "secret": true, "password": true, "passwd": true, "auth": true, "authorization": true, "session": true, "sessionid": true, "session_id": true, "api_key": true, "apikey": true, "key": true, "code": true, "gclid": true, "yclid": true, "fbclid": true}
+		if sensitive[lower] {
+			query.Del(key)
+		}
+	}
+	result := strings.ToLower(parsed.Scheme) + "://" + parsed.Host + SafePath(raw)
+	if encoded := query.Encode(); encoded != "" {
+		result += "?" + encoded
+	}
+	if len(result) > 1024 {
+		result = strings.ToLower(parsed.Scheme) + "://" + parsed.Host + SafePath(raw)
+	}
+	if len(result) > 1024 {
+		return ""
+	}
+	return CleanText(result, 1024)
+}
 func SourceAttribution(campaign Campaign, referrer, siteHost string) Attribution {
 	if campaign.Source != "" {
 		return Attribution{CleanText(campaign.Source, 64), "campaign", "utm", CleanText(campaign.Name, 64)}
@@ -207,24 +232,21 @@ func SourceAttribution(campaign Campaign, referrer, siteHost string) Attribution
 	if campaign.Facebook {
 		return Attribution{"Meta", "social", "click-parameter", ""}
 	}
-	parsed, err := url.Parse(referrer)
+	safeReferrer := SafeReferrer(referrer)
+	parsed, err := url.Parse(safeReferrer)
 	host := strings.ToLower(parsedHost(parsed))
 	if err != nil || host == "" || strings.EqualFold(host, strings.Split(siteHost, ":")[0]) {
-		return Attribution{"direct-hidden", "unknown", "absent", ""}
+		return Attribution{"direct", "direct", "absent", ""}
 	}
 	for _, rule := range []struct{ host, name, kind string }{
 		{"google.com", "Google", "search"}, {"google.ru", "Google", "search"}, {"yandex.ru", "Yandex", "search"}, {"yandex.com", "Yandex", "search"}, {"bing.com", "Bing", "search"}, {"duckduckgo.com", "DuckDuckGo", "search"},
 		{"chatgpt.com", "ChatGPT", "ai"}, {"chat.openai.com", "ChatGPT", "ai"}, {"claude.ai", "Claude", "ai"}, {"perplexity.ai", "Perplexity", "ai"}, {"t.me", "Telegram", "messenger"}, {"telegram.org", "Telegram", "messenger"}, {"habr.com", "Habr", "referral"}, {"github.com", "GitHub", "referral"}, {"reddit.com", "Reddit", "social"},
 	} {
 		if host == rule.host || strings.HasSuffix(host, "."+rule.host) {
-			detail := host + SafePath(referrer)
-			if rule.kind == "ai" {
-				detail = host
-			}
-			return Attribution{rule.name, rule.kind, "referrer", detail}
+			return Attribution{rule.name, rule.kind, "referrer", safeReferrer}
 		}
 	}
-	return Attribution{CleanText(host, 128), "referral", "referrer", host + SafePath(referrer)}
+	return Attribution{CleanText(host, 128), "referral", "referrer", safeReferrer}
 }
 func parsedHost(parsed *url.URL) string {
 	if parsed == nil {
@@ -706,7 +728,7 @@ func (report ExperienceReport) View(filter ExperienceFilter) ExperienceView {
 				result.LocalHours[hour]++
 			}
 		}
-		if session.Source.Name == "direct-hidden" && session.FirstSource != "direct-hidden" && session.FirstSource != "direct" && session.FirstSource != "" {
+		if (session.Source.Name == "direct" || session.Source.Name == "direct-hidden") && session.FirstSource != "direct-hidden" && session.FirstSource != "direct" && session.FirstSource != "" {
 			hiddenReturns++
 		}
 		loopFound := false
