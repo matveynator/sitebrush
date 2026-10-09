@@ -2,7 +2,7 @@ module github.com/matveynator/sitebrush/v2
 
 go 1.25.0
 
-toolchain go1.26.6
+toolchain go1.26.9
 
 require (
 	github.com/go-webauthn/webauthn v0.17.4
@@ -10,11 +10,11 @@ require (
 	github.com/jchv/go-webview-selector v0.0.0-20250730141630-a5f64a01ba3a
 	github.com/matveynator/netchan v0.0.0-20260802175005-7848addf9431
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
-	golang.org/x/crypto v0.54.0
-	golang.org/x/net v0.57.0
-	golang.org/x/sys v0.47.0
-	golang.org/x/term v0.45.0
-	golang.org/x/text v0.40.0
+	golang.org/x/crypto v0.57.0
+	golang.org/x/net v0.60.0
+	golang.org/x/sys v0.48.0
+	golang.org/x/term v0.46.0
+	golang.org/x/text v0.42.0
 	modernc.org/sqlite v1.50.1
 )
 
