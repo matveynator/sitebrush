@@ -550,11 +550,10 @@
     .security-radar-tooltip[hidden] { display:none; }
     .security-radar-tooltip strong { display:block; margin-bottom:4px; }
     .security-radar { display:block; width:min(100%,360px); height:auto; margin-inline:auto; overflow:visible; }
-    .security-radar polygon { fill:rgba(224,90,42,.16); stroke:#e05a2a; stroke-width:2; }
-    .security-radar .security-radar-axis { stroke:var(--bs-border-color); stroke-width:1; }
+    .security-radar .security-radar-axis { fill:none; stroke:var(--bs-border-color); stroke-width:1; }
     .security-radar .security-radar-ring-label { fill:var(--bs-secondary-color); font-size:8px; stroke:none; }
     .security-radar text { fill:currentColor; font-size:9px; }
-    .security-radar-point { fill:#e05a2a; stroke:#ff2d2d; stroke-width:2; }
+    .security-radar-point { stroke-width:2; }
     .security-chart-grid {
       display:grid;
       grid-template-columns:repeat(2,minmax(0,1fr));
@@ -1528,6 +1527,11 @@
         radar.appendChild(label);
       });
       if (hasData) {
+        const activeCategories = categories.filter(function observedCategory(category) {
+          return (Number(selectedCategories[category]) || 0) > 0;
+        }).sort(function prevailingCategory(left, right) {
+          return selectedCategories[right]-selectedCategories[left] || left.localeCompare(right);
+        });
         const definitions = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
         const gradient = document.createElementNS('http://www.w3.org/2000/svg', 'linearGradient');
         gradient.id = 'security-selected-day-colors';
@@ -1535,7 +1539,7 @@
         gradient.setAttribute('x1', '76'); gradient.setAttribute('y1', '46');
         gradient.setAttribute('x2', '284'); gradient.setAttribute('y2', '254');
         let colorOffset = 0;
-        for (const category of categories) {
+        for (const category of activeCategories) {
           const categoryCount = Math.max(0, Number(selectedCategories[category]) || 0);
           if (categoryCount === 0) continue;
           for (const offset of [colorOffset, colorOffset+categoryCount/dailyTotal]) {
@@ -1548,13 +1552,14 @@
         }
         definitions.appendChild(gradient);
         radar.appendChild(definitions);
+        const attackPaint = activeCategories.length === 1 ? securityTypeColor(activeCategories[0]) : 'url(#security-selected-day-colors)';
         const polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
         polygon.setAttribute('points', categories.map(function categoryPoint(category, index) {
           return point(index, Math.max(0, Number(selectedCategories[category]) || 0) / dailyTotal).join(',');
         }).join(' '));
-        polygon.setAttribute('fill', 'url(#security-selected-day-colors)');
-        polygon.setAttribute('fill-opacity', '0.17');
-        polygon.setAttribute('stroke', 'url(#security-selected-day-colors)');
+        polygon.style.fill = attackPaint;
+        polygon.style.fillOpacity = '0.25';
+        polygon.style.stroke = attackPaint;
         polygon.setAttribute('stroke-width', '2');
         radar.appendChild(polygon);
         categories.forEach(function addPoint(category, index) {
