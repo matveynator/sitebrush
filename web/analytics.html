@@ -904,19 +904,6 @@
   {{if eq .AnalyticsTab "security"}}
   <section class="card world-map-card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_blocked_map"}}</h2><p class="small">{{index .T "ax_blocked_stats_hint"}} · {{index .T "ax_unknown_geo"}}: {{.SecurityIPSummary.UnknownLocations}}</p><div id="analytics-blocked-ip-map" class="world-map-panel"><div id="analytics-blocked-map-overlay" class="world-map-empty">{{index .T "analytics_no_data"}}</div></div></div></section>
   <dialog id="analytics-blocked-map-dialog" class="card analytics-map-dialog" style="width:min(760px,90vw);max-height:80vh;overflow:auto;margin:auto"><div class="card-body"><form method="dialog"><button class="btn btn-outline-secondary float-end" aria-label="Close">×</button></form><h2 class="h5">{{index .T "ax_blocked_ips"}}</h2><div id="analytics-blocked-map-list"></div></div></dialog>
-  <section class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_blocked_ips"}}</h2><p class="small">{{index .T "ax_blocked_stats_hint"}}</p><div class="metric-grid">
-    <div class="metric-card card"><div class="card-body">{{index .T "ax_blocked_ips"}}<div class="metric-value">{{.SecurityIPSummary.Blocked}}</div></div></div>
-    <div class="metric-card card"><div class="card-body">{{index .T "ax_allowed_ips"}}<div class="metric-value">{{.SecurityIPSummary.Allowed}}</div></div></div>
-    <div class="metric-card card"><div class="card-body">{{index .T "ax_throttled_ips"}}<div class="metric-value">{{.SecurityIPSummary.Throttled}}</div></div></div>
-    <div class="metric-card card"><div class="card-body">{{index .T "ax_returning_blocked_ips"}}<div class="metric-value">{{if .SecurityIPSummary.RepeatStarted.IsZero}}{{index .T "analytics_no_data"}}{{else}}{{.SecurityIPSummary.ReturningIPs}}{{end}}</div></div></div>
-    <div class="metric-card card"><div class="card-body">{{index .T "ax_blocked_return_requests"}}<div class="metric-value">{{if .SecurityIPSummary.RepeatStarted.IsZero}}{{index .T "analytics_no_data"}}{{else}}{{.SecurityIPSummary.ReturnRequests}}{{end}}</div></div></div>
-    <div class="metric-card card"><div class="card-body">{{index .T "ax_blocked_return_visits"}}<div class="metric-value">{{if .SecurityIPSummary.RepeatStarted.IsZero}}{{index .T "analytics_no_data"}}{{else}}{{.SecurityIPSummary.ReturnVisits}}{{end}}</div></div></div>
-  </div><p class="small mt-3">{{index .T "ax_blocked_repeats_hint"}}{{if not .SecurityIPSummary.RepeatStarted.IsZero}} · {{.SecurityIPSummary.RepeatStarted.Format "2006-01-02 15:04 UTC"}}{{end}}</p>
-  <div class="row g-3">
-    <div class="col-md-4"><h3 class="h6">{{index .T "ax_security_by_type"}}</h3><table class="table table-sm"><thead><tr><th>{{index .T "ax_security_by_type"}}</th><th>{{index .T "ax_ip_count"}}</th></tr></thead><tbody>{{range .SecurityIPSummary.Attacks}}<tr><td>{{with index $.T (print "ax_risk_" .Label)}}{{.}}{{else}}{{if eq .Label "unknown"}}{{index $.T "analytics_no_data"}}{{else}}{{.Label}}{{end}}{{end}}</td><td>{{.Count}}</td></tr>{{else}}<tr><td colspan="2">{{index .T "analytics_no_data"}}</td></tr>{{end}}</tbody></table></div>
-    <div class="col-md-4"><h3 class="h6">{{index .T "ax_security_by_country"}}</h3><table class="table table-sm"><thead><tr><th>{{index .T "ax_security_by_country"}}</th><th>{{index .T "ax_ip_count"}}</th></tr></thead><tbody>{{range .SecurityIPSummary.Countries}}<tr><td data-country-code="{{.Label}}">{{if eq .Label "unknown"}}{{index $.T "analytics_no_data"}}{{else}}{{.Label}}{{end}}</td><td>{{.Count}}</td></tr>{{else}}<tr><td colspan="2">{{index .T "analytics_no_data"}}</td></tr>{{end}}</tbody></table></div>
-    <div class="col-md-4"><h3 class="h6">{{index .T "ax_policies"}}</h3><table class="table table-sm"><thead><tr><th>{{index .T "ax_policies"}}</th><th>{{index .T "ax_ip_count"}}</th></tr></thead><tbody>{{range .SecurityIPSummary.Policies}}<tr><td data-security-policy-name="{{.Label}}">{{with index $.T (print "ax_policy_" .Label)}}{{.}}{{else}}{{.Label}}{{end}}</td><td>{{.Count}}</td></tr>{{end}}</tbody></table></div>
-  </div></div></section>
   <section id="security-activity" class="card security-chart-card mb-4" data-activity-calendar="security" data-hour-title="{{index .T "ax_security_by_hour"}}" data-type-title="{{index .T "ax_security_by_type"}}" data-activity-title="{{index .T "ax_security_activity"}}" data-empty-text="{{index .T "analytics_no_data"}}">
   <div class="card-body">
     <h2 class="h5">{{index .T "ax_security_activity"}}</h2>
@@ -961,6 +948,19 @@
       {{range .SecurityTypeAxes}}<span data-security-type="{{.}}" data-label="{{index $.T (print "ax_risk_" .)}}" data-description="{{index $.T (print "ax_risk_desc_" .)}}"></span>{{end}}
     </div>
   </div></section>
+
+  <section class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_blocked_ips"}}</h2><p class="small">{{index .T "ax_blocked_stats_hint"}}</p><div class="metric-grid">
+    <div class="metric-card card"><div class="card-body">{{index .T "ax_blocked_ips"}}<div class="metric-value">{{.SecurityIPSummary.Blocked}}</div></div></div>
+    <div class="metric-card card"><div class="card-body">{{index .T "ax_allowed_ips"}}<div class="metric-value">{{.SecurityIPSummary.Allowed}}</div></div></div>
+    <div class="metric-card card"><div class="card-body">{{index .T "ax_throttled_ips"}}<div class="metric-value">{{.SecurityIPSummary.Throttled}}</div></div></div>
+    <div class="metric-card card"><div class="card-body">{{index .T "ax_returning_blocked_ips"}}<div class="metric-value">{{if .SecurityIPSummary.RepeatStarted.IsZero}}{{index .T "analytics_no_data"}}{{else}}{{.SecurityIPSummary.ReturningIPs}}{{end}}</div></div></div>
+    <div class="metric-card card"><div class="card-body">{{index .T "ax_blocked_return_requests"}}<div class="metric-value">{{if .SecurityIPSummary.RepeatStarted.IsZero}}{{index .T "analytics_no_data"}}{{else}}{{.SecurityIPSummary.ReturnRequests}}{{end}}</div></div></div>
+  </div><p class="small mt-3">{{index .T "ax_blocked_repeats_hint"}}{{if not .SecurityIPSummary.RepeatStarted.IsZero}} · {{.SecurityIPSummary.RepeatStarted.Format "2006-01-02 15:04 UTC"}}{{end}}</p>
+  <div class="row g-3">
+    <div class="col-md-4"><h3 class="h6">{{index .T "ax_security_by_type"}}</h3><table class="table table-sm"><thead><tr><th>{{index .T "ax_security_by_type"}}</th><th>{{index .T "ax_ip_count"}}</th></tr></thead><tbody>{{range .SecurityIPSummary.Attacks}}<tr><td>{{with index $.T (print "ax_risk_" .Label)}}{{.}}{{else}}{{if eq .Label "unknown"}}{{index $.T "analytics_no_data"}}{{else}}{{.Label}}{{end}}{{end}}</td><td>{{.Count}}</td></tr>{{else}}<tr><td colspan="2">{{index .T "analytics_no_data"}}</td></tr>{{end}}</tbody></table></div>
+    <div class="col-md-4"><h3 class="h6">{{index .T "ax_security_by_country"}}</h3><table class="table table-sm"><thead><tr><th>{{index .T "ax_security_by_country"}}</th><th>{{index .T "ax_ip_count"}}</th></tr></thead><tbody>{{range .SecurityIPSummary.Countries}}<tr><td data-country-code="{{.Label}}">{{if eq .Label "unknown"}}{{index $.T "analytics_no_data"}}{{else}}{{.Label}}{{end}}</td><td>{{.Count}}</td></tr>{{else}}<tr><td colspan="2">{{index .T "analytics_no_data"}}</td></tr>{{end}}</tbody></table></div>
+    <div class="col-md-4"><h3 class="h6">{{index .T "ax_policies"}}</h3><table class="table table-sm"><thead><tr><th>{{index .T "ax_policies"}}</th><th>{{index .T "ax_ip_count"}}</th></tr></thead><tbody>{{range .SecurityIPSummary.Policies}}<tr><td data-security-policy-name="{{.Label}}">{{with index $.T (print "ax_policy_" .Label)}}{{.}}{{else}}{{.Label}}{{end}}</td><td>{{.Count}}</td></tr>{{end}}</tbody></table></div>
+  </div></div></section>
 
   <section id="security" class="card mb-4"><div class="card-body">
     <h2 class="h5">{{index .T "ax_security"}}</h2>
