@@ -2391,6 +2391,8 @@ type sitebrushSecurityHostLoad struct {
 	NetworkKnown   bool
 }
 
+const analyticsSessionMetricsFormatVersion = 2
+
 type analyticsPreparedReport struct {
 	LegacyAudience         map[string][]analyticsCountRow `json:"legacy_audience,omitempty"`
 	LegacyMapPoints        []analyticsMapPoint            `json:"legacy_map_points,omitempty"`
@@ -5485,7 +5487,7 @@ func (aggregate *siteAnalyticsAggregate) report(generatedAt time.Time) analytics
 		}
 	}
 	report := analyticsPreparedReport{
-		SessionMetricsVersion: 1,
+		SessionMetricsVersion: analyticsSessionMetricsFormatVersion,
 		GeneratedAt:           generatedAt.Format(time.RFC3339),
 		PeriodStart:           generatedAt.Format(time.RFC3339),
 		PeriodEnd:             generatedAt.Format(time.RFC3339),
@@ -7099,7 +7101,7 @@ func analyticsReportView(report analyticsPreparedReport, translations map[string
 	}
 	sort.Strings(legacyNames)
 	for _, name := range legacyNames {
-		section := analyticsReportSection{Title: "Legacy " + name + " HTTP page requests", Description: "Historical request counts. These are not sessions."}
+		section := analyticsReportSection{Title: "Legacy " + name + " activity counts", Description: "Historical aggregates may count requests and cannot be reconstructed as session-only data."}
 		for _, row := range report.LegacyAudience[name] {
 			section.Rows = append(section.Rows, analyticsReportRow{Label: row.Label, Value: strconv.Itoa(row.Count)})
 		}
@@ -7111,40 +7113,61 @@ func analyticsReportView(report analyticsPreparedReport, translations map[string
 // Historical snapshots counted page requests in audience dimensions. Keep that
 // evidence visible as technical history without merging it into session totals.
 func analyticsSeparateLegacyCounters(report analyticsPreparedReport) analyticsPreparedReport {
-	if report.SessionMetricsVersion != 0 {
+	if report.SessionMetricsVersion >= analyticsSessionMetricsFormatVersion {
 		return report
 	}
-	report.LegacyStaticRequests += report.StaticRequests
-	report.LegacyPageRequests += report.PageViews
-	report.PageViews = 0
-	report.LegacyAssets = report.TopAssets
-	report.LegacyBrowsers = report.Browsers
-	report.LegacyOperatingSystems = report.OperatingSystems
-	report.LegacyBotCrawlers = report.BotCrawlers
-	report.LegacyAudience = map[string][]analyticsCountRow{}
+	// Version 1 only separated some audience fields. A legacy page marker without
+	// extracted dimensions identifies counters that cannot represent pure sessions.
+	if report.SessionMetricsVersion == 1 && report.LegacyPageRequests == 0 {
+		report.SessionMetricsVersion = analyticsSessionMetricsFormatVersion
+		return report
+	}
+	versionOne := report.SessionMetricsVersion == 1
+	legacyAudience := make(map[string][]analyticsCountRow)
+	for name, rows := range report.LegacyAudience {
+		legacyAudience[name] = rows
+	}
+	report.LegacyAudience = legacyAudience
+	if report.SessionMetricsVersion == 0 {
+		report.LegacyStaticRequests += report.StaticRequests
+		report.LegacyPageRequests += report.PageViews
+		report.PageViews = 0
+		report.LegacyAssets = report.TopAssets
+		report.LegacyBrowsers = report.Browsers
+		report.LegacyOperatingSystems = report.OperatingSystems
+		report.LegacyBotCrawlers = report.BotCrawlers
+		if len(report.VisitorTypes) > 0 {
+			report.LegacyAudience["visitor types"] = report.VisitorTypes
+		}
+		report.StaticRequests = 0
+		report.TopAssets, report.Browsers, report.OperatingSystems, report.BotCrawlers, report.VisitorTypes = nil, nil, nil, nil, nil
+	}
 	for _, dimension := range []struct {
 		name string
 		rows []analyticsCountRow
 	}{
 		{"pages", report.TopPages}, {"traffic sources", report.TrafficSources}, {"referrers", report.Referrers},
 		{"countries", report.Countries}, {"cities", report.Cities}, {"devices", report.Devices},
-		{"visitor types", report.VisitorTypes}, {"bot referrers", report.BotReferrers}, {"languages", report.Languages},
+		{"bot referrers", report.BotReferrers}, {"languages", report.Languages},
 	} {
 		if len(dimension.rows) > 0 {
-			report.LegacyAudience[dimension.name] = dimension.rows
+			name := dimension.name
+			if versionOne {
+				name = "unclassified version-1 " + name
+			}
+			report.LegacyAudience[name] = dimension.rows
 		}
 	}
-	report.LegacyMapPoints = report.MapPoints
+	for _, point := range report.MapPoints {
+		if versionOne {
+			point.Label = "unclassified version-1: " + point.Label
+		}
+		report.LegacyMapPoints = append(report.LegacyMapPoints, point)
+	}
 	report.TopPages, report.TrafficSources, report.Referrers = nil, nil, nil
 	report.Countries, report.Cities, report.Devices = nil, nil, nil
 	report.BotReferrers, report.Languages, report.MapPoints = nil, nil, nil
-	report.StaticRequests = 0
-	report.TopAssets = nil
-	report.Browsers = nil
-	report.OperatingSystems = nil
-	report.BotCrawlers = nil
-	report.VisitorTypes = nil
-	report.SessionMetricsVersion = 1
+	report.SessionMetricsVersion = analyticsSessionMetricsFormatVersion
 	return report
 }
 

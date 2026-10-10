@@ -20326,6 +20326,34 @@ func TestRepeatedInterruptForcesExitDuringStalledShutdown(t *testing.T) {
 
 // END security view and signal boundary tests.
 
+func TestMergedAudiencePercentagesMigratePartiallyConvertedVersionOne(t *testing.T) {
+	partiallyConverted := analyticsPreparedReport{SessionMetricsVersion: 1, GeneratedAt: "2026-10-09T12:00:00Z", LegacyPageRequests: 50, PageViews: 1, HumanSessions: 1, BotSessions: 1,
+		TopPages: []analyticsCountRow{{Label: "/", Count: 51}}, TrafficSources: []analyticsCountRow{{Label: "direct", Count: 52}},
+		Countries: []analyticsCountRow{{Label: "US", Count: 52}}, MapPoints: []analyticsMapPoint{{Label: "US", Count: 52}},
+		VisitorTypes: []analyticsCountRow{{Label: "human", Count: 1}, {Label: "bot", Count: 1}},
+		Browsers:     []analyticsCountRow{{Label: "Chrome", Count: 1}}, LegacyBrowsers: []analyticsCountRow{{Label: "Chrome", Count: 50}},
+	}
+	modern := analyticsPreparedReport{SessionMetricsVersion: analyticsSessionMetricsFormatVersion, GeneratedAt: "2026-10-10T12:00:00Z", PageViews: 1, HumanSessions: 1, BotSessions: 1,
+		TopPages: []analyticsCountRow{{Label: "/", Count: 1}}, TrafficSources: []analyticsCountRow{{Label: "direct", Count: 2}},
+		Countries: []analyticsCountRow{{Label: "US", Count: 2}}, MapPoints: []analyticsMapPoint{{Label: "US", Count: 2}},
+		VisitorTypes: []analyticsCountRow{{Label: "human", Count: 1}, {Label: "bot", Count: 1}}, Browsers: []analyticsCountRow{{Label: "Chrome", Count: 1}},
+	}
+	merged := mergeTechnicalReports(partiallyConverted, modern)
+	if merged.SessionMetricsVersion != analyticsSessionMetricsFormatVersion || merged.PageViews != 2 || merged.HumanSessions != 2 || merged.BotSessions != 2 || merged.LegacyPageRequests != 50 {
+		t.Fatalf("format migration damaged known totals: %+v", merged)
+	}
+	if merged.TrafficSources[0].Count != 2 || merged.TrafficSources[0].Value != "50.0%" || merged.LegacyAudience["unclassified version-1 traffic sources"][0].Count != 52 || merged.MapPoints[0].Count != 2 || merged.LegacyMapPoints[0].Count != 52 {
+		t.Fatalf("version-1 request counters entered session dimensions: %+v", merged)
+	}
+	if merged.Browsers[0].Count != 2 || merged.VisitorTypes[0].Count != 2 || merged.LegacyBrowsers[0].Count != 50 {
+		t.Fatalf("valid version-1 session fields were discarded: %+v", merged)
+	}
+	again := analyticsSeparateLegacyCounters(merged)
+	if again.TrafficSources[0].Count != 2 || again.LegacyAudience["unclassified version-1 traffic sources"][0].Count != 52 {
+		t.Fatal("migration is not idempotent")
+	}
+}
+
 func TestMergedAudiencePercentagesExcludeLegacyRequestCounters(t *testing.T) {
 	legacy := analyticsPreparedReport{GeneratedAt: "2026-10-09T12:00:00Z", PageViews: 50, TotalRequests: 50,
 		TopPages: []analyticsCountRow{{Label: "/", Count: 50}}, TrafficSources: []analyticsCountRow{{Label: "direct", Count: 50}},
