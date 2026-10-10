@@ -81,6 +81,10 @@ jobs:
           use_oidc: true
       - name: Enforce lock-free architecture
         run: go test -count=1 ./scripts/architecture
+      - name: Test analytics sessions and graceful shutdown
+        run: >-
+          go test -count=1 .
+          -run '^(TestAnalytics(SeparatesSession|LiveFlush|Rotation)|TestMergedAudiencePercentages|TestControlDatabaseShutdown|TestControlReader|TestRepeatedInterrupt|TestSecurityBlockPagination|TestBlockedIPStatistics)'
       - name: Test security boundaries and demo
         run: >-
           go test -count=1 .

@@ -91,8 +91,6 @@ func TestScanDirectoryFailsClosedForStructurallyInvalidSARIF(t *testing.T) {
 	}
 }
 
-
-
 func TestScanDirectoryAcceptsOnlyExactValidatedBaselineFingerprint(t *testing.T) {
 	directory := t.TempDir()
 	writeSARIF(t, directory, "baseline.sarif", `{"version":"2.1.0","runs":[{"results":[
@@ -121,7 +119,6 @@ func TestScanDirectoryAcceptsOnlyExactValidatedBaselineFingerprint(t *testing.T)
 	}
 }
 
-
 func TestValidatedRedirectBaselineSurvivesLineMovement(t *testing.T) {
 	root := repositoryRoot(t)
 	previousDirectory, err := os.Getwd()
@@ -137,15 +134,10 @@ func TestValidatedRedirectBaselineSurvivesLineMovement(t *testing.T) {
 		}
 	}()
 
-	for _, tc := range []struct {
-		uri       string
-		startLine int
-	}{
-		{uri: "pkg/crawler/whole_site.go", startLine: 101},
-		{uri: "sitebrush.go", startLine: 14811},
-	} {
-		if justification, ok := baselineJustification("go/bad-redirect-check", tc.uri, "", tc.startLine); !ok || justification == "" {
-			t.Fatalf("validated redirect baseline did not match %s at moved line %d", tc.uri, tc.startLine)
+	for _, uri := range []string{"pkg/crawler/whole_site.go", "sitebrush.go"} {
+		startLine := localPathCheckLine(t, uri)
+		if justification, ok := baselineJustification("go/bad-redirect-check", uri, "", startLine); !ok || justification == "" {
+			t.Fatalf("validated redirect baseline did not match %s at moved line %d", uri, startLine)
 		}
 	}
 }
@@ -165,17 +157,34 @@ func TestValidatedRedirectBaselineRejectsNearbyNewFinding(t *testing.T) {
 		}
 	}()
 
-	for _, tc := range []struct {
-		uri       string
-		startLine int
-	}{
-		{uri: "pkg/crawler/whole_site.go", startLine: 102},
-		{uri: "sitebrush.go", startLine: 14812},
-	} {
-		if _, ok := baselineJustification("go/bad-redirect-check", tc.uri, "", tc.startLine); ok {
-			t.Fatalf("nearby new redirect finding was incorrectly accepted for %s at line %d", tc.uri, tc.startLine)
+	for _, uri := range []string{"pkg/crawler/whole_site.go", "sitebrush.go"} {
+		startLine := localPathCheckLine(t, uri) + 1
+		if _, ok := baselineJustification("go/bad-redirect-check", uri, "", startLine); ok {
+			t.Fatalf("nearby new redirect finding was incorrectly accepted for %s at line %d", uri, startLine)
 		}
 	}
+}
+
+func localPathCheckLine(t *testing.T, uri string) int {
+	t.Helper()
+	source, err := os.ReadFile(uri)
+	if err != nil {
+		t.Fatal(err)
+	}
+	matched := 0
+	for index, line := range strings.Split(string(source), "\n") {
+		if strings.TrimSpace(line) != "if trimmedPath[0] == '/' {" {
+			continue
+		}
+		if matched != 0 {
+			t.Fatalf("ambiguous local path check in %s", uri)
+		}
+		matched = index + 1
+	}
+	if matched == 0 {
+		t.Fatalf("local path check missing from %s", uri)
+	}
+	return matched
 }
 
 // --- Workflow integration enforcement ---

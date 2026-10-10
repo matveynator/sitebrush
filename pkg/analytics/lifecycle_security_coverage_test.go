@@ -134,7 +134,7 @@ func TestAnalyticsValidationSecurityBoundaries(t *testing.T) {
 		func(e *Event) { e.Path = "relative" },
 		func(e *Event) { e.Path = "/bad?query" },
 		func(e *Event) { e.Source = strings.Repeat("x", 129) },
-		func(e *Event) { e.Referrer = strings.Repeat("x", 257) },
+		func(e *Event) { e.Referrer = strings.Repeat("x", 1025) },
 	}
 	for index, mutate := range mutations {
 		event := base
@@ -285,7 +285,7 @@ func TestAnalyticsTargetAndAttributionSecurityBranches(t *testing.T) {
 		{Campaign{Facebook: true}, "", "example.org", "Meta"},
 		{Campaign{}, "https://chatgpt.com/share/x", "example.org", "ChatGPT"},
 		{Campaign{}, "https://sub.reddit.com/r/test", "example.org", "Reddit"},
-		{Campaign{}, "https://example.org/page", "example.org", "direct"},
+		{Campaign{}, "https://example.org/page", "example.org", "example.org"},
 	}
 	for _, tc := range cases {
 		if got := SourceAttribution(tc.campaign, tc.referrer, tc.host); got.Name != tc.want {
