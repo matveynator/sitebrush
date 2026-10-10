@@ -125,7 +125,13 @@
       color:var(--theme-foreground);
       font-weight:600;
     }
-    .analytics-table { table-layout:fixed; color:var(--dashboard-text); }
+    .analytics-table {
+      table-layout:fixed;
+      border-collapse:separate;
+      border-spacing:0;
+      color:var(--dashboard-text);
+    }
+    .analytics-table, .analytics-table * { text-decoration:none; }
     .analytics-table thead th {
       color:var(--theme-foreground);
       border-bottom-color:var(--dashboard-border);
@@ -134,7 +140,9 @@
       letter-spacing:0.04em;
     }
     .analytics-table tbody td {
-      border-bottom-color:rgba(54, 73, 109, 0.7);
+      border:0;
+      padding-block:0.5rem;
+      line-height:1.5;
       background:transparent;
     }
     .analytics-table tbody tr:hover td {
@@ -195,44 +203,12 @@
       color:var(--theme-foreground);
     }
     .analytics-share-cell { min-width:120px; }
-    .analytics-share-bar {
-      display:flex;
-      align-items:center;
-      justify-content:flex-end;
-      gap:8px;
-    }
-    .analytics-share-track {
-      width:74px;
-      height:9px;
-      background:var(--dashboard-bar);
-      border-radius:999px;
-      overflow:hidden;
-      flex:0 0 auto;
-      border:1px solid rgba(148, 171, 214, 0.18);
-    }
-    .analytics-share-fill {
-      height:100%;
-      width:0;
-      border-radius:999px;
-      background:var(--theme-muted-foreground);
-      box-shadow:0 0 8px rgba(0, 209, 255, 0.32);
-      transition:width 320ms ease;
-    }
     .analytics-share-number {
       min-width:42px;
       text-align:right;
       font-variant-numeric:tabular-nums;
       color:var(--theme-foreground);
       font-weight:600;
-    }
-    .analytics-share-badge {
-      padding:2px 8px;
-      border-radius:999px;
-      font-size:0.78rem;
-      font-weight:600;
-      line-height:1.3;
-      border:1px solid rgba(148, 171, 214, 0.35);
-      background:rgba(66, 83, 117, 0.2);
     }
     .world-map-card {
       border:1px solid var(--dashboard-border);
@@ -906,10 +882,7 @@
                 <td class="analytics-label">{{.Label}}{{if .Detail}}<div class="text-muted small">{{.Detail}}</div>{{end}}</td>
                 <td>{{.Value}}</td>
                 <td class="analytics-share-cell" data-share="{{.Percent}}">
-                  <div class="analytics-share-bar">
-                    <span class="analytics-share-track"><span class="analytics-share-fill"></span></span>
-                    <span class="analytics-share-number">{{.Percent}}</span>
-                  </div>
+                  <span class="analytics-share-number">{{if .Percent}}{{.Percent}}{{else}}{{index $.T "analytics_no_data"}}{{end}}</span>
                 </td>
               </tr>
               {{end}}
@@ -1133,7 +1106,7 @@
 <script type="application/json" id="analytics-server-hours">{{.ServerHoursJSON}}</script>
 <script src="/p/static/leaflet.min.js"></script>
 <script>
-(function renderAnalyticsShareBars() {
+(function renderAnalyticsDistributionCharts() {
   const themeStyle = getComputedStyle(document.documentElement);
   const palette = [1, 2, 3, 4, 5].map(function (index) {
     return themeStyle.getPropertyValue('--theme-chart-' + index).trim();
@@ -1177,7 +1150,6 @@
   }
 
   for (const analyticsCard of analyticsCards) {
-    const shareCells = analyticsCard.querySelectorAll('.analytics-share-cell');
     const tableRows = analyticsCard.querySelectorAll('tbody tr');
     const values = [];
     const labels = [];
@@ -1190,35 +1162,6 @@
       const shareValueRaw = shareCell.getAttribute('data-share') || '';
       const shareValue = parseSharePercent(shareValueRaw);
       const color = palette[rowIndex % palette.length];
-      const shareBarContainer = shareCell.querySelector('.analytics-share-bar');
-      const shareTrack = shareCell.querySelector('.analytics-share-track');
-      const shareFill = shareCell.querySelector('.analytics-share-fill');
-      const shareNumber = shareCell.querySelector('.analytics-share-number');
-      if (shareFill) {
-        shareFill.style.width = shareValue + '%';
-        shareFill.style.background = color;
-      }
-      if (shareNumber) {
-        shareNumber.style.color = color;
-      }
-      if (shareBarContainer) {
-        const isSmallValue = shareValue > 0 && shareValue < 12;
-        if (isSmallValue) {
-          if (shareTrack) shareTrack.style.display = 'inline-block';
-        } else {
-          if (shareTrack) shareTrack.style.display = 'none';
-          const badge = document.createElement('span');
-          badge.className = 'analytics-share-badge';
-          badge.textContent = shareValueRaw;
-          badge.style.color = color;
-          badge.style.borderColor = color + '99';
-          badge.style.background = color + '1f';
-          if (shareNumber) {
-            shareNumber.textContent = '';
-            shareNumber.appendChild(badge);
-          }
-        }
-      }
       if (shareValue > 0) {
         values.push(shareValue);
         labels.push(labelCell ? labelCell.textContent.trim() : '');
@@ -1262,15 +1205,6 @@
     }
   }
 
-  const shareCells = document.querySelectorAll('.analytics-share-cell');
-  for (const shareCell of shareCells) {
-    const shareValueRaw = shareCell.getAttribute('data-share') || '';
-    const normalizedShare = parseSharePercent(shareValueRaw);
-    const fillElement = shareCell.querySelector('.analytics-share-fill');
-    if (fillElement) {
-      fillElement.style.width = normalizedShare + '%';
-    }
-  }
 })();
 
 (function renderSecurityCharts() {
