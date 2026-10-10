@@ -463,6 +463,16 @@ http://your-domain.example
 
 ---
 
+## Visitor analytics
+
+Visitor metrics count browser-observed sessions, separated by 30 minutes of inactivity. Page opens, static file requests, bot visits and total HTTP requests are distinct units. Browser observations can be incomplete when JavaScript is disabled or collection reaches its bounded queue or memory budget.
+
+Sources retain the available referring URL, including its page and safe query parameters; credentials, secrets and fragments are removed. A short-lived HttpOnly cookie scoped to the analytics WebSocket carries the HTTP landing referrer when browser evidence is unavailable. In-app User-Agent signatures are secondary evidence. A supplied referrer is never classified as Direct.
+
+Each configured goal has its own achievement count, including zero. Path/URI goals count matching page opens or URI changes; action goals count new action increments, excluding retransmissions. Session details preserve the source, referring URL, page trail and individual achievements. Source and page conversion rates count sessions rather than file requests. Journey details describe the latest 100 retained sessions within seven days; daily aggregates cover the selected reporting period.
+
+Existing HTTP aggregates cannot reconstruct lost referrers or individual historical goal achievements. New bot-session and per-goal counters begin with observations collected by this version; old request totals remain technical history. Goals are not applied retroactively.
+
 ## Project history
 
 SiteBrush v2 is written in Go.

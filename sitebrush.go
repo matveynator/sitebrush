@@ -916,12 +916,17 @@ type serverControlDatabaseAccessRequest struct {
 	run      func(*sql.DB) error
 }
 
+type serverControlDatabaseCloseRequest struct {
+	reply   chan error
+	timeout time.Duration
+}
+
 type serverControlDatabaseDispatcher struct {
 	readRequests  chan serverControlDatabaseAccessRequest
 	writeRequests chan serverControlDatabaseAccessRequest
 	stop          chan struct{}
-	workersDone   chan struct{}
-	closeRequests chan chan struct{}
+	workersDone   chan string
+	closeRequests chan serverControlDatabaseCloseRequest
 	stopped       chan struct{}
 }
 
@@ -954,8 +959,8 @@ func startServerControlDatabaseDispatcher(databasePath string, debug bool) (*ser
 		readRequests:  make(chan serverControlDatabaseAccessRequest, 256),
 		writeRequests: make(chan serverControlDatabaseAccessRequest, 128),
 		stop:          make(chan struct{}),
-		workersDone:   make(chan struct{}, serverControlDatabaseReaderCount+1),
-		closeRequests: make(chan chan struct{}),
+		workersDone:   make(chan string, serverControlDatabaseReaderCount+1),
+		closeRequests: make(chan serverControlDatabaseCloseRequest),
 		stopped:       make(chan struct{}),
 	}
 	go dispatcher.runWorker(writerDatabase, dispatcher.writeRequests, "writer", debug)
@@ -994,7 +999,7 @@ func openServerControlDatabaseHandle(databasePath string, writer bool) (*sql.DB,
 func (dispatcher *serverControlDatabaseDispatcher) runWorker(database *sql.DB, requests <-chan serverControlDatabaseAccessRequest, workerName string, debug bool) {
 	defer func() {
 		_ = database.Close()
-		dispatcher.workersDone <- struct{}{}
+		dispatcher.workersDone <- workerName
 	}()
 	for {
 		select {
@@ -1002,6 +1007,8 @@ func (dispatcher *serverControlDatabaseDispatcher) runWorker(database *sql.DB, r
 			return
 		case request := <-requests:
 			select {
+			case <-dispatcher.stop:
+				return
 			case <-request.ctx.Done():
 				select {
 				case request.reply <- request.ctx.Err():
@@ -1075,38 +1082,55 @@ func (dispatcher *serverControlDatabaseDispatcher) execute(ctx context.Context, 
 	}
 }
 
-func (dispatcher *serverControlDatabaseDispatcher) Close() {
+func (dispatcher *serverControlDatabaseDispatcher) Close() error {
+	return dispatcher.closeWithin(0)
+}
+
+func (dispatcher *serverControlDatabaseDispatcher) closeWithin(timeout time.Duration) error {
 	if dispatcher == nil {
-		return
+		return nil
 	}
-	reply := make(chan struct{})
+	reply := make(chan error, 1)
 	select {
-	case dispatcher.closeRequests <- reply:
+	case dispatcher.closeRequests <- serverControlDatabaseCloseRequest{reply: reply, timeout: timeout}:
 	case <-dispatcher.stopped:
-		return
+		return nil
 	}
-	select {
-	case <-reply:
-	case <-dispatcher.stopped:
-	}
+	return <-reply
 }
 
 func (dispatcher *serverControlDatabaseDispatcher) runCloser() {
-	reply := <-dispatcher.closeRequests
+	request := <-dispatcher.closeRequests
 	close(dispatcher.stop)
-	for range serverControlDatabaseReaderCount + 1 {
-		<-dispatcher.workersDone
+	// Normal shutdown waits for every owner to release its connection. An
+	// explicit diagnostic deadline reports unfinished workers without hiding it.
+	pending := map[string]bool{"writer": true}
+	for index := range serverControlDatabaseReaderCount {
+		pending[fmt.Sprintf("reader-%d", index+1)] = true
 	}
-	for {
+	var deadline <-chan time.Time
+	if request.timeout > 0 {
+		timer := time.NewTimer(request.timeout)
+		defer timer.Stop()
+		deadline = timer.C
+	}
+	for len(pending) > 0 {
 		select {
-		case <-dispatcher.readRequests:
-		case <-dispatcher.writeRequests:
-		default:
+		case worker := <-dispatcher.workersDone:
+			delete(pending, worker)
+		case <-deadline:
+			workers := make([]string, 0, len(pending))
+			for worker := range pending {
+				workers = append(workers, worker)
+			}
+			sort.Strings(workers)
 			close(dispatcher.stopped)
-			close(reply)
+			request.reply <- fmt.Errorf("server control database shutdown timed out after %s; unfinished workers: %s", request.timeout, strings.Join(workers, ", "))
 			return
 		}
 	}
+	close(dispatcher.stopped)
+	request.reply <- nil
 }
 
 // siteFileDatabase owns one writer and a fixed set of readers. All callers
@@ -2353,6 +2377,7 @@ type siteAnalyticsEvent struct {
 	VisitorID                    string
 	TrustedPeer, IndexingCrawler bool
 	SecurityBlocked              bool
+	SecurityAlreadyBlocked       bool
 	IsAdmin                      bool
 	IsAsset                      bool
 	IsController                 bool
@@ -2367,51 +2392,60 @@ type sitebrushSecurityHostLoad struct {
 }
 
 type analyticsPreparedReport struct {
-	AdminUnclassified   bool                `json:"admin_unclassified,omitempty"`
-	ResponsePercentiles []analyticsCountRow `json:"response_percentiles,omitempty"`
-	GeneratedAt         string              `json:"generated_at"`
-	PeriodStart         string              `json:"period_start"`
-	PeriodEnd           string              `json:"period_end"`
-	TotalRequests       int                 `json:"total_requests"`
-	PageViews           int                 `json:"page_views"`
-	UniqueVisitors      int                 `json:"unique_visitors"`
-	HumanRequests       int                 `json:"human_requests"`
-	BotRequests         int                 `json:"bot_requests"`
-	ReturningVisitors   int                 `json:"returning_visitors"`
-	ReturnVisits        int                 `json:"return_visits"`
-	Sessions            int                 `json:"sessions"`
-	BounceRate          float64             `json:"bounce_rate"`
-	AverageDurationMS   int64               `json:"average_duration_ms"`
-	ErrorCount          int                 `json:"error_count"`
-	AdminRequests       int                 `json:"admin_requests"`
-	StaticRequests      int                 `json:"static_requests"`
-	TopPages            []analyticsCountRow `json:"top_pages"`
-	EntryPages          []analyticsCountRow `json:"entry_pages"`
-	ExitPages           []analyticsCountRow `json:"exit_pages"`
-	TrafficSources      []analyticsCountRow `json:"traffic_sources"`
-	Referrers           []analyticsCountRow `json:"referrers"`
-	ReturningSources    []analyticsCountRow `json:"returning_sources"`
-	ReturningReferrers  []analyticsCountRow `json:"returning_referrers"`
-	Countries           []analyticsCountRow `json:"countries"`
-	Cities              []analyticsCountRow `json:"cities"`
-	EntryHours          []analyticsCountRow `json:"entry_hours"`
-	MapPoints           []analyticsMapPoint `json:"map_points"`
-	Devices             []analyticsCountRow `json:"devices"`
-	VisitorTypes        []analyticsCountRow `json:"visitor_types"`
-	BotCrawlers         []analyticsCountRow `json:"bot_crawlers"`
-	BotReturnSources    []analyticsCountRow `json:"bot_return_sources"`
-	BotReferrers        []analyticsCountRow `json:"bot_referrers"`
-	Browsers            []analyticsCountRow `json:"browsers"`
-	OperatingSystems    []analyticsCountRow `json:"operating_systems"`
-	Languages           []analyticsCountRow `json:"languages"`
-	StatusCodes         []analyticsCountRow `json:"status_codes"`
-	HourlyActivity      []analyticsCountRow `json:"hourly_activity"`
-	DailyActivity       []analyticsCountRow `json:"daily_activity"`
-	SlowPages           []analyticsCountRow `json:"slow_pages"`
-	TopAssets           []analyticsCountRow `json:"top_assets"`
-	ErrorPaths          []analyticsCountRow `json:"error_paths"`
-	ContentSources      []analyticsCountRow `json:"content_sources"`
-	SystemEvents        []analyticsCountRow `json:"system_events,omitempty"`
+	SessionMetricsVersion  int                 `json:"session_metrics_version,omitempty"`
+	LegacyStaticRequests   int                 `json:"legacy_static_requests,omitempty"`
+	LegacyPageRequests     int                 `json:"legacy_page_requests,omitempty"`
+	LegacyAssets           []analyticsCountRow `json:"legacy_assets,omitempty"`
+	LegacyBrowsers         []analyticsCountRow `json:"legacy_browsers,omitempty"`
+	LegacyOperatingSystems []analyticsCountRow `json:"legacy_operating_systems,omitempty"`
+	LegacyBotCrawlers      []analyticsCountRow `json:"legacy_bot_crawlers,omitempty"`
+	AdminUnclassified      bool                `json:"admin_unclassified,omitempty"`
+	ResponsePercentiles    []analyticsCountRow `json:"response_percentiles,omitempty"`
+	GeneratedAt            string              `json:"generated_at"`
+	PeriodStart            string              `json:"period_start"`
+	PeriodEnd              string              `json:"period_end"`
+	TotalRequests          int                 `json:"total_requests"`
+	PageViews              int                 `json:"page_views"`
+	UniqueVisitors         int                 `json:"unique_visitors"`
+	HumanRequests          int                 `json:"human_requests"`
+	BotRequests            int                 `json:"bot_requests"`
+	HumanSessions          int                 `json:"human_sessions"`
+	BotSessions            int                 `json:"bot_sessions"`
+	ReturningVisitors      int                 `json:"returning_visitors"`
+	ReturnVisits           int                 `json:"return_visits"`
+	Sessions               int                 `json:"sessions"`
+	BounceRate             float64             `json:"bounce_rate"`
+	AverageDurationMS      int64               `json:"average_duration_ms"`
+	ErrorCount             int                 `json:"error_count"`
+	AdminRequests          int                 `json:"admin_requests"`
+	StaticRequests         int                 `json:"static_requests"`
+	TopPages               []analyticsCountRow `json:"top_pages"`
+	EntryPages             []analyticsCountRow `json:"entry_pages"`
+	ExitPages              []analyticsCountRow `json:"exit_pages"`
+	TrafficSources         []analyticsCountRow `json:"traffic_sources"`
+	Referrers              []analyticsCountRow `json:"referrers"`
+	ReturningSources       []analyticsCountRow `json:"returning_sources"`
+	ReturningReferrers     []analyticsCountRow `json:"returning_referrers"`
+	Countries              []analyticsCountRow `json:"countries"`
+	Cities                 []analyticsCountRow `json:"cities"`
+	EntryHours             []analyticsCountRow `json:"entry_hours"`
+	MapPoints              []analyticsMapPoint `json:"map_points"`
+	Devices                []analyticsCountRow `json:"devices"`
+	VisitorTypes           []analyticsCountRow `json:"visitor_types"`
+	BotCrawlers            []analyticsCountRow `json:"bot_crawlers"`
+	BotReturnSources       []analyticsCountRow `json:"bot_return_sources"`
+	BotReferrers           []analyticsCountRow `json:"bot_referrers"`
+	Browsers               []analyticsCountRow `json:"browsers"`
+	OperatingSystems       []analyticsCountRow `json:"operating_systems"`
+	Languages              []analyticsCountRow `json:"languages"`
+	StatusCodes            []analyticsCountRow `json:"status_codes"`
+	HourlyActivity         []analyticsCountRow `json:"hourly_activity"`
+	DailyActivity          []analyticsCountRow `json:"daily_activity"`
+	SlowPages              []analyticsCountRow `json:"slow_pages"`
+	TopAssets              []analyticsCountRow `json:"top_assets"`
+	ErrorPaths             []analyticsCountRow `json:"error_paths"`
+	ContentSources         []analyticsCountRow `json:"content_sources"`
+	SystemEvents           []analyticsCountRow `json:"system_events,omitempty"`
 }
 
 type analyticsTechnicalHistory struct {
@@ -3447,6 +3481,16 @@ func (a *App) analyticsMiddleware(next http.Handler) http.Handler {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Carry the landing request's evidence to the browser channel without
+		// putting per-visitor metadata into cached static HTML.
+		if r.Method == http.MethodGet && shouldRecordAnalyticsRequest(r) && !isLikelyStaticAssetPath(r.URL.Path) && !isSitebrushControllerQuery(r.URL.Query()) {
+			if referrer := browserstats.SafeReferrer(r.Referer()); referrer != "" {
+				source := browserstats.SourceAttribution(browserstats.Campaign{}, referrer, r.Host)
+				if source.Kind != "internal" {
+					http.SetCookie(w, &http.Cookie{Name: "sitebrush_analytics_referrer", Value: url.QueryEscape(referrer), Path: "/_sitebrush/analytics", MaxAge: 1800, HttpOnly: true, Secure: requestScheme(r) == "https", SameSite: http.SameSiteLaxMode})
+				}
+			}
+		}
 		startedAt := time.Now()
 		writer := &statusCapturingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(writer, r)
@@ -3458,6 +3502,7 @@ func (a *App) analyticsMiddleware(next http.Handler) http.Handler {
 		}
 		if a.securityAnalytics != nil && r.URL.Path != "/_sitebrush/analytics" && len(a.securityAnalytics) < cap(a.securityAnalytics) {
 			securityEvent := siteAnalyticsEvent{Bytes: writer.bytesWritten, Domain: a.analyticsEventDomain(r, ""), Path: analyticsBoundedString(r.URL.EscapedPath(), 512), Query: analyticsBoundedString(r.URL.RawQuery, 2048), Method: r.Method, StatusCode: writer.statusCode, OccurredAt: startedAt.UTC(), RemoteAddress: analyticsBoundedString(r.RemoteAddr, 64), Forwarded: analyticsBoundedString(r.Header.Get("Forwarded"), 256), ForwardedFor: analyticsBoundedString(r.Header.Get("X-Forwarded-For"), 256), UserAgent: analyticsBoundedString(r.UserAgent(), 256), AcceptLanguage: analyticsBoundedString(r.Header.Get("Accept-Language"), 64), TrustedPeer: sitebrushPeerRequestTrusted(r, startedAt.UTC()), IndexingCrawler: httpsecurity.IsIndexingCrawlerRequest(r), SecurityBlocked: writer.Header().Get("X-Sitebrush-Security-Incident") != "" || writer.statusCode == http.StatusTooManyRequests || writer.statusCode == http.StatusForbidden}
+			securityEvent.SecurityAlreadyBlocked = writer.Header().Get("X-Sitebrush-Security-Already-Blocked") == "1"
 			select {
 			case a.securityAnalytics <- securityEvent:
 			default:
@@ -3492,13 +3537,13 @@ func (a *App) analyticsMiddleware(next http.Handler) http.Handler {
 			ForwardedFor:  analyticsBoundedString(r.Header.Get("X-Forwarded-For"), 256),
 
 			UserAgent:      analyticsBoundedString(r.UserAgent(), 256),
-			Referer:        analyticsBoundedString(r.Referer(), 512),
+			Referer:        analyticsRequestReferrer(r.Referer()),
 			AcceptLanguage: analyticsBoundedString(r.Header.Get("Accept-Language"), 64),
 			GeoCountryCode: analyticsBoundedString(analyticsGeoCountryCodeFromRequest(r), 8),
 			GeoCity:        analyticsBoundedString(analyticsGeoCityFromRequest(r), 128),
 			GeoSource:      analyticsBoundedString(analyticsGeoSourceFromRequest(r), 64),
 			IsAdmin:        a.analyticsEventIsAdmin(r, contentSource),
-			IsAsset:        isLikelyStaticAssetPath(r.URL.Path),
+			IsAsset:        isLikelyStaticAssetPath(r.URL.Path) || analyticsFileContentType(writer.Header().Get("Content-Type")),
 			IsController:   r.URL.RawQuery != "" && isSitebrushControllerQuery(r.URL.Query()),
 		}
 		a.enqueueAnalyticsEvent(event)
@@ -3519,6 +3564,11 @@ func shouldRecordAnalyticsRequest(r *http.Request) bool {
 		}
 	}
 	return true
+}
+
+func analyticsFileContentType(contentType string) bool {
+	mediaType := strings.ToLower(strings.TrimSpace(strings.SplitN(contentType, ";", 2)[0]))
+	return mediaType != "" && mediaType != "text/html" && mediaType != "application/xhtml+xml"
 }
 
 func isSitebrushControllerQuery(query url.Values) bool {
@@ -3743,16 +3793,22 @@ func (a *App) runAnalyticsEventWriter(ctx context.Context) {
 			if now.Sub(quietSince) >= 5*time.Second {
 				pressured = false
 			}
-		case <-ticker.C:
+		case now := <-ticker.C:
 			if pressured {
 				continue
 			}
 			if len(a.analyticsEvents) > cap(a.analyticsEvents)/4 {
 				continue
 			}
+			if len(batches) == cap(batches) {
+				continue
+			}
+			// Copy contact history before handing the old batch to persistence;
+			// the saver and collector must never own the same session records.
+			next := state.nextAfterFlush(now)
 			select {
 			case batches <- state:
-				state = newAnalyticsAggregateState(limit / 8)
+				state = next
 			default:
 			}
 		}
@@ -3775,6 +3831,9 @@ func (a *App) flushAnalyticsAggregateState(ctx context.Context, state *analytics
 		return
 	}
 	for domain, aggregate := range state.domains {
+		if aggregate.totalRequests == 0 && len(state.systemEvents[domain]) == 0 {
+			continue
+		}
 		report := aggregate.report(time.Now().UTC())
 		report.AdminUnclassified = true
 		report.SystemEvents = append(report.SystemEvents, state.systemEvents[domain]...)
@@ -3916,26 +3975,28 @@ func (a *App) browserAnalyticsSocket(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
-			event.Attribution = browserstats.SourceAttribution(event.Campaign, event.Referrer, r.Host)
-			if event.Tab != "" {
-				event.Path = browserstats.SafePath(event.Path)
-				event.Browser = analyticsBrowserName(r.UserAgent())
-				event.OS = analyticsOSName(r.UserAgent())
-				event.ClientClass = browserstats.ClientClass(r.UserAgent())
-				if event.ClientClass == "unknown" {
-					event.ClientClass = "human-likely"
-				}
-				event.Address = clientIPAddress(r)
-				for index := range event.Actions {
-					event.Actions[index].Target = browserstats.SafeTarget(event.Actions[index].Target)
-					event.Actions[index].Name = browserstats.CleanText(event.Actions[index].Name, 64)
+			if event.Referrer == "" {
+				if cookie, cookieErr := r.Cookie("sitebrush_analytics_referrer"); cookieErr == nil {
+					if decoded, decodeErr := url.QueryUnescape(cookie.Value); decodeErr == nil {
+						event.Referrer = browserstats.SafeReferrer(decoded)
+					}
 				}
 			}
-			event.Source = browserAnalyticsSource(event.Source, event.Referrer, r.Host)
-			if event.Tab != "" {
-				event.Source = event.Attribution.Name
+			event.Attribution = browserstats.SourceWithAgent(event.Campaign, event.Referrer, r.Host, r.UserAgent())
+			event.Path = browserstats.SafePath(event.Path)
+			event.Browser = analyticsBrowserName(r.UserAgent())
+			event.OS = analyticsOSName(r.UserAgent())
+			event.ClientClass = browserstats.ClientClass(r.UserAgent())
+			if event.ClientClass == "unknown" {
+				event.ClientClass = "human-likely"
 			}
-			event.Referrer = ""
+			event.Address = clientIPAddress(r)
+			for index := range event.Actions {
+				event.Actions[index].Target = browserstats.SafeTarget(event.Actions[index].Target)
+				event.Actions[index].Name = browserstats.CleanText(event.Actions[index].Name, 64)
+			}
+			event.Source = event.Attribution.Name
+			event.Referrer = browserstats.SafeReferrer(event.Referrer)
 			select {
 			case a.browserAnalytics <- browserAnalyticsEnvelope{domain, event, now}:
 			default:
@@ -4452,15 +4513,20 @@ func (a *App) runSecurityAnalytics(stop <-chan struct{}) {
 			}
 			address := clientIPAddress(&http.Request{RemoteAddr: event.RemoteAddress, Header: http.Header{"Forwarded": []string{event.Forwarded}, "X-Forwarded-For": []string{event.ForwardedFor}}})
 			country, city := "", ""
+			latitude, longitude := 0.0, 0.0
+			geoKnown := false
 			if a.geoIP != nil && address != "" {
 				boundary, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 				if location, found := a.geoIP.Lookup(boundary, address); found {
 					country = location.CountryCode
 					city = location.City
+					latitude, longitude, geoKnown = location.Latitude, location.Longitude, true
 				}
 				cancel()
 			}
-			category := state.Record(browserstats.RequestObservation{Time: event.OccurredAt, IP: address, Path: event.Path, Query: event.Query, Method: event.Method, Status: event.StatusCode, Bytes: event.Bytes, Agent: event.UserAgent, Language: analyticsLanguageLabel(event.AcceptLanguage), Country: country, City: city, Blocked: event.SecurityBlocked, ServerLoadHigh: sitebrushSecurityLoadWasHigh(hostLoadHistory, event.OccurredAt), Trusted: event.TrustedPeer, IndexingCrawler: event.IndexingCrawler})
+			observation := browserstats.RequestObservation{Time: event.OccurredAt, IP: address, Path: event.Path, Query: event.Query, Method: event.Method, Status: event.StatusCode, Bytes: event.Bytes, Agent: event.UserAgent, Language: analyticsLanguageLabel(event.AcceptLanguage), Country: country, City: city, Blocked: event.SecurityBlocked, AlreadyBlocked: event.SecurityAlreadyBlocked, ServerLoadHigh: sitebrushSecurityLoadWasHigh(hostLoadHistory, event.OccurredAt), Trusted: event.TrustedPeer, IndexingCrawler: event.IndexingCrawler}
+			observation.Latitude, observation.Longitude, observation.GeoKnown = latitude, longitude, geoKnown
+			category := state.Record(observation)
 			if category != "" && a.attackGuard != nil {
 				description := securityIncidentDescription(category, event.Path, event.StatusCode)
 				block, alreadyBlocked := a.attackGuard.CheckSite(domain, address, event.OccurredAt)
@@ -4837,7 +4903,7 @@ func (a *App) enrichSecurityIncidents(state *browserstats.SecurityState, stop <-
 		default:
 		}
 		incident := &state.Incidents[index]
-		if incident.Country != "" || incident.IP == "" {
+		if incident.GeoKnown || incident.IP == "" {
 			continue
 		}
 		boundary, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
@@ -4847,6 +4913,7 @@ func (a *App) enrichSecurityIncidents(state *browserstats.SecurityState, stop <-
 		if found {
 			incident.Country = location.CountryCode
 			incident.City = location.City
+			incident.Latitude, incident.Longitude, incident.GeoKnown = location.Latitude, location.Longitude, true
 		}
 	}
 }
@@ -4891,7 +4958,7 @@ func browserAnalyticsSections(report browserstats.Report, translations map[strin
 	}{{"views", report.Views}, {"visitors", report.Visitors}, {"new", report.New}, {"returning", report.Returning}, {"continuing", report.Continuing}, {"resurrected", report.Resurrected}, {"dormant", report.Dormant}, {"sessions", report.Sessions}, {"single", report.SingleSessions}, {"temporary", report.Temporary}} {
 		metricText := strconv.Itoa(metric.count)
 		if !report.ComparisonAvailable && (metric.key == "continuing" || metric.key == "resurrected" || metric.key == "dormant") {
-			metricText = "—"
+			metricText = "No data"
 		}
 		cards = append(cards, analyticsMetricCard{Label: label(metric.key), Value: metricText})
 	}
@@ -5057,6 +5124,8 @@ type analyticsAggregateState struct {
 }
 
 type siteAnalyticsAggregate struct {
+	humanSessions         int
+	botSessions           int
 	accountedBytes        int64
 	limited               bool
 	durationBuckets       [32]int
@@ -5171,6 +5240,9 @@ func (state *analyticsAggregateState) reports(generatedAt time.Time) map[string]
 	}
 	reports := make(map[string]analyticsPreparedReport, len(state.domains)+len(state.systemEvents))
 	for domain, aggregate := range state.domains {
+		if aggregate.totalRequests == 0 && len(state.systemEvents[domain]) == 0 {
+			continue
+		}
 		report := aggregate.report(generatedAt)
 		if systemEvents := state.systemEvents[domain]; len(systemEvents) > 0 {
 			report.SystemEvents = append(report.SystemEvents, systemEvents...)
@@ -5191,15 +5263,25 @@ func (state *analyticsAggregateState) reports(generatedAt time.Time) map[string]
 	return reports
 }
 
-func (state *analyticsAggregateState) resetAfterFlush() {
-	if state == nil {
-		return
+func (state *analyticsAggregateState) nextAfterFlush(now time.Time) *analyticsAggregateState {
+	retained := newAnalyticsAggregateState(state.memoryLimitBytes)
+	for domain, previous := range state.domains {
+		next := newSiteAnalyticsAggregate()
+		for visitor, session := range previous.visitorSessions {
+			if now.Sub(session.lastEvent.OccurredAt) <= 30*time.Minute {
+				contact := *session
+				contact.pageCount = 0
+				next.visitorSessions[visitor] = &contact
+			}
+		}
+		if len(next.visitorSessions) == 0 {
+			continue
+		}
+		next.accountedBytes = next.estimatedBytes()
+		retained.domains[domain] = next
+		retained.usedBytes += next.accountedBytes + int64(len(domain)+256)
 	}
-	state.domains = make(map[string]*siteAnalyticsAggregate)
-	state.systemEvents = make(map[string][]analyticsCountRow)
-	state.usedBytes = 0
-	state.disabled = false
-	state.overloadDomain = ""
+	return retained
 }
 
 func (state *analyticsAggregateState) aggregateForDomain(domain string) *siteAnalyticsAggregate {
@@ -5289,7 +5371,7 @@ func (aggregate *siteAnalyticsAggregate) record(event siteAnalyticsEvent) {
 	if event.IsAdmin {
 		aggregate.adminRequests++
 	}
-	if event.ContentSource == "static" || event.IsAsset {
+	if event.IsAsset {
 		aggregate.staticRequests++
 		incrementAnalyticsCounter(aggregate.assets, event.Path)
 	}
@@ -5297,10 +5379,25 @@ func (aggregate *siteAnalyticsAggregate) record(event siteAnalyticsEvent) {
 		aggregate.errorCount++
 		incrementAnalyticsCounter(aggregate.errorPaths, event.Path+" "+strconv.Itoa(event.StatusCode))
 	}
-	if event.IsController || event.IsAsset || event.Method != http.MethodGet {
+	if analyticsIsBot(event.UserAgent) {
+		if aggregate.recordSessionEvent(event) {
+			aggregate.recordAudienceSession(event)
+		}
+		return
+	}
+	if event.IsController || event.IsAsset || event.Method != http.MethodGet || event.StatusCode >= 300 || event.IsAdmin {
 		return
 	}
 	aggregate.pageViews++
+	incrementAnalyticsCounter(aggregate.topPages, event.Path)
+	aggregate.slowPageTotalDuration[event.Path] += event.Duration.Milliseconds()
+	aggregate.slowPageCounts[event.Path]++
+	if aggregate.recordSessionEvent(event) {
+		aggregate.recordAudienceSession(event)
+	}
+}
+
+func (aggregate *siteAnalyticsAggregate) recordAudienceSession(event siteAnalyticsEvent) {
 	if event.GeoCountryCode == "" && event.ClientIP != "" {
 		if aggregate.geoCandidates == nil {
 			aggregate.geoCandidates = make(map[string]int)
@@ -5310,7 +5407,6 @@ func (aggregate *siteAnalyticsAggregate) record(event siteAnalyticsEvent) {
 		}
 	}
 
-	incrementAnalyticsCounter(aggregate.topPages, event.Path)
 	incrementAnalyticsCounter(aggregate.trafficSources, classifyAnalyticsTrafficSource(event.Referer))
 	if host := analyticsRefererHost(event.Referer); host != "" {
 		incrementAnalyticsCounter(aggregate.referrers, host)
@@ -5334,12 +5430,9 @@ func (aggregate *siteAnalyticsAggregate) record(event siteAnalyticsEvent) {
 	incrementAnalyticsCounter(aggregate.browsers, analyticsBrowserName(event.UserAgent))
 	incrementAnalyticsCounter(aggregate.operatingSystems, analyticsOSName(event.UserAgent))
 	incrementAnalyticsCounter(aggregate.languages, analyticsLanguageLabel(event.AcceptLanguage))
-	aggregate.slowPageTotalDuration[event.Path] += event.Duration.Milliseconds()
-	aggregate.slowPageCounts[event.Path]++
-	aggregate.recordSessionEvent(event)
 }
 
-func (aggregate *siteAnalyticsAggregate) recordSessionEvent(event siteAnalyticsEvent) {
+func (aggregate *siteAnalyticsAggregate) recordSessionEvent(event siteAnalyticsEvent) bool {
 	visitorID := event.VisitorID
 	if strings.TrimSpace(visitorID) == "" {
 		visitorID = analyticsVisitorID(event.ClientIP, event.UserAgent)
@@ -5348,17 +5441,28 @@ func (aggregate *siteAnalyticsAggregate) recordSessionEvent(event siteAnalyticsE
 	if state == nil {
 		state = &analyticsVisitorSessionState{firstEvent: event, lastEvent: event, pageCount: 1}
 		aggregate.visitorSessions[visitorID] = state
-		return
+		if analyticsIsBot(event.UserAgent) {
+			aggregate.botSessions++
+		} else {
+			aggregate.humanSessions++
+		}
+		return true
 	}
 	if event.OccurredAt.Sub(state.lastEvent.OccurredAt) > 30*time.Minute {
 		aggregate.flushVisitorSession(state)
 		state.firstEvent = event
 		state.lastEvent = event
 		state.pageCount = 1
-		return
+		if analyticsIsBot(event.UserAgent) {
+			aggregate.botSessions++
+		} else {
+			aggregate.humanSessions++
+		}
+		return true
 	}
 	state.lastEvent = event
 	state.pageCount++
+	return false
 }
 
 func (aggregate *siteAnalyticsAggregate) report(generatedAt time.Time) analyticsPreparedReport {
@@ -5370,20 +5474,23 @@ func (aggregate *siteAnalyticsAggregate) report(generatedAt time.Time) analytics
 		}
 	}
 	report := analyticsPreparedReport{
-		GeneratedAt:       generatedAt.Format(time.RFC3339),
-		PeriodStart:       generatedAt.Format(time.RFC3339),
-		PeriodEnd:         generatedAt.Format(time.RFC3339),
-		TotalRequests:     aggregate.totalRequests,
-		PageViews:         aggregate.pageViews,
-		UniqueVisitors:    len(aggregate.visitorSet),
-		HumanRequests:     aggregate.humanRequests,
-		BotRequests:       aggregate.botRequests,
-		Sessions:          sessionSummary.SessionCount,
-		ReturningVisitors: sessionSummary.ReturningVisitors,
-		ReturnVisits:      sessionSummary.ReturnVisits,
-		ErrorCount:        aggregate.errorCount,
-		AdminRequests:     aggregate.adminRequests,
-		StaticRequests:    aggregate.staticRequests,
+		SessionMetricsVersion: 1,
+		GeneratedAt:           generatedAt.Format(time.RFC3339),
+		PeriodStart:           generatedAt.Format(time.RFC3339),
+		PeriodEnd:             generatedAt.Format(time.RFC3339),
+		TotalRequests:         aggregate.totalRequests,
+		PageViews:             aggregate.pageViews,
+		UniqueVisitors:        len(aggregate.visitorSet),
+		HumanRequests:         aggregate.humanRequests,
+		BotRequests:           aggregate.botRequests,
+		HumanSessions:         aggregate.humanSessions,
+		BotSessions:           aggregate.botSessions,
+		Sessions:              sessionSummary.SessionCount,
+		ReturningVisitors:     sessionSummary.ReturningVisitors,
+		ReturnVisits:          sessionSummary.ReturnVisits,
+		ErrorCount:            aggregate.errorCount,
+		AdminRequests:         aggregate.adminRequests,
+		StaticRequests:        aggregate.staticRequests,
 	}
 	if !aggregate.periodStart.IsZero() {
 		report.PeriodStart = aggregate.periodStart.Format(time.RFC3339)
@@ -5400,23 +5507,24 @@ func (aggregate *siteAnalyticsAggregate) report(generatedAt time.Time) analytics
 	report.TopPages = sortedAnalyticsRows(aggregate.topPages, 12, report.PageViews)
 	report.EntryPages = sortedAnalyticsRows(sessionSummary.EntryPages, 10, sessionSummary.SessionCount)
 	report.ExitPages = sortedAnalyticsRows(sessionSummary.ExitPages, 10, sessionSummary.SessionCount)
-	report.TrafficSources = sortedAnalyticsRows(aggregate.trafficSources, 10, report.PageViews)
-	report.Referrers = sortedAnalyticsRows(aggregate.referrers, 10, report.PageViews)
+	audienceSessions := report.HumanSessions + report.BotSessions
+	report.TrafficSources = sortedAnalyticsRows(aggregate.trafficSources, 10, audienceSessions)
+	report.Referrers = sortedAnalyticsRows(aggregate.referrers, 10, audienceSessions)
 	report.ReturningSources = sortedAnalyticsRows(sessionSummary.ReturningSources, 10, report.ReturnVisits)
 	report.ReturningReferrers = sortedAnalyticsRows(sessionSummary.ReturningReferrers, 10, report.ReturnVisits)
-	report.Countries = sortedAnalyticsRows(aggregate.countries, 10, report.PageViews)
-	report.Cities = sortedAnalyticsRows(aggregate.cities, 10, report.PageViews)
+	report.Countries = sortedAnalyticsRows(aggregate.countries, 10, audienceSessions)
+	report.Cities = sortedAnalyticsRows(aggregate.cities, 10, audienceSessions)
 	report.EntryHours = sortedAnalyticsRows(sessionSummary.EntryHours, 24, sessionSummary.SessionCount)
 	report.ResponsePercentiles = analyticsDurationPercentiles(aggregate.durationBuckets, aggregate.totalRequests)
 	report.MapPoints = analyticsMapPoints(aggregate.mapBuckets, report.PageViews)
-	report.Devices = sortedAnalyticsRows(aggregate.devices, 10, report.PageViews)
-	report.VisitorTypes = sortedAnalyticsRows(aggregate.visitorTypes, 10, report.PageViews)
-	report.BotCrawlers = sortedAnalyticsRows(aggregate.botCrawlers, 10, report.PageViews)
+	report.Devices = sortedAnalyticsRows(aggregate.devices, 10, audienceSessions)
+	report.VisitorTypes = sortedAnalyticsRows(aggregate.visitorTypes, 10, audienceSessions)
+	report.BotCrawlers = sortedAnalyticsRows(aggregate.botCrawlers, 10, report.BotSessions)
 	report.BotReturnSources = sortedAnalyticsRows(sessionSummary.BotReturnSources, 10, report.ReturnVisits)
-	report.BotReferrers = sortedAnalyticsRows(aggregate.botReferrers, 10, report.PageViews)
-	report.Browsers = sortedAnalyticsRows(aggregate.browsers, 10, report.PageViews)
-	report.OperatingSystems = sortedAnalyticsRows(aggregate.operatingSystems, 10, report.PageViews)
-	report.Languages = sortedAnalyticsRows(aggregate.languages, 10, report.PageViews)
+	report.BotReferrers = sortedAnalyticsRows(aggregate.botReferrers, 10, report.BotSessions)
+	report.Browsers = sortedAnalyticsRows(aggregate.browsers, 10, audienceSessions)
+	report.OperatingSystems = sortedAnalyticsRows(aggregate.operatingSystems, 10, audienceSessions)
+	report.Languages = sortedAnalyticsRows(aggregate.languages, 10, audienceSessions)
 	report.StatusCodes = sortedAnalyticsRows(aggregate.statusCodes, 10, report.TotalRequests)
 	report.HourlyActivity = sortedAnalyticsRows(aggregate.hourlyActivity, 24, report.TotalRequests)
 	report.DailyActivity = sortedAnalyticsRows(aggregate.dailyActivity, 14, report.TotalRequests)
@@ -5681,130 +5789,13 @@ func (a *App) buildAnalyticsReport(ctx context.Context, domain string) (analytic
 }
 
 func buildAnalyticsReportFromEvents(events []siteAnalyticsEvent, generatedAt time.Time) analyticsPreparedReport {
-	report := analyticsPreparedReport{GeneratedAt: generatedAt.Format(time.RFC3339), PeriodStart: generatedAt.Format(time.RFC3339), PeriodEnd: generatedAt.Format(time.RFC3339)}
-	if len(events) == 0 {
-		return report
+	ordered := append([]siteAnalyticsEvent(nil), events...)
+	sort.SliceStable(ordered, func(left, right int) bool { return ordered[left].OccurredAt.Before(ordered[right].OccurredAt) })
+	aggregate := newSiteAnalyticsAggregate()
+	for _, event := range ordered {
+		aggregate.record(event)
 	}
-	report.PeriodStart = events[0].OccurredAt.Format(time.RFC3339)
-	report.PeriodEnd = events[len(events)-1].OccurredAt.Format(time.RFC3339)
-	report.TotalRequests = len(events)
-	visitorSet := make(map[string]struct{})
-	topPages := make(map[string]int)
-	trafficSources := make(map[string]int)
-	referrers := make(map[string]int)
-	countries := make(map[string]int)
-	cities := make(map[string]int)
-	mapBuckets := make(map[string]analyticsMapBucket)
-	devices := make(map[string]int)
-	visitorTypes := make(map[string]int)
-	botCrawlers := make(map[string]int)
-	botReferrers := make(map[string]int)
-	browsers := make(map[string]int)
-	operatingSystems := make(map[string]int)
-	languages := make(map[string]int)
-	statusCodes := make(map[string]int)
-	hourlyActivity := make(map[string]int)
-	dailyActivity := make(map[string]int)
-	assets := make(map[string]int)
-	errorPaths := make(map[string]int)
-	contentSources := make(map[string]int)
-	slowPageTotalDuration := make(map[string]int64)
-	slowPageCounts := make(map[string]int)
-	sessionEvents := make(map[string][]siteAnalyticsEvent)
-	var totalDuration int64
-	for _, event := range events {
-		visitorSet[event.VisitorID] = struct{}{}
-		totalDuration += event.Duration.Milliseconds()
-		if analyticsIsBot(event.UserAgent) {
-			report.BotRequests++
-		} else {
-			report.HumanRequests++
-		}
-		contentSources[analyticsContentSourceLabel(event.ContentSource)]++
-		statusCodes[strconv.Itoa(event.StatusCode)]++
-		hourlyActivity[event.OccurredAt.In(time.Local).Format("15:00")]++
-		dailyActivity[event.OccurredAt.Format("2006-01-02")]++
-		if event.IsAdmin {
-			report.AdminRequests++
-		}
-		if event.ContentSource == "static" || event.IsAsset {
-			report.StaticRequests++
-			assets[event.Path]++
-		}
-		if event.StatusCode >= 400 {
-			report.ErrorCount++
-			errorPaths[event.Path+" "+strconv.Itoa(event.StatusCode)]++
-		}
-		if event.IsController || event.IsAsset || event.Method != http.MethodGet {
-			continue
-		}
-		report.PageViews++
-		topPages[event.Path]++
-		trafficSources[classifyAnalyticsTrafficSource(event.Referer)]++
-		if host := analyticsRefererHost(event.Referer); host != "" {
-			referrers[host]++
-		}
-		location := analyticsLocationForEvent(event)
-		countries[location.Country]++
-		cities[location.CityLabel]++
-		if location.hasCoordinates() {
-			addAnalyticsMapBucket(mapBuckets, location)
-		}
-		devices[analyticsDeviceClass(event.UserAgent)]++
-		if analyticsIsBot(event.UserAgent) {
-			visitorTypes["bot"]++
-			botCrawlers[analyticsBotCrawlerName(event.UserAgent)]++
-			if host := analyticsRefererHost(event.Referer); host != "" {
-				botReferrers[host]++
-			}
-		} else {
-			visitorTypes["human"]++
-		}
-		browsers[analyticsBrowserName(event.UserAgent)]++
-		operatingSystems[analyticsOSName(event.UserAgent)]++
-		languages[analyticsLanguageLabel(event.AcceptLanguage)]++
-		slowPageTotalDuration[event.Path] += event.Duration.Milliseconds()
-		slowPageCounts[event.Path]++
-		sessionEvents[event.VisitorID] = append(sessionEvents[event.VisitorID], event)
-	}
-	report.UniqueVisitors = len(visitorSet)
-	if len(events) > 0 {
-		report.AverageDurationMS = totalDuration / int64(len(events))
-	}
-	sessionSummary := analyticsSessionPageStats(sessionEvents)
-	report.Sessions = sessionSummary.SessionCount
-	report.ReturningVisitors = sessionSummary.ReturningVisitors
-	report.ReturnVisits = sessionSummary.ReturnVisits
-	if sessionSummary.SessionCount > 0 {
-		report.BounceRate = float64(sessionSummary.BouncedSessions) / float64(sessionSummary.SessionCount) * 100
-	}
-	report.TopPages = sortedAnalyticsRows(topPages, 12, report.PageViews)
-	report.EntryPages = sortedAnalyticsRows(sessionSummary.EntryPages, 10, sessionSummary.SessionCount)
-	report.ExitPages = sortedAnalyticsRows(sessionSummary.ExitPages, 10, sessionSummary.SessionCount)
-	report.TrafficSources = sortedAnalyticsRows(trafficSources, 10, report.PageViews)
-	report.Referrers = sortedAnalyticsRows(referrers, 10, report.PageViews)
-	report.ReturningSources = sortedAnalyticsRows(sessionSummary.ReturningSources, 10, report.ReturnVisits)
-	report.ReturningReferrers = sortedAnalyticsRows(sessionSummary.ReturningReferrers, 10, report.ReturnVisits)
-	report.Countries = sortedAnalyticsRows(countries, 10, report.PageViews)
-	report.Cities = sortedAnalyticsRows(cities, 10, report.PageViews)
-	report.EntryHours = sortedAnalyticsRows(sessionSummary.EntryHours, 24, sessionSummary.SessionCount)
-	report.MapPoints = analyticsMapPoints(mapBuckets, report.PageViews)
-	report.Devices = sortedAnalyticsRows(devices, 10, report.PageViews)
-	report.VisitorTypes = sortedAnalyticsRows(visitorTypes, 10, report.PageViews)
-	report.BotCrawlers = sortedAnalyticsRows(botCrawlers, 10, report.PageViews)
-	report.BotReturnSources = sortedAnalyticsRows(sessionSummary.BotReturnSources, 10, report.ReturnVisits)
-	report.BotReferrers = sortedAnalyticsRows(botReferrers, 10, report.PageViews)
-	report.Browsers = sortedAnalyticsRows(browsers, 10, report.PageViews)
-	report.OperatingSystems = sortedAnalyticsRows(operatingSystems, 10, report.PageViews)
-	report.Languages = sortedAnalyticsRows(languages, 10, report.PageViews)
-	report.StatusCodes = sortedAnalyticsRows(statusCodes, 10, report.TotalRequests)
-	report.HourlyActivity = sortedAnalyticsRows(hourlyActivity, 24, report.TotalRequests)
-	report.DailyActivity = sortedAnalyticsRows(dailyActivity, 14, report.TotalRequests)
-	report.TopAssets = sortedAnalyticsRows(assets, 10, report.StaticRequests)
-	report.ErrorPaths = sortedAnalyticsRows(errorPaths, 10, report.ErrorCount)
-	report.ContentSources = sortedAnalyticsRows(contentSources, 10, report.TotalRequests)
-	report.SlowPages = analyticsSlowPageRows(slowPageTotalDuration, slowPageCounts, 10)
-	return report
+	return aggregate.report(generatedAt)
 }
 
 type analyticsSessionSummary struct {
@@ -5968,6 +5959,8 @@ func mergeAnalyticsMapPoints(current, addition []analyticsMapPoint) []analyticsM
 }
 
 func mergeTechnicalReports(current, addition analyticsPreparedReport) analyticsPreparedReport {
+	current = analyticsSeparateLegacyCounters(current)
+	addition = analyticsSeparateLegacyCounters(addition)
 	if current.GeneratedAt == "" {
 		current = addition
 		return current
@@ -5977,9 +5970,17 @@ func mergeTechnicalReports(current, addition analyticsPreparedReport) analyticsP
 	current.PageViews += addition.PageViews
 	current.HumanRequests += addition.HumanRequests
 	current.BotRequests += addition.BotRequests
+	current.HumanSessions += addition.HumanSessions
+	current.BotSessions += addition.BotSessions
 	current.ErrorCount += addition.ErrorCount
 	current.AdminRequests += addition.AdminRequests
 	current.StaticRequests += addition.StaticRequests
+	current.LegacyStaticRequests += addition.LegacyStaticRequests
+	current.LegacyPageRequests += addition.LegacyPageRequests
+	current.LegacyAssets = mergeAnalyticsCountRows(current.LegacyAssets, addition.LegacyAssets, 20, current.LegacyStaticRequests)
+	current.LegacyBrowsers = mergeAnalyticsCountRows(current.LegacyBrowsers, addition.LegacyBrowsers, 10, 0)
+	current.LegacyOperatingSystems = mergeAnalyticsCountRows(current.LegacyOperatingSystems, addition.LegacyOperatingSystems, 10, 0)
+	current.LegacyBotCrawlers = mergeAnalyticsCountRows(current.LegacyBotCrawlers, addition.LegacyBotCrawlers, 20, 0)
 	if current.PeriodStart == "" || (addition.PeriodStart != "" && addition.PeriodStart < current.PeriodStart) {
 		current.PeriodStart = addition.PeriodStart
 	}
@@ -5993,17 +5994,18 @@ func mergeTechnicalReports(current, addition analyticsPreparedReport) analyticsP
 		current.AverageDurationMS = (current.AverageDurationMS*int64(previousRequests) + addition.AverageDurationMS*int64(addition.TotalRequests)) / int64(current.TotalRequests)
 	}
 	current.TopPages = mergeAnalyticsCountRows(current.TopPages, addition.TopPages, 24, current.PageViews)
-	current.TrafficSources = mergeAnalyticsCountRows(current.TrafficSources, addition.TrafficSources, 20, current.PageViews)
-	current.Referrers = mergeAnalyticsCountRows(current.Referrers, addition.Referrers, 20, current.PageViews)
-	current.Countries = mergeAnalyticsCountRows(current.Countries, addition.Countries, 20, current.PageViews)
-	current.Cities = mergeAnalyticsCountRows(current.Cities, addition.Cities, 20, current.PageViews)
-	current.Devices = mergeAnalyticsCountRows(current.Devices, addition.Devices, 10, current.PageViews)
-	current.VisitorTypes = mergeAnalyticsCountRows(current.VisitorTypes, addition.VisitorTypes, 10, current.PageViews)
-	current.BotCrawlers = mergeAnalyticsCountRows(current.BotCrawlers, addition.BotCrawlers, 20, current.PageViews)
-	current.BotReferrers = mergeAnalyticsCountRows(current.BotReferrers, addition.BotReferrers, 20, current.PageViews)
-	current.Browsers = mergeAnalyticsCountRows(current.Browsers, addition.Browsers, 10, current.PageViews)
-	current.OperatingSystems = mergeAnalyticsCountRows(current.OperatingSystems, addition.OperatingSystems, 10, current.PageViews)
-	current.Languages = mergeAnalyticsCountRows(current.Languages, addition.Languages, 20, current.PageViews)
+	audienceSessions := current.HumanSessions + current.BotSessions
+	current.TrafficSources = mergeAnalyticsCountRows(current.TrafficSources, addition.TrafficSources, 20, audienceSessions)
+	current.Referrers = mergeAnalyticsCountRows(current.Referrers, addition.Referrers, 20, audienceSessions)
+	current.Countries = mergeAnalyticsCountRows(current.Countries, addition.Countries, 20, audienceSessions)
+	current.Cities = mergeAnalyticsCountRows(current.Cities, addition.Cities, 20, audienceSessions)
+	current.Devices = mergeAnalyticsCountRows(current.Devices, addition.Devices, 10, audienceSessions)
+	current.VisitorTypes = mergeAnalyticsCountRows(current.VisitorTypes, addition.VisitorTypes, 10, audienceSessions)
+	current.BotCrawlers = mergeAnalyticsCountRows(current.BotCrawlers, addition.BotCrawlers, 20, current.BotSessions)
+	current.BotReferrers = mergeAnalyticsCountRows(current.BotReferrers, addition.BotReferrers, 20, current.BotSessions)
+	current.Browsers = mergeAnalyticsCountRows(current.Browsers, addition.Browsers, 10, audienceSessions)
+	current.OperatingSystems = mergeAnalyticsCountRows(current.OperatingSystems, addition.OperatingSystems, 10, audienceSessions)
+	current.Languages = mergeAnalyticsCountRows(current.Languages, addition.Languages, 20, audienceSessions)
 	current.StatusCodes = mergeAnalyticsCountRows(current.StatusCodes, addition.StatusCodes, 20, current.TotalRequests)
 	current.HourlyActivity = mergeAnalyticsCountRows(current.HourlyActivity, addition.HourlyActivity, 24, current.TotalRequests)
 	current.DailyActivity = mergeAnalyticsCountRows(current.DailyActivity, addition.DailyActivity, 90, current.TotalRequests)
@@ -6122,6 +6124,9 @@ func analyticsContentSourceLabel(contentSource string) string {
 func classifyAnalyticsTrafficSource(rawReferer string) string {
 	host := analyticsRefererHost(rawReferer)
 	if host == "" {
+		if strings.TrimSpace(rawReferer) != "" {
+			return "unknown-referrer"
+		}
 		return "direct"
 	}
 	searchHosts := []string{"google.", "bing.", "yahoo.", "duckduckgo.", "yandex.", "baidu."}
@@ -6137,6 +6142,16 @@ func classifyAnalyticsTrafficSource(rawReferer string) string {
 		}
 	}
 	return "referral"
+}
+
+func analyticsRequestReferrer(raw string) string {
+	if safe := browserstats.SafeReferrer(raw); safe != "" {
+		return safe
+	}
+	if strings.TrimSpace(raw) != "" {
+		return "unknown-referrer"
+	}
+	return ""
 }
 
 func analyticsRefererHost(rawReferer string) string {
@@ -6162,6 +6177,9 @@ func analyticsDeviceClass(userAgent string) string {
 }
 
 func analyticsIsBot(userAgent string) bool {
+	if browserstats.ClientClass(userAgent) != "unknown" {
+		return true
+	}
 	loweredAgent := strings.ToLower(userAgent)
 	botMarkers := []string{
 		"bot", "spider", "crawler", "crawl", "slurp", "bingpreview", "facebookexternalhit",
@@ -6530,6 +6548,164 @@ type analyticsSecurityBlockView struct {
 	ObservedRequests                  []browserstats.Probe
 }
 
+func (block analyticsSecurityBlockView) OperatingSystem() string {
+	if block.Agent == "" {
+		return ""
+	}
+	name := analyticsOSName(block.Agent)
+	if name == "Other" {
+		return ""
+	}
+	return name
+}
+
+type analyticsSecurityPagination struct {
+	Links                       []analyticsSecurityPageLink
+	Page, Pages, Total          int
+	Query, PreviousURL, NextURL string
+}
+
+type analyticsSecurityPageLink struct {
+	Number  int
+	URL     string
+	Current bool
+}
+
+type analyticsSecurityIncidentView struct {
+	browserstats.Incident
+	OperatingSystem string
+}
+
+func analyticsSecurityPage(r *http.Request, pageKey, queryKey, anchor string, total int) (analyticsSecurityPagination, int, int) {
+	const pageSize = 25
+	pages := max(1, (total+pageSize-1)/pageSize)
+	requested, _ := strconv.Atoi(r.URL.Query().Get(pageKey))
+	page := min(pages, max(1, requested))
+	result := analyticsSecurityPagination{Page: page, Pages: pages, Total: total, Query: browserstats.CleanText(r.URL.Query().Get(queryKey), 256)}
+	pageURL := func(number int) string {
+		query := r.URL.Query()
+		query.Set(pageKey, strconv.Itoa(number))
+		return r.URL.Path + "?" + query.Encode() + "#" + anchor
+	}
+	if page > 1 {
+		result.PreviousURL = pageURL(page - 1)
+	}
+	if page < pages {
+		result.NextURL = pageURL(page + 1)
+	}
+	for number := max(1, page-2); number <= min(pages, page+2); number++ {
+		result.Links = append(result.Links, analyticsSecurityPageLink{Number: number, URL: pageURL(number), Current: number == page})
+	}
+	start := (page - 1) * pageSize
+	return result, start, min(total, start+pageSize)
+}
+
+func analyticsSecurityBlockPage(r *http.Request, blocks []analyticsSecurityBlockView, pageKey, queryKey, anchor string) ([]analyticsSecurityBlockView, analyticsSecurityPagination) {
+	query := strings.ToLower(browserstats.CleanText(r.URL.Query().Get(queryKey), 256))
+	filtered := make([]analyticsSecurityBlockView, 0, len(blocks))
+	for _, block := range blocks {
+		searchable := strings.Join([]string{block.IP, block.IncidentID, block.Domain, block.Reason, block.Description, block.Country, block.City, block.Agent, block.OperatingSystem()}, " ")
+		if query == "" || strings.Contains(strings.ToLower(searchable), query) {
+			filtered = append(filtered, block)
+		}
+	}
+	sort.Slice(filtered, func(left, right int) bool {
+		if filtered[left].LastEvent.Equal(filtered[right].LastEvent) {
+			return filtered[left].IP < filtered[right].IP
+		}
+		return filtered[left].LastEvent.After(filtered[right].LastEvent)
+	})
+	pagination, start, end := analyticsSecurityPage(r, pageKey, queryKey, anchor, len(filtered))
+	return filtered[start:end], pagination
+}
+
+type analyticsBlockedIPMapPoint struct {
+	RepeatKnown                                                bool
+	Blocked                                                    bool
+	Address, Country, City, Browser, OS, Policy, Reason, Class string
+	Last                                                       time.Time
+	Latitude, Longitude                                        float64
+	GeoKnown                                                   bool
+	RepeatRequests                                             int
+	AttackTypes                                                []string
+}
+
+type analyticsSecurityIPSummary struct {
+	Blocked, Allowed, Throttled, ReturningIPs, ReturnRequests, ReturnVisits, UnknownLocations int
+	RepeatStarted                                                                             time.Time
+	Attacks, Countries, Policies                                                              []browserstats.Row
+}
+
+// Snapshot metrics count addresses, while repeat evidence counts separately
+// observed requests against an already-active block. Pagination never affects totals.
+func analyticsSecurityIPStatistics(blocks []analyticsBlockedIPMapPoint, allowlist []httpsecurity.SecurityAllow, throttles []httpsecurity.SecurityThrottle, report browserstats.SecurityReport) analyticsSecurityIPSummary {
+	result := analyticsSecurityIPSummary{RepeatStarted: report.ReturnTrackingStarted}
+	allowed := map[string]bool{}
+	for _, entry := range allowlist {
+		allowed[entry.IP] = true
+	}
+	result.Allowed = len(allowed)
+	blocked := map[string]bool{}
+	attacks, countries := map[string]int{}, map[string]int{}
+	policies := map[string]int{"local": 0, "manual": 0, "global": 0, "allowlist": result.Allowed, "throttle": 0}
+	for _, block := range blocks {
+		if allowed[block.Address] || blocked[block.Address] {
+			continue
+		}
+		blocked[block.Address] = true
+		result.Blocked++
+		policies[block.Policy]++
+		country := block.Country
+		if country == "" {
+			country = "unknown"
+		}
+		countries[country]++
+		if !block.GeoKnown {
+			result.UnknownLocations++
+		}
+		seenCategories := map[string]bool{}
+		for _, category := range block.AttackTypes {
+			if !seenCategories[category] {
+				attacks[category]++
+				seenCategories[category] = true
+			}
+		}
+	}
+	throttled := map[string]bool{}
+	for _, entry := range throttles {
+		if !allowed[entry.IP] && !blocked[entry.IP] {
+			throttled[entry.IP] = true
+		}
+	}
+	result.Throttled = len(throttled)
+	policies["throttle"] = result.Throttled
+	returning := map[string]bool{}
+	for _, observation := range report.BlockedReturns {
+		if returning[observation.IP] {
+			continue
+		}
+		returning[observation.IP] = true
+		result.ReturningIPs++
+		result.ReturnRequests += observation.Requests
+		result.ReturnVisits += observation.Visits
+	}
+	ordered := func(counts map[string]int) []browserstats.Row {
+		rows := make([]browserstats.Row, 0, len(counts))
+		for label, count := range counts {
+			rows = append(rows, browserstats.Row{Label: label, Count: count})
+		}
+		sort.Slice(rows, func(left, right int) bool {
+			if rows[left].Count == rows[right].Count {
+				return rows[left].Label < rows[right].Label
+			}
+			return rows[left].Count > rows[right].Count
+		})
+		return rows
+	}
+	result.Attacks, result.Countries, result.Policies = ordered(attacks), ordered(countries), ordered(policies)
+	return result
+}
+
 func analyticsSelectedTab(r *http.Request) string {
 	tab := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("tab")))
 	if tab == "security" {
@@ -6582,6 +6758,14 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 	experience := browserDashboard.Report.Experience.View(filter)
 	goals := a.loadAnalyticsGoals(domain)
 	experience.GoalsConfigured = len(goals) > 0
+	goalCounts := make(map[string]int)
+	for _, row := range experience.GoalRows {
+		goalCounts[row.Label] = row.Count
+	}
+	experience.GoalRows = nil
+	for _, goal := range goals {
+		experience.GoalRows = append(experience.GoalRows, browserstats.Row{Label: goal.Name, Count: goalCounts[goal.Name]})
+	}
 	if !experience.GoalsConfigured {
 		visibleInsights := experience.Insights[:0]
 		for _, insight := range experience.Insights {
@@ -6625,26 +6809,139 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	securityIncidents := make(map[string]browserstats.Incident, len(security.Incidents))
+	attackTypesByIP := map[string]map[string]bool{}
 	for _, incident := range security.Incidents {
+		if attackTypesByIP[incident.IP] == nil {
+			attackTypesByIP[incident.IP] = map[string]bool{}
+		}
+		for category, count := range incident.Categories {
+			if count > 0 {
+				attackTypesByIP[incident.IP][category] = true
+			}
+		}
 		previous, found := securityIncidents[incident.IP]
 		if !found || incident.Last.After(previous.Last) {
 			securityIncidents[incident.IP] = incident
 		}
 	}
+	allowedIPs := map[string]bool{}
+	for _, entry := range securityAllowlist {
+		allowedIPs[entry.IP] = true
+	}
+	repeatRequests := map[string]int{}
+	returnsByIP := map[string]browserstats.BlockedReturn{}
+	for _, observation := range security.BlockedReturns {
+		repeatRequests[observation.IP] = observation.Requests
+		returnsByIP[observation.IP] = observation
+	}
+	blockedMap := make([]analyticsBlockedIPMapPoint, 0, len(securityBlocks))
+	knownAttackTypes := map[string]bool{}
+	for _, category := range analyticsSecurityTypeAxes() {
+		knownAttackTypes[category] = true
+	}
 	for _, securityBlock := range securityBlocks {
-		view := analyticsSecurityBlockView{SecurityBlock: securityBlock}
-		if incident, found := securityIncidents[securityBlock.IP]; found {
-			view.Country = incident.Country
-			view.City = incident.City
-			view.ClientClass = incident.Class
-			view.Agent = incident.Agent
-			view.ObservedRequests = append([]browserstats.Probe(nil), incident.Examples...)
+		if allowedIPs[securityBlock.IP] {
+			continue
 		}
+		view := analyticsSecurityBlockView{SecurityBlock: securityBlock}
+		point := analyticsBlockedIPMapPoint{Blocked: true, RepeatKnown: !security.ReturnTrackingStarted.IsZero(), Address: securityBlock.IP, Policy: securityBlock.Source, Reason: securityBlock.Description, Last: securityBlock.LastEvent, RepeatRequests: repeatRequests[securityBlock.IP]}
+		if observed, found := returnsByIP[securityBlock.IP]; found {
+			view.Country, view.City, view.Agent, view.ClientClass = observed.Country, observed.City, observed.Agent, browserstats.ClientClass(observed.Agent)
+			point.Country, point.City, point.OS, point.Browser, point.Class = observed.Country, observed.City, view.OperatingSystem(), analyticsBrowserName(observed.Agent), view.ClientClass
+			point.Latitude, point.Longitude, point.GeoKnown = observed.Latitude, observed.Longitude, observed.GeoKnown
+		}
+		if point.Policy == "" {
+			point.Policy = "local"
+		}
+		if incident, found := securityIncidents[securityBlock.IP]; found {
+			if incident.Country != "" {
+				view.Country = incident.Country
+			}
+			if incident.City != "" {
+				view.City = incident.City
+			}
+			if incident.Agent != "" {
+				view.Agent, view.ClientClass = incident.Agent, incident.Class
+			}
+			view.ObservedRequests = append([]browserstats.Probe(nil), incident.Examples...)
+			point.Country, point.City, point.Class = view.Country, view.City, view.ClientClass
+			if view.Agent != "" {
+				point.Browser, point.OS = analyticsBrowserName(view.Agent), view.OperatingSystem()
+			}
+			if incident.GeoKnown {
+				point.Latitude, point.Longitude, point.GeoKnown = incident.Latitude, incident.Longitude, true
+			}
+		}
+		categories := attackTypesByIP[securityBlock.IP]
+		if categories == nil {
+			categories = map[string]bool{}
+		}
+		if knownAttackTypes[securityBlock.Reason] || (point.Policy != "manual" && securityBlock.Reason != "") {
+			categories[securityBlock.Reason] = true
+		}
+		if len(categories) == 0 {
+			categories["unknown"] = true
+		}
+		for category := range categories {
+			point.AttackTypes = append(point.AttackTypes, category)
+		}
+		sort.Strings(point.AttackTypes)
+		blockedMap = append(blockedMap, point)
 		if securityBlock.Source == "global" {
 			securityGlobalBlocks = append(securityGlobalBlocks, view)
 			continue
 		}
 		securityLocalBlocks = append(securityLocalBlocks, view)
+	}
+	if a.geoIP != nil {
+		geoBoundary, cancelGeo := context.WithTimeout(r.Context(), 100*time.Millisecond)
+		for index := range blockedMap {
+			if geoBoundary.Err() != nil {
+				break
+			}
+			if blockedMap[index].GeoKnown {
+				continue
+			}
+			if location, found := a.geoIP.Lookup(geoBoundary, blockedMap[index].Address); found {
+				blockedMap[index].Country, blockedMap[index].City = location.CountryCode, location.City
+				blockedMap[index].Latitude, blockedMap[index].Longitude, blockedMap[index].GeoKnown = location.Latitude, location.Longitude, true
+			}
+		}
+		cancelGeo()
+	}
+	securityIPSummary := analyticsSecurityIPStatistics(blockedMap, securityAllowlist, securityThrottles, security)
+	blockedMapJSON, _ := json.Marshal(blockedMap)
+	securityLocalBlocks, localBlockPage := analyticsSecurityBlockPage(r, securityLocalBlocks, "local_page", "local_query", "local-blocks")
+	securityGlobalBlocks, globalBlockPage := analyticsSecurityBlockPage(r, securityGlobalBlocks, "global_page", "global_query", "global-blocks")
+	// GeoIP is a boundary lookup for only the displayed rows, with one small budget.
+	if a.geoIP != nil {
+		geoBoundary, cancelGeo := context.WithTimeout(r.Context(), 100*time.Millisecond)
+		for _, blocks := range [][]analyticsSecurityBlockView{securityLocalBlocks, securityGlobalBlocks} {
+			for index := range blocks {
+				if geoBoundary.Err() != nil {
+					break
+				}
+				if blocks[index].Country != "" && blocks[index].City != "" {
+					continue
+				}
+				if location, found := a.geoIP.Lookup(geoBoundary, blocks[index].IP); found {
+					blocks[index].Country = location.CountryCode
+					blocks[index].City = location.City
+				}
+			}
+		}
+		cancelGeo()
+	}
+	sort.Slice(security.Incidents, func(left, right int) bool {
+		if security.Incidents[left].Last.Equal(security.Incidents[right].Last) {
+			return security.Incidents[left].IP < security.Incidents[right].IP
+		}
+		return security.Incidents[left].Last.After(security.Incidents[right].Last)
+	})
+	incidentPage, incidentStart, incidentEnd := analyticsSecurityPage(r, "incident_page", "", "security-incidents", len(security.Incidents))
+	visibleIncidents := make([]analyticsSecurityIncidentView, 0, incidentEnd-incidentStart)
+	for _, incident := range security.Incidents[incidentStart:incidentEnd] {
+		visibleIncidents = append(visibleIncidents, analyticsSecurityIncidentView{Incident: incident, OperatingSystem: (analyticsSecurityBlockView{Agent: incident.Agent}).OperatingSystem()})
 	}
 	unknownGeo := 0
 	for _, session := range experience.Recent {
@@ -6665,6 +6962,11 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 	if !found {
 		report = analyticsPreparedReport{GeneratedAt: time.Now().UTC().Format(time.RFC3339)}
 	}
+	report = analyticsSeparateLegacyCounters(report)
+	// Human page opens require browser observations; HTTP totals remain technical.
+	humanExperience := browserDashboard.Report.Experience.View(browserstats.ExperienceFilter{Traffic: "human"})
+	report.HumanSessions = humanExperience.Sessions
+	report.PageViews = humanExperience.Views
 	serverLocalHours := [24]int{}
 	for _, row := range report.HourlyActivity {
 		hour, hourErr := strconv.Atoi(strings.TrimSuffix(row.Label, ":00"))
@@ -6681,6 +6983,7 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 	securityActivityDaysJSON, _ := json.Marshal(security.ActivityDays)
 	securityActivityHoursJSON, _ := json.Marshal(security.ActivityHours)
 	securityActivityTypesJSON, _ := json.Marshal(security.ActivityTypes)
+	securityActivityCountriesJSON, _ := json.Marshal(security.ActivityCountries)
 	securityActivitySeverityJSON, _ := json.Marshal(security.ActivitySeverity)
 	activitySessions := make([]analyticsActivitySession, 0, len(experience.Recent))
 	for _, session := range experience.Recent {
@@ -6693,6 +6996,9 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 	}
 	securityIncidentsJSON, _ := json.Marshal(securityActivityIncidents)
 	a.render(w, r, "analytics.html", map[string]any{
+		"SecurityIPSummary": securityIPSummary, "SecurityBlockedMapJSON": template.JS(blockedMapJSON),
+		"LocalBlockPage": localBlockPage, "GlobalBlockPage": globalBlockPage, "IncidentPage": incidentPage,
+		"SecurityVisibleIncidents": visibleIncidents, "SecurityActivityCountriesJSON": template.JS(securityActivityCountriesJSON),
 		"ReturnPath":       requestedReturnPath(r),
 		"AnalyticsTab":     selectedTab,
 		"Report":           analyticsReportView(report, translationsForRequest(r)),
@@ -6702,6 +7008,11 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func analyticsReportView(report analyticsPreparedReport, translations map[string]string) analyticsPageData {
+	report = analyticsSeparateLegacyCounters(report)
+	technicalAudienceSessions := 0
+	for _, row := range report.VisitorTypes {
+		technicalAudienceSessions += row.Count
+	}
 	view := analyticsPageData{
 		GeneratedAt:    formatAnalyticsTime(report.GeneratedAt),
 		Period:         formatAnalyticsTime(report.PeriodStart) + " - " + formatAnalyticsTime(report.PeriodEnd),
@@ -6717,14 +7028,21 @@ func analyticsReportView(report analyticsPreparedReport, translations map[string
 	view.Cards = []analyticsMetricCard{
 		{Label: translationOrDefault(translations, "analytics_total_requests", "Total requests"), Value: strconv.Itoa(report.TotalRequests), Hint: translationOrDefault(translations, "analytics_total_requests_hint", "All logged dynamic, static, and controller requests.")},
 		{Label: translationOrDefault(translations, "analytics_page_views", "Page views"), Value: strconv.Itoa(report.PageViews), Hint: translationOrDefault(translations, "analytics_page_views_hint", "GET page requests excluding assets and Sitebrush controllers.")},
-		{Label: translationOrDefault(translations, "analytics_human_requests", "People"), Value: strconv.Itoa(report.HumanRequests), Hint: translationOrDefault(translations, "analytics_human_requests_hint", "Requests that do not look like known bots or crawlers.")},
-		{Label: translationOrDefault(translations, "analytics_bot_requests", "Bots"), Value: strconv.Itoa(report.BotRequests), Hint: translationOrDefault(translations, "analytics_bot_requests_hint", "Requests from crawlers, bots, monitors, and automated clients.")},
+		{Label: translationOrDefault(translations, "ax_sessions", "Sessions") + " · " + translationOrDefault(translations, "analytics_human_requests", "People"), Value: strconv.Itoa(report.HumanSessions), Hint: "Observed human sessions, with a 30-minute inactivity boundary."},
+		{Label: translationOrDefault(translations, "ax_sessions", "Sessions") + " · " + translationOrDefault(translations, "analytics_bot_requests", "Bots"), Value: strconv.Itoa(report.BotSessions), Hint: "Bot visits grouped by client and 30-minute inactivity; historical request totals are not visits."},
+		{Label: translationOrDefault(translations, "analytics_section_assets", "Files"), Value: strconv.Itoa(report.StaticRequests), Hint: "Static file requests, excluding HTML pages."},
 		{Label: translationOrDefault(translations, "analytics_avg_duration", "Average response time"), Value: formatDurationMS(report.AverageDurationMS), Hint: translationOrDefault(translations, "analytics_avg_duration_hint", "Weighted average server response time across the selected period.")},
 		{Label: translationOrDefault(translations, "analytics_errors", "Errors"), Value: strconv.Itoa(report.ErrorCount), Hint: translationOrDefault(translations, "analytics_errors_hint", "Requests with HTTP status 400 or higher.")},
 		{Label: translationOrDefault(translations, "analytics_admin_traffic", "Admin traffic"), Value: strconv.Itoa(report.AdminRequests), Hint: translationOrDefault(translations, "analytics_admin_traffic_hint", "Requests made while logged in as an administrator.")},
 	}
 	if report.AdminUnclassified {
 		view.Cards = view.Cards[:len(view.Cards)-1]
+	}
+	if report.LegacyStaticRequests > 0 {
+		view.Cards = append(view.Cards, analyticsMetricCard{Label: "Legacy static HTTP requests", Value: strconv.Itoa(report.LegacyStaticRequests), Hint: "Historical counter includes HTML delivery and files; it cannot be reconstructed as file requests."})
+	}
+	if report.LegacyPageRequests > 0 {
+		view.Cards = append(view.Cards, analyticsMetricCard{Label: "Legacy HTTP page requests", Value: strconv.Itoa(report.LegacyPageRequests), Hint: "Historical page request counter; it includes automation and is not a count of human page opens."})
 	}
 	view.Sections = []analyticsReportSection{
 		analyticsSectionView("analytics_section_status_codes", "analytics_section_status_codes_hint", report.StatusCodes, report.TotalRequests, "plain", translations),
@@ -6733,12 +7051,53 @@ func analyticsReportView(report analyticsPreparedReport, translations map[string
 		analyticsSectionView("analytics_section_content_sources", "analytics_section_content_sources_hint", report.ContentSources, report.TotalRequests, "content", translations),
 		analyticsSectionView("analytics_section_assets", "analytics_section_assets_hint", report.TopAssets, report.StaticRequests, "path", translations),
 		analyticsSectionView("analytics_section_errors", "analytics_section_errors_hint", report.ErrorPaths, report.ErrorCount, "path", translations),
-		analyticsSectionView("analytics_section_bot_crawlers", "analytics_section_bot_crawlers_hint", report.BotCrawlers, report.PageViews, "plain", translations),
-		analyticsSectionView("analytics_section_browsers", "analytics_section_browsers_hint", report.Browsers, report.PageViews, "plain", translations),
-		analyticsSectionView("analytics_section_os", "analytics_section_os_hint", report.OperatingSystems, report.PageViews, "plain", translations),
+		analyticsSectionView("analytics_section_bot_crawlers", "analytics_section_bot_crawlers_hint", report.BotCrawlers, report.BotSessions, "plain", translations),
+		analyticsSectionView("analytics_section_browsers", "analytics_section_browsers_hint", report.Browsers, technicalAudienceSessions, "plain", translations),
+		analyticsSectionView("analytics_section_os", "analytics_section_os_hint", report.OperatingSystems, technicalAudienceSessions, "plain", translations),
 		analyticsSectionView("analytics_section_system_events", "analytics_section_system_events_hint", report.SystemEvents, 0, "plain", translations),
 	}
+	for _, legacy := range []struct {
+		title string
+		rows  []analyticsCountRow
+	}{
+		{"Legacy static HTTP requests", report.LegacyAssets},
+		{"Legacy browser HTTP page requests", report.LegacyBrowsers},
+		{"Legacy operating system HTTP page requests", report.LegacyOperatingSystems},
+		{"Legacy crawler HTTP page requests", report.LegacyBotCrawlers},
+	} {
+		if len(legacy.rows) == 0 {
+			continue
+		}
+		section := analyticsReportSection{Title: legacy.title, Description: "Historical request counts. These are not sessions."}
+		for _, row := range legacy.rows {
+			section.Rows = append(section.Rows, analyticsReportRow{Label: row.Label, Value: strconv.Itoa(row.Count)})
+		}
+		view.Sections = append(view.Sections, section)
+	}
 	return view
+}
+
+// Historical snapshots counted page requests in audience dimensions. Keep that
+// evidence visible as technical history without merging it into session totals.
+func analyticsSeparateLegacyCounters(report analyticsPreparedReport) analyticsPreparedReport {
+	if report.SessionMetricsVersion != 0 {
+		return report
+	}
+	report.LegacyStaticRequests += report.StaticRequests
+	report.LegacyPageRequests += report.PageViews
+	report.PageViews = 0
+	report.LegacyAssets = report.TopAssets
+	report.LegacyBrowsers = report.Browsers
+	report.LegacyOperatingSystems = report.OperatingSystems
+	report.LegacyBotCrawlers = report.BotCrawlers
+	report.StaticRequests = 0
+	report.TopAssets = nil
+	report.Browsers = nil
+	report.OperatingSystems = nil
+	report.BotCrawlers = nil
+	report.VisitorTypes = nil
+	report.SessionMetricsVersion = 1
+	return report
 }
 
 func analyticsSectionView(titleKey, descriptionKey string, sourceRows []analyticsCountRow, total int, labelKind string, translations map[string]string) analyticsReportSection {
@@ -6988,16 +7347,16 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 		}
 		if a.attackGuard != nil {
 			var block httpsecurity.SecurityBlock
-			var blocked, allowed bool
+			var blocked, allowed, alreadyBlocked bool
 			category := ""
 			if !trusted {
 				category = browserstats.ProbeCategory(r.URL.EscapedPath(), r.URL.RawQuery)
 			}
 			if immediateSecurityCategory(category) {
 				description := securityIncidentDescription(category, r.URL.EscapedPath(), 0)
-				block, blocked = a.attackGuard.ObserveSiteIncident(domain, clientIP, category, description, now)
+				block, blocked, alreadyBlocked = a.attackGuard.ObserveSiteIncidentEvidence(domain, clientIP, category, description, now)
 			} else {
-				block, blocked, allowed = a.attackGuard.ObserveSiteRequestFastDisposition(domain, clientIP, r.URL.EscapedPath(), r.Method, trusted || crawlerRead, now)
+				block, blocked, allowed, alreadyBlocked = a.attackGuard.ObserveSiteRequestFastEvidence(domain, clientIP, r.URL.EscapedPath(), r.Method, trusted || crawlerRead, now)
 			}
 			if allowed {
 				serveNext()
@@ -7020,6 +7379,9 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 				w.Header().Set("Cache-Control", "no-store")
 				w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 				w.Header().Set("X-Sitebrush-Security-Incident", block.IncidentID)
+				if alreadyBlocked {
+					w.Header().Set("X-Sitebrush-Security-Already-Blocked", "1")
+				}
 				w.WriteHeader(http.StatusTooManyRequests)
 				_, _ = io.WriteString(w, httpsecurity.BlockedHTML(preferredLanguageCode(r.Header.Get("Accept-Language")), block))
 				return
@@ -7729,16 +8091,38 @@ func signalAwareContext(parent context.Context) (context.Context, context.Cancel
 	ctx, cancel := context.WithCancel(parent)
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, shutdownsignals.ServerShutdownSignals()...)
+	stopRequests := make(chan struct{})
+	finished := make(chan struct{})
 	go func() {
-		select {
-		case receivedSignal := <-signals:
-			log.Printf("%sSHUTDOWN%s signal=%s received", terminalYellow(), terminalReset(), receivedSignal)
-			cancel()
-		case <-ctx.Done():
+		defer signal.Stop(signals)
+		defer close(finished)
+		parentStopped := parent.Done()
+		shuttingDown := false
+		for {
+			select {
+			case receivedSignal := <-signals:
+				if shuttingDown {
+					log.Printf("%sSHUTDOWN%s repeated signal=%s; forcing process exit", terminalRed(), terminalReset(), receivedSignal)
+					os.Exit(130)
+				}
+				shuttingDown = true
+				log.Printf("%sSHUTDOWN%s signal=%s received", terminalYellow(), terminalReset(), receivedSignal)
+				cancel()
+			case <-parentStopped:
+				parentStopped = nil
+				shuttingDown = true
+				cancel()
+			case <-stopRequests:
+				return
+			}
 		}
 	}()
 	return ctx, func() {
-		signal.Stop(signals)
+		select {
+		case stopRequests <- struct{}{}:
+		case <-finished:
+		}
+		<-finished
 		cancel()
 	}
 }
@@ -7815,7 +8199,10 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application.controlDatabase = controlDatabaseDispatcher
 	defer func() {
 		logShutdownStep("closing server control database dispatcher")
-		controlDatabaseDispatcher.Close()
+		if closeErr := controlDatabaseDispatcher.Close(); closeErr != nil {
+			log.Printf("%sSHUTDOWN%s %v", terminalRed(), terminalReset(), closeErr)
+			return
+		}
 		logShutdownDone("server control database dispatcher closed")
 	}()
 	application.startTLSHandshakeNoiseProcess(ctx.Done())

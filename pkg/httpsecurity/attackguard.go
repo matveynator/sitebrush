@@ -17,14 +17,14 @@ import (
 )
 
 const (
-	defaultSecurityBlockTTL     = 24 * time.Hour
-	securityReasonHistoryTTL    = 7 * 24 * time.Hour
+	defaultSecurityBlockTTL      = 24 * time.Hour
+	securityReasonHistoryTTL     = 7 * 24 * time.Hour
 	securityEscalationHistoryTTL = 64 * 24 * time.Hour
-	trustedAdminIPCacheTTL   = 5 * time.Minute
-	securityReasonLogLimit   = 24
-	attackGuardShardCount    = 16
-	attackGuardQueueSize     = 256
-	attackGuardWindowLimit   = 1024
+	trustedAdminIPCacheTTL       = 5 * time.Minute
+	securityReasonLogLimit       = 24
+	attackGuardShardCount        = 16
+	attackGuardQueueSize         = 256
+	attackGuardWindowLimit       = 1024
 )
 
 type SecuritySettings struct {
@@ -126,15 +126,16 @@ type attackGuardRequest struct {
 }
 
 type attackGuardResult struct {
-	Block        SecurityBlock
-	Blocked      bool
-	Blocks       []SecurityBlock
-	Allowed      bool
-	AdminTrusted bool
-	Allowlist    []SecurityAllow
-	Settings     SecuritySettings
-	Changed      bool
-	Err          error
+	Block          SecurityBlock
+	Blocked        bool
+	AlreadyBlocked bool
+	Blocks         []SecurityBlock
+	Allowed        bool
+	AdminTrusted   bool
+	Allowlist      []SecurityAllow
+	Settings       SecuritySettings
+	Changed        bool
+	Err            error
 }
 
 type AttackGuard struct {
@@ -284,7 +285,7 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 			return attackGuardResult{Allowed: true}
 		}
 		if block, blocked := activeSecurityBlock(blocks, ip, request.Domain, now); blocked {
-			return attackGuardResult{Block: block, Blocked: true}
+			return attackGuardResult{Block: block, Blocked: true, AlreadyBlocked: true}
 		}
 		if request.Trusted {
 			return attackGuardResult{}
@@ -336,6 +337,7 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 		return attackGuardResult{}
 
 	case attackGuardObserveIncident:
+		_, alreadyBlocked := activeSecurityBlock(blocks, ip, request.Domain, now)
 		if _, allowed := allowlist[ip]; allowed {
 			return attackGuardResult{Allowed: true}
 		}
@@ -362,7 +364,7 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 		block := blockLocalSecurityIP(blocks, ip, request.Domain, request.Category, request.Description, now)
 		block.Domain = cleanSecurityText(request.Domain, 255)
 		blocks[ip] = block
-		return attackGuardResult{Block: block, Blocked: true, Changed: true}
+		return attackGuardResult{Block: block, Blocked: true, Changed: true, AlreadyBlocked: alreadyBlocked}
 
 	case attackGuardAdd:
 		if ip == "" {
@@ -822,11 +824,16 @@ func (guard *AttackGuard) ObserveRequestFastDisposition(ip, path, method string,
 }
 
 func (guard *AttackGuard) ObserveSiteRequestFastDisposition(domain, ip, path, method string, trusted bool, now time.Time) (SecurityBlock, bool, bool) {
+	block, blocked, allowed, _ := guard.ObserveSiteRequestFastEvidence(domain, ip, path, method, trusted, now)
+	return block, blocked, allowed
+}
+
+func (guard *AttackGuard) ObserveSiteRequestFastEvidence(domain, ip, path, method string, trusted bool, now time.Time) (SecurityBlock, bool, bool, bool) {
 	result, ok := guard.exchangeFast(attackGuardRequest{Operation: attackGuardObserveFast, Domain: normalizeSecurityDomain(domain), IP: ip, Path: path, Method: method, Trusted: trusted, Now: now})
 	if ok && result.Changed {
 		guard.signalSave()
 	}
-	return result.Block, ok && result.Blocked, ok && result.Allowed
+	return result.Block, ok && result.Blocked, ok && result.Allowed, ok && result.AlreadyBlocked
 }
 
 // ObserveSiteNotFoundFastDisposition counts only misses so normal page traffic
@@ -852,11 +859,16 @@ func (guard *AttackGuard) ObserveIncident(ip, category, description string, now 
 }
 
 func (guard *AttackGuard) ObserveSiteIncident(domain, ip, category, description string, now time.Time) (SecurityBlock, bool) {
+	block, blocked, _ := guard.ObserveSiteIncidentEvidence(domain, ip, category, description, now)
+	return block, blocked
+}
+
+func (guard *AttackGuard) ObserveSiteIncidentEvidence(domain, ip, category, description string, now time.Time) (SecurityBlock, bool, bool) {
 	result, ok := guard.exchangeFast(attackGuardRequest{Operation: attackGuardObserveIncident, Domain: normalizeSecurityDomain(domain), IP: ip, Category: category, Description: description, Now: now})
 	if ok && result.Changed {
 		guard.signalSave()
 	}
-	return result.Block, ok && result.Blocked
+	return result.Block, ok && result.Blocked, ok && result.AlreadyBlocked
 }
 
 func (guard *AttackGuard) Add(ip, reason, description, source string, expiresAt, now time.Time) (SecurityBlock, error) {

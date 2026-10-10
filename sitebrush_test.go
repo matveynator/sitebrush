@@ -3329,8 +3329,8 @@ func TestAnalyticsReportBuildsGoogleAnalyticsStyleMetrics(t *testing.T) {
 	if report.TotalRequests != 8 {
 		t.Fatalf("total requests = %d, want 8", report.TotalRequests)
 	}
-	if report.PageViews != 6 {
-		t.Fatalf("page views = %d, want 6", report.PageViews)
+	if report.PageViews != 3 {
+		t.Fatalf("human page views = %d, want 3", report.PageViews)
 	}
 	if report.UniqueVisitors != 5 {
 		t.Fatalf("unique visitors = %d, want 5", report.UniqueVisitors)
@@ -3341,11 +3341,11 @@ func TestAnalyticsReportBuildsGoogleAnalyticsStyleMetrics(t *testing.T) {
 	if report.ReturningVisitors != 1 || report.ReturnVisits != 1 {
 		t.Fatalf("returning visitors/visits = %d/%d, want 1/1", report.ReturningVisitors, report.ReturnVisits)
 	}
-	if report.Sessions != 5 {
-		t.Fatalf("sessions = %d, want 5", report.Sessions)
+	if report.Sessions != 4 {
+		t.Fatalf("sessions = %d, want 4", report.Sessions)
 	}
-	if report.BounceRate < 79.9 || report.BounceRate > 80.1 {
-		t.Fatalf("bounce rate = %.1f, want about 80.0", report.BounceRate)
+	if report.BounceRate < 74.9 || report.BounceRate > 75.1 {
+		t.Fatalf("bounce rate = %.1f, want about 75.0", report.BounceRate)
 	}
 	if report.ErrorCount != 1 {
 		t.Fatalf("errors = %d, want 1", report.ErrorCount)
@@ -3358,24 +3358,20 @@ func TestAnalyticsReportBuildsGoogleAnalyticsStyleMetrics(t *testing.T) {
 	}
 	assertAnalyticsRow(t, report.TopPages, "/", 1)
 	assertAnalyticsRow(t, report.TopPages, "/pricing", 1)
-	assertAnalyticsRow(t, report.TopPages, "/docs", 2)
-	assertAnalyticsRow(t, report.TopPages, "/missing", 1)
-	assertAnalyticsRow(t, report.TopPages, "/robots", 1)
+	assertAnalyticsRow(t, report.TopPages, "/docs", 1)
 	assertAnalyticsRow(t, report.TrafficSources, "organic search", 1)
-	assertAnalyticsRow(t, report.TrafficSources, "social", 1)
-	assertAnalyticsRow(t, report.TrafficSources, "direct", 2)
+	assertAnalyticsRow(t, report.TrafficSources, "direct", 1)
 	assertAnalyticsRow(t, report.TrafficSources, "referral", 2)
-	assertAnalyticsRow(t, report.Devices, "desktop", 3)
-	assertAnalyticsRow(t, report.Devices, "mobile", 1)
+	assertAnalyticsRow(t, report.Devices, "desktop", 2)
 	assertAnalyticsRow(t, report.Devices, "bot", 2)
-	assertAnalyticsRow(t, report.VisitorTypes, "human", 4)
+	assertAnalyticsRow(t, report.VisitorTypes, "human", 2)
 	assertAnalyticsRow(t, report.VisitorTypes, "bot", 2)
 	assertAnalyticsRow(t, report.BotCrawlers, "GPTBot", 2)
 	assertAnalyticsRow(t, report.BotReturnSources, "referral", 1)
 	assertAnalyticsRow(t, report.BotReferrers, "example.org", 2)
 	assertAnalyticsRow(t, report.Countries, "United Kingdom", 2)
-	assertAnalyticsRow(t, report.Countries, "Russia", 1)
-	assertAnalyticsRow(t, report.EntryHours, "11:00", 4)
+	assertAnalyticsRow(t, report.Countries, "Germany", 1)
+	assertAnalyticsRow(t, report.EntryHours, "11:00", 3)
 	assertAnalyticsRow(t, report.StatusCodes, "404", 1)
 	assertAnalyticsRow(t, report.TopAssets, "/p/logo.png", 1)
 	assertAnalyticsRow(t, report.ErrorPaths, "/missing 404", 1)
@@ -3398,8 +3394,8 @@ func TestAnalyticsAggregateStoresProcessedReportAndOverloadMarkers(t *testing.T)
 		VisitorID:      "visitor-a",
 	})
 	report := state.reports(now)["localhost"]
-	if report.TotalRequests != 1 || report.PageViews != 1 || report.StaticRequests != 1 {
-		t.Fatalf("report counts = total:%d views:%d static:%d, want 1/1/1", report.TotalRequests, report.PageViews, report.StaticRequests)
+	if report.TotalRequests != 1 || report.PageViews != 1 || report.StaticRequests != 0 {
+		t.Fatalf("report counts = total:%d views:%d files:%d, want 1/1/0", report.TotalRequests, report.PageViews, report.StaticRequests)
 	}
 	assertAnalyticsRow(t, report.TopPages, "/", 1)
 
@@ -4731,7 +4727,11 @@ func TestRegistrationConfirmationSurvivesProcessMemoryRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(dispatcher.Close)
+	t.Cleanup(func() {
+		if err := dispatcher.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 
 	firstMemoryContext, stopFirstMemory := context.WithCancel(context.Background())
 	application := &App{
@@ -12530,7 +12530,11 @@ func TestPublicTrialEndpointsAllowCredentialFreeCrossOriginEmbedding(t *testing.
 		t.Fatal(err)
 	}
 	application.controlDatabase = dispatcher
-	t.Cleanup(dispatcher.Close)
+	t.Cleanup(func() {
+		if err := dispatcher.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 
 	request := httptest.NewRequest(http.MethodOptions, "https://sitebrush.example/?trial_site_preview", nil)
 	request.Header.Set("Origin", "https://embedded.example")
@@ -12609,7 +12613,11 @@ func TestExpiredPublicTrialCleanupKeepsRegisteredSiteAndDeletesAnonymousSite(t *
 		t.Fatal(err)
 	}
 	application.controlDatabase = dispatcher
-	t.Cleanup(dispatcher.Close)
+	t.Cleanup(func() {
+		if err := dispatcher.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 
 	registeredContext := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), "registered.sitebrush.example"))
 	if _, err := application.db.ExecContext(registeredContext, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "registered.sitebrush.example", "admin@example.com", "password"); err != nil {
@@ -16018,7 +16026,7 @@ func testBrowserAnalyticsWebSocketDelivery(t *testing.T, scheme string) {
 	}
 	select {
 	case envelope := <-app.browserAnalytics:
-		if envelope.domain != "example.org" || envelope.event.Source != "search.example" || envelope.event.Referrer != "" || envelope.event.Path != "/docs" {
+		if envelope.domain != "example.org" || envelope.event.Source != "search.example" || envelope.event.Referrer != observation.Referrer || envelope.event.Path != "/docs" {
 			t.Fatalf("envelope: %+v", envelope)
 		}
 	case <-time.After(time.Second):
@@ -17182,12 +17190,13 @@ func TestCoverageEmailDNSSetupTranslations(t *testing.T) {
 }
 
 func TestCoverageAnalyticsTechnicalReportMerge(t *testing.T) {
-	addition := analyticsPreparedReport{GeneratedAt: "2026-09-24T12:00:00Z", PeriodEnd: "2026-09-25", TotalRequests: 2, PageViews: 2, AverageDurationMS: 300}
+	addition := analyticsPreparedReport{SessionMetricsVersion: 1, GeneratedAt: "2026-09-24T12:00:00Z", PeriodEnd: "2026-09-25", TotalRequests: 2, PageViews: 2, AverageDurationMS: 300}
 	if got := mergeTechnicalReports(analyticsPreparedReport{}, addition); got.GeneratedAt != addition.GeneratedAt {
 		t.Fatalf("initial report merge = %+v", got)
 	}
 	current := analyticsPreparedReport{
-		GeneratedAt: "2026-09-24T11:00:00Z", PeriodStart: "2026-09-23", PeriodEnd: "2026-09-24",
+		SessionMetricsVersion: 1,
+		GeneratedAt:           "2026-09-24T11:00:00Z", PeriodStart: "2026-09-23", PeriodEnd: "2026-09-24",
 		TotalRequests: 2, PageViews: 1, AverageDurationMS: 100,
 		TopPages:     []analyticsCountRow{{Label: "/", Count: 1}},
 		SystemEvents: make([]analyticsCountRow, 32), UniqueVisitors: 9, Sessions: 7,
@@ -19891,3 +19900,414 @@ func TestAIEditorPatchProtocolSupportsInsertionAndDeletion(t *testing.T) {
 		t.Fatalf("insertion/deletion result=%s", result.HTML)
 	}
 }
+
+// BEGIN analytics session boundary tests.
+
+func TestAnalyticsSeparatesSessionPageAndFiftyFilesAcrossFlush(t *testing.T) {
+	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	state := newAnalyticsAggregateState(16 << 20)
+	event := siteAnalyticsEvent{Domain: "site.example", Path: "/", Method: http.MethodGet, StatusCode: http.StatusOK, ContentSource: "static", UserAgent: "Mozilla/5.0", VisitorID: "visitor", OccurredAt: now, Referer: "https://example-game.com/article"}
+	state.record(event)
+	for index := 0; index < 50; index++ {
+		asset := event
+		asset.Path = "/image.png"
+		asset.IsAsset = true
+		state.record(asset)
+	}
+	first := state.reports(now)[event.Domain]
+	if first.TotalRequests != 51 || first.HumanSessions != 1 || first.PageViews != 1 || first.StaticRequests != 50 {
+		t.Fatalf("mixed units: %+v", first)
+	}
+	state = state.nextAfterFlush(now)
+	event.OccurredAt = now.Add(time.Minute)
+	event.Path = "/download/"
+	event.Referer = "https://site.example/"
+	state.record(event)
+	second := state.reports(event.OccurredAt)[event.Domain]
+	if second.HumanSessions != 0 || second.PageViews != 1 {
+		t.Fatalf("flush created a visit: %+v", second)
+	}
+	event.OccurredAt = now.Add(32 * time.Minute)
+	event.UserAgent = "Go-http-client/1.1"
+	event.VisitorID = "bot"
+	state.record(event)
+	third := state.reports(event.OccurredAt)[event.Domain]
+	if third.BotSessions != 1 || third.PageViews != 1 {
+		t.Fatalf("bot became page view: %+v", third)
+	}
+}
+
+type analyticsFlushObservedRepository struct {
+	browserstats.Repository
+	saved chan string
+}
+
+func (repository analyticsFlushObservedRepository) Exchange(request browserstats.StorageRequest) browserstats.StorageResult {
+	result := repository.Repository.Exchange(request)
+	if request.Operation == browserstats.SaveTechnical && result.Err == nil {
+		repository.saved <- request.Report
+	}
+	return result
+}
+
+func TestAnalyticsLiveFlushPreservesHumanAndBotSessions(t *testing.T) {
+	store := browserstats.OpenStore(t.TempDir())
+	saved := make(chan string, 16)
+	app := &App{
+		analyticsStorage: analyticsFlushObservedRepository{Repository: store, saved: saved},
+		analyticsEvents:  make(chan siteAnalyticsEvent, 16), analyticsFlushInterval: 20 * time.Millisecond,
+		analyticsMemoryLimit: 16 << 20,
+	}
+	boundary, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); app.runAnalyticsEventWriter(boundary) }()
+	t.Cleanup(func() {
+		defer store.Close()
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("collector did not stop")
+		}
+	})
+	now := time.Now().UTC()
+	for round, elapsed := range []time.Duration{0, time.Second, 32 * time.Minute} {
+		for _, agent := range []string{"Mozilla/5.0 Chrome/124.0.0.0", "Go-http-client/1.1"} {
+			app.analyticsEvents <- siteAnalyticsEvent{
+				Domain: "site.example", Path: "/docs/", Method: http.MethodGet, StatusCode: http.StatusOK,
+				ClientIP: "203.0.113.1", UserAgent: agent, OccurredAt: now.Add(elapsed), Referer: "https://example-game.com/article",
+			}
+		}
+		deadline := time.After(5 * time.Second)
+		for {
+			select {
+			case snapshot := <-saved:
+				var history analyticsTechnicalHistory
+				if err := json.Unmarshal([]byte(snapshot), &history); err != nil {
+					t.Fatal(err)
+				}
+				merged := analyticsPreparedReport{}
+				for _, daily := range history.Days {
+					merged = mergeTechnicalReports(merged, daily)
+				}
+				if merged.TotalRequests < (round+1)*2 {
+					continue
+				}
+				sessions := 1
+				if round == 2 {
+					sessions = 2
+				}
+				if merged.TotalRequests != (round+1)*2 || merged.PageViews != round+1 || merged.HumanSessions != sessions || merged.BotSessions != sessions {
+					t.Fatalf("live flush round %d: %+v", round, merged)
+				}
+				assertAnalyticsRow(t, merged.VisitorTypes, "human", sessions)
+				assertAnalyticsRow(t, merged.VisitorTypes, "bot", sessions)
+			case <-deadline:
+				t.Fatalf("live flush round %d timed out", round)
+			}
+			break
+		}
+	}
+}
+
+func TestAnalyticsRotationDetachesAndExpiresSessionHistory(t *testing.T) {
+	now := time.Now().UTC()
+	state := newAnalyticsAggregateState(16 << 20)
+	event := siteAnalyticsEvent{Domain: "site.example", Path: "/", Method: http.MethodGet, StatusCode: http.StatusOK, UserAgent: "Mozilla/5.0", VisitorID: "visitor", OccurredAt: now}
+	state.record(event)
+	next := state.nextAfterFlush(now.Add(time.Minute))
+	event.OccurredAt = now.Add(2 * time.Minute)
+	next.record(event)
+	original := state.domains[event.Domain].visitorSessions[event.VisitorID]
+	if original.pageCount != 1 || !original.lastEvent.OccurredAt.Equal(now) {
+		t.Fatal("collector changed the detached persistence batch")
+	}
+	if next.usedBytes == 0 || next.domains[event.Domain].humanSessions != 0 {
+		t.Fatal("retained history was not budgeted or created a new session")
+	}
+	if expired := next.nextAfterFlush(now.Add(33 * time.Minute)); len(expired.domains) != 0 {
+		t.Fatal("inactive history survived expiry")
+	}
+}
+
+func TestMergedAudiencePercentagesUseSessions(t *testing.T) {
+	for _, botsOnly := range []bool{false, true} {
+		name := "mixed"
+		if botsOnly {
+			name = "bots-only"
+		}
+		t.Run(name, func(t *testing.T) {
+			now := time.Now().UTC()
+			aggregate := newSiteAnalyticsAggregate()
+			for _, agent := range []string{"Mozilla/5.0 Chrome/124.0.0.0", "Go-http-client/1.1"} {
+				if botsOnly && agent != "Go-http-client/1.1" {
+					continue
+				}
+				aggregate.record(siteAnalyticsEvent{Path: "/", Method: http.MethodGet, StatusCode: http.StatusOK, VisitorID: agent, UserAgent: agent, Referer: "https://example-game.com/article", AcceptLanguage: "en-US", GeoCountryCode: "US", GeoCity: "New York", OccurredAt: now})
+			}
+			report := aggregate.report(now)
+			merged := mergeTechnicalReports(mergeTechnicalReports(report, report), report)
+			audience := merged.HumanSessions + merged.BotSessions
+			for _, dimension := range []struct {
+				name  string
+				rows  []analyticsCountRow
+				total int
+			}{
+				{"sources", merged.TrafficSources, audience}, {"referrers", merged.Referrers, audience},
+				{"countries", merged.Countries, audience}, {"cities", merged.Cities, audience},
+				{"devices", merged.Devices, audience}, {"types", merged.VisitorTypes, audience},
+				{"browsers", merged.Browsers, audience}, {"OS", merged.OperatingSystems, audience},
+				{"languages", merged.Languages, audience}, {"crawlers", merged.BotCrawlers, merged.BotSessions},
+				{"bot referrers", merged.BotReferrers, merged.BotSessions},
+			} {
+				if len(dimension.rows) == 0 {
+					t.Fatalf("%s has no observations", dimension.name)
+				}
+				for _, row := range dimension.rows {
+					if want := analyticsPercent(row.Count, dimension.total); row.Value != want {
+						t.Errorf("%s %s: %s, want %s", dimension.name, row.Label, row.Value, want)
+					}
+				}
+			}
+		})
+	}
+}
+
+// END analytics session boundary tests.
+
+// BEGIN control database shutdown tests.
+
+func TestControlDatabaseShutdownBoundsAnUnfinishedOperation(t *testing.T) {
+	dispatcher, err := startServerControlDatabaseDispatcher(filepath.Join(t.TempDir(), "control.db"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	replied := make(chan error, 1)
+	go func() {
+		replied <- dispatcher.execute(context.Background(), serverControlDatabaseWrite, "unfinished-test-operation", func(database *sql.DB) error {
+			if _, err := database.ExecContext(context.Background(), "SELECT 1"); err != nil {
+				return err
+			}
+			close(started)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("operation did not start")
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- dispatcher.closeWithin(20 * time.Millisecond) }()
+	select {
+	case err := <-closed:
+		if err == nil || !strings.Contains(err.Error(), "writer") {
+			t.Fatalf("shutdown did not report the unfinished worker: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown hung on an unfinished operation")
+	}
+	select {
+	case err := <-replied:
+		if err == nil {
+			t.Fatal("subscriber did not receive termination")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("subscriber still waiting")
+	}
+	if err := dispatcher.execute(context.Background(), serverControlDatabaseRead, "after-close", func(*sql.DB) error { t.Fatal("stopped dispatcher ran new work"); return nil }); err == nil {
+		t.Fatal("closed dispatcher accepted work")
+	}
+	close(release)
+	for range serverControlDatabaseReaderCount + 1 {
+		select {
+		case worker := <-dispatcher.workersDone:
+			if worker == "writer" {
+				return
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("released writer did not close")
+		}
+	}
+	t.Fatal("released writer was not reported")
+}
+
+func TestControlDatabaseShutdownCompletesWithIdleWorkers(t *testing.T) {
+	dispatcher, err := startServerControlDatabaseDispatcher(filepath.Join(t.TempDir(), "control.db"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatcher.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatcher.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestControlReaderLoadsInvoicesAndShutsDownWithoutDeadline(t *testing.T) {
+	dispatcher, err := startServerControlDatabaseDispatcher(filepath.Join(t.TempDir(), "control.db"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundary, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	defer dispatcher.Close()
+	if err := dispatcher.execute(boundary, serverControlDatabaseWrite, "seed-invoice", func(database *sql.DB) error {
+		_, err := (hostingandsupport.Store{DB: database}).CreateInvoice(boundary, hostingandsupport.Invoice{CustomerEmail: "visitor@example.com", Domain: "site.example", Amount: "10.00", Currency: "EUR", Lines: []hostingandsupport.InvoiceLine{{Domain: "site.example", Description: "Hosting", TotalAmountMinor: 1000}}})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatcher.execute(boundary, serverControlDatabaseRead, "expenses-snapshot-control-data", func(database *sql.DB) error {
+		invoices := (hostingandsupport.Store{DB: database}).Invoices(boundary, 80)
+		if len(invoices) != 1 || len(invoices[0].Lines) != 1 {
+			return fmt.Errorf("invoice cursor retained the only reader connection: %+v", invoices)
+		}
+		return boundary.Err()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- dispatcher.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("normal shutdown still waits on invoice reader")
+	}
+}
+
+// END control database shutdown tests.
+
+// BEGIN security view and signal boundary tests.
+
+func TestSecurityBlockPaginationSearchesOutsideCurrentPage(t *testing.T) {
+	now := time.Now().UTC()
+	blocks := make([]analyticsSecurityBlockView, 51)
+	for index := range blocks {
+		blocks[index] = analyticsSecurityBlockView{SecurityBlock: httpsecurity.SecurityBlock{IP: fmt.Sprintf("192.0.2.%d", index+1), IncidentID: fmt.Sprintf("incident-%d", index), LastEvent: now.Add(time.Duration(index) * time.Second)}, Country: "RU", City: "Moscow", Agent: "Mozilla/5.0 (Windows NT 10.0)"}
+	}
+	request := httptest.NewRequest("GET", "/?analytics&tab=security&local_page=3&global_query=preserved", nil)
+	visible, page := analyticsSecurityBlockPage(request, blocks, "local_page", "local_query", "local-blocks")
+	if len(visible) != 1 || page.Total != 51 || page.Pages != 3 || page.Page != 3 || visible[0].IP != "192.0.2.1" {
+		t.Fatalf("third page: %+v %+v", page, visible)
+	}
+	for _, link := range page.Links {
+		target, err := url.Parse(link.URL)
+		if err != nil || target.Fragment != "local-blocks" || target.Query().Get("global_query") != "preserved" {
+			t.Fatalf("pagination lost list anchor or filters: %+v", link)
+		}
+	}
+	incidentRequest := httptest.NewRequest("GET", "/?analytics&tab=security&incident_page=2", nil)
+	incidentPage, _, _ := analyticsSecurityPage(incidentRequest, "incident_page", "", "security-incidents", 80)
+	for _, link := range incidentPage.Links {
+		target, err := url.Parse(link.URL)
+		if err != nil || target.Fragment != "security-incidents" {
+			t.Fatalf("incident page starts at top: %+v", link)
+		}
+	}
+	request = httptest.NewRequest("GET", "/?analytics&tab=security&local_page=3&local_query=incident-50", nil)
+	visible, page = analyticsSecurityBlockPage(request, blocks, "local_page", "local_query", "local-blocks")
+	if len(visible) != 1 || page.Page != 1 || page.Total != 1 || visible[0].OperatingSystem() != "Windows" {
+		t.Fatalf("full-registry search: %+v %+v", page, visible)
+	}
+}
+
+func TestBlockedIPStatisticsCountAddressesAndRespectPolicyPrecedence(t *testing.T) {
+	blocks := []analyticsBlockedIPMapPoint{
+		{Address: "192.0.2.1", Country: "RU", Policy: "local", GeoKnown: true, AttackTypes: []string{"repository", "repository", "secret"}},
+		{Address: "192.0.2.1", Country: "RU", Policy: "local", AttackTypes: []string{"repository"}},
+		{Address: "192.0.2.2", Country: "DE", Policy: "global", GeoKnown: true, AttackTypes: []string{"repository"}},
+		{Address: "192.0.2.3", Policy: "manual", AttackTypes: []string{"unknown"}},
+		{Address: "192.0.2.4", Policy: "global", AttackTypes: []string{"repository"}},
+	}
+	allowlist := []httpsecurity.SecurityAllow{{IP: "192.0.2.4"}, {IP: "192.0.2.4"}}
+	throttles := []httpsecurity.SecurityThrottle{{IP: "192.0.2.1"}, {IP: "192.0.2.4"}, {IP: "192.0.2.5"}}
+	report := browserstats.SecurityReport{ReturnTrackingStarted: time.Now(), BlockedReturns: []browserstats.BlockedReturn{{IP: "192.0.2.1", Requests: 50, Visits: 1}, {IP: "192.0.2.2", Requests: 2, Visits: 2}}}
+	summary := analyticsSecurityIPStatistics(blocks, allowlist, throttles, report)
+	if summary.Blocked != 3 || summary.Allowed != 1 || summary.Throttled != 1 || summary.ReturningIPs != 2 || summary.ReturnRequests != 52 || summary.ReturnVisits != 3 || summary.UnknownLocations != 1 {
+		t.Fatalf("mixed units or policy overlaps: %+v", summary)
+	}
+	for _, row := range summary.Attacks {
+		if row.Label == "repository" && row.Count != 2 {
+			t.Fatalf("category counted twice per IP: %+v", row)
+		}
+	}
+}
+
+func TestRepeatedInterruptForcesExitDuringStalledShutdown(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix interrupt signals")
+	}
+	if os.Getenv("SITEBRUSH_TEST_REPEAT_INTERRUPT") == "1" {
+		boundary, stop := signalAwareContext(context.Background())
+		defer stop()
+		fmt.Println("signal-ready")
+		<-boundary.Done()
+		fmt.Println("shutdown-started")
+		select {}
+	}
+	child := exec.Command(os.Args[0], "-test.run=^TestRepeatedInterruptForcesExitDuringStalledShutdown$")
+	child.Env = append(os.Environ(), "SITEBRUSH_TEST_REPEAT_INTERRUPT=1")
+	output, err := child.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer child.Process.Kill()
+	lines := make(chan string, 4)
+	go func() {
+		defer close(lines)
+		scanner := bufio.NewScanner(output)
+		for scanner.Scan() {
+			lines <- scanner.Text()
+		}
+	}()
+	awaitLine := func(expected string) {
+		t.Helper()
+		select {
+		case received := <-lines:
+			if received != expected {
+				t.Fatalf("child: %q, want %q", received, expected)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("child did not reach %s", expected)
+		}
+	}
+	awaitLine("signal-ready")
+	if err := child.Process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+	awaitLine("shutdown-started")
+	if err := child.Process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+	finished := make(chan error, 1)
+	go func() { finished <- child.Wait() }()
+	select {
+	case err := <-finished:
+		exit, ok := err.(*exec.ExitError)
+		if !ok || exit.ExitCode() != 130 {
+			t.Fatalf("second interrupt did not force exit 130: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second interrupt left the child running")
+	}
+}
+
+// END security view and signal boundary tests.

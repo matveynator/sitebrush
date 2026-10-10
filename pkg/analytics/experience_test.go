@@ -174,7 +174,7 @@ func TestExperienceSourceEvidenceAndCleaning(t *testing.T) {
 		{"https://google.com.attacker.example/path?q=1", Campaign{}, "google.com.attacker.example", "referrer"},
 		{"", Campaign{Source: "telegram", Name: "launch"}, "telegram", "utm"},
 		{"", Campaign{Google: true}, "Google Ads", "click-parameter"},
-		{"https://site.example/page", Campaign{}, "direct", "absent"},
+		{"https://site.example/page", Campaign{}, "site.example", "referrer"},
 	}
 	for _, test := range cases {
 		actual := SourceAttribution(test.campaign, test.ref, "site.example")

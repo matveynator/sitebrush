@@ -45,8 +45,11 @@ type BrowserContext struct {
 type PageOutcome struct {
 	Date, Path         string
 	Views, Uncontinued int
+	Acted, Progressed  bool
 }
 type SessionSummary struct {
+	Referrer                                                                                             string
+	GoalCounts                                                                                           map[string]int
 	Campaign                                                                                             Campaign
 	Outcomes                                                                                             map[string]*PageOutcome
 	ID, Visitor, Landing, Language, PageLanguage, Browser, OS, Timezone, LocalTime, Country, City, Class string
@@ -65,6 +68,7 @@ type SessionSummary struct {
 	Address                                                                                              string `json:"address,omitempty"`
 }
 type Measures struct {
+	ActionSessions, NextSessions, CompletedSessions, EndSessions                                        int
 	MismatchViews                                                                                       int
 	ProgressViews                                                                                       int
 	PageSessions, PageGoalSessions                                                                      int
@@ -73,6 +77,8 @@ type Measures struct {
 	Scroll50, Scroll100                                                                                 int
 }
 type Segment struct {
+	Referrer                                                string
+	GoalCounts                                              map[string]int
 	ActionCounts                                            map[string]int
 	LocalHours                                              [24]int
 	Date, Source, Evidence, Campaign, Page, Language, Class string
@@ -100,6 +106,8 @@ type ExperienceReport struct {
 }
 type ExperienceFilter struct{ Source, Campaign, Page, Language, Traffic string }
 type ExperienceRow struct {
+	Referrer                   string
+	GoalCounts                 map[string]int
 	Label, Detail              string
 	Source, Campaign, Evidence string
 	Measures
@@ -109,6 +117,7 @@ type Insight struct {
 	Numerator, Denominator int
 }
 type ExperienceView struct {
+	GoalRows   []Row
 	ActionRows []Row
 	Measures
 	Sources, Pages, Languages, Journeys []ExperienceRow
@@ -235,8 +244,18 @@ func SourceAttribution(campaign Campaign, referrer, siteHost string) Attribution
 	safeReferrer := SafeReferrer(referrer)
 	parsed, err := url.Parse(safeReferrer)
 	host := strings.ToLower(parsedHost(parsed))
-	if err != nil || host == "" || strings.EqualFold(host, strings.Split(siteHost, ":")[0]) {
+	if strings.TrimSpace(referrer) == "" {
 		return Attribution{"direct", "direct", "absent", ""}
+	}
+	if err != nil || host == "" {
+		original, parseErr := url.Parse(referrer)
+		if parseErr == nil && original.Scheme != "" && original.Hostname() != "" {
+			return Attribution{CleanText(original.Hostname(), 128), "app", "referrer", CleanText(original.Scheme+"://"+original.Host+SafePath(referrer), 256)}
+		}
+		return Attribution{"unknown-referrer", "referral", "referrer", "URL unavailable"}
+	}
+	if strings.EqualFold(host, strings.Split(siteHost, ":")[0]) {
+		return Attribution{host, "internal", "referrer", safeReferrer}
 	}
 	for _, rule := range []struct{ host, name, kind string }{
 		{"google.com", "Google", "search"}, {"google.ru", "Google", "search"}, {"yandex.ru", "Yandex", "search"}, {"yandex.com", "Yandex", "search"}, {"bing.com", "Bing", "search"}, {"duckduckgo.com", "DuckDuckGo", "search"},
@@ -247,6 +266,20 @@ func SourceAttribution(campaign Campaign, referrer, siteHost string) Attribution
 		}
 	}
 	return Attribution{CleanText(host, 128), "referral", "referrer", safeReferrer}
+}
+
+// Application signatures are evidence only when no referrer was supplied.
+func SourceWithAgent(campaign Campaign, referrer, siteHost, agent string) Attribution {
+	source := SourceAttribution(campaign, referrer, siteHost)
+	if source.Kind != "direct" {
+		return source
+	}
+	for _, signature := range []struct{ match, name string }{{"telegram", "Telegram"}, {"fban", "Facebook"}, {"fbav", "Facebook"}, {"instagram", "Instagram"}, {"linkedinapp", "LinkedIn"}} {
+		if strings.Contains(strings.ToLower(agent), signature.match) {
+			return Attribution{signature.name, "app", "user-agent", ""}
+		}
+	}
+	return source
 }
 func parsedHost(parsed *url.URL) string {
 	if parsed == nil {
@@ -287,7 +320,7 @@ func (site *Site) experienceSegment(now time.Time, session *SessionSummary, path
 		site.Experience.Segments = map[string]*Segment{}
 	}
 	date := dayKey(now)
-	key := strings.Join([]string{date, session.Source.Name, session.Source.Detail, pathname, session.Language, session.Class}, "\x1f")
+	key := strings.Join([]string{date, session.Source.Name, session.Source.Detail, session.Referrer, pathname, session.Language, session.Class}, "\x1f")
 	if segment := site.Experience.Segments[key]; segment != nil {
 		return segment
 	}
@@ -307,6 +340,7 @@ func (site *Site) experienceSegment(now time.Time, session *SessionSummary, path
 		return site.Experience.Segments[key]
 	}
 	segment := &Segment{Date: date, Source: session.Source.Name, Evidence: session.Source.Evidence, Campaign: session.Source.Detail, Page: pathname, Language: session.Language, Class: session.Class}
+	segment.Referrer = session.Referrer
 	site.Experience.Segments[key] = segment
 	return segment
 }
@@ -342,6 +376,7 @@ func (site *Site) recordExperience(event Event, now time.Time, visitor *Visitor,
 			source = Attribution{event.Source, "unknown", "legacy", ""}
 		}
 		session = &SessionSummary{ID: key, Visitor: event.Visitor, Landing: event.Path, Language: event.Language, PageLanguage: event.PageLanguage, Browser: event.Browser, OS: event.OS, Timezone: event.Timezone, Source: source, Campaign: event.Campaign, FirstSource: visitor.FirstSource, Started: now, Class: event.ClientClass, Tabs: map[string][]string{}, LastViews: map[string]string{}, Address: event.Address}
+		session.Referrer = SafeReferrer(event.Referrer)
 		if session.Class == "" {
 			session.Class = "human-likely"
 		}
@@ -387,6 +422,39 @@ func (site *Site) recordExperience(event Event, now time.Time, visitor *Visitor,
 	}
 	segment := site.experienceSegment(view.Started, session, event.Path)
 	segment.ActiveMS += delta
+	// Count deltas before action totals advance, so retries cannot repeat goals.
+	for _, goal := range site.Goals {
+		achievements := 0
+		if (goal.Kind == "path" && fresh && goal.Match == event.Path) || (goal.Kind == "uri" && (fresh || event.URI != view.URI) && goal.Match == SafeURI(event.URI)) {
+			achievements = 1
+		}
+		if goal.Kind == "action" {
+			counts := map[string]int{}
+			for _, action := range event.Actions {
+				if action.Name == goal.Match {
+					identity := action.Name + "\x1f" + action.Target
+					counts[identity] = max(counts[identity], action.Count)
+				}
+			}
+			for identity, count := range counts {
+				achievements += max(0, count-view.Actions[identity])
+			}
+		}
+		if achievements > 0 {
+			if segment.GoalCounts == nil {
+				segment.GoalCounts = map[string]int{}
+			}
+			if session.GoalCounts == nil {
+				session.GoalCounts = map[string]int{}
+			}
+			if len(segment.GoalCounts) < 32 || segment.GoalCounts[goal.Name] > 0 {
+				segment.GoalCounts[goal.Name] += achievements
+				session.GoalCounts[goal.Name] += achievements
+			} else {
+				site.Experience.Incomplete = true
+			}
+		}
+	}
 	if fresh {
 		segment.Views++
 		if session.Outcomes == nil {
@@ -429,6 +497,7 @@ func (site *Site) recordExperience(event Event, now time.Time, visitor *Visitor,
 				}
 				previousView.Next = true
 				site.experienceSegment(previousView.Started, session, previousView.Path).NextViews++
+				site.markPageProgress(session, previousView, false)
 			}
 		}
 		if len(session.LastViews) < 4 || session.LastViews[event.Tab] != "" {
@@ -462,6 +531,7 @@ func (site *Site) recordExperience(event Event, now time.Time, visitor *Visitor,
 				decrementUncontinued(session, view)
 			}
 			view.Acted = true
+			site.markPageProgress(session, view, true)
 		}
 		if segment.ActionCounts == nil {
 			segment.ActionCounts = map[string]int{}
@@ -476,7 +546,7 @@ func (site *Site) recordExperience(event Event, now time.Time, visitor *Visitor,
 		view.Actions[identity] = action.Count
 		appendStep(session, event.Tab, "→ "+action.Name+" "+action.Target)
 	}
-	if !session.Goal && goalMatched(site.Goals, event.Path, event.URI, event.Actions) {
+	if !session.Goal && len(session.GoalCounts) > 0 {
 		session.Goal = true
 		countedPages := map[string]bool{}
 		for _, outcome := range session.Outcomes {
@@ -496,6 +566,30 @@ func decrementUncontinued(session *SessionSummary, view *View) {
 	if outcome := session.Outcomes[key]; outcome != nil && outcome.Uncontinued > 0 {
 		outcome.Uncontinued--
 	}
+}
+
+// A page's behavior is counted once per session, even when it is reloaded.
+func (site *Site) markPageProgress(session *SessionSummary, view *View, action bool) {
+	firstAction, firstProgress := true, true
+	for _, outcome := range session.Outcomes {
+		if outcome.Path == view.Path {
+			firstAction = firstAction && !outcome.Acted
+			firstProgress = firstProgress && !outcome.Progressed
+		}
+	}
+	outcome := session.Outcomes[dayKey(view.Started)+"\x1f"+view.Path]
+	if outcome == nil {
+		return
+	}
+	segment := site.experienceSegment(view.Started, session, view.Path)
+	if action && firstAction {
+		segment.ActionSessions++
+	}
+	if firstProgress {
+		segment.NextSessions++
+	}
+	outcome.Acted = outcome.Acted || action
+	outcome.Progressed = true
 }
 func appendStep(session *SessionSummary, tab, step string) {
 	if len(session.Tabs) >= 4 && session.Tabs[tab] == nil {
@@ -532,6 +626,7 @@ func (site *Site) pruneExperience(now time.Time) {
 	for key, session := range site.Experience.Recent {
 		if !session.Complete && now.Sub(session.Last) > 30*time.Minute {
 			session.Complete = true
+			completed := map[string]bool{}
 			for _, outcome := range session.Outcomes {
 				stamp, err := time.Parse("2006-01-02", outcome.Date)
 				if err != nil {
@@ -540,6 +635,19 @@ func (site *Site) pruneExperience(now time.Time) {
 				daily := site.experienceSegment(stamp, session, outcome.Path)
 				daily.CompletedViews += outcome.Views
 				daily.EndViews += outcome.Uncontinued
+				if !completed[outcome.Path] {
+					completed[outcome.Path] = true
+					daily.CompletedSessions++
+					progressed := false
+					for _, candidate := range session.Outcomes {
+						if candidate.Path == outcome.Path && candidate.Progressed {
+							progressed = true
+						}
+					}
+					if !progressed {
+						daily.EndSessions++
+					}
+				}
 			}
 		}
 		if now.Sub(session.Last) > 7*24*time.Hour {
@@ -611,6 +719,10 @@ func (site *Site) ExperienceReport(now time.Time, days int, detail bool) Experie
 	return report
 }
 func addMeasures(target *Measures, source Measures) {
+	target.ActionSessions += source.ActionSessions
+	target.NextSessions += source.NextSessions
+	target.CompletedSessions += source.CompletedSessions
+	target.EndSessions += source.EndSessions
 	target.MismatchViews += source.MismatchViews
 	target.ProgressViews += source.ProgressViews
 	target.PageSessions += source.PageSessions
@@ -646,6 +758,7 @@ func (report ExperienceReport) View(filter ExperienceFilter) ExperienceView {
 		}
 	}
 	actionCounts := map[string]int{}
+	goalCounts := map[string]int{}
 	sources, pages, languages := map[string]*ExperienceRow{}, map[string]*ExperienceRow{}, map[string]*ExperienceRow{}
 	accepts := func(source, page, language, class string) bool {
 		return (filter.Source == "" || filter.Source == source) && (filter.Page == "" || filter.Page == page) && (filter.Language == "" || filter.Language == language) && (filter.Traffic == "all" || (filter.Traffic == "bots" && class != "human-likely") || (filter.Traffic != "bots" && class == "human-likely"))
@@ -659,6 +772,7 @@ func (report ExperienceReport) View(filter ExperienceFilter) ExperienceView {
 			segment.GoalSessions = segment.PageGoalSessions
 		}
 		merge(actionCounts, segment.ActionCounts)
+		merge(goalCounts, segment.GoalCounts)
 		addMeasures(&result.Measures, segment.Measures)
 		for hour, count := range segment.LocalHours {
 			result.LocalHours[hour] += count
@@ -666,7 +780,7 @@ func (report ExperienceReport) View(filter ExperienceFilter) ExperienceView {
 		for _, group := range []struct {
 			rows        map[string]*ExperienceRow
 			key, detail string
-		}{{sources, segment.Source + "\x1f" + segment.Evidence + "\x1f" + segment.Campaign, segment.Evidence + " · " + segment.Campaign}, {pages, segment.Page, ""}, {languages, segment.Language, ""}} {
+		}{{sources, segment.Source + "\x1f" + segment.Evidence + "\x1f" + segment.Campaign + "\x1f" + segment.Referrer, segment.Evidence + " · " + segment.Campaign}, {pages, segment.Page, ""}, {languages, segment.Language, ""}} {
 			if group.rows[group.key] == nil {
 				label := group.key
 				source, campaign, evidence := "", "", ""
@@ -677,8 +791,13 @@ func (report ExperienceReport) View(filter ExperienceFilter) ExperienceView {
 					evidence = segment.Evidence
 				}
 				group.rows[group.key] = &ExperienceRow{Label: label, Detail: group.detail, Source: source, Campaign: campaign, Evidence: evidence}
+				group.rows[group.key].Referrer = segment.Referrer
 			}
 			addMeasures(&group.rows[group.key].Measures, segment.Measures)
+			if group.rows[group.key].GoalCounts == nil {
+				group.rows[group.key].GoalCounts = map[string]int{}
+			}
+			merge(group.rows[group.key].GoalCounts, segment.GoalCounts)
 		}
 	}
 	ordered := func(group map[string]*ExperienceRow) []ExperienceRow {
@@ -695,8 +814,13 @@ func (report ExperienceReport) View(filter ExperienceFilter) ExperienceView {
 		return rows
 	}
 	result.ActionRows = rows(actionCounts)
+	result.GoalRows = rows(goalCounts)
 	result.Sources = ordered(sources)
 	result.Pages = ordered(pages)
+	for index := range result.Pages {
+		result.Pages[index].Sessions = result.Pages[index].PageSessions
+		result.Pages[index].GoalSessions = result.Pages[index].PageGoalSessions
+	}
 	result.Languages = ordered(languages)
 	journeys := map[string]*ExperienceRow{}
 	loops, hiddenReturns := 0, 0
@@ -779,23 +903,23 @@ func (report ExperienceReport) View(filter ExperienceFilter) ExperienceView {
 	}
 	// Insights are observations with explicit denominators, not causal claims.
 	for _, source := range result.Sources {
-		if source.Sessions >= 20 {
+		if source.Sessions > 0 {
 			result.Insights = append(result.Insights, Insight{"source-goal", source.Label, source.GoalSessions, source.Sessions})
 		}
 	}
 	for _, page := range result.Pages {
-		if page.Views >= 20 && page.MismatchViews > 0 {
+		if page.Views > 0 && page.MismatchViews > 0 {
 			result.Insights = append(result.Insights, Insight{"language-mismatch", page.Label, page.MismatchViews, page.Views})
 		}
-		if page.Views >= 20 {
-			result.Insights = append(result.Insights, Insight{"continued", page.Label, page.NextViews, page.Views})
+		if page.PageSessions > 0 {
+			result.Insights = append(result.Insights, Insight{"continued", page.Label, page.NextSessions, page.PageSessions})
 		}
-		if page.CompletedViews >= 20 {
-			result.Insights = append(result.Insights, Insight{"end", page.Label, page.EndViews, page.CompletedViews})
+		if page.CompletedSessions > 0 {
+			result.Insights = append(result.Insights, Insight{"end", page.Label, page.EndSessions, page.CompletedSessions})
 		}
 	}
 	for _, language := range result.Languages {
-		if language.Sessions >= 20 {
+		if language.Sessions > 0 {
 			result.Insights = append(result.Insights, Insight{"language-goal", language.Label, language.GoalSessions, language.Sessions})
 		}
 	}
@@ -808,18 +932,22 @@ func (report ExperienceReport) View(filter ExperienceFilter) ExperienceView {
 
 func ratio(numerator, denominator int) string {
 	if denominator == 0 {
-		return "—"
+		return "No data"
 	}
 	return fmt.Sprintf("%.1f%% (%d/%d)", 100*float64(numerator)/float64(denominator), numerator, denominator)
 }
-func (metrics Measures) GoalRate() string   { return ratio(metrics.GoalSessions, metrics.Sessions) }
-func (metrics Measures) ActionRate() string { return ratio(metrics.ActionViews, metrics.Views) }
-func (metrics Measures) NextRate() string   { return ratio(metrics.ProgressViews, metrics.Views) }
-func (metrics Measures) EndRate() string    { return ratio(metrics.EndViews, metrics.CompletedViews) }
+func (metrics Measures) GoalRate() string { return ratio(metrics.GoalSessions, metrics.Sessions) }
+func (metrics Measures) ActionRate() string {
+	return ratio(metrics.ActionSessions, metrics.PageSessions)
+}
+func (metrics Measures) NextRate() string { return ratio(metrics.NextSessions, metrics.PageSessions) }
+func (metrics Measures) EndRate() string {
+	return ratio(metrics.EndSessions, metrics.CompletedSessions)
+}
 func (metrics Measures) ScrollRate() string { return ratio(metrics.Scroll50, metrics.Views) }
 func (metrics Measures) AverageActive() string {
 	if metrics.Views == 0 {
-		return "—"
+		return "No data"
 	}
 	return fmt.Sprintf("%.1f s", float64(metrics.ActiveMS)/float64(metrics.Views)/1000)
 }
@@ -828,7 +956,7 @@ func (session SessionSummary) Active() string {
 }
 func (session SessionSummary) ReturnAfter() string {
 	if session.ReturnAfterMS <= 0 {
-		return "—"
+		return "No data"
 	}
 	duration := time.Duration(session.ReturnAfterMS) * time.Millisecond
 	if duration >= 24*time.Hour {

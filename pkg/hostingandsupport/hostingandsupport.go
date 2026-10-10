@@ -1598,8 +1598,18 @@ func (store Store) Invoices(ctx context.Context, limit int) []Invoice {
 		if scanErr != nil {
 			continue
 		}
-		invoice.Lines = store.InvoiceLines(ctx, invoice.ID)
 		invoices = append(invoices, invoice)
+	}
+	// Each database participant owns one connection. Release the parent cursor
+	// before loading child records, otherwise the child query waits on itself.
+	if err := rows.Err(); err != nil {
+		return nil
+	}
+	if err := rows.Close(); err != nil {
+		return nil
+	}
+	for index := range invoices {
+		invoices[index].Lines = store.InvoiceLines(ctx, invoices[index].ID)
 	}
 	return invoices
 }

@@ -125,7 +125,13 @@
       color:var(--theme-foreground);
       font-weight:600;
     }
-    .analytics-table { table-layout:fixed; color:var(--dashboard-text); }
+    .analytics-table {
+      table-layout:fixed;
+      border-collapse:separate;
+      border-spacing:0;
+      color:var(--dashboard-text);
+    }
+    .analytics-table, .analytics-table * { text-decoration:none; }
     .analytics-table thead th {
       color:var(--theme-foreground);
       border-bottom-color:var(--dashboard-border);
@@ -134,7 +140,9 @@
       letter-spacing:0.04em;
     }
     .analytics-table tbody td {
-      border-bottom-color:rgba(54, 73, 109, 0.7);
+      border:0;
+      padding-block:0.5rem;
+      line-height:1.5;
       background:transparent;
     }
     .analytics-table tbody tr:hover td {
@@ -195,44 +203,12 @@
       color:var(--theme-foreground);
     }
     .analytics-share-cell { min-width:120px; }
-    .analytics-share-bar {
-      display:flex;
-      align-items:center;
-      justify-content:flex-end;
-      gap:8px;
-    }
-    .analytics-share-track {
-      width:74px;
-      height:9px;
-      background:var(--dashboard-bar);
-      border-radius:999px;
-      overflow:hidden;
-      flex:0 0 auto;
-      border:1px solid rgba(148, 171, 214, 0.18);
-    }
-    .analytics-share-fill {
-      height:100%;
-      width:0;
-      border-radius:999px;
-      background:var(--theme-muted-foreground);
-      box-shadow:0 0 8px rgba(0, 209, 255, 0.32);
-      transition:width 320ms ease;
-    }
     .analytics-share-number {
       min-width:42px;
       text-align:right;
       font-variant-numeric:tabular-nums;
       color:var(--theme-foreground);
       font-weight:600;
-    }
-    .analytics-share-badge {
-      padding:2px 8px;
-      border-radius:999px;
-      font-size:0.78rem;
-      font-weight:600;
-      line-height:1.3;
-      border:1px solid rgba(148, 171, 214, 0.35);
-      background:rgba(66, 83, 117, 0.2);
     }
     .world-map-card {
       border:1px solid var(--dashboard-border);
@@ -242,10 +218,17 @@
     }
     .world-map-layout {
       display:grid;
-      grid-template-columns:minmax(0, 1fr) 320px;
+      grid-template-columns:minmax(0, 1fr);
       gap:18px;
       align-items:stretch;
     }
+    #analytics-map-sessions:not([open]) { display:none; }
+    #analytics-map-sessions::backdrop { background:rgba(0,0,0,.5); }
+    .analytics-map-dialog:not([open]) { display:none; }
+    .analytics-map-dialog::backdrop { background:rgba(0,0,0,.5); }
+    .security-block-reason { padding:.75rem; border-inline-start:3px solid var(--theme-border); border-radius:6px; background:var(--theme-accent); }
+    .security-block-reason strong { display:inline-block; margin-bottom:.5rem; }
+    .security-block-reason p { margin:0; font-size:.85rem; overflow-wrap:anywhere; }
     .world-map-panel {
       position:relative;
       min-height:360px;
@@ -572,11 +555,10 @@
     .security-radar-tooltip[hidden] { display:none; }
     .security-radar-tooltip strong { display:block; margin-bottom:4px; }
     .security-radar { display:block; width:min(100%,360px); height:auto; margin-inline:auto; overflow:visible; }
-    .security-radar polygon { fill:rgba(224,90,42,.16); stroke:#e05a2a; stroke-width:2; }
-    .security-radar .security-radar-axis { stroke:var(--bs-border-color); stroke-width:1; }
+    .security-radar .security-radar-axis { fill:none; stroke:var(--bs-border-color); stroke-width:1; }
     .security-radar .security-radar-ring-label { fill:var(--bs-secondary-color); font-size:8px; stroke:none; }
     .security-radar text { fill:currentColor; font-size:9px; }
-    .security-radar-point { fill:#e05a2a; stroke:#ff2d2d; stroke-width:2; }
+    .security-radar-point { stroke-width:2; }
     .security-chart-grid {
       display:grid;
       grid-template-columns:repeat(2,minmax(0,1fr));
@@ -602,9 +584,8 @@
       font-size:.82rem;
     }
     .security-rank-label {
-      overflow:hidden;
-      text-overflow:ellipsis;
-      white-space:nowrap;
+      overflow-wrap:anywhere;
+      white-space:normal;
       color:var(--theme-foreground);
     }
     .security-rank-track {
@@ -787,13 +768,13 @@
         <div id="analytics-visitor-map" class="world-map-panel" aria-label="{{.Report.MapTitle}}">
           <div id="analytics-session-map-overlay" class="world-map-empty">{{index .T "analytics_no_data"}}</div>
         </div>
-        <div>
-          <ul id="analytics-session-map-summary" class="world-map-list"></ul>
-          <p id="analytics-session-map-empty" class="text-muted mb-0">{{index .T "analytics_no_data"}}</p>
-        </div>
       </div>
     </div>
   </section>
+
+  <dialog id="analytics-map-sessions" class="card" style="width:min(760px,90vw);max-height:80vh;overflow:auto;margin:auto" aria-labelledby="analytics-map-sessions-title">
+    <div class="card-body"><form method="dialog"><button class="btn btn-outline-secondary float-end" aria-label="Close">×</button></form><h2 id="analytics-map-sessions-title" class="h5">{{index .T "ax_sessions"}}</h2><div id="analytics-map-sessions-list"></div></div>
+  </dialog>
 
   <section class="card activity-calendar-card activity-calendar-days mb-4" data-activity-calendar="visitors" data-color="green">
     <div class="card-body"><h2 class="h5">{{index .T "ax_activity_days"}}</h2><p class="small text-muted">{{index .T "ax_activity_heatmap_hint"}}</p>
@@ -816,7 +797,7 @@
   <section id="sources" class="card mb-4"><div class="card-body">
     <h2 class="h5">{{index .T "ax_sources"}}</h2><p class="small">{{index .T "ax_attribution_hint"}}</p>
     <div class="table-responsive"><table class="table"><thead><tr><th>{{index .T "ax_source"}}</th><th>{{index .T "ax_sessions"}}</th><th>{{index .T "ax_views"}}</th><th>{{index .T "ax_actions"}}</th>{{if .Experience.GoalsConfigured}}<th>{{index .T "ax_meaningful"}}</th>{{end}}<th>{{index .T "ax_returns"}}</th></tr></thead><tbody>
-    {{range .Experience.Sources}}<tr><td>{{if eq .Label "direct-hidden"}}{{index $.T "ax_hidden"}}{{else}}{{.Label}}{{end}}<small class="d-block">{{index $.T (print "ax_evidence_" .Evidence)}} · {{.Campaign}}</small></td><td>{{.Sessions}}</td><td>{{.Views}}</td><td>{{.Actions}}</td>{{if $.Experience.GoalsConfigured}}<td>{{.GoalRate}}</td>{{end}}<td>{{.Returning}}</td></tr>{{else}}<tr><td colspan="{{if .Experience.GoalsConfigured}}6{{else}}5{{end}}">{{index .T "analytics_no_data"}}</td></tr>{{end}}
+    {{range .Experience.Sources}}<tr><td>{{.Label}}<small class="d-block text-break">{{.Evidence}} · {{.Campaign}}{{if ne .Referrer .Campaign}} · {{.Referrer}}{{end}}</small></td><td>{{.Sessions}}</td><td>{{.Views}}</td><td>{{.Actions}}</td>{{if $.Experience.GoalsConfigured}}<td>{{.GoalRate}}{{range $goal,$count := .GoalCounts}}<small class="d-block">{{$goal}} — {{$count}}</small>{{end}}</td>{{end}}<td>{{.Returning}}</td></tr>{{else}}<tr><td colspan="{{if .Experience.GoalsConfigured}}6{{else}}5{{end}}">{{index .T "analytics_no_data"}}</td></tr>{{end}}
     </tbody></table></div>
   </div></section>
   <section id="browser-overview" class="mb-4">
@@ -835,15 +816,17 @@
     {{if .Experience.Insights}}<div class="mt-3"><h3 class="h6">{{index .T "ax_insights"}}</h3><p class="small">{{index .T "ax_insights_hint"}}</p><ul>{{range .Experience.Insights}}<li>{{index $.T (print "ax_insight_" .Kind)}} · {{.Label}}: {{.Numerator}} / {{.Denominator}}</li>{{end}}</ul></div>{{end}}
   </section>
 
-  {{if .Experience.ActionRows}}<section class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_actions"}}</h2><ul>{{range .Experience.ActionRows}}<li>{{.Label}} — {{.Count}}</li>{{end}}</ul></div></section>{{end}}
+  <section class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_actions"}}</h2><ul>{{range .Experience.GoalRows}}<li>{{.Label}} — {{.Count}}{{if eq .Count 0}} · {{index $.T "ax_not_observed"}}{{end}}</li>{{end}}{{range .Experience.ActionRows}}<li>{{.Label}} — {{.Count}}</li>{{else}}<li>{{index .T "analytics_no_data"}}</li>{{end}}</ul></div></section>
   <section id="journeys" class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_journeys"}}</h2><p class="small">{{index .T "ax_recent_hint"}}</p><ul>{{range .Experience.Journeys}}<li>{{.Label}} <strong>× {{.Sessions}}</strong></li>{{else}}<li>{{index .T "analytics_no_data"}}</li>{{end}}</ul></div></section>
   <section id="browser-content" class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_content"}}</h2><p class="small">{{index .T "ax_exit_hint"}}</p>
-    <div class="table-responsive"><table class="table"><thead><tr><th>{{index .T "ax_page"}}</th><th>{{index .T "ax_views"}}</th><th>{{index .T "ax_active"}}</th><th>50% ↓</th><th>{{index .T "ax_action_rate"}}</th><th>{{index .T "ax_next"}}</th><th>{{index .T "ax_end"}}</th></tr></thead><tbody>{{range .Experience.Pages}}<tr><td>{{.Label}}</td><td>{{.Views}}</td><td>{{.AverageActive}}</td><td>{{.ScrollRate}}</td><td>{{.ActionRate}}</td><td>{{.NextRate}}</td><td>{{.EndRate}}</td></tr>{{end}}</tbody></table></div>
+    <div class="table-responsive"><table class="table"><thead><tr><th>{{index .T "ax_page"}}</th><th>{{index .T "ax_sessions"}}</th><th>{{index .T "ax_views"}}</th><th>{{index .T "ax_active"}}</th><th>50% ↓</th><th>{{index .T "ax_action_rate"}}</th><th>{{index .T "ax_next"}}</th><th>{{index .T "ax_end"}}</th></tr></thead><tbody>{{range .Experience.Pages}}<tr><td>{{.Label}}</td><td>{{.Sessions}}</td><td>{{.Views}}</td><td>{{.AverageActive}}</td><td>{{.ScrollRate}}</td><td>{{.ActionRate}}</td><td>{{.NextRate}}</td><td>{{.EndRate}}</td></tr>{{end}}</tbody></table></div>
   </div></section>
   <section id="sessions" class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_sessions"}}</h2><p class="small">{{index .T "ax_recent_hint"}}</p>
     {{range .Experience.Recent}}<details class="border-bottom py-2"><summary>{{if eq .Class "human-likely"}}👤{{else}}🤖{{end}} <time data-relative-time="{{.Started.Format "2006-01-02T15:04:05Z07:00"}}">{{.When}}</time> · {{.Source.Name}} → {{.Landing}} · {{.Language}} · {{.Browser}} / {{.OS}} · active {{.Active}}</summary>
     <p class="small mb-1">{{if .Address}}IP: <code class="analytics-session-ip" data-ip="{{.Address}}">{{.Address}}</code> · {{end}}{{index $.T "ax_first_source"}}: {{.FirstSource}} · {{if .Country}}{{.Country}}{{if .City}}, {{.City}}{{end}}{{else}}unknown location{{end}}</p>
     {{if .Returning}}<p class="small mb-1">Returned after {{.ReturnAfter}} · {{.FirstSource}} → {{.Source.Name}} · {{if .Goal}}goal reached{{else}}no configured goal yet{{end}}</p>{{end}}
+    <p class="small text-break">Referer: {{if .Referrer}}{{.Referrer}}{{else}}{{index $.T "analytics_no_data"}}{{end}} · {{.Source.Evidence}} · {{.ID}}</p>
+    {{if .GoalCounts}}<ul>{{range $goal,$count := .GoalCounts}}<li>{{$goal}} — {{$count}}</li>{{end}}</ul>{{end}}
     {{range .Tabs}}<ol class="mb-1">{{range .}}<li>{{.}}</li>{{end}}</ol>{{end}}{{if .Limited}}<p>{{index $.T "ax_incomplete"}}</p>{{end}}</details>{{else}}<p>{{index .T "analytics_no_data"}}</p>{{end}}
   </div></section>
 
@@ -881,7 +864,7 @@
 
 
   <div class="report-grid">
-    {{range .Report.Sections}}{{if .Rows}}
+    {{range .Report.Sections}}
     <section class="card">
       <div class="card-body">
         <h2 class="h5">{{.Title}}</h2>
@@ -902,10 +885,7 @@
                 <td class="analytics-label">{{.Label}}{{if .Detail}}<div class="text-muted small">{{.Detail}}</div>{{end}}</td>
                 <td>{{.Value}}</td>
                 <td class="analytics-share-cell" data-share="{{.Percent}}">
-                  <div class="analytics-share-bar">
-                    <span class="analytics-share-track"><span class="analytics-share-fill"></span></span>
-                    <span class="analytics-share-number">{{.Percent}}</span>
-                  </div>
+                  <span class="analytics-share-number">{{if .Percent}}{{.Percent}}{{else}}{{index $.T "analytics_no_data"}}{{end}}</span>
                 </td>
               </tr>
               {{end}}
@@ -917,11 +897,13 @@
         {{end}}
       </div>
     </section>
-    {{end}}{{end}}
+    {{end}}
   </div>
 </div></section>
   {{end}}
   {{if eq .AnalyticsTab "security"}}
+  <section class="card world-map-card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_blocked_map"}}</h2><p class="small">{{index .T "ax_blocked_stats_hint"}} · {{index .T "ax_unknown_geo"}}: {{.SecurityIPSummary.UnknownLocations}}</p><div id="analytics-blocked-ip-map" class="world-map-panel"><div id="analytics-blocked-map-overlay" class="world-map-empty">{{index .T "analytics_no_data"}}</div></div></div></section>
+  <dialog id="analytics-blocked-map-dialog" class="card analytics-map-dialog" style="width:min(760px,90vw);max-height:80vh;overflow:auto;margin:auto"><div class="card-body"><form method="dialog"><button class="btn btn-outline-secondary float-end" aria-label="Close">×</button></form><h2 class="h5">{{index .T "ax_blocked_ips"}}</h2><div id="analytics-blocked-map-list"></div></div></dialog>
   <section id="security-activity" class="card security-chart-card mb-4" data-activity-calendar="security" data-hour-title="{{index .T "ax_security_by_hour"}}" data-type-title="{{index .T "ax_security_by_type"}}" data-activity-title="{{index .T "ax_security_activity"}}" data-empty-text="{{index .T "analytics_no_data"}}">
   <div class="card-body">
     <h2 class="h5">{{index .T "ax_security_activity"}}</h2>
@@ -946,7 +928,7 @@
     <div class="security-calendar-insights">
       <section class="security-calendar-insight"><h3 class="h6" data-calendar-hour-title>{{index .T "ax_security_by_hour"}}</h3><div class="hourly-chart activity-calendar-hour-chart" data-calendar-hour-chart></div><div class="activity-calendar-details" data-calendar-details></div></section>
       <section class="security-calendar-insight security-radar-card"><h3 class="h6" data-calendar-radar-title>{{index .T "ax_security_by_type"}}</h3><svg class="security-radar" data-calendar-radar viewBox="0 0 360 320" role="img" aria-label="{{index .T "ax_security_by_type"}}"></svg><div class="security-radar-tooltip" data-calendar-radar-tooltip role="tooltip" hidden><strong data-calendar-radar-tooltip-title></strong><span data-calendar-radar-tooltip-description></span></div><div class="small text-muted text-center" data-calendar-radar-legend></div></section>
-      <section class="security-calendar-insight"><h3 class="h6">{{index .T "ax_security_by_country"}}</h3><div id="security-country-chart" class="security-rank-chart"></div></section>
+      <section class="security-calendar-insight"><div class="d-flex justify-content-between align-items-start gap-2"><h3 class="h6">{{index .T "ax_security_by_country"}}</h3><button class="btn btn-outline-secondary btn-sm" type="button" data-security-all-days>{{index .T "ax_all_days"}}</button></div><p class="small" data-security-country-period>{{index .T "ax_all_days"}}</p><div id="security-country-chart" class="security-rank-chart"></div></section>
     </div>
     <div class="mt-3">
       <div id="security-type-help" class="security-type-help">
@@ -960,11 +942,25 @@
     </div>
     <script type="application/json" id="security-hours-data">{{.SecurityHoursJSON}}</script>
     <script type="application/json" id="security-countries-data">{{.SecurityCountriesJSON}}</script>
+    <script type="application/json" data-calendar-countries>{{.SecurityActivityCountriesJSON}}</script>
     <script type="application/json" id="security-types-data">{{.SecurityTypesJSON}}</script>
     <div id="security-type-labels" hidden>
       {{range .SecurityTypeAxes}}<span data-security-type="{{.}}" data-label="{{index $.T (print "ax_risk_" .)}}" data-description="{{index $.T (print "ax_risk_desc_" .)}}"></span>{{end}}
     </div>
   </div></section>
+
+  <section class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_blocked_ips"}}</h2><p class="small">{{index .T "ax_blocked_stats_hint"}}</p><div class="metric-grid">
+    <div class="metric-card card"><div class="card-body">{{index .T "ax_blocked_ips"}}<div class="metric-value">{{.SecurityIPSummary.Blocked}}</div></div></div>
+    <div class="metric-card card"><div class="card-body">{{index .T "ax_allowed_ips"}}<div class="metric-value">{{.SecurityIPSummary.Allowed}}</div></div></div>
+    <div class="metric-card card"><div class="card-body">{{index .T "ax_throttled_ips"}}<div class="metric-value">{{.SecurityIPSummary.Throttled}}</div></div></div>
+    <div class="metric-card card"><div class="card-body">{{index .T "ax_returning_blocked_ips"}}<div class="metric-value">{{if .SecurityIPSummary.RepeatStarted.IsZero}}{{index .T "analytics_no_data"}}{{else}}{{.SecurityIPSummary.ReturningIPs}}{{end}}</div></div></div>
+    <div class="metric-card card"><div class="card-body">{{index .T "ax_blocked_return_requests"}}<div class="metric-value">{{if .SecurityIPSummary.RepeatStarted.IsZero}}{{index .T "analytics_no_data"}}{{else}}{{.SecurityIPSummary.ReturnRequests}}{{end}}</div></div></div>
+  </div><p class="small mt-3">{{index .T "ax_blocked_repeats_hint"}}{{if not .SecurityIPSummary.RepeatStarted.IsZero}} · {{.SecurityIPSummary.RepeatStarted.Format "2006-01-02 15:04 UTC"}}{{end}}</p>
+  <div class="row g-3">
+    <div class="col-md-4"><h3 class="h6">{{index .T "ax_security_by_type"}}</h3><table class="table table-sm"><thead><tr><th>{{index .T "ax_security_by_type"}}</th><th>{{index .T "ax_ip_count"}}</th></tr></thead><tbody>{{range .SecurityIPSummary.Attacks}}<tr><td>{{with index $.T (print "ax_risk_" .Label)}}{{.}}{{else}}{{if eq .Label "unknown"}}{{index $.T "analytics_no_data"}}{{else}}{{.Label}}{{end}}{{end}}</td><td>{{.Count}}</td></tr>{{else}}<tr><td colspan="2">{{index .T "analytics_no_data"}}</td></tr>{{end}}</tbody></table></div>
+    <div class="col-md-4"><h3 class="h6">{{index .T "ax_security_by_country"}}</h3><table class="table table-sm"><thead><tr><th>{{index .T "ax_security_by_country"}}</th><th>{{index .T "ax_ip_count"}}</th></tr></thead><tbody>{{range .SecurityIPSummary.Countries}}<tr><td data-country-code="{{.Label}}">{{if eq .Label "unknown"}}{{index $.T "analytics_no_data"}}{{else}}{{.Label}}{{end}}</td><td>{{.Count}}</td></tr>{{else}}<tr><td colspan="2">{{index .T "analytics_no_data"}}</td></tr>{{end}}</tbody></table></div>
+    <div class="col-md-4"><h3 class="h6">{{index .T "ax_policies"}}</h3><table class="table table-sm"><thead><tr><th>{{index .T "ax_policies"}}</th><th>{{index .T "ax_ip_count"}}</th></tr></thead><tbody>{{range .SecurityIPSummary.Policies}}<tr><td data-security-policy-name="{{.Label}}">{{with index $.T (print "ax_policy_" .Label)}}{{.}}{{else}}{{.Label}}{{end}}</td><td>{{.Count}}</td></tr>{{end}}</tbody></table></div>
+  </div></div></section>
 
   <section id="security" class="card mb-4"><div class="card-body">
     <h2 class="h5">{{index .T "ax_security"}}</h2>
@@ -1055,9 +1051,9 @@
       </table>
     </div>
 
-    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+    <div id="local-blocks" class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
       <div><h3 class="h6 mb-0">Local and manual blocks</h3><div class="small">{{index .T "ax_security_block_log_help"}}</div></div>
-      <input id="security-incident-search" class="form-control form-control-sm security-registry-search" type="search" placeholder="Search Incident ID, IP, domain or reason">
+      <form method="get" class="d-flex gap-2"><input type="hidden" name="analytics"><input type="hidden" name="tab" value="security"><input name="local_query" value="{{.LocalBlockPage.Query}}" class="form-control form-control-sm security-registry-search" type="search" placeholder="Search Incident ID, IP, domain or reason"><button class="btn btn-outline-secondary btn-sm">{{index .T "ax_search"}}</button></form>
     </div>
     <div class="table-responsive mb-4">
       <table class="table table-sm align-middle">
@@ -1065,17 +1061,11 @@
         <tbody>
         {{range .SecurityLocalBlocks}}
           <tr class="security-row-danger" data-security-incident-row>
-            <td><code>{{.IP}}</code><div class="small text-muted">Incident {{.IncidentID}}</div>{{if .Domain}}<div class="small"><strong>Domain:</strong> {{.Domain}}</div>{{end}}{{if or .Country .City .ClientClass}}<div class="small mt-1">{{if .Country}}{{.Country}}{{if .City}} · {{.City}}{{end}}{{end}}{{if .ClientClass}}{{if or .Country .City}} · {{end}}{{.ClientClass}}{{end}}</div>{{end}}{{if .Agent}}<div class="small text-muted text-break">{{.Agent}}</div>{{end}}</td>
+            <td><code>{{.IP}}</code><div class="small"><span data-country-code="{{.Country}}">{{if .Country}}{{.Country}}{{else}}{{index $.T "analytics_no_data"}}{{end}}</span> · {{if .City}}{{.City}}{{else}}{{index $.T "analytics_no_data"}}{{end}} · {{if .OperatingSystem}}{{.OperatingSystem}}{{else}}{{index $.T "analytics_no_data"}}{{end}}</div><div class="small text-muted">Incident {{.IncidentID}}</div>{{if .Domain}}<div class="small"><strong>Domain:</strong> {{.Domain}}</div>{{end}}{{if .ClientClass}}<div class="small">{{.ClientClass}}</div>{{end}}{{if .Agent}}<details class="small text-break"><summary>User-Agent</summary>{{.Agent}}</details>{{end}}</td>
             <td>
-              <form method="post" action="?analytics&amp;tab=security" class="d-flex flex-column gap-1"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
-                <input type="hidden" name="security_action" value="update">
-                <input type="hidden" name="ip" value="{{.IP}}">
-                <input class="form-control form-control-sm" name="reason" value="{{.Reason}}">
-                <input class="form-control form-control-sm" name="description" value="{{.Description}}">
-                <button class="btn btn-outline-secondary btn-sm align-self-start">Update</button>
-              </form>
+              <div class="security-block-reason"><strong data-security-block-type="{{.Reason}}">{{with index $.T (print "ax_risk_" .Reason)}}{{.}}{{else}}{{.Reason}}{{end}}</strong><p>{{if .Description}}{{.Description}}{{else}}{{index $.T "analytics_no_data"}}{{end}}</p></div>
               {{if .ReasonLog}}<details class="mt-2"><summary class="small">{{index $.T "ax_security_block_history"}}</summary><ul class="security-reason-log">{{range .ReasonLog}}<li>{{if ne .First .At}}{{.First.Format "2006-01-02 15:04"}} — {{end}}{{.At.Format "2006-01-02 15:04"}} · {{.Source}} · {{.Reason}} × {{.Count}}{{if .Description}} — {{.Description}}{{end}}</li>{{end}}</ul></details>{{end}}
-              {{if .ObservedRequests}}<details class="mt-2" open><summary class="small">{{index $.T "ax_security_actual_requests"}}</summary><ul class="security-reason-log">{{range .ObservedRequests}}<li><code>{{.Method}} {{.Path}}</code> · HTTP {{.Status}} · × {{.Count}}{{if ne .First .Last}} · {{.First.Format "2006-01-02 15:04"}} — {{.Last.Format "2006-01-02 15:04"}}{{else}} · {{.Last.Format "2006-01-02 15:04"}}{{end}}</li>{{end}}</ul></details>{{end}}
+              {{if .ObservedRequests}}<details class="mt-2"><summary class="small">{{index $.T "ax_security_actual_requests"}}</summary><ul class="security-reason-log">{{range .ObservedRequests}}<li><code>{{.Method}} {{.Path}}</code> · HTTP {{.Status}} · × {{.Count}}{{if ne .First .Last}} · {{.First.Format "2006-01-02 15:04"}} — {{.Last.Format "2006-01-02 15:04"}}{{else}} · {{.Last.Format "2006-01-02 15:04"}}{{end}}</li>{{end}}</ul></details>{{end}}
             </td>
             <td><span class="security-source-badge {{if eq .Source "manual"}}security-source-manual{{else}}security-source-local{{end}}">{{.Source}}</span></td>
             <td><time data-relative-time="{{.LastEvent.Format "2006-01-02T15:04:05Z07:00"}}">{{.LastEvent.Format "02 Jan 2006 15:04"}}</time></td>
@@ -1096,9 +1086,10 @@
       </table>
     </div>
 
-    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+    <nav class="d-flex align-items-center gap-3 mb-4" aria-label="{{index .T "ax_pages"}}">{{if .LocalBlockPage.PreviousURL}}<a href="{{.LocalBlockPage.PreviousURL}}">←</a>{{end}}{{range .LocalBlockPage.Links}}{{if .Current}}<span class="btn btn-secondary btn-sm" aria-current="page">{{.Number}}</span>{{else}}<a class="btn btn-outline-secondary btn-sm" href="{{.URL}}">{{.Number}}</a>{{end}}{{end}}<span>{{.LocalBlockPage.Total}}</span>{{if .LocalBlockPage.NextURL}}<a href="{{.LocalBlockPage.NextURL}}">→</a>{{end}}</nav>
+    <div id="global-blocks" class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
       <div><h3 class="h6 mb-0">Global reputation registry</h3><div class="small">Read-only entries confirmed by independent SiteBrush installations.</div></div>
-      <input id="security-global-search" class="form-control form-control-sm security-registry-search" type="search" placeholder="Search global IP or reason">
+      <form method="get" class="d-flex gap-2"><input type="hidden" name="analytics"><input type="hidden" name="tab" value="security"><input name="global_query" value="{{.GlobalBlockPage.Query}}" class="form-control form-control-sm security-registry-search" type="search" placeholder="Search global IP or reason"><button class="btn btn-outline-secondary btn-sm">{{index .T "ax_search"}}</button></form>
     </div>
     <div class="table-responsive mb-4">
       <table class="table table-sm align-middle" id="security-global-table">
@@ -1106,7 +1097,7 @@
         <tbody>
         {{range .SecurityGlobalBlocks}}
           <tr class="security-row-danger" data-security-global-row data-security-incident-row>
-            <td><code>{{.IP}}</code><div class="small text-muted">Incident {{.IncidentID}}</div>{{if .Domain}}<div class="small"><strong>Domain:</strong> {{.Domain}}</div>{{end}}</td>
+            <td><code>{{.IP}}</code><div class="small"><span data-country-code="{{.Country}}">{{if .Country}}{{.Country}}{{else}}{{index $.T "analytics_no_data"}}{{end}}</span> · {{if .City}}{{.City}}{{else}}{{index $.T "analytics_no_data"}}{{end}} · {{if .OperatingSystem}}{{.OperatingSystem}}{{else}}{{index $.T "analytics_no_data"}}{{end}}</div><div class="small text-muted">Incident {{.IncidentID}}</div>{{if .Domain}}<div class="small"><strong>Domain:</strong> {{.Domain}}</div>{{end}}{{if .ClientClass}}<div class="small">{{.ClientClass}}</div>{{end}}{{if .Agent}}<details class="small text-break"><summary>User-Agent</summary>{{.Agent}}</details>{{end}}</td>
             <td>{{.Reason}}{{if .Description}}<div class="small">{{.Description}}</div>{{end}}{{if .ReasonLog}}<details><summary class="small">Reason summary</summary><ul class="security-reason-log">{{range .ReasonLog}}<li>{{if ne .First .At}}{{.First.Format "2006-01-02 15:04"}} — {{end}}{{.At.Format "2006-01-02 15:04"}} · {{.Reason}} × {{.Count}}{{if .Description}} — {{.Description}}{{end}}</li>{{end}}</ul></details>{{end}}</td>
             <td><span class="security-source-badge security-source-global">global reputation</span></td>
             <td><time data-relative-time="{{.LastEvent.Format "2006-01-02T15:04:05Z07:00"}}">{{.LastEvent.Format "02 Jan 2006 15:04"}}</time></td>
@@ -1120,16 +1111,19 @@
       </table>
     </div>
 
-    <h3 class="h6">Detected security incidents</h3>
-    {{range .Security.Incidents}}<details class="border-bottom py-2"><summary>{{if .PossibleExposure}}⚠ {{index $.T "ax_exposure"}} · {{end}}{{.IP}} · {{.Count}} · <time data-relative-time="{{.Last.Format "2006-01-02T15:04:05Z07:00"}}">{{.Last.Format "02 Jan 2006 15:04"}}</time></summary><p>{{.Country}} {{.City}} · {{.Agent}}</p><ul>{{range $category,$count:=.Categories}}<li>{{index $.T (print "ax_risk_" $category)}} × {{$count}}</li>{{end}}</ul><table class="table"><tbody>{{range .Examples}}<tr><td>{{.First.Format "15:04:05"}} — {{.Last.Format "15:04:05"}}</td><td>{{.Method}} {{.Path}}</td><td>{{.Status}}</td><td>× {{.Count}}</td></tr>{{end}}</tbody></table></details>{{else}}<p>{{index .T "ax_no_incidents"}}</p>{{end}}
+    <nav class="d-flex align-items-center gap-3 mb-4" aria-label="{{index .T "ax_pages"}}">{{if .GlobalBlockPage.PreviousURL}}<a href="{{.GlobalBlockPage.PreviousURL}}">←</a>{{end}}{{range .GlobalBlockPage.Links}}{{if .Current}}<span class="btn btn-secondary btn-sm" aria-current="page">{{.Number}}</span>{{else}}<a class="btn btn-outline-secondary btn-sm" href="{{.URL}}">{{.Number}}</a>{{end}}{{end}}<span>{{.GlobalBlockPage.Total}}</span>{{if .GlobalBlockPage.NextURL}}<a href="{{.GlobalBlockPage.NextURL}}">→</a>{{end}}</nav>
+    <h3 id="security-incidents" class="h6">Detected security incidents</h3>
+    {{range .SecurityVisibleIncidents}}<details class="border-bottom py-2"><summary>{{if .PossibleExposure}}⚠ {{index $.T "ax_exposure"}} · {{end}}{{.IP}} · <span data-country-code="{{.Country}}">{{if .Country}}{{.Country}}{{else}}{{index $.T "analytics_no_data"}}{{end}}</span> · {{if .City}}{{.City}}{{else}}{{index $.T "analytics_no_data"}}{{end}} · {{if .OperatingSystem}}{{.OperatingSystem}}{{else}}{{index $.T "analytics_no_data"}}{{end}} · {{.Count}} · <time data-relative-time="{{.Last.Format "2006-01-02T15:04:05Z07:00"}}">{{.Last.Format "02 Jan 2006 15:04"}}</time></summary><p>{{.Country}} {{.City}} · {{.Agent}}</p><ul>{{range $category,$count:=.Categories}}<li>{{index $.T (print "ax_risk_" $category)}} × {{$count}}</li>{{end}}</ul><table class="table"><tbody>{{range .Examples}}<tr><td>{{.First.Format "15:04:05"}} — {{.Last.Format "15:04:05"}}</td><td>{{.Method}} {{.Path}}</td><td>{{.Status}}</td><td>× {{.Count}}</td></tr>{{end}}</tbody></table></details>{{else}}<p>{{index .T "ax_no_incidents"}}</p>{{end}}
+    <nav class="d-flex align-items-center gap-3 mt-3" aria-label="{{index .T "ax_pages"}}">{{if .IncidentPage.PreviousURL}}<a href="{{.IncidentPage.PreviousURL}}">←</a>{{end}}{{range .IncidentPage.Links}}{{if .Current}}<span class="btn btn-secondary btn-sm" aria-current="page">{{.Number}}</span>{{else}}<a class="btn btn-outline-secondary btn-sm" href="{{.URL}}">{{.Number}}</a>{{end}}{{end}}<span>{{.IncidentPage.Total}}</span>{{if .IncidentPage.NextURL}}<a href="{{.IncidentPage.NextURL}}">→</a>{{end}}</nav>
   </div></section>
   {{end}}
 </div>
 <script type="application/json" id="analytics-map-points">{{.SessionMapJSON}}</script>
+<script type="application/json" id="analytics-blocked-map-points">{{.SecurityBlockedMapJSON}}</script>
 <script type="application/json" id="analytics-server-hours">{{.ServerHoursJSON}}</script>
 <script src="/p/static/leaflet.min.js"></script>
 <script>
-(function renderAnalyticsShareBars() {
+(function renderAnalyticsDistributionCharts() {
   const themeStyle = getComputedStyle(document.documentElement);
   const palette = [1, 2, 3, 4, 5].map(function (index) {
     return themeStyle.getPropertyValue('--theme-chart-' + index).trim();
@@ -1173,7 +1167,6 @@
   }
 
   for (const analyticsCard of analyticsCards) {
-    const shareCells = analyticsCard.querySelectorAll('.analytics-share-cell');
     const tableRows = analyticsCard.querySelectorAll('tbody tr');
     const values = [];
     const labels = [];
@@ -1186,35 +1179,6 @@
       const shareValueRaw = shareCell.getAttribute('data-share') || '';
       const shareValue = parseSharePercent(shareValueRaw);
       const color = palette[rowIndex % palette.length];
-      const shareBarContainer = shareCell.querySelector('.analytics-share-bar');
-      const shareTrack = shareCell.querySelector('.analytics-share-track');
-      const shareFill = shareCell.querySelector('.analytics-share-fill');
-      const shareNumber = shareCell.querySelector('.analytics-share-number');
-      if (shareFill) {
-        shareFill.style.width = shareValue + '%';
-        shareFill.style.background = color;
-      }
-      if (shareNumber) {
-        shareNumber.style.color = color;
-      }
-      if (shareBarContainer) {
-        const isSmallValue = shareValue > 0 && shareValue < 12;
-        if (isSmallValue) {
-          if (shareTrack) shareTrack.style.display = 'inline-block';
-        } else {
-          if (shareTrack) shareTrack.style.display = 'none';
-          const badge = document.createElement('span');
-          badge.className = 'analytics-share-badge';
-          badge.textContent = shareValueRaw;
-          badge.style.color = color;
-          badge.style.borderColor = color + '99';
-          badge.style.background = color + '1f';
-          if (shareNumber) {
-            shareNumber.textContent = '';
-            shareNumber.appendChild(badge);
-          }
-        }
-      }
       if (shareValue > 0) {
         values.push(shareValue);
         labels.push(labelCell ? labelCell.textContent.trim() : '');
@@ -1258,15 +1222,6 @@
     }
   }
 
-  const shareCells = document.querySelectorAll('.analytics-share-cell');
-  for (const shareCell of shareCells) {
-    const shareValueRaw = shareCell.getAttribute('data-share') || '';
-    const normalizedShare = parseSharePercent(shareValueRaw);
-    const fillElement = shareCell.querySelector('.analytics-share-fill');
-    if (fillElement) {
-      fillElement.style.width = normalizedShare + '%';
-    }
-  }
 })();
 
 (function renderSecurityCharts() {
@@ -1343,9 +1298,6 @@
   }
 
   renderHourlyChart('security-hour-chart', parseJSON('security-hours-data', []));
-  renderRankChart('security-country-chart', parseJSON('security-countries-data', []), function countryLabel(label) {
-    return label === 'unknown' ? '—' : label;
-  });
   renderRankChart('security-type-chart', parseJSON('security-types-data', []), function typeLabel(label) {
     return typeLabels.get(label) || label;
   });
@@ -1375,18 +1327,6 @@
     return Math.min(4, Math.max(1, Math.ceil(count * 4 / maximum)));
   }
 
-  function securityActivityColor(level, intensity) {
-    const colorsByLevel = {
-      0: ['#ebedf0', '#ebedf0', '#ebedf0', '#ebedf0'],
-      1: ['#dcfce7', '#86efac', '#4ade80', '#16a34a'],
-      2: ['#fef3c7', '#fcd34d', '#fbbf24', '#eab308'],
-      3: ['#ffedd5', '#fdba74', '#fb923c', '#f97316'],
-      4: ['#fecaca', '#f87171', '#ef4444', '#b91c1c']
-    };
-    const colors = colorsByLevel[Math.max(0, Math.min(4, Number(level) || 0))];
-    const colorIndex = Math.max(0, Math.min(3, (Number(intensity) || 1) - 1));
-    return colors[colorIndex];
-  }
 
   const securityTypeColors = {
     'rapid-crawl': '#2563eb',
@@ -1407,6 +1347,12 @@
     return securityTypeColors[category] || '#64748b';
   }
 
+  for (const heading of document.querySelectorAll('[data-security-block-type]')) {
+    const color = securityTypeColor(heading.dataset.securityBlockType);
+    heading.style.borderBottom = '3px solid '+color;
+    heading.closest('.security-block-reason').style.borderInlineStartColor = color;
+  }
+
   function dailyActivityOpacity(count, averageDailyCount) {
     if (count <= 0 || averageDailyCount <= 0) return 1;
     return Math.min(0.9, Math.max(0.12, 0.9 * count / averageDailyCount));
@@ -1417,6 +1363,12 @@
     const hourCounts = readData(calendar, '[data-calendar-hours]', {});
     const details = readData(calendar, '[data-calendar-details-data]', []);
     const activityTypes = readData(calendar, '[data-calendar-types]', {});
+    const activityCountries = readData(calendar, '[data-calendar-countries]', {});
+    const overallCountries = readData(calendar, '#security-countries-data', []);
+    const countryChart = calendar.querySelector('#security-country-chart');
+    const countryPeriod = calendar.querySelector('[data-security-country-period]');
+    const allDaysButton = calendar.querySelector('[data-security-all-days]');
+    const countryModel = {selectedDay: null};
     const severityLevels = readData(calendar, '[data-calendar-severity]', {});
     const calendarGrid = calendar.querySelector('[data-calendar-grid]');
     const yearTabs = calendar.querySelector('[data-calendar-years]');
@@ -1445,6 +1397,61 @@
       typeLabels.set(labelElement.dataset.securityType || '', labelElement.dataset.label || labelElement.dataset.securityType || '');
       typeDescriptions.set(labelElement.dataset.securityType || '', labelElement.dataset.description || '');
     }
+
+    for (const explanation of calendar.querySelectorAll('[data-security-type-help]')) {
+      const heading = explanation.querySelector('strong');
+      if (heading) {
+        heading.style.borderBottom = '3px solid ' + securityTypeColor(explanation.dataset.securityTypeHelp);
+        heading.style.paddingBottom = '4px';
+      }
+    }
+
+    function countryName(countryCode) {
+      if (!countryCode || countryCode === 'unknown') return calendar.dataset.emptyText || 'No data';
+      try {
+        if (/^[A-Za-z]{2}$/.test(countryCode) && typeof Intl.DisplayNames === 'function') {
+          return new Intl.DisplayNames([document.documentElement.lang || 'en'], {type:'region'}).of(countryCode.toUpperCase());
+        }
+      } catch (countryError) { console.error('SiteBrush security: country label', countryError); }
+      return countryCode;
+    }
+
+    function renderCountries() {
+      if (!countryChart) return;
+      const selectedDay = countryModel.selectedDay;
+      const countryRows = selectedDay === null ? overallCountries : Object.entries(activityCountries[selectedDay] || {}).map(function countryCount(entry) { return {Label:entry[0], Count:entry[1]}; });
+      const orderedCountries = countryRows.slice().sort(function orderCountries(left, right) { return right.Count-left.Count || left.Label.localeCompare(right.Label); });
+      countryChart.replaceChildren();
+      const maximum = orderedCountries.reduce(function largestCountryCount(highest, country) { return Math.max(highest, Number(country.Count)||0); }, 0);
+      const total = orderedCountries.reduce(function totalCountryCount(sum, country) { return sum+(Number(country.Count)||0); }, 0);
+      countryPeriod.textContent = (selectedDay || allDaysButton.textContent) + ' · ' + total;
+      allDaysButton.disabled = selectedDay === null;
+      if (orderedCountries.length === 0) { countryChart.textContent = calendar.dataset.emptyText || 'No data'; return; }
+      for (const country of orderedCountries) {
+        const countryRow = document.createElement('div');
+        countryRow.className = 'security-rank-row';
+        const countryLabel = document.createElement('span');
+        countryLabel.className = 'security-rank-label';
+        countryLabel.textContent = countryName(country.Label);
+        const track = document.createElement('span');
+        track.className = 'security-rank-track';
+        const fill = document.createElement('span');
+        fill.className = 'security-rank-fill';
+        fill.style.width = (maximum > 0 ? country.Count*100/maximum : 0) + '%';
+        track.appendChild(fill);
+        const count = document.createElement('span');
+        count.className = 'security-rank-value';
+        count.textContent = String(country.Count);
+        countryRow.append(countryLabel, track, count);
+        countryChart.appendChild(countryRow);
+      }
+    }
+
+    if (allDaysButton) allDaysButton.addEventListener('click', function showAllCountries() {
+      countryModel.selectedDay = null;
+      renderCountries();
+    });
+    renderCountries();
 
     if (securityLegendDescription) {
       const legendHint = securityLegendDescription.textContent;
@@ -1541,14 +1548,44 @@
         radar.appendChild(label);
       });
       if (hasData) {
-        const selectedLevel = Number(severityLevels[dayKey]) || 1;
+        const attackPoints = categories.map(function categoryPoint(category, index) {
+          return point(index, Math.max(0, Number(selectedCategories[category]) || 0) / dailyTotal);
+        });
+        const activeCategories = categories.filter(function observedCategory(category) {
+          return (Number(selectedCategories[category]) || 0) > 0;
+        }).sort(function prevailingCategory(left, right) {
+          return selectedCategories[right]-selectedCategories[left] || left.localeCompare(right);
+        });
+        const definitions = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+        const gradient = document.createElementNS('http://www.w3.org/2000/svg', 'linearGradient');
+        gradient.id = 'security-selected-day-colors';
+        gradient.setAttribute('gradientUnits', 'userSpaceOnUse');
+        gradient.setAttribute('x1', String(Math.min(...attackPoints.map(function horizontalPoint(coordinates) { return coordinates[0]; }))));
+        gradient.setAttribute('y1', String(Math.min(...attackPoints.map(function verticalPoint(coordinates) { return coordinates[1]; }))));
+        gradient.setAttribute('x2', String(Math.max(...attackPoints.map(function horizontalPoint(coordinates) { return coordinates[0]; }))));
+        gradient.setAttribute('y2', String(Math.max(...attackPoints.map(function verticalPoint(coordinates) { return coordinates[1]; }))));
+        let colorOffset = 0;
+        for (const category of activeCategories) {
+          const categoryCount = Math.max(0, Number(selectedCategories[category]) || 0);
+          if (categoryCount === 0) continue;
+          for (const offset of [colorOffset, colorOffset+categoryCount/dailyTotal]) {
+            const colorStop = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
+            colorStop.setAttribute('offset', String(offset*100)+'%');
+            colorStop.setAttribute('stop-color', securityTypeColor(category));
+            gradient.appendChild(colorStop);
+          }
+          colorOffset += categoryCount/dailyTotal;
+        }
+        definitions.appendChild(gradient);
+        radar.appendChild(definitions);
+        const attackPaint = activeCategories.length === 1 ? securityTypeColor(activeCategories[0]) : 'url(#security-selected-day-colors)';
         const polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-        polygon.setAttribute('points', categories.map(function categoryPoint(category, index) {
-          return point(index, Math.max(0, Number(selectedCategories[category]) || 0) / dailyTotal).join(',');
+        polygon.setAttribute('points', attackPoints.map(function serializedPoint(coordinates) {
+          return coordinates.join(',');
         }).join(' '));
-        polygon.setAttribute('fill', securityActivityColor(selectedLevel, 4));
-        polygon.setAttribute('fill-opacity', '0.17');
-        polygon.setAttribute('stroke', securityActivityColor(selectedLevel, 4));
+        polygon.style.fill = attackPaint;
+        polygon.style.fillOpacity = '0.25';
+        polygon.style.stroke = attackPaint;
         polygon.setAttribute('stroke-width', '2');
         radar.appendChild(polygon);
         categories.forEach(function addPoint(category, index) {
@@ -1591,6 +1628,8 @@
       dayButton.title = formatDate(dayKey) + ' · ' + count;
       dayButton.setAttribute('aria-label', dayButton.title);
       dayButton.addEventListener('click', function selectDay() {
+        countryModel.selectedDay = dayKey;
+        renderCountries();
         renderHours(dayKey);
       });
       calendarGrid.appendChild(dayButton);
@@ -1772,18 +1811,18 @@
   renderHours('analytics-server-hour-chart', serverHours, sharedMaximum);
 })();
 
-(function renderAnalyticsVisitorMap() {
+(function renderAnalyticsMaps() {
   'use strict';
-  const mapElement = document.getElementById('analytics-visitor-map');
-  const pointsElement = document.getElementById('analytics-map-points');
-  const summaryElement = document.getElementById('analytics-session-map-summary');
-  const emptyElement = document.getElementById('analytics-session-map-empty');
-  const overlayElement = document.getElementById('analytics-session-map-overlay');
+  function renderMap(mapID, pointsID, overlayID, dialogID, listID, blockedMap) {
+  const mapElement = document.getElementById(mapID);
+  const pointsElement = document.getElementById(pointsID);
+  const overlayElement = document.getElementById(overlayID);
   if (!mapElement || !pointsElement || !window.L) return;
 
   let sessions = [];
   try {
-    sessions = JSON.parse(pointsElement.textContent || '[]');
+    const parsedSessions = JSON.parse(pointsElement.textContent || '[]');
+    sessions = Array.isArray(parsedSessions) ? parsedSessions : [];
   } catch (parseError) {
     console.error('SiteBrush analytics: invalid session map data', parseError);
     return;
@@ -1815,11 +1854,12 @@
           country: session.Country || '', city: session.City || '',
           count: 0, languages: new Map(), devices: new Map(),
           classes: new Map(), sources: new Set(),
-          addresses: new Map()
+          addresses: new Map(), sessions: []
         };
         groups.set(key, group);
       }
       group.count += 1;
+      group.sessions.push(session);
       const address = String(session.Address || '').trim();
       if (address) group.addresses.set(address, (group.addresses.get(address) || 0) + 1);
       const language = languageCode(session.Language);
@@ -1828,7 +1868,8 @@
       group.languages.set(language, (group.languages.get(language) || 0) + 1);
       group.devices.set(device, (group.devices.get(device) || 0) + 1);
       group.classes.set(clientClass, (group.classes.get(clientClass) || 0) + 1);
-      if (session.Source && session.Source.Name && group.sources.size < 4) group.sources.add(session.Source.Name);
+      if (blockedMap && session.Policy) group.sources.add(session.Policy);
+      else if (session.Source && session.Source.Name && group.sources.size < 4) group.sources.add(session.Source.Name);
     }
     return Array.from(groups.values()).sort(function sortGroups(left, right) {
       return right.count - left.count;
@@ -1874,7 +1915,7 @@
     const innerGradient = gradientFor(group.devices, ['#2563eb','#16a34a','#9333ea']);
     const marker = document.createElement('div');
     marker.className = 'session-map-marker';
-    marker.style.background = outerGradient;
+    marker.style.background = blockedMap ? '#dc2626' : outerGradient;
     const inner = document.createElement('div');
     inner.className = 'session-map-marker-inner';
     inner.style.background = innerGradient;
@@ -1903,7 +1944,7 @@
 
     const sessionsLine = document.createElement('div');
     const uniqueAddresses = group.addresses.size;
-    sessionsLine.textContent = group.count + (group.count === 1 ? ' session' : ' sessions') +
+    sessionsLine.textContent = group.count + (blockedMap ? ' IP' : (group.count === 1 ? ' session' : ' sessions')) +
       (uniqueAddresses ? ' · ' + uniqueAddresses + (uniqueAddresses === 1 ? ' IP' : ' IPs') : '');
     wrapper.appendChild(sessionsLine);
 
@@ -1917,7 +1958,7 @@
 
     const languagesLine = document.createElement('div');
     languagesLine.textContent = 'Languages: ' + countsText(group.languages, {});
-    wrapper.appendChild(languagesLine);
+    if (!blockedMap) wrapper.appendChild(languagesLine);
 
     const devicesLine = document.createElement('div');
     devicesLine.textContent = 'Devices: ' + countsText(group.devices, {mobile:'📱 ',desktop:'💻 ',automation:'🤖 '});
@@ -1928,25 +1969,70 @@
       sourceLine.textContent = 'Sources: ' + Array.from(group.sources).join(', ');
       wrapper.appendChild(sourceLine);
     }
+    if (group.sessions.length === 1) wrapper.appendChild(sessionNode(group.sessions[0]));
     return wrapper;
   }
 
-  function summaryRow(group) {
-    const row = document.createElement('li');
-    const label = document.createElement('span');
-    label.textContent = ([group.city, group.country].filter(Boolean).join(', ') || 'Unknown location');
-    const count = document.createElement('strong');
-    count.textContent = String(group.count);
-    const detail = document.createElement('small');
-    const addressSummary = group.addresses.size
-      ? group.addresses.size + (group.addresses.size === 1 ? ' IP' : ' IPs') + ' · '
-      : '';
-    detail.textContent = addressSummary + countsText(group.languages, {}) + ' · ' + countsText(group.devices, {mobile:'📱 ',desktop:'💻 ',automation:'🤖 '});
-    row.appendChild(label);
-    row.appendChild(count);
-    row.appendChild(detail);
-    return row;
+  function sessionNode(session) {
+    if (blockedMap) return blockedIPNode(session);
+    const wrapper = document.createElement('div');
+    wrapper.className = 'border-bottom py-2 text-break';
+    const source = session.Source || {};
+    for (const description of [
+      session.Started + ' · ' + deviceKind(session) + ' · ' + (session.Browser || '') + ' / ' + (session.OS || ''),
+      [session.Country, session.City, session.Language].filter(Boolean).join(' · '),
+      (source.Name || 'No data') + ' → ' + (session.Landing || '') + ' · ' + (session.Referrer || source.Detail || ''),
+      session.ID + (session.Address ? ' · IP: ' + session.Address : '')
+    ]) {
+      const paragraph = document.createElement('p');
+      paragraph.className = 'small mb-1';
+      paragraph.textContent = description;
+      wrapper.appendChild(paragraph);
+    }
+    for (const steps of Object.values(session.Tabs || {})) {
+      const journey = document.createElement('p');
+      journey.textContent = steps.join(' → ');
+      wrapper.appendChild(journey);
+    }
+    for (const [goalName, achievementCount] of Object.entries(session.GoalCounts || {})) {
+      const achievement = document.createElement('p');
+      achievement.textContent = goalName + ' — ' + achievementCount;
+      wrapper.appendChild(achievement);
+    }
+    return wrapper;
   }
+
+  function blockedIPNode(block) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'border-bottom py-2 text-break';
+    const attackNames = new Map();
+    for (const attackLabel of document.querySelectorAll('[data-security-type]')) attackNames.set(attackLabel.dataset.securityType, attackLabel.dataset.label);
+    const policyNames = new Map();
+    for (const policyLabel of document.querySelectorAll('[data-security-policy-name]')) policyNames.set(policyLabel.dataset.securityPolicyName, policyLabel.textContent);
+    for (const description of [
+      block.Address,
+      [block.Country, block.City, block.OS, block.Browser].filter(Boolean).join(' · ') || 'No data',
+      (policyNames.get(block.Policy) || block.Policy) + ' · ' + block.Last,
+      (block.AttackTypes || []).map(function attackName(category) { return attackNames.get(category) || category; }).join(' · '),
+      block.Reason || 'No data',
+      'Requests after block: ' + (block.RepeatKnown ? (block.RepeatRequests || 0) : 'No data')
+    ]) {
+      const paragraph = document.createElement('p');
+      paragraph.className = 'small mb-1';
+      paragraph.textContent = description;
+      wrapper.appendChild(paragraph);
+    }
+    return wrapper;
+  }
+
+  function showSessions(group) {
+    const dialog = document.getElementById(dialogID);
+    const sessionList = document.getElementById(listID);
+    sessionList.replaceChildren();
+    for (const session of group.sessions) sessionList.appendChild(sessionNode(session));
+    dialog.showModal();
+  }
+
 
   const map = window.L.map(mapElement, {
     center: [20, 0], zoom: 2, minZoom: 2, maxZoom: 8,
@@ -1964,15 +2050,18 @@
   for (const group of groups) {
     const marker = window.L.marker([group.latitude, group.longitude], {icon: markerIcon(group)});
     marker.bindTooltip(tooltipNode(group), {direction:'top', opacity:.97});
+    if (group.sessions.length > 1) marker.on('click', function openSessionList() { showSessions(group); });
+    else marker.bindPopup(sessionNode(group.sessions[0]));
     marker.addTo(map);
     bounds.push([group.latitude, group.longitude]);
-    if (summaryElement && summaryElement.children.length < 12) summaryElement.appendChild(summaryRow(group));
   }
 
   if (overlayElement) overlayElement.hidden = groups.length > 0;
-  if (emptyElement) emptyElement.hidden = groups.length > 0;
   if (bounds.length === 1) map.setView(bounds[0], 4);
   if (bounds.length > 1) map.fitBounds(bounds, {padding:[28,28], maxZoom:5});
+  }
+  renderMap('analytics-visitor-map', 'analytics-map-points', 'analytics-session-map-overlay', 'analytics-map-sessions', 'analytics-map-sessions-list', false);
+  renderMap('analytics-blocked-ip-map', 'analytics-blocked-map-points', 'analytics-blocked-map-overlay', 'analytics-blocked-map-dialog', 'analytics-blocked-map-list', true);
 })();
 
 (function setupReturnToPreviousURI() {
@@ -2008,20 +2097,16 @@
 
 
 <script>
-(function wireSecuritySearch() {
-  function wire(inputID, selector) {
-    const searchInput = document.getElementById(inputID);
-    if (!searchInput) return;
-    const rows = Array.from(document.querySelectorAll(selector));
-    searchInput.addEventListener('input', function () {
-      const query = searchInput.value.trim().toLowerCase();
-      for (const row of rows) {
-        row.hidden = query !== '' && !row.textContent.toLowerCase().includes(query);
-      }
-    });
+(function renderSecurityCountryNames() {
+  let countryNames;
+  try {
+    if (typeof Intl.DisplayNames === 'function') countryNames = new Intl.DisplayNames([document.documentElement.lang || 'en'], {type:'region'});
+  } catch (countryError) { console.error('SiteBrush security: country labels', countryError); }
+  for (const countryLabel of document.querySelectorAll('[data-country-code]')) {
+    const countryCode = countryLabel.dataset.countryCode;
+    if (!countryNames || !/^[A-Za-z]{2}$/.test(countryCode || '')) continue;
+    countryLabel.textContent = countryNames.of(countryCode.toUpperCase());
   }
-  wire('security-incident-search', '[data-security-incident-row]');
-  wire('security-global-search', '[data-security-global-row]');
 })();
 </script>
 <script>

@@ -14,6 +14,8 @@ type RequestObservation struct {
 	Status                                                  int
 	Bytes                                                   int64
 	Blocked, ServerLoadHigh                                 bool
+	AlreadyBlocked, GeoKnown                                bool
+	Latitude, Longitude                                     float64
 	Trusted, IndexingCrawler                                bool
 }
 type Probe struct {
@@ -23,6 +25,8 @@ type Probe struct {
 	Bytes                  int64
 }
 type Incident struct {
+	Latitude, Longitude             float64
+	GeoKnown                        bool
 	IP, Country, City, Agent, Class string
 	First, Last                     time.Time
 	Count                           int
@@ -35,16 +39,19 @@ type RequestGroup struct {
 	Count, Errors                      int
 }
 type SecurityState struct {
-	Started, Updated time.Time
-	Incidents        []Incident
-	Groups           map[string]*RequestGroup
-	EventBuckets     map[string]*SecurityEventBucket
-	ActivityHours    map[string]int
-	ActivityDays     map[string]int
-	ActivityTypes    map[string]map[string]int
-	ActivitySeverity map[string]int
-	Windows          map[string]*RequestWindow `json:"-"`
-	Incomplete       bool
+	BlockedReturns        map[string]*BlockedReturn
+	ReturnTrackingStarted time.Time
+	Started, Updated      time.Time
+	Incidents             []Incident
+	Groups                map[string]*RequestGroup
+	EventBuckets          map[string]*SecurityEventBucket
+	ActivityHours         map[string]int
+	ActivityDays          map[string]int
+	ActivityTypes         map[string]map[string]int
+	ActivityCountries     map[string]map[string]int
+	ActivitySeverity      map[string]int
+	Windows               map[string]*RequestWindow `json:"-"`
+	Incomplete            bool
 }
 type SecurityEventBucket struct {
 	Date, Country, Category string
@@ -61,16 +68,72 @@ type RequestWindow struct {
 	Paths           map[string]bool
 }
 type SecurityReport struct {
+	BlockedReturns               []BlockedReturn
+	ReturnTrackingStarted        time.Time
 	Incidents                    []Incident
 	Groups                       []RequestGroup
 	ActivityHours                map[string]int
 	ActivityDays                 map[string]int
 	ActivityTypes                map[string]map[string]int
+	ActivityCountries            map[string]map[string]int
 	ActivitySeverity             map[string]int
 	EventHours                   [24]int
 	Countries, Types             []SecurityDimension
 	Requests, Errors, Suspicious int
 	Incomplete                   bool
+}
+
+type BlockedReturn struct {
+	Latitude, Longitude      float64
+	GeoKnown                 bool
+	IP, Country, City, Agent string
+	First, Last              time.Time
+	Requests, Visits         int
+}
+
+func cutoffForBlockedReturns(now time.Time, days int) string {
+	return dayKey(now.AddDate(0, 0, -min(30, max(1, days))+1))
+}
+
+// Repeat evidence comes from the guard's pre-existing decision, never from a
+// later snapshot or a generic HTTP error. Retention and cardinality are bounded.
+func (state *SecurityState) recordBlockedReturn(request RequestObservation) {
+	if state.BlockedReturns == nil {
+		state.BlockedReturns = map[string]*BlockedReturn{}
+	}
+	ip := CleanText(request.IP, 64)
+	observation := state.BlockedReturns[ip]
+	if observation == nil {
+		if len(state.BlockedReturns) >= 2048 {
+			oldest := ""
+			for candidate, previous := range state.BlockedReturns {
+				if oldest == "" || previous.Last.Before(state.BlockedReturns[oldest].Last) {
+					oldest = candidate
+				}
+			}
+			delete(state.BlockedReturns, oldest)
+			state.Incomplete = true
+		}
+		observation = &BlockedReturn{IP: ip, First: request.Time}
+		state.BlockedReturns[ip] = observation
+	}
+	if observation.Visits == 0 || request.Time.Sub(observation.Last) > 30*time.Minute {
+		observation.Visits++
+	}
+	observation.Requests++
+	if request.Time.After(observation.Last) {
+		observation.Last = request.Time
+	}
+	if request.Country != "" {
+		observation.Country = CleanText(request.Country, 64)
+	}
+	if request.City != "" {
+		observation.City = CleanText(request.City, 64)
+	}
+	observation.Agent = CleanText(request.Agent, 128)
+	if request.GeoKnown {
+		observation.Latitude, observation.Longitude, observation.GeoKnown = request.Latitude, request.Longitude, true
+	}
 }
 
 // Names identify client claims. User-Agent alone cannot authenticate a crawler.
@@ -145,6 +208,12 @@ func ProbeCategory(pathname, query string) string {
 }
 func (state *SecurityState) Record(request RequestObservation) string {
 	now := request.Time
+	if state.ReturnTrackingStarted.IsZero() {
+		state.ReturnTrackingStarted = now
+	}
+	if request.Blocked && request.AlreadyBlocked && !request.Trusted && request.IP != "" {
+		state.recordBlockedReturn(request)
+	}
 	if state.Started.IsZero() {
 		state.Started = now
 	}
@@ -246,6 +315,17 @@ func (state *SecurityState) recordSecurityEvent(request RequestObservation, cate
 	date := request.Time.UTC().Format("2006-01-02")
 	hour := request.Time.UTC().Hour()
 	state.recordSecurityActivity(request, category)
+	if state.ActivityCountries == nil {
+		state.ActivityCountries = securityCountriesByDay(state.EventBuckets)
+	}
+	if state.ActivityCountries[date] == nil {
+		state.ActivityCountries[date] = map[string]int{}
+	}
+	if len(state.ActivityCountries[date]) >= 256 && state.ActivityCountries[date][country] == 0 {
+		country = "unknown"
+		state.Incomplete = true
+	}
+	state.ActivityCountries[date][country]++
 	if state.ActivityTypes == nil {
 		state.ActivityTypes = make(map[string]map[string]int)
 	}
@@ -310,6 +390,11 @@ func (state *SecurityState) recordIncident(request RequestObservation, category,
 		index = len(state.Incidents) - 1
 	}
 	incident := &state.Incidents[index]
+	if request.GeoKnown {
+		incident.GeoKnown = true
+		incident.Latitude, incident.Longitude = request.Latitude, request.Longitude
+		incident.Country, incident.City = CleanText(request.Country, 64), CleanText(request.City, 64)
+	}
 	incident.Last = request.Time
 	incident.Count++
 	incident.Categories[category]++
@@ -331,6 +416,11 @@ func (state *SecurityState) recordIncident(request RequestObservation, category,
 	}
 }
 func (state *SecurityState) Prune(now time.Time) {
+	for ip, observation := range state.BlockedReturns {
+		if now.Sub(observation.Last) > 30*24*time.Hour {
+			delete(state.BlockedReturns, ip)
+		}
+	}
 	retained := state.Incidents[:0]
 	for _, incident := range state.Incidents {
 		if now.Sub(incident.Last) <= 30*24*time.Hour {
@@ -369,6 +459,11 @@ func (state *SecurityState) Prune(now time.Time) {
 			delete(state.ActivityTypes, date)
 		}
 	}
+	for date := range state.ActivityCountries {
+		if date < activityCutoff {
+			delete(state.ActivityCountries, date)
+		}
+	}
 	for date := range state.ActivitySeverity {
 		if date < activityCutoff {
 			delete(state.ActivitySeverity, date)
@@ -393,6 +488,17 @@ func (state *SecurityState) Report(now time.Time, days int) SecurityReport {
 		}
 	}
 	result := SecurityReport{Incomplete: state.Incomplete, ActivityHours: state.ActivityHours, ActivityDays: state.ActivityDays, ActivityTypes: state.ActivityTypes, ActivitySeverity: activitySeverity}
+	result.ReturnTrackingStarted = state.ReturnTrackingStarted
+	for _, observation := range state.BlockedReturns {
+		if dayKey(observation.Last) >= cutoffForBlockedReturns(now, days) {
+			result.BlockedReturns = append(result.BlockedReturns, *observation)
+		}
+	}
+	sort.Slice(result.BlockedReturns, func(left, right int) bool { return result.BlockedReturns[left].IP < result.BlockedReturns[right].IP })
+	result.ActivityCountries = state.ActivityCountries
+	if result.ActivityCountries == nil {
+		result.ActivityCountries = securityCountriesByDay(state.EventBuckets)
+	}
 	cutoff := dayKey(now.AddDate(0, 0, -days+1))
 	securityCutoff := dayKey(now.AddDate(0, 0, -29))
 	countryCounts := map[string]int{}
@@ -404,8 +510,15 @@ func (state *SecurityState) Report(now time.Time, days int) SecurityReport {
 		if bucket.Hour >= 0 && bucket.Hour < len(result.EventHours) {
 			result.EventHours[bucket.Hour] += bucket.Count
 		}
-		countryCounts[bucket.Country] += bucket.Count
 		typeCounts[bucket.Category] += bucket.Count
+	}
+	for date, countries := range result.ActivityCountries {
+		if date < cutoff || date > dayKey(now) {
+			continue
+		}
+		for country, count := range countries {
+			countryCounts[country] += count
+		}
 	}
 	for _, group := range state.Groups {
 		if group.Date >= cutoff && group.Date <= dayKey(now) {
@@ -451,6 +564,19 @@ func (state *SecurityState) Report(now time.Time, days int) SecurityReport {
 	})
 	return result
 }
+
+// Older checkpoints retain country evidence in event buckets. New observations
+// keep bounded daily country totals alongside the year-long activity calendar.
+func securityCountriesByDay(buckets map[string]*SecurityEventBucket) map[string]map[string]int {
+	result := map[string]map[string]int{}
+	for _, bucket := range buckets {
+		if result[bucket.Date] == nil {
+			result[bucket.Date] = map[string]int{}
+		}
+		result[bucket.Date][bucket.Country] += bucket.Count
+	}
+	return result
+}
 func (incident Incident) Reasons() string {
 	labels := []string{}
 	for category, count := range incident.Categories {
@@ -463,7 +589,7 @@ func (incident Incident) Reasons() string {
 // Limits apply before persistence as well as on disk. Detail is sacrificed first.
 func (state *SecurityState) Limit(budget int) {
 	estimate := func() int {
-		total := len(state.Groups) * 512
+		total := len(state.Groups)*512 + len(state.BlockedReturns)*512
 		for _, incident := range state.Incidents {
 			total += 1024 + len(incident.Examples)*512
 		}
@@ -481,6 +607,16 @@ func (state *SecurityState) Limit(budget int) {
 			}
 		}
 		delete(state.Groups, oldest)
+		state.Incomplete = true
+	}
+	for estimate() > budget && len(state.BlockedReturns) > 0 {
+		oldest := ""
+		for ip, observation := range state.BlockedReturns {
+			if oldest == "" || observation.Last.Before(state.BlockedReturns[oldest].Last) {
+				oldest = ip
+			}
+		}
+		delete(state.BlockedReturns, oldest)
 		state.Incomplete = true
 	}
 }
