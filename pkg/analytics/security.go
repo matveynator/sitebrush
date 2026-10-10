@@ -35,16 +35,17 @@ type RequestGroup struct {
 	Count, Errors                      int
 }
 type SecurityState struct {
-	Started, Updated time.Time
-	Incidents        []Incident
-	Groups           map[string]*RequestGroup
-	EventBuckets     map[string]*SecurityEventBucket
-	ActivityHours    map[string]int
-	ActivityDays     map[string]int
-	ActivityTypes    map[string]map[string]int
-	ActivitySeverity map[string]int
-	Windows          map[string]*RequestWindow `json:"-"`
-	Incomplete       bool
+	Started, Updated  time.Time
+	Incidents         []Incident
+	Groups            map[string]*RequestGroup
+	EventBuckets      map[string]*SecurityEventBucket
+	ActivityHours     map[string]int
+	ActivityDays      map[string]int
+	ActivityTypes     map[string]map[string]int
+	ActivityCountries map[string]map[string]int
+	ActivitySeverity  map[string]int
+	Windows           map[string]*RequestWindow `json:"-"`
+	Incomplete        bool
 }
 type SecurityEventBucket struct {
 	Date, Country, Category string
@@ -66,6 +67,7 @@ type SecurityReport struct {
 	ActivityHours                map[string]int
 	ActivityDays                 map[string]int
 	ActivityTypes                map[string]map[string]int
+	ActivityCountries            map[string]map[string]int
 	ActivitySeverity             map[string]int
 	EventHours                   [24]int
 	Countries, Types             []SecurityDimension
@@ -246,6 +248,17 @@ func (state *SecurityState) recordSecurityEvent(request RequestObservation, cate
 	date := request.Time.UTC().Format("2006-01-02")
 	hour := request.Time.UTC().Hour()
 	state.recordSecurityActivity(request, category)
+	if state.ActivityCountries == nil {
+		state.ActivityCountries = securityCountriesByDay(state.EventBuckets)
+	}
+	if state.ActivityCountries[date] == nil {
+		state.ActivityCountries[date] = map[string]int{}
+	}
+	if len(state.ActivityCountries[date]) >= 256 && state.ActivityCountries[date][country] == 0 {
+		country = "unknown"
+		state.Incomplete = true
+	}
+	state.ActivityCountries[date][country]++
 	if state.ActivityTypes == nil {
 		state.ActivityTypes = make(map[string]map[string]int)
 	}
@@ -369,6 +382,11 @@ func (state *SecurityState) Prune(now time.Time) {
 			delete(state.ActivityTypes, date)
 		}
 	}
+	for date := range state.ActivityCountries {
+		if date < activityCutoff {
+			delete(state.ActivityCountries, date)
+		}
+	}
 	for date := range state.ActivitySeverity {
 		if date < activityCutoff {
 			delete(state.ActivitySeverity, date)
@@ -393,6 +411,10 @@ func (state *SecurityState) Report(now time.Time, days int) SecurityReport {
 		}
 	}
 	result := SecurityReport{Incomplete: state.Incomplete, ActivityHours: state.ActivityHours, ActivityDays: state.ActivityDays, ActivityTypes: state.ActivityTypes, ActivitySeverity: activitySeverity}
+	result.ActivityCountries = state.ActivityCountries
+	if result.ActivityCountries == nil {
+		result.ActivityCountries = securityCountriesByDay(state.EventBuckets)
+	}
 	cutoff := dayKey(now.AddDate(0, 0, -days+1))
 	securityCutoff := dayKey(now.AddDate(0, 0, -29))
 	countryCounts := map[string]int{}
@@ -404,8 +426,15 @@ func (state *SecurityState) Report(now time.Time, days int) SecurityReport {
 		if bucket.Hour >= 0 && bucket.Hour < len(result.EventHours) {
 			result.EventHours[bucket.Hour] += bucket.Count
 		}
-		countryCounts[bucket.Country] += bucket.Count
 		typeCounts[bucket.Category] += bucket.Count
+	}
+	for date, countries := range result.ActivityCountries {
+		if date < cutoff || date > dayKey(now) {
+			continue
+		}
+		for country, count := range countries {
+			countryCounts[country] += count
+		}
 	}
 	for _, group := range state.Groups {
 		if group.Date >= cutoff && group.Date <= dayKey(now) {
@@ -449,6 +478,19 @@ func (state *SecurityState) Report(now time.Time, days int) SecurityReport {
 		}
 		return left.Last.After(right.Last)
 	})
+	return result
+}
+
+// Older checkpoints retain country evidence in event buckets. New observations
+// keep bounded daily country totals alongside the year-long activity calendar.
+func securityCountriesByDay(buckets map[string]*SecurityEventBucket) map[string]map[string]int {
+	result := map[string]map[string]int{}
+	for _, bucket := range buckets {
+		if result[bucket.Date] == nil {
+			result[bucket.Date] = map[string]int{}
+		}
+		result[bucket.Date][bucket.Country] += bucket.Count
+	}
 	return result
 }
 func (incident Incident) Reasons() string {

@@ -580,9 +580,8 @@
       font-size:.82rem;
     }
     .security-rank-label {
-      overflow:hidden;
-      text-overflow:ellipsis;
-      white-space:nowrap;
+      overflow-wrap:anywhere;
+      white-space:normal;
       color:var(--theme-foreground);
     }
     .security-rank-track {
@@ -923,7 +922,7 @@
     <div class="security-calendar-insights">
       <section class="security-calendar-insight"><h3 class="h6" data-calendar-hour-title>{{index .T "ax_security_by_hour"}}</h3><div class="hourly-chart activity-calendar-hour-chart" data-calendar-hour-chart></div><div class="activity-calendar-details" data-calendar-details></div></section>
       <section class="security-calendar-insight security-radar-card"><h3 class="h6" data-calendar-radar-title>{{index .T "ax_security_by_type"}}</h3><svg class="security-radar" data-calendar-radar viewBox="0 0 360 320" role="img" aria-label="{{index .T "ax_security_by_type"}}"></svg><div class="security-radar-tooltip" data-calendar-radar-tooltip role="tooltip" hidden><strong data-calendar-radar-tooltip-title></strong><span data-calendar-radar-tooltip-description></span></div><div class="small text-muted text-center" data-calendar-radar-legend></div></section>
-      <section class="security-calendar-insight"><h3 class="h6">{{index .T "ax_security_by_country"}}</h3><div id="security-country-chart" class="security-rank-chart"></div></section>
+      <section class="security-calendar-insight"><div class="d-flex justify-content-between align-items-start gap-2"><h3 class="h6">{{index .T "ax_security_by_country"}}</h3><button class="btn btn-outline-secondary btn-sm" type="button" data-security-all-days>{{index .T "ax_all_days"}}</button></div><p class="small" data-security-country-period>{{index .T "ax_all_days"}}</p><div id="security-country-chart" class="security-rank-chart"></div></section>
     </div>
     <div class="mt-3">
       <div id="security-type-help" class="security-type-help">
@@ -937,6 +936,7 @@
     </div>
     <script type="application/json" id="security-hours-data">{{.SecurityHoursJSON}}</script>
     <script type="application/json" id="security-countries-data">{{.SecurityCountriesJSON}}</script>
+    <script type="application/json" data-calendar-countries>{{.SecurityActivityCountriesJSON}}</script>
     <script type="application/json" id="security-types-data">{{.SecurityTypesJSON}}</script>
     <div id="security-type-labels" hidden>
       {{range .SecurityTypeAxes}}<span data-security-type="{{.}}" data-label="{{index $.T (print "ax_risk_" .)}}" data-description="{{index $.T (print "ax_risk_desc_" .)}}"></span>{{end}}
@@ -1032,9 +1032,9 @@
       </table>
     </div>
 
-    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+    <div id="local-blocks" class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
       <div><h3 class="h6 mb-0">Local and manual blocks</h3><div class="small">{{index .T "ax_security_block_log_help"}}</div></div>
-      <input id="security-incident-search" class="form-control form-control-sm security-registry-search" type="search" placeholder="Search Incident ID, IP, domain or reason">
+      <form method="get" class="d-flex gap-2"><input type="hidden" name="analytics"><input type="hidden" name="tab" value="security"><input name="local_query" value="{{.LocalBlockPage.Query}}" class="form-control form-control-sm security-registry-search" type="search" placeholder="Search Incident ID, IP, domain or reason"><button class="btn btn-outline-secondary btn-sm">{{index .T "ax_search"}}</button></form>
     </div>
     <div class="table-responsive mb-4">
       <table class="table table-sm align-middle">
@@ -1042,7 +1042,7 @@
         <tbody>
         {{range .SecurityLocalBlocks}}
           <tr class="security-row-danger" data-security-incident-row>
-            <td><code>{{.IP}}</code><div class="small text-muted">Incident {{.IncidentID}}</div>{{if .Domain}}<div class="small"><strong>Domain:</strong> {{.Domain}}</div>{{end}}{{if or .Country .City .ClientClass}}<div class="small mt-1">{{if .Country}}{{.Country}}{{if .City}} · {{.City}}{{end}}{{end}}{{if .ClientClass}}{{if or .Country .City}} · {{end}}{{.ClientClass}}{{end}}</div>{{end}}{{if .Agent}}<div class="small text-muted text-break">{{.Agent}}</div>{{end}}</td>
+            <td><code>{{.IP}}</code><div class="small"><span data-country-code="{{.Country}}">{{if .Country}}{{.Country}}{{else}}{{index $.T "analytics_no_data"}}{{end}}</span> · {{if .City}}{{.City}}{{else}}{{index $.T "analytics_no_data"}}{{end}} · {{if .OperatingSystem}}{{.OperatingSystem}}{{else}}{{index $.T "analytics_no_data"}}{{end}}</div><div class="small text-muted">Incident {{.IncidentID}}</div>{{if .Domain}}<div class="small"><strong>Domain:</strong> {{.Domain}}</div>{{end}}{{if .ClientClass}}<div class="small">{{.ClientClass}}</div>{{end}}{{if .Agent}}<details class="small text-break"><summary>User-Agent</summary>{{.Agent}}</details>{{end}}</td>
             <td>
               <form method="post" action="?analytics&amp;tab=security" class="d-flex flex-column gap-1"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
                 <input type="hidden" name="security_action" value="update">
@@ -1052,7 +1052,7 @@
                 <button class="btn btn-outline-secondary btn-sm align-self-start">Update</button>
               </form>
               {{if .ReasonLog}}<details class="mt-2"><summary class="small">{{index $.T "ax_security_block_history"}}</summary><ul class="security-reason-log">{{range .ReasonLog}}<li>{{if ne .First .At}}{{.First.Format "2006-01-02 15:04"}} — {{end}}{{.At.Format "2006-01-02 15:04"}} · {{.Source}} · {{.Reason}} × {{.Count}}{{if .Description}} — {{.Description}}{{end}}</li>{{end}}</ul></details>{{end}}
-              {{if .ObservedRequests}}<details class="mt-2" open><summary class="small">{{index $.T "ax_security_actual_requests"}}</summary><ul class="security-reason-log">{{range .ObservedRequests}}<li><code>{{.Method}} {{.Path}}</code> · HTTP {{.Status}} · × {{.Count}}{{if ne .First .Last}} · {{.First.Format "2006-01-02 15:04"}} — {{.Last.Format "2006-01-02 15:04"}}{{else}} · {{.Last.Format "2006-01-02 15:04"}}{{end}}</li>{{end}}</ul></details>{{end}}
+              {{if .ObservedRequests}}<details class="mt-2"><summary class="small">{{index $.T "ax_security_actual_requests"}}</summary><ul class="security-reason-log">{{range .ObservedRequests}}<li><code>{{.Method}} {{.Path}}</code> · HTTP {{.Status}} · × {{.Count}}{{if ne .First .Last}} · {{.First.Format "2006-01-02 15:04"}} — {{.Last.Format "2006-01-02 15:04"}}{{else}} · {{.Last.Format "2006-01-02 15:04"}}{{end}}</li>{{end}}</ul></details>{{end}}
             </td>
             <td><span class="security-source-badge {{if eq .Source "manual"}}security-source-manual{{else}}security-source-local{{end}}">{{.Source}}</span></td>
             <td><time data-relative-time="{{.LastEvent.Format "2006-01-02T15:04:05Z07:00"}}">{{.LastEvent.Format "02 Jan 2006 15:04"}}</time></td>
@@ -1073,9 +1073,10 @@
       </table>
     </div>
 
-    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+    <nav class="d-flex align-items-center gap-3 mb-4" aria-label="{{index .T "ax_pages"}}">{{if .LocalBlockPage.PreviousURL}}<a href="{{.LocalBlockPage.PreviousURL}}">←</a>{{end}}<span>{{.LocalBlockPage.Page}} / {{.LocalBlockPage.Pages}} · {{.LocalBlockPage.Total}}</span>{{if .LocalBlockPage.NextURL}}<a href="{{.LocalBlockPage.NextURL}}">→</a>{{end}}</nav>
+    <div id="global-blocks" class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
       <div><h3 class="h6 mb-0">Global reputation registry</h3><div class="small">Read-only entries confirmed by independent SiteBrush installations.</div></div>
-      <input id="security-global-search" class="form-control form-control-sm security-registry-search" type="search" placeholder="Search global IP or reason">
+      <form method="get" class="d-flex gap-2"><input type="hidden" name="analytics"><input type="hidden" name="tab" value="security"><input name="global_query" value="{{.GlobalBlockPage.Query}}" class="form-control form-control-sm security-registry-search" type="search" placeholder="Search global IP or reason"><button class="btn btn-outline-secondary btn-sm">{{index .T "ax_search"}}</button></form>
     </div>
     <div class="table-responsive mb-4">
       <table class="table table-sm align-middle" id="security-global-table">
@@ -1083,7 +1084,7 @@
         <tbody>
         {{range .SecurityGlobalBlocks}}
           <tr class="security-row-danger" data-security-global-row data-security-incident-row>
-            <td><code>{{.IP}}</code><div class="small text-muted">Incident {{.IncidentID}}</div>{{if .Domain}}<div class="small"><strong>Domain:</strong> {{.Domain}}</div>{{end}}</td>
+            <td><code>{{.IP}}</code><div class="small"><span data-country-code="{{.Country}}">{{if .Country}}{{.Country}}{{else}}{{index $.T "analytics_no_data"}}{{end}}</span> · {{if .City}}{{.City}}{{else}}{{index $.T "analytics_no_data"}}{{end}} · {{if .OperatingSystem}}{{.OperatingSystem}}{{else}}{{index $.T "analytics_no_data"}}{{end}}</div><div class="small text-muted">Incident {{.IncidentID}}</div>{{if .Domain}}<div class="small"><strong>Domain:</strong> {{.Domain}}</div>{{end}}{{if .ClientClass}}<div class="small">{{.ClientClass}}</div>{{end}}{{if .Agent}}<details class="small text-break"><summary>User-Agent</summary>{{.Agent}}</details>{{end}}</td>
             <td>{{.Reason}}{{if .Description}}<div class="small">{{.Description}}</div>{{end}}{{if .ReasonLog}}<details><summary class="small">Reason summary</summary><ul class="security-reason-log">{{range .ReasonLog}}<li>{{if ne .First .At}}{{.First.Format "2006-01-02 15:04"}} — {{end}}{{.At.Format "2006-01-02 15:04"}} · {{.Reason}} × {{.Count}}{{if .Description}} — {{.Description}}{{end}}</li>{{end}}</ul></details>{{end}}</td>
             <td><span class="security-source-badge security-source-global">global reputation</span></td>
             <td><time data-relative-time="{{.LastEvent.Format "2006-01-02T15:04:05Z07:00"}}">{{.LastEvent.Format "02 Jan 2006 15:04"}}</time></td>
@@ -1097,8 +1098,10 @@
       </table>
     </div>
 
-    <h3 class="h6">Detected security incidents</h3>
-    {{range .Security.Incidents}}<details class="border-bottom py-2"><summary>{{if .PossibleExposure}}⚠ {{index $.T "ax_exposure"}} · {{end}}{{.IP}} · {{.Count}} · <time data-relative-time="{{.Last.Format "2006-01-02T15:04:05Z07:00"}}">{{.Last.Format "02 Jan 2006 15:04"}}</time></summary><p>{{.Country}} {{.City}} · {{.Agent}}</p><ul>{{range $category,$count:=.Categories}}<li>{{index $.T (print "ax_risk_" $category)}} × {{$count}}</li>{{end}}</ul><table class="table"><tbody>{{range .Examples}}<tr><td>{{.First.Format "15:04:05"}} — {{.Last.Format "15:04:05"}}</td><td>{{.Method}} {{.Path}}</td><td>{{.Status}}</td><td>× {{.Count}}</td></tr>{{end}}</tbody></table></details>{{else}}<p>{{index .T "ax_no_incidents"}}</p>{{end}}
+    <nav class="d-flex align-items-center gap-3 mb-4" aria-label="{{index .T "ax_pages"}}">{{if .GlobalBlockPage.PreviousURL}}<a href="{{.GlobalBlockPage.PreviousURL}}">←</a>{{end}}<span>{{.GlobalBlockPage.Page}} / {{.GlobalBlockPage.Pages}} · {{.GlobalBlockPage.Total}}</span>{{if .GlobalBlockPage.NextURL}}<a href="{{.GlobalBlockPage.NextURL}}">→</a>{{end}}</nav>
+    <h3 id="security-incidents" class="h6">Detected security incidents</h3>
+    {{range .SecurityVisibleIncidents}}<details class="border-bottom py-2"><summary>{{if .PossibleExposure}}⚠ {{index $.T "ax_exposure"}} · {{end}}{{.IP}} · <span data-country-code="{{.Country}}">{{if .Country}}{{.Country}}{{else}}{{index $.T "analytics_no_data"}}{{end}}</span> · {{if .City}}{{.City}}{{else}}{{index $.T "analytics_no_data"}}{{end}} · {{if .OperatingSystem}}{{.OperatingSystem}}{{else}}{{index $.T "analytics_no_data"}}{{end}} · {{.Count}} · <time data-relative-time="{{.Last.Format "2006-01-02T15:04:05Z07:00"}}">{{.Last.Format "02 Jan 2006 15:04"}}</time></summary><p>{{.Country}} {{.City}} · {{.Agent}}</p><ul>{{range $category,$count:=.Categories}}<li>{{index $.T (print "ax_risk_" $category)}} × {{$count}}</li>{{end}}</ul><table class="table"><tbody>{{range .Examples}}<tr><td>{{.First.Format "15:04:05"}} — {{.Last.Format "15:04:05"}}</td><td>{{.Method}} {{.Path}}</td><td>{{.Status}}</td><td>× {{.Count}}</td></tr>{{end}}</tbody></table></details>{{else}}<p>{{index .T "ax_no_incidents"}}</p>{{end}}
+    <nav class="d-flex align-items-center gap-3 mt-3" aria-label="{{index .T "ax_pages"}}">{{if .IncidentPage.PreviousURL}}<a href="{{.IncidentPage.PreviousURL}}">←</a>{{end}}<span>{{.IncidentPage.Page}} / {{.IncidentPage.Pages}} · {{.IncidentPage.Total}}</span>{{if .IncidentPage.NextURL}}<a href="{{.IncidentPage.NextURL}}">→</a>{{end}}</nav>
   </div></section>
   {{end}}
 </div>
@@ -1281,9 +1284,6 @@
   }
 
   renderHourlyChart('security-hour-chart', parseJSON('security-hours-data', []));
-  renderRankChart('security-country-chart', parseJSON('security-countries-data', []), function countryLabel(label) {
-    return label === 'unknown' ? 'No data' : label;
-  });
   renderRankChart('security-type-chart', parseJSON('security-types-data', []), function typeLabel(label) {
     return typeLabels.get(label) || label;
   });
@@ -1313,18 +1313,6 @@
     return Math.min(4, Math.max(1, Math.ceil(count * 4 / maximum)));
   }
 
-  function securityActivityColor(level, intensity) {
-    const colorsByLevel = {
-      0: ['#ebedf0', '#ebedf0', '#ebedf0', '#ebedf0'],
-      1: ['#dcfce7', '#86efac', '#4ade80', '#16a34a'],
-      2: ['#fef3c7', '#fcd34d', '#fbbf24', '#eab308'],
-      3: ['#ffedd5', '#fdba74', '#fb923c', '#f97316'],
-      4: ['#fecaca', '#f87171', '#ef4444', '#b91c1c']
-    };
-    const colors = colorsByLevel[Math.max(0, Math.min(4, Number(level) || 0))];
-    const colorIndex = Math.max(0, Math.min(3, (Number(intensity) || 1) - 1));
-    return colors[colorIndex];
-  }
 
   const securityTypeColors = {
     'rapid-crawl': '#2563eb',
@@ -1355,6 +1343,12 @@
     const hourCounts = readData(calendar, '[data-calendar-hours]', {});
     const details = readData(calendar, '[data-calendar-details-data]', []);
     const activityTypes = readData(calendar, '[data-calendar-types]', {});
+    const activityCountries = readData(calendar, '[data-calendar-countries]', {});
+    const overallCountries = readData(calendar, '#security-countries-data', []);
+    const countryChart = calendar.querySelector('#security-country-chart');
+    const countryPeriod = calendar.querySelector('[data-security-country-period]');
+    const allDaysButton = calendar.querySelector('[data-security-all-days]');
+    const countryModel = {selectedDay: null};
     const severityLevels = readData(calendar, '[data-calendar-severity]', {});
     const calendarGrid = calendar.querySelector('[data-calendar-grid]');
     const yearTabs = calendar.querySelector('[data-calendar-years]');
@@ -1383,6 +1377,61 @@
       typeLabels.set(labelElement.dataset.securityType || '', labelElement.dataset.label || labelElement.dataset.securityType || '');
       typeDescriptions.set(labelElement.dataset.securityType || '', labelElement.dataset.description || '');
     }
+
+    for (const explanation of calendar.querySelectorAll('[data-security-type-help]')) {
+      const heading = explanation.querySelector('strong');
+      if (heading) {
+        heading.style.borderBottom = '3px solid ' + securityTypeColor(explanation.dataset.securityTypeHelp);
+        heading.style.paddingBottom = '4px';
+      }
+    }
+
+    function countryName(countryCode) {
+      if (!countryCode || countryCode === 'unknown') return calendar.dataset.emptyText || 'No data';
+      try {
+        if (/^[A-Za-z]{2}$/.test(countryCode) && typeof Intl.DisplayNames === 'function') {
+          return new Intl.DisplayNames([document.documentElement.lang || 'en'], {type:'region'}).of(countryCode.toUpperCase());
+        }
+      } catch (countryError) { console.error('SiteBrush security: country label', countryError); }
+      return countryCode;
+    }
+
+    function renderCountries() {
+      if (!countryChart) return;
+      const selectedDay = countryModel.selectedDay;
+      const countryRows = selectedDay === null ? overallCountries : Object.entries(activityCountries[selectedDay] || {}).map(function countryCount(entry) { return {Label:entry[0], Count:entry[1]}; });
+      const orderedCountries = countryRows.slice().sort(function orderCountries(left, right) { return right.Count-left.Count || left.Label.localeCompare(right.Label); });
+      countryChart.replaceChildren();
+      const maximum = orderedCountries.reduce(function largestCountryCount(highest, country) { return Math.max(highest, Number(country.Count)||0); }, 0);
+      const total = orderedCountries.reduce(function totalCountryCount(sum, country) { return sum+(Number(country.Count)||0); }, 0);
+      countryPeriod.textContent = (selectedDay || allDaysButton.textContent) + ' · ' + total;
+      allDaysButton.disabled = selectedDay === null;
+      if (orderedCountries.length === 0) { countryChart.textContent = calendar.dataset.emptyText || 'No data'; return; }
+      for (const country of orderedCountries) {
+        const countryRow = document.createElement('div');
+        countryRow.className = 'security-rank-row';
+        const countryLabel = document.createElement('span');
+        countryLabel.className = 'security-rank-label';
+        countryLabel.textContent = countryName(country.Label);
+        const track = document.createElement('span');
+        track.className = 'security-rank-track';
+        const fill = document.createElement('span');
+        fill.className = 'security-rank-fill';
+        fill.style.width = (maximum > 0 ? country.Count*100/maximum : 0) + '%';
+        track.appendChild(fill);
+        const count = document.createElement('span');
+        count.className = 'security-rank-value';
+        count.textContent = String(country.Count);
+        countryRow.append(countryLabel, track, count);
+        countryChart.appendChild(countryRow);
+      }
+    }
+
+    if (allDaysButton) allDaysButton.addEventListener('click', function showAllCountries() {
+      countryModel.selectedDay = null;
+      renderCountries();
+    });
+    renderCountries();
 
     if (securityLegendDescription) {
       const legendHint = securityLegendDescription.textContent;
@@ -1479,14 +1528,33 @@
         radar.appendChild(label);
       });
       if (hasData) {
-        const selectedLevel = Number(severityLevels[dayKey]) || 1;
+        const definitions = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+        const gradient = document.createElementNS('http://www.w3.org/2000/svg', 'linearGradient');
+        gradient.id = 'security-selected-day-colors';
+        gradient.setAttribute('gradientUnits', 'userSpaceOnUse');
+        gradient.setAttribute('x1', '76'); gradient.setAttribute('y1', '46');
+        gradient.setAttribute('x2', '284'); gradient.setAttribute('y2', '254');
+        let colorOffset = 0;
+        for (const category of categories) {
+          const categoryCount = Math.max(0, Number(selectedCategories[category]) || 0);
+          if (categoryCount === 0) continue;
+          for (const offset of [colorOffset, colorOffset+categoryCount/dailyTotal]) {
+            const colorStop = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
+            colorStop.setAttribute('offset', String(offset*100)+'%');
+            colorStop.setAttribute('stop-color', securityTypeColor(category));
+            gradient.appendChild(colorStop);
+          }
+          colorOffset += categoryCount/dailyTotal;
+        }
+        definitions.appendChild(gradient);
+        radar.appendChild(definitions);
         const polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
         polygon.setAttribute('points', categories.map(function categoryPoint(category, index) {
           return point(index, Math.max(0, Number(selectedCategories[category]) || 0) / dailyTotal).join(',');
         }).join(' '));
-        polygon.setAttribute('fill', securityActivityColor(selectedLevel, 4));
+        polygon.setAttribute('fill', 'url(#security-selected-day-colors)');
         polygon.setAttribute('fill-opacity', '0.17');
-        polygon.setAttribute('stroke', securityActivityColor(selectedLevel, 4));
+        polygon.setAttribute('stroke', 'url(#security-selected-day-colors)');
         polygon.setAttribute('stroke-width', '2');
         radar.appendChild(polygon);
         categories.forEach(function addPoint(category, index) {
@@ -1529,6 +1597,8 @@
       dayButton.title = formatDate(dayKey) + ' · ' + count;
       dayButton.setAttribute('aria-label', dayButton.title);
       dayButton.addEventListener('click', function selectDay() {
+        countryModel.selectedDay = dayKey;
+        renderCountries();
         renderHours(dayKey);
       });
       calendarGrid.appendChild(dayButton);
@@ -1966,20 +2036,16 @@
 
 
 <script>
-(function wireSecuritySearch() {
-  function wire(inputID, selector) {
-    const searchInput = document.getElementById(inputID);
-    if (!searchInput) return;
-    const rows = Array.from(document.querySelectorAll(selector));
-    searchInput.addEventListener('input', function () {
-      const query = searchInput.value.trim().toLowerCase();
-      for (const row of rows) {
-        row.hidden = query !== '' && !row.textContent.toLowerCase().includes(query);
-      }
-    });
+(function renderSecurityCountryNames() {
+  let countryNames;
+  try {
+    if (typeof Intl.DisplayNames === 'function') countryNames = new Intl.DisplayNames([document.documentElement.lang || 'en'], {type:'region'});
+  } catch (countryError) { console.error('SiteBrush security: country labels', countryError); }
+  for (const countryLabel of document.querySelectorAll('[data-country-code]')) {
+    const countryCode = countryLabel.dataset.countryCode;
+    if (!countryNames || !/^[A-Za-z]{2}$/.test(countryCode || '')) continue;
+    countryLabel.textContent = countryNames.of(countryCode.toUpperCase());
   }
-  wire('security-incident-search', '[data-security-incident-row]');
-  wire('security-global-search', '[data-security-global-row]');
 })();
 </script>
 <script>

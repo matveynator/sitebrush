@@ -1083,7 +1083,7 @@ func (dispatcher *serverControlDatabaseDispatcher) execute(ctx context.Context, 
 }
 
 func (dispatcher *serverControlDatabaseDispatcher) Close() error {
-	return dispatcher.closeWithin(10 * time.Second)
+	return dispatcher.closeWithin(0)
 }
 
 func (dispatcher *serverControlDatabaseDispatcher) closeWithin(timeout time.Duration) error {
@@ -1102,19 +1102,23 @@ func (dispatcher *serverControlDatabaseDispatcher) closeWithin(timeout time.Dura
 func (dispatcher *serverControlDatabaseDispatcher) runCloser() {
 	request := <-dispatcher.closeRequests
 	close(dispatcher.stop)
-	// A library call may outlive its subscriber. Bound shutdown rather than
-	// letting one unfinished database operation hold the process indefinitely.
+	// Normal shutdown waits for every owner to release its connection. An
+	// explicit diagnostic deadline reports unfinished workers without hiding it.
 	pending := map[string]bool{"writer": true}
 	for index := range serverControlDatabaseReaderCount {
 		pending[fmt.Sprintf("reader-%d", index+1)] = true
 	}
-	timer := time.NewTimer(request.timeout)
-	defer timer.Stop()
+	var deadline <-chan time.Time
+	if request.timeout > 0 {
+		timer := time.NewTimer(request.timeout)
+		defer timer.Stop()
+		deadline = timer.C
+	}
 	for len(pending) > 0 {
 		select {
 		case worker := <-dispatcher.workersDone:
 			delete(pending, worker)
-		case <-timer.C:
+		case <-deadline:
 			workers := make([]string, 0, len(pending))
 			for worker := range pending {
 				workers = append(workers, worker)
@@ -6536,6 +6540,67 @@ type analyticsSecurityBlockView struct {
 	ObservedRequests                  []browserstats.Probe
 }
 
+func (block analyticsSecurityBlockView) OperatingSystem() string {
+	if block.Agent == "" {
+		return ""
+	}
+	name := analyticsOSName(block.Agent)
+	if name == "Other" {
+		return ""
+	}
+	return name
+}
+
+type analyticsSecurityPagination struct {
+	Page, Pages, Total          int
+	Query, PreviousURL, NextURL string
+}
+
+type analyticsSecurityIncidentView struct {
+	browserstats.Incident
+	OperatingSystem string
+}
+
+func analyticsSecurityPage(r *http.Request, pageKey, queryKey, anchor string, total int) (analyticsSecurityPagination, int, int) {
+	const pageSize = 25
+	pages := max(1, (total+pageSize-1)/pageSize)
+	requested, _ := strconv.Atoi(r.URL.Query().Get(pageKey))
+	page := min(pages, max(1, requested))
+	result := analyticsSecurityPagination{Page: page, Pages: pages, Total: total, Query: browserstats.CleanText(r.URL.Query().Get(queryKey), 256)}
+	pageURL := func(number int) string {
+		query := r.URL.Query()
+		query.Set(pageKey, strconv.Itoa(number))
+		return r.URL.Path + "?" + query.Encode() + "#" + anchor
+	}
+	if page > 1 {
+		result.PreviousURL = pageURL(page - 1)
+	}
+	if page < pages {
+		result.NextURL = pageURL(page + 1)
+	}
+	start := (page - 1) * pageSize
+	return result, start, min(total, start+pageSize)
+}
+
+func analyticsSecurityBlockPage(r *http.Request, blocks []analyticsSecurityBlockView, pageKey, queryKey, anchor string) ([]analyticsSecurityBlockView, analyticsSecurityPagination) {
+	query := strings.ToLower(browserstats.CleanText(r.URL.Query().Get(queryKey), 256))
+	filtered := make([]analyticsSecurityBlockView, 0, len(blocks))
+	for _, block := range blocks {
+		searchable := strings.Join([]string{block.IP, block.IncidentID, block.Domain, block.Reason, block.Description, block.Country, block.City, block.Agent, block.OperatingSystem()}, " ")
+		if query == "" || strings.Contains(strings.ToLower(searchable), query) {
+			filtered = append(filtered, block)
+		}
+	}
+	sort.Slice(filtered, func(left, right int) bool {
+		if filtered[left].LastEvent.Equal(filtered[right].LastEvent) {
+			return filtered[left].IP < filtered[right].IP
+		}
+		return filtered[left].LastEvent.After(filtered[right].LastEvent)
+	})
+	pagination, start, end := analyticsSecurityPage(r, pageKey, queryKey, anchor, len(filtered))
+	return filtered[start:end], pagination
+}
+
 func analyticsSelectedTab(r *http.Request) string {
 	tab := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("tab")))
 	if tab == "security" {
@@ -6660,6 +6725,38 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		}
 		securityLocalBlocks = append(securityLocalBlocks, view)
 	}
+	securityLocalBlocks, localBlockPage := analyticsSecurityBlockPage(r, securityLocalBlocks, "local_page", "local_query", "local-blocks")
+	securityGlobalBlocks, globalBlockPage := analyticsSecurityBlockPage(r, securityGlobalBlocks, "global_page", "global_query", "global-blocks")
+	// GeoIP is a boundary lookup for only the displayed rows, with one small budget.
+	if a.geoIP != nil {
+		geoBoundary, cancelGeo := context.WithTimeout(r.Context(), 100*time.Millisecond)
+		for _, blocks := range [][]analyticsSecurityBlockView{securityLocalBlocks, securityGlobalBlocks} {
+			for index := range blocks {
+				if geoBoundary.Err() != nil {
+					break
+				}
+				if blocks[index].Country != "" && blocks[index].City != "" {
+					continue
+				}
+				if location, found := a.geoIP.Lookup(geoBoundary, blocks[index].IP); found {
+					blocks[index].Country = location.CountryCode
+					blocks[index].City = location.City
+				}
+			}
+		}
+		cancelGeo()
+	}
+	sort.Slice(security.Incidents, func(left, right int) bool {
+		if security.Incidents[left].Last.Equal(security.Incidents[right].Last) {
+			return security.Incidents[left].IP < security.Incidents[right].IP
+		}
+		return security.Incidents[left].Last.After(security.Incidents[right].Last)
+	})
+	incidentPage, incidentStart, incidentEnd := analyticsSecurityPage(r, "incident_page", "", "security-incidents", len(security.Incidents))
+	visibleIncidents := make([]analyticsSecurityIncidentView, 0, incidentEnd-incidentStart)
+	for _, incident := range security.Incidents[incidentStart:incidentEnd] {
+		visibleIncidents = append(visibleIncidents, analyticsSecurityIncidentView{Incident: incident, OperatingSystem: (analyticsSecurityBlockView{Agent: incident.Agent}).OperatingSystem()})
+	}
 	unknownGeo := 0
 	for _, session := range experience.Recent {
 		if !session.GeoKnown {
@@ -6700,6 +6797,7 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 	securityActivityDaysJSON, _ := json.Marshal(security.ActivityDays)
 	securityActivityHoursJSON, _ := json.Marshal(security.ActivityHours)
 	securityActivityTypesJSON, _ := json.Marshal(security.ActivityTypes)
+	securityActivityCountriesJSON, _ := json.Marshal(security.ActivityCountries)
 	securityActivitySeverityJSON, _ := json.Marshal(security.ActivitySeverity)
 	activitySessions := make([]analyticsActivitySession, 0, len(experience.Recent))
 	for _, session := range experience.Recent {
@@ -6712,6 +6810,8 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 	}
 	securityIncidentsJSON, _ := json.Marshal(securityActivityIncidents)
 	a.render(w, r, "analytics.html", map[string]any{
+		"LocalBlockPage": localBlockPage, "GlobalBlockPage": globalBlockPage, "IncidentPage": incidentPage,
+		"SecurityVisibleIncidents": visibleIncidents, "SecurityActivityCountriesJSON": template.JS(securityActivityCountriesJSON),
 		"ReturnPath":       requestedReturnPath(r),
 		"AnalyticsTab":     selectedTab,
 		"Report":           analyticsReportView(report, translationsForRequest(r)),
@@ -7801,17 +7901,38 @@ func signalAwareContext(parent context.Context) (context.Context, context.Cancel
 	ctx, cancel := context.WithCancel(parent)
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, shutdownsignals.ServerShutdownSignals()...)
+	stopRequests := make(chan struct{})
+	finished := make(chan struct{})
 	go func() {
 		defer signal.Stop(signals)
-		select {
-		case receivedSignal := <-signals:
-			log.Printf("%sSHUTDOWN%s signal=%s received", terminalYellow(), terminalReset(), receivedSignal)
-			cancel()
-		case <-ctx.Done():
+		defer close(finished)
+		parentStopped := parent.Done()
+		shuttingDown := false
+		for {
+			select {
+			case receivedSignal := <-signals:
+				if shuttingDown {
+					log.Printf("%sSHUTDOWN%s repeated signal=%s; forcing process exit", terminalRed(), terminalReset(), receivedSignal)
+					os.Exit(130)
+				}
+				shuttingDown = true
+				log.Printf("%sSHUTDOWN%s signal=%s received", terminalYellow(), terminalReset(), receivedSignal)
+				cancel()
+			case <-parentStopped:
+				parentStopped = nil
+				shuttingDown = true
+				cancel()
+			case <-stopRequests:
+				return
+			}
 		}
 	}()
 	return ctx, func() {
-		signal.Stop(signals)
+		select {
+		case stopRequests <- struct{}{}:
+		case <-finished:
+		}
+		<-finished
 		cancel()
 	}
 }
