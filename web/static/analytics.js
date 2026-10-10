@@ -168,7 +168,7 @@
             referrer.password = '';
             referrer.hash = '';
             removeSensitiveParameters(referrer.searchParams, false);
-            return boundedText(referrer.href, 256);
+            return boundedText(referrer.href, 1024);
         } catch (referrerError) {
             console.debug('SiteBrush analytics: invalid referrer', referrerError.name);
             return '';

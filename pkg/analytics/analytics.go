@@ -409,7 +409,9 @@ func (site *Site) Record(event Event, now time.Time, limit int64) bool {
 		daily.Views++
 		observation.Views++
 		increment(daily.Pages, event.Path)
-		increment(daily.Sources, visitor.SessionSource)
+		if visitor.SessionViews == 1 {
+			increment(daily.Sources, visitor.SessionSource)
+		}
 		page := visitor.Pages[event.Path]
 		if page == nil {
 			if len(visitor.Pages) >= MaximumPages {
@@ -661,5 +663,5 @@ func Valid(event Event) bool {
 			return false
 		}
 	}
-	return strings.HasPrefix(event.Path, "/") && len(event.Path) <= 512 && !strings.ContainsAny(event.Path, "?#\r\n") && len(event.Source) <= 128 && len(event.Referrer) <= 256
+	return strings.HasPrefix(event.Path, "/") && len(event.Path) <= 512 && !strings.ContainsAny(event.Path, "?#\r\n") && len(event.Source) <= 128 && len(event.Referrer) <= 1024
 }

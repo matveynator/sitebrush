@@ -6,12 +6,12 @@ import (
 )
 
 func TestExperienceMeasureFormatting(t *testing.T) {
-	metrics := Measures{GoalSessions: 1, Sessions: 4, ActionViews: 2, Views: 4, ProgressViews: 3, EndViews: 1, CompletedViews: 2, Scroll50: 2, ActiveMS: 5000}
+	metrics := Measures{GoalSessions: 1, Sessions: 4, PageSessions: 4, ActionSessions: 2, NextSessions: 3, EndSessions: 1, CompletedSessions: 2, Views: 4, Scroll50: 2, ActiveMS: 5000}
 	checks := map[string]string{
 		metrics.GoalRate(): "25.0% (1/4)", metrics.ActionRate(): "50.0% (2/4)", metrics.NextRate(): "75.0% (3/4)",
 		metrics.EndRate(): "50.0% (1/2)", metrics.ScrollRate(): "50.0% (2/4)", metrics.AverageActive(): "1.2 s",
 		(SessionSummary{ActiveMS: 1250}).Active():            "1.2 s",
-		(SessionSummary{}).ReturnAfter():                     "—",
+		(SessionSummary{}).ReturnAfter():                     "No data",
 		(SessionSummary{ReturnAfterMS: 30000}).ReturnAfter(): "1m",
 		(SessionSummary{ReturnAfterMS: int64(2*time.Hour+15*time.Minute) / int64(time.Millisecond)}).ReturnAfter(): "2h 15m",
 		(SessionSummary{ReturnAfterMS: int64(26*time.Hour+5*time.Hour) / int64(time.Millisecond)}).ReturnAfter():   "1d 7h",
@@ -22,7 +22,7 @@ func TestExperienceMeasureFormatting(t *testing.T) {
 			t.Errorf("formatted %q, want %q", got, want)
 		}
 	}
-	if (Measures{}).GoalRate() != "—" || (Measures{}).AverageActive() != "—" {
+	if (Measures{}).GoalRate() != "No data" || (Measures{}).AverageActive() != "No data" {
 		t.Fatal("zero denominator should be unavailable")
 	}
 }

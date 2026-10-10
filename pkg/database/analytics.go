@@ -82,16 +82,21 @@ func (db *Database) UpsertAnalyticsSession(ctx context.Context, session Analytic
 		return fmt.Errorf("nil database")
 	}
 	return db.withSerializedConnectionFor(ctx, WorkloadGeneral, func(ctx context.Context, conn *sql.DB) error {
-		query := fmt.Sprintf(`SELECT display_name, last_seen_at, visit_count, visitor_number FROM analytics_sessions WHERE session_id = %s ORDER BY last_seen_at DESC LIMIT 1`, placeholder(dbType, 1))
+		query := fmt.Sprintf(`SELECT display_name, last_seen_at, visit_count, visitor_number, referer FROM analytics_sessions WHERE session_id = %s ORDER BY last_seen_at DESC LIMIT 1`, placeholder(dbType, 1))
 		var (
-			existingName  string
-			lastSeen      sql.NullInt64
-			visitCount    sql.NullInt64
-			visitorNumber sql.NullInt64
+			existingName    string
+			lastSeen        sql.NullInt64
+			visitCount      sql.NullInt64
+			visitorNumber   sql.NullInt64
+			existingReferer sql.NullString
 		)
-		err := conn.QueryRowContext(ctx, query, session.SessionID).Scan(&existingName, &lastSeen, &visitCount, &visitorNumber)
+		err := conn.QueryRowContext(ctx, query, session.SessionID).Scan(&existingName, &lastSeen, &visitCount, &visitorNumber, &existingReferer)
 		if err != nil && err != sql.ErrNoRows {
 			return err
+		}
+		// Subsequent file or internal requests cannot erase acquisition evidence.
+		if existingReferer.String != "" {
+			session.Referer = existingReferer.String
 		}
 
 		now := session.LastSeenAt
@@ -334,7 +339,7 @@ func (db *Database) QueryAnalyticsSummary(ctx context.Context, start, end int64,
 		if err != nil {
 			return err
 		}
-		summary.TopReferrers, err = queryTopList(ctx, conn, dbType, `SELECT referer, COUNT(*) FROM analytics_events WHERE occurred_at >= %s AND occurred_at < %s AND referer != '' GROUP BY referer ORDER BY COUNT(*) DESC LIMIT %s`, start, end, limit)
+		summary.TopReferrers, err = queryTopList(ctx, conn, dbType, `SELECT referer, COUNT(DISTINCT session_id) FROM analytics_events WHERE occurred_at >= %s AND occurred_at < %s AND referer != '' GROUP BY referer ORDER BY COUNT(DISTINCT session_id) DESC LIMIT %s`, start, end, limit)
 		if err != nil {
 			return err
 		}

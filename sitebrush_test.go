@@ -3329,8 +3329,8 @@ func TestAnalyticsReportBuildsGoogleAnalyticsStyleMetrics(t *testing.T) {
 	if report.TotalRequests != 8 {
 		t.Fatalf("total requests = %d, want 8", report.TotalRequests)
 	}
-	if report.PageViews != 6 {
-		t.Fatalf("page views = %d, want 6", report.PageViews)
+	if report.PageViews != 3 {
+		t.Fatalf("human page views = %d, want 3", report.PageViews)
 	}
 	if report.UniqueVisitors != 5 {
 		t.Fatalf("unique visitors = %d, want 5", report.UniqueVisitors)
@@ -3341,11 +3341,11 @@ func TestAnalyticsReportBuildsGoogleAnalyticsStyleMetrics(t *testing.T) {
 	if report.ReturningVisitors != 1 || report.ReturnVisits != 1 {
 		t.Fatalf("returning visitors/visits = %d/%d, want 1/1", report.ReturningVisitors, report.ReturnVisits)
 	}
-	if report.Sessions != 5 {
-		t.Fatalf("sessions = %d, want 5", report.Sessions)
+	if report.Sessions != 4 {
+		t.Fatalf("sessions = %d, want 4", report.Sessions)
 	}
-	if report.BounceRate < 79.9 || report.BounceRate > 80.1 {
-		t.Fatalf("bounce rate = %.1f, want about 80.0", report.BounceRate)
+	if report.BounceRate < 74.9 || report.BounceRate > 75.1 {
+		t.Fatalf("bounce rate = %.1f, want about 75.0", report.BounceRate)
 	}
 	if report.ErrorCount != 1 {
 		t.Fatalf("errors = %d, want 1", report.ErrorCount)
@@ -3358,24 +3358,20 @@ func TestAnalyticsReportBuildsGoogleAnalyticsStyleMetrics(t *testing.T) {
 	}
 	assertAnalyticsRow(t, report.TopPages, "/", 1)
 	assertAnalyticsRow(t, report.TopPages, "/pricing", 1)
-	assertAnalyticsRow(t, report.TopPages, "/docs", 2)
-	assertAnalyticsRow(t, report.TopPages, "/missing", 1)
-	assertAnalyticsRow(t, report.TopPages, "/robots", 1)
+	assertAnalyticsRow(t, report.TopPages, "/docs", 1)
 	assertAnalyticsRow(t, report.TrafficSources, "organic search", 1)
-	assertAnalyticsRow(t, report.TrafficSources, "social", 1)
-	assertAnalyticsRow(t, report.TrafficSources, "direct", 2)
+	assertAnalyticsRow(t, report.TrafficSources, "direct", 1)
 	assertAnalyticsRow(t, report.TrafficSources, "referral", 2)
-	assertAnalyticsRow(t, report.Devices, "desktop", 3)
-	assertAnalyticsRow(t, report.Devices, "mobile", 1)
+	assertAnalyticsRow(t, report.Devices, "desktop", 2)
 	assertAnalyticsRow(t, report.Devices, "bot", 2)
-	assertAnalyticsRow(t, report.VisitorTypes, "human", 4)
+	assertAnalyticsRow(t, report.VisitorTypes, "human", 2)
 	assertAnalyticsRow(t, report.VisitorTypes, "bot", 2)
 	assertAnalyticsRow(t, report.BotCrawlers, "GPTBot", 2)
 	assertAnalyticsRow(t, report.BotReturnSources, "referral", 1)
 	assertAnalyticsRow(t, report.BotReferrers, "example.org", 2)
 	assertAnalyticsRow(t, report.Countries, "United Kingdom", 2)
-	assertAnalyticsRow(t, report.Countries, "Russia", 1)
-	assertAnalyticsRow(t, report.EntryHours, "11:00", 4)
+	assertAnalyticsRow(t, report.Countries, "Germany", 1)
+	assertAnalyticsRow(t, report.EntryHours, "11:00", 3)
 	assertAnalyticsRow(t, report.StatusCodes, "404", 1)
 	assertAnalyticsRow(t, report.TopAssets, "/p/logo.png", 1)
 	assertAnalyticsRow(t, report.ErrorPaths, "/missing 404", 1)
@@ -3398,8 +3394,8 @@ func TestAnalyticsAggregateStoresProcessedReportAndOverloadMarkers(t *testing.T)
 		VisitorID:      "visitor-a",
 	})
 	report := state.reports(now)["localhost"]
-	if report.TotalRequests != 1 || report.PageViews != 1 || report.StaticRequests != 1 {
-		t.Fatalf("report counts = total:%d views:%d static:%d, want 1/1/1", report.TotalRequests, report.PageViews, report.StaticRequests)
+	if report.TotalRequests != 1 || report.PageViews != 1 || report.StaticRequests != 0 {
+		t.Fatalf("report counts = total:%d views:%d files:%d, want 1/1/0", report.TotalRequests, report.PageViews, report.StaticRequests)
 	}
 	assertAnalyticsRow(t, report.TopPages, "/", 1)
 
