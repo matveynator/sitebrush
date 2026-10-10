@@ -916,12 +916,17 @@ type serverControlDatabaseAccessRequest struct {
 	run      func(*sql.DB) error
 }
 
+type serverControlDatabaseCloseRequest struct {
+	reply   chan error
+	timeout time.Duration
+}
+
 type serverControlDatabaseDispatcher struct {
 	readRequests  chan serverControlDatabaseAccessRequest
 	writeRequests chan serverControlDatabaseAccessRequest
 	stop          chan struct{}
-	workersDone   chan struct{}
-	closeRequests chan chan struct{}
+	workersDone   chan string
+	closeRequests chan serverControlDatabaseCloseRequest
 	stopped       chan struct{}
 }
 
@@ -954,8 +959,8 @@ func startServerControlDatabaseDispatcher(databasePath string, debug bool) (*ser
 		readRequests:  make(chan serverControlDatabaseAccessRequest, 256),
 		writeRequests: make(chan serverControlDatabaseAccessRequest, 128),
 		stop:          make(chan struct{}),
-		workersDone:   make(chan struct{}, serverControlDatabaseReaderCount+1),
-		closeRequests: make(chan chan struct{}),
+		workersDone:   make(chan string, serverControlDatabaseReaderCount+1),
+		closeRequests: make(chan serverControlDatabaseCloseRequest),
 		stopped:       make(chan struct{}),
 	}
 	go dispatcher.runWorker(writerDatabase, dispatcher.writeRequests, "writer", debug)
@@ -994,7 +999,7 @@ func openServerControlDatabaseHandle(databasePath string, writer bool) (*sql.DB,
 func (dispatcher *serverControlDatabaseDispatcher) runWorker(database *sql.DB, requests <-chan serverControlDatabaseAccessRequest, workerName string, debug bool) {
 	defer func() {
 		_ = database.Close()
-		dispatcher.workersDone <- struct{}{}
+		dispatcher.workersDone <- workerName
 	}()
 	for {
 		select {
@@ -1002,6 +1007,8 @@ func (dispatcher *serverControlDatabaseDispatcher) runWorker(database *sql.DB, r
 			return
 		case request := <-requests:
 			select {
+			case <-dispatcher.stop:
+				return
 			case <-request.ctx.Done():
 				select {
 				case request.reply <- request.ctx.Err():
@@ -1075,38 +1082,51 @@ func (dispatcher *serverControlDatabaseDispatcher) execute(ctx context.Context, 
 	}
 }
 
-func (dispatcher *serverControlDatabaseDispatcher) Close() {
+func (dispatcher *serverControlDatabaseDispatcher) Close() error {
+	return dispatcher.closeWithin(10 * time.Second)
+}
+
+func (dispatcher *serverControlDatabaseDispatcher) closeWithin(timeout time.Duration) error {
 	if dispatcher == nil {
-		return
+		return nil
 	}
-	reply := make(chan struct{})
+	reply := make(chan error, 1)
 	select {
-	case dispatcher.closeRequests <- reply:
+	case dispatcher.closeRequests <- serverControlDatabaseCloseRequest{reply: reply, timeout: timeout}:
 	case <-dispatcher.stopped:
-		return
+		return nil
 	}
-	select {
-	case <-reply:
-	case <-dispatcher.stopped:
-	}
+	return <-reply
 }
 
 func (dispatcher *serverControlDatabaseDispatcher) runCloser() {
-	reply := <-dispatcher.closeRequests
+	request := <-dispatcher.closeRequests
 	close(dispatcher.stop)
-	for range serverControlDatabaseReaderCount + 1 {
-		<-dispatcher.workersDone
+	// A library call may outlive its subscriber. Bound shutdown rather than
+	// letting one unfinished database operation hold the process indefinitely.
+	pending := map[string]bool{"writer": true}
+	for index := range serverControlDatabaseReaderCount {
+		pending[fmt.Sprintf("reader-%d", index+1)] = true
 	}
-	for {
+	timer := time.NewTimer(request.timeout)
+	defer timer.Stop()
+	for len(pending) > 0 {
 		select {
-		case <-dispatcher.readRequests:
-		case <-dispatcher.writeRequests:
-		default:
+		case worker := <-dispatcher.workersDone:
+			delete(pending, worker)
+		case <-timer.C:
+			workers := make([]string, 0, len(pending))
+			for worker := range pending {
+				workers = append(workers, worker)
+			}
+			sort.Strings(workers)
 			close(dispatcher.stopped)
-			close(reply)
+			request.reply <- fmt.Errorf("server control database shutdown timed out after %s; unfinished workers: %s", request.timeout, strings.Join(workers, ", "))
 			return
 		}
 	}
+	close(dispatcher.stopped)
+	request.reply <- nil
 }
 
 // siteFileDatabase owns one writer and a fixed set of readers. All callers
@@ -7782,6 +7802,7 @@ func signalAwareContext(parent context.Context) (context.Context, context.Cancel
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, shutdownsignals.ServerShutdownSignals()...)
 	go func() {
+		defer signal.Stop(signals)
 		select {
 		case receivedSignal := <-signals:
 			log.Printf("%sSHUTDOWN%s signal=%s received", terminalYellow(), terminalReset(), receivedSignal)
@@ -7867,7 +7888,10 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application.controlDatabase = controlDatabaseDispatcher
 	defer func() {
 		logShutdownStep("closing server control database dispatcher")
-		controlDatabaseDispatcher.Close()
+		if closeErr := controlDatabaseDispatcher.Close(); closeErr != nil {
+			log.Printf("%sSHUTDOWN%s %v", terminalRed(), terminalReset(), closeErr)
+			return
+		}
 		logShutdownDone("server control database dispatcher closed")
 	}()
 	application.startTLSHandshakeNoiseProcess(ctx.Done())
