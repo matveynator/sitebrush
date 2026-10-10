@@ -84,6 +84,8 @@ type SecurityReport struct {
 }
 
 type BlockedReturn struct {
+	Latitude, Longitude      float64
+	GeoKnown                 bool
 	IP, Country, City, Agent string
 	First, Last              time.Time
 	Requests, Visits         int
@@ -129,6 +131,9 @@ func (state *SecurityState) recordBlockedReturn(request RequestObservation) {
 		observation.City = CleanText(request.City, 64)
 	}
 	observation.Agent = CleanText(request.Agent, 128)
+	if request.GeoKnown {
+		observation.Latitude, observation.Longitude, observation.GeoKnown = request.Latitude, request.Longitude, true
+	}
 }
 
 // Names identify client claims. User-Agent alone cannot authenticate a crawler.

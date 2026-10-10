@@ -6829,8 +6829,10 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		allowedIPs[entry.IP] = true
 	}
 	repeatRequests := map[string]int{}
+	returnsByIP := map[string]browserstats.BlockedReturn{}
 	for _, observation := range security.BlockedReturns {
 		repeatRequests[observation.IP] = observation.Requests
+		returnsByIP[observation.IP] = observation
 	}
 	blockedMap := make([]analyticsBlockedIPMapPoint, 0, len(securityBlocks))
 	knownAttackTypes := map[string]bool{}
@@ -6843,6 +6845,11 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		}
 		view := analyticsSecurityBlockView{SecurityBlock: securityBlock}
 		point := analyticsBlockedIPMapPoint{Blocked: true, RepeatKnown: !security.ReturnTrackingStarted.IsZero(), Address: securityBlock.IP, Policy: securityBlock.Source, Reason: securityBlock.Description, Last: securityBlock.LastEvent, RepeatRequests: repeatRequests[securityBlock.IP]}
+		if observed, found := returnsByIP[securityBlock.IP]; found {
+			view.Country, view.City, view.Agent, view.ClientClass = observed.Country, observed.City, observed.Agent, browserstats.ClientClass(observed.Agent)
+			point.Country, point.City, point.OS, point.Browser, point.Class = observed.Country, observed.City, view.OperatingSystem(), analyticsBrowserName(observed.Agent), view.ClientClass
+			point.Latitude, point.Longitude, point.GeoKnown = observed.Latitude, observed.Longitude, observed.GeoKnown
+		}
 		if point.Policy == "" {
 			point.Policy = "local"
 		}
