@@ -1527,6 +1527,9 @@
         radar.appendChild(label);
       });
       if (hasData) {
+        const attackPoints = categories.map(function categoryPoint(category, index) {
+          return point(index, Math.max(0, Number(selectedCategories[category]) || 0) / dailyTotal);
+        });
         const activeCategories = categories.filter(function observedCategory(category) {
           return (Number(selectedCategories[category]) || 0) > 0;
         }).sort(function prevailingCategory(left, right) {
@@ -1536,8 +1539,10 @@
         const gradient = document.createElementNS('http://www.w3.org/2000/svg', 'linearGradient');
         gradient.id = 'security-selected-day-colors';
         gradient.setAttribute('gradientUnits', 'userSpaceOnUse');
-        gradient.setAttribute('x1', '76'); gradient.setAttribute('y1', '46');
-        gradient.setAttribute('x2', '284'); gradient.setAttribute('y2', '254');
+        gradient.setAttribute('x1', String(Math.min(...attackPoints.map(function horizontalPoint(coordinates) { return coordinates[0]; }))));
+        gradient.setAttribute('y1', String(Math.min(...attackPoints.map(function verticalPoint(coordinates) { return coordinates[1]; }))));
+        gradient.setAttribute('x2', String(Math.max(...attackPoints.map(function horizontalPoint(coordinates) { return coordinates[0]; }))));
+        gradient.setAttribute('y2', String(Math.max(...attackPoints.map(function verticalPoint(coordinates) { return coordinates[1]; }))));
         let colorOffset = 0;
         for (const category of activeCategories) {
           const categoryCount = Math.max(0, Number(selectedCategories[category]) || 0);
@@ -1554,8 +1559,8 @@
         radar.appendChild(definitions);
         const attackPaint = activeCategories.length === 1 ? securityTypeColor(activeCategories[0]) : 'url(#security-selected-day-colors)';
         const polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-        polygon.setAttribute('points', categories.map(function categoryPoint(category, index) {
-          return point(index, Math.max(0, Number(selectedCategories[category]) || 0) / dailyTotal).join(',');
+        polygon.setAttribute('points', attackPoints.map(function serializedPoint(coordinates) {
+          return coordinates.join(',');
         }).join(' '));
         polygon.style.fill = attackPaint;
         polygon.style.fillOpacity = '0.25';
