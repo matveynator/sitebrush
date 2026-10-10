@@ -2392,60 +2392,62 @@ type sitebrushSecurityHostLoad struct {
 }
 
 type analyticsPreparedReport struct {
-	SessionMetricsVersion  int                 `json:"session_metrics_version,omitempty"`
-	LegacyStaticRequests   int                 `json:"legacy_static_requests,omitempty"`
-	LegacyPageRequests     int                 `json:"legacy_page_requests,omitempty"`
-	LegacyAssets           []analyticsCountRow `json:"legacy_assets,omitempty"`
-	LegacyBrowsers         []analyticsCountRow `json:"legacy_browsers,omitempty"`
-	LegacyOperatingSystems []analyticsCountRow `json:"legacy_operating_systems,omitempty"`
-	LegacyBotCrawlers      []analyticsCountRow `json:"legacy_bot_crawlers,omitempty"`
-	AdminUnclassified      bool                `json:"admin_unclassified,omitempty"`
-	ResponsePercentiles    []analyticsCountRow `json:"response_percentiles,omitempty"`
-	GeneratedAt            string              `json:"generated_at"`
-	PeriodStart            string              `json:"period_start"`
-	PeriodEnd              string              `json:"period_end"`
-	TotalRequests          int                 `json:"total_requests"`
-	PageViews              int                 `json:"page_views"`
-	UniqueVisitors         int                 `json:"unique_visitors"`
-	HumanRequests          int                 `json:"human_requests"`
-	BotRequests            int                 `json:"bot_requests"`
-	HumanSessions          int                 `json:"human_sessions"`
-	BotSessions            int                 `json:"bot_sessions"`
-	ReturningVisitors      int                 `json:"returning_visitors"`
-	ReturnVisits           int                 `json:"return_visits"`
-	Sessions               int                 `json:"sessions"`
-	BounceRate             float64             `json:"bounce_rate"`
-	AverageDurationMS      int64               `json:"average_duration_ms"`
-	ErrorCount             int                 `json:"error_count"`
-	AdminRequests          int                 `json:"admin_requests"`
-	StaticRequests         int                 `json:"static_requests"`
-	TopPages               []analyticsCountRow `json:"top_pages"`
-	EntryPages             []analyticsCountRow `json:"entry_pages"`
-	ExitPages              []analyticsCountRow `json:"exit_pages"`
-	TrafficSources         []analyticsCountRow `json:"traffic_sources"`
-	Referrers              []analyticsCountRow `json:"referrers"`
-	ReturningSources       []analyticsCountRow `json:"returning_sources"`
-	ReturningReferrers     []analyticsCountRow `json:"returning_referrers"`
-	Countries              []analyticsCountRow `json:"countries"`
-	Cities                 []analyticsCountRow `json:"cities"`
-	EntryHours             []analyticsCountRow `json:"entry_hours"`
-	MapPoints              []analyticsMapPoint `json:"map_points"`
-	Devices                []analyticsCountRow `json:"devices"`
-	VisitorTypes           []analyticsCountRow `json:"visitor_types"`
-	BotCrawlers            []analyticsCountRow `json:"bot_crawlers"`
-	BotReturnSources       []analyticsCountRow `json:"bot_return_sources"`
-	BotReferrers           []analyticsCountRow `json:"bot_referrers"`
-	Browsers               []analyticsCountRow `json:"browsers"`
-	OperatingSystems       []analyticsCountRow `json:"operating_systems"`
-	Languages              []analyticsCountRow `json:"languages"`
-	StatusCodes            []analyticsCountRow `json:"status_codes"`
-	HourlyActivity         []analyticsCountRow `json:"hourly_activity"`
-	DailyActivity          []analyticsCountRow `json:"daily_activity"`
-	SlowPages              []analyticsCountRow `json:"slow_pages"`
-	TopAssets              []analyticsCountRow `json:"top_assets"`
-	ErrorPaths             []analyticsCountRow `json:"error_paths"`
-	ContentSources         []analyticsCountRow `json:"content_sources"`
-	SystemEvents           []analyticsCountRow `json:"system_events,omitempty"`
+	LegacyAudience         map[string][]analyticsCountRow `json:"legacy_audience,omitempty"`
+	LegacyMapPoints        []analyticsMapPoint            `json:"legacy_map_points,omitempty"`
+	SessionMetricsVersion  int                            `json:"session_metrics_version,omitempty"`
+	LegacyStaticRequests   int                            `json:"legacy_static_requests,omitempty"`
+	LegacyPageRequests     int                            `json:"legacy_page_requests,omitempty"`
+	LegacyAssets           []analyticsCountRow            `json:"legacy_assets,omitempty"`
+	LegacyBrowsers         []analyticsCountRow            `json:"legacy_browsers,omitempty"`
+	LegacyOperatingSystems []analyticsCountRow            `json:"legacy_operating_systems,omitempty"`
+	LegacyBotCrawlers      []analyticsCountRow            `json:"legacy_bot_crawlers,omitempty"`
+	AdminUnclassified      bool                           `json:"admin_unclassified,omitempty"`
+	ResponsePercentiles    []analyticsCountRow            `json:"response_percentiles,omitempty"`
+	GeneratedAt            string                         `json:"generated_at"`
+	PeriodStart            string                         `json:"period_start"`
+	PeriodEnd              string                         `json:"period_end"`
+	TotalRequests          int                            `json:"total_requests"`
+	PageViews              int                            `json:"page_views"`
+	UniqueVisitors         int                            `json:"unique_visitors"`
+	HumanRequests          int                            `json:"human_requests"`
+	BotRequests            int                            `json:"bot_requests"`
+	HumanSessions          int                            `json:"human_sessions"`
+	BotSessions            int                            `json:"bot_sessions"`
+	ReturningVisitors      int                            `json:"returning_visitors"`
+	ReturnVisits           int                            `json:"return_visits"`
+	Sessions               int                            `json:"sessions"`
+	BounceRate             float64                        `json:"bounce_rate"`
+	AverageDurationMS      int64                          `json:"average_duration_ms"`
+	ErrorCount             int                            `json:"error_count"`
+	AdminRequests          int                            `json:"admin_requests"`
+	StaticRequests         int                            `json:"static_requests"`
+	TopPages               []analyticsCountRow            `json:"top_pages"`
+	EntryPages             []analyticsCountRow            `json:"entry_pages"`
+	ExitPages              []analyticsCountRow            `json:"exit_pages"`
+	TrafficSources         []analyticsCountRow            `json:"traffic_sources"`
+	Referrers              []analyticsCountRow            `json:"referrers"`
+	ReturningSources       []analyticsCountRow            `json:"returning_sources"`
+	ReturningReferrers     []analyticsCountRow            `json:"returning_referrers"`
+	Countries              []analyticsCountRow            `json:"countries"`
+	Cities                 []analyticsCountRow            `json:"cities"`
+	EntryHours             []analyticsCountRow            `json:"entry_hours"`
+	MapPoints              []analyticsMapPoint            `json:"map_points"`
+	Devices                []analyticsCountRow            `json:"devices"`
+	VisitorTypes           []analyticsCountRow            `json:"visitor_types"`
+	BotCrawlers            []analyticsCountRow            `json:"bot_crawlers"`
+	BotReturnSources       []analyticsCountRow            `json:"bot_return_sources"`
+	BotReferrers           []analyticsCountRow            `json:"bot_referrers"`
+	Browsers               []analyticsCountRow            `json:"browsers"`
+	OperatingSystems       []analyticsCountRow            `json:"operating_systems"`
+	Languages              []analyticsCountRow            `json:"languages"`
+	StatusCodes            []analyticsCountRow            `json:"status_codes"`
+	HourlyActivity         []analyticsCountRow            `json:"hourly_activity"`
+	DailyActivity          []analyticsCountRow            `json:"daily_activity"`
+	SlowPages              []analyticsCountRow            `json:"slow_pages"`
+	TopAssets              []analyticsCountRow            `json:"top_assets"`
+	ErrorPaths             []analyticsCountRow            `json:"error_paths"`
+	ContentSources         []analyticsCountRow            `json:"content_sources"`
+	SystemEvents           []analyticsCountRow            `json:"system_events,omitempty"`
 }
 
 type analyticsTechnicalHistory struct {
@@ -5981,6 +5983,14 @@ func mergeTechnicalReports(current, addition analyticsPreparedReport) analyticsP
 	current.LegacyBrowsers = mergeAnalyticsCountRows(current.LegacyBrowsers, addition.LegacyBrowsers, 10, 0)
 	current.LegacyOperatingSystems = mergeAnalyticsCountRows(current.LegacyOperatingSystems, addition.LegacyOperatingSystems, 10, 0)
 	current.LegacyBotCrawlers = mergeAnalyticsCountRows(current.LegacyBotCrawlers, addition.LegacyBotCrawlers, 20, 0)
+	legacyAudience := make(map[string][]analyticsCountRow)
+	for _, legacyReport := range []analyticsPreparedReport{current, addition} {
+		for dimension, rows := range legacyReport.LegacyAudience {
+			legacyAudience[dimension] = mergeAnalyticsCountRows(legacyAudience[dimension], rows, 24, current.LegacyPageRequests)
+		}
+	}
+	current.LegacyAudience = legacyAudience
+	current.LegacyMapPoints = mergeAnalyticsMapPoints(current.LegacyMapPoints, addition.LegacyMapPoints)
 	if current.PeriodStart == "" || (addition.PeriodStart != "" && addition.PeriodStart < current.PeriodStart) {
 		current.PeriodStart = addition.PeriodStart
 	}
@@ -7074,6 +7084,18 @@ func analyticsReportView(report analyticsPreparedReport, translations map[string
 		}
 		view.Sections = append(view.Sections, section)
 	}
+	legacyNames := make([]string, 0, len(report.LegacyAudience))
+	for name := range report.LegacyAudience {
+		legacyNames = append(legacyNames, name)
+	}
+	sort.Strings(legacyNames)
+	for _, name := range legacyNames {
+		section := analyticsReportSection{Title: "Legacy " + name + " HTTP page requests", Description: "Historical request counts. These are not sessions."}
+		for _, row := range report.LegacyAudience[name] {
+			section.Rows = append(section.Rows, analyticsReportRow{Label: row.Label, Value: strconv.Itoa(row.Count)})
+		}
+		view.Sections = append(view.Sections, section)
+	}
 	return view
 }
 
@@ -7090,6 +7112,23 @@ func analyticsSeparateLegacyCounters(report analyticsPreparedReport) analyticsPr
 	report.LegacyBrowsers = report.Browsers
 	report.LegacyOperatingSystems = report.OperatingSystems
 	report.LegacyBotCrawlers = report.BotCrawlers
+	report.LegacyAudience = map[string][]analyticsCountRow{}
+	for _, dimension := range []struct {
+		name string
+		rows []analyticsCountRow
+	}{
+		{"pages", report.TopPages}, {"traffic sources", report.TrafficSources}, {"referrers", report.Referrers},
+		{"countries", report.Countries}, {"cities", report.Cities}, {"devices", report.Devices},
+		{"visitor types", report.VisitorTypes}, {"bot referrers", report.BotReferrers}, {"languages", report.Languages},
+	} {
+		if len(dimension.rows) > 0 {
+			report.LegacyAudience[dimension.name] = dimension.rows
+		}
+	}
+	report.LegacyMapPoints = report.MapPoints
+	report.TopPages, report.TrafficSources, report.Referrers = nil, nil, nil
+	report.Countries, report.Cities, report.Devices = nil, nil, nil
+	report.BotReferrers, report.Languages, report.MapPoints = nil, nil, nil
 	report.StaticRequests = 0
 	report.TopAssets = nil
 	report.Browsers = nil
