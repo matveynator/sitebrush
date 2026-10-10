@@ -224,6 +224,11 @@
     }
     #analytics-map-sessions:not([open]) { display:none; }
     #analytics-map-sessions::backdrop { background:rgba(0,0,0,.5); }
+    .analytics-map-dialog:not([open]) { display:none; }
+    .analytics-map-dialog::backdrop { background:rgba(0,0,0,.5); }
+    .security-block-reason { padding:.75rem; border-inline-start:3px solid var(--theme-border); border-radius:6px; background:var(--theme-accent); }
+    .security-block-reason strong { display:inline-block; margin-bottom:.5rem; }
+    .security-block-reason p { margin:0; font-size:.85rem; overflow-wrap:anywhere; }
     .world-map-panel {
       position:relative;
       min-height:360px;
@@ -897,6 +902,21 @@
 </div></section>
   {{end}}
   {{if eq .AnalyticsTab "security"}}
+  <section class="card world-map-card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_blocked_map"}}</h2><p class="small">{{index .T "ax_blocked_stats_hint"}} · {{index .T "ax_unknown_geo"}}: {{.SecurityIPSummary.UnknownLocations}}</p><div id="analytics-blocked-ip-map" class="world-map-panel"><div id="analytics-blocked-map-overlay" class="world-map-empty">{{index .T "analytics_no_data"}}</div></div></div></section>
+  <dialog id="analytics-blocked-map-dialog" class="card analytics-map-dialog" style="width:min(760px,90vw);max-height:80vh;overflow:auto;margin:auto"><div class="card-body"><form method="dialog"><button class="btn btn-outline-secondary float-end" aria-label="Close">×</button></form><h2 class="h5">{{index .T "ax_blocked_ips"}}</h2><div id="analytics-blocked-map-list"></div></div></dialog>
+  <section class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_blocked_ips"}}</h2><p class="small">{{index .T "ax_blocked_stats_hint"}}</p><div class="metric-grid">
+    <div class="metric-card card"><div class="card-body">{{index .T "ax_blocked_ips"}}<div class="metric-value">{{.SecurityIPSummary.Blocked}}</div></div></div>
+    <div class="metric-card card"><div class="card-body">{{index .T "ax_allowed_ips"}}<div class="metric-value">{{.SecurityIPSummary.Allowed}}</div></div></div>
+    <div class="metric-card card"><div class="card-body">{{index .T "ax_throttled_ips"}}<div class="metric-value">{{.SecurityIPSummary.Throttled}}</div></div></div>
+    <div class="metric-card card"><div class="card-body">{{index .T "ax_returning_blocked_ips"}}<div class="metric-value">{{if .SecurityIPSummary.RepeatStarted.IsZero}}{{index .T "analytics_no_data"}}{{else}}{{.SecurityIPSummary.ReturningIPs}}{{end}}</div></div></div>
+    <div class="metric-card card"><div class="card-body">{{index .T "ax_blocked_return_requests"}}<div class="metric-value">{{if .SecurityIPSummary.RepeatStarted.IsZero}}{{index .T "analytics_no_data"}}{{else}}{{.SecurityIPSummary.ReturnRequests}}{{end}}</div></div></div>
+    <div class="metric-card card"><div class="card-body">{{index .T "ax_blocked_return_visits"}}<div class="metric-value">{{if .SecurityIPSummary.RepeatStarted.IsZero}}{{index .T "analytics_no_data"}}{{else}}{{.SecurityIPSummary.ReturnVisits}}{{end}}</div></div></div>
+  </div><p class="small mt-3">{{index .T "ax_blocked_repeats_hint"}}{{if not .SecurityIPSummary.RepeatStarted.IsZero}} · {{.SecurityIPSummary.RepeatStarted.Format "2006-01-02 15:04 UTC"}}{{end}}</p>
+  <div class="row g-3">
+    <div class="col-md-4"><h3 class="h6">{{index .T "ax_security_by_type"}}</h3><table class="table table-sm"><thead><tr><th>{{index .T "ax_security_by_type"}}</th><th>{{index .T "ax_ip_count"}}</th></tr></thead><tbody>{{range .SecurityIPSummary.Attacks}}<tr><td>{{with index $.T (print "ax_risk_" .Label)}}{{.}}{{else}}{{if eq .Label "unknown"}}{{index $.T "analytics_no_data"}}{{else}}{{.Label}}{{end}}{{end}}</td><td>{{.Count}}</td></tr>{{else}}<tr><td colspan="2">{{index .T "analytics_no_data"}}</td></tr>{{end}}</tbody></table></div>
+    <div class="col-md-4"><h3 class="h6">{{index .T "ax_security_by_country"}}</h3><table class="table table-sm"><thead><tr><th>{{index .T "ax_security_by_country"}}</th><th>{{index .T "ax_ip_count"}}</th></tr></thead><tbody>{{range .SecurityIPSummary.Countries}}<tr><td data-country-code="{{.Label}}">{{if eq .Label "unknown"}}{{index $.T "analytics_no_data"}}{{else}}{{.Label}}{{end}}</td><td>{{.Count}}</td></tr>{{else}}<tr><td colspan="2">{{index .T "analytics_no_data"}}</td></tr>{{end}}</tbody></table></div>
+    <div class="col-md-4"><h3 class="h6">{{index .T "ax_policies"}}</h3><table class="table table-sm"><thead><tr><th>{{index .T "ax_policies"}}</th><th>{{index .T "ax_ip_count"}}</th></tr></thead><tbody>{{range .SecurityIPSummary.Policies}}<tr><td data-security-policy-name="{{.Label}}">{{with index $.T (print "ax_policy_" .Label)}}{{.}}{{else}}{{.Label}}{{end}}</td><td>{{.Count}}</td></tr>{{end}}</tbody></table></div>
+  </div></div></section>
   <section id="security-activity" class="card security-chart-card mb-4" data-activity-calendar="security" data-hour-title="{{index .T "ax_security_by_hour"}}" data-type-title="{{index .T "ax_security_by_type"}}" data-activity-title="{{index .T "ax_security_activity"}}" data-empty-text="{{index .T "analytics_no_data"}}">
   <div class="card-body">
     <h2 class="h5">{{index .T "ax_security_activity"}}</h2>
@@ -1043,13 +1063,7 @@
           <tr class="security-row-danger" data-security-incident-row>
             <td><code>{{.IP}}</code><div class="small"><span data-country-code="{{.Country}}">{{if .Country}}{{.Country}}{{else}}{{index $.T "analytics_no_data"}}{{end}}</span> · {{if .City}}{{.City}}{{else}}{{index $.T "analytics_no_data"}}{{end}} · {{if .OperatingSystem}}{{.OperatingSystem}}{{else}}{{index $.T "analytics_no_data"}}{{end}}</div><div class="small text-muted">Incident {{.IncidentID}}</div>{{if .Domain}}<div class="small"><strong>Domain:</strong> {{.Domain}}</div>{{end}}{{if .ClientClass}}<div class="small">{{.ClientClass}}</div>{{end}}{{if .Agent}}<details class="small text-break"><summary>User-Agent</summary>{{.Agent}}</details>{{end}}</td>
             <td>
-              <form method="post" action="?analytics&amp;tab=security" class="d-flex flex-column gap-1"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
-                <input type="hidden" name="security_action" value="update">
-                <input type="hidden" name="ip" value="{{.IP}}">
-                <input class="form-control form-control-sm" name="reason" value="{{.Reason}}">
-                <input class="form-control form-control-sm" name="description" value="{{.Description}}">
-                <button class="btn btn-outline-secondary btn-sm align-self-start">Update</button>
-              </form>
+              <div class="security-block-reason"><strong data-security-block-type="{{.Reason}}">{{with index $.T (print "ax_risk_" .Reason)}}{{.}}{{else}}{{.Reason}}{{end}}</strong><p>{{if .Description}}{{.Description}}{{else}}{{index $.T "analytics_no_data"}}{{end}}</p></div>
               {{if .ReasonLog}}<details class="mt-2"><summary class="small">{{index $.T "ax_security_block_history"}}</summary><ul class="security-reason-log">{{range .ReasonLog}}<li>{{if ne .First .At}}{{.First.Format "2006-01-02 15:04"}} — {{end}}{{.At.Format "2006-01-02 15:04"}} · {{.Source}} · {{.Reason}} × {{.Count}}{{if .Description}} — {{.Description}}{{end}}</li>{{end}}</ul></details>{{end}}
               {{if .ObservedRequests}}<details class="mt-2"><summary class="small">{{index $.T "ax_security_actual_requests"}}</summary><ul class="security-reason-log">{{range .ObservedRequests}}<li><code>{{.Method}} {{.Path}}</code> · HTTP {{.Status}} · × {{.Count}}{{if ne .First .Last}} · {{.First.Format "2006-01-02 15:04"}} — {{.Last.Format "2006-01-02 15:04"}}{{else}} · {{.Last.Format "2006-01-02 15:04"}}{{end}}</li>{{end}}</ul></details>{{end}}
             </td>
@@ -1072,7 +1086,7 @@
       </table>
     </div>
 
-    <nav class="d-flex align-items-center gap-3 mb-4" aria-label="{{index .T "ax_pages"}}">{{if .LocalBlockPage.PreviousURL}}<a href="{{.LocalBlockPage.PreviousURL}}">←</a>{{end}}<span>{{.LocalBlockPage.Page}} / {{.LocalBlockPage.Pages}} · {{.LocalBlockPage.Total}}</span>{{if .LocalBlockPage.NextURL}}<a href="{{.LocalBlockPage.NextURL}}">→</a>{{end}}</nav>
+    <nav class="d-flex align-items-center gap-3 mb-4" aria-label="{{index .T "ax_pages"}}">{{if .LocalBlockPage.PreviousURL}}<a href="{{.LocalBlockPage.PreviousURL}}">←</a>{{end}}{{range .LocalBlockPage.Links}}{{if .Current}}<span class="btn btn-secondary btn-sm" aria-current="page">{{.Number}}</span>{{else}}<a class="btn btn-outline-secondary btn-sm" href="{{.URL}}">{{.Number}}</a>{{end}}{{end}}<span>{{.LocalBlockPage.Total}}</span>{{if .LocalBlockPage.NextURL}}<a href="{{.LocalBlockPage.NextURL}}">→</a>{{end}}</nav>
     <div id="global-blocks" class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
       <div><h3 class="h6 mb-0">Global reputation registry</h3><div class="small">Read-only entries confirmed by independent SiteBrush installations.</div></div>
       <form method="get" class="d-flex gap-2"><input type="hidden" name="analytics"><input type="hidden" name="tab" value="security"><input name="global_query" value="{{.GlobalBlockPage.Query}}" class="form-control form-control-sm security-registry-search" type="search" placeholder="Search global IP or reason"><button class="btn btn-outline-secondary btn-sm">{{index .T "ax_search"}}</button></form>
@@ -1097,14 +1111,15 @@
       </table>
     </div>
 
-    <nav class="d-flex align-items-center gap-3 mb-4" aria-label="{{index .T "ax_pages"}}">{{if .GlobalBlockPage.PreviousURL}}<a href="{{.GlobalBlockPage.PreviousURL}}">←</a>{{end}}<span>{{.GlobalBlockPage.Page}} / {{.GlobalBlockPage.Pages}} · {{.GlobalBlockPage.Total}}</span>{{if .GlobalBlockPage.NextURL}}<a href="{{.GlobalBlockPage.NextURL}}">→</a>{{end}}</nav>
+    <nav class="d-flex align-items-center gap-3 mb-4" aria-label="{{index .T "ax_pages"}}">{{if .GlobalBlockPage.PreviousURL}}<a href="{{.GlobalBlockPage.PreviousURL}}">←</a>{{end}}{{range .GlobalBlockPage.Links}}{{if .Current}}<span class="btn btn-secondary btn-sm" aria-current="page">{{.Number}}</span>{{else}}<a class="btn btn-outline-secondary btn-sm" href="{{.URL}}">{{.Number}}</a>{{end}}{{end}}<span>{{.GlobalBlockPage.Total}}</span>{{if .GlobalBlockPage.NextURL}}<a href="{{.GlobalBlockPage.NextURL}}">→</a>{{end}}</nav>
     <h3 id="security-incidents" class="h6">Detected security incidents</h3>
     {{range .SecurityVisibleIncidents}}<details class="border-bottom py-2"><summary>{{if .PossibleExposure}}⚠ {{index $.T "ax_exposure"}} · {{end}}{{.IP}} · <span data-country-code="{{.Country}}">{{if .Country}}{{.Country}}{{else}}{{index $.T "analytics_no_data"}}{{end}}</span> · {{if .City}}{{.City}}{{else}}{{index $.T "analytics_no_data"}}{{end}} · {{if .OperatingSystem}}{{.OperatingSystem}}{{else}}{{index $.T "analytics_no_data"}}{{end}} · {{.Count}} · <time data-relative-time="{{.Last.Format "2006-01-02T15:04:05Z07:00"}}">{{.Last.Format "02 Jan 2006 15:04"}}</time></summary><p>{{.Country}} {{.City}} · {{.Agent}}</p><ul>{{range $category,$count:=.Categories}}<li>{{index $.T (print "ax_risk_" $category)}} × {{$count}}</li>{{end}}</ul><table class="table"><tbody>{{range .Examples}}<tr><td>{{.First.Format "15:04:05"}} — {{.Last.Format "15:04:05"}}</td><td>{{.Method}} {{.Path}}</td><td>{{.Status}}</td><td>× {{.Count}}</td></tr>{{end}}</tbody></table></details>{{else}}<p>{{index .T "ax_no_incidents"}}</p>{{end}}
-    <nav class="d-flex align-items-center gap-3 mt-3" aria-label="{{index .T "ax_pages"}}">{{if .IncidentPage.PreviousURL}}<a href="{{.IncidentPage.PreviousURL}}">←</a>{{end}}<span>{{.IncidentPage.Page}} / {{.IncidentPage.Pages}} · {{.IncidentPage.Total}}</span>{{if .IncidentPage.NextURL}}<a href="{{.IncidentPage.NextURL}}">→</a>{{end}}</nav>
+    <nav class="d-flex align-items-center gap-3 mt-3" aria-label="{{index .T "ax_pages"}}">{{if .IncidentPage.PreviousURL}}<a href="{{.IncidentPage.PreviousURL}}">←</a>{{end}}{{range .IncidentPage.Links}}{{if .Current}}<span class="btn btn-secondary btn-sm" aria-current="page">{{.Number}}</span>{{else}}<a class="btn btn-outline-secondary btn-sm" href="{{.URL}}">{{.Number}}</a>{{end}}{{end}}<span>{{.IncidentPage.Total}}</span>{{if .IncidentPage.NextURL}}<a href="{{.IncidentPage.NextURL}}">→</a>{{end}}</nav>
   </div></section>
   {{end}}
 </div>
 <script type="application/json" id="analytics-map-points">{{.SessionMapJSON}}</script>
+<script type="application/json" id="analytics-blocked-map-points">{{.SecurityBlockedMapJSON}}</script>
 <script type="application/json" id="analytics-server-hours">{{.ServerHoursJSON}}</script>
 <script src="/p/static/leaflet.min.js"></script>
 <script>
@@ -1330,6 +1345,12 @@
 
   function securityTypeColor(category) {
     return securityTypeColors[category] || '#64748b';
+  }
+
+  for (const heading of document.querySelectorAll('[data-security-block-type]')) {
+    const color = securityTypeColor(heading.dataset.securityBlockType);
+    heading.style.borderBottom = '3px solid '+color;
+    heading.closest('.security-block-reason').style.borderInlineStartColor = color;
   }
 
   function dailyActivityOpacity(count, averageDailyCount) {
@@ -1790,16 +1811,18 @@
   renderHours('analytics-server-hour-chart', serverHours, sharedMaximum);
 })();
 
-(function renderAnalyticsVisitorMap() {
+(function renderAnalyticsMaps() {
   'use strict';
-  const mapElement = document.getElementById('analytics-visitor-map');
-  const pointsElement = document.getElementById('analytics-map-points');
-  const overlayElement = document.getElementById('analytics-session-map-overlay');
+  function renderMap(mapID, pointsID, overlayID, dialogID, listID, blockedMap) {
+  const mapElement = document.getElementById(mapID);
+  const pointsElement = document.getElementById(pointsID);
+  const overlayElement = document.getElementById(overlayID);
   if (!mapElement || !pointsElement || !window.L) return;
 
   let sessions = [];
   try {
-    sessions = JSON.parse(pointsElement.textContent || '[]');
+    const parsedSessions = JSON.parse(pointsElement.textContent || '[]');
+    sessions = Array.isArray(parsedSessions) ? parsedSessions : [];
   } catch (parseError) {
     console.error('SiteBrush analytics: invalid session map data', parseError);
     return;
@@ -1845,7 +1868,8 @@
       group.languages.set(language, (group.languages.get(language) || 0) + 1);
       group.devices.set(device, (group.devices.get(device) || 0) + 1);
       group.classes.set(clientClass, (group.classes.get(clientClass) || 0) + 1);
-      if (session.Source && session.Source.Name && group.sources.size < 4) group.sources.add(session.Source.Name);
+      if (blockedMap && session.Policy) group.sources.add(session.Policy);
+      else if (session.Source && session.Source.Name && group.sources.size < 4) group.sources.add(session.Source.Name);
     }
     return Array.from(groups.values()).sort(function sortGroups(left, right) {
       return right.count - left.count;
@@ -1891,7 +1915,7 @@
     const innerGradient = gradientFor(group.devices, ['#2563eb','#16a34a','#9333ea']);
     const marker = document.createElement('div');
     marker.className = 'session-map-marker';
-    marker.style.background = outerGradient;
+    marker.style.background = blockedMap ? '#dc2626' : outerGradient;
     const inner = document.createElement('div');
     inner.className = 'session-map-marker-inner';
     inner.style.background = innerGradient;
@@ -1920,7 +1944,7 @@
 
     const sessionsLine = document.createElement('div');
     const uniqueAddresses = group.addresses.size;
-    sessionsLine.textContent = group.count + (group.count === 1 ? ' session' : ' sessions') +
+    sessionsLine.textContent = group.count + (blockedMap ? ' IP' : (group.count === 1 ? ' session' : ' sessions')) +
       (uniqueAddresses ? ' · ' + uniqueAddresses + (uniqueAddresses === 1 ? ' IP' : ' IPs') : '');
     wrapper.appendChild(sessionsLine);
 
@@ -1934,7 +1958,7 @@
 
     const languagesLine = document.createElement('div');
     languagesLine.textContent = 'Languages: ' + countsText(group.languages, {});
-    wrapper.appendChild(languagesLine);
+    if (!blockedMap) wrapper.appendChild(languagesLine);
 
     const devicesLine = document.createElement('div');
     devicesLine.textContent = 'Devices: ' + countsText(group.devices, {mobile:'📱 ',desktop:'💻 ',automation:'🤖 '});
@@ -1950,6 +1974,7 @@
   }
 
   function sessionNode(session) {
+    if (blockedMap) return blockedIPNode(session);
     const wrapper = document.createElement('div');
     wrapper.className = 'border-bottom py-2 text-break';
     const source = session.Source || {};
@@ -1977,9 +2002,32 @@
     return wrapper;
   }
 
+  function blockedIPNode(block) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'border-bottom py-2 text-break';
+    const attackNames = new Map();
+    for (const attackLabel of document.querySelectorAll('[data-security-type]')) attackNames.set(attackLabel.dataset.securityType, attackLabel.dataset.label);
+    const policyNames = new Map();
+    for (const policyLabel of document.querySelectorAll('[data-security-policy-name]')) policyNames.set(policyLabel.dataset.securityPolicyName, policyLabel.textContent);
+    for (const description of [
+      block.Address,
+      [block.Country, block.City, block.OS, block.Browser].filter(Boolean).join(' · ') || 'No data',
+      (policyNames.get(block.Policy) || block.Policy) + ' · ' + block.Last,
+      (block.AttackTypes || []).map(function attackName(category) { return attackNames.get(category) || category; }).join(' · '),
+      block.Reason || 'No data',
+      'Requests after block: ' + (block.RepeatKnown ? (block.RepeatRequests || 0) : 'No data')
+    ]) {
+      const paragraph = document.createElement('p');
+      paragraph.className = 'small mb-1';
+      paragraph.textContent = description;
+      wrapper.appendChild(paragraph);
+    }
+    return wrapper;
+  }
+
   function showSessions(group) {
-    const dialog = document.getElementById('analytics-map-sessions');
-    const sessionList = document.getElementById('analytics-map-sessions-list');
+    const dialog = document.getElementById(dialogID);
+    const sessionList = document.getElementById(listID);
     sessionList.replaceChildren();
     for (const session of group.sessions) sessionList.appendChild(sessionNode(session));
     dialog.showModal();
@@ -2011,6 +2059,9 @@
   if (overlayElement) overlayElement.hidden = groups.length > 0;
   if (bounds.length === 1) map.setView(bounds[0], 4);
   if (bounds.length > 1) map.fitBounds(bounds, {padding:[28,28], maxZoom:5});
+  }
+  renderMap('analytics-visitor-map', 'analytics-map-points', 'analytics-session-map-overlay', 'analytics-map-sessions', 'analytics-map-sessions-list', false);
+  renderMap('analytics-blocked-ip-map', 'analytics-blocked-map-points', 'analytics-blocked-map-overlay', 'analytics-blocked-map-dialog', 'analytics-blocked-map-list', true);
 })();
 
 (function setupReturnToPreviousURI() {

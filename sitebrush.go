@@ -2377,6 +2377,7 @@ type siteAnalyticsEvent struct {
 	VisitorID                    string
 	TrustedPeer, IndexingCrawler bool
 	SecurityBlocked              bool
+	SecurityAlreadyBlocked       bool
 	IsAdmin                      bool
 	IsAsset                      bool
 	IsController                 bool
@@ -3501,6 +3502,7 @@ func (a *App) analyticsMiddleware(next http.Handler) http.Handler {
 		}
 		if a.securityAnalytics != nil && r.URL.Path != "/_sitebrush/analytics" && len(a.securityAnalytics) < cap(a.securityAnalytics) {
 			securityEvent := siteAnalyticsEvent{Bytes: writer.bytesWritten, Domain: a.analyticsEventDomain(r, ""), Path: analyticsBoundedString(r.URL.EscapedPath(), 512), Query: analyticsBoundedString(r.URL.RawQuery, 2048), Method: r.Method, StatusCode: writer.statusCode, OccurredAt: startedAt.UTC(), RemoteAddress: analyticsBoundedString(r.RemoteAddr, 64), Forwarded: analyticsBoundedString(r.Header.Get("Forwarded"), 256), ForwardedFor: analyticsBoundedString(r.Header.Get("X-Forwarded-For"), 256), UserAgent: analyticsBoundedString(r.UserAgent(), 256), AcceptLanguage: analyticsBoundedString(r.Header.Get("Accept-Language"), 64), TrustedPeer: sitebrushPeerRequestTrusted(r, startedAt.UTC()), IndexingCrawler: httpsecurity.IsIndexingCrawlerRequest(r), SecurityBlocked: writer.Header().Get("X-Sitebrush-Security-Incident") != "" || writer.statusCode == http.StatusTooManyRequests || writer.statusCode == http.StatusForbidden}
+			securityEvent.SecurityAlreadyBlocked = writer.Header().Get("X-Sitebrush-Security-Already-Blocked") == "1"
 			select {
 			case a.securityAnalytics <- securityEvent:
 			default:
@@ -4511,15 +4513,20 @@ func (a *App) runSecurityAnalytics(stop <-chan struct{}) {
 			}
 			address := clientIPAddress(&http.Request{RemoteAddr: event.RemoteAddress, Header: http.Header{"Forwarded": []string{event.Forwarded}, "X-Forwarded-For": []string{event.ForwardedFor}}})
 			country, city := "", ""
+			latitude, longitude := 0.0, 0.0
+			geoKnown := false
 			if a.geoIP != nil && address != "" {
 				boundary, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 				if location, found := a.geoIP.Lookup(boundary, address); found {
 					country = location.CountryCode
 					city = location.City
+					latitude, longitude, geoKnown = location.Latitude, location.Longitude, true
 				}
 				cancel()
 			}
-			category := state.Record(browserstats.RequestObservation{Time: event.OccurredAt, IP: address, Path: event.Path, Query: event.Query, Method: event.Method, Status: event.StatusCode, Bytes: event.Bytes, Agent: event.UserAgent, Language: analyticsLanguageLabel(event.AcceptLanguage), Country: country, City: city, Blocked: event.SecurityBlocked, ServerLoadHigh: sitebrushSecurityLoadWasHigh(hostLoadHistory, event.OccurredAt), Trusted: event.TrustedPeer, IndexingCrawler: event.IndexingCrawler})
+			observation := browserstats.RequestObservation{Time: event.OccurredAt, IP: address, Path: event.Path, Query: event.Query, Method: event.Method, Status: event.StatusCode, Bytes: event.Bytes, Agent: event.UserAgent, Language: analyticsLanguageLabel(event.AcceptLanguage), Country: country, City: city, Blocked: event.SecurityBlocked, AlreadyBlocked: event.SecurityAlreadyBlocked, ServerLoadHigh: sitebrushSecurityLoadWasHigh(hostLoadHistory, event.OccurredAt), Trusted: event.TrustedPeer, IndexingCrawler: event.IndexingCrawler}
+			observation.Latitude, observation.Longitude, observation.GeoKnown = latitude, longitude, geoKnown
+			category := state.Record(observation)
 			if category != "" && a.attackGuard != nil {
 				description := securityIncidentDescription(category, event.Path, event.StatusCode)
 				block, alreadyBlocked := a.attackGuard.CheckSite(domain, address, event.OccurredAt)
@@ -4896,7 +4903,7 @@ func (a *App) enrichSecurityIncidents(state *browserstats.SecurityState, stop <-
 		default:
 		}
 		incident := &state.Incidents[index]
-		if incident.Country != "" || incident.IP == "" {
+		if incident.GeoKnown || incident.IP == "" {
 			continue
 		}
 		boundary, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
@@ -4906,6 +4913,7 @@ func (a *App) enrichSecurityIncidents(state *browserstats.SecurityState, stop <-
 		if found {
 			incident.Country = location.CountryCode
 			incident.City = location.City
+			incident.Latitude, incident.Longitude, incident.GeoKnown = location.Latitude, location.Longitude, true
 		}
 	}
 }
@@ -6552,8 +6560,15 @@ func (block analyticsSecurityBlockView) OperatingSystem() string {
 }
 
 type analyticsSecurityPagination struct {
+	Links                       []analyticsSecurityPageLink
 	Page, Pages, Total          int
 	Query, PreviousURL, NextURL string
+}
+
+type analyticsSecurityPageLink struct {
+	Number  int
+	URL     string
+	Current bool
 }
 
 type analyticsSecurityIncidentView struct {
@@ -6578,6 +6593,9 @@ func analyticsSecurityPage(r *http.Request, pageKey, queryKey, anchor string, to
 	if page < pages {
 		result.NextURL = pageURL(page + 1)
 	}
+	for number := max(1, page-2); number <= min(pages, page+2); number++ {
+		result.Links = append(result.Links, analyticsSecurityPageLink{Number: number, URL: pageURL(number), Current: number == page})
+	}
 	start := (page - 1) * pageSize
 	return result, start, min(total, start+pageSize)
 }
@@ -6599,6 +6617,93 @@ func analyticsSecurityBlockPage(r *http.Request, blocks []analyticsSecurityBlock
 	})
 	pagination, start, end := analyticsSecurityPage(r, pageKey, queryKey, anchor, len(filtered))
 	return filtered[start:end], pagination
+}
+
+type analyticsBlockedIPMapPoint struct {
+	RepeatKnown                                                bool
+	Blocked                                                    bool
+	Address, Country, City, Browser, OS, Policy, Reason, Class string
+	Last                                                       time.Time
+	Latitude, Longitude                                        float64
+	GeoKnown                                                   bool
+	RepeatRequests                                             int
+	AttackTypes                                                []string
+}
+
+type analyticsSecurityIPSummary struct {
+	Blocked, Allowed, Throttled, ReturningIPs, ReturnRequests, ReturnVisits, UnknownLocations int
+	RepeatStarted                                                                             time.Time
+	Attacks, Countries, Policies                                                              []browserstats.Row
+}
+
+// Snapshot metrics count addresses, while repeat evidence counts separately
+// observed requests against an already-active block. Pagination never affects totals.
+func analyticsSecurityIPStatistics(blocks []analyticsBlockedIPMapPoint, allowlist []httpsecurity.SecurityAllow, throttles []httpsecurity.SecurityThrottle, report browserstats.SecurityReport) analyticsSecurityIPSummary {
+	result := analyticsSecurityIPSummary{RepeatStarted: report.ReturnTrackingStarted}
+	allowed := map[string]bool{}
+	for _, entry := range allowlist {
+		allowed[entry.IP] = true
+	}
+	result.Allowed = len(allowed)
+	blocked := map[string]bool{}
+	attacks, countries := map[string]int{}, map[string]int{}
+	policies := map[string]int{"local": 0, "manual": 0, "global": 0, "allowlist": result.Allowed, "throttle": 0}
+	for _, block := range blocks {
+		if allowed[block.Address] || blocked[block.Address] {
+			continue
+		}
+		blocked[block.Address] = true
+		result.Blocked++
+		policies[block.Policy]++
+		country := block.Country
+		if country == "" {
+			country = "unknown"
+		}
+		countries[country]++
+		if !block.GeoKnown {
+			result.UnknownLocations++
+		}
+		seenCategories := map[string]bool{}
+		for _, category := range block.AttackTypes {
+			if !seenCategories[category] {
+				attacks[category]++
+				seenCategories[category] = true
+			}
+		}
+	}
+	throttled := map[string]bool{}
+	for _, entry := range throttles {
+		if !allowed[entry.IP] && !blocked[entry.IP] {
+			throttled[entry.IP] = true
+		}
+	}
+	result.Throttled = len(throttled)
+	policies["throttle"] = result.Throttled
+	returning := map[string]bool{}
+	for _, observation := range report.BlockedReturns {
+		if returning[observation.IP] {
+			continue
+		}
+		returning[observation.IP] = true
+		result.ReturningIPs++
+		result.ReturnRequests += observation.Requests
+		result.ReturnVisits += observation.Visits
+	}
+	ordered := func(counts map[string]int) []browserstats.Row {
+		rows := make([]browserstats.Row, 0, len(counts))
+		for label, count := range counts {
+			rows = append(rows, browserstats.Row{Label: label, Count: count})
+		}
+		sort.Slice(rows, func(left, right int) bool {
+			if rows[left].Count == rows[right].Count {
+				return rows[left].Label < rows[right].Label
+			}
+			return rows[left].Count > rows[right].Count
+		})
+		return rows
+	}
+	result.Attacks, result.Countries, result.Policies = ordered(attacks), ordered(countries), ordered(policies)
+	return result
 }
 
 func analyticsSelectedTab(r *http.Request) string {
@@ -6704,27 +6809,92 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	securityIncidents := make(map[string]browserstats.Incident, len(security.Incidents))
+	attackTypesByIP := map[string]map[string]bool{}
 	for _, incident := range security.Incidents {
+		if attackTypesByIP[incident.IP] == nil {
+			attackTypesByIP[incident.IP] = map[string]bool{}
+		}
+		for category, count := range incident.Categories {
+			if count > 0 {
+				attackTypesByIP[incident.IP][category] = true
+			}
+		}
 		previous, found := securityIncidents[incident.IP]
 		if !found || incident.Last.After(previous.Last) {
 			securityIncidents[incident.IP] = incident
 		}
 	}
+	allowedIPs := map[string]bool{}
+	for _, entry := range securityAllowlist {
+		allowedIPs[entry.IP] = true
+	}
+	repeatRequests := map[string]int{}
+	for _, observation := range security.BlockedReturns {
+		repeatRequests[observation.IP] = observation.Requests
+	}
+	blockedMap := make([]analyticsBlockedIPMapPoint, 0, len(securityBlocks))
+	knownAttackTypes := map[string]bool{}
+	for _, category := range analyticsSecurityTypeAxes() {
+		knownAttackTypes[category] = true
+	}
 	for _, securityBlock := range securityBlocks {
+		if allowedIPs[securityBlock.IP] {
+			continue
+		}
 		view := analyticsSecurityBlockView{SecurityBlock: securityBlock}
+		point := analyticsBlockedIPMapPoint{Blocked: true, RepeatKnown: !security.ReturnTrackingStarted.IsZero(), Address: securityBlock.IP, Policy: securityBlock.Source, Reason: securityBlock.Description, Last: securityBlock.LastEvent, RepeatRequests: repeatRequests[securityBlock.IP]}
+		if point.Policy == "" {
+			point.Policy = "local"
+		}
 		if incident, found := securityIncidents[securityBlock.IP]; found {
 			view.Country = incident.Country
 			view.City = incident.City
 			view.ClientClass = incident.Class
 			view.Agent = incident.Agent
 			view.ObservedRequests = append([]browserstats.Probe(nil), incident.Examples...)
+			point.Country, point.City, point.Class = incident.Country, incident.City, incident.Class
+			point.Browser, point.OS = analyticsBrowserName(incident.Agent), view.OperatingSystem()
+			point.Latitude, point.Longitude, point.GeoKnown = incident.Latitude, incident.Longitude, incident.GeoKnown
 		}
+		categories := attackTypesByIP[securityBlock.IP]
+		if categories == nil {
+			categories = map[string]bool{}
+		}
+		if knownAttackTypes[securityBlock.Reason] || (point.Policy != "manual" && securityBlock.Reason != "") {
+			categories[securityBlock.Reason] = true
+		}
+		if len(categories) == 0 {
+			categories["unknown"] = true
+		}
+		for category := range categories {
+			point.AttackTypes = append(point.AttackTypes, category)
+		}
+		sort.Strings(point.AttackTypes)
+		blockedMap = append(blockedMap, point)
 		if securityBlock.Source == "global" {
 			securityGlobalBlocks = append(securityGlobalBlocks, view)
 			continue
 		}
 		securityLocalBlocks = append(securityLocalBlocks, view)
 	}
+	if a.geoIP != nil {
+		geoBoundary, cancelGeo := context.WithTimeout(r.Context(), 100*time.Millisecond)
+		for index := range blockedMap {
+			if geoBoundary.Err() != nil {
+				break
+			}
+			if blockedMap[index].GeoKnown {
+				continue
+			}
+			if location, found := a.geoIP.Lookup(geoBoundary, blockedMap[index].Address); found {
+				blockedMap[index].Country, blockedMap[index].City = location.CountryCode, location.City
+				blockedMap[index].Latitude, blockedMap[index].Longitude, blockedMap[index].GeoKnown = location.Latitude, location.Longitude, true
+			}
+		}
+		cancelGeo()
+	}
+	securityIPSummary := analyticsSecurityIPStatistics(blockedMap, securityAllowlist, securityThrottles, security)
+	blockedMapJSON, _ := json.Marshal(blockedMap)
 	securityLocalBlocks, localBlockPage := analyticsSecurityBlockPage(r, securityLocalBlocks, "local_page", "local_query", "local-blocks")
 	securityGlobalBlocks, globalBlockPage := analyticsSecurityBlockPage(r, securityGlobalBlocks, "global_page", "global_query", "global-blocks")
 	// GeoIP is a boundary lookup for only the displayed rows, with one small budget.
@@ -6810,6 +6980,7 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 	}
 	securityIncidentsJSON, _ := json.Marshal(securityActivityIncidents)
 	a.render(w, r, "analytics.html", map[string]any{
+		"SecurityIPSummary": securityIPSummary, "SecurityBlockedMapJSON": template.JS(blockedMapJSON),
 		"LocalBlockPage": localBlockPage, "GlobalBlockPage": globalBlockPage, "IncidentPage": incidentPage,
 		"SecurityVisibleIncidents": visibleIncidents, "SecurityActivityCountriesJSON": template.JS(securityActivityCountriesJSON),
 		"ReturnPath":       requestedReturnPath(r),
@@ -7160,16 +7331,16 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 		}
 		if a.attackGuard != nil {
 			var block httpsecurity.SecurityBlock
-			var blocked, allowed bool
+			var blocked, allowed, alreadyBlocked bool
 			category := ""
 			if !trusted {
 				category = browserstats.ProbeCategory(r.URL.EscapedPath(), r.URL.RawQuery)
 			}
 			if immediateSecurityCategory(category) {
 				description := securityIncidentDescription(category, r.URL.EscapedPath(), 0)
-				block, blocked = a.attackGuard.ObserveSiteIncident(domain, clientIP, category, description, now)
+				block, blocked, alreadyBlocked = a.attackGuard.ObserveSiteIncidentEvidence(domain, clientIP, category, description, now)
 			} else {
-				block, blocked, allowed = a.attackGuard.ObserveSiteRequestFastDisposition(domain, clientIP, r.URL.EscapedPath(), r.Method, trusted || crawlerRead, now)
+				block, blocked, allowed, alreadyBlocked = a.attackGuard.ObserveSiteRequestFastEvidence(domain, clientIP, r.URL.EscapedPath(), r.Method, trusted || crawlerRead, now)
 			}
 			if allowed {
 				serveNext()
@@ -7192,6 +7363,9 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 				w.Header().Set("Cache-Control", "no-store")
 				w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 				w.Header().Set("X-Sitebrush-Security-Incident", block.IncidentID)
+				if alreadyBlocked {
+					w.Header().Set("X-Sitebrush-Security-Already-Blocked", "1")
+				}
 				w.WriteHeader(http.StatusTooManyRequests)
 				_, _ = io.WriteString(w, httpsecurity.BlockedHTML(preferredLanguageCode(r.Header.Get("Accept-Language")), block))
 				return

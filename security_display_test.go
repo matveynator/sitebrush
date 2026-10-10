@@ -5,12 +5,14 @@ import (
 	"context"
 	"fmt"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
 	"testing"
 	"time"
 
+	browserstats "github.com/matveynator/sitebrush/v2/pkg/analytics"
 	"github.com/matveynator/sitebrush/v2/pkg/httpsecurity"
 )
 
@@ -25,10 +27,46 @@ func TestSecurityBlockPaginationSearchesOutsideCurrentPage(t *testing.T) {
 	if len(visible) != 1 || page.Total != 51 || page.Pages != 3 || page.Page != 3 || visible[0].IP != "192.0.2.1" {
 		t.Fatalf("third page: %+v %+v", page, visible)
 	}
+	for _, link := range page.Links {
+		target, err := url.Parse(link.URL)
+		if err != nil || target.Fragment != "local-blocks" || target.Query().Get("global_query") != "preserved" {
+			t.Fatalf("pagination lost list anchor or filters: %+v", link)
+		}
+	}
+	incidentRequest := httptest.NewRequest("GET", "/?analytics&tab=security&incident_page=2", nil)
+	incidentPage, _, _ := analyticsSecurityPage(incidentRequest, "incident_page", "", "security-incidents", 80)
+	for _, link := range incidentPage.Links {
+		target, err := url.Parse(link.URL)
+		if err != nil || target.Fragment != "security-incidents" {
+			t.Fatalf("incident page starts at top: %+v", link)
+		}
+	}
 	request = httptest.NewRequest("GET", "/?analytics&tab=security&local_page=3&local_query=incident-50", nil)
 	visible, page = analyticsSecurityBlockPage(request, blocks, "local_page", "local_query", "local-blocks")
 	if len(visible) != 1 || page.Page != 1 || page.Total != 1 || visible[0].OperatingSystem() != "Windows" {
 		t.Fatalf("full-registry search: %+v %+v", page, visible)
+	}
+}
+
+func TestBlockedIPStatisticsCountAddressesAndRespectPolicyPrecedence(t *testing.T) {
+	blocks := []analyticsBlockedIPMapPoint{
+		{Address: "192.0.2.1", Country: "RU", Policy: "local", GeoKnown: true, AttackTypes: []string{"repository", "repository", "secret"}},
+		{Address: "192.0.2.1", Country: "RU", Policy: "local", AttackTypes: []string{"repository"}},
+		{Address: "192.0.2.2", Country: "DE", Policy: "global", GeoKnown: true, AttackTypes: []string{"repository"}},
+		{Address: "192.0.2.3", Policy: "manual", AttackTypes: []string{"unknown"}},
+		{Address: "192.0.2.4", Policy: "global", AttackTypes: []string{"repository"}},
+	}
+	allowlist := []httpsecurity.SecurityAllow{{IP: "192.0.2.4"}, {IP: "192.0.2.4"}}
+	throttles := []httpsecurity.SecurityThrottle{{IP: "192.0.2.1"}, {IP: "192.0.2.4"}, {IP: "192.0.2.5"}}
+	report := browserstats.SecurityReport{ReturnTrackingStarted: time.Now(), BlockedReturns: []browserstats.BlockedReturn{{IP: "192.0.2.1", Requests: 50, Visits: 1}, {IP: "192.0.2.2", Requests: 2, Visits: 2}}}
+	summary := analyticsSecurityIPStatistics(blocks, allowlist, throttles, report)
+	if summary.Blocked != 3 || summary.Allowed != 1 || summary.Throttled != 1 || summary.ReturningIPs != 2 || summary.ReturnRequests != 52 || summary.ReturnVisits != 3 || summary.UnknownLocations != 1 {
+		t.Fatalf("mixed units or policy overlaps: %+v", summary)
+	}
+	for _, row := range summary.Attacks {
+		if row.Label == "repository" && row.Count != 2 {
+			t.Fatalf("category counted twice per IP: %+v", row)
+		}
 	}
 }
 
