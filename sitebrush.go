@@ -3767,16 +3767,22 @@ func (a *App) runAnalyticsEventWriter(ctx context.Context) {
 			if now.Sub(quietSince) >= 5*time.Second {
 				pressured = false
 			}
-		case <-ticker.C:
+		case now := <-ticker.C:
 			if pressured {
 				continue
 			}
 			if len(a.analyticsEvents) > cap(a.analyticsEvents)/4 {
 				continue
 			}
+			if len(batches) == cap(batches) {
+				continue
+			}
+			// Copy contact history before handing the old batch to persistence;
+			// the saver and collector must never own the same session records.
+			next := state.nextAfterFlush(now)
 			select {
 			case batches <- state:
-				state = newAnalyticsAggregateState(limit / 8)
+				state = next
 			default:
 			}
 		}
@@ -3799,6 +3805,9 @@ func (a *App) flushAnalyticsAggregateState(ctx context.Context, state *analytics
 		return
 	}
 	for domain, aggregate := range state.domains {
+		if aggregate.totalRequests == 0 && len(state.systemEvents[domain]) == 0 {
+			continue
+		}
 		report := aggregate.report(time.Now().UTC())
 		report.AdminUnclassified = true
 		report.SystemEvents = append(report.SystemEvents, state.systemEvents[domain]...)
@@ -5222,32 +5231,25 @@ func (state *analyticsAggregateState) reports(generatedAt time.Time) map[string]
 	return reports
 }
 
-func (state *analyticsAggregateState) resetAfterFlush() {
-	if state == nil {
-		return
-	}
-	// Keep bounded contact history across flushes; a flush is not a new visit.
-	retained := make(map[string]*siteAnalyticsAggregate)
+func (state *analyticsAggregateState) nextAfterFlush(now time.Time) *analyticsAggregateState {
+	retained := newAnalyticsAggregateState(state.memoryLimitBytes)
 	for domain, previous := range state.domains {
 		next := newSiteAnalyticsAggregate()
 		for visitor, session := range previous.visitorSessions {
-			if previous.periodEnd.Sub(session.lastEvent.OccurredAt) <= 30*time.Minute {
-				session.pageCount = 0
-				next.visitorSessions[visitor] = session
+			if now.Sub(session.lastEvent.OccurredAt) <= 30*time.Minute {
+				contact := *session
+				contact.pageCount = 0
+				next.visitorSessions[visitor] = &contact
 			}
 		}
-		next.periodEnd = previous.periodEnd
-		retained[domain] = next
+		if len(next.visitorSessions) == 0 {
+			continue
+		}
+		next.accountedBytes = next.estimatedBytes()
+		retained.domains[domain] = next
+		retained.usedBytes += next.accountedBytes + int64(len(domain)+256)
 	}
-	state.domains = retained
-	state.systemEvents = make(map[string][]analyticsCountRow)
-	state.usedBytes = 0
-	for _, aggregate := range state.domains {
-		aggregate.accountedBytes = aggregate.estimatedBytes()
-		state.usedBytes += aggregate.accountedBytes
-	}
-	state.disabled = false
-	state.overloadDomain = ""
+	return retained
 }
 
 func (state *analyticsAggregateState) aggregateForDomain(domain string) *siteAnalyticsAggregate {
@@ -5960,17 +5962,18 @@ func mergeTechnicalReports(current, addition analyticsPreparedReport) analyticsP
 		current.AverageDurationMS = (current.AverageDurationMS*int64(previousRequests) + addition.AverageDurationMS*int64(addition.TotalRequests)) / int64(current.TotalRequests)
 	}
 	current.TopPages = mergeAnalyticsCountRows(current.TopPages, addition.TopPages, 24, current.PageViews)
-	current.TrafficSources = mergeAnalyticsCountRows(current.TrafficSources, addition.TrafficSources, 20, current.PageViews)
-	current.Referrers = mergeAnalyticsCountRows(current.Referrers, addition.Referrers, 20, current.PageViews)
-	current.Countries = mergeAnalyticsCountRows(current.Countries, addition.Countries, 20, current.PageViews)
-	current.Cities = mergeAnalyticsCountRows(current.Cities, addition.Cities, 20, current.PageViews)
-	current.Devices = mergeAnalyticsCountRows(current.Devices, addition.Devices, 10, current.PageViews)
-	current.VisitorTypes = mergeAnalyticsCountRows(current.VisitorTypes, addition.VisitorTypes, 10, current.PageViews)
-	current.BotCrawlers = mergeAnalyticsCountRows(current.BotCrawlers, addition.BotCrawlers, 20, current.PageViews)
-	current.BotReferrers = mergeAnalyticsCountRows(current.BotReferrers, addition.BotReferrers, 20, current.PageViews)
-	current.Browsers = mergeAnalyticsCountRows(current.Browsers, addition.Browsers, 10, current.PageViews)
-	current.OperatingSystems = mergeAnalyticsCountRows(current.OperatingSystems, addition.OperatingSystems, 10, current.PageViews)
-	current.Languages = mergeAnalyticsCountRows(current.Languages, addition.Languages, 20, current.PageViews)
+	audienceSessions := current.HumanSessions + current.BotSessions
+	current.TrafficSources = mergeAnalyticsCountRows(current.TrafficSources, addition.TrafficSources, 20, audienceSessions)
+	current.Referrers = mergeAnalyticsCountRows(current.Referrers, addition.Referrers, 20, audienceSessions)
+	current.Countries = mergeAnalyticsCountRows(current.Countries, addition.Countries, 20, audienceSessions)
+	current.Cities = mergeAnalyticsCountRows(current.Cities, addition.Cities, 20, audienceSessions)
+	current.Devices = mergeAnalyticsCountRows(current.Devices, addition.Devices, 10, audienceSessions)
+	current.VisitorTypes = mergeAnalyticsCountRows(current.VisitorTypes, addition.VisitorTypes, 10, audienceSessions)
+	current.BotCrawlers = mergeAnalyticsCountRows(current.BotCrawlers, addition.BotCrawlers, 20, current.BotSessions)
+	current.BotReferrers = mergeAnalyticsCountRows(current.BotReferrers, addition.BotReferrers, 20, current.BotSessions)
+	current.Browsers = mergeAnalyticsCountRows(current.Browsers, addition.Browsers, 10, audienceSessions)
+	current.OperatingSystems = mergeAnalyticsCountRows(current.OperatingSystems, addition.OperatingSystems, 10, audienceSessions)
+	current.Languages = mergeAnalyticsCountRows(current.Languages, addition.Languages, 20, audienceSessions)
 	current.StatusCodes = mergeAnalyticsCountRows(current.StatusCodes, addition.StatusCodes, 20, current.TotalRequests)
 	current.HourlyActivity = mergeAnalyticsCountRows(current.HourlyActivity, addition.HourlyActivity, 24, current.TotalRequests)
 	current.DailyActivity = mergeAnalyticsCountRows(current.DailyActivity, addition.DailyActivity, 90, current.TotalRequests)
