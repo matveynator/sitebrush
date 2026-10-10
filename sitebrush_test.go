@@ -15986,11 +15986,19 @@ func (writer *analyticsPipeWriter) Hijack() (net.Conn, *bufio.ReadWriter, error)
 
 func TestBrowserAnalyticsWebSocketDelivery(t *testing.T) {
 	for _, scheme := range []string{"http", "https"} {
-		t.Run(scheme, func(t *testing.T) { testBrowserAnalyticsWebSocketDelivery(t, scheme) })
+		t.Run(scheme, func(t *testing.T) {
+			testBrowserAnalyticsWebSocketDelivery(t, scheme, false, "Mozilla/5.0", "human-likely")
+		})
+		t.Run(scheme+"-legacy-campaign", func(t *testing.T) {
+			testBrowserAnalyticsWebSocketDelivery(t, scheme, true, "Mozilla/5.0", "human-likely")
+		})
+		t.Run(scheme+"-headless", func(t *testing.T) {
+			testBrowserAnalyticsWebSocketDelivery(t, scheme, false, "HeadlessChrome/124", "automation")
+		})
 	}
 }
 
-func testBrowserAnalyticsWebSocketDelivery(t *testing.T, scheme string) {
+func testBrowserAnalyticsWebSocketDelivery(t *testing.T, scheme string, legacyCampaign bool, userAgent, expectedClass string) {
 	serverConnection, clientConnection := net.Pipe()
 	defer serverConnection.Close()
 	defer clientConnection.Close()
@@ -16012,11 +16020,17 @@ func testBrowserAnalyticsWebSocketDelivery(t *testing.T, scheme string) {
 		t.Fatal(err)
 	}
 	configuration.Header.Set("X-Forwarded-Proto", scheme)
+	configuration.Header.Set("User-Agent", userAgent)
 	connection, err := websocket.NewClient(configuration, clientConnection)
 	if err != nil {
 		t.Fatal(err)
 	}
 	observation := browserstats.Event{Visitor: "1111111111111111", View: "2222222222222222", Sequence: 1, Path: "/docs", Referrer: "https://search.example/private?query=x", Persistent: true}
+	expectedSource := "search.example"
+	if legacyCampaign {
+		observation.Source, observation.Referrer = "utm:legacy-source", ""
+		expectedSource = "legacy-source"
+	}
 	encoded, err := json.Marshal(observation)
 	if err != nil {
 		t.Fatal(err)
@@ -16026,7 +16040,7 @@ func testBrowserAnalyticsWebSocketDelivery(t *testing.T, scheme string) {
 	}
 	select {
 	case envelope := <-app.browserAnalytics:
-		if envelope.domain != "example.org" || envelope.event.Source != "search.example" || envelope.event.Referrer != observation.Referrer || envelope.event.Path != "/docs" {
+		if envelope.domain != "example.org" || envelope.event.Source != expectedSource || envelope.event.Referrer != observation.Referrer || envelope.event.Path != "/docs" || envelope.event.ClientClass != expectedClass {
 			t.Fatalf("envelope: %+v", envelope)
 		}
 	case <-time.After(time.Second):

@@ -3984,13 +3984,22 @@ func (a *App) browserAnalyticsSocket(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
+			// Cached clients predate structured campaign fields but still send UTM
+			// evidence in Source; retain that evidence during protocol upgrades.
+			if event.Campaign.Source == "" && strings.HasPrefix(event.Source, "utm:") {
+				event.Campaign.Source = browserstats.CleanText(strings.TrimPrefix(event.Source, "utm:"), 64)
+			}
 			event.Attribution = browserstats.SourceWithAgent(event.Campaign, event.Referrer, r.Host, r.UserAgent())
 			event.Path = browserstats.SafePath(event.Path)
 			event.Browser = analyticsBrowserName(r.UserAgent())
 			event.OS = analyticsOSName(r.UserAgent())
 			event.ClientClass = browserstats.ClientClass(r.UserAgent())
 			if event.ClientClass == "unknown" {
-				event.ClientClass = "human-likely"
+				if analyticsIsBot(r.UserAgent()) {
+					event.ClientClass = "automation"
+				} else {
+					event.ClientClass = "human-likely"
+				}
 			}
 			event.Address = clientIPAddress(r)
 			for index := range event.Actions {
