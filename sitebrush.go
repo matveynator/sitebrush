@@ -6854,14 +6854,23 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 			point.Policy = "local"
 		}
 		if incident, found := securityIncidents[securityBlock.IP]; found {
-			view.Country = incident.Country
-			view.City = incident.City
-			view.ClientClass = incident.Class
-			view.Agent = incident.Agent
+			if incident.Country != "" {
+				view.Country = incident.Country
+			}
+			if incident.City != "" {
+				view.City = incident.City
+			}
+			if incident.Agent != "" {
+				view.Agent, view.ClientClass = incident.Agent, incident.Class
+			}
 			view.ObservedRequests = append([]browserstats.Probe(nil), incident.Examples...)
-			point.Country, point.City, point.Class = incident.Country, incident.City, incident.Class
-			point.Browser, point.OS = analyticsBrowserName(incident.Agent), view.OperatingSystem()
-			point.Latitude, point.Longitude, point.GeoKnown = incident.Latitude, incident.Longitude, incident.GeoKnown
+			point.Country, point.City, point.Class = view.Country, view.City, view.ClientClass
+			if view.Agent != "" {
+				point.Browser, point.OS = analyticsBrowserName(view.Agent), view.OperatingSystem()
+			}
+			if incident.GeoKnown {
+				point.Latitude, point.Longitude, point.GeoKnown = incident.Latitude, incident.Longitude, true
+			}
 		}
 		categories := attackTypesByIP[securityBlock.IP]
 		if categories == nil {
