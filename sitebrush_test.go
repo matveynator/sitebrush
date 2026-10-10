@@ -20311,3 +20311,25 @@ func TestRepeatedInterruptForcesExitDuringStalledShutdown(t *testing.T) {
 }
 
 // END security view and signal boundary tests.
+
+func TestMergedAudiencePercentagesExcludeLegacyRequestCounters(t *testing.T) {
+	legacy := analyticsPreparedReport{GeneratedAt: "2026-10-09T12:00:00Z", PageViews: 50, TotalRequests: 50,
+		TopPages: []analyticsCountRow{{Label: "/", Count: 50}}, TrafficSources: []analyticsCountRow{{Label: "direct", Count: 50}},
+		Countries: []analyticsCountRow{{Label: "US", Count: 50}}, Devices: []analyticsCountRow{{Label: "desktop", Count: 50}},
+		BotReferrers: []analyticsCountRow{{Label: "example.org", Count: 50}}, Languages: []analyticsCountRow{{Label: "en", Count: 50}},
+		MapPoints: []analyticsMapPoint{{Label: "US", Count: 50, Latitude: 38, Longitude: -97}},
+	}
+	modern := analyticsPreparedReport{SessionMetricsVersion: 1, GeneratedAt: "2026-10-10T12:00:00Z", HumanSessions: 1, BotSessions: 1, PageViews: 1, TotalRequests: 2,
+		TopPages: []analyticsCountRow{{Label: "/", Count: 1}}, TrafficSources: []analyticsCountRow{{Label: "direct", Count: 2}},
+		Countries: []analyticsCountRow{{Label: "US", Count: 2}}, Devices: []analyticsCountRow{{Label: "desktop", Count: 1}},
+		BotReferrers: []analyticsCountRow{{Label: "example.org", Count: 1}}, Languages: []analyticsCountRow{{Label: "en", Count: 2}},
+		MapPoints: []analyticsMapPoint{{Label: "US", Count: 2, Latitude: 38, Longitude: -97}},
+	}
+	merged := mergeTechnicalReports(legacy, modern)
+	if merged.HumanSessions != 1 || merged.BotSessions != 1 || merged.PageViews != 1 || merged.TopPages[0].Count != 1 || merged.TrafficSources[0].Value != "100.0%" || merged.Devices[0].Value != "50.0%" || merged.BotReferrers[0].Value != "100.0%" {
+		t.Fatalf("legacy requests entered session dimensions: %+v", merged)
+	}
+	if merged.LegacyAudience["countries"][0].Count != 50 || merged.Countries[0].Count != 2 || merged.LegacyMapPoints[0].Count != 50 || merged.MapPoints[0].Count != 2 {
+		t.Fatalf("legacy technical evidence was lost or mixed: %+v", merged)
+	}
+}
