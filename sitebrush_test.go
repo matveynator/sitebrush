@@ -3218,6 +3218,38 @@ func TestLatestServerBinaryDownloadURL(t *testing.T) {
 	}
 }
 
+func TestAnalyticsErrorsLinkToDetails(t *testing.T) {
+	view := analyticsReportView(analyticsPreparedReport{SessionMetricsVersion: analyticsSessionMetricsFormatVersion, ErrorCount: 12, ErrorPaths: []analyticsCountRow{{Label: "/missing", Count: 12}}}, translationsForLanguageCode("ru"))
+	foundCard, foundSection := false, false
+	for _, card := range view.Cards {
+		if card.Link == "#analytics-errors" {
+			foundCard = card.Value == "12"
+		}
+	}
+	for _, section := range view.Sections {
+		if section.ID == "analytics-errors" {
+			foundSection = len(section.Rows) == 1 && section.Rows[0].Value == "12"
+		}
+	}
+	if !foundCard || !foundSection {
+		t.Fatal("error counter is not connected to its detail section")
+	}
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "password"); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest("GET", "http://localhost/?analytics", nil)
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != 200 || !strings.Contains(response.Body.String(), `href="#analytics-errors"`) || !strings.Contains(response.Body.String(), `id="analytics-errors"`) {
+		t.Fatal("rendered error counter has no usable detail link")
+	}
+	if !strings.Contains(response.Body.String(), `href="#analytics-errors">Подробности ошибок</a>`) {
+		t.Fatal("explicit error detail link is missing")
+	}
+}
+
 func TestAnalyticsReportBuildsGoogleAnalyticsStyleMetrics(t *testing.T) {
 	now := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
 	events := []siteAnalyticsEvent{
@@ -13444,6 +13476,24 @@ func TestVisualEditorUsesLocalJoditAssetsAndServerImageUpload(t *testing.T) {
 			t.Fatalf("visual editor missing %q in %s", expectedFragment, body)
 		}
 	}
+	// A source textarea owns its scroll range; Jodit's pointer-triggered autosize
+	// must not collapse the surrounding viewport while the user selects code.
+	for selector, declarations := range map[string][]string{
+		".jodit-container:not(.jodit_inline) .jodit-source":         {"height: 100% !important", "min-height: 0 !important", "max-height: 100% !important", "overflow: hidden !important"},
+		".jodit-container:not(.jodit_inline) .jodit-source__mirror": {"height: 100% !important", "min-height: 0 !important", "max-height: 100% !important", "box-sizing: border-box", "overflow: auto !important", "resize: none !important"},
+	} {
+		start := strings.Index(body, selector+" {")
+		if start < 0 {
+			t.Fatalf("missing source viewport rule %s", selector)
+		}
+		rule := body[start:]
+		rule = rule[:strings.Index(rule, "}")]
+		for _, declaration := range declarations {
+			if !strings.Contains(rule, declaration) {
+				t.Fatalf("source viewport %s missing %s", selector, declaration)
+			}
+		}
+	}
 	if strings.Contains(body, "visualEditorPreviewPane") || strings.Contains(body, "editor-preview-pane") {
 		t.Fatalf("visual editor should not contain text-editor preview tabs: %s", body)
 	}
@@ -17542,10 +17592,69 @@ func TestAdminIPAllowlistIsOptInAndRejectsOtherAddresses(t *testing.T) {
 	}
 }
 
+func TestPasskeyReadyGreetingIsLocalizedAndUsesExistingLogin(t *testing.T) {
+	application, database := newTestApplication(t)
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','owner@example.org','secret',1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO account_passkeys(domain,email,credential_id,credential_json) VALUES('other.example','owner@example.org','other-key','{}')`); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "https://example.org/?login&return_path=%2Fdocs", nil)
+	response := httptest.NewRecorder()
+	application.login(response, request)
+	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "data-passkey-login") {
+		t.Fatal("foreign site key enabled passkey greeting")
+	}
+	if _, err := database.Exec(`INSERT INTO account_passkeys(domain,email,credential_id,credential_json) VALUES('example.org','owner@example.org','site-key','{}')`); err != nil {
+		t.Fatal(err)
+	}
+	languages := []string{"en", "fr", "ru", "ja", "it", "sv", "fi", "mn", "zh", "he", "fa", "de", "tr", "kk", "es", "pt"}
+	for _, language := range languages {
+		t.Run(language, func(t *testing.T) {
+			translations, exists := translationCatalog[language]
+			if !exists {
+				t.Fatalf("missing locale %s", language)
+			}
+			for _, key := range []string{"auth_passkey_ready_title", "auth_passkey_ready_text", "auth_passkey_ready_button"} {
+				if strings.TrimSpace(translations[key]) == "" {
+					t.Fatalf("missing local translation %s", key)
+				}
+				if language != "en" && translations[key] == translationCatalog["en"][key] {
+					t.Fatalf("untranslated greeting %s", key)
+				}
+			}
+			if !strings.Contains(translations["auth_passkey_ready_text"], translations["auth_passkey_ready_button"]) {
+				t.Fatal("instruction does not name the displayed button")
+			}
+			request := httptest.NewRequest(http.MethodGet, "https://example.org/?login&return_path=%2Fdocs", nil)
+			request.Header.Set("Accept-Language", language)
+			response := httptest.NewRecorder()
+			application.login(response, request)
+			page := stdhtml.UnescapeString(response.Body.String())
+			if response.Code != http.StatusOK {
+				t.Fatalf("login status=%d", response.Code)
+			}
+			for _, key := range []string{"auth_passkey_ready_title", "auth_passkey_ready_text", "auth_passkey_ready_button"} {
+				if !strings.Contains(page, translations[key]) {
+					t.Fatalf("localized greeting not rendered: %s", key)
+				}
+			}
+			if strings.Contains(page, translations["auth_passkey_offer_text"]) {
+				t.Fatal("login still offers to create a key")
+			}
+			if !strings.Contains(page, "data-passkey-login") || !strings.Contains(page, "return_path=%2Fdocs") || !strings.Contains(page, `data-passkey-finish="?login&passkey_finish"`) || !strings.Contains(page, `name="password"`) {
+				t.Fatal("existing login mechanisms or return path changed")
+			}
+		})
+	}
+}
+
 func TestAdminIPLoginBlockHidesAuthenticationOptions(t *testing.T) {
 	application, database := newTestApplication(t)
 	for _, statement := range []string{
 		`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','owner@example.org','secret',1)`,
+		`INSERT INTO account_passkeys(domain,email,credential_id,credential_json) VALUES('example.org','owner@example.org','site-key','{}')`,
 		`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
 		`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES('example.org','owner@example.org','192.0.2.1',1)`,
 	} {
@@ -20238,6 +20347,214 @@ func TestSecurityBlockPaginationSearchesOutsideCurrentPage(t *testing.T) {
 	if len(visible) != 1 || page.Page != 1 || page.Total != 1 || visible[0].OperatingSystem() != "Windows" {
 		t.Fatalf("full-registry search: %+v %+v", page, visible)
 	}
+}
+
+func TestSecurityUnifiedJournalAndRegistrySearch(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "password"); err != nil {
+		t.Fatal(err)
+	}
+	guard, err := httpsecurity.NewAttackGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.attackGuard = guard
+	t.Cleanup(guard.Close)
+	now := time.Now().UTC()
+	state := browserstats.SecurityState{}
+	for _, ip := range []string{"192.0.2.1", "192.0.2.2", "192.0.2.3"} {
+		state.Record(browserstats.RequestObservation{Time: now, IP: ip, Country: "RU", City: "Moscow", Agent: "curl/8", Path: "/.git/config", Method: "GET", Status: 404})
+	}
+	body, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := application.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.SaveSecurity, Domain: "localhost", State: string(body)}); result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	if _, err := guard.Add("192.0.2.1", "repository", "local evidence", "manual", now.Add(time.Hour), now); err != nil {
+		t.Fatal(err)
+	}
+	if err := guard.ApplyGlobal("192.0.2.3", "repository", "global evidence", now, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	for _, scenario := range []struct{ query, present, absent string }{
+		{"", "Not blocked", "Detected security incidents"},
+		{"&local_query=192.0.2.2", "Not blocked", "local evidence"},
+		{"&global_query=missing", "No matching records.", "global evidence"},
+		{"&global_query=GLOBAL+EVIDENCE", "global evidence", "No matching records."},
+	} {
+		request := httptest.NewRequest("GET", "http://localhost/?analytics&tab=security&days=7"+scenario.query, nil)
+		request.Header.Set("Accept-Language", "en")
+		request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+		response := httptest.NewRecorder()
+		application.route(response, request)
+		page := response.Body.String()
+		if response.Code != 200 || strings.Index(page, `id="local-blocks"`) < 0 || strings.Index(page, `id="global-blocks"`) < 0 {
+			t.Fatalf("security page failed: status=%d", response.Code)
+		}
+		journal := page[strings.Index(page, `id="local-blocks"`):strings.Index(page, `id="global-blocks"`)]
+		if strings.Contains(scenario.query, "global_query") {
+			journal = page[strings.Index(page, `id="global-blocks"`):]
+			journal = journal[:strings.Index(journal, "</table>")]
+		}
+		if response.Code != 200 || !strings.Contains(journal, scenario.present) || strings.Contains(journal, scenario.absent) {
+			t.Fatalf("journal query=%q status=%d missing=%q unexpected=%q", scenario.query, response.Code, scenario.present, scenario.absent)
+		}
+		if !strings.Contains(page, `action="#local-blocks"`) || !strings.Contains(page, `action="#global-blocks"`) || strings.Contains(page, `id="security-type-help"`) {
+			t.Fatal("search anchors or simplified layout invalid")
+		}
+		if scenario.query == "" {
+			if strings.Count(page, `id="security-returning-ips"`) != 1 || strings.Count(page, `data-security-return-requests`) != 1 {
+				t.Fatal("return IP and request counters were not combined")
+			}
+			for _, ip := range []string{"192.0.2.1", "192.0.2.2", "192.0.2.3"} {
+				if strings.Count(page, "<code>"+ip+"</code>") != 1 {
+					t.Fatalf("duplicate or missing journal IP %s", ip)
+				}
+			}
+			if strings.Count(journal, ">Unblock</button>") != 1 {
+				t.Fatal("Unblock offered for observation without block")
+			}
+		}
+	}
+}
+
+func TestSecurityGlobalPolicyEnforcedByHTTPMiddleware(t *testing.T) {
+	application, _ := newTestApplication(t)
+	guard, err := httpsecurity.NewAttackGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(guard.Close)
+	application.attackGuard = guard
+	now := time.Now().UTC()
+	if err := guard.ApplyGlobal("192.0.2.11", "repository", "confirmed", now, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := guard.Add("192.0.2.12", "manual", "local", "manual", now.Add(time.Hour), now); err != nil {
+		t.Fatal(err)
+	}
+	handler := application.authAbuseMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) }))
+	for _, enabled := range []bool{true, false, true} {
+		if err := guard.SetSettings(httpsecurity.SecuritySettings{GlobalSync: enabled}); err != nil {
+			t.Fatal(err)
+		}
+		for _, ip := range []string{"192.0.2.11", "192.0.2.12"} {
+			for _, path := range []string{"/", "/.git/config"} {
+				request := httptest.NewRequest("GET", "http://example.com"+path, nil)
+				request.RemoteAddr = ip + ":12345"
+				response := httptest.NewRecorder()
+				handler.ServeHTTP(response, request)
+				want := 429
+				if !enabled && ip == "192.0.2.11" {
+					want = 204
+				}
+				if response.Code != want {
+					t.Fatalf("enabled=%v ip=%s status=%d want=%d", enabled, ip, response.Code, want)
+				}
+			}
+		}
+	}
+}
+
+func TestSecurityGlobalSyncPullsAtStartupAndWake(t *testing.T) {
+	application, _ := newTestApplication(t)
+	guard, err := httpsecurity.NewAttackGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(guard.Close)
+	application.attackGuard = guard
+	application.securityGlobalSignals = make(chan securitysync.Signal, 1)
+	application.securityGlobalWake = make(chan struct{}, 1)
+	application.securityGlobalStatus = make(chan chan securityGlobalSyncStatus)
+	listener, err := netchan.Listen[sitebrushNetChanRequest]("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_NETCHAN_ADDRESS", listener.Address)
+	now := time.Now().UTC()
+	payload, err := json.Marshal([]securitysync.Entry{{IP: "192.0.2.21", Reason: "repository", Confirmations: 3, LastEvent: now, ExpiresAt: now.Add(time.Hour)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	responses := make(chan sitebrushNetChanResponse, 3)
+	responses <- sitebrushNetChanResponse{Status: "ok", StatusCode: 200, Payload: payload}
+	responses <- sitebrushNetChanResponse{Status: "test failure", StatusCode: 503}
+	responses <- sitebrushNetChanResponse{Status: "ok", StatusCode: 200, Payload: payload}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case connection, open := <-listener.Channels:
+				if !open {
+					return
+				}
+				defer connection.Abort()
+				select {
+				case task := <-connection.Receive:
+					var response sitebrushNetChanResponse
+					select {
+					case response = <-responses:
+					case <-stop:
+						return
+					}
+					select {
+					case task.Response <- response:
+					case <-stop:
+						connection.Abort()
+						return
+					}
+				case <-stop:
+					connection.Abort()
+					return
+				}
+			}
+		}
+	}()
+	go func() { defer close(done); application.runSecurityGlobalSync(stop) }()
+	defer func() {
+		close(stop)
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Error("sync did not stop")
+		}
+	}()
+	awaitStatus := func(failed bool) securityGlobalSyncStatus {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		var last securityGlobalSyncStatus
+		for time.Now().Before(deadline) {
+			status := application.securityGlobalSyncView()
+			last = status
+			if !status.LastSuccess.IsZero() && (status.Error != "") == failed {
+				return status
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("sync status did not update: %+v", last)
+		return securityGlobalSyncStatus{}
+	}
+	initial := awaitStatus(false)
+	if initial.Entries != 1 {
+		t.Fatalf("startup registry size=%d", initial.Entries)
+	}
+	application.securityGlobalWake <- struct{}{}
+	failed := awaitStatus(true)
+	if !failed.LastSuccess.Equal(initial.LastSuccess) {
+		t.Fatal("failed refresh discarded last success")
+	}
+	if _, blocked := guard.Check("192.0.2.21", now); !blocked {
+		t.Fatal("failed refresh discarded protection")
+	}
+	application.securityGlobalWake <- struct{}{}
+	awaitStatus(false)
 }
 
 func TestBlockedIPStatisticsCountAddressesAndRespectPolicyPrecedence(t *testing.T) {

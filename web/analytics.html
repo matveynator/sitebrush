@@ -583,6 +583,9 @@
       align-items:center;
       font-size:.82rem;
     }
+    #security-country-chart .security-rank-row { grid-template-columns:minmax(90px,1fr) minmax(0,1.4fr); }
+    #security-country-chart .security-rank-track { display:none; }
+    #security-country-chart .security-rank-value { white-space:normal; }
     .security-rank-label {
       overflow-wrap:anywhere;
       white-space:normal;
@@ -611,20 +614,6 @@
       color:var(--theme-foreground);
       font-weight:600;
     }
-    .security-type-help {
-      display:grid;
-      grid-template-columns:repeat(auto-fit,minmax(260px,1fr));
-      gap:10px;
-      margin-top:14px;
-    }
-    .security-type-help-item {
-      border:1px solid var(--dashboard-border);
-      border-radius:var(--theme-radius);
-      padding:10px 12px;
-      background:rgba(255,255,255,.02);
-    }
-    .security-type-help-item strong { display:block; margin-bottom:4px; }
-    .security-type-help-item p { margin:0; font-size:.82rem; color:var(--dashboard-muted); }
     @media (max-width: 900px) {
       .security-chart-grid { grid-template-columns:1fr; }
       .security-calendar-insights { grid-template-columns:repeat(3,minmax(0,1fr)); }
@@ -854,8 +843,9 @@
     <section class="card metric-card">
       <div class="card-body">
         <div class="text-muted small">{{.Label}}</div>
-        <div class="metric-value">{{.Value}}</div>
+        <div class="metric-value">{{if .Link}}<a href="{{.Link}}" aria-label="{{.Label}} — {{.Hint}}">{{.Value}}</a>{{else}}{{.Value}}{{end}}</div>
         <div class="text-muted small mt-2">{{.Hint}}</div>
+        {{if .Link}}<a class="small d-inline-block mt-2" href="{{.Link}}">{{index $.T "analytics_error_details"}}</a>{{end}}
       </div>
     </section>
     {{end}}
@@ -865,7 +855,7 @@
 
   <div class="report-grid">
     {{range .Report.Sections}}
-    <section class="card">
+    <section class="card" {{if .ID}}id="{{.ID}}"{{end}}>
       <div class="card-body">
         <h2 class="h5">{{.Title}}</h2>
         {{if .Description}}<p class="text-muted small">{{.Description}}</p>{{end}}
@@ -904,7 +894,7 @@
   {{if eq .AnalyticsTab "security"}}
   <section class="card world-map-card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_blocked_map"}}</h2><p class="small">{{index .T "ax_blocked_stats_hint"}} · {{index .T "ax_unknown_geo"}}: {{.SecurityIPSummary.UnknownLocations}}</p><div id="analytics-blocked-ip-map" class="world-map-panel"><div id="analytics-blocked-map-overlay" class="world-map-empty">{{index .T "analytics_no_data"}}</div></div></div></section>
   <dialog id="analytics-blocked-map-dialog" class="card analytics-map-dialog" style="width:min(760px,90vw);max-height:80vh;overflow:auto;margin:auto"><div class="card-body"><form method="dialog"><button class="btn btn-outline-secondary float-end" aria-label="Close">×</button></form><h2 class="h5">{{index .T "ax_blocked_ips"}}</h2><div id="analytics-blocked-map-list"></div></div></dialog>
-  <section id="security-activity" class="card security-chart-card mb-4" data-activity-calendar="security" data-hour-title="{{index .T "ax_security_by_hour"}}" data-type-title="{{index .T "ax_security_by_type"}}" data-activity-title="{{index .T "ax_security_activity"}}" data-empty-text="{{index .T "analytics_no_data"}}">
+  <section id="security-activity" class="card security-chart-card mb-4" data-activity-calendar="security" data-event-label="{{index .T "ax_event_count"}}" data-ip-label="{{index .T "ax_ip_count"}}" data-hour-title="{{index .T "ax_security_by_hour"}}" data-type-title="{{index .T "ax_security_by_type"}}" data-activity-title="{{index .T "ax_security_activity"}}" data-empty-text="{{index .T "analytics_no_data"}}">
   <div class="card-body">
     <h2 class="h5">{{index .T "ax_security_activity"}}</h2>
     <p class="small text-muted">{{index .T "ax_security_activity_hint"}}</p>
@@ -930,19 +920,11 @@
       <section class="security-calendar-insight security-radar-card"><h3 class="h6" data-calendar-radar-title>{{index .T "ax_security_by_type"}}</h3><svg class="security-radar" data-calendar-radar viewBox="0 0 360 320" role="img" aria-label="{{index .T "ax_security_by_type"}}"></svg><div class="security-radar-tooltip" data-calendar-radar-tooltip role="tooltip" hidden><strong data-calendar-radar-tooltip-title></strong><span data-calendar-radar-tooltip-description></span></div><div class="small text-muted text-center" data-calendar-radar-legend></div></section>
       <section class="security-calendar-insight"><div class="d-flex justify-content-between align-items-start gap-2"><h3 class="h6">{{index .T "ax_security_by_country"}}</h3><button class="btn btn-outline-secondary btn-sm" type="button" data-security-all-days>{{index .T "ax_all_days"}}</button></div><p class="small" data-security-country-period>{{index .T "ax_all_days"}}</p><div id="security-country-chart" class="security-rank-chart"></div></section>
     </div>
-    <div class="mt-3">
-      <div id="security-type-help" class="security-type-help">
-        {{range .SecurityTypeAxes}}
-        <div class="security-type-help-item" data-security-type-help="{{.}}">
-          <strong>{{index $.T (print "ax_risk_" .)}}</strong>
-          <p>{{index $.T (print "ax_risk_desc_" .)}}</p>
-        </div>
-        {{end}}
-      </div>
-    </div>
     <script type="application/json" id="security-hours-data">{{.SecurityHoursJSON}}</script>
     <script type="application/json" id="security-countries-data">{{.SecurityCountriesJSON}}</script>
     <script type="application/json" data-calendar-countries>{{.SecurityActivityCountriesJSON}}</script>
+    <script type="application/json" data-country-ips>{{.SecurityCountryIPsJSON}}</script>
+    <script type="application/json" data-daily-country-ips>{{.SecurityDailyCountryIPsJSON}}</script>
     <script type="application/json" id="security-types-data">{{.SecurityTypesJSON}}</script>
     <div id="security-type-labels" hidden>
       {{range .SecurityTypeAxes}}<span data-security-type="{{.}}" data-label="{{index $.T (print "ax_risk_" .)}}" data-description="{{index $.T (print "ax_risk_desc_" .)}}"></span>{{end}}
@@ -953,14 +935,14 @@
     <div class="metric-card card"><div class="card-body">{{index .T "ax_blocked_ips"}}<div class="metric-value">{{.SecurityIPSummary.Blocked}}</div></div></div>
     <div class="metric-card card"><div class="card-body">{{index .T "ax_allowed_ips"}}<div class="metric-value">{{.SecurityIPSummary.Allowed}}</div></div></div>
     <div class="metric-card card"><div class="card-body">{{index .T "ax_throttled_ips"}}<div class="metric-value">{{.SecurityIPSummary.Throttled}}</div></div></div>
-    <div class="metric-card card"><div class="card-body">{{index .T "ax_returning_blocked_ips"}}<div class="metric-value">{{if .SecurityIPSummary.RepeatStarted.IsZero}}{{index .T "analytics_no_data"}}{{else}}{{.SecurityIPSummary.ReturningIPs}}{{end}}</div></div></div>
-    <div class="metric-card card"><div class="card-body">{{index .T "ax_blocked_return_requests"}}<div class="metric-value">{{if .SecurityIPSummary.RepeatStarted.IsZero}}{{index .T "analytics_no_data"}}{{else}}{{.SecurityIPSummary.ReturnRequests}}{{end}}</div></div></div>
+    <div id="security-returning-ips" class="metric-card card"><div class="card-body">
+      {{index .T "ax_returning_blocked_ips"}}
+      <div class="metric-value">{{if .SecurityIPSummary.RepeatStarted.IsZero}}{{index .T "analytics_no_data"}}{{else}}{{.SecurityIPSummary.ReturningIPs}}{{end}}</div>
+      <div class="small mt-2" data-security-return-requests>{{index .T "ax_blocked_return_requests"}}: {{if .SecurityIPSummary.RepeatStarted.IsZero}}{{index .T "analytics_no_data"}}{{else}}{{.SecurityIPSummary.ReturnRequests}}{{end}}</div>
+    </div></div>
   </div><p class="small mt-3">{{index .T "ax_blocked_repeats_hint"}}{{if not .SecurityIPSummary.RepeatStarted.IsZero}} · {{.SecurityIPSummary.RepeatStarted.Format "2006-01-02 15:04 UTC"}}{{end}}</p>
-  <div class="row g-3">
-    <div class="col-md-4"><h3 class="h6">{{index .T "ax_security_by_type"}}</h3><table class="table table-sm"><thead><tr><th>{{index .T "ax_security_by_type"}}</th><th>{{index .T "ax_ip_count"}}</th></tr></thead><tbody>{{range .SecurityIPSummary.Attacks}}<tr><td>{{with index $.T (print "ax_risk_" .Label)}}{{.}}{{else}}{{if eq .Label "unknown"}}{{index $.T "analytics_no_data"}}{{else}}{{.Label}}{{end}}{{end}}</td><td>{{.Count}}</td></tr>{{else}}<tr><td colspan="2">{{index .T "analytics_no_data"}}</td></tr>{{end}}</tbody></table></div>
-    <div class="col-md-4"><h3 class="h6">{{index .T "ax_security_by_country"}}</h3><table class="table table-sm"><thead><tr><th>{{index .T "ax_security_by_country"}}</th><th>{{index .T "ax_ip_count"}}</th></tr></thead><tbody>{{range .SecurityIPSummary.Countries}}<tr><td data-country-code="{{.Label}}">{{if eq .Label "unknown"}}{{index $.T "analytics_no_data"}}{{else}}{{.Label}}{{end}}</td><td>{{.Count}}</td></tr>{{else}}<tr><td colspan="2">{{index .T "analytics_no_data"}}</td></tr>{{end}}</tbody></table></div>
-    <div class="col-md-4"><h3 class="h6">{{index .T "ax_policies"}}</h3><table class="table table-sm"><thead><tr><th>{{index .T "ax_policies"}}</th><th>{{index .T "ax_ip_count"}}</th></tr></thead><tbody>{{range .SecurityIPSummary.Policies}}<tr><td data-security-policy-name="{{.Label}}">{{with index $.T (print "ax_policy_" .Label)}}{{.}}{{else}}{{.Label}}{{end}}</td><td>{{.Count}}</td></tr>{{end}}</tbody></table></div>
-  </div></div></section>
+  <div hidden>{{range .SecurityIPSummary.Policies}}<span data-security-policy-name="{{.Label}}">{{with index $.T (print "ax_policy_" .Label)}}{{.}}{{else}}{{.Label}}{{end}}</span>{{end}}</div>
+  </div></section>
 
   <section id="security" class="card mb-4"><div class="card-body">
     <h2 class="h5">{{index .T "ax_security"}}</h2>
@@ -1053,7 +1035,14 @@
 
     <div id="local-blocks" class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
       <div><h3 class="h6 mb-0">Local and manual blocks</h3><div class="small">{{index .T "ax_security_block_log_help"}}</div></div>
-      <form method="get" class="d-flex gap-2"><input type="hidden" name="analytics"><input type="hidden" name="tab" value="security"><input name="local_query" value="{{.LocalBlockPage.Query}}" class="form-control form-control-sm security-registry-search" type="search" placeholder="Search Incident ID, IP, domain or reason"><button class="btn btn-outline-secondary btn-sm">{{index .T "ax_search"}}</button></form>
+      <form method="get" action="#local-blocks" data-security-search class="d-flex gap-2">
+        <input type="hidden" name="analytics"><input type="hidden" name="tab" value="security">
+        <input type="hidden" name="days" value="{{.SecurityPeriod}}">
+        <input type="hidden" name="global_query" value="{{.GlobalBlockPage.Query}}">
+        <input type="hidden" name="global_page" value="{{.GlobalBlockPage.Page}}">
+        <input name="local_query" value="{{.LocalBlockPage.Query}}" class="form-control form-control-sm security-registry-search" type="search" placeholder="Search Incident ID, IP, domain or reason">
+        <button class="btn btn-outline-secondary btn-sm">{{index .T "ax_search"}}</button>
+      </form>
     </div>
     <div class="table-responsive mb-4">
       <table class="table table-sm align-middle">
@@ -1064,23 +1053,24 @@
             <td><code>{{.IP}}</code><div class="small"><span data-country-code="{{.Country}}">{{if .Country}}{{.Country}}{{else}}{{index $.T "analytics_no_data"}}{{end}}</span> · {{if .City}}{{.City}}{{else}}{{index $.T "analytics_no_data"}}{{end}} · {{if .OperatingSystem}}{{.OperatingSystem}}{{else}}{{index $.T "analytics_no_data"}}{{end}}</div><div class="small text-muted">Incident {{.IncidentID}}</div>{{if .Domain}}<div class="small"><strong>Domain:</strong> {{.Domain}}</div>{{end}}{{if .ClientClass}}<div class="small">{{.ClientClass}}</div>{{end}}{{if .Agent}}<details class="small text-break"><summary>User-Agent</summary>{{.Agent}}</details>{{end}}</td>
             <td>
               <div class="security-block-reason"><strong data-security-block-type="{{.Reason}}">{{with index $.T (print "ax_risk_" .Reason)}}{{.}}{{else}}{{.Reason}}{{end}}</strong><p>{{if .Description}}{{.Description}}{{else}}{{index $.T "analytics_no_data"}}{{end}}</p></div>
+              {{if .Incident.Count}}<div class="small">{{if .Incident.PossibleExposure}}⚠ {{index $.T "ax_exposure"}} · {{end}}{{.Incident.Count}} events{{range $category,$count := .Incident.Categories}}<div>{{with index $.T (print "ax_risk_" $category)}}{{.}}{{else}}{{$category}}{{end}} × {{$count}}</div>{{end}}</div>{{end}}
               {{if .ReasonLog}}<details class="mt-2"><summary class="small">{{index $.T "ax_security_block_history"}}</summary><ul class="security-reason-log">{{range .ReasonLog}}<li>{{if ne .First .At}}{{.First.Format "2006-01-02 15:04"}} — {{end}}{{.At.Format "2006-01-02 15:04"}} · {{.Source}} · {{.Reason}} × {{.Count}}{{if .Description}} — {{.Description}}{{end}}</li>{{end}}</ul></details>{{end}}
               {{if .ObservedRequests}}<details class="mt-2"><summary class="small">{{index $.T "ax_security_actual_requests"}}</summary><ul class="security-reason-log">{{range .ObservedRequests}}<li><code>{{.Method}} {{.Path}}</code> · HTTP {{.Status}} · × {{.Count}}{{if ne .First .Last}} · {{.First.Format "2006-01-02 15:04"}} — {{.Last.Format "2006-01-02 15:04"}}{{else}} · {{.Last.Format "2006-01-02 15:04"}}{{end}}</li>{{end}}</ul></details>{{end}}
             </td>
-            <td><span class="security-source-badge {{if eq .Source "manual"}}security-source-manual{{else}}security-source-local{{end}}">{{.Source}}</span></td>
+            <td><strong>{{if eq .Status "Blocked"}}{{index $.T "ax_blocked_status"}}{{else if eq .Status "Allowlisted"}}{{index $.T "ax_allowed_ips"}}{{else}}{{index $.T "ax_not_blocked"}}{{end}}</strong><br><span class="security-source-badge {{if eq .Source "manual"}}security-source-manual{{else}}security-source-local{{end}}">{{.Source}}</span></td>
             <td><time data-relative-time="{{.LastEvent.Format "2006-01-02T15:04:05Z07:00"}}">{{.LastEvent.Format "02 Jan 2006 15:04"}}</time></td>
-            <td><time data-relative-time="{{.ExpiresAt.Format "2006-01-02T15:04:05Z07:00"}}" data-countdown>{{.ExpiresAt.Format "02 Jan 2006 15:04"}}</time></td>
+            <td>{{if .ExpiresAt.IsZero}}—{{else}}<time data-relative-time="{{.ExpiresAt.Format "2006-01-02T15:04:05Z07:00"}}" data-countdown>{{.ExpiresAt.Format "02 Jan 2006 15:04"}}</time>{{end}}</td>
             <td>{{.Violations}}</td>
             <td>
-              <form method="post" action="?analytics&amp;tab=security"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+              {{if eq .Status "Blocked"}}<form method="post" action="?analytics&amp;tab=security"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
                 <input type="hidden" name="security_action" value="remove">
                 <input type="hidden" name="ip" value="{{.IP}}">
                 <button class="btn btn-outline-secondary btn-sm">Unblock</button>
-              </form>
+              </form>{{end}}
             </td>
           </tr>
         {{else}}
-          <tr><td colspan="7">No local blocks.</td></tr>
+          <tr><td colspan="7">{{if .LocalBlockPage.Query}}No matching records.{{else}}No local blocks or incidents.{{end}}</td></tr>
         {{end}}
         </tbody>
       </table>
@@ -1089,8 +1079,16 @@
     <nav class="d-flex align-items-center gap-3 mb-4" aria-label="{{index .T "ax_pages"}}">{{if .LocalBlockPage.PreviousURL}}<a href="{{.LocalBlockPage.PreviousURL}}">←</a>{{end}}{{range .LocalBlockPage.Links}}{{if .Current}}<span class="btn btn-secondary btn-sm" aria-current="page">{{.Number}}</span>{{else}}<a class="btn btn-outline-secondary btn-sm" href="{{.URL}}">{{.Number}}</a>{{end}}{{end}}<span>{{.LocalBlockPage.Total}}</span>{{if .LocalBlockPage.NextURL}}<a href="{{.LocalBlockPage.NextURL}}">→</a>{{end}}</nav>
     <div id="global-blocks" class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
       <div><h3 class="h6 mb-0">Global reputation registry</h3><div class="small">Read-only entries confirmed by independent SiteBrush installations.</div></div>
-      <form method="get" class="d-flex gap-2"><input type="hidden" name="analytics"><input type="hidden" name="tab" value="security"><input name="global_query" value="{{.GlobalBlockPage.Query}}" class="form-control form-control-sm security-registry-search" type="search" placeholder="Search global IP or reason"><button class="btn btn-outline-secondary btn-sm">{{index .T "ax_search"}}</button></form>
+      <form method="get" action="#global-blocks" data-security-search class="d-flex gap-2">
+        <input type="hidden" name="analytics"><input type="hidden" name="tab" value="security">
+        <input type="hidden" name="days" value="{{.SecurityPeriod}}">
+        <input type="hidden" name="local_query" value="{{.LocalBlockPage.Query}}">
+        <input type="hidden" name="local_page" value="{{.LocalBlockPage.Page}}">
+        <input name="global_query" value="{{.GlobalBlockPage.Query}}" class="form-control form-control-sm security-registry-search" type="search" placeholder="Search global IP or reason">
+        <button class="btn btn-outline-secondary btn-sm">{{index .T "ax_search"}}</button>
+      </form>
     </div>
+    <p class="small">Global protection: {{if .SecuritySettings.GlobalSync}}enabled{{else}}disabled{{end}} · Unexpired cached entries: {{.SecurityGlobalRegistryCount}} · Last successful sync: {{if .SecurityGlobalSyncStatus.LastSuccess.IsZero}}{{index .T "analytics_no_data"}}{{else}}{{.SecurityGlobalSyncStatus.LastSuccess.Format "2006-01-02 15:04 UTC"}}{{end}} · Entries received: {{.SecurityGlobalSyncStatus.Entries}}{{if .SecurityGlobalSyncStatus.Error}} · {{.SecurityGlobalSyncStatus.Error}}{{end}}</p>
     <div class="table-responsive mb-4">
       <table class="table table-sm align-middle" id="security-global-table">
         <thead><tr><th>IP / incident</th><th>Reason</th><th>Source</th><th>Last event</th><th>Expires</th><th>Evidence</th></tr></thead>
@@ -1098,23 +1096,20 @@
         {{range .SecurityGlobalBlocks}}
           <tr class="security-row-danger" data-security-global-row data-security-incident-row>
             <td><code>{{.IP}}</code><div class="small"><span data-country-code="{{.Country}}">{{if .Country}}{{.Country}}{{else}}{{index $.T "analytics_no_data"}}{{end}}</span> · {{if .City}}{{.City}}{{else}}{{index $.T "analytics_no_data"}}{{end}} · {{if .OperatingSystem}}{{.OperatingSystem}}{{else}}{{index $.T "analytics_no_data"}}{{end}}</div><div class="small text-muted">Incident {{.IncidentID}}</div>{{if .Domain}}<div class="small"><strong>Domain:</strong> {{.Domain}}</div>{{end}}{{if .ClientClass}}<div class="small">{{.ClientClass}}</div>{{end}}{{if .Agent}}<details class="small text-break"><summary>User-Agent</summary>{{.Agent}}</details>{{end}}</td>
-            <td>{{.Reason}}{{if .Description}}<div class="small">{{.Description}}</div>{{end}}{{if .ReasonLog}}<details><summary class="small">Reason summary</summary><ul class="security-reason-log">{{range .ReasonLog}}<li>{{if ne .First .At}}{{.First.Format "2006-01-02 15:04"}} — {{end}}{{.At.Format "2006-01-02 15:04"}} · {{.Reason}} × {{.Count}}{{if .Description}} — {{.Description}}{{end}}</li>{{end}}</ul></details>{{end}}</td>
+            <td>{{.Reason}}{{if .Description}}<div class="small">{{.Description}}</div>{{end}}{{if .Incident.Count}}<div class="small">{{if .Incident.PossibleExposure}}⚠ {{index $.T "ax_exposure"}}{{end}}{{range $category,$count := .Incident.Categories}}<div>{{with index $.T (print "ax_risk_" $category)}}{{.}}{{else}}{{$category}}{{end}} × {{$count}}</div>{{end}}</div>{{end}}{{if .ObservedRequests}}<details><summary>{{index $.T "ax_security_actual_requests"}}</summary>{{range .ObservedRequests}}<div><code>{{.Method}} {{.Path}}</code> · HTTP {{.Status}} · × {{.Count}} · {{.Last.Format "2006-01-02 15:04"}}</div>{{end}}</details>{{end}}{{if .ReasonLog}}<details><summary class="small">Reason summary</summary><ul class="security-reason-log">{{range .ReasonLog}}<li>{{if ne .First .At}}{{.First.Format "2006-01-02 15:04"}} — {{end}}{{.At.Format "2006-01-02 15:04"}} · {{.Reason}} × {{.Count}}{{if .Description}} — {{.Description}}{{end}}</li>{{end}}</ul></details>{{end}}</td>
             <td><span class="security-source-badge security-source-global">global reputation</span></td>
             <td><time data-relative-time="{{.LastEvent.Format "2006-01-02T15:04:05Z07:00"}}">{{.LastEvent.Format "02 Jan 2006 15:04"}}</time></td>
             <td><time data-relative-time="{{.ExpiresAt.Format "2006-01-02T15:04:05Z07:00"}}" data-countdown>{{.ExpiresAt.Format "02 Jan 2006 15:04"}}</time></td>
             <td>{{.Violations}}</td>
           </tr>
         {{else}}
-          <tr><td colspan="6">No active global reputation entries.</td></tr>
+          <tr><td colspan="6">{{if .GlobalBlockPage.Query}}No matching records.{{else}}No active global reputation entries.{{end}}</td></tr>
         {{end}}
         </tbody>
       </table>
     </div>
 
     <nav class="d-flex align-items-center gap-3 mb-4" aria-label="{{index .T "ax_pages"}}">{{if .GlobalBlockPage.PreviousURL}}<a href="{{.GlobalBlockPage.PreviousURL}}">←</a>{{end}}{{range .GlobalBlockPage.Links}}{{if .Current}}<span class="btn btn-secondary btn-sm" aria-current="page">{{.Number}}</span>{{else}}<a class="btn btn-outline-secondary btn-sm" href="{{.URL}}">{{.Number}}</a>{{end}}{{end}}<span>{{.GlobalBlockPage.Total}}</span>{{if .GlobalBlockPage.NextURL}}<a href="{{.GlobalBlockPage.NextURL}}">→</a>{{end}}</nav>
-    <h3 id="security-incidents" class="h6">Detected security incidents</h3>
-    {{range .SecurityVisibleIncidents}}<details class="border-bottom py-2"><summary>{{if .PossibleExposure}}⚠ {{index $.T "ax_exposure"}} · {{end}}{{.IP}} · <span data-country-code="{{.Country}}">{{if .Country}}{{.Country}}{{else}}{{index $.T "analytics_no_data"}}{{end}}</span> · {{if .City}}{{.City}}{{else}}{{index $.T "analytics_no_data"}}{{end}} · {{if .OperatingSystem}}{{.OperatingSystem}}{{else}}{{index $.T "analytics_no_data"}}{{end}} · {{.Count}} · <time data-relative-time="{{.Last.Format "2006-01-02T15:04:05Z07:00"}}">{{.Last.Format "02 Jan 2006 15:04"}}</time></summary><p>{{.Country}} {{.City}} · {{.Agent}}</p><ul>{{range $category,$count:=.Categories}}<li>{{index $.T (print "ax_risk_" $category)}} × {{$count}}</li>{{end}}</ul><table class="table"><tbody>{{range .Examples}}<tr><td>{{.First.Format "15:04:05"}} — {{.Last.Format "15:04:05"}}</td><td>{{.Method}} {{.Path}}</td><td>{{.Status}}</td><td>× {{.Count}}</td></tr>{{end}}</tbody></table></details>{{else}}<p>{{index .T "ax_no_incidents"}}</p>{{end}}
-    <nav class="d-flex align-items-center gap-3 mt-3" aria-label="{{index .T "ax_pages"}}">{{if .IncidentPage.PreviousURL}}<a href="{{.IncidentPage.PreviousURL}}">←</a>{{end}}{{range .IncidentPage.Links}}{{if .Current}}<span class="btn btn-secondary btn-sm" aria-current="page">{{.Number}}</span>{{else}}<a class="btn btn-outline-secondary btn-sm" href="{{.URL}}">{{.Number}}</a>{{end}}{{end}}<span>{{.IncidentPage.Total}}</span>{{if .IncidentPage.NextURL}}<a href="{{.IncidentPage.NextURL}}">→</a>{{end}}</nav>
   </div></section>
   {{end}}
 </div>
@@ -1365,10 +1360,12 @@
     const activityTypes = readData(calendar, '[data-calendar-types]', {});
     const activityCountries = readData(calendar, '[data-calendar-countries]', {});
     const overallCountries = readData(calendar, '#security-countries-data', []);
+	const countryIPs = readData(calendar, '[data-country-ips]', {});
+	const dailyCountryIPs = readData(calendar, '[data-daily-country-ips]', {});
     const countryChart = calendar.querySelector('#security-country-chart');
     const countryPeriod = calendar.querySelector('[data-security-country-period]');
     const allDaysButton = calendar.querySelector('[data-security-all-days]');
-    const countryModel = {selectedDay: null};
+    const countryModel = {selectedDay: null, page: 1};
     const severityLevels = readData(calendar, '[data-calendar-severity]', {});
     const calendarGrid = calendar.querySelector('[data-calendar-grid]');
     const yearTabs = calendar.querySelector('[data-calendar-years]');
@@ -1398,14 +1395,6 @@
       typeDescriptions.set(labelElement.dataset.securityType || '', labelElement.dataset.description || '');
     }
 
-    for (const explanation of calendar.querySelectorAll('[data-security-type-help]')) {
-      const heading = explanation.querySelector('strong');
-      if (heading) {
-        heading.style.borderBottom = '3px solid ' + securityTypeColor(explanation.dataset.securityTypeHelp);
-        heading.style.paddingBottom = '4px';
-      }
-    }
-
     function countryName(countryCode) {
       if (!countryCode || countryCode === 'unknown') return calendar.dataset.emptyText || 'No data';
       try {
@@ -1427,7 +1416,10 @@
       countryPeriod.textContent = (selectedDay || allDaysButton.textContent) + ' · ' + total;
       allDaysButton.disabled = selectedDay === null;
       if (orderedCountries.length === 0) { countryChart.textContent = calendar.dataset.emptyText || 'No data'; return; }
-      for (const country of orderedCountries) {
+	  const pages = Math.max(1, Math.ceil(orderedCountries.length / 10));
+	  countryModel.page = Math.min(pages, countryModel.page);
+	  const audiences = selectedDay === null ? countryIPs : (dailyCountryIPs[selectedDay] || {});
+      for (const country of orderedCountries.slice((countryModel.page - 1) * 10, countryModel.page * 10)) {
         const countryRow = document.createElement('div');
         countryRow.className = 'security-rank-row';
         const countryLabel = document.createElement('span');
@@ -1441,14 +1433,35 @@
         track.appendChild(fill);
         const count = document.createElement('span');
         count.className = 'security-rank-value';
-        count.textContent = String(country.Count);
+        const audience = audiences[country.Label];
+        count.textContent = (calendar.dataset.eventLabel || 'Events') + ': ' + country.Count + ' · ' + (calendar.dataset.ipLabel || 'IP') + ': ' + (audience && audience.Known ? String(audience.Count) : (calendar.dataset.emptyText || 'No data'));
+        count.style.minWidth = '0';
         countryRow.append(countryLabel, track, count);
         countryChart.appendChild(countryRow);
       }
+	  const navigation = document.createElement('nav');
+	  navigation.className = 'd-flex align-items-center gap-2 mt-2';
+	  for (const direction of [-1, 1]) {
+	    const button = document.createElement('button');
+	    button.type = 'button';
+	    button.className = 'btn btn-outline-secondary btn-sm';
+	    button.textContent = direction < 0 ? '←' : '→';
+	    button.disabled = direction < 0 ? countryModel.page === 1 : countryModel.page === pages;
+	    button.setAttribute('aria-label', direction < 0 ? 'Previous country page' : 'Next country page');
+	    button.addEventListener('click', function changeCountryPage() { countryModel.page += direction; renderCountries(); });
+	    navigation.appendChild(button);
+	    if (direction < 0) {
+	      const pageLabel = document.createElement('span');
+	      pageLabel.textContent = countryModel.page + ' / ' + pages;
+	      navigation.appendChild(pageLabel);
+	    }
+	  }
+	  countryChart.appendChild(navigation);
     }
 
     if (allDaysButton) allDaysButton.addEventListener('click', function showAllCountries() {
       countryModel.selectedDay = null;
+      countryModel.page = 1;
       renderCountries();
     });
     renderCountries();
@@ -1517,7 +1530,7 @@
         label.setAttribute('text-anchor', labelPoint[0] < centerX - 8 ? 'end' : (labelPoint[0] > centerX + 8 ? 'start' : 'middle'));
         const fullLabel = typeLabels.get(category) || category;
         label.textContent = fullLabel.split(/\s+/).slice(0, category === 'sitebrush-exploit' ? 3 : 2).join(' ');
-        const fullDescription = typeDescriptions.get(category) || fullLabel;
+        const fullDescription = (typeDescriptions.get(category) || fullLabel) + ' · ' + (calendar.dataset.eventLabel || 'Events') + ': ' + (Number(selectedCategories[category]) || 0) + ' · ' + (dayKey || (allDaysButton ? allDaysButton.textContent : 'All days'));
         label.style.fill = securityTypeColor(category);
         label.setAttribute('tabindex', '0');
         label.setAttribute('role', 'button');
@@ -1629,6 +1642,7 @@
       dayButton.setAttribute('aria-label', dayButton.title);
       dayButton.addEventListener('click', function selectDay() {
         countryModel.selectedDay = dayKey;
+        countryModel.page = 1;
         renderCountries();
         renderHours(dayKey);
       });
@@ -2062,6 +2076,17 @@
   }
   renderMap('analytics-visitor-map', 'analytics-map-points', 'analytics-session-map-overlay', 'analytics-map-sessions', 'analytics-map-sessions-list', false);
   renderMap('analytics-blocked-ip-map', 'analytics-blocked-map-points', 'analytics-blocked-map-overlay', 'analytics-blocked-map-dialog', 'analytics-blocked-map-list', true);
+})();
+
+(function setupSecuritySearchFocus() {
+  if (window.location.hash !== '#local-blocks' && window.location.hash !== '#global-blocks') return;
+  const section = document.querySelector(window.location.hash);
+  const searchField = section && section.querySelector('[data-security-search] input[type="search"]');
+  if (!searchField) return;
+  const queryName = searchField.name;
+  if (!new URLSearchParams(window.location.search).has(queryName)) return;
+  searchField.focus({preventScroll: true});
+  section.scrollIntoView({block: 'start'});
 })();
 
 (function setupReturnToPreviousURI() {

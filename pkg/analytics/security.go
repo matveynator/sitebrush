@@ -2,6 +2,7 @@ package analytics
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"sort"
 	"strings"
@@ -39,6 +40,7 @@ type RequestGroup struct {
 	Count, Errors                      int
 }
 type SecurityState struct {
+	CountryAudience       map[string]map[string]*SecurityCountryAudience
 	BlockedReturns        map[string]*BlockedReturn
 	ReturnTrackingStarted time.Time
 	Started, Updated      time.Time
@@ -58,6 +60,16 @@ type SecurityEventBucket struct {
 	Hour                    int
 	Count                   int
 }
+
+// Exact country audiences require address evidence, not sums of daily totals.
+type SecurityCountryAudience struct {
+	Addresses map[string]bool
+	Events    int
+}
+type SecurityCountryIPs struct {
+	Count int
+	Known bool
+}
 type SecurityDimension struct {
 	Label string
 	Count int
@@ -68,6 +80,8 @@ type RequestWindow struct {
 	Paths           map[string]bool
 }
 type SecurityReport struct {
+	CountryIPs                   map[string]SecurityCountryIPs
+	DailyCountryIPs              map[string]map[string]SecurityCountryIPs
 	BlockedReturns               []BlockedReturn
 	ReturnTrackingStarted        time.Time
 	Incidents                    []Incident
@@ -326,6 +340,29 @@ func (state *SecurityState) recordSecurityEvent(request RequestObservation, cate
 		state.Incomplete = true
 	}
 	state.ActivityCountries[date][country]++
+	if state.CountryAudience == nil {
+		state.CountryAudience = make(map[string]map[string]*SecurityCountryAudience)
+	}
+	if state.CountryAudience[date] == nil {
+		state.CountryAudience[date] = make(map[string]*SecurityCountryAudience)
+	}
+	audience := state.CountryAudience[date][country]
+	if audience == nil {
+		audience = &SecurityCountryAudience{Addresses: make(map[string]bool)}
+		state.CountryAudience[date][country] = audience
+	}
+	address := CleanText(request.IP, 64)
+	if parsed := net.ParseIP(address); parsed != nil {
+		address = parsed.String()
+	} else {
+		address = ""
+	}
+	if address != "" && (audience.Addresses[address] || len(audience.Addresses) < 4096) {
+		audience.Addresses[address] = true
+		audience.Events++
+	} else {
+		state.Incomplete = true
+	}
 	if state.ActivityTypes == nil {
 		state.ActivityTypes = make(map[string]map[string]int)
 	}
@@ -416,6 +453,11 @@ func (state *SecurityState) recordIncident(request RequestObservation, category,
 	}
 }
 func (state *SecurityState) Prune(now time.Time) {
+	for date := range state.CountryAudience {
+		if date < dayKey(now.AddDate(0, 0, -29)) {
+			delete(state.CountryAudience, date)
+		}
+	}
 	for ip, observation := range state.BlockedReturns {
 		if now.Sub(observation.Last) > 30*24*time.Hour {
 			delete(state.BlockedReturns, ip)
@@ -536,6 +578,7 @@ func (state *SecurityState) Report(now time.Time, days int) SecurityReport {
 	for label, count := range countryCounts {
 		result.Countries = append(result.Countries, SecurityDimension{Label: label, Count: count})
 	}
+	result.CountryIPs, result.DailyCountryIPs = state.countryAudiences(result.ActivityCountries, cutoff, dayKey(now))
 	for label, count := range typeCounts {
 		result.Types = append(result.Types, SecurityDimension{Label: label, Count: count})
 	}
@@ -565,6 +608,44 @@ func (state *SecurityState) Report(now time.Time, days int) SecurityReport {
 	return result
 }
 
+func (state *SecurityState) countryAudiences(events map[string]map[string]int, cutoff, last string) (map[string]SecurityCountryIPs, map[string]map[string]SecurityCountryIPs) {
+	overall := make(map[string]SecurityCountryIPs)
+	daily := make(map[string]map[string]SecurityCountryIPs)
+	addresses := make(map[string]map[string]bool)
+	for date, countries := range events {
+		if date > last {
+			continue
+		}
+		daily[date] = make(map[string]SecurityCountryIPs)
+		for country, count := range countries {
+			audience := state.CountryAudience[date][country]
+			known := audience != nil && audience.Events == count
+			day := SecurityCountryIPs{Known: known}
+			if audience != nil {
+				day.Count = len(audience.Addresses)
+			}
+			daily[date][country] = day
+			if date < cutoff {
+				continue
+			}
+			if addresses[country] == nil {
+				addresses[country] = make(map[string]bool)
+				overall[country] = SecurityCountryIPs{Known: true}
+			}
+			if audience != nil {
+				for address := range audience.Addresses {
+					addresses[country][address] = true
+				}
+			}
+			period := overall[country]
+			period.Known = period.Known && known
+			period.Count = len(addresses[country])
+			overall[country] = period
+		}
+	}
+	return overall, daily
+}
+
 // Older checkpoints retain country evidence in event buckets. New observations
 // keep bounded daily country totals alongside the year-long activity calendar.
 func securityCountriesByDay(buckets map[string]*SecurityEventBucket) map[string]map[string]int {
@@ -590,10 +671,25 @@ func (incident Incident) Reasons() string {
 func (state *SecurityState) Limit(budget int) {
 	estimate := func() int {
 		total := len(state.Groups)*512 + len(state.BlockedReturns)*512
+		for _, countries := range state.CountryAudience {
+			for _, audience := range countries {
+				total += 128 + len(audience.Addresses)*96
+			}
+		}
 		for _, incident := range state.Incidents {
 			total += 1024 + len(incident.Examples)*512
 		}
 		return total
+	}
+	for estimate() > budget && len(state.CountryAudience) > 0 {
+		oldest := ""
+		for date := range state.CountryAudience {
+			if oldest == "" || date < oldest {
+				oldest = date
+			}
+		}
+		delete(state.CountryAudience, oldest)
+		state.Incomplete = true
 	}
 	for estimate() > budget && len(state.Incidents) > 0 {
 		state.Incidents = state.Incidents[1:]
