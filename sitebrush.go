@@ -173,6 +173,8 @@ type App struct {
 	securityLosses                 chan string
 	securityReputation             chan<- securitysync.Request
 	securityGlobalSignals          chan securitysync.Signal
+	securityGlobalWake             chan struct{}
+	securityGlobalStatus           chan chan securityGlobalSyncStatus
 	analyticsShutdownRequested     <-chan struct{}
 	analyticsFlushInterval         time.Duration
 	analyticsFinished              chan struct{}
@@ -2503,12 +2505,14 @@ type analyticsSecurityActivityIncident struct {
 }
 
 type analyticsMetricCard struct {
+	Link  string
 	Label string
 	Value string
 	Hint  string
 }
 
 type analyticsReportSection struct {
+	ID          string
 	Title       string
 	Description string
 	Rows        []analyticsReportRow
@@ -6565,8 +6569,36 @@ func formatDurationMS(milliseconds int64) string {
 
 type analyticsSecurityBlockView struct {
 	httpsecurity.SecurityBlock
+	Status                            string
+	Incident                          browserstats.Incident
 	Country, City, ClientClass, Agent string
 	ObservedRequests                  []browserstats.Probe
+}
+
+type securityGlobalSyncStatus struct {
+	LastSuccess time.Time
+	Entries     int
+	Error       string
+}
+
+func (a *App) securityGlobalSyncView() securityGlobalSyncStatus {
+	if a.securityGlobalStatus == nil {
+		return securityGlobalSyncStatus{Error: "Synchronization has not started"}
+	}
+	reply := make(chan securityGlobalSyncStatus, 1)
+	timer := time.NewTimer(100 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case a.securityGlobalStatus <- reply:
+	case <-timer.C:
+		return securityGlobalSyncStatus{Error: "Synchronization status unavailable"}
+	}
+	select {
+	case status := <-reply:
+		return status
+	case <-timer.C:
+		return securityGlobalSyncStatus{Error: "Synchronization status unavailable"}
+	}
 }
 
 func (block analyticsSecurityBlockView) OperatingSystem() string {
@@ -6590,11 +6622,6 @@ type analyticsSecurityPageLink struct {
 	Number  int
 	URL     string
 	Current bool
-}
-
-type analyticsSecurityIncidentView struct {
-	browserstats.Incident
-	OperatingSystem string
 }
 
 func analyticsSecurityPage(r *http.Request, pageKey, queryKey, anchor string, total int) (analyticsSecurityPagination, int, int) {
@@ -6625,7 +6652,10 @@ func analyticsSecurityBlockPage(r *http.Request, blocks []analyticsSecurityBlock
 	query := strings.ToLower(browserstats.CleanText(r.URL.Query().Get(queryKey), 256))
 	filtered := make([]analyticsSecurityBlockView, 0, len(blocks))
 	for _, block := range blocks {
-		searchable := strings.Join([]string{block.IP, block.IncidentID, block.Domain, block.Reason, block.Description, block.Country, block.City, block.Agent, block.OperatingSystem()}, " ")
+		searchable := strings.Join([]string{block.IP, block.IncidentID, block.Domain, block.Reason, block.Description, block.Country, block.City, block.Agent, block.OperatingSystem(), block.Status}, " ")
+		for _, probe := range block.ObservedRequests {
+			searchable += " " + probe.Method + " " + probe.Path
+		}
 		if query == "" || strings.Contains(strings.ToLower(searchable), query) {
 			filtered = append(filtered, block)
 		}
@@ -6826,7 +6856,7 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		if json.Unmarshal([]byte(loadedSecurity.Text), &state) == nil {
 			securityNow := time.Now().UTC()
 			state.Prune(securityNow)
-			security = state.Report(securityNow, 365)
+			security = state.Report(securityNow, browserDashboard.Days)
 		}
 	}
 	securityIncidents := make(map[string]browserstats.Incident, len(security.Incidents))
@@ -6864,7 +6894,7 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		if allowedIPs[securityBlock.IP] {
 			continue
 		}
-		view := analyticsSecurityBlockView{SecurityBlock: securityBlock}
+		view := analyticsSecurityBlockView{SecurityBlock: securityBlock, Status: "Blocked"}
 		point := analyticsBlockedIPMapPoint{Blocked: true, RepeatKnown: !security.ReturnTrackingStarted.IsZero(), Address: securityBlock.IP, Policy: securityBlock.Source, Reason: securityBlock.Description, Last: securityBlock.LastEvent, RepeatRequests: repeatRequests[securityBlock.IP]}
 		if observed, found := returnsByIP[securityBlock.IP]; found {
 			view.Country, view.City, view.Agent, view.ClientClass = observed.Country, observed.City, observed.Agent, browserstats.ClientClass(observed.Agent)
@@ -6875,6 +6905,7 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 			point.Policy = "local"
 		}
 		if incident, found := securityIncidents[securityBlock.IP]; found {
+			view.Incident = incident
 			if incident.Country != "" {
 				view.Country = incident.Country
 			}
@@ -6907,7 +6938,9 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 			point.AttackTypes = append(point.AttackTypes, category)
 		}
 		sort.Strings(point.AttackTypes)
-		blockedMap = append(blockedMap, point)
+		if securityBlock.Source != "global" || securitySettings.GlobalSync {
+			blockedMap = append(blockedMap, point)
+		}
 		if securityBlock.Source == "global" {
 			securityGlobalBlocks = append(securityGlobalBlocks, view)
 			continue
@@ -6931,8 +6964,48 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		cancelGeo()
 	}
 	securityIPSummary := analyticsSecurityIPStatistics(blockedMap, securityAllowlist, securityThrottles, security)
+	// Search sees the same GeoIP evidence as the displayed journal rows.
+	locations := make(map[string]analyticsBlockedIPMapPoint, len(blockedMap))
+	for _, point := range blockedMap {
+		locations[point.Address] = point
+	}
+	for _, rows := range [][]analyticsSecurityBlockView{securityLocalBlocks, securityGlobalBlocks} {
+		for index := range rows {
+			point := locations[rows[index].IP]
+			if rows[index].Country == "" {
+				rows[index].Country = point.Country
+			}
+			if rows[index].City == "" {
+				rows[index].City = point.City
+			}
+		}
+	}
 	blockedMapJSON, _ := json.Marshal(blockedMap)
+	// The journal includes observations without manufacturing enforcement entries.
+	journalIPs := make(map[string]bool)
+	for _, block := range securityBlocks {
+		journalIPs[block.IP] = true
+	}
+	for _, incident := range security.Incidents {
+		if journalIPs[incident.IP] && !allowedIPs[incident.IP] {
+			continue
+		}
+		status := "Not blocked"
+		if allowedIPs[incident.IP] {
+			status = "Allowlisted"
+		}
+		categories := make([]string, 0, len(incident.Categories))
+		for category := range incident.Categories {
+			categories = append(categories, category)
+		}
+		sort.Strings(categories)
+		securityLocalBlocks = append(securityLocalBlocks, analyticsSecurityBlockView{
+			SecurityBlock: httpsecurity.SecurityBlock{IP: incident.IP, Source: "observed", Reason: strings.Join(categories, ", "), LastEvent: incident.Last, Violations: incident.Count},
+			Status:        status, Incident: incident, Country: incident.Country, City: incident.City, Agent: incident.Agent, ClientClass: incident.Class, ObservedRequests: incident.Examples,
+		})
+	}
 	securityLocalBlocks, localBlockPage := analyticsSecurityBlockPage(r, securityLocalBlocks, "local_page", "local_query", "local-blocks")
+	globalRegistryCount := len(securityGlobalBlocks)
 	securityGlobalBlocks, globalBlockPage := analyticsSecurityBlockPage(r, securityGlobalBlocks, "global_page", "global_query", "global-blocks")
 	// GeoIP is a boundary lookup for only the displayed rows, with one small budget.
 	if a.geoIP != nil {
@@ -6959,11 +7032,6 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		}
 		return security.Incidents[left].Last.After(security.Incidents[right].Last)
 	})
-	incidentPage, incidentStart, incidentEnd := analyticsSecurityPage(r, "incident_page", "", "security-incidents", len(security.Incidents))
-	visibleIncidents := make([]analyticsSecurityIncidentView, 0, incidentEnd-incidentStart)
-	for _, incident := range security.Incidents[incidentStart:incidentEnd] {
-		visibleIncidents = append(visibleIncidents, analyticsSecurityIncidentView{Incident: incident, OperatingSystem: (analyticsSecurityBlockView{Agent: incident.Agent}).OperatingSystem()})
-	}
 	unknownGeo := 0
 	for _, session := range experience.Recent {
 		if !session.GeoKnown {
@@ -6998,6 +7066,8 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 	serverHoursJSON, _ := json.Marshal(serverLocalHours)
 	securityHoursJSON, _ := json.Marshal(security.EventHours)
 	securityCountriesJSON, _ := json.Marshal(security.Countries)
+	securityCountryIPsJSON, _ := json.Marshal(security.CountryIPs)
+	securityDailyCountryIPsJSON, _ := json.Marshal(security.DailyCountryIPs)
 	securityTypesJSON, _ := json.Marshal(security.Types)
 	activityDaysJSON, _ := json.Marshal(experience.ActivityDays)
 	activityHoursJSON, _ := json.Marshal(experience.ActivityHours)
@@ -7017,9 +7087,12 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 	}
 	securityIncidentsJSON, _ := json.Marshal(securityActivityIncidents)
 	a.render(w, r, "analytics.html", map[string]any{
-		"SecurityIPSummary": securityIPSummary, "SecurityBlockedMapJSON": template.JS(blockedMapJSON),
-		"LocalBlockPage": localBlockPage, "GlobalBlockPage": globalBlockPage, "IncidentPage": incidentPage,
-		"SecurityVisibleIncidents": visibleIncidents, "SecurityActivityCountriesJSON": template.JS(securityActivityCountriesJSON),
+		"SecurityPeriod": browserDashboard.Days, "SecurityGlobalSyncStatus": a.securityGlobalSyncView(),
+		"SecurityGlobalRegistryCount": globalRegistryCount,
+		"SecurityIPSummary":           securityIPSummary, "SecurityBlockedMapJSON": template.JS(blockedMapJSON),
+		"LocalBlockPage": localBlockPage, "GlobalBlockPage": globalBlockPage,
+		"SecurityActivityCountriesJSON": template.JS(securityActivityCountriesJSON),
+		"SecurityCountryIPsJSON":        template.JS(securityCountryIPsJSON), "SecurityDailyCountryIPsJSON": template.JS(securityDailyCountryIPsJSON),
 		"ReturnPath":       requestedReturnPath(r),
 		"AnalyticsTab":     selectedTab,
 		"Report":           analyticsReportView(report, translationsForRequest(r)),
@@ -7053,7 +7126,7 @@ func analyticsReportView(report analyticsPreparedReport, translations map[string
 		{Label: translationOrDefault(translations, "ax_sessions", "Sessions") + " · " + translationOrDefault(translations, "analytics_bot_requests", "Bots"), Value: strconv.Itoa(report.BotSessions), Hint: "Bot visits grouped by client and 30-minute inactivity; historical request totals are not visits."},
 		{Label: translationOrDefault(translations, "analytics_section_assets", "Files"), Value: strconv.Itoa(report.StaticRequests), Hint: "Static file requests, excluding HTML pages."},
 		{Label: translationOrDefault(translations, "analytics_avg_duration", "Average response time"), Value: formatDurationMS(report.AverageDurationMS), Hint: translationOrDefault(translations, "analytics_avg_duration_hint", "Weighted average server response time across the selected period.")},
-		{Label: translationOrDefault(translations, "analytics_errors", "Errors"), Value: strconv.Itoa(report.ErrorCount), Hint: translationOrDefault(translations, "analytics_errors_hint", "Requests with HTTP status 400 or higher.")},
+		{Label: translationOrDefault(translations, "analytics_errors", "Errors"), Value: strconv.Itoa(report.ErrorCount), Hint: translationOrDefault(translations, "analytics_errors_hint", "Requests with HTTP status 400 or higher."), Link: "#analytics-errors"},
 		{Label: translationOrDefault(translations, "analytics_admin_traffic", "Admin traffic"), Value: strconv.Itoa(report.AdminRequests), Hint: translationOrDefault(translations, "analytics_admin_traffic_hint", "Requests made while logged in as an administrator.")},
 	}
 	if report.AdminUnclassified {
@@ -7184,6 +7257,9 @@ func analyticsSectionView(titleKey, descriptionKey string, sourceRows []analytic
 		Title:       translationOrDefault(translations, titleKey, titleFallback),
 		Description: translationOrDefault(translations, descriptionKey, descriptionFallback),
 		Rows:        make([]analyticsReportRow, 0, len(sourceRows)),
+	}
+	if titleKey == "analytics_section_errors" {
+		section.ID = "analytics-errors"
 	}
 	for _, sourceRow := range sourceRows {
 		value := strconv.Itoa(sourceRow.Count)
@@ -7378,6 +7454,12 @@ func (a *App) handleAnalyticsSecurityAction(w http.ResponseWriter, r *http.Reque
 			AutoBlock:  r.FormValue("auto_block") == "on",
 			GlobalSync: r.FormValue("global_sync") == "on",
 		})
+		if err == nil {
+			select {
+			case a.securityGlobalWake <- struct{}{}:
+			default:
+			}
+		}
 	default:
 		http.Error(w, "unknown security action", http.StatusBadRequest)
 		return
@@ -8263,6 +8345,8 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	}
 	application.securityReputation = securityReputation
 	application.securityGlobalSignals = make(chan securitysync.Signal, 64)
+	application.securityGlobalWake = make(chan struct{}, 1)
+	application.securityGlobalStatus = make(chan chan securityGlobalSyncStatus)
 	controlDatabaseDispatcher, err := startServerControlDatabaseDispatcher(effectiveDBPath, config.Debug)
 	if err != nil {
 		return fmt.Errorf("start server control database dispatcher: %w", err)
@@ -26445,12 +26529,56 @@ func (a *App) runSecurityGlobalSync(stop <-chan struct{}) {
 	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
 	lastSent := map[string]time.Time{}
+	status := securityGlobalSyncStatus{}
+	results := make(chan securityGlobalSyncStatus)
+	signalFinished := make(chan struct{})
+	sending := false
+	pendingPull, pulling := true, false
+	startPull := func() {
+		if !pendingPull || pulling || a.attackGuard == nil {
+			return
+		}
+		settings, err := a.attackGuard.Settings()
+		if err != nil || !settings.GlobalSync {
+			pendingPull = false
+			return
+		}
+		pendingPull, pulling = false, true
+		go func() {
+			result := a.pullSecurityReputationWithTimeout(stop)
+			select {
+			case results <- result:
+			case <-stop:
+			}
+		}()
+	}
 
 	for {
+		startPull()
+		signalInput := a.securityGlobalSignals
+		if sending {
+			signalInput = nil
+		}
 		select {
 		case <-stop:
 			return
-		case signal, open := <-a.securityGlobalSignals:
+		case reply := <-a.securityGlobalStatus:
+			select {
+			case reply <- status:
+			case <-stop:
+				return
+			}
+		case <-a.securityGlobalWake:
+			pendingPull = true
+		case result := <-results:
+			pulling = false
+			status.Error = result.Error
+			if result.Error == "" {
+				status.LastSuccess, status.Entries = result.LastSuccess, result.Entries
+			}
+		case <-signalFinished:
+			sending = false
+		case signal, open := <-signalInput:
 			if !open {
 				return
 			}
@@ -26467,7 +26595,14 @@ func (a *App) runSecurityGlobalSync(stop <-chan struct{}) {
 				continue
 			}
 			lastSent[key] = now
-			a.sendSecuritySignalWithTimeout(stop, signal)
+			sending = true
+			go func() {
+				a.sendSecuritySignalWithTimeout(stop, signal)
+				select {
+				case signalFinished <- struct{}{}:
+				case <-stop:
+				}
+			}()
 			if len(lastSent) > 4096 {
 				for candidate, sentAt := range lastSent {
 					if now.Sub(sentAt) > 2*time.Hour {
@@ -26476,14 +26611,7 @@ func (a *App) runSecurityGlobalSync(stop <-chan struct{}) {
 				}
 			}
 		case <-ticker.C:
-			if a.attackGuard == nil {
-				continue
-			}
-			settings, err := a.attackGuard.Settings()
-			if err != nil || !settings.GlobalSync {
-				continue
-			}
-			a.pullSecurityReputationWithTimeout(stop)
+			pendingPull = true
 		}
 	}
 }
@@ -26496,6 +26624,13 @@ func (a *App) sendSecuritySignalWithTimeout(stop <-chan struct{}, signal securit
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+	go func() {
+		select {
+		case <-stop:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
 	request := serviceMailRequest{
 		Version:        1,
 		CodeKind:       "security_signal",
@@ -26508,14 +26643,21 @@ func (a *App) sendSecuritySignalWithTimeout(stop <-chan struct{}, signal securit
 	}
 }
 
-func (a *App) pullSecurityReputationWithTimeout(stop <-chan struct{}) {
+func (a *App) pullSecurityReputationWithTimeout(stop <-chan struct{}) securityGlobalSyncStatus {
 	select {
 	case <-stop:
-		return
+		return securityGlobalSyncStatus{Error: "Synchronization stopped"}
 	default:
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+	go func() {
+		select {
+		case <-stop:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
 	request := serviceMailRequest{
 		Version:       1,
 		CodeKind:      "security_reputation",
@@ -26526,20 +26668,30 @@ func (a *App) pullSecurityReputationWithTimeout(stop <-chan struct{}) {
 	response, err := a.sendSecurityNetChanRequestWithResponse(ctx, &request)
 	if err != nil {
 		log.Printf("security reputation pull skipped: %v", err)
-		return
+		return securityGlobalSyncStatus{Error: err.Error()}
 	}
 	var entries []securitysync.Entry
 	if err := json.Unmarshal(response.Payload, &entries); err != nil {
 		log.Printf("security reputation decode skipped: %v", err)
-		return
+		return securityGlobalSyncStatus{Error: err.Error()}
 	}
 	for _, entry := range entries {
+		settings, settingsErr := a.attackGuard.Settings()
+		if settingsErr != nil {
+			return securityGlobalSyncStatus{Error: settingsErr.Error()}
+		}
+		if !settings.GlobalSync {
+			return securityGlobalSyncStatus{Error: "Synchronization disabled"}
+		}
 		description := fmt.Sprintf("confirmed by %d independent SiteBrush installations", entry.Confirmations)
 		if strings.TrimSpace(entry.Description) != "" {
 			description += ": " + strings.TrimSpace(entry.Description)
 		}
-		_ = a.attackGuard.ApplyGlobal(entry.IP, entry.Reason, description, entry.LastEvent, entry.ExpiresAt)
+		if err := a.attackGuard.ApplyGlobal(entry.IP, entry.Reason, description, entry.LastEvent, entry.ExpiresAt); err != nil {
+			return securityGlobalSyncStatus{Error: err.Error()}
+		}
 	}
+	return securityGlobalSyncStatus{LastSuccess: time.Now().UTC(), Entries: len(entries)}
 }
 
 func (a *App) sendSecurityNetChanRequest(ctx context.Context, request *serviceMailRequest) error {

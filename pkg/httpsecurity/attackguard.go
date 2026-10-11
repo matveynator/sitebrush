@@ -262,6 +262,12 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 		now = time.Now().UTC()
 	}
 	ip := normalizeSecurityIP(request.IP)
+	// Global entries remain visible while disabled, but every enforcement path
+	// receives only the policy currently enabled by the owning worker.
+	activeBlock := func() (SecurityBlock, bool) {
+		block, blocked := activeSecurityBlock(blocks, ip, request.Domain, now)
+		return block, blocked && (block.Source != "global" || settings.GlobalSync)
+	}
 	if request.Domain != "" && (request.Operation == attackGuardObserveFast || request.Operation == attackGuardObserveIncident) {
 		trustedAt, trusted := trustedAdminIPs[adminIPTrustKey(request.Domain, ip)]
 		if trusted && now.Sub(trustedAt) <= trustedAdminIPCacheTTL {
@@ -277,14 +283,14 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 		if _, allowed := allowlist[ip]; allowed {
 			return attackGuardResult{Allowed: true}
 		}
-		block, blocked := activeSecurityBlock(blocks, ip, request.Domain, now)
+		block, blocked := activeBlock()
 		return attackGuardResult{Block: block, Blocked: blocked}
 
 	case attackGuardObserveFast:
 		if _, allowed := allowlist[ip]; allowed {
 			return attackGuardResult{Allowed: true}
 		}
-		if block, blocked := activeSecurityBlock(blocks, ip, request.Domain, now); blocked {
+		if block, blocked := activeBlock(); blocked {
 			return attackGuardResult{Block: block, Blocked: true, AlreadyBlocked: true}
 		}
 		if request.Trusted {
@@ -337,9 +343,12 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 		return attackGuardResult{}
 
 	case attackGuardObserveIncident:
-		_, alreadyBlocked := activeSecurityBlock(blocks, ip, request.Domain, now)
+		active, alreadyBlocked := activeBlock()
 		if _, allowed := allowlist[ip]; allowed {
 			return attackGuardResult{Allowed: true}
+		}
+		if alreadyBlocked && (active.Source == "global" || !settings.AutoBlock) {
+			return attackGuardResult{Block: active, Blocked: true, AlreadyBlocked: true}
 		}
 		if !settings.AutoBlock || ip == "" || !securityCategoryBlocks(request.Category) {
 			return attackGuardResult{}
@@ -428,6 +437,9 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 		return attackGuardResult{Settings: *settings, Changed: true}
 
 	case attackGuardApplyGlobal:
+		if !settings.GlobalSync {
+			return attackGuardResult{}
+		}
 		if ip == "" {
 			return attackGuardResult{Err: errors.New("invalid IP address")}
 		}
@@ -528,7 +540,7 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 		return attackGuardResult{Allowed: true}
 
 	case attackGuardClaimIncidentReport:
-		block, blocked := activeSecurityBlock(blocks, ip, request.Domain, now)
+		block, blocked := activeBlock()
 		if !blocked || block.IncidentID == "" || block.IncidentID != cleanSecurityText(request.Reason, 64) {
 			return attackGuardResult{Err: errors.New("security incident not found")}
 		}

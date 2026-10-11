@@ -91,3 +91,83 @@ const legacyAction = {
 fragment.documents.click({target: legacyAction});
 assert.equal(fragment.sockets[0].sent.at(-1).actions.at(-1).name, 'legacy-action');
 console.log('browser analytics: bounded messages, URI cleaning, safe referrers, namespaced actions and compatibility passed');
+
+// Exercise the embedded renderer directly so pagination follows the production model.
+const analyticsTemplate = fs.readFileSync(path.join(__dirname, '../../web/analytics.html'), 'utf8');
+function securityElement() {
+    return {
+        children: [], style: {}, listeners: {}, textContent: '',
+        replaceChildren() { this.children = []; },
+        appendChild(child) { this.children.push(child); },
+        append(...children) { this.children.push(...children); },
+        setAttribute() {},
+        addEventListener(name, handler) { this.listeners[name] = handler; }
+    };
+}
+const countryRendererStart = analyticsTemplate.indexOf('    function renderCountries() {');
+const countryRendererEnd = analyticsTemplate.indexOf('    if (allDaysButton)', countryRendererStart);
+assert.ok(countryRendererStart > 0 && countryRendererEnd > countryRendererStart);
+const countryChart = securityElement();
+const countryModel = {selectedDay: null, page: 1};
+const overallCountries = Array.from({length: 23}, (_, index) => ({Label: 'C' + index, Count: 100 - index}));
+const countryContext = {
+    countryChart, countryModel, overallCountries,
+    countryIPs: {C0: {Count: 2, Known: true}, C1: {Count: 9, Known: false}},
+    dailyCountryIPs: {'2026-10-11': {RU: {Count: 1, Known: true}}},
+    activityCountries: {'2026-10-11': {RU: 3}},
+    countryPeriod: securityElement(), allDaysButton: {textContent: 'All days'},
+    calendar: {dataset: {emptyText: 'No data', eventLabel: 'Events', ipLabel: 'IP'}},
+    countryName: country => country,
+    document: {createElement: () => securityElement()}
+};
+vm.createContext(countryContext);
+vm.runInContext(analyticsTemplate.slice(countryRendererStart, countryRendererEnd) + '\nrenderCountries();', countryContext);
+assert.equal(countryChart.children.length, 11);
+assert.match(countryChart.children[0].children[2].textContent, /Events: 100.*IP: 2/);
+assert.match(countryChart.children[1].children[2].textContent, /IP: No data/);
+countryChart.children.at(-1).children.at(-1).listeners.click();
+assert.equal(countryModel.page, 2);
+assert.equal(countryChart.children[0].children[0].textContent, 'C10');
+countryChart.children.at(-1).children.at(-1).listeners.click();
+assert.equal(countryChart.children.length, 4);
+assert.equal(countryChart.children.at(-1).children.at(-1).disabled, true);
+countryModel.selectedDay = '2026-10-11';
+countryModel.page = 1;
+countryContext.renderCountries();
+assert.equal(countryChart.children.length, 2);
+assert.match(countryChart.children[0].children[2].textContent, /Events: 3.*IP: 1/);
+countryModel.selectedDay = 'missing-day';
+countryContext.renderCountries();
+assert.equal(countryChart.textContent, 'No data');
+
+const searchFocusStart = analyticsTemplate.indexOf('(function setupSecuritySearchFocus()');
+const searchFocusEnd = analyticsTemplate.indexOf('(function setupReturnToPreviousURI()', searchFocusStart);
+let focusedSearch = false;
+let scrolledSearch = false;
+const searchFocusContext = {
+    URLSearchParams,
+    window: {location: {hash: '#local-blocks', search: '?local_query=192.0.2.1'}},
+    document: {querySelector: selector => {
+        assert.equal(selector, searchFocusContext.window.location.hash);
+        return {
+            querySelector: () => ({name: selector === '#local-blocks' ? 'local_query' : 'global_query', focus: options => {assert.equal(options.preventScroll, true); focusedSearch = true;}}),
+            scrollIntoView: () => {scrolledSearch = true;}
+        };
+    }}
+};
+vm.runInNewContext(analyticsTemplate.slice(searchFocusStart, searchFocusEnd), searchFocusContext);
+assert.equal(focusedSearch, true);
+assert.equal(scrolledSearch, true);
+focusedSearch = false;
+scrolledSearch = false;
+searchFocusContext.window.location = {hash: '#global-blocks', search: '?global_query=repository'};
+vm.runInNewContext(analyticsTemplate.slice(searchFocusStart, searchFocusEnd), searchFocusContext);
+assert.equal(focusedSearch, true);
+assert.equal(scrolledSearch, true);
+focusedSearch = false;
+scrolledSearch = false;
+searchFocusContext.window.location = {hash: '#global-blocks', search: '?analytics'};
+vm.runInNewContext(analyticsTemplate.slice(searchFocusStart, searchFocusEnd), searchFocusContext);
+assert.equal(focusedSearch, false);
+assert.equal(scrolledSearch, false);
+console.log('security analytics: country pagination, unique IP visibility and targeted search focus passed');

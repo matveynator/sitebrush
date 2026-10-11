@@ -181,6 +181,60 @@ func TestAttackGuardAllowlistOverridesLocalAndGlobalBlocks(t *testing.T) {
 	}
 }
 
+func TestAttackGuardGlobalPolicyTogglePreservesLocalProtection(t *testing.T) {
+	guard, err := NewAttackGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Close()
+	now := time.Now().UTC()
+	if err := guard.ApplyGlobal("192.0.2.1", "injection", "confirmed", now, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := guard.Add("192.0.2.2", "manual", "local rule", "manual", now.Add(time.Hour), now); err != nil {
+		t.Fatal(err)
+	}
+	for _, enabled := range []bool{true, false, true} {
+		if err := guard.SetSettings(SecuritySettings{AutoBlock: true, GlobalSync: enabled}); err != nil {
+			t.Fatal(err)
+		}
+		if _, blocked := guard.CheckSite("example.com", "192.0.2.1", now); blocked != enabled {
+			t.Fatalf("global enabled=%v blocked=%v", enabled, blocked)
+		}
+		if _, blocked := guard.CheckSite("example.com", "192.0.2.2", now); !blocked {
+			t.Fatal("toggle disabled manual protection")
+		}
+		blocks, err := guard.Snapshot(now)
+		if err != nil || len(blocks) != 2 {
+			t.Fatalf("toggle discarded registry: %+v %v", blocks, err)
+		}
+	}
+	if err := guard.Allow("192.0.2.1", "trusted"); err != nil {
+		t.Fatal(err)
+	}
+	if _, blocked := guard.Check("192.0.2.1", now); blocked {
+		t.Fatal("global protection bypassed allowlist")
+	}
+	if _, blocked := guard.Check("192.0.2.2", now.Add(2*time.Hour)); blocked {
+		t.Fatal("expired local block applied")
+	}
+	if err := guard.ApplyGlobal("192.0.2.3", "injection", "confirmed", now, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := guard.SetSettings(SecuritySettings{GlobalSync: true}); err != nil {
+		t.Fatal(err)
+	}
+	if block, blocked := guard.ObserveSiteIncident("example.com", "192.0.2.3", "injection", "attempt", now); !blocked || block.Source != "global" {
+		t.Fatal("disabled local detection bypassed or converted global rule")
+	}
+	if err := guard.SetSettings(SecuritySettings{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, blocked := guard.ObserveSiteIncident("example.com", "192.0.2.3", "injection", "attempt", now); blocked {
+		t.Fatal("disabled global rule applied to incident")
+	}
+}
+
 func TestAttackGuardAdministratorTrustIsPerSiteAndExpires(t *testing.T) {
 	guard, err := NewAttackGuard("")
 	if err != nil {
@@ -465,7 +519,6 @@ func TestAttackGuardCountsOnlyNotFoundPathsAsEnumeration(t *testing.T) {
 	}
 }
 
-
 func TestAttackGuardDoesNotBlockAuthenticationFailures(t *testing.T) {
 	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
 	guard, err := NewAttackGuard("")
@@ -490,7 +543,6 @@ func TestAttackGuardDoesNotBlockAuthenticationFailures(t *testing.T) {
 		t.Fatalf("authentication failure analytics leaked into IP blocking: %#v", block)
 	}
 }
-
 
 func TestAutomaticSecurityBlockTTLProgression(t *testing.T) {
 	want := []time.Duration{
@@ -556,7 +608,6 @@ func TestAttackGuardRequiresRepeatedHeuristicIncidents(t *testing.T) {
 	}
 }
 
-
 func TestAttackGuardIncidentReportIsOneShot(t *testing.T) {
 	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
 	guard, err := NewAttackGuard("")
@@ -591,33 +642,32 @@ func TestAttackGuardIncidentReportIsOneShot(t *testing.T) {
 	}
 }
 
-
 func TestAttackGuardDropsPersistedAuthenticationFailureBlocks(t *testing.T) {
 	now := time.Now().UTC()
 	path := filepath.Join(t.TempDir(), "security.json")
 	state := attackGuardDiskState{
-		Version: 2,
+		Version:  2,
 		Settings: SecuritySettings{AutoBlock: true, GlobalSync: true},
 		Blocks: []SecurityBlock{
 			{
-				IP: "203.0.113.210",
-				Reason: "authentication-failures",
+				IP:          "203.0.113.210",
+				Reason:      "authentication-failures",
 				Description: "legacy automatic auth failure block",
-				Source: "local",
-				LastEvent: now,
-				ExpiresAt: now.Add(7 * 24 * time.Hour),
-				Violations: 1,
-				IncidentID: "legacy-auth",
+				Source:      "local",
+				LastEvent:   now,
+				ExpiresAt:   now.Add(7 * 24 * time.Hour),
+				Violations:  1,
+				IncidentID:  "legacy-auth",
 			},
 			{
-				IP: "203.0.113.211",
-				Reason: "authentication-failures",
+				IP:          "203.0.113.211",
+				Reason:      "authentication-failures",
 				Description: "administrator chose to block manually",
-				Source: "manual",
-				LastEvent: now,
-				ExpiresAt: now.Add(7 * 24 * time.Hour),
-				Violations: 1,
-				IncidentID: "manual-auth",
+				Source:      "manual",
+				LastEvent:   now,
+				ExpiresAt:   now.Add(7 * 24 * time.Hour),
+				Violations:  1,
+				IncidentID:  "manual-auth",
 			},
 		},
 	}
@@ -642,7 +692,6 @@ func TestAttackGuardDropsPersistedAuthenticationFailureBlocks(t *testing.T) {
 		t.Fatalf("manual administrator block was incorrectly removed: %#v", block)
 	}
 }
-
 
 func TestAttackGuardIncidentReportFailureReleasesClaim(t *testing.T) {
 	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
@@ -713,15 +762,15 @@ func TestSecuritySourceLabels(t *testing.T) {
 
 func TestSecurityCategoryThresholds(t *testing.T) {
 	tests := map[string]int{
-		"repository": 1,
-		"secret": 1,
-		"traversal": 1,
-		"enumeration": 1,
-		"injection": 2,
-		"source-backup": 3,
-		"scanner-client": 3,
+		"repository":              1,
+		"secret":                  1,
+		"traversal":               1,
+		"enumeration":             1,
+		"injection":               2,
+		"source-backup":           3,
+		"scanner-client":          3,
 		"authentication-failures": 0,
-		"unknown": 0,
+		"unknown":                 0,
 	}
 	for category, want := range tests {
 		if got := securityCategoryThreshold(category); got != want {
@@ -757,7 +806,6 @@ func TestAttackGuardPersistenceSnapshotKeepsExpiredEscalationHistory(t *testing.
 		t.Fatalf("expired escalation history missing: %#v", history)
 	}
 }
-
 
 // BEGIN bounded security state and queue regression tests.
 

@@ -473,6 +473,14 @@ Each configured goal has its own achievement count, including zero. Path/URI goa
 
 Existing HTTP aggregates cannot reconstruct lost referrers or individual historical goal achievements. New bot-session and per-goal counters begin with observations collected by this version; old request totals remain technical history. Goals are not applied retroactively.
 
+## Security analytics
+
+The local journal combines active local/manual blocks with observed incidents that have not caused a block. Each IP appears once with its current status and retained request evidence. Global entries remain in a separate read-only registry. Both journals search before pagination, show 25 rows per page, and return searches and page navigation to the corresponding list.
+
+Country activity shows events and unique IPs together, ten countries per page, for the selected reporting period or calendar day. Period audiences deduplicate addresses across days. Address evidence is bounded and retained for up to 30 days; historical or incomplete audiences display No data rather than inferred counts.
+
+Global reputation sync controls both exchange and enforcement. Enabling it pulls confirmed entries immediately and refreshes every ten minutes. Disabling it leaves cached global entries visible but inactive; local/manual protection and allowlist precedence remain unchanged. The registry shows the last successful pull and refresh errors. A failed refresh does not remove unexpired cached protection.
+
 ## Project history
 
 SiteBrush v2 is written in Go.

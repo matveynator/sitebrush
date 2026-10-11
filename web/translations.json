@@ -1,5 +1,12 @@
 {
   "en": {
+    "auth_passkey_ready_title": "Passkey sign-in is already set up!",
+    "auth_passkey_ready_text": "A passkey is already registered for this site. Click “Sign in with a passkey” and confirm with Face ID, Touch ID, your fingerprint or your device PIN. If your passkey is saved on another device, select it in the sign-in window.",
+    "auth_passkey_ready_button": "Sign in with a passkey",
+	"analytics_error_details": "Error details",
+	"ax_event_count": "Events",
+	"ax_not_blocked": "Not blocked",
+	"ax_blocked_status": "Blocked",
     "auth_email_changed_title": "Email address changed",
     "auth_email_changed_reason": "The email address managing this site has changed. The change was confirmed through the new email address shown below.",
     "auth_email_changed_time": "Confirmed at (UTC)",
@@ -1217,6 +1224,9 @@
     "ax_security_legend_hover": "Hover a square to see what it means"
   },
   "fr": {
+    "auth_passkey_ready_title": "La connexion par clé d’accès est déjà configurée !",
+    "auth_passkey_ready_text": "Une clé d’accès est déjà enregistrée pour ce site. Cliquez sur « Se connecter avec une clé d’accès » et confirmez avec Face ID, Touch ID, votre empreinte digitale ou le code PIN de votre appareil. Si votre clé est enregistrée sur un autre appareil, sélectionnez-le dans la fenêtre de connexion.",
+    "auth_passkey_ready_button": "Se connecter avec une clé d’accès",
     "auth_email_changed_title": "Adresse e-mail modifiée",
     "auth_email_changed_reason": "L’adresse e-mail de gestion du site a changé. La modification a été confirmée via la nouvelle adresse indiquée ci-dessous.",
     "auth_email_changed_time": "Confirmation (UTC)",
@@ -2284,6 +2294,13 @@
     "ax_security_legend_hover": "Hover a square to see what it means"
   },
   "ru": {
+    "auth_passkey_ready_title": "Вход по ключу уже настроен!",
+    "auth_passkey_ready_text": "Для этого сайта уже есть ключ доступа. Нажмите «Войти по ключу» и подтвердите вход с помощью Face ID, Touch ID, отпечатка пальца или PIN-кода устройства. Если ключ сохранён на другом устройстве, выберите его в открывшемся окне.",
+    "auth_passkey_ready_button": "Войти по ключу",
+	"analytics_error_details": "Подробности ошибок",
+	"ax_event_count": "События",
+	"ax_not_blocked": "Без блокировки",
+	"ax_blocked_status": "Заблокирован",
     "auth_email_changed_title": "Адрес электронной почты изменён",
     "auth_email_changed_reason": "Адрес управления сайтом изменён. Смена подтверждена через новый адрес электронной почты, указанный ниже.",
     "auth_email_changed_time": "Время подтверждения (UTC)",
@@ -3501,6 +3518,9 @@
     "ax_security_legend_hover": "Наведите на квадрат, чтобы увидеть пояснение"
   },
   "ja": {
+    "auth_passkey_ready_title": "パスキーでログインする準備ができています！",
+    "auth_passkey_ready_text": "このサイトにはすでにパスキーが登録されています。「パスキーでログイン」を押し、Face ID、Touch ID、指紋認証、または端末のPINで確認してください。パスキーを別の端末に保存している場合は、ログイン画面でその端末を選択してください。",
+    "auth_passkey_ready_button": "パスキーでログイン",
     "auth_email_changed_title": "メールアドレスが変更されました",
     "auth_email_changed_reason": "サイトを管理するメールアドレスが変更されました。変更は以下の新しいメールアドレスから確認されました。",
     "auth_email_changed_time": "確認日時（UTC）",
@@ -4564,6 +4584,9 @@
     "ax_security_legend_hover": "Hover a square to see what it means"
   },
   "it": {
+    "auth_passkey_ready_title": "L’accesso con passkey è già configurato!",
+    "auth_passkey_ready_text": "Per questo sito è già registrata una passkey. Premi «Accedi con una passkey» e conferma con Face ID, Touch ID, la tua impronta digitale o il PIN del dispositivo. Se la passkey è salvata su un altro dispositivo, selezionalo nella finestra di accesso.",
+    "auth_passkey_ready_button": "Accedi con una passkey",
     "auth_email_changed_title": "Indirizzo email modificato",
     "auth_email_changed_reason": "L’indirizzo email per gestire il sito è cambiato. La modifica è stata confermata tramite il nuovo indirizzo indicato sotto.",
     "auth_email_changed_time": "Confermato il (UTC)",
@@ -5627,6 +5650,9 @@
     "ax_security_legend_hover": "Hover a square to see what it means"
   },
   "sv": {
+    "auth_passkey_ready_title": "Inloggning med nyckel är redan klar!",
+    "auth_passkey_ready_text": "En inloggningsnyckel är redan registrerad för den här webbplatsen. Tryck på ”Logga in med nyckel” och bekräfta med Face ID, Touch ID, ditt fingeravtryck eller enhetens PIN-kod. Om nyckeln är sparad på en annan enhet väljer du den i inloggningsfönstret.",
+    "auth_passkey_ready_button": "Logga in med nyckel",
     "auth_email_changed_title": "E-postadressen har ändrats",
     "auth_email_changed_reason": "E-postadressen för att hantera webbplatsen har ändrats. Ändringen bekräftades via den nya adressen nedan.",
     "auth_email_changed_time": "Bekräftad (UTC)",
@@ -6690,6 +6716,9 @@
     "ax_security_legend_hover": "Hover a square to see what it means"
   },
   "fi": {
+    "auth_passkey_ready_title": "Kirjautuminen pääsyavaimella on jo käytössä!",
+    "auth_passkey_ready_text": "Tälle sivustolle on jo rekisteröity pääsyavain. Paina ”Kirjaudu pääsyavaimella” ja vahvista Face ID:llä, Touch ID:llä, sormenjäljelläsi tai laitteen PIN-koodilla. Jos pääsyavain on tallennettu toiselle laitteelle, valitse se kirjautumisikkunassa.",
+    "auth_passkey_ready_button": "Kirjaudu pääsyavaimella",
     "auth_email_changed_title": "Sähköpostiosoite on vaihdettu",
     "auth_email_changed_reason": "Sivuston hallinnan sähköpostiosoite on vaihdettu. Muutos vahvistettiin alla olevan uuden osoitteen kautta.",
     "auth_email_changed_time": "Vahvistettu (UTC)",
@@ -7753,6 +7782,9 @@
     "ax_security_legend_hover": "Hover a square to see what it means"
   },
   "mn": {
+    "auth_passkey_ready_title": "Түлхүүрээр нэвтрэх тохиргоо бэлэн боллоо!",
+    "auth_passkey_ready_text": "Энэ сайтад нэвтрэх түлхүүр аль хэдийн бүртгэгдсэн байна. «Түлхүүрээр нэвтрэх» товчийг дарж Face ID, Touch ID, хурууны хээ эсвэл төхөөрөмжийн PIN кодоор баталгаажуулна уу. Түлхүүр өөр төхөөрөмж дээр хадгалагдсан бол нэвтрэх цонхноос тухайн төхөөрөмжийг сонгоно уу.",
+    "auth_passkey_ready_button": "Түлхүүрээр нэвтрэх",
     "auth_email_changed_title": "Имэйл хаяг өөрчлөгдлөө",
     "auth_email_changed_reason": "Сайтыг удирдах имэйл хаяг өөрчлөгдлөө. Өөрчлөлтийг доор заасан шинэ имэйл хаягаар баталгаажуулсан.",
     "auth_email_changed_time": "Баталгаажуулсан цаг (UTC)",
@@ -8816,6 +8848,9 @@
     "ax_security_legend_hover": "Hover a square to see what it means"
   },
   "zh": {
+    "auth_passkey_ready_title": "通行密钥登录已设置好！",
+    "auth_passkey_ready_text": "此网站已注册通行密钥。点击“使用通行密钥登录”，然后通过 Face ID、Touch ID、指纹或设备 PIN 码确认。如果通行密钥保存在其他设备上，请在登录窗口中选择该设备。",
+    "auth_passkey_ready_button": "使用通行密钥登录",
     "auth_email_changed_title": "电子邮箱地址已更改",
     "auth_email_changed_reason": "管理此网站的电子邮箱地址已更改。该更改已通过下方的新邮箱地址确认。",
     "auth_email_changed_time": "确认时间（UTC）",
@@ -9879,6 +9914,9 @@
     "ax_security_legend_hover": "Hover a square to see what it means"
   },
   "he": {
+    "auth_passkey_ready_title": "הכניסה באמצעות מפתח גישה כבר מוגדרת!",
+    "auth_passkey_ready_text": "כבר רשום מפתח גישה לאתר הזה. לחצו על „כניסה באמצעות מפתח גישה” ואשרו באמצעות Face ID, Touch ID, טביעת אצבע או קוד ה-PIN של המכשיר. אם המפתח שמור במכשיר אחר, בחרו בו בחלון הכניסה.",
+    "auth_passkey_ready_button": "כניסה באמצעות מפתח גישה",
     "auth_email_changed_title": "כתובת האימייל שונתה",
     "auth_email_changed_reason": "כתובת האימייל לניהול האתר שונתה. השינוי אושר באמצעות הכתובת החדשה המופיעה למטה.",
     "auth_email_changed_time": "מועד האישור (UTC)",
@@ -10942,6 +10980,9 @@
     "ax_security_legend_hover": "Hover a square to see what it means"
   },
   "fa": {
+    "auth_passkey_ready_title": "ورود با کلید عبور از قبل آماده است!",
+    "auth_passkey_ready_text": "برای این سایت یک کلید عبور ثبت شده است. روی «ورود با کلید عبور» بزنید و با Face ID، Touch ID، اثر انگشت یا پین دستگاه خود تأیید کنید. اگر کلید عبور روی دستگاه دیگری ذخیره شده است، آن دستگاه را در پنجرهٔ ورود انتخاب کنید.",
+    "auth_passkey_ready_button": "ورود با کلید عبور",
     "auth_email_changed_title": "نشانی ایمیل تغییر کرد",
     "auth_email_changed_reason": "نشانی ایمیل مدیریت سایت تغییر کرد. این تغییر از طریق نشانی ایمیل جدید زیر تأیید شد.",
     "auth_email_changed_time": "زمان تأیید (UTC)",
@@ -12005,6 +12046,9 @@
     "ax_security_legend_hover": "Hover a square to see what it means"
   },
   "de": {
+    "auth_passkey_ready_title": "Die Anmeldung mit Passkey ist schon eingerichtet!",
+    "auth_passkey_ready_text": "Für diese Website ist bereits ein Passkey registriert. Klicken Sie auf „Mit Passkey anmelden“ und bestätigen Sie mit Face ID, Touch ID, Ihrem Fingerabdruck oder der Geräte-PIN. Wenn Ihr Passkey auf einem anderen Gerät gespeichert ist, wählen Sie es im Anmeldefenster aus.",
+    "auth_passkey_ready_button": "Mit Passkey anmelden",
     "auth_email_changed_title": "E-Mail-Adresse geändert",
     "auth_email_changed_reason": "Die E-Mail-Adresse zur Verwaltung dieser Website wurde geändert. Die Änderung wurde über die unten angegebene neue Adresse bestätigt.",
     "auth_email_changed_time": "Bestätigt am (UTC)",
@@ -13068,6 +13112,9 @@
     "ax_security_legend_hover": "Hover a square to see what it means"
   },
   "tr": {
+    "auth_passkey_ready_title": "Geçiş anahtarıyla giriş zaten hazır!",
+    "auth_passkey_ready_text": "Bu site için bir geçiş anahtarı zaten kayıtlı. «Geçiş anahtarıyla giriş yap» düğmesine basın ve Face ID, Touch ID, parmak iziniz veya cihazınızın PIN koduyla onaylayın. Anahtarınız başka bir cihazda kayıtlıysa giriş penceresinde o cihazı seçin.",
+    "auth_passkey_ready_button": "Geçiş anahtarıyla giriş yap",
     "auth_email_changed_title": "E-posta adresi değiştirildi",
     "auth_email_changed_reason": "Siteyi yönetmek için kullanılan e-posta adresi değiştirildi. Değişiklik aşağıdaki yeni e-posta adresi üzerinden onaylandı.",
     "auth_email_changed_time": "Onay zamanı (UTC)",
@@ -14131,6 +14178,9 @@
     "ax_security_legend_hover": "Hover a square to see what it means"
   },
   "kk": {
+    "auth_passkey_ready_title": "Кілтпен кіру дайын!",
+    "auth_passkey_ready_text": "Бұл сайт үшін кіру кілті тіркелген. «Кілтпен кіру» түймесін басып, Face ID, Touch ID, саусақ ізі немесе құрылғының PIN коды арқылы растаңыз. Кілт басқа құрылғыда сақталған болса, ашылған кіру терезесінде сол құрылғыны таңдаңыз.",
+    "auth_passkey_ready_button": "Кілтпен кіру",
     "auth_email_changed_title": "Электрондық пошта мекенжайы өзгертілді",
     "auth_email_changed_reason": "Сайтты басқаруға арналған электрондық пошта мекенжайы өзгертілді. Өзгеріс төмендегі жаңа пошта мекенжайы арқылы расталды.",
     "auth_email_changed_time": "Растау уақыты (UTC)",
@@ -15194,6 +15244,9 @@
     "ax_security_legend_hover": "Hover a square to see what it means"
   },
   "es": {
+    "auth_passkey_ready_title": "¡El acceso con clave ya está configurado!",
+    "auth_passkey_ready_text": "Este sitio ya tiene una clave de acceso registrada. Pulsa «Entrar con clave de acceso» y confirma con Face ID, Touch ID, tu huella digital o el PIN del dispositivo. Si tu clave está guardada en otro dispositivo, selecciónalo en la ventana de acceso.",
+    "auth_passkey_ready_button": "Entrar con clave de acceso",
     "auth_email_changed_title": "Dirección de correo cambiada",
     "auth_email_changed_reason": "La dirección de correo que administra el sitio ha cambiado. El cambio se confirmó mediante la nueva dirección indicada abajo.",
     "auth_email_changed_time": "Confirmado el (UTC)",
@@ -16257,6 +16310,9 @@
     "ax_security_legend_hover": "Hover a square to see what it means"
   },
   "pt": {
+    "auth_passkey_ready_title": "O acesso com chave já está configurado!",
+    "auth_passkey_ready_text": "Já existe uma chave de acesso registada para este site. Clique em «Entrar com chave de acesso» e confirme com Face ID, Touch ID, a sua impressão digital ou o PIN do dispositivo. Se a chave estiver guardada noutro dispositivo, selecione-o na janela de acesso.",
+    "auth_passkey_ready_button": "Entrar com chave de acesso",
     "auth_email_changed_title": "Endereço de e-mail alterado",
     "auth_email_changed_reason": "O endereço de e-mail que administra o site foi alterado. A alteração foi confirmada pelo novo endereço indicado abaixo.",
     "auth_email_changed_time": "Confirmado em (UTC)",
