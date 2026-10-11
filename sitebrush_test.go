@@ -15986,11 +15986,19 @@ func (writer *analyticsPipeWriter) Hijack() (net.Conn, *bufio.ReadWriter, error)
 
 func TestBrowserAnalyticsWebSocketDelivery(t *testing.T) {
 	for _, scheme := range []string{"http", "https"} {
-		t.Run(scheme, func(t *testing.T) { testBrowserAnalyticsWebSocketDelivery(t, scheme) })
+		t.Run(scheme, func(t *testing.T) {
+			testBrowserAnalyticsWebSocketDelivery(t, scheme, false, "Mozilla/5.0", "human-likely")
+		})
+		t.Run(scheme+"-legacy-campaign", func(t *testing.T) {
+			testBrowserAnalyticsWebSocketDelivery(t, scheme, true, "Mozilla/5.0", "human-likely")
+		})
+		t.Run(scheme+"-headless", func(t *testing.T) {
+			testBrowserAnalyticsWebSocketDelivery(t, scheme, false, "HeadlessChrome/124", "automation")
+		})
 	}
 }
 
-func testBrowserAnalyticsWebSocketDelivery(t *testing.T, scheme string) {
+func testBrowserAnalyticsWebSocketDelivery(t *testing.T, scheme string, legacyCampaign bool, userAgent, expectedClass string) {
 	serverConnection, clientConnection := net.Pipe()
 	defer serverConnection.Close()
 	defer clientConnection.Close()
@@ -16012,11 +16020,17 @@ func testBrowserAnalyticsWebSocketDelivery(t *testing.T, scheme string) {
 		t.Fatal(err)
 	}
 	configuration.Header.Set("X-Forwarded-Proto", scheme)
+	configuration.Header.Set("User-Agent", userAgent)
 	connection, err := websocket.NewClient(configuration, clientConnection)
 	if err != nil {
 		t.Fatal(err)
 	}
 	observation := browserstats.Event{Visitor: "1111111111111111", View: "2222222222222222", Sequence: 1, Path: "/docs", Referrer: "https://search.example/private?query=x", Persistent: true}
+	expectedSource := "search.example"
+	if legacyCampaign {
+		observation.Source, observation.Referrer = "utm:legacy-source", ""
+		expectedSource = "legacy-source"
+	}
 	encoded, err := json.Marshal(observation)
 	if err != nil {
 		t.Fatal(err)
@@ -16026,7 +16040,7 @@ func testBrowserAnalyticsWebSocketDelivery(t *testing.T, scheme string) {
 	}
 	select {
 	case envelope := <-app.browserAnalytics:
-		if envelope.domain != "example.org" || envelope.event.Source != "search.example" || envelope.event.Referrer != observation.Referrer || envelope.event.Path != "/docs" {
+		if envelope.domain != "example.org" || envelope.event.Source != expectedSource || envelope.event.Referrer != observation.Referrer || envelope.event.Path != "/docs" || envelope.event.ClientClass != expectedClass {
 			t.Fatalf("envelope: %+v", envelope)
 		}
 	case <-time.After(time.Second):
@@ -20311,3 +20325,53 @@ func TestRepeatedInterruptForcesExitDuringStalledShutdown(t *testing.T) {
 }
 
 // END security view and signal boundary tests.
+
+func TestMergedAudiencePercentagesMigratePartiallyConvertedVersionOne(t *testing.T) {
+	partiallyConverted := analyticsPreparedReport{SessionMetricsVersion: 1, GeneratedAt: "2026-10-09T12:00:00Z", LegacyPageRequests: 50, PageViews: 1, HumanSessions: 1, BotSessions: 1,
+		TopPages: []analyticsCountRow{{Label: "/", Count: 51}}, TrafficSources: []analyticsCountRow{{Label: "direct", Count: 52}},
+		Countries: []analyticsCountRow{{Label: "US", Count: 52}}, MapPoints: []analyticsMapPoint{{Label: "US", Count: 52}},
+		VisitorTypes: []analyticsCountRow{{Label: "human", Count: 1}, {Label: "bot", Count: 1}},
+		Browsers:     []analyticsCountRow{{Label: "Chrome", Count: 1}}, LegacyBrowsers: []analyticsCountRow{{Label: "Chrome", Count: 50}},
+	}
+	modern := analyticsPreparedReport{SessionMetricsVersion: analyticsSessionMetricsFormatVersion, GeneratedAt: "2026-10-10T12:00:00Z", PageViews: 1, HumanSessions: 1, BotSessions: 1,
+		TopPages: []analyticsCountRow{{Label: "/", Count: 1}}, TrafficSources: []analyticsCountRow{{Label: "direct", Count: 2}},
+		Countries: []analyticsCountRow{{Label: "US", Count: 2}}, MapPoints: []analyticsMapPoint{{Label: "US", Count: 2}},
+		VisitorTypes: []analyticsCountRow{{Label: "human", Count: 1}, {Label: "bot", Count: 1}}, Browsers: []analyticsCountRow{{Label: "Chrome", Count: 1}},
+	}
+	merged := mergeTechnicalReports(partiallyConverted, modern)
+	if merged.SessionMetricsVersion != analyticsSessionMetricsFormatVersion || merged.PageViews != 2 || merged.HumanSessions != 2 || merged.BotSessions != 2 || merged.LegacyPageRequests != 50 {
+		t.Fatalf("format migration damaged known totals: %+v", merged)
+	}
+	if merged.TrafficSources[0].Count != 2 || merged.TrafficSources[0].Value != "50.0%" || merged.LegacyAudience["unclassified version-1 traffic sources"][0].Count != 52 || merged.MapPoints[0].Count != 2 || merged.LegacyMapPoints[0].Count != 52 {
+		t.Fatalf("version-1 request counters entered session dimensions: %+v", merged)
+	}
+	if merged.Browsers[0].Count != 2 || merged.VisitorTypes[0].Count != 2 || merged.LegacyBrowsers[0].Count != 50 {
+		t.Fatalf("valid version-1 session fields were discarded: %+v", merged)
+	}
+	again := analyticsSeparateLegacyCounters(merged)
+	if again.TrafficSources[0].Count != 2 || again.LegacyAudience["unclassified version-1 traffic sources"][0].Count != 52 {
+		t.Fatal("migration is not idempotent")
+	}
+}
+
+func TestMergedAudiencePercentagesExcludeLegacyRequestCounters(t *testing.T) {
+	legacy := analyticsPreparedReport{GeneratedAt: "2026-10-09T12:00:00Z", PageViews: 50, TotalRequests: 50,
+		TopPages: []analyticsCountRow{{Label: "/", Count: 50}}, TrafficSources: []analyticsCountRow{{Label: "direct", Count: 50}},
+		Countries: []analyticsCountRow{{Label: "US", Count: 50}}, Devices: []analyticsCountRow{{Label: "desktop", Count: 50}},
+		BotReferrers: []analyticsCountRow{{Label: "example.org", Count: 50}}, Languages: []analyticsCountRow{{Label: "en", Count: 50}},
+		MapPoints: []analyticsMapPoint{{Label: "US", Count: 50, Latitude: 38, Longitude: -97}},
+	}
+	modern := analyticsPreparedReport{SessionMetricsVersion: 1, GeneratedAt: "2026-10-10T12:00:00Z", HumanSessions: 1, BotSessions: 1, PageViews: 1, TotalRequests: 2,
+		TopPages: []analyticsCountRow{{Label: "/", Count: 1}}, TrafficSources: []analyticsCountRow{{Label: "direct", Count: 2}},
+		Countries: []analyticsCountRow{{Label: "US", Count: 2}}, Devices: []analyticsCountRow{{Label: "desktop", Count: 1}},
+		BotReferrers: []analyticsCountRow{{Label: "example.org", Count: 1}}, Languages: []analyticsCountRow{{Label: "en", Count: 2}},
+		MapPoints: []analyticsMapPoint{{Label: "US", Count: 2, Latitude: 38, Longitude: -97}},
+	}
+	merged := mergeTechnicalReports(legacy, modern)
+	if merged.HumanSessions != 1 || merged.BotSessions != 1 || merged.PageViews != 1 || merged.TopPages[0].Count != 1 || merged.TrafficSources[0].Value != "100.0%" || merged.Devices[0].Value != "50.0%" || merged.BotReferrers[0].Value != "100.0%" {
+		t.Fatalf("legacy requests entered session dimensions: %+v", merged)
+	}
+	if merged.LegacyAudience["countries"][0].Count != 50 || merged.Countries[0].Count != 2 || merged.LegacyMapPoints[0].Count != 50 || merged.MapPoints[0].Count != 2 {
+		t.Fatalf("legacy technical evidence was lost or mixed: %+v", merged)
+	}
+}
