@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -10,12 +9,10 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
-
-	"github.com/matveynator/sitebrush/v2/pkg/systeminit"
 )
 
 func TestHTTPServerUsesAnotherPortWhenExistingProcessOwnsRequestedPort(t *testing.T) {
-	primaryListener, err := systeminit.Listen(context.Background(), "tcp", ":0")
+	primaryListener, err := net.Listen("tcp", ":0")
 	if err != nil {
 		t.Fatal(err)
 	}

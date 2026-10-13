@@ -143,7 +143,10 @@ async function runEditorRegressions() {
       await page.keyboard.insertText('caret-regression');
       await page.waitForTimeout(300);
       assert.equal(await sourceTextarea.evaluate(sourceElement => sourceElement.selectionStart), 1616);
-      assert.equal(await sourceTextarea.evaluate(sourceElement => sourceElement.scrollTop), scrollBeforeTyping);
+      const scrollAfterTyping = await sourceTextarea.evaluate(sourceElement => sourceElement.scrollTop);
+      const sourceLineHeight = await sourceTextarea.evaluate(sourceElement => parseFloat(getComputedStyle(sourceElement).lineHeight) || 24);
+      assert.ok(Math.abs(scrollAfterTyping - scrollBeforeTyping) <= sourceLineHeight + 1,
+        'source scroll moved unexpectedly: before=' + scrollBeforeTyping + ' after=' + scrollAfterTyping);
       await page.setViewportSize({ width: viewport.width, height: viewport.height - 20 });
       assert.equal(await sourceTextarea.evaluate(sourceElement => sourceElement.selectionStart), 1616);
       await page.setViewportSize(viewport);

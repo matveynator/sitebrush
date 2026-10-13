@@ -223,10 +223,9 @@ const desktopNativeFilePickerEnabled = {{.NativeFileDialog}};
 const uploadResizeModeStorageKey = 'sitebrush.visualUploadResizeMode';
 const uploadCustomSizeStorageKey = 'sitebrush.visualUploadCustomSize';
 sitebrushEditorModel.document = parseVisualEditorDocument(initialHtmlContent);
-const visualEditorDocumentModel = sitebrushEditorModel.document;
 const visualEditorThemeMediaQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
 
-const uploadDialogState = {
+sitebrushEditorModel.uploadDialog = {
   editor: null,
   files: [],
   index: 0,
@@ -458,18 +457,18 @@ function syncVisualEditorFrameTheme(visualHtmlEditor, colorScheme) {
   if (!frameRootElement) {
     return;
   }
-  applyVisualEditorFrameAttributes(frameRootElement, visualEditorDocumentModel.htmlAttributeList, ['jodit']);
+  applyVisualEditorFrameAttributes(frameRootElement, sitebrushEditorModel.document.htmlAttributeList, ['jodit']);
   frameRootElement.style.colorScheme = colorScheme;
-  if (!visualEditorDocumentModel.hasStoredThemeMarker) {
+  if (!sitebrushEditorModel.document.hasStoredThemeMarker) {
     frameRootElement.classList.toggle('dark', colorScheme === 'dark');
     frameRootElement.classList.toggle('light', colorScheme !== 'dark');
     frameRootElement.setAttribute('data-bs-theme', colorScheme);
     frameRootElement.setAttribute('data-theme', colorScheme);
   }
   if (frameDocument.body) {
-    applyVisualEditorFrameAttributes(frameDocument.body, visualEditorDocumentModel.bodyAttributeList, ['jodit-wysiwyg']);
+    applyVisualEditorFrameAttributes(frameDocument.body, sitebrushEditorModel.document.bodyAttributeList, ['jodit-wysiwyg']);
     frameDocument.body.style.colorScheme = colorScheme;
-    if (!visualEditorDocumentModel.hasStoredThemeMarker) {
+    if (!sitebrushEditorModel.document.hasStoredThemeMarker) {
       frameDocument.body.classList.toggle('dark', colorScheme === 'dark');
       frameDocument.body.classList.toggle('light', colorScheme !== 'dark');
     }
@@ -784,10 +783,10 @@ function uploadPreparedFile(preparedFile) {
 function closeUploadDialog() {
   const overlayElement = document.getElementById('uploadDialogOverlay');
   overlayElement.classList.remove('is-open');
-  uploadDialogState.recipient = null;
-  if (uploadDialogState.resolver) {
-    uploadDialogState.resolver();
-    uploadDialogState.resolver = null;
+  sitebrushEditorModel.uploadDialog.recipient = null;
+  if (sitebrushEditorModel.uploadDialog.resolver) {
+    sitebrushEditorModel.uploadDialog.resolver();
+    sitebrushEditorModel.uploadDialog.resolver = null;
   }
 }
 
@@ -817,14 +816,14 @@ function syncUploadResizeControls() {
 function rememberUploadResizeControls() {
   const resizeModeElement = document.getElementById('uploadDialogResizeMode');
   const customSizeElement = document.getElementById('uploadDialogCustomSize');
-  uploadDialogState.resizeMode = normalizedResizeMode(resizeModeElement.value || 'original');
-  uploadDialogState.customSize = customSizeElement.value || '1200';
-  storeUploadPreference(uploadResizeModeStorageKey, uploadDialogState.resizeMode);
-  storeUploadPreference(uploadCustomSizeStorageKey, uploadDialogState.customSize);
+  sitebrushEditorModel.uploadDialog.resizeMode = normalizedResizeMode(resizeModeElement.value || 'original');
+  sitebrushEditorModel.uploadDialog.customSize = customSizeElement.value || '1200';
+  storeUploadPreference(uploadResizeModeStorageKey, sitebrushEditorModel.uploadDialog.resizeMode);
+  storeUploadPreference(uploadCustomSizeStorageKey, sitebrushEditorModel.uploadDialog.customSize);
 }
 
 function showUploadDialogForCurrentFile() {
-  const selectedFile = uploadDialogState.files[uploadDialogState.index];
+  const selectedFile = sitebrushEditorModel.uploadDialog.files[sitebrushEditorModel.uploadDialog.index];
   if (!selectedFile) {
     closeUploadDialog();
     return;
@@ -840,17 +839,17 @@ function showUploadDialogForCurrentFile() {
   const uploadButtonElement = document.getElementById('uploadDialogUpload');
   errorElement.textContent = '';
   uploadButtonElement.disabled = true;
-  queueElement.textContent = editUIText.queuePrefix + ' ' + (uploadDialogState.index + 1) + ' ' + editUIText.queueOf + ' ' + uploadDialogState.files.length + ': ' + selectedFile.name;
+  queueElement.textContent = editUIText.queuePrefix + ' ' + (sitebrushEditorModel.uploadDialog.index + 1) + ' ' + editUIText.queueOf + ' ' + sitebrushEditorModel.uploadDialog.files.length + ': ' + selectedFile.name;
   metaElement.textContent = humanFileSize(selectedFile.size) + (selectedFile.type ? ' - ' + selectedFile.type : '');
-  imageControlsElement.classList.toggle('SiteBrushUploadHidden', !!uploadDialogState.recipient || !isResizableImage(selectedFile));
-  resizeModeElement.value = uploadDialogState.resizeMode;
-  document.getElementById('uploadDialogCustomSize').value = uploadDialogState.customSize;
+  imageControlsElement.classList.toggle('SiteBrushUploadHidden', !!sitebrushEditorModel.uploadDialog.recipient || !isResizableImage(selectedFile));
+  resizeModeElement.value = sitebrushEditorModel.uploadDialog.resizeMode;
+  document.getElementById('uploadDialogCustomSize').value = sitebrushEditorModel.uploadDialog.customSize;
   syncUploadResizeControls();
   openImagePreview(selectedFile, previewElement);
   overlayElement.classList.add('is-open');
-  const previewResolver = uploadDialogState.resolver;
+  const previewResolver = sitebrushEditorModel.uploadDialog.resolver;
   hashFileName(selectedFile).then(function setDefaultName(defaultName) {
-    if (uploadDialogState.resolver !== previewResolver || uploadDialogState.files[uploadDialogState.index] !== selectedFile) {
+    if (sitebrushEditorModel.uploadDialog.resolver !== previewResolver || sitebrushEditorModel.uploadDialog.files[sitebrushEditorModel.uploadDialog.index] !== selectedFile) {
       return;
     }
     nameElement.value = defaultName;
@@ -858,7 +857,7 @@ function showUploadDialogForCurrentFile() {
     nameElement.focus();
     nameElement.select();
   }).catch(function fallbackName() {
-    if (uploadDialogState.resolver !== previewResolver || uploadDialogState.files[uploadDialogState.index] !== selectedFile) {
+    if (sitebrushEditorModel.uploadDialog.resolver !== previewResolver || sitebrushEditorModel.uploadDialog.files[sitebrushEditorModel.uploadDialog.index] !== selectedFile) {
       return;
     }
     nameElement.value = selectedFile.name;
@@ -867,12 +866,12 @@ function showUploadDialogForCurrentFile() {
 }
 
 function advanceUploadDialog() {
-  uploadDialogState.index += 1;
+  sitebrushEditorModel.uploadDialog.index += 1;
   showUploadDialogForCurrentFile();
 }
 
 function uploadCurrentDialogFile() {
-  const selectedFile = uploadDialogState.files[uploadDialogState.index];
+  const selectedFile = sitebrushEditorModel.uploadDialog.files[sitebrushEditorModel.uploadDialog.index];
   const nameElement = document.getElementById('uploadDialogName');
   const errorElement = document.getElementById('uploadDialogError');
   const uploadButtonElement = document.getElementById('uploadDialogUpload');
@@ -888,15 +887,15 @@ function uploadCurrentDialogFile() {
   uploadButtonElement.disabled = true;
   errorElement.textContent = editUIText.uploading;
   rememberUploadResizeControls();
-  const uploadRecipient = uploadDialogState.recipient;
-  const uploadResolver = uploadDialogState.resolver;
+  const uploadRecipient = sitebrushEditorModel.uploadDialog.recipient;
+  const uploadResolver = sitebrushEditorModel.uploadDialog.resolver;
   resizeImageFile(selectedFile, outputName, uploadRecipient ? 0 : selectedResizeMaxSide())
     .then(function uploadAndInsertPreparedFile(preparedFileResult) {
-      if (uploadDialogState.resolver !== uploadResolver) {
+      if (sitebrushEditorModel.uploadDialog.resolver !== uploadResolver) {
         return;
       }
       return uploadPreparedFile(preparedFileResult.file).then(function insertUploadedFile(uploadPayload) {
-        if (uploadDialogState.resolver !== uploadResolver) {
+        if (sitebrushEditorModel.uploadDialog.resolver !== uploadResolver) {
           return;
         }
         const storedFileURL = uploadedFileURL(uploadPayload);
@@ -906,17 +905,17 @@ function uploadCurrentDialogFile() {
         if (uploadRecipient) {
           uploadRecipient(storedFileURL, preparedFileResult.file.size);
         } else {
-          insertUploadedFileIntoEditor(uploadDialogState.editor, storedFileURL, preparedFileResult.file.name, preparedFileResult.file.type, preparedFileResult.width, preparedFileResult.height);
+          insertUploadedFileIntoEditor(sitebrushEditorModel.uploadDialog.editor, storedFileURL, preparedFileResult.file.name, preparedFileResult.file.type, preparedFileResult.width, preparedFileResult.height);
         }
       });
     })
     .then(function advanceAfterUpload() {
-      if (uploadDialogState.resolver === uploadResolver) {
+      if (sitebrushEditorModel.uploadDialog.resolver === uploadResolver) {
         advanceUploadDialog();
       }
     })
     .catch(function showUploadError(uploadError) {
-      if (uploadDialogState.resolver !== uploadResolver) {
+      if (sitebrushEditorModel.uploadDialog.resolver !== uploadResolver) {
         return;
       }
       errorElement.textContent = uploadError.message || editUIText.fileUploadFailed;
@@ -925,20 +924,20 @@ function uploadCurrentDialogFile() {
 }
 
 function openUploadDialog(visualHtmlEditor, selectedFiles, uploadRecipient) {
-  uploadDialogState.editor = visualHtmlEditor;
-  uploadDialogState.files = Array.from(selectedFiles || []);
-  uploadDialogState.index = 0;
-  uploadDialogState.recipient = uploadRecipient || null;
+  sitebrushEditorModel.uploadDialog.editor = visualHtmlEditor;
+  sitebrushEditorModel.uploadDialog.files = Array.from(selectedFiles || []);
+  sitebrushEditorModel.uploadDialog.index = 0;
+  sitebrushEditorModel.uploadDialog.recipient = uploadRecipient || null;
   return new Promise(function waitForDialog(resolve) {
-    uploadDialogState.resolver = resolve;
+    sitebrushEditorModel.uploadDialog.resolver = resolve;
     showUploadDialogForCurrentFile();
   });
 }
 
 function pickFilesWithBrowser(visualHtmlEditor, uploadRecipient) {
-  if (uploadDialogState.pickerInput) {
-    uploadDialogState.pickerInput.remove();
-    uploadDialogState.pickerInput = null;
+  if (sitebrushEditorModel.uploadDialog.pickerInput) {
+    sitebrushEditorModel.uploadDialog.pickerInput.remove();
+    sitebrushEditorModel.uploadDialog.pickerInput = null;
   }
   const fileInputElement = document.createElement('input');
   fileInputElement.type = 'file';
@@ -950,11 +949,11 @@ function pickFilesWithBrowser(visualHtmlEditor, uploadRecipient) {
   fileInputElement.style.left = '-10000px';
   fileInputElement.style.top = '0';
   fileInputElement.style.opacity = '0';
-  uploadDialogState.pickerInput = fileInputElement;
+  sitebrushEditorModel.uploadDialog.pickerInput = fileInputElement;
   fileInputElement.addEventListener('change', function onFilesSelected() {
     const selectedFiles = Array.from(fileInputElement.files || []);
     fileInputElement.remove();
-    uploadDialogState.pickerInput = null;
+    sitebrushEditorModel.uploadDialog.pickerInput = null;
     if (selectedFiles.length === 0) {
       return;
     }
@@ -1012,7 +1011,7 @@ syncUploadResizeControls();
 function createVisualHtmlEditor() {
   // Jodit reads the textarea before applying options. Only the body may enter
   // its paragraph normalizers; the source envelope belongs to our document model.
-  const previewBodyHTML = createVisualEditorPreviewBody(visualEditorDocumentModel.bodyHTML);
+  const previewBodyHTML = createVisualEditorPreviewBody(sitebrushEditorModel.document.bodyHTML);
   document.getElementById('visualEditorRoot').value = previewBodyHTML;
   return Jodit.make('#visualEditorRoot', {
     value: previewBodyHTML,
