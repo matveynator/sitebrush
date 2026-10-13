@@ -100,7 +100,20 @@ async function runEditorRegressions() {
       assert.equal(await page.frameLocator('.jodit-wysiwyg_iframe').locator('body').evaluate(bodyElement => bodyElement.ownerDocument.defaultView.fixtureHandlerMustNotRun), undefined);
       assert.equal(await page.frameLocator('.jodit-wysiwyg_iframe').locator('body').evaluate(bodyElement => bodyElement.ownerDocument.defaultView.fixtureBodyScriptMustNotRun), undefined);
       await control('source').click();
-      const sourceTextarea = page.locator('#sitebrushSourceHTML');
+      const sourceEditor = page.locator('.jodit-source .CodeMirror');
+      async function sourceHTML() {
+        return sourceEditor.evaluate(editorElement => editorElement.CodeMirror.getValue());
+      }
+      async function replaceSourceHTML(documentHTML) {
+        await sourceEditor.evaluate((editorElement, nextHTML) => {
+          const codeMirrorEditor = editorElement.CodeMirror;
+          codeMirrorEditor.replaceRange(nextHTML, { line: 0, ch: 0 },
+            { line: codeMirrorEditor.lastLine(), ch: codeMirrorEditor.getLine(codeMirrorEditor.lastLine()).length });
+        }, documentHTML);
+      }
+      async function sourceCursorIndex() {
+        return sourceEditor.evaluate(editorElement => editorElement.CodeMirror.indexFromPos(editorElement.CodeMirror.getCursor()));
+      }
       const loadedAssetURLs = await page.locator('script[src*="visual_editor_"]').evaluateAll(scriptElements => scriptElements.map(scriptElement => scriptElement.src));
       assert.equal(loadedAssetURLs.length, 2);
       const editorAssetVersion = new URL(loadedAssetURLs[0]).searchParams.get('v');
@@ -110,8 +123,8 @@ async function runEditorRegressions() {
         const assetResponse = await context.request.get(loadedAssetURL);
         assert.ok(assetResponse.headers()['cache-control'].includes('no-store'));
       }
-      assert.equal(await sourceTextarea.inputValue(), originalDocument);
-      assert.deepEqual(await sourceTextarea.evaluate(sourceElement => [sourceElement.scrollTop, sourceElement.selectionStart]), [0, 0]);
+      assert.equal(await sourceHTML(), originalDocument);
+      assert.deepEqual(await sourceEditor.evaluate(editorElement => [editorElement.CodeMirror.getScrollInfo().top, editorElement.CodeMirror.indexFromPos(editorElement.CodeMirror.getCursor())]), [0, 0]);
       assert.equal(await page.locator('.jodit-toolbar__box button').count(), 3);
       for (const visualControlName of ['bold', 'italic', 'source', 'insertServerFile']) {
         assert.equal(await control(visualControlName).count(), 0, visualControlName + ' must be removed');
@@ -129,41 +142,94 @@ async function runEditorRegressions() {
         await page.screenshot({ path: process.env.SITEBRUSH_EDITOR_ARTIFACT_DIR + '/code-' + viewport.width + '.png' });
       }
 
-      // Typing midway through a long document must retain its caret and scroll.
-      await sourceTextarea.evaluate(sourceElement => {
-        sourceElement.focus();
-        sourceElement.setSelectionRange(1600, 1600);
-        sourceElement.scrollTop = 400;
+      assert.ok(await sourceEditor.locator('.cm-tag').count(), 'HTML tags are highlighted');
+      assert.ok(await sourceEditor.locator('.cm-attribute').count(), 'HTML attributes are highlighted');
+      assert.ok(await sourceEditor.locator('.cm-keyword').count(), 'inline JavaScript is highlighted');
+      const embeddedModes = await sourceEditor.evaluate(editorElement => {
+        const codeMirrorEditor = editorElement.CodeMirror;
+        const cssPosition = codeMirrorEditor.posFromIndex(codeMirrorEditor.getValue().indexOf('width: 180px') + 3);
+        const scriptPosition = codeMirrorEditor.posFromIndex(codeMirrorEditor.getValue().indexOf('const boundaryExample') + 3);
+        return [codeMirrorEditor.getModeAt(cssPosition).name, codeMirrorEditor.getModeAt(scriptPosition).name];
       });
+      assert.deepEqual(embeddedModes, ['css', 'javascript']);
+      const lightTagColor = await sourceEditor.locator('.cm-tag').first().evaluate(tagElement => getComputedStyle(tagElement).color);
+      await page.emulateMedia({ colorScheme: 'dark' });
+      assert.notEqual(await sourceEditor.locator('.cm-tag').first().evaluate(tagElement => getComputedStyle(tagElement).color), lightTagColor);
+      await page.emulateMedia({ colorScheme: 'light' });
+      const sourceRectangle = await sourceEditor.boundingBox();
+      assert.ok(sourceRectangle.x >= 0 && sourceRectangle.x + sourceRectangle.width <= viewport.width + 1);
+      assert.ok(sourceRectangle.y + sourceRectangle.height <= viewport.height + 1);
+
+      await replaceSourceHTML('<div>');
+      await sourceEditor.evaluate(editorElement => {
+        editorElement.CodeMirror.setCursor(0, 5);
+        editorElement.CodeMirror.focus();
+      });
+      await page.keyboard.press('Enter');
+      assert.equal(await sourceHTML(), '<div>\n  ');
+      await page.keyboard.press('Tab');
+      assert.equal(await sourceHTML(), '<div>\n    ');
+      await page.keyboard.press('Shift+Tab');
+      assert.equal(await sourceHTML(), '<div>\n  ');
+      await page.keyboard.insertText('text');
+      await sourceEditor.evaluate(editorElement => editorElement.CodeMirror.setSelection({ line: 0, ch: 0 }, { line: 1, ch: 6 }));
+      await page.keyboard.press('Tab');
+      assert.equal(await sourceHTML(), '  <div>\n    text');
+      await page.keyboard.press('Shift+Tab');
+      assert.equal(await sourceHTML(), '<div>\n  text');
+      await sourceEditor.evaluate(editorElement => {
+        const codeMirrorEditor = editorElement.CodeMirror;
+        codeMirrorEditor.clearHistory();
+        codeMirrorEditor.setCursor(1, 6);
+      });
+      await page.keyboard.insertText(' undo');
+      assert.equal(await sourceHTML(), '<div>\n  text undo');
+      await sourceEditor.evaluate(editorElement => editorElement.CodeMirror.undo());
+      assert.equal(await sourceHTML(), '<div>\n  text');
+      await sourceEditor.evaluate(editorElement => editorElement.CodeMirror.redo());
+      assert.equal(await sourceHTML(), '<div>\n  text undo');
+      assert.equal(await page.evaluate(() => sitebrushEditorModel.sourceHTML), '<div>\n  text undo');
+      await control('cancelSource').click();
+      await control('source').click();
+      assert.equal(await sourceHTML(), originalDocument);
+
+      // Typing midway through a long document must retain its caret and scroll.
+      const caretStart = originalDocument.indexOf('Long document for caret') + 3000;
+      await sourceEditor.evaluate((editorElement, cursorIndex) => {
+        const codeMirrorEditor = editorElement.CodeMirror;
+        codeMirrorEditor.setCursor(codeMirrorEditor.posFromIndex(cursorIndex));
+        codeMirrorEditor.focus();
+      }, caretStart);
       // Let the browser reveal the caret before measuring; native typing may
       // legitimately scroll an offscreen caret into view on a narrow viewport.
       await page.keyboard.press('ArrowRight');
       await page.keyboard.press('ArrowLeft');
-      const scrollBeforeTyping = await sourceTextarea.evaluate(sourceElement => sourceElement.scrollTop);
+      const scrollBeforeTyping = await sourceEditor.evaluate(editorElement => editorElement.CodeMirror.getScrollInfo().top);
+      assert.ok(scrollBeforeTyping > 0, 'long document is scrolled before typing');
       await page.keyboard.insertText('caret-regression');
       await page.waitForTimeout(300);
-      assert.equal(await sourceTextarea.evaluate(sourceElement => sourceElement.selectionStart), 1616);
-      const scrollAfterTyping = await sourceTextarea.evaluate(sourceElement => sourceElement.scrollTop);
-      const sourceLineHeight = await sourceTextarea.evaluate(sourceElement => parseFloat(getComputedStyle(sourceElement).lineHeight) || 24);
+      assert.equal(await sourceCursorIndex(), caretStart + 16);
+      const scrollAfterTyping = await sourceEditor.evaluate(editorElement => editorElement.CodeMirror.getScrollInfo().top);
+      const sourceLineHeight = await sourceEditor.evaluate(editorElement => editorElement.CodeMirror.defaultTextHeight());
       assert.ok(Math.abs(scrollAfterTyping - scrollBeforeTyping) <= sourceLineHeight + 1,
         'source scroll moved unexpectedly: before=' + scrollBeforeTyping + ' after=' + scrollAfterTyping);
       await page.setViewportSize({ width: viewport.width, height: viewport.height - 20 });
-      assert.equal(await sourceTextarea.evaluate(sourceElement => sourceElement.selectionStart), 1616);
+      assert.equal(await sourceCursorIndex(), caretStart + 16);
       await page.setViewportSize(viewport);
       await page.emulateMedia({ colorScheme: 'dark' });
-      assert.equal(await sourceTextarea.evaluate(sourceElement => sourceElement.selectionStart), 1616);
+      assert.equal(await sourceCursorIndex(), caretStart + 16);
       assert.equal(await page.locator('.jodit-toolbar__box button').count(), 3);
       await page.emulateMedia({ colorScheme: 'light' });
       await control('cancelSource').click();
       assert.ok(await control('bold').isVisible());
       assert.equal(await page.locator('.jodit-toolbar__box button').count(), visualControlCount);
       await control('source').click();
-      assert.equal(await sourceTextarea.inputValue(), originalDocument);
+      assert.equal(await sourceHTML(), originalDocument);
       const modifiedDocument = originalDocument.replace('Editable content', 'Changed from source')
         .replace('preserve > metadata', 'source metadata preserved')
         .replace('.class-frame { width: 180px; height: 120px; }', '.class-frame { width: 160px; height: 110px; }')
         .replace(' data-example="body-preserved"', '');
-      await sourceTextarea.fill(modifiedDocument);
+      await replaceSourceHTML(modifiedDocument);
       await control('backToVisual').click();
       assert.ok(await control('bold').isVisible());
       assert.ok(await page.frameLocator('.jodit-wysiwyg_iframe').getByText('Changed from source').isVisible());
@@ -172,7 +238,7 @@ async function runEditorRegressions() {
       assert.equal(updatedClassArea.height, 110);
       assert.equal(await page.frameLocator('.jodit-wysiwyg_iframe').locator('body').getAttribute('data-example'), null);
       await control('source').click();
-      assert.equal(await sourceTextarea.inputValue(), modifiedDocument);
+      assert.equal(await sourceHTML(), modifiedDocument);
       await saveWithButton(control('saveSource'));
       assert.equal(await storedHTML(sourcePagePath), modifiedDocument);
 
@@ -183,6 +249,17 @@ async function runEditorRegressions() {
       await saveWithButton(control('savePageHtml'));
       assert.equal(await storedHTML(unchangedPagePath), unchangedHTML, 'no-op save preserves exact document');
 
+      const hotkeyPagePath = await openFixture();
+      await control('source').click();
+      const hotkeyDocument = (await sourceHTML()).replace('Editable content', 'Saved with keyboard');
+      await replaceSourceHTML(hotkeyDocument);
+      await sourceEditor.evaluate(editorElement => editorElement.CodeMirror.focus());
+      await Promise.all([
+        page.waitForURL(browserURL => !browserURL.searchParams.has('visual')),
+        page.keyboard.press(viewport.width === 320 ? 'Meta+s' : 'Control+s')
+      ]);
+      assert.equal(await storedHTML(hotkeyPagePath), hotkeyDocument);
+
       // Repair historical copies through source mode, then repeat visual saves.
       // The document envelope must never be appended to the editable body.
       const repeatedPagePath = '/editor-repeat-' + viewport.width;
@@ -191,8 +268,8 @@ async function runEditorRegressions() {
       const canonicalHead = canonicalDocument.slice(0, canonicalDocument.indexOf('<body'));
       await page.goto(fixtureURL + corruptedPagePath + '?visual');
       await control('source').click();
-      assert.equal((await sourceTextarea.inputValue()).match(/<meta\b/g).length, 3);
-      await sourceTextarea.fill(canonicalDocument);
+      assert.equal((await sourceHTML()).match(/<meta\b/g).length, 3);
+      await replaceSourceHTML(canonicalDocument);
       await control('backToVisual').click();
       await saveWithButton(control('savePageHtml'));
       for (let saveCycle = 0; saveCycle < 3; saveCycle++) {
@@ -202,7 +279,7 @@ async function runEditorRegressions() {
         assert.equal(cycleDocument.match(/<head\b/g).length, 1);
         await page.goto(fixtureURL + corruptedPagePath + '?visual');
         await control('source').click();
-        assert.equal((await sourceTextarea.inputValue()).match(/<meta\b/g).length, 1);
+        assert.equal((await sourceHTML()).match(/<meta\b/g).length, 1);
         await control('backToVisual').click();
         const cycleParagraph = page.frameLocator('.jodit-wysiwyg_iframe').getByText('Editable content', { exact: false });
         await cycleParagraph.click();
@@ -342,13 +419,16 @@ async function runEditorRegressions() {
       // same endpoint. Failed uploads must not mutate the selected image.
       const failedSavePath = await openFixture();
       await control('source').click();
-      const errorDraft = (await sourceTextarea.inputValue()).replace('Editable content', 'Retry save draft');
-      await sourceTextarea.fill(errorDraft);
-      await page.route('**/*?save', interceptedRoute => interceptedRoute.fulfill({ status: 500, body: 'fixture save failure' }));
+      const errorDraft = (await sourceHTML()).replace('Editable content', 'Retry save draft');
+      await replaceSourceHTML(errorDraft);
+      await page.route('**/*?save', async interceptedRoute => {
+        assert.equal(await sourceEditor.evaluate(editorElement => editorElement.CodeMirror.getOption('readOnly')), true);
+        await interceptedRoute.fulfill({ status: 500, body: 'fixture save failure' });
+      });
       await control('saveSource').click();
       await page.locator('#editorSaveStatus').getByText('fixture save failure', { exact: false }).waitFor();
-      assert.equal(await sourceTextarea.inputValue(), errorDraft);
-      assert.equal(await sourceTextarea.evaluate(sourceElement => sourceElement.readOnly), false);
+      assert.equal(await sourceHTML(), errorDraft);
+      assert.equal(await sourceEditor.evaluate(editorElement => editorElement.CodeMirror.getOption('readOnly')), false);
       await page.unroute('**/*?save');
       await saveWithButton(control('saveSource'));
       assert.equal(await storedHTML(failedSavePath), errorDraft);

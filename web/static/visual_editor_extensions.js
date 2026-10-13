@@ -9,6 +9,7 @@ const sitebrushEditorModel = {
   mode: 'visual',
   sourceHTML: '',
   sourceSnapshot: '',
+  sourceCodeMirror: null,
   renderedBodyHTML: '',
   visualButtons: [],
   imageDraft: null,
@@ -32,7 +33,7 @@ function renderVisualEditorSaveStatus(editorInstance) {
   saveStatusElement.hidden = !sitebrushEditorModel.savingPage && !sitebrushEditorModel.saveError;
   saveStatusElement.textContent = sitebrushEditorModel.savingPage ? editUIText.saving : sitebrushEditorModel.saveError;
   editorInstance.setReadOnly(sitebrushEditorModel.savingPage);
-  document.getElementById('sitebrushSourceHTML').readOnly = sitebrushEditorModel.savingPage;
+  sitebrushEditorModel.sourceCodeMirror.setOption('readOnly', sitebrushEditorModel.savingPage);
 }
 
 function currentVisualEditorDocumentHTML(editorBodyHTML) {
@@ -133,15 +134,7 @@ function initializeSitebrushEditorExtensions(editorInstance) {
   sourceTextarea.setAttribute('aria-label', editUIText.htmlCode);
   sourceContainer.appendChild(sourceTextarea);
   editorInstance.workplace.appendChild(sourceContainer);
-  sourceTextarea.addEventListener('input', function updateSourceDraft() {
-    sitebrushEditorModel.sourceHTML = sourceTextarea.value;
-  });
-  sourceTextarea.addEventListener('keydown', function saveSourceWithHotkey(keyboardEvent) {
-    if ((keyboardEvent.ctrlKey || keyboardEvent.metaKey) && keyboardEvent.key.toLowerCase() === 's') {
-      keyboardEvent.preventDefault();
-      submitVisualEditorForm(editorInstance);
-    }
-  });
+  initializeSitebrushSourceCodeMirror(sourceTextarea, editorInstance);
   editorInstance.events.on('afterSetMode', function renderChangedEditorMode() {
     renderSitebrushEditorToolbar(editorInstance);
   });
@@ -168,6 +161,43 @@ function initializeSitebrushEditorExtensions(editorInstance) {
   });
 }
 
+function initializeSitebrushSourceCodeMirror(sourceTextarea, editorInstance) {
+  const sourceCodeMirror = window.CodeMirror.fromTextArea(sourceTextarea, {
+    mode: 'htmlmixed',
+    lineNumbers: true,
+    lineWrapping: true,
+    smartIndent: true,
+    electricChars: true,
+    indentUnit: 2,
+    tabSize: 2,
+    indentWithTabs: false,
+    viewportMargin: 100,
+    extraKeys: {
+      Tab: function indentSourceSelection(codeMirrorEditor) {
+        if (codeMirrorEditor.somethingSelected()) {
+          codeMirrorEditor.indentSelection('add');
+          return;
+        }
+        codeMirrorEditor.replaceSelection('  ', 'end', '+input');
+      },
+      'Shift-Tab': function unindentSourceSelection(codeMirrorEditor) {
+        codeMirrorEditor.indentSelection('subtract');
+      },
+      Enter: 'newlineAndIndent',
+      'Ctrl-S': function saveSourceWithControlKey() { submitVisualEditorForm(editorInstance); },
+      'Cmd-S': function saveSourceWithCommandKey() { submitVisualEditorForm(editorInstance); }
+    }
+  });
+  sitebrushEditorModel.sourceCodeMirror = sourceCodeMirror;
+  sourceCodeMirror.getInputField().setAttribute('aria-label', editUIText.htmlCode);
+  sourceCodeMirror.on('change', function updateSourceDraft(codeMirrorEditor, sourceChange) {
+    // Loading the view must preserve the original document bytes in the model.
+    if (sourceChange.origin !== 'setValue') {
+      sitebrushEditorModel.sourceHTML = codeMirrorEditor.getValue();
+    }
+  });
+}
+
 /* Jodit's hover/selection callbacks need scripting enabled in their document.
    CSP blocks scripts supplied by page HTML while allowing parent-owned editor
    functions; the visual projection also excludes page handlers and scripts. */
@@ -186,13 +216,15 @@ function enterSitebrushCodeMode(editorInstance) {
   sitebrushEditorModel.sourceHTML = currentVisualEditorDocumentHTML(editorInstance.value);
   sitebrushEditorModel.sourceSnapshot = sitebrushEditorModel.sourceHTML;
   sitebrushEditorModel.mode = 'code';
-  const sourceTextarea = document.getElementById('sitebrushSourceHTML');
-  sourceTextarea.value = sitebrushEditorModel.sourceHTML;
+  const sourceCodeMirror = sitebrushEditorModel.sourceCodeMirror;
+  sourceCodeMirror.setOption('lineSeparator', sitebrushEditorModel.sourceHTML.includes('\r\n') ? '\r\n' : null);
+  sourceCodeMirror.setValue(sitebrushEditorModel.sourceHTML);
+  sourceCodeMirror.clearHistory();
   editorInstance.setMode(Jodit.MODE_SOURCE);
-  sourceTextarea.focus({ preventScroll: true });
-  sourceTextarea.setSelectionRange(0, 0);
-  sourceTextarea.scrollTop = 0;
-  sourceTextarea.scrollLeft = 0;
+  sourceCodeMirror.refresh();
+  sourceCodeMirror.setCursor(0, 0);
+  sourceCodeMirror.scrollTo(0, 0);
+  sourceCodeMirror.focus();
 }
 
 function returnToSitebrushVisualMode(editorInstance, discardSourceChanges) {
