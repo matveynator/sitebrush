@@ -11,6 +11,7 @@ for (const [htmlText, expectedBody, expectedShell] of [
   ['<!DOCTYPE html><HTML><HEAD><META content="a > b"><TITLE>Title</TITLE></HEAD><BODY class="original">body</BODY></HTML>', 'body', true],
   ['<!-- <body>comment</body> --><html><head><script>const sample="<body>wrong</body>";</script><style>.example:before{content:"<body>"}</style></head><body>right</body></html>', 'right', true],
   ['<html><head><title>Example</title></head>implicit body</html>', 'implicit body', true],
+  ['<!doctype html><title>x</title><main>content</main>', '<main>content</main>', true],
   ['<html><head><title>Empty</title></head></html>', '', true],
   ['<html><head><script>const sample="</script-not-a-tag><body>wrong</body>";</script></head><body>right</body></html>', 'right', true],
   ['<html><head><template><body>template content</body></template></head><body>real body</body></html>', 'real body', true]
