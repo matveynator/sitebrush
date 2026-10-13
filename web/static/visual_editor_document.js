@@ -59,9 +59,12 @@ function visualEditorDocumentTokens(htmlText) {
 
 function visualEditorDocumentEnvelope(htmlText) {
   const documentTokens = visualEditorDocumentTokens(htmlText);
+  const headElementNames = new Set(['base', 'basefont', 'bgsound', 'link', 'meta', 'noframes', 'script', 'style', 'template', 'title']);
   let bodyStart = -1;
   let bodyEnd = htmlText.length;
   let shellStart = -1;
+  let implicitBodyStart = -1;
+  let implicitHeadEnd = -1;
   let hasDocumentShell = false;
   let templateDepth = 0;
   for (const documentToken of documentTokens) {
@@ -80,9 +83,17 @@ function visualEditorDocumentEnvelope(htmlText) {
     }
     if (documentToken.closing && documentToken.name === 'head' && bodyStart < 0) {
       shellStart = documentToken.end;
+      implicitHeadEnd = documentToken.end;
     }
     if (!documentToken.closing && documentToken.name === 'body' && bodyStart < 0) {
       bodyStart = documentToken.end;
+    }
+    if (bodyStart < 0 && implicitBodyStart < 0) {
+      if (headElementNames.has(documentToken.name) || documentToken.name === 'head') {
+        implicitHeadEnd = Math.max(implicitHeadEnd, documentToken.end);
+      } else if (!documentToken.closing && !['html', '!doctype', 'body'].includes(documentToken.name)) {
+        implicitBodyStart = documentToken.start;
+      }
     }
     if (documentToken.closing && (documentToken.name === 'body' || documentToken.name === 'html')) {
       bodyEnd = Math.min(bodyEnd, documentToken.start);
@@ -91,7 +102,11 @@ function visualEditorDocumentEnvelope(htmlText) {
   if (!hasDocumentShell) {
     return { hasDocumentShell: false, prefix: '', suffix: '', bodyHTML: htmlText };
   }
-  const contentStart = bodyStart >= 0 ? bodyStart : shellStart >= 0 ? shellStart : htmlText.length;
+  const contentStart = bodyStart >= 0 ? bodyStart
+    : implicitBodyStart >= 0 ? implicitBodyStart
+    : implicitHeadEnd >= 0 ? implicitHeadEnd
+    : shellStart >= 0 ? shellStart
+    : htmlText.length;
   const contentEnd = Math.max(contentStart, bodyEnd);
   return {
     hasDocumentShell: true,
