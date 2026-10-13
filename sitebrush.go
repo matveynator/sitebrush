@@ -8617,7 +8617,7 @@ func (a *App) serveEmbeddedStaticAsset(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if relativePath == "site_copy.js" {
+	if relativePath == "site_copy.js" || relativePath == "visual_editor_document.js" || relativePath == "visual_editor_extensions.js" || relativePath == "visual_editor.css" {
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	}
 	w.Header().Set("Content-Type", asset.contentType)
@@ -9039,12 +9039,14 @@ func automaticSSLUnavailableHintKey(portWasProvided bool) string {
 }
 
 func listenOnAvailablePort(requestedPort int) (net.Listener, int, error) {
-	listener, err := systeminit.Listen(context.Background(), "tcp", ":"+strconv.Itoa(requestedPort))
+	// Independent editor builds must not share an HTTP socket: a browser could
+	// otherwise receive HTML and helpers from different running processes.
+	listener, err := net.Listen("tcp", ":"+strconv.Itoa(requestedPort))
 	if err == nil {
 		return listener, requestedPort, nil
 	}
 	for fallbackPort := 9898; fallbackPort < 65536; fallbackPort++ {
-		listener, err = systeminit.Listen(context.Background(), "tcp", ":"+strconv.Itoa(fallbackPort))
+		listener, err = net.Listen("tcp", ":"+strconv.Itoa(fallbackPort))
 		if err == nil {
 			log.Printf("port %d is unavailable, using %d", requestedPort, fallbackPort)
 			return listener, fallbackPort, nil
@@ -9054,7 +9056,7 @@ func listenOnAvailablePort(requestedPort int) (net.Listener, int, error) {
 }
 
 func listenTLSForAutoCert() (net.Listener, error) {
-	return systeminit.Listen(context.Background(), "tcp", ":443")
+	return net.Listen("tcp", ":443")
 }
 
 func (a *App) serveTLSWithAutoCert(ctx context.Context, tlsListener net.Listener, tlsConfig *tls.Config, handler http.Handler) {
@@ -35093,6 +35095,21 @@ func (a *App) applyTemplateClassSynchronization(ctx context.Context, domain, pre
 	}
 }
 
+// Development builds share a release label, so embedded content determines the
+// editor asset version. HTML and its helpers must not mix across rebuilds.
+func visualEditorAssetVersion() (string, error) {
+	assetHash := sha256.New()
+	for _, assetPath := range []string{"web/edit.html", "web/static/visual_editor_document.js", "web/static/visual_editor_extensions.js", "web/static/visual_editor.css"} {
+		assetBytes, err := embeddedWebFiles.ReadFile(assetPath)
+		if err != nil {
+			return "", err
+		}
+		_, _ = io.WriteString(assetHash, assetPath)
+		_, _ = assetHash.Write(assetBytes)
+	}
+	return hex.EncodeToString(assetHash.Sum(nil)), nil
+}
+
 func (a *App) render(w http.ResponseWriter, r *http.Request, templateName string, templateData any) {
 	var translations map[string]string
 	domain := ""
@@ -35122,6 +35139,15 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, templateName string
 	}
 	envelope := map[string]any{"Domain": domain, "T": translations, "CompileVersion": CompileVersion, "LanguageCode": languageCode, "TextDirection": textDirection, "AccountCSRF": accountCSRF(r)}
 	mergeTemplateData(envelope, templateData)
+	if templateName == "edit.html" {
+		assetVersion, err := visualEditorAssetVersion()
+		if err != nil {
+			http.Error(w, "editor assets unavailable", http.StatusInternalServerError)
+			return
+		}
+		envelope["VisualEditorAssetVersion"] = assetVersion
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	}
 	if a != nil && a.renderTemplates != nil {
 		reply := make(chan renderTemplateResponse, 1)
 		a.renderTemplates <- renderTemplateRequest{name: templateName, envelope: envelope, reply: reply}

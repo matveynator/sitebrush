@@ -12,6 +12,7 @@
   <title>{{index .T "edit_title_prefix"}} {{.Path}}</title>
   <link rel="stylesheet" href="/p/static/jodit.min.css" />
   <link rel="stylesheet" href="/p/static/admin_theme.css" />
+  <link rel="stylesheet" href="/p/static/visual_editor.css?v={{.VisualEditorAssetVersion}}" />
   <style>
     :root {
       color-scheme: light dark;
@@ -97,7 +98,55 @@
   <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}" />
   <input type="hidden" id="htmlContentField" name="html" />
   <textarea id="visualEditorRoot" class="editor-host">{{.HTML}}</textarea>
+  <output id="editorSaveStatus" class="SiteBrushEditorSaveStatus" role="status" hidden></output>
 </form>
+
+<div id="imagePropertiesDialog" class="SiteBrushImageOverlay" role="dialog" aria-modal="true" aria-labelledby="imagePropertiesTitle" hidden>
+  <div class="SiteBrushUploadModal">
+    <div class="SiteBrushUploadHeader">
+      <h2 id="imagePropertiesTitle" class="SiteBrushUploadTitle">{{index .T "edit_image_properties"}}</h2>
+      <button id="imagePropertiesClose" class="SiteBrushUploadClose" type="button" aria-label="{{index .T "tree_close"}}">&times;</button>
+    </div>
+    <div class="SiteBrushImageBody">
+      <div class="SiteBrushImagePreviewPane">
+        <div id="imagePropertiesPreviewStage" class="SiteBrushImagePreviewStage">
+          <img id="imagePropertiesPreview" class="SiteBrushImagePreview" alt="{{index .T "edit_image_preview"}}">
+        </div>
+        <div class="SiteBrushImageMetadata">
+          <output id="imagePropertiesDimensions" class="SiteBrushUploadHint"></output>
+          <div class="SiteBrushUploadHint"><span>{{index .T "edit_image_file_size"}}</span>: <output id="imagePropertiesFileSize" aria-live="polite"></output></div>
+        </div>
+      </div>
+      <div class="SiteBrushImageFields">
+      <label class="SiteBrushUploadField">{{index .T "edit_image_source_url"}}<input id="imagePropertiesSource" type="text"></label>
+      <div class="SiteBrushImageDimensions">
+        <label class="SiteBrushUploadField">{{index .T "edit_image_width"}}<input id="imagePropertiesWidth" type="number" min="1" max="12000" step="1"></label>
+        <label class="SiteBrushUploadField">{{index .T "edit_image_height"}}<input id="imagePropertiesHeight" type="number" min="1" max="12000" step="1"></label>
+      </div>
+      <label class="SiteBrushImageRatioLock"><input id="imagePropertiesLock" type="checkbox"> {{index .T "edit_image_lock_ratio"}}</label>
+      <div class="SiteBrushImageDimensions">
+      <label class="SiteBrushUploadField">{{index .T "edit_image_fit"}}
+        <select id="imagePropertiesFit">
+          <option value="cover">{{index .T "edit_image_cover"}}</option>
+          <option value="contain">{{index .T "edit_image_contain"}}</option>
+          <option value="fill">{{index .T "edit_image_stretch"}}</option>
+        </select>
+      </label>
+      <label class="SiteBrushUploadField">{{index .T "edit_image_position"}}<input id="imagePropertiesPosition" type="text" placeholder="50% 50%"></label>
+      </div>
+      <details class="SiteBrushUploadHint"><summary>{{index .T "edit_image_help"}}</summary><p>{{index .T "edit_image_layout_hint"}}</p></details>
+      <div id="imagePropertiesError" class="SiteBrushUploadError" role="alert"></div>
+      </div>
+    </div>
+    <div class="SiteBrushUploadFooter">
+      <div class="SiteBrushUploadActions">
+        <button id="imagePropertiesReplace" class="SiteBrushUploadButton" type="button">{{index .T "edit_image_replace"}}</button>
+        <button id="imagePropertiesCancel" class="SiteBrushUploadButton" type="button">{{index .T "edit_cancel"}}</button>
+        <button id="imagePropertiesSave" class="SiteBrushUploadButton primary" type="button">{{index .T "edit_save"}}</button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <div id="uploadDialogOverlay" class="SiteBrushUploadOverlay" role="dialog" aria-modal="true" aria-labelledby="uploadDialogTitle">
   <div class="SiteBrushUploadModal">
@@ -142,8 +191,23 @@
 </div>
 
 <script src="/p/static/jodit.min.js"></script>
+<script src="/p/static/visual_editor_document.js?v={{.VisualEditorAssetVersion}}"></script>
+<script src="/p/static/visual_editor_extensions.js?v={{.VisualEditorAssetVersion}}"></script>
 <script>
 const editUIText = {
+  htmlCode: {{index .T "edit_html_code"}},
+  fileSizeLoading: {{index .T "edit_image_file_size_loading"}},
+  fileSizeUnavailable: {{index .T "edit_image_file_size_unavailable"}},
+  byteUnit: {{index .T "edit_file_unit_byte"}},
+  kilobyteUnit: {{index .T "edit_file_unit_kb"}},
+  megabyteUnit: {{index .T "edit_file_unit_mb"}},
+  cancel: {{index .T "edit_cancel"}},
+  save: {{index .T "edit_save"}},
+  backToVisual: {{index .T "edit_back_to_visual"}},
+  invalidImageSize: {{index .T "edit_error_image_size"}},
+  invalidImagePosition: {{index .T "edit_error_image_position"}},
+  saveFailed: {{index .T "edit_error_save_failed"}},
+  saving: {{index .T "edit_saving"}},
   imageResizeFailed: "{{index .T "edit_error_image_resize_failed"}}",
   imagePreviewFailed: "{{index .T "edit_error_image_preview_failed"}}",
   fileUploadFailed: "{{index .T "edit_error_file_upload_failed"}}",
@@ -158,16 +222,17 @@ const currentPagePath = {{.Path}};
 const desktopNativeFilePickerEnabled = {{.NativeFileDialog}};
 const uploadResizeModeStorageKey = 'sitebrush.visualUploadResizeMode';
 const uploadCustomSizeStorageKey = 'sitebrush.visualUploadCustomSize';
-const visualEditorDocumentModel = parseVisualEditorDocument(initialHtmlContent);
+sitebrushEditorModel.document = parseVisualEditorDocument(initialHtmlContent);
 const visualEditorThemeMediaQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
 
-const uploadDialogState = {
+sitebrushEditorModel.uploadDialog = {
   editor: null,
   files: [],
   index: 0,
   pickerInput: null,
   resizeMode: normalizedResizeMode(storedUploadPreference(uploadResizeModeStorageKey, 'original')),
   customSize: storedUploadPreference(uploadCustomSizeStorageKey, '1200'),
+  recipient: null,
   resolver: null
 };
 
@@ -206,19 +271,16 @@ function currentVisualEditorColorScheme() {
 
 function parseVisualEditorDocument(htmlContent) {
   const parsedDocument = new DOMParser().parseFromString(htmlContent || '', 'text/html');
-  const hasDocumentShell = /<(html|head|body)(\s|>)/i.test(htmlContent || '');
+  const documentEnvelope = visualEditorDocumentEnvelope(htmlContent || '');
+  const hasDocumentShell = documentEnvelope.hasDocumentShell;
   const bodyElement = parsedDocument.body;
-  const headElement = parsedDocument.head;
   return {
-    hasDocumentShell: hasDocumentShell,
-    doctype: visualEditorDoctype(parsedDocument),
+    originalHTML: htmlContent || '',
+    envelope: documentEnvelope,
     hasStoredThemeMarker: visualEditorHasStoredThemeMarker(parsedDocument.documentElement, bodyElement),
     htmlAttributeList: hasDocumentShell ? visualEditorElementAttributeList(parsedDocument.documentElement) : [],
     bodyAttributeList: hasDocumentShell ? visualEditorElementAttributeList(bodyElement) : [],
-    htmlAttributes: hasDocumentShell ? visualEditorElementAttributes(parsedDocument.documentElement) : '',
-    bodyAttributes: hasDocumentShell ? visualEditorElementAttributes(bodyElement) : '',
-    headHTML: hasDocumentShell && headElement ? headElement.innerHTML : '',
-    bodyHTML: hasDocumentShell && bodyElement ? bodyElement.innerHTML : htmlContent || ''
+    bodyHTML: documentEnvelope.bodyHTML
   };
 }
 
@@ -236,24 +298,6 @@ function visualEditorElementHasThemeMarker(element) {
   return element.classList.contains('dark') || element.classList.contains('light');
 }
 
-function visualEditorDoctype(parsedDocument) {
-  if (!parsedDocument || !parsedDocument.doctype) {
-    return '<!doctype html>';
-  }
-  const doctypeNode = parsedDocument.doctype;
-  let doctypeText = '<!DOCTYPE ' + doctypeNode.name;
-  if (doctypeNode.publicId) {
-    doctypeText += ' PUBLIC "' + doctypeNode.publicId + '"';
-  }
-  if (doctypeNode.systemId) {
-    if (!doctypeNode.publicId) {
-      doctypeText += ' SYSTEM';
-    }
-    doctypeText += ' "' + doctypeNode.systemId + '"';
-  }
-  return doctypeText + '>';
-}
-
 function visualEditorElementAttributeList(element) {
   if (!element || !element.attributes) {
     return [];
@@ -267,25 +311,6 @@ function visualEditorElementAttributeList(element) {
     });
   }
   return attributeList;
-}
-
-function visualEditorElementAttributes(element) {
-  if (!element || !element.attributes) {
-    return '';
-  }
-  const attributeTexts = [];
-  for (let attributeIndex = 0; attributeIndex < element.attributes.length; attributeIndex++) {
-    const currentAttribute = element.attributes[attributeIndex];
-    attributeTexts.push(currentAttribute.name + '="' + escapeHTMLAttribute(currentAttribute.value) + '"');
-  }
-  return attributeTexts.join(' ');
-}
-
-function visualEditorOpeningTag(tagName, attributeText) {
-  if (!attributeText) {
-    return '<' + tagName + '>';
-  }
-  return '<' + tagName + ' ' + attributeText + '>';
 }
 
 function visualEditorFrameBaseURL() {
@@ -327,7 +352,6 @@ function visualEditorInlineStyleText(htmlContent) {
 }
 
 function visualEditorFrameStyle() {
-  const inlineSiteStyle = visualEditorInlineStyleText(initialHtmlContent);
   const fallbackStyle = [
     'html{min-height:100%;color-scheme:light dark;}',
     ':where(body){min-height:100%;margin:0;box-sizing:border-box;background:Canvas;color:CanvasText;}',
@@ -338,10 +362,7 @@ function visualEditorFrameStyle() {
     '*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important;}',
     '#loader,#loader-wrapper,[id*="loader" i],[class*="loader-wrapper" i],[class*="page-loader" i],[class*="preloader" i],[class*="loading-overlay" i],[class*="loading-screen" i]{display:none!important;}'
   ].join('\n');
-  if (!inlineSiteStyle) {
-    return fallbackStyle + '\n' + editorSafetyStyle;
-  }
-  return fallbackStyle + '\n\n' + inlineSiteStyle + '\n\n' + editorSafetyStyle;
+  return fallbackStyle + '\n' + editorSafetyStyle;
 }
 
 function syncVisualEditorTheme(visualHtmlEditor) {
@@ -436,18 +457,18 @@ function syncVisualEditorFrameTheme(visualHtmlEditor, colorScheme) {
   if (!frameRootElement) {
     return;
   }
-  applyVisualEditorFrameAttributes(frameRootElement, visualEditorDocumentModel.htmlAttributeList, ['jodit']);
+  applyVisualEditorFrameAttributes(frameRootElement, sitebrushEditorModel.document.htmlAttributeList, ['jodit']);
   frameRootElement.style.colorScheme = colorScheme;
-  if (!visualEditorDocumentModel.hasStoredThemeMarker) {
+  if (!sitebrushEditorModel.document.hasStoredThemeMarker) {
     frameRootElement.classList.toggle('dark', colorScheme === 'dark');
     frameRootElement.classList.toggle('light', colorScheme !== 'dark');
     frameRootElement.setAttribute('data-bs-theme', colorScheme);
     frameRootElement.setAttribute('data-theme', colorScheme);
   }
   if (frameDocument.body) {
-    applyVisualEditorFrameAttributes(frameDocument.body, visualEditorDocumentModel.bodyAttributeList, ['jodit-wysiwyg']);
+    applyVisualEditorFrameAttributes(frameDocument.body, sitebrushEditorModel.document.bodyAttributeList, ['jodit-wysiwyg']);
     frameDocument.body.style.colorScheme = colorScheme;
-    if (!visualEditorDocumentModel.hasStoredThemeMarker) {
+    if (!sitebrushEditorModel.document.hasStoredThemeMarker) {
       frameDocument.body.classList.toggle('dark', colorScheme === 'dark');
       frameDocument.body.classList.toggle('light', colorScheme !== 'dark');
     }
@@ -480,6 +501,9 @@ function applyVisualEditorFrameAttributes(targetElement, attributeList, required
     if (currentAttribute.name === 'contenteditable') {
       continue;
     }
+    if (currentAttribute.name.toLowerCase().startsWith('on')) {
+      continue;
+    }
     if (currentAttribute.name === 'class') {
       continue;
     }
@@ -506,26 +530,38 @@ function applyVisualEditorFrameAttributes(targetElement, attributeList, required
 }
 
 function storedVisualEditorHTML(editorBodyHTML) {
-  if (!visualEditorDocumentModel.hasDocumentShell) {
-    return editorBodyHTML;
-  }
-  return [
-    visualEditorDocumentModel.doctype,
-    visualEditorOpeningTag('html', visualEditorDocumentModel.htmlAttributes),
-    '<head>',
-    visualEditorDocumentModel.headHTML,
-    '</head>',
-    visualEditorOpeningTag('body', visualEditorDocumentModel.bodyAttributes),
-    editorBodyHTML,
-    '</body></html>'
-  ].join('');
+  return currentVisualEditorDocumentHTML(editorBodyHTML);
 }
 
 function submitVisualEditorForm(visualHtmlEditor) {
+  if (sitebrushEditorModel.savingPage) {
+    return;
+  }
   const visualEditorFormElement = document.getElementById('visualEditorForm');
   const htmlContentFieldElement = document.getElementById('htmlContentField');
-  htmlContentFieldElement.value = storedVisualEditorHTML(visualHtmlEditor.value);
-  visualEditorFormElement.submit();
+  htmlContentFieldElement.value = sitebrushEditorModel.mode === 'code'
+    ? sitebrushEditorModel.sourceHTML
+    : storedVisualEditorHTML(visualHtmlEditor.value);
+  // Native form submission converts every newline to CRLF, including untouched
+  // metadata. URLSearchParams keeps the source bytes in the existing save route.
+  const saveRequestBody = new URLSearchParams(new FormData(visualEditorFormElement));
+  sitebrushEditorModel.savingPage = true;
+  sitebrushEditorModel.saveError = '';
+  renderVisualEditorSaveStatus(visualHtmlEditor);
+  fetch(visualEditorFormElement.action, { method: 'POST', body: saveRequestBody })
+    .then(function readPageSaveResponse(saveResponse) {
+      if (!saveResponse.ok) {
+        return saveResponse.text().then(function reportPageSaveError(errorText) {
+          throw new Error(editUIText.saveFailed + ' (' + saveResponse.status + '): ' + errorText);
+        });
+      }
+      window.location.assign(saveResponse.url);
+    })
+    .catch(function showPageSaveError(saveError) {
+      sitebrushEditorModel.savingPage = false;
+      sitebrushEditorModel.saveError = saveError.message || editUIText.saveFailed;
+      renderVisualEditorSaveStatus(visualHtmlEditor);
+    });
 }
 
 function uploadedFileURL(uploadPayload) {
@@ -596,9 +632,10 @@ function fileExtension(fileName, mimeType) {
 }
 
 function humanFileSize(fileSize) {
-  if (fileSize < 1024) { return fileSize + ' B'; }
-  if (fileSize < 1024 * 1024) { return (fileSize / 1024).toFixed(1) + ' KB'; }
-  return (fileSize / 1024 / 1024).toFixed(1) + ' MB';
+  const numberFormat = new Intl.NumberFormat(document.documentElement.lang, { maximumFractionDigits: 1 });
+  if (fileSize < 1024) { return numberFormat.format(fileSize) + ' ' + editUIText.byteUnit; }
+  if (fileSize < 1024 * 1024) { return numberFormat.format(fileSize / 1024) + ' ' + editUIText.kilobyteUnit; }
+  return numberFormat.format(fileSize / 1024 / 1024) + ' ' + editUIText.megabyteUnit;
 }
 
 function bytesToHex(byteBuffer) {
@@ -730,6 +767,7 @@ function uploadPreparedFile(preparedFile) {
   const uploadRequestBody = new FormData();
   uploadRequestBody.append('action', 'upload');
   uploadRequestBody.append('upload_files', preparedFile, preparedFile.name);
+  uploadRequestBody.append('account_csrf', document.querySelector('[name="account_csrf"]').value);
   return fetch(currentPagePath + '?files', {
     method: 'POST',
     body: uploadRequestBody,
@@ -745,9 +783,10 @@ function uploadPreparedFile(preparedFile) {
 function closeUploadDialog() {
   const overlayElement = document.getElementById('uploadDialogOverlay');
   overlayElement.classList.remove('is-open');
-  if (uploadDialogState.resolver) {
-    uploadDialogState.resolver();
-    uploadDialogState.resolver = null;
+  sitebrushEditorModel.uploadDialog.recipient = null;
+  if (sitebrushEditorModel.uploadDialog.resolver) {
+    sitebrushEditorModel.uploadDialog.resolver();
+    sitebrushEditorModel.uploadDialog.resolver = null;
   }
 }
 
@@ -777,14 +816,14 @@ function syncUploadResizeControls() {
 function rememberUploadResizeControls() {
   const resizeModeElement = document.getElementById('uploadDialogResizeMode');
   const customSizeElement = document.getElementById('uploadDialogCustomSize');
-  uploadDialogState.resizeMode = normalizedResizeMode(resizeModeElement.value || 'original');
-  uploadDialogState.customSize = customSizeElement.value || '1200';
-  storeUploadPreference(uploadResizeModeStorageKey, uploadDialogState.resizeMode);
-  storeUploadPreference(uploadCustomSizeStorageKey, uploadDialogState.customSize);
+  sitebrushEditorModel.uploadDialog.resizeMode = normalizedResizeMode(resizeModeElement.value || 'original');
+  sitebrushEditorModel.uploadDialog.customSize = customSizeElement.value || '1200';
+  storeUploadPreference(uploadResizeModeStorageKey, sitebrushEditorModel.uploadDialog.resizeMode);
+  storeUploadPreference(uploadCustomSizeStorageKey, sitebrushEditorModel.uploadDialog.customSize);
 }
 
 function showUploadDialogForCurrentFile() {
-  const selectedFile = uploadDialogState.files[uploadDialogState.index];
+  const selectedFile = sitebrushEditorModel.uploadDialog.files[sitebrushEditorModel.uploadDialog.index];
   if (!selectedFile) {
     closeUploadDialog();
     return;
@@ -800,32 +839,39 @@ function showUploadDialogForCurrentFile() {
   const uploadButtonElement = document.getElementById('uploadDialogUpload');
   errorElement.textContent = '';
   uploadButtonElement.disabled = true;
-  queueElement.textContent = editUIText.queuePrefix + ' ' + (uploadDialogState.index + 1) + ' ' + editUIText.queueOf + ' ' + uploadDialogState.files.length + ': ' + selectedFile.name;
+  queueElement.textContent = editUIText.queuePrefix + ' ' + (sitebrushEditorModel.uploadDialog.index + 1) + ' ' + editUIText.queueOf + ' ' + sitebrushEditorModel.uploadDialog.files.length + ': ' + selectedFile.name;
   metaElement.textContent = humanFileSize(selectedFile.size) + (selectedFile.type ? ' - ' + selectedFile.type : '');
-  imageControlsElement.classList.toggle('SiteBrushUploadHidden', !isResizableImage(selectedFile));
-  resizeModeElement.value = uploadDialogState.resizeMode;
-  document.getElementById('uploadDialogCustomSize').value = uploadDialogState.customSize;
+  imageControlsElement.classList.toggle('SiteBrushUploadHidden', !!sitebrushEditorModel.uploadDialog.recipient || !isResizableImage(selectedFile));
+  resizeModeElement.value = sitebrushEditorModel.uploadDialog.resizeMode;
+  document.getElementById('uploadDialogCustomSize').value = sitebrushEditorModel.uploadDialog.customSize;
   syncUploadResizeControls();
   openImagePreview(selectedFile, previewElement);
   overlayElement.classList.add('is-open');
+  const previewResolver = sitebrushEditorModel.uploadDialog.resolver;
   hashFileName(selectedFile).then(function setDefaultName(defaultName) {
+    if (sitebrushEditorModel.uploadDialog.resolver !== previewResolver || sitebrushEditorModel.uploadDialog.files[sitebrushEditorModel.uploadDialog.index] !== selectedFile) {
+      return;
+    }
     nameElement.value = defaultName;
     uploadButtonElement.disabled = false;
     nameElement.focus();
     nameElement.select();
   }).catch(function fallbackName() {
+    if (sitebrushEditorModel.uploadDialog.resolver !== previewResolver || sitebrushEditorModel.uploadDialog.files[sitebrushEditorModel.uploadDialog.index] !== selectedFile) {
+      return;
+    }
     nameElement.value = selectedFile.name;
     uploadButtonElement.disabled = false;
   });
 }
 
 function advanceUploadDialog() {
-  uploadDialogState.index += 1;
+  sitebrushEditorModel.uploadDialog.index += 1;
   showUploadDialogForCurrentFile();
 }
 
 function uploadCurrentDialogFile() {
-  const selectedFile = uploadDialogState.files[uploadDialogState.index];
+  const selectedFile = sitebrushEditorModel.uploadDialog.files[sitebrushEditorModel.uploadDialog.index];
   const nameElement = document.getElementById('uploadDialogName');
   const errorElement = document.getElementById('uploadDialogError');
   const uploadButtonElement = document.getElementById('uploadDialogUpload');
@@ -841,52 +887,77 @@ function uploadCurrentDialogFile() {
   uploadButtonElement.disabled = true;
   errorElement.textContent = editUIText.uploading;
   rememberUploadResizeControls();
-  resizeImageFile(selectedFile, outputName, selectedResizeMaxSide())
+  const uploadRecipient = sitebrushEditorModel.uploadDialog.recipient;
+  const uploadResolver = sitebrushEditorModel.uploadDialog.resolver;
+  resizeImageFile(selectedFile, outputName, uploadRecipient ? 0 : selectedResizeMaxSide())
     .then(function uploadAndInsertPreparedFile(preparedFileResult) {
+      if (sitebrushEditorModel.uploadDialog.resolver !== uploadResolver) {
+        return;
+      }
       return uploadPreparedFile(preparedFileResult.file).then(function insertUploadedFile(uploadPayload) {
-        insertUploadedFileIntoEditor(uploadDialogState.editor, uploadedFileURL(uploadPayload), preparedFileResult.file.name, preparedFileResult.file.type, preparedFileResult.width, preparedFileResult.height);
+        if (sitebrushEditorModel.uploadDialog.resolver !== uploadResolver) {
+          return;
+        }
+        const storedFileURL = uploadedFileURL(uploadPayload);
+        if (!storedFileURL) {
+          throw new Error(editUIText.fileUploadFailed);
+        }
+        if (uploadRecipient) {
+          uploadRecipient(storedFileURL, preparedFileResult.file.size);
+        } else {
+          insertUploadedFileIntoEditor(sitebrushEditorModel.uploadDialog.editor, storedFileURL, preparedFileResult.file.name, preparedFileResult.file.type, preparedFileResult.width, preparedFileResult.height);
+        }
       });
     })
     .then(function advanceAfterUpload() {
-      advanceUploadDialog();
+      if (sitebrushEditorModel.uploadDialog.resolver === uploadResolver) {
+        advanceUploadDialog();
+      }
     })
     .catch(function showUploadError(uploadError) {
+      if (sitebrushEditorModel.uploadDialog.resolver !== uploadResolver) {
+        return;
+      }
       errorElement.textContent = uploadError.message || editUIText.fileUploadFailed;
       uploadButtonElement.disabled = false;
     });
 }
 
-function openUploadDialog(visualHtmlEditor, selectedFiles) {
-  uploadDialogState.editor = visualHtmlEditor;
-  uploadDialogState.files = Array.from(selectedFiles || []);
-  uploadDialogState.index = 0;
+function openUploadDialog(visualHtmlEditor, selectedFiles, uploadRecipient) {
+  sitebrushEditorModel.uploadDialog.editor = visualHtmlEditor;
+  sitebrushEditorModel.uploadDialog.files = Array.from(selectedFiles || []);
+  sitebrushEditorModel.uploadDialog.index = 0;
+  sitebrushEditorModel.uploadDialog.recipient = uploadRecipient || null;
   return new Promise(function waitForDialog(resolve) {
-    uploadDialogState.resolver = resolve;
+    sitebrushEditorModel.uploadDialog.resolver = resolve;
     showUploadDialogForCurrentFile();
   });
 }
 
-function pickFilesWithBrowser(visualHtmlEditor) {
-  if (uploadDialogState.pickerInput) {
-    uploadDialogState.pickerInput.remove();
-    uploadDialogState.pickerInput = null;
+function pickFilesWithBrowser(visualHtmlEditor, uploadRecipient) {
+  if (sitebrushEditorModel.uploadDialog.pickerInput) {
+    sitebrushEditorModel.uploadDialog.pickerInput.remove();
+    sitebrushEditorModel.uploadDialog.pickerInput = null;
   }
   const fileInputElement = document.createElement('input');
   fileInputElement.type = 'file';
-  fileInputElement.multiple = true;
+  fileInputElement.multiple = !uploadRecipient;
+  if (uploadRecipient) {
+    fileInputElement.accept = 'image/*';
+  }
   fileInputElement.style.position = 'fixed';
   fileInputElement.style.left = '-10000px';
   fileInputElement.style.top = '0';
   fileInputElement.style.opacity = '0';
-  uploadDialogState.pickerInput = fileInputElement;
+  sitebrushEditorModel.uploadDialog.pickerInput = fileInputElement;
   fileInputElement.addEventListener('change', function onFilesSelected() {
     const selectedFiles = Array.from(fileInputElement.files || []);
     fileInputElement.remove();
-    uploadDialogState.pickerInput = null;
+    sitebrushEditorModel.uploadDialog.pickerInput = null;
     if (selectedFiles.length === 0) {
       return;
     }
-    openUploadDialog(visualHtmlEditor, selectedFiles);
+    openUploadDialog(visualHtmlEditor, selectedFiles, uploadRecipient);
   });
   document.body.appendChild(fileInputElement);
   fileInputElement.click();
@@ -902,9 +973,9 @@ function nativePickedFilesToFiles(nativePayload) {
   });
 }
 
-function chooseAndUploadFiles(visualHtmlEditor) {
+function chooseAndUploadFiles(visualHtmlEditor, uploadRecipient) {
   if (!desktopNativeFilePickerEnabled) {
-    pickFilesWithBrowser(visualHtmlEditor);
+    pickFilesWithBrowser(visualHtmlEditor, uploadRecipient);
     return;
   }
   fetch(currentPagePath + '?native_pick_files', { headers: { 'Accept': 'application/json' } })
@@ -917,11 +988,11 @@ function chooseAndUploadFiles(visualHtmlEditor) {
     .then(function useNativePickedFiles(nativePayload) {
       const selectedFiles = nativePickedFilesToFiles(nativePayload);
       if (selectedFiles.length > 0) {
-        openUploadDialog(visualHtmlEditor, selectedFiles);
+        openUploadDialog(visualHtmlEditor, uploadRecipient ? selectedFiles.filter(function isPickedImage(selectedFile) { return selectedFile.type.startsWith('image/'); }).slice(0, 1) : selectedFiles, uploadRecipient);
       }
     })
     .catch(function fallbackToBrowserPicker() {
-      pickFilesWithBrowser(visualHtmlEditor);
+      pickFilesWithBrowser(visualHtmlEditor, uploadRecipient);
     });
 }
 
@@ -938,8 +1009,12 @@ document.getElementById('uploadDialogCustomSize').addEventListener('input', func
 syncUploadResizeControls();
 
 function createVisualHtmlEditor() {
+  // Jodit reads the textarea before applying options. Only the body may enter
+  // its paragraph normalizers; the source envelope belongs to our document model.
+  const previewBodyHTML = createVisualEditorPreviewBody(sitebrushEditorModel.document.bodyHTML);
+  document.getElementById('visualEditorRoot').value = previewBodyHTML;
   return Jodit.make('#visualEditorRoot', {
-    value: visualEditorDocumentModel.bodyHTML,
+    value: previewBodyHTML,
     height: '100%',
     width: '100%',
     minWidth: 0,
@@ -947,18 +1022,26 @@ function createVisualHtmlEditor() {
     minHeight: 0,
     maxHeight: 'none',
     theme: currentVisualEditorThemeName(),
+    language: visualEditorLanguageCode(document.documentElement.lang),
+    direction: document.documentElement.dir,
+    i18n: {{.VisualEditorI18N}},
     iframe: true,
-    iframeSandbox: 'allow-same-origin',
+    iframeSandbox: 'allow-same-origin allow-scripts',
     iframeBaseUrl: visualEditorFrameBaseURL(),
     iframeCSSLinks: visualEditorStylesheetLinks(initialHtmlContent),
     iframeStyle: visualEditorFrameStyle(),
     sourceEditor: 'area',
+    defaultMode: Jodit.MODE_WYSIWYG,
+    saveModeInStorage: false,
+    useSplitMode: false,
+    disablePlugins: ['source', 'imageProperties'],
+    wrapNodes: { exclude: new Set(['hr', 'style', 'br', 'meta', 'link', 'title', 'script', 'base', 'head', 'html', 'body']), emptyBlockAfterInit: false },
     toolbarAdaptive: false,
     showCharsCounter: false,
     showWordsCounter: false,
     showXPathInStatusbar: false,
     buttons: [
-      'source', '|', 'bold', 'italic', 'underline', 'strikethrough', '|',
+      { name: 'source', tooltip: editUIText.htmlCode, exec: enterSitebrushCodeMode }, '|', 'bold', 'italic', 'underline', 'strikethrough', '|',
       'ul', 'ol', '|', 'outdent', 'indent', '|', 'left', 'center', 'right', '|',
       'fontsize', 'brush', 'paragraph', '|', 'link', {
         name: 'insertServerFile',
@@ -971,14 +1054,14 @@ function createVisualHtmlEditor() {
       'undo', 'redo', '|', {
         name: 'savePageHtml',
         iconURL: '/p/static/save-page.png',
-        tooltip: 'Save page',
+        tooltip: editUIText.save,
         exec: function executeSave(editorInstance) {
           submitVisualEditorForm(editorInstance);
         }
       }, '|', {
         name: 'cancelEdit',
         iconURL: '/p/static/exit-editor.png',
-        tooltip: 'Cancel edit',
+        tooltip: editUIText.cancel,
         exec: function executeCancel() {
           window.location.href = currentPagePath;
         }
@@ -998,6 +1081,7 @@ function connectSaveHotkey(visualHtmlEditor) {
 }
 
 const visualHtmlEditor = createVisualHtmlEditor();
+initializeSitebrushEditorExtensions(visualHtmlEditor);
 visualHtmlEditor.sitebrushThemeName = currentVisualEditorThemeName();
 syncVisualEditorLayout(visualHtmlEditor);
 protectVisualEditorFrameNavigation(visualHtmlEditor);

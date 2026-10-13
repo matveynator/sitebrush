@@ -132,6 +132,20 @@ It follows the pages and referenced resources and imports the files the site nee
 
 ### 2. Edit
 
+Double-click or double-tap an image in the visual editor to change its source,
+frame dimensions, fit and crop position. Replacement uploads use the site's
+normal file storage and keep the original file. Fill / Crop is the default;
+Fit shows the whole image, and Stretch requires an explicit choice. Cancel or
+Close discards the dialog draft; Save saves the whole page. Existing CSS sizing
+is preserved unless you explicitly resize the frame, so automatic height can
+change when replacing an image.
+
+HTML mode provides only Cancel, Save and Back to Visual, including on narrow
+phones. Save writes the HTML directly; Back applies it to the visual draft
+without saving, and Cancel restores the draft from before entering HTML mode.
+The source editor starts at the beginning and preserves untouched document
+metadata during visual edits.
+
 Open the website normally.
 
 * **Desktop:** right-click an element
