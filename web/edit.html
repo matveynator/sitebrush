@@ -11,6 +11,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{{index .T "edit_title_prefix"}} {{.Path}}</title>
   <link rel="stylesheet" href="/p/static/jodit.min.css" />
+  <link rel="stylesheet" href="/p/static/codemirror/codemirror.min.css" />
   <link rel="stylesheet" href="/p/static/admin_theme.css" />
   <link rel="stylesheet" href="/p/static/visual_editor.css?v={{.VisualEditorAssetVersion}}" />
   <style>
@@ -52,10 +53,9 @@
     .jodit-container:not(.jodit_inline) .jodit-toolbar__box { flex: 0 0 auto; width: 100% !important; max-width: none !important; }
     .jodit-container:not(.jodit_inline) .jodit-workplace { flex: 1 1 auto !important; width: 100% !important; max-width: none !important; min-width: 0 !important; min-height: 0 !important; max-height: none !important; overflow: hidden !important; }
     .jodit-container:not(.jodit_inline) .jodit-wysiwyg_iframe { width: 100% !important; height: 100% !important; border: 0 !important; background: var(--page-bg); }
-    /* Jodit autosizes its source textarea on pointer events; a fixed viewport
-       prevents that resize from collapsing the scroll range during selection. */
+    /* Source editors own their scroll range inside the fixed workspace. */
     .jodit-container:not(.jodit_inline) .jodit-source { height: 100% !important; min-height: 0 !important; max-height: 100% !important; min-width: 0; overflow: hidden !important; }
-    .jodit-container:not(.jodit_inline) .jodit-source__mirror { display: block; width: 100% !important; height: 100% !important; min-height: 0 !important; max-height: 100% !important; box-sizing: border-box; overflow: auto !important; resize: none !important; }
+    .jodit-container:not(.jodit_inline) .jodit-source__mirror { width: 100% !important; height: 100% !important; min-height: 0 !important; max-height: 100% !important; box-sizing: border-box; overflow: auto !important; resize: none !important; }
     .jodit-status-bar { display: none; }
     .SiteBrushUploadOverlay { position: fixed; inset: 0; z-index: 2147483647; display: none; align-items: center; justify-content: center; padding: 20px; background: rgba(7, 15, 28, .55); }
     .SiteBrushUploadOverlay.is-open { display: flex; }
@@ -191,6 +191,11 @@
 </div>
 
 <script src="/p/static/jodit.min.js"></script>
+<script src="/p/static/codemirror/codemirror.min.js"></script>
+<script src="/p/static/codemirror/xml.min.js"></script>
+<script src="/p/static/codemirror/css.min.js"></script>
+<script src="/p/static/codemirror/javascript.min.js"></script>
+<script src="/p/static/codemirror/htmlmixed.min.js"></script>
 <script src="/p/static/visual_editor_document.js?v={{.VisualEditorAssetVersion}}"></script>
 <script src="/p/static/visual_editor_extensions.js?v={{.VisualEditorAssetVersion}}"></script>
 <script>
@@ -426,6 +431,9 @@ function resizeVisualEditorWorkspace(visualHtmlEditor) {
   }
   if (visualHtmlEditor.editor) {
     setVisualEditorStyle(visualHtmlEditor.editor, 'minHeight', workplaceHeight + 'px');
+  }
+  if (sitebrushEditorModel.mode === 'code' && sitebrushEditorModel.sourceCodeMirror) {
+    sitebrushEditorModel.sourceCodeMirror.refresh();
   }
 }
 

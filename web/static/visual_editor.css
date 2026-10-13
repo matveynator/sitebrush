@@ -137,3 +137,32 @@
   max-height: 25vh;
   overflow: auto;
 }
+
+/* Match the text editor while keeping scrolling inside Jodit's workspace. */
+.jodit-source .CodeMirror {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  box-sizing: border-box;
+  background: var(--field-bg);
+  color: var(--field-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 14px;
+  line-height: 1.45;
+}
+.jodit-source .CodeMirror-gutters { background: var(--surface-soft); border-color: var(--field-border); }
+.jodit-source .CodeMirror-linenumber { color: var(--hint); }
+.jodit-source .CodeMirror-cursor { border-left-color: var(--field-text); }
+.jodit-source .CodeMirror-selected { background: rgba(26,101,216,.22); }
+.jodit-source .cm-s-default .cm-tag { color: #12702a; }
+.jodit-source .cm-s-default .cm-attribute { color: #1a65d8; }
+.jodit-source .cm-s-default .cm-string { color: #a33b00; }
+.jodit-source .cm-s-default .cm-keyword { color: #7c3aed; }
+.jodit-source .cm-s-default .cm-comment { color: #777; }
+@media (prefers-color-scheme: dark) {
+  .jodit-source .cm-s-default .cm-tag { color: #7ee787; }
+  .jodit-source .cm-s-default .cm-attribute { color: #9ec2ff; }
+  .jodit-source .cm-s-default .cm-string { color: #ffa657; }
+  .jodit-source .cm-s-default .cm-keyword { color: #d2a8ff; }
+  .jodit-source .cm-s-default .cm-comment { color: #8b949e; }
+}
