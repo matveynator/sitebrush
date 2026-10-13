@@ -15721,12 +15721,29 @@ func (a *App) savePage(w http.ResponseWriter, r *http.Request) {
 		title = pagePath
 	}
 	html := r.FormValue("html")
+	var previousStoredHTML string
+	_ = a.db.QueryRowContext(saveCtx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, previousPath).Scan(&previousStoredHTML)
+	if pageContentKind(pagePath, html) == "html" {
+		resolvedBlocks, resolveErr := sitebrushtemplate.ResolveTemplateChanges(previousStoredHTML, html)
+		if resolveErr != nil {
+			sitebrushTemplateProgress.Publish(progressToken, templatePropagationProgressEvent{Stage: "error", Domain: domain, Path: pagePath, Error: resolveErr.Error(), Done: true})
+			sitebrushTemplateProgress.Finish(progressToken)
+			http.Error(w, resolveErr.Error(), http.StatusConflict)
+			return
+		}
+		if normalizedHTML, changed := sitebrushtemplate.ReplaceBlocks(html, resolvedBlocks); changed {
+			html = normalizedHTML
+		}
+	}
 	resourceSpider, localizedHTML := localizeSavedPageExternalResources(r.Context(), domain, pagePath, html, r, a.grabTracker)
 	html = localizedHTML
 	newHTMLBytes := int64(len([]byte(html)))
-	var previousStoredHTML string
-	_ = a.db.QueryRowContext(saveCtx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousStoredHTML)
-	pageDelta := newHTMLBytes - int64(len([]byte(previousStoredHTML)))
+	previousTargetHTML := previousStoredHTML
+	if previousPath != pagePath {
+		previousTargetHTML = ""
+		_ = a.db.QueryRowContext(saveCtx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousTargetHTML)
+	}
+	pageDelta := newHTMLBytes - int64(len([]byte(previousTargetHTML)))
 	publishedPageDelta := int64(0)
 	publishedStaticDelta := int64(0)
 	fileDelta := a.estimateImportedFileDelta(domain, resourceSpider)

@@ -25,8 +25,8 @@ type DetectionPage struct {
 }
 
 type detectionDocument struct {
-	page DetectionPage
-	root *html.Node
+	page  DetectionPage
+	spans map[*html.Node]*sourceElement
 }
 
 type subtreeFingerprint struct {
@@ -35,6 +35,9 @@ type subtreeFingerprint struct {
 	canonicalBytes           int
 	containsExistingTemplate bool
 	empty                    bool
+	meaningful               bool
+	innerMeaningful          bool
+	invalid                  bool
 }
 
 type templateCandidate struct {
@@ -71,13 +74,13 @@ func DetectAutomaticTemplatesWithProgress(pageList []DetectionPage, reportProgre
 	usedTemplateIdentifiers := make(map[string]struct{})
 
 	for pageIndex, page := range pageList {
-		root, err := html.Parse(strings.NewReader(page.HTML))
+		root, spans, err := parseDetectionSource(page.HTML)
 		if err != nil {
 			return nil, fmt.Errorf("parse page %s for SiteBrush-Template detection: %w", page.Key, err)
 		}
-		documentList = append(documentList, detectionDocument{page: page, root: root})
+		documentList = append(documentList, detectionDocument{page: page, spans: spans})
 		collectExistingTemplateMarkup(root, existingTemplateNodes, usedTemplateIdentifiers)
-		fingerprintDOMSubtrees(root, page.Key, candidateByHash, existingTemplateNodes, explicitDocumentWrapperTags(page.HTML))
+		fingerprintDOMSubtrees(root, page.Key, candidateByHash, existingTemplateNodes, spans)
 		reportDetectionProgress(reportProgress, detectionPhasePercent(0, 70, pageIndex+1, len(pageList)))
 	}
 
@@ -123,16 +126,22 @@ func DetectAutomaticTemplatesWithProgress(pageList []DetectionPage, reportProgre
 
 	result := make([]DetectionPage, 0, len(documentList))
 	for documentIndex, document := range documentList {
-		if !documentContainsChangedNode(document.root, changedNodes) {
-			result = append(result, document.page)
-			reportDetectionProgress(reportProgress, detectionPhasePercent(90, 100, documentIndex+1, len(documentList)))
-			continue
+		edits := make([]classEdit, 0)
+		for node, span := range document.spans {
+			if _, changed := changedNodes[node]; changed {
+				edits = append(edits, classEdit{startTagStart: span.start, startTagEnd: span.startEnd, rewrite: classRewrite{classNames: strings.Fields(nodeClassValue(node))}})
+			}
 		}
-		var renderedHTML bytes.Buffer
-		if err := html.Render(&renderedHTML, document.root); err != nil {
-			return nil, fmt.Errorf("render page %s after SiteBrush-Template detection: %w", document.page.Key, err)
+		sort.Slice(edits, func(left, right int) bool { return edits[left].startTagStart < edits[right].startTagStart })
+		var updatedHTML strings.Builder
+		previousEnd := 0
+		for _, edit := range edits {
+			updatedHTML.WriteString(document.page.HTML[previousEnd:edit.startTagStart])
+			updatedHTML.WriteString(markDetectionStartTag(document.page.HTML[edit.startTagStart:edit.startTagEnd], edit.rewrite.classNames[:2]))
+			previousEnd = edit.startTagEnd
 		}
-		result = append(result, DetectionPage{Key: document.page.Key, HTML: renderedHTML.String()})
+		updatedHTML.WriteString(document.page.HTML[previousEnd:])
+		result = append(result, DetectionPage{Key: document.page.Key, HTML: updatedHTML.String()})
 		reportDetectionProgress(reportProgress, detectionPhasePercent(90, 100, documentIndex+1, len(documentList)))
 	}
 	reportDetectionProgress(reportProgress, 100)
@@ -152,15 +161,19 @@ func reportDetectionProgress(reportProgress func(int), completedPercent int) {
 	}
 }
 
-func fingerprintDOMSubtrees(root *html.Node, pageKey string, candidateByHash map[[sha256.Size]byte][]*templateCandidate, existingTemplateNodes map[*html.Node]struct{}, explicitWrapperTags map[string]struct{}) subtreeFingerprint {
+func fingerprintDOMSubtrees(root *html.Node, pageKey string, candidateByHash map[[sha256.Size]byte][]*templateCandidate, existingTemplateNodes map[*html.Node]struct{}, spans map[*html.Node]*sourceElement) subtreeFingerprint {
 	if root == nil {
 		return subtreeFingerprint{}
 	}
 	childFingerprints := make([]subtreeFingerprint, 0)
 	for child := root.FirstChild; child != nil; child = child.NextSibling {
-		childFingerprints = append(childFingerprints, fingerprintDOMSubtrees(child, pageKey, candidateByHash, existingTemplateNodes, explicitWrapperTags))
+		childFingerprints = append(childFingerprints, fingerprintDOMSubtrees(child, pageKey, candidateByHash, existingTemplateNodes, spans))
 	}
 	fingerprint := canonicalNodeFingerprint(root, childFingerprints)
+	if root.Type == html.ElementNode {
+		span := spans[root]
+		fingerprint.invalid = fingerprint.invalid || span == nil || !span.valid
+	}
 	if _, existingTemplate := existingTemplateNodes[root]; existingTemplate {
 		fingerprint.containsExistingTemplate = true
 	}
@@ -170,7 +183,7 @@ func fingerprintDOMSubtrees(root *html.Node, pageKey string, candidateByHash map
 			break
 		}
 	}
-	if automaticTemplateCandidateAllowed(root, fingerprint, explicitWrapperTags) {
+	if automaticTemplateCandidateAllowed(root, fingerprint, spans) {
 		candidate := &templateCandidate{pageKey: pageKey, node: root, fingerprint: fingerprint}
 		candidateByHash[fingerprint.hash] = append(candidateByHash[fingerprint.hash], candidate)
 	}
@@ -232,10 +245,22 @@ func canonicalNodeFingerprint(node *html.Node, childFingerprints []subtreeFinger
 	default:
 		return subtreeFingerprint{empty: true}
 	}
+	meaningful := detectionNodeHasContent(node)
+	innerMeaningful := false
+	rawCode := strings.EqualFold(node.Data, "script") || strings.EqualFold(node.Data, "style")
+	if rawCode {
+		innerMeaningful = meaningful
+	}
+	invalid := false
 	for _, childFingerprint := range childFingerprints {
 		elementCount += childFingerprint.elementCount
+		invalid = invalid || childFingerprint.invalid
+		// Raw code must not inherit comment-only text as meaningful content.
+		if !rawCode {
+			innerMeaningful = innerMeaningful || childFingerprint.meaningful
+		}
 	}
-	return subtreeFingerprint{hash: sha256.Sum256(hashSource.Bytes()), elementCount: elementCount, canonicalBytes: canonicalBytes}
+	return subtreeFingerprint{hash: sha256.Sum256(hashSource.Bytes()), elementCount: elementCount, canonicalBytes: canonicalBytes, meaningful: meaningful || innerMeaningful, innerMeaningful: innerMeaningful, invalid: invalid}
 }
 
 func canonicalDetectionNode(node *html.Node) string {
@@ -318,45 +343,24 @@ func elementText(node *html.Node) string {
 	return text.String()
 }
 
-func automaticTemplateCandidateAllowed(node *html.Node, fingerprint subtreeFingerprint, explicitWrapperTags map[string]struct{}) bool {
-	if node == nil || node.Type != html.ElementNode || fingerprint.containsExistingTemplate {
+func automaticTemplateCandidateAllowed(node *html.Node, fingerprint subtreeFingerprint, spans map[*html.Node]*sourceElement) bool {
+	if node == nil || node.Type != html.ElementNode || fingerprint.containsExistingTemplate || fingerprint.invalid || !fingerprint.innerMeaningful {
 		return false
 	}
-	tagName := strings.ToLower(node.Data)
-	if documentWrapperTag(tagName) {
-		if _, explicit := explicitWrapperTags[tagName]; !explicit {
-			return false
-		}
-	}
-	return fingerprint.elementCount >= AutomaticTemplateMinimumElementCount && fingerprint.canonicalBytes >= AutomaticTemplateMinimumCanonicalBytes
-}
-
-func explicitDocumentWrapperTags(sourceHTML string) map[string]struct{} {
-	explicitTags := make(map[string]struct{}, 3)
-	tokenizer := html.NewTokenizer(strings.NewReader(sourceHTML))
-	for {
-		tokenType := tokenizer.Next()
-		if tokenType == html.ErrorToken {
-			return explicitTags
-		}
-		if tokenType != html.StartTagToken && tokenType != html.SelfClosingTagToken {
-			continue
-		}
-		tagName, _ := tokenizer.TagName()
-		normalizedTagName := strings.ToLower(string(tagName))
-		if documentWrapperTag(normalizedTagName) {
-			explicitTags[normalizedTagName] = struct{}{}
-		}
-	}
-}
-
-func documentWrapperTag(tagName string) bool {
-	return tagName == "html" || tagName == "head" || tagName == "body"
+	span := spans[node]
+	return span != nil && span.paired && span.valid && !isHTMLVoidElement(node.Data) && fingerprint.elementCount >= AutomaticTemplateMinimumElementCount && fingerprint.canonicalBytes >= AutomaticTemplateMinimumCanonicalBytes
 }
 
 func matchingTemplateCandidateGroups(candidateByHash map[[sha256.Size]byte][]*templateCandidate) []*templateCandidateGroup {
 	groupList := make([]*templateCandidateGroup, 0)
 	for hashValue, hashCandidates := range candidateByHash {
+		distinctPageKeys := make(map[string]struct{})
+		for _, candidate := range hashCandidates {
+			distinctPageKeys[candidate.pageKey] = struct{}{}
+		}
+		if len(distinctPageKeys) < 2 {
+			continue
+		}
 		candidateByCanonical := make(map[string][]*templateCandidate)
 		for _, candidate := range hashCandidates {
 			canonical := canonicalDetectionNode(candidate.node)
@@ -364,14 +368,10 @@ func matchingTemplateCandidateGroups(candidateByHash map[[sha256.Size]byte][]*te
 		}
 		for canonical, canonicalCandidates := range candidateByCanonical {
 			occurrencesByPage := make(map[string]int)
-			ambiguousWithinPage := false
 			for _, candidate := range canonicalCandidates {
 				occurrencesByPage[candidate.pageKey]++
-				if occurrencesByPage[candidate.pageKey] > 1 {
-					ambiguousWithinPage = true
-				}
 			}
-			if ambiguousWithinPage || len(occurrencesByPage) < 2 {
+			if len(occurrencesByPage) < 2 {
 				continue
 			}
 			groupList = append(groupList, &templateCandidateGroup{canonical: canonical, hash: hashValue, elementCount: canonicalCandidates[0].fingerprint.elementCount, occurrences: canonicalCandidates})
@@ -500,15 +500,6 @@ func addAutomaticTemplateClasses(node *html.Node, identifierClass string) {
 		return
 	}
 	node.Attr = append(node.Attr, html.Attribute{Key: "class", Val: "SiteBrush-Template " + identifierClass})
-}
-
-func documentContainsChangedNode(root *html.Node, changedNodes map[*html.Node]struct{}) bool {
-	for node := root; node != nil; node = nextDOMNode(root, node) {
-		if _, changed := changedNodes[node]; changed {
-			return true
-		}
-	}
-	return false
 }
 
 func validCSSClassName(className string) bool {

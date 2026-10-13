@@ -20,14 +20,14 @@ func TestTemplateSecurityBoundaryClassAndWrapperNormalization(t *testing.T) {
 		}
 	}
 
-	tags := explicitDocumentWrapperTags("<!doctype html><HTML><HEAD></HEAD><BODY><div></div></BODY></HTML>")
-	for _, tag := range []string{"html", "head", "body"} {
-		if _, ok := tags[tag]; !ok {
-			t.Fatalf("explicit wrapper %q not detected", tag)
-		}
+	root, spans, err := parseDetectionSource("<!doctype html><HTML><HEAD></HEAD><BODY><div></div></BODY></HTML>")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if documentWrapperTag("div") {
-		t.Fatal("ordinary element treated as document wrapper")
+	for node := root.FirstChild; node != nil; node = nextDOMNode(root, node) {
+		if node.Type == html.ElementNode && (!spans[node].valid || !spans[node].paired) {
+			t.Fatalf("explicit source boundaries not recognized: %s", node.Data)
+		}
 	}
 }
 
@@ -89,7 +89,7 @@ func TestAutomaticTemplatePurposeAndIdentifierCollisionBranches(t *testing.T) {
 
 	hash := sha256.Sum256([]byte("same-template"))
 	group := &templateCandidateGroup{
-		hash: hash,
+		hash:        hash,
 		occurrences: []*templateCandidate{{node: &html.Node{Type: html.ElementNode, Data: "footer"}}},
 	}
 	first := automaticTemplateIdentifier(group, map[string]struct{}{})
@@ -115,13 +115,14 @@ func TestDetectionProgressAndCandidateBoundaryBranches(t *testing.T) {
 	}
 	reportDetectionProgress(nil, 10)
 
-	fp := subtreeFingerprint{elementCount: AutomaticTemplateMinimumElementCount, canonicalBytes: AutomaticTemplateMinimumCanonicalBytes}
+	fp := subtreeFingerprint{innerMeaningful: true, elementCount: 1}
 	node := &html.Node{Type: html.ElementNode, Data: "div"}
-	if !automaticTemplateCandidateAllowed(node, fp, nil) {
+	spans := map[*html.Node]*sourceElement{node: {valid: true, paired: true}}
+	if !automaticTemplateCandidateAllowed(node, fp, spans) {
 		t.Fatal("valid ordinary candidate rejected")
 	}
 	fp.containsExistingTemplate = true
-	if automaticTemplateCandidateAllowed(node, fp, nil) {
+	if automaticTemplateCandidateAllowed(node, fp, spans) {
 		t.Fatal("SECURITY: nested existing template was accepted as automatic candidate")
 	}
 }
@@ -129,9 +130,9 @@ func TestDetectionProgressAndCandidateBoundaryBranches(t *testing.T) {
 func TestTemplateRewriteAndMatchHelperBranches(t *testing.T) {
 	rewrite := classRewrite{classNames: []string{"shared", "theme"}}
 	tests := []struct {
-		input string
+		input  string
 		remove bool
-		want string
+		want   string
 	}{
 		{"<div>", false, "<div class=\"SiteBrush-Template shared theme\">"},
 		{"<img />", false, "<img  class=\"SiteBrush-Template shared theme\"/>"},
