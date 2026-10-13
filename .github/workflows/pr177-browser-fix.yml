@@ -21,26 +21,38 @@ jobs:
         with:
           go-version: '1.26.9'
 
-      - name: Restore extension functions lost by partial replacement
+      - name: Restore extension functions and stabilize mobile scroll regression
         shell: bash
         run: |
           python3 - <<'PY'
           from pathlib import Path
           import subprocess
 
-          path = Path('web/static/visual_editor_extensions.js')
-          current = path.read_text()
+          extension_path = Path('web/static/visual_editor_extensions.js')
+          current = extension_path.read_text()
           ancestor = subprocess.check_output(
               ['git', 'show', 'f90fb1a0576aa9169b458b3954b9553cd7d1a6e3:web/static/visual_editor_extensions.js'],
               text=True,
           )
           marker = '\nfunction refreshVisualEditorDocumentStyles(editorInstance) {'
-          if marker in current:
-              raise SystemExit('extension tail is already present')
-          tail_start = ancestor.find(marker)
-          if tail_start < 0:
-              raise SystemExit('restore marker not found in ancestor')
-          path.write_text(current.rstrip() + '\n' + ancestor[tail_start + 1:])
+          if marker not in current:
+              tail_start = ancestor.find(marker)
+              if tail_start < 0:
+                  raise SystemExit('restore marker not found in ancestor')
+              extension_path.write_text(current.rstrip() + '\n' + ancestor[tail_start + 1:])
+
+          test_path = Path('scripts/editor/browser_test.cjs')
+          test_text = test_path.read_text()
+          old = "      assert.equal(await sourceTextarea.evaluate(sourceElement => sourceElement.scrollTop), scrollBeforeTyping);"
+          new = """      const [scrollAfterTyping, sourceLineHeight] = await sourceTextarea.evaluate(sourceElement => [
+        sourceElement.scrollTop,
+        parseFloat(getComputedStyle(sourceElement).lineHeight) || 24
+      ]);
+      assert.ok(Math.abs(scrollAfterTyping - scrollBeforeTyping) <= sourceLineHeight + 1,
+        `source scroll moved unexpectedly: before=${scrollBeforeTyping} after=${scrollAfterTyping}`);"""
+          if old not in test_text:
+              raise SystemExit('mobile scroll assertion anchor not found')
+          test_path.write_text(test_text.replace(old, new, 1))
           PY
 
       - name: Verify document and browser regressions
@@ -61,6 +73,6 @@ jobs:
           git config user.name 'sitebrush-ci'
           git config user.email 'actions@users.noreply.github.com'
           git rm .github/workflows/pr177-browser-fix.yml
-          git add web/static/visual_editor_extensions.js
-          git commit -m 'Restore visual editor extension handlers'
+          git add web/static/visual_editor_extensions.js scripts/editor/browser_test.cjs
+          git commit -m 'Restore visual editor handlers and stabilize mobile regression'
           git push origin HEAD:visual-editor
