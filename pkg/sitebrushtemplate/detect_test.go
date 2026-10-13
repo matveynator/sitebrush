@@ -109,22 +109,18 @@ func TestDetectAutomaticTemplatesDoesNotMergeDifferentContent(t *testing.T) {
 	}
 }
 
-func TestDetectAutomaticTemplatesFindsAnyRepeatedElement(t *testing.T) {
+func TestDetectAutomaticTemplatesFindsContentBearingPairedElements(t *testing.T) {
 	testCases := []struct {
 		name       string
 		tagName    string
 		firstHTML  string
 		secondHTML string
 	}{
-		{name: "image", tagName: "img", firstHTML: `<body data-page="1"><img src="/logo.png" alt="Logo"></body>`, secondHTML: `<body data-page="2"><img src="/logo.png" alt="Logo"></body>`},
 		{name: "link", tagName: "a", firstHTML: `<body data-page="1"><a href="/help">Help</a></body>`, secondHTML: `<body data-page="2"><a href="/help">Help</a></body>`},
 		{name: "button", tagName: "button", firstHTML: `<body data-page="1"><button type="button">Open</button></body>`, secondHTML: `<body data-page="2"><button type="button">Open</button></body>`},
-		{name: "input", tagName: "input", firstHTML: `<body data-page="1"><input name="search" type="search"></body>`, secondHTML: `<body data-page="2"><input name="search" type="search"></body>`},
 		{name: "table row", tagName: "tr", firstHTML: `<body data-page="1"><table data-page="1"><tbody data-page="1"><tr><td>Shared</td></tr></tbody></table></body>`, secondHTML: `<body data-page="2"><table data-page="2"><tbody data-page="2"><tr><td>Shared</td></tr></tbody></table></body>`},
 		{name: "style", tagName: "style", firstHTML: `<head data-page="1"><style>.shared { color: red; }</style></head><body data-page="1"></body>`, secondHTML: `<head data-page="2"><style>.shared{color:red}</style></head><body data-page="2"></body>`},
 		{name: "inline JavaScript", tagName: "script", firstHTML: `<head data-page="1"><script>window.shared = true;</script></head><body data-page="1"></body>`, secondHTML: `<head data-page="2"><script>window.shared = true;</script></head><body data-page="2"></body>`},
-		{name: "external JavaScript", tagName: "script", firstHTML: `<head data-page="1"><script src="/shared.js"></script></head><body data-page="1"></body>`, secondHTML: `<head data-page="2"><script src="/shared.js"></script></head><body data-page="2"></body>`},
-		{name: "external CSS", tagName: "link", firstHTML: `<head data-page="1"><link rel="stylesheet" href="/shared.css"></head><body data-page="1"></body>`, secondHTML: `<head data-page="2"><link rel="stylesheet" href="/shared.css"></head><body data-page="2"></body>`},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -222,18 +218,18 @@ func TestDetectAutomaticTemplatesRejectsNestedGroupWithStandaloneOccurrence(t *t
 	}
 }
 
-func TestDetectAutomaticTemplatesRejectsDuplicateOccurrencesWithinPage(t *testing.T) {
+func TestDetectAutomaticTemplatesMarksDuplicateOccurrencesAcrossPages(t *testing.T) {
 	component := `<section class="feature">` + automaticTemplateTestElementList("Repeated") + `</section>`
 	detectedPages, err := DetectAutomaticTemplates([]DetectionPage{
-		{Key: "/", HTML: `<html><body><main>` + component + component + `</main></body></html>`},
-		{Key: "/about", HTML: `<html><body><main>` + component + component + `</main></body></html>`},
+		{Key: "/", HTML: `<html data-page="1"><body data-page="1"><main data-page="1">` + component + component + `</main></body></html>`},
+		{Key: "/about", HTML: `<html data-page="2"><body data-page="2"><main data-page="2">` + component + component + `</main></body></html>`},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, page := range detectedPages {
-		if firstAutomaticTemplateIdentifier(t, page.HTML, "section") != "" {
-			t.Fatalf("ambiguous same-page sections must not share an identifier: %s", page.HTML)
+		if firstAutomaticTemplateIdentifier(t, page.HTML, "section") == "" || templateCount(page.HTML) != 2 {
+			t.Fatalf("every repeated section must share a template: %s", page.HTML)
 		}
 	}
 }
