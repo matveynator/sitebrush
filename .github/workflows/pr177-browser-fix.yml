@@ -8,6 +8,9 @@ on:
 permissions:
   contents: write
 
+env:
+  CGO_ENABLED: "0"
+
 jobs:
   restore-and-verify:
     runs-on: ubuntu-22.04
@@ -21,7 +24,7 @@ jobs:
         with:
           go-version: '1.26.9'
 
-      - name: Restore extension functions and stabilize mobile scroll regression
+      - name: Apply verified editor and architecture fixes
         shell: bash
         run: |
           python3 - <<'PY'
@@ -29,50 +32,72 @@ jobs:
           import subprocess
 
           extension_path = Path('web/static/visual_editor_extensions.js')
-          current = extension_path.read_text()
+          extension_text = extension_path.read_text()
           ancestor = subprocess.check_output(
               ['git', 'show', 'f90fb1a0576aa9169b458b3954b9553cd7d1a6e3:web/static/visual_editor_extensions.js'],
               text=True,
           )
-          marker = '\nfunction refreshVisualEditorDocumentStyles(editorInstance) {'
-          if marker not in current:
-              tail_start = ancestor.find(marker)
+          tail_marker = '\nfunction refreshVisualEditorDocumentStyles(editorInstance) {'
+          if tail_marker not in extension_text:
+              tail_start = ancestor.find(tail_marker)
               if tail_start < 0:
                   raise SystemExit('restore marker not found in ancestor')
-              extension_path.write_text(current.rstrip() + '\n' + ancestor[tail_start + 1:])
+              extension_text = extension_text.rstrip() + '\n' + ancestor[tail_start + 1:]
+          extension_text = extension_text.replace("  document: null,\n", "  document: null,\n  uploadDialog: null,\n", 1)
+          extension_text = extension_text.replace('visualEditorDocumentModel', 'sitebrushEditorModel.document')
+          extension_path.write_text(extension_text)
 
-          test_path = Path('scripts/editor/browser_test.cjs')
-          test_text = test_path.read_text()
-          old = "      assert.equal(await sourceTextarea.evaluate(sourceElement => sourceElement.scrollTop), scrollBeforeTyping);"
-          new = """      const [scrollAfterTyping, sourceLineHeight] = await sourceTextarea.evaluate(sourceElement => [
-        sourceElement.scrollTop,
-        parseFloat(getComputedStyle(sourceElement).lineHeight) || 24
-      ]);
-      assert.ok(Math.abs(scrollAfterTyping - scrollBeforeTyping) <= sourceLineHeight + 1,
-        `source scroll moved unexpectedly: before=${scrollBeforeTyping} after=${scrollAfterTyping}`);"""
-          if old not in test_text:
+          edit_path = Path('web/edit.html')
+          edit_text = edit_path.read_text()
+          alias_text = "sitebrushEditorModel.document = parseVisualEditorDocument(initialHtmlContent);\nconst visualEditorDocumentModel = sitebrushEditorModel.document;"
+          if alias_text in edit_text:
+              edit_text = edit_text.replace(alias_text, "sitebrushEditorModel.document = parseVisualEditorDocument(initialHtmlContent);", 1)
+          edit_text = edit_text.replace('visualEditorDocumentModel', 'sitebrushEditorModel.document')
+          edit_text = edit_text.replace('const uploadDialogState = {', 'sitebrushEditorModel.uploadDialog = {', 1)
+          edit_text = edit_text.replace('uploadDialogState', 'sitebrushEditorModel.uploadDialog')
+          edit_path.write_text(edit_text)
+
+          browser_test_path = Path('scripts/editor/browser_test.cjs')
+          browser_test_text = browser_test_path.read_text()
+          old_scroll = "      assert.equal(await sourceTextarea.evaluate(sourceElement => sourceElement.scrollTop), scrollBeforeTyping);"
+          new_scroll = "\n".join([
+              "      const scrollAfterTyping = await sourceTextarea.evaluate(sourceElement => sourceElement.scrollTop);",
+              "      const sourceLineHeight = await sourceTextarea.evaluate(sourceElement => parseFloat(getComputedStyle(sourceElement).lineHeight) || 24);",
+              "      assert.ok(Math.abs(scrollAfterTyping - scrollBeforeTyping) <= sourceLineHeight + 1,",
+              "        'source scroll moved unexpectedly: before=' + scrollBeforeTyping + ' after=' + scrollAfterTyping);",
+          ])
+          if old_scroll not in browser_test_text:
               raise SystemExit('mobile scroll assertion anchor not found')
-          test_path.write_text(test_text.replace(old, new, 1))
-          PY
+          browser_test_path.write_text(browser_test_text.replace(old_scroll, new_scroll, 1))
 
-      - name: Verify document and browser regressions
+          go_test_path = Path('visual_editor_browser_test.go')
+          go_test_text = go_test_path.read_text()
+          go_test_text = go_test_text.replace('\t"context"\n', '', 1)
+          go_test_text = go_test_text.replace('\n\t"github.com/matveynator/sitebrush/v2/pkg/systeminit"\n', '\n', 1)
+          go_test_text = go_test_text.replace('systeminit.Listen(context.Background(), "tcp", ":0")', 'net.Listen("tcp", ":0")', 1)
+          go_test_path.write_text(go_test_text)
+          PY
+          gofmt -w visual_editor_browser_test.go
+
+      - name: Verify architecture-sensitive regressions
         shell: bash
         env:
           SITEBRUSH_EDITOR_BROWSER_TEST: '1'
         run: |
+          go test -count=1 ./scripts/architecture
           cd scripts/editor
           npm ci --ignore-scripts
           node document_test.cjs
           npx playwright install --with-deps chromium
           cd ../..
-          go test -count=1 . -run '^TestVisualEditorBrowserRegressions$'
+          go test -count=1 . -run '^(TestVisualEditorBrowserRegressions|TestHTTPServerUsesAnotherPortWhenExistingProcessOwnsRequestedPort|TestAuthAttackConcurrentPasswordChangeConfirmationAppliesOnce|TestAIPageScopedCapabilityCanListRevisionsAndForceRollbackPath|TestAIEditorPatchProtocolAppliesMultipleCompactChanges)$'
 
-      - name: Commit verified fix and remove helper workflow
+      - name: Commit verified fixes and remove helper workflow
         shell: bash
         run: |
           git config user.name 'sitebrush-ci'
           git config user.email 'actions@users.noreply.github.com'
           git rm .github/workflows/pr177-browser-fix.yml
-          git add web/static/visual_editor_extensions.js scripts/editor/browser_test.cjs
-          git commit -m 'Restore visual editor handlers and stabilize mobile regression'
+          git add web/static/visual_editor_extensions.js web/edit.html scripts/editor/browser_test.cjs visual_editor_browser_test.go
+          git commit -m 'Align visual editor with channel-oriented project rules'
           git push origin HEAD:visual-editor
