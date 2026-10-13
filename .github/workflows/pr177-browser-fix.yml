@@ -1,0 +1,66 @@
+name: PR 177 browser fix
+
+on:
+  push:
+    branches:
+      - visual-editor
+
+permissions:
+  contents: write
+
+jobs:
+  restore-and-verify:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: visual-editor
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.9'
+
+      - name: Restore extension functions lost by partial replacement
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+
+          path = Path('web/static/visual_editor_extensions.js')
+          current = path.read_text()
+          ancestor = subprocess.check_output(
+              ['git', 'show', 'f90fb1a0576aa9169b458b3954b9553cd7d1a6e3:web/static/visual_editor_extensions.js'],
+              text=True,
+          )
+          marker = '\nfunction refreshVisualEditorDocumentStyles(editorInstance) {'
+          if marker in current:
+              raise SystemExit('extension tail is already present')
+          tail_start = ancestor.find(marker)
+          if tail_start < 0:
+              raise SystemExit('restore marker not found in ancestor')
+          path.write_text(current.rstrip() + '\n' + ancestor[tail_start + 1:])
+          PY
+
+      - name: Verify document and browser regressions
+        shell: bash
+        env:
+          SITEBRUSH_EDITOR_BROWSER_TEST: '1'
+        run: |
+          cd scripts/editor
+          npm ci --ignore-scripts
+          node document_test.cjs
+          npx playwright install --with-deps chromium
+          cd ../..
+          go test -count=1 . -run '^TestVisualEditorBrowserRegressions$'
+
+      - name: Commit verified fix and remove helper workflow
+        shell: bash
+        run: |
+          git config user.name 'sitebrush-ci'
+          git config user.email 'actions@users.noreply.github.com'
+          git rm .github/workflows/pr177-browser-fix.yml
+          git add web/static/visual_editor_extensions.js
+          git commit -m 'Restore visual editor extension handlers'
+          git push origin HEAD:visual-editor
