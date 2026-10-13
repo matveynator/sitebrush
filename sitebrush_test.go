@@ -17372,6 +17372,8 @@ func TestAuthAttackConcurrentEmailChangeConfirmationAppliesOnce(t *testing.T) {
 
 func TestAuthAttackConcurrentPasswordChangeConfirmationAppliesOnce(t *testing.T) {
 	application, database := newTestApplication(t)
+	// The production site DB serializes writes through its dedicated worker.
+	database.SetMaxOpenConns(1)
 	now := time.Now().UTC()
 	const currentEmail = "owner@example.com"
 	confirmation := EmailConfirmation{
@@ -19723,8 +19725,19 @@ func TestAIPageScopedCapabilityCanListRevisionsAndForceRollbackPath(t *testing.T
 	revisionsRequest.Header.Set("Authorization", "Bearer "+session.Token)
 	revisionsResponse := httptest.NewRecorder()
 	application.aiContentEndpoint(revisionsResponse, revisionsRequest, "localhost", capabilityToken, "revisions")
-	if revisionsResponse.Code != http.StatusOK || !strings.Contains(revisionsResponse.Body.String(), "<html><body>old</body></html>") {
+	if revisionsResponse.Code != http.StatusOK {
 		t.Fatalf("revisions status=%d body=%q", revisionsResponse.Code, revisionsResponse.Body.String())
+	}
+	var revisionsPayload struct {
+		Revisions []struct {
+			HTML string `json:"html"`
+		} `json:"revisions"`
+	}
+	if err := json.Unmarshal(revisionsResponse.Body.Bytes(), &revisionsPayload); err != nil {
+		t.Fatalf("decode revisions response: %v body=%q", err, revisionsResponse.Body.String())
+	}
+	if len(revisionsPayload.Revisions) != 1 || revisionsPayload.Revisions[0].HTML != "<html><body>old</body></html>" {
+		t.Fatalf("revisions payload=%+v", revisionsPayload)
 	}
 
 	store := &capturingAIEditorStore{requests: make(chan aieditor.Request, 1)}
@@ -19992,8 +20005,9 @@ func TestAIEditorPatchProtocolAppliesMultipleCompactChanges(t *testing.T) {
 	if !strings.Contains(result.HTML, "<footer>Keep</footer>") {
 		t.Fatalf("unrelated HTML changed: %s", result.HTML)
 	}
-	if len(result.HTML) != len(currentHTML)+len("New title")-len("Old title") {
-		t.Fatalf("compact patch unexpectedly rewrote page shape: before=%d after=%d", len(currentHTML), len(result.HTML))
+	expectedHTML := "<html><head><title>Catalog</title></head><body><h1>New title</h1><p class=\"price\">90</p><footer>Keep</footer></body></html>"
+	if result.HTML != expectedHTML {
+		t.Fatalf("compact patch unexpectedly rewrote page shape: got=%q want=%q", result.HTML, expectedHTML)
 	}
 }
 
