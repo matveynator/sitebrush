@@ -91,6 +91,16 @@ jobs:
           -run 'Test(StorageJail|PublishedStaticRejectsSymlink|PublicOutbound|RequirePublicOutboundURL|ParseGrabSourceURL|ParseOptionalGrabSourceIP|LogoutRedirectsToSameURI|AutoCertDiskCache|AutomaticSSLCertificateCacheName|SecurityBoundaryGlobalSyncStopsWhenSignalChannelCloses|SecurityBoundarySecuritySignalCannotForgeQuorumWithEmbeddedInstallationIDs|SecurityBoundaryBackupImport|SecurityBoundaryProfileSensitiveActionsRequireCSRF|SecurityBoundaryFileUpload|SecurityBoundaryAuthenticatedMutation|SecurityBoundaryClientIPAddress|SecurityBoundaryMissingPageEscapesReflectedPath|SecurityBoundaryServiceEndpointsRejectMalformedJSON|SecurityBoundaryHostingSnapshotRejectsOversizedBody)'
       - name: Test demo landing
         run: go test -count=1 . -run '^TestDemoSiteVisitorGetsEditorSessionAndCleanupDeletesSite$'
+      - name: Install editor browser test dependencies
+        working-directory: scripts/editor
+        run: |
+          npm ci --ignore-scripts
+          node document_test.cjs
+          npx playwright install --with-deps chromium
+      - name: Test visual editor on desktop and narrow mobile
+        env:
+          SITEBRUSH_EDITOR_BROWSER_TEST: "1"
+        run: go test -count=1 . -run '^Test(VisualEditorBrowserRegressions|HTTPServerUsesAnotherPortWhenExistingProcessOwnsRequestedPort)$'
 
   govulncheck:
     name: govulncheck
