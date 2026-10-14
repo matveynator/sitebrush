@@ -9,33 +9,45 @@ import (
 	"time"
 )
 
-func TestMarkedFieldValuesExpireWithoutRemovingFormOutcomes(t *testing.T) {
+func TestFormAnalyticsRejectsFieldContentsAndKeepsStructuralOutcomes(t *testing.T) {
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 	site := New(now)
-	event := conversionEvent("1111111111111111", "2222222222222222", "/", 1, Signal{Kind: "page"}, Signal{Kind: "form-start", Form: "key:contact"}, Signal{Kind: "field-value", Form: "key:contact", Field: "key:plan", FieldName: "plan", FieldText: "pro"})
-	if !Valid(event) || !site.Record(event, now, 4<<20) {
-		t.Fatal("safe field rejected")
+	unsafe := conversionEvent("1111111111111111", "2222222222222222", "/", 1,
+		Signal{Kind: "page"},
+		Signal{Kind: "form-start", Form: "key:contact"},
+		Signal{Kind: "field-value", Form: "key:contact", Field: "key:plan", FieldName: "plan", FieldText: "selected-plan"},
+	)
+	if Valid(unsafe) {
+		t.Fatal("field contents must never be accepted by analytics")
+	}
+
+	safe := conversionEvent("1111111111111111", "2222222222222222", "/", 1,
+		Signal{Kind: "page"},
+		Signal{Kind: "form-view", Form: "key:contact"},
+		Signal{Kind: "form-start", Form: "key:contact"},
+		Signal{Kind: "field", Form: "key:contact", Field: "key:plan", Filled: true},
+		Signal{Kind: "form-submit", Form: "key:contact"},
+		Signal{Kind: "form-success", Form: "key:contact"},
+	)
+	if !Valid(safe) || !site.Record(safe, now, 4<<20) {
+		t.Fatal("structural form analytics rejected")
 	}
 	report := site.Report(now.Add(time.Hour), 7).Conversion
-	if len(report.Forms) != 1 || len(report.Forms[0].Values) != 1 || report.Forms[0].Values[0].Text != "pro" {
-		t.Fatal("field value missing")
+	if len(report.Forms) != 1 || report.Forms[0].Started != 1 || report.Forms[0].Submitted != 1 || report.Forms[0].Succeeded != 1 {
+		t.Fatal("structural form outcomes missing", report.Forms)
 	}
-	site.Prune(now.AddDate(0, 0, 8))
-	report = site.Report(now.AddDate(0, 0, 8), 30).Conversion
-	if report.Forms[0].Started != 1 || len(report.Forms[0].Values) != 0 {
-		t.Fatal("field expiry changed funnel outcomes")
+	if len(report.Forms[0].Values) != 0 {
+		t.Fatal("form report exposed field contents")
 	}
-	for _, pair := range [][2]string{{"password", "password-secret"}, {"token", "opaque"}, {"plan", "4111 1111 1111 1111"}, {"plan", "Bearer opaque"}} {
-		if SafeFieldValue(pair[0], pair[1]) {
-			t.Fatal("sensitive value admitted", pair[0])
-		}
+	if SafeFieldValue("plan", "selected-plan") {
+		t.Fatal("field contents admitted")
 	}
 }
 
 func TestDailyArchivesExcludeVisitorAndFieldDetails(t *testing.T) {
 	now := time.Now().UTC()
 	directory := t.TempDir()
-	report := Report{Conversion: ConversionReport{Locations: []VisitorLocation{{Address: "192.0.2.9", Fingerprint: "fingerprint"}}, Forms: []ConversionForm{{Started: 1, Values: []FormFieldValue{{Field: "key:plan", Text: "pro"}}}}}}
+	report := Report{Conversion: ConversionReport{Locations: []VisitorLocation{{Address: "192.0.2.9", Fingerprint: "fingerprint"}}, Forms: []ConversionForm{{Started: 1, Values: []FormFieldValue{{Field: "key:plan", Text: "legacy-value"}}}}}}
 	encoded, _ := json.Marshal(map[string]Report{dayKey(now): report})
 	if err := writeDailyArchive(directory, string(encoded), now); err != nil {
 		t.Fatal(err)
