@@ -8,11 +8,21 @@ import (
 
 // Published structure and observed navigation remain separate: URL nesting
 // describes the site, while each page's traffic describes actual journeys.
-type PublishedPage struct{ Path, Title string }
+type PublishedPage struct {
+	Path, Title string
+	Inspected   bool
+	Links       []string
+	Actions     []PublishedAction
+}
+type PublishedCatalog struct {
+	Pages                  []PublishedPage
+	Truncated, Unavailable bool
+}
 type SiteTree struct {
 	Root        *SiteTreeNode
 	Truncated   bool
 	Unavailable bool
+	Links       map[string][]string
 }
 type SiteTreeNode struct {
 	Path, Title string
@@ -76,5 +86,11 @@ func BuildSiteTree(pages []PublishedPage, journeys []*ConversionPath) SiteTree {
 		}
 	}
 	sortChildren(nodes["/"])
-	return SiteTree{Root: nodes["/"], Truncated: truncated}
+	links := map[string][]string{}
+	for _, page := range pages {
+		if page.Inspected {
+			links[page.Path] = append([]string{}, page.Links...)
+		}
+	}
+	return SiteTree{Root: nodes["/"], Truncated: truncated, Links: links}
 }

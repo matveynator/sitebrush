@@ -11,8 +11,11 @@
         replaySession: null, replayPages: new Map(), replayIndex: 0, replayTimer: null, replayPlaying: false,
         siteTree: JSON.parse(document.getElementById('conversion-site-catalog').textContent),
         goals: JSON.parse(document.getElementById('conversion-configuration').textContent) || [],
+        suggestedGoals: JSON.parse(document.getElementById('conversion-suggestions').textContent) || [],
+        mapTilesUnavailable: false,
         connection: null, saving: false, selectedDay: null, calendarYear: new Date().getUTCFullYear(), visitorMap: null, mapMarkers: null
     };
+    if (model.goals.length && !model.goals.some(function primaryGoal(goal) { return goal.Primary; })) model.goals[0].Primary = true;
     function node(tagName,text,className) {
         const createdElement = document.createElement(tagName);
         if (text !== undefined) createdElement.textContent = String(text);
@@ -42,7 +45,7 @@
                 const stepElement = node('div',undefined,'conversion-step');
                 stepElement.append(node('strong',step.Name === 'Visitors' ? label('cx_visitors') : step.Name),node('div',step.Users + ' ' + label('cx_visitors')),
                     node('small',label('cx_transition') + ': ' + step.Transition));
-                if (step.Drop) stepElement.append(node('div',label('cx_lost') + ': ' + step.Drop),node('small',label('cx_pending') + ': ' + step.Pending + ' · ' + label('cx_lost') + ': ' + step.Lost));
+                if (step.Drop) stepElement.append(node('div',label('cx_lost') + ': ' + step.Drop),node('small',label('cx_pending') + ': ' + step.Pending + ' · ' + label('cx_lost') + ': ' + step.Lost + ' · ' + label('cx_exit') + ': ' + (step.Exited || 0)));
                 steps.append(stepElement);
             }
             funnelContainer.append(steps);
@@ -50,14 +53,16 @@
             container.append(funnelContainer);
         }
     }
-    function renderPathBranch(branch,parentUsers) {
+    function renderPathBranch(branch,parentPage) {
         const branchElement = node('li');
         branchElement.append(node('strong',branch.Label),node('small',branch.Users + ' ' + label('cx_visitors') + ' · ' + branch.Share + ' · ' + label('cx_conversion') + ': ' + branch.Conversion + ' · ' + label('cx_exit') + ': ' + branch.ExitRate));
+        const publishedLinks = (model.siteTree.Links || {})[parentPage];
+        if (publishedLinks && branch.Label.startsWith('/') && branch.Label !== parentPage && !publishedLinks.includes(branch.Label)) branchElement.append(node('small',label('cx_unlinked_path'),'badge text-bg-warning'));
         const children = branch.Children || [];
         if (children.length) {
             const childTree = node('ul',undefined,'conversion-tree');
-            for (const childBranch of children.slice(0,5)) childTree.append(renderPathBranch(childBranch,branch.Users));
-            if (children.length > 5) { const extraBranches = details('+' + (children.length - 5)); const extraTree = node('ul',undefined,'conversion-tree'); for (const childBranch of children.slice(5)) extraTree.append(renderPathBranch(childBranch,branch.Users)); extraBranches.append(extraTree); childTree.append(extraBranches); }
+            for (const childBranch of children.slice(0,5)) childTree.append(renderPathBranch(childBranch,branch.Label));
+            if (children.length > 5) { const extraBranches = details('+' + (children.length - 5)); const extraTree = node('ul',undefined,'conversion-tree'); for (const childBranch of children.slice(5)) extraTree.append(renderPathBranch(childBranch,branch.Label)); extraBranches.append(extraTree); childTree.append(extraBranches); }
             branchElement.append(childTree);
         }
         if (branch.Exits) branchElement.append(node('small','↳ ' + label('cx_exit') + ' · ' + branch.Exits));
@@ -89,13 +94,15 @@
     function renderVisitorMap() {
         const container = document.getElementById('conversion-visitor-map');
         const status = document.getElementById('conversion-map-status');
-        const visitors = (model.report.Locations || []).filter(function inSelectedDay(visitor) { return !model.selectedDay || (visitor.Days || []).includes(model.selectedDay); });
+        const visitors = (model.report.Locations || []).filter(function inSelectedPeriod(visitor) { return (visitor.Days || []).some(function inSelectedYear(day) { return day.startsWith(String(model.calendarYear) + '-') && (!model.selectedDay || day === model.selectedDay); }); });
         const list = document.getElementById('conversion-map-visitors'); list.replaceChildren();
         renderVisitorCards(visitors,list);
-        if (!window.L) { status.textContent = label('analytics_no_data'); return; }
+        if (!window.L) { status.textContent = label('cx_map_unavailable'); return; }
         if (!model.visitorMap) {
             model.visitorMap = window.L.map(container,{scrollWheelZoom:false}).setView([20,0],2);
-            window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:18,attribution:'© OpenStreetMap contributors'}).addTo(model.visitorMap);
+            const tiles = window.L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:18,referrerPolicy:'origin',attribution:'&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a>'});
+            tiles.on('tileerror',function tileUnavailable() { if (!model.mapTilesUnavailable) { model.mapTilesUnavailable = true; status.textContent += ' · ' + label('cx_map_unavailable'); } });
+            tiles.addTo(model.visitorMap);
             model.mapMarkers = window.L.layerGroup().addTo(model.visitorMap);
         }
         model.mapMarkers.clearLayers();
@@ -117,6 +124,21 @@
         if (bounds.length === 1) model.visitorMap.setView(bounds[0],4);
         else if (bounds.length > 1) model.visitorMap.fitBounds(bounds,{padding:[24,24],maxZoom:5});
         status.textContent = (clusters.size ? visitors.length + ' ' + label('cx_visitors') : label('analytics_no_data')) + ' · ' + label('cx_unknown_location') + ': ' + unknown;
+        if (model.mapTilesUnavailable) status.textContent += ' · ' + label('cx_map_unavailable');
+    }
+    function calendarActivityLevel(visitors,maximum) {
+        if (visitors <= 0 || maximum <= 0) return 0;
+        if (visitors >= maximum) return 4;
+        return 1 + Math.floor((visitors - 1)*3/(maximum - 1));
+    }
+    function calendarActivityRanges(maximum) {
+        const ranges = [{level:0,minimumVisitors:0,maximumVisitors:0}];
+        for (let level = 1; level <= 4; level++) {
+            const minimumVisitors = level === 4 ? maximum : Math.ceil((level-1)*Math.max(0,maximum-1)/3)+1;
+            const maximumVisitors = level === 4 ? maximum : Math.ceil(level*Math.max(0,maximum-1)/3);
+            if (maximum > 0 && minimumVisitors <= maximumVisitors) ranges.push({level,minimumVisitors,maximumVisitors});
+        }
+        return ranges;
     }
     function renderVisitCalendar() {
         const container = document.getElementById('conversion-visit-calendar'); container.replaceChildren();
@@ -144,20 +166,17 @@
         for (let date = firstDay; date < nextYear; date = new Date(date.getTime()+86400000)) {
             const dayKey = date.toISOString().slice(0,10); const visitors = counts.get(dayKey) || 0;
             const dayIndex = Math.round((date-firstDay)/86400000); const dayButton = node('button',undefined,'activity-calendar-day');
-            dayButton.type = 'button'; dayButton.dataset.level = visitors ? String(Math.max(1,Math.ceil(visitors*4/Math.max(4,maximum)))) : '0';
+            dayButton.type = 'button'; dayButton.dataset.level = String(calendarActivityLevel(visitors,maximum));
             dayButton.style.gridColumn = String(Math.floor((dayIndex+firstWeekday)/7)+1); dayButton.style.gridRow = String((date.getUTCDay()+6)%7+1);
             dayButton.title = dayKey + ' · ' + visitors + ' ' + label('cx_visitors'); dayButton.setAttribute('aria-label',dayButton.title); dayButton.setAttribute('aria-pressed',String(model.selectedDay === dayKey));
             dayButton.disabled = date > new Date();
             dayButton.addEventListener('click',function selectDay() { model.selectedDay = model.selectedDay === dayKey ? null : dayKey; renderVisitCalendar(); renderVisitorMap(); }); grid.append(dayButton);
         }
         const legend = node('div',undefined,'activity-calendar-legend d-flex flex-wrap gap-3 mt-2');
-        const scaleMaximum = Math.max(4,maximum);
-        for (let level = 0; level <= 4; level++) {
-            const lower = level === 0 ? 0 : Math.floor((level-1)*scaleMaximum/4)+1;
-            const upper = level === 0 ? 0 : Math.floor(level*scaleMaximum/4);
-            const range = lower === upper ? String(lower) : lower + '–' + upper;
+        for (const interval of calendarActivityRanges(maximum)) {
+            const range = interval.minimumVisitors === interval.maximumVisitors ? String(interval.minimumVisitors) : interval.minimumVisitors + '–' + interval.maximumVisitors;
             const entry = node('span',undefined,'d-inline-flex align-items-center gap-1');
-            const swatch = node('span',undefined,'activity-calendar-day'); swatch.dataset.level = String(level); swatch.setAttribute('aria-hidden','true');
+            const swatch = node('span',undefined,'activity-calendar-day'); swatch.dataset.level = String(interval.level); swatch.setAttribute('aria-hidden','true');
             entry.append(swatch,node('small',range)); entry.title = range + ' ' + label('cx_visitors'); legend.append(entry);
         }
         container.append(grid,legend,node('small',label('ax_activity_less') + ' → ' + label('ax_activity_more') + ' · ' + label('cx_visitors'),'text-muted'));
@@ -176,11 +195,11 @@
             if (traffic && traffic.Children && traffic.Children.length) {
                 const nextSteps = details(label('cx_next_steps'),true);
                 const journeyTree = node('ul',undefined,'conversion-tree');
-                for (const nextBranch of traffic.Children.slice(0,5)) journeyTree.append(renderPathBranch(nextBranch,traffic.Users));
+                for (const nextBranch of traffic.Children.slice(0,5)) journeyTree.append(renderPathBranch(nextBranch,branch.Path));
                 if (traffic.Children.length > 5) {
                     const otherSteps = details('+' + (traffic.Children.length - 5));
                     const otherTree = node('ul',undefined,'conversion-tree');
-                    for (const nextBranch of traffic.Children.slice(5)) otherTree.append(renderPathBranch(nextBranch,traffic.Users));
+                    for (const nextBranch of traffic.Children.slice(5)) otherTree.append(renderPathBranch(nextBranch,branch.Path));
                     otherSteps.append(otherTree); journeyTree.append(otherSteps);
                 }
                 nextSteps.append(journeyTree); disclosure.append(nextSteps);
@@ -205,7 +224,7 @@
     function renderPaths() {
         const container = document.getElementById('conversion-paths'); container.replaceChildren();
         if (!model.report.Paths || !model.report.Paths.length) { empty(container); return; }
-        for (const root of model.report.Paths) { const rootDetails = details(root.Root,root === model.report.Paths[0]); const tree = node('ul',undefined,'conversion-tree'); tree.append(renderPathBranch(root,root.Users)); rootDetails.append(tree); container.append(rootDetails); }
+        for (const root of model.report.Paths) { const rootDetails = details(root.Root,root === model.report.Paths[0]); const tree = node('ul',undefined,'conversion-tree'); tree.append(renderPathBranch(root,root.Root)); rootDetails.append(tree); container.append(rootDetails); }
     }
     function showHeatmap(page,container) {
         const frame = node('iframe',undefined,'conversion-heatmap-frame');
@@ -383,32 +402,60 @@
     }
     function button(title,onClick) { const actionButton = node('button',label(title),'btn btn-outline-secondary btn-sm'); actionButton.type = 'button'; actionButton.addEventListener('click',onClick); return actionButton; }
     const eventKinds = ['page','click','scroll','download','form-start','form-submit','form-success','external-link','event','uri','action'];
+    const maximumGoalCount = 32;
+    const maximumSuggestedGoalCount = 8;
+    function goalRulesSignature(goal) {
+        const steps = goal.Steps && goal.Steps.length ? goal.Steps : [goal];
+        return JSON.stringify(steps.map(function stepRules(step) {
+            return [step.Kind === 'path' ? 'uri' : step.Kind || 'page',step.Page || '',step.Element || '',step.Match || '',step.Kind === 'scroll' ? Number(step.Threshold || 50) : 0,step.SuccessPage || ''];
+        }));
+    }
     function renderGoals() {
         const container = document.getElementById('conversion-goals'); container.replaceChildren();
+        document.getElementById('conversion-add-goal').disabled = model.goals.length >= maximumGoalCount;
+        document.getElementById('conversion-suggest-goals').disabled = model.goals.length >= maximumSuggestedGoalCount || model.suggestedGoals.every(function alreadyConfigured(suggestion) { return model.goals.some(function sameRules(goal) { return goalRulesSignature(goal) === goalRulesSignature(suggestion); }); });
         for (const goal of model.goals) {
             const goalEditor = node('div',undefined,'conversion-editor');
+            if (goal.Automatic) goalEditor.append(node('p',label('cx_automatic_goal'),'small text-muted'));
             const nameRow = node('div',undefined,'conversion-editor-row');
             nameRow.append(inputField('cx_name',goal.Name,function renameGoal(goalName) { goal.Name = goalName; }));
             const primaryLabel = node('label',label('cx_primary')); const primaryInput = node('input'); primaryInput.type = 'radio'; primaryInput.name = 'conversion-primary'; primaryInput.checked = !!goal.Primary;
             primaryInput.addEventListener('change',function choosePrimary() { for (const candidateGoal of model.goals) candidateGoal.Primary = candidateGoal === goal; renderGoals(); }); primaryLabel.prepend(primaryInput); nameRow.append(primaryLabel);
             nameRow.append(button('cx_remove',function removeGoal() { model.goals = model.goals.filter(function keepGoal(candidateGoal) { return candidateGoal !== goal; }); renderGoals(); })); goalEditor.append(nameRow);
-            if (!goal.Steps || !goal.Steps.length) goal.Steps = [{Name:goal.Name,Kind:goal.Kind || 'page',Match:goal.Match || '',Page:goal.Page || '',Element:goal.Element || '',Threshold:goal.Threshold || 50}];
-            for (const step of goal.Steps) {
+            // Single-event goals must remain flat to preserve the separate funnel capacity.
+            const steps = goal.Steps && goal.Steps.length ? goal.Steps : [goal];
+            for (const step of steps) {
                 const stepRow = node('div',undefined,'conversion-editor-row');
-                stepRow.append(inputField('cx_step',step.Name,function renameStep(stepName) { step.Name = stepName; }));
+                if (goal.Steps && goal.Steps.length) stepRow.append(inputField('cx_step',step.Name,function renameStep(stepName) { step.Name = stepName; }));
                 const kindLabel = node('label',label('cx_event'),'small'); const kindSelect = node('select',undefined,'form-select form-select-sm');
-                for (const kind of eventKinds) { const kindOption = node('option',kind); kindOption.value = kind; kindOption.selected = kind === step.Kind; kindSelect.append(kindOption); }
+                for (const kind of eventKinds) { const kindOption = node('option',label('cx_kind_' + kind.replaceAll('-','_'))); kindOption.value = kind; kindOption.selected = kind === (step.Kind === 'path' ? 'uri' : step.Kind); kindSelect.append(kindOption); }
                 kindSelect.addEventListener('change',function changeKind() { step.Kind = kindSelect.value; renderGoals(); }); kindLabel.append(kindSelect); stepRow.append(kindLabel);
                 stepRow.append(inputField('ax_page',step.Page,function changePage(pagePath) { step.Page = pagePath; }),inputField('cx_element',step.Element,function changeElement(elementKey) { step.Element = elementKey; }));
                 if (step.Kind === 'form-success') stepRow.append(inputField('cx_success_page',step.SuccessPage,function changeSuccessPage(successPage) { step.SuccessPage = successPage; }));
                 if (step.Kind === 'scroll') stepRow.append(inputField('cx_threshold',String(step.Threshold || 50),function changeThreshold(threshold) { step.Threshold = Number(threshold); },'number'));
                 else if (['event','uri','action'].includes(step.Kind)) stepRow.append(inputField('cx_match',step.Match,function changeMatch(eventMatch) { step.Match = eventMatch; }));
-                stepRow.append(button('cx_remove',function removeStep() { if (goal.Steps.length <= 1) return; goal.Steps = goal.Steps.filter(function keepStep(candidateStep) { return candidateStep !== step; }); renderGoals(); })); goalEditor.append(stepRow);
+                stepRow.append(button('cx_remove',function removeStep() { if (!goal.Steps || goal.Steps.length <= 1) return; goal.Steps = goal.Steps.filter(function keepStep(candidateStep) { return candidateStep !== step; }); renderGoals(); })); goalEditor.append(stepRow);
             }
-            goalEditor.append(button('cx_add_step',function addStep() { if (goal.Steps.length >= 10) return; goal.Steps.push({Name:label('cx_step'),Kind:'page',Match:'',Page:'',Element:''}); renderGoals(); })); container.append(goalEditor);
+            goalEditor.append(button('cx_add_step',function addStep() {
+                if (steps.length >= 10) return;
+                if (!goal.Steps || !goal.Steps.length) goal.Steps = [{Name:goal.Name,Kind:goal.Kind || 'page',Match:goal.Match || '',Page:goal.Page || '',Element:goal.Element || '',Threshold:goal.Threshold || 50,SuccessPage:goal.SuccessPage || ''}];
+                goal.Steps.push({Name:label('cx_step'),Kind:'page',Match:'',Page:'',Element:''});
+                renderGoals();
+            })); container.append(goalEditor);
         }
     }
-    document.getElementById('conversion-add-goal').addEventListener('click',function addGoal() { if (model.goals.length >= 32) return; model.goals.push({Name:label('ax_goals') + ' ' + (model.goals.length + 1),Primary:model.goals.length === 0,Steps:[{Name:label('cx_step'),Kind:'page',Page:'/',Match:'',Element:''}]}); renderGoals(); });
+    document.getElementById('conversion-suggest-goals').addEventListener('click',function addSuggestedGoals() {
+        for (const suggestion of model.suggestedGoals) {
+            if (model.goals.length >= maximumSuggestedGoalCount) break;
+            const duplicate = model.goals.some(function sameGoal(goal) { return goalRulesSignature(goal) === goalRulesSignature(suggestion); });
+            if (duplicate) continue;
+            const suggestedGoal = JSON.parse(JSON.stringify(suggestion));
+            suggestedGoal.Primary = model.goals.length === 0;
+            model.goals.push(suggestedGoal);
+        }
+        renderGoals();
+    });
+    document.getElementById('conversion-add-goal').addEventListener('click',function addGoal() { if (model.goals.length >= maximumGoalCount) return; model.goals.push({Name:label('ax_goals') + ' ' + (model.goals.length + 1),Primary:model.goals.length === 0,Kind:'page',Page:'/',Match:'',Element:''}); renderGoals(); });
     document.getElementById('conversion-save').addEventListener('click',function saveConfiguration() {
         if (model.saving) return;
         model.saving = true;

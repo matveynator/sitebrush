@@ -5126,6 +5126,10 @@ func (a *App) analyticsBehaviourPreview(w http.ResponseWriter, r *http.Request, 
 }
 
 func (a *App) analyticsPublishedPage(domain, pathname string) (string, error) {
+	return a.analyticsPublishedPageContent(domain, pathname, 2<<20)
+}
+
+func (a *App) analyticsPublishedPageContent(domain, pathname string, maximum int) (string, error) {
 	root := a.domainStaticDir(domain)
 	candidate := filepath.Join(root, staticRelativePathForPage(pathname))
 	resolved, err := a.existingPathInsideStorageSubtree(root, candidate)
@@ -5139,7 +5143,10 @@ func (a *App) analyticsPublishedPage(domain, pathname string) (string, error) {
 		return "", err
 	}
 	defer file.Close()
-	content, err := io.ReadAll(io.LimitReader(file, 2<<20))
+	content, err := io.ReadAll(io.LimitReader(file, int64(maximum)+1))
+	if len(content) > maximum {
+		return "", errors.New("published page exceeds inspection budget")
+	}
 	return string(content), err
 }
 
@@ -5286,40 +5293,96 @@ func (a *App) analyticsURIRules(domain string) string {
 	return string(encoded)
 }
 
-// The admin report reuses the editor's page catalog without reading page bodies
-// or adding SQL work to public page delivery.
-func (a *App) analyticsSiteTree(r *http.Request, domain string, journeys []*browserstats.ConversionPath) template.JS {
-	tree := browserstats.SiteTree{}
+// Catalog inspection is bounded and only runs at the authenticated report
+// boundary. Public delivery never loads page bodies or initializes funnels.
+func (a *App) analyticsPublishedCatalog(r *http.Request, domain string) browserstats.PublishedCatalog {
+	catalog := browserstats.PublishedCatalog{}
 	rows, err := a.db.QueryContext(r.Context(), `SELECT path,title FROM published_pages WHERE domain=? ORDER BY path LIMIT 1001`, domain)
 	if err != nil {
-		tree.Unavailable = true
-	} else {
-		pages := []browserstats.PublishedPage{}
-		for rows.Next() {
-			var page browserstats.PublishedPage
-			if err = rows.Scan(&page.Path, &page.Title); err != nil {
-				break
-			}
-			if len(pages) == 1000 {
-				tree.Truncated = true
-				break
-			}
-			pages = append(pages, page)
+		catalog.Unavailable = true
+		return catalog
+	}
+	for rows.Next() {
+		var page browserstats.PublishedPage
+		if err = rows.Scan(&page.Path, &page.Title); err != nil {
+			break
 		}
-		if err == nil {
-			err = rows.Err()
+		if len(catalog.Pages) == 1000 {
+			catalog.Truncated = true
+			break
 		}
-		_ = rows.Close()
+		catalog.Pages = append(catalog.Pages, page)
+	}
+	if err == nil {
+		err = rows.Err()
+	}
+	_ = rows.Close()
+	if err != nil {
+		catalog.Unavailable = true
+		return catalog
+	}
+	priorities := make([]int, len(catalog.Pages))
+	for index := range priorities {
+		priorities[index] = index
+	}
+	sort.SliceStable(priorities, func(left, right int) bool {
+		return browserstats.PublishedPagePriority(catalog.Pages[priorities[left]]) > browserstats.PublishedPagePriority(catalog.Pages[priorities[right]])
+	})
+	remaining := 512 << 10
+	for _, index := range priorities[:min(16, len(priorities))] {
+		select {
+		case <-r.Context().Done():
+			return catalog
+		default:
+		}
+		page := catalog.Pages[index]
+		content, err := a.analyticsPublishedPageContent(domain, page.Path, min(65536, remaining))
 		if err != nil {
-			tree.Unavailable = true
-		} else {
-			truncated := tree.Truncated
-			tree = browserstats.BuildSiteTree(pages, journeys)
-			tree.Truncated = tree.Truncated || truncated
+			continue
+		}
+		remaining -= len(content)
+		catalog.Pages[index] = browserstats.InspectPublishedPage(page, content, domain)
+		if remaining <= 0 {
+			break
 		}
 	}
+	return catalog
+}
+
+func analyticsSiteTree(catalog browserstats.PublishedCatalog, journeys []*browserstats.ConversionPath) template.JS {
+	tree := browserstats.BuildSiteTree(catalog.Pages, journeys)
+	tree.Truncated = tree.Truncated || catalog.Truncated
+	tree.Unavailable = catalog.Unavailable
 	encoded, _ := json.Marshal(tree)
 	return template.JS(encoded)
+}
+
+func (a *App) initializeAnalyticsGoals(r *http.Request, domain string, catalog browserstats.PublishedCatalog) error {
+	stored := a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.ReadConfiguration, Domain: domain, Limit: 16384, Stop: r.Context().Done()})
+	if stored.Err == nil {
+		return nil
+	}
+	if !errors.Is(stored.Err, sql.ErrNoRows) {
+		return stored.Err
+	}
+	goals, err := a.readAnalyticsGoals(domain)
+	if err != nil {
+		return err
+	}
+	if goals == nil {
+		if catalog.Unavailable {
+			return errors.New("published page catalog is unavailable")
+		}
+		goals = browserstats.InitialGoals(catalog.Pages, translationsForRequest(r))
+		if len(goals) == 0 {
+			return nil
+		}
+	}
+	if err := browserstats.ValidateGoals(goals); err != nil {
+		return err
+	}
+	result := a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.InitializeConfiguration, Domain: domain, State: analyticsGoalsJSON(goals), Stop: r.Context().Done()})
+	return result.Err
 }
 
 func analyticsScriptTag(content string) string {
@@ -7298,6 +7361,15 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		a.saveAnalyticsGoals(w, r, domain)
 		return
 	}
+	catalog := browserstats.PublishedCatalog{}
+	var initialGoalsError error
+	if selectedTab == "analytics" {
+		catalog = a.analyticsPublishedCatalog(r, domain)
+		initialGoalsError = a.initializeAnalyticsGoals(r, domain, catalog)
+		if initialGoalsError != nil {
+			log.Printf("initial analytics goals unavailable domain=%q: %v", domain, initialGoalsError)
+		}
+	}
 	browserDashboard := a.browserAnalyticsView(r, domain)
 	filter := browserstats.ExperienceFilter{Traffic: r.URL.Query().Get("traffic")}
 	if filter.Traffic != "all" && filter.Traffic != "bots" {
@@ -7573,10 +7645,11 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		"ReturnPath":            requestedReturnPath(r),
 		"AnalyticsTab":          selectedTab,
 		"ReplayPreferencesJSON": a.analyticsReplayPreferencesJSON(domain),
-		"SiteTreeJSON":          a.analyticsSiteTree(r, domain, browserDashboard.Report.Conversion.Paths),
+		"SiteTreeJSON":          analyticsSiteTree(catalog, browserDashboard.Report.Conversion.Paths),
 		"AnalyticsDiskUsage":    analyticsStorageText(a.analyticsDiskBytes(domain)),
 		"AnalyticsQuotaBlocked": a.storedDomainStorageUsage(r.Context(), domain).AnalyticsLimited,
-		"Conversion":            browserDashboard.Report.Conversion, "GoalsJSON": template.JS(analyticsGoalsJSON(goals)), "ConversionJSON": analyticsConversionJSON(browserDashboard.Report.Conversion),
+		"InitialGoalsError":     initialGoalsError != nil, "SuggestedGoalsJSON": template.JS(analyticsGoalsJSON(browserstats.InitialGoals(catalog.Pages, translationsForRequest(r)))),
+		"Conversion": browserDashboard.Report.Conversion, "GoalsJSON": template.JS(analyticsGoalsJSON(goals)), "ConversionJSON": analyticsConversionJSON(browserDashboard.Report.Conversion),
 		"Report":           analyticsReportView(report, translationsForRequest(r)),
 		"BrowserAnalytics": browserDashboard,
 		"Experience":       experience, "ExperienceFilter": filter, "Security": security, "SecurityTypeAxes": analyticsSecurityTypeAxes(), "SecurityBlocks": securityBlocks, "SecurityLocalBlocks": securityLocalBlocks, "SecurityGlobalBlocks": securityGlobalBlocks, "SecurityAllowlist": securityAllowlist, "SecurityThrottles": securityThrottles, "SecuritySettings": securitySettings, "GoalsText": strings.Join(goalLines, "\n"), "SessionMapJSON": template.JS(mapJSON), "PeriodOptions": []int{1, 7, 30, 90}, "UnknownGeo": unknownGeo, "ServerRequests": serverRequests, "ServerLocalHours": serverLocalHours, "ServerHoursJSON": template.JS(serverHoursJSON), "SecurityHoursJSON": template.JS(securityHoursJSON), "SecurityCountriesJSON": template.JS(securityCountriesJSON), "SecurityTypesJSON": template.JS(securityTypesJSON), "ActivityDaysJSON": template.JS(activityDaysJSON), "ActivityHoursJSON": template.JS(activityHoursJSON), "SecurityActivityDaysJSON": template.JS(securityActivityDaysJSON), "SecurityActivityHoursJSON": template.JS(securityActivityHoursJSON), "SecurityActivityTypesJSON": template.JS(securityActivityTypesJSON), "SecurityActivitySeverityJSON": template.JS(securityActivitySeverityJSON), "ActivitySessionsJSON": template.JS(activitySessionsJSON), "SecurityIncidentsJSON": template.JS(securityIncidentsJSON), "ServerTimezone": time.Local.String(), "ServerNowRFC3339": serverNow.Format(time.RFC3339), "ServerNowDisplay": serverNow.Format("02 Jan 2006 15:04:05"), "ServerTimezoneOffsetSeconds": serverTimezoneOffsetSeconds,
@@ -26874,26 +26947,19 @@ func (a *App) reportHostingSnapshot(ctx context.Context) error {
 		LanguageCode:    "en",
 		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
 	}
-	if err := a.signServiceMailRequest(ctx, &request); err != nil {
-		return err
-	}
-	snapshot.InstallationID = request.InstallationID
-	request.HostingSnapshot = &snapshot
-	payload, err := json.Marshal(request)
-	if err != nil {
-		return err
-	}
 	var lastErr error
 	for _, snapshotURL := range encryptedSnapshotURLs {
 		if strings.TrimSpace(snapshotURL) == "" {
 			continue
 		}
-		encryptedPayload, err := serviceMailEncryptPayloadForRelay(snapshotURL, payload)
+		err := a.sendSignedRequestCompatible(ctx, request, func(payload []byte) error {
+			encrypted, err := serviceMailEncryptPayloadForRelay(snapshotURL, payload)
+			if err != nil {
+				return err
+			}
+			return postServiceMailRelayPayload(ctx, snapshotURL, encrypted)
+		})
 		if err != nil {
-			lastErr = err
-			continue
-		}
-		if err := postServiceMailRelayPayload(ctx, snapshotURL, encryptedPayload); err != nil {
 			lastErr = err
 			continue
 		}
@@ -27459,21 +27525,16 @@ func (a *App) reportHostingSnapshotNetChan(ctx context.Context) error {
 		LanguageCode:    "en",
 		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
 	}
-	if err := a.signServiceMailRequest(ctx, &request); err != nil {
-		return err
-	}
-	request.HostingSnapshot.InstallationID = request.InstallationID
-	payload, err := json.Marshal(request)
-	if err != nil {
-		return err
-	}
 	var lastErr error
 	deliveries := a.hostingSnapshotDeliveries
 	if deliveries == nil {
 		deliveries = startHostingSnapshotNetChanDeliveryWorker(ctx.Done())
 	}
 	for _, address := range addresses {
-		if err := sendHostingSnapshotNetChanPayload(ctx, deliveries, address, payload); err != nil {
+		err := a.sendSignedRequestCompatible(ctx, request, func(payload []byte) error {
+			return sendHostingSnapshotNetChanPayload(ctx, deliveries, address, payload)
+		})
+		if err != nil {
 			lastErr = err
 			continue
 		}
@@ -27601,7 +27662,7 @@ func performHostingSnapshotNetChanDelivery(stop <-chan struct{}, task hostingSna
 			responseReceived = true
 			networkResponse = nil
 			if response.StatusCode >= 400 {
-				responseError = fmt.Errorf("sitebrush netchan rejected request: %s", response.Status)
+				responseError = serviceMailRelayRejection{Transport: "netchan", StatusCode: response.StatusCode, Message: response.Status}
 			}
 		case err, isOpen := <-errorsChannel:
 			if !isOpen {
@@ -28440,18 +28501,13 @@ func (a *App) sendServiceMailThroughRelay(ctx context.Context, relayURL string, 
 		relayRequest.HostingSnapshot = nil
 		log.Printf("service mail hosting snapshot attach skipped relay=%s error=%v", relayURL, err)
 	}
-	if err := a.signServiceMailRequest(ctx, &relayRequest); err != nil {
-		return err
-	}
-	signedPayload, err := json.Marshal(relayRequest)
-	if err != nil {
-		return err
-	}
-	requestPayload, err := serviceMailEncryptPayloadForRelay(relayURL, signedPayload)
-	if err != nil {
-		return err
-	}
-	return postServiceMailRelayPayload(ctx, relayURL, requestPayload)
+	return a.sendSignedRequestCompatible(ctx, relayRequest, func(payload []byte) error {
+		encrypted, err := serviceMailEncryptPayloadForRelay(relayURL, payload)
+		if err != nil {
+			return err
+		}
+		return postServiceMailRelayPayload(ctx, relayURL, encrypted)
+	})
 }
 
 func (a *App) sendMailoutTaskThroughNetChan(ctx context.Context, record mailout.Record) error {
@@ -28546,6 +28602,12 @@ func (a *App) sendServiceMailNetChanRequest(ctx context.Context, request *servic
 			deliveryAcknowledged = true
 			deliveryFinished = nil
 		case response := <-responseChannel:
+			if response.StatusCode == http.StatusForbidden && strings.TrimSpace(response.Status) == "signature verification failed" {
+				if compatible, changed := legacyHostingRequest(relayRequest); changed {
+					connection.Abort()
+					return a.sendServiceMailNetChanRequest(ctx, &compatible)
+				}
+			}
 			return response, nil
 		case connectionErr, isOpen := <-errorsChannel:
 			if isOpen {
@@ -28604,6 +28666,65 @@ func (a *App) attachHostingSnapshotToServiceMailRequest(ctx context.Context, rel
 	return nil
 }
 
+type serviceMailRelayRejection struct {
+	Transport  string
+	StatusCode int
+	Message    string
+}
+
+func (rejection serviceMailRelayRejection) Error() string {
+	if rejection.Transport == "netchan" {
+		return "sitebrush netchan rejected request: " + diagnosticlog.SafeLogValue(rejection.Message)
+	}
+	return fmt.Sprintf("relay returned %d %s: %s", rejection.StatusCode, http.StatusText(rejection.StatusCode), diagnosticlog.SafeLogValue(rejection.Message))
+}
+
+// Older peers reconstruct the signed JSON with an older snapshot schema. Retry
+// once with that schema, freshly signed; totals still include analytics usage.
+// The receiver's signature verification and authorization remain unchanged.
+func legacyHostingRequest(request serviceMailRequest) (serviceMailRequest, bool) {
+	if request.HostingSnapshot == nil {
+		return request, false
+	}
+	snapshot := *request.HostingSnapshot
+	snapshot.Sites = append([]hostingandsupport.HostingSnapshotSite(nil), snapshot.Sites...)
+	changed := false
+	for index := range snapshot.Sites {
+		if snapshot.Sites[index].AnalyticsBytes != 0 {
+			snapshot.Sites[index].AnalyticsBytes = 0
+			changed = true
+		}
+	}
+	request.HostingSnapshot = &snapshot
+	request.Signature = ""
+	return request, changed
+}
+
+// Context is the existing compatibility boundary for SQL identity lookup and
+// external transports. Requests and snapshot slices belong to this one sender.
+func (a *App) sendSignedRequestCompatible(boundary context.Context, request serviceMailRequest, deliver func([]byte) error) error {
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := a.signServiceMailRequest(boundary, &request); err != nil {
+			return err
+		}
+		payload, err := json.Marshal(request)
+		if err != nil {
+			return err
+		}
+		err = deliver(payload)
+		var rejection serviceMailRelayRejection
+		if attempt > 0 || !errors.As(err, &rejection) || rejection.StatusCode != http.StatusForbidden || strings.TrimSpace(rejection.Message) != "signature verification failed" {
+			return err
+		}
+		compatible, changed := legacyHostingRequest(request)
+		if !changed {
+			return err
+		}
+		request = compatible
+	}
+	return errors.New("hosting schema compatibility retry exhausted")
+}
+
 func (a *App) signServiceMailRequest(ctx context.Context, request *serviceMailRequest) error {
 	installationID, publicKey, privateKey, err := a.serviceMailLocalKeyPair(ctx)
 	if err != nil {
@@ -28642,7 +28763,7 @@ func postServiceMailRelayPayload(ctx context.Context, relayURL string, payload [
 	defer httpResponse.Body.Close()
 	if httpResponse.StatusCode < 200 || httpResponse.StatusCode >= 300 {
 		bodyBytes, _ := io.ReadAll(io.LimitReader(httpResponse.Body, 1024))
-		return fmt.Errorf("relay returned %s: %s", httpResponse.Status, strings.TrimSpace(string(bodyBytes)))
+		return serviceMailRelayRejection{StatusCode: httpResponse.StatusCode, Message: strings.TrimSpace(string(bodyBytes))}
 	}
 	return nil
 }

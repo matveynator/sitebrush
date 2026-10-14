@@ -60,6 +60,7 @@ function securityElement() {
         replaceChildren() { this.children = []; },
         appendChild(child) { this.children.push(child); },
         append(...children) { this.children.push(...children); },
+        prepend(...children) { this.children.unshift(...children); },
         setAttribute() {},
         addEventListener(name, handler) { this.listeners[name] = handler; }
     };
@@ -131,3 +132,99 @@ vm.runInNewContext(analyticsTemplate.slice(searchFocusStart, searchFocusEnd), se
 assert.equal(focusedSearch, false);
 assert.equal(scrolledSearch, false);
 console.log('security analytics: country pagination, unique IP visibility and targeted search focus passed');
+
+// Verify the annual scale contract across sparse and busy years: only maxima
+// use the darkest green, and the legend covers every count without overlap.
+const dashboardSource = fs.readFileSync(path.join(__dirname, '../../web/static/analytics_dashboard.js'), 'utf8');
+const calendarHelpers = dashboardSource.slice(dashboardSource.indexOf('    function calendarActivityLevel('), dashboardSource.indexOf('    function renderVisitCalendar('));
+const calendarContext = {};
+vm.runInNewContext(calendarHelpers, calendarContext);
+for (const annualMaximum of [0,1,2,3,4,7,100,1000]) {
+    const intervals = calendarContext.calendarActivityRanges(annualMaximum);
+    for (let visitorCount = 0; visitorCount <= annualMaximum; visitorCount++) {
+        const level = calendarContext.calendarActivityLevel(visitorCount,annualMaximum);
+        assert.equal(level === 4, annualMaximum > 0 && visitorCount === annualMaximum);
+        const containing = intervals.filter(interval => visitorCount >= interval.minimumVisitors && visitorCount <= interval.maximumVisitors);
+        assert.equal(containing.length,1,'legend must cover every count exactly once');
+        assert.equal(containing[0].level,level,'legend must match the calendar cell');
+    }
+}
+console.log('Analytics calendar: annual maximum, sparse years and exact legend ranges passed');
+
+const signatureHelper = dashboardSource.slice(dashboardSource.indexOf('    function goalRulesSignature('), dashboardSource.indexOf('    function renderGoals('));
+const goalContext = {};
+vm.runInNewContext(signatureHelper, goalContext);
+const flatForm = {Name:'Contact',Kind:'form-submit',Page:'/contact',Element:'key:contact'};
+const editedForm = {Name:'Контакты',Primary:true,Steps:[{Name:'Send',Kind:'form-submit',Page:'/contact',Element:'key:contact'}]};
+assert.equal(goalContext.goalRulesSignature(flatForm),goalContext.goalRulesSignature(editedForm),'flat and edited goals with the same rules must deduplicate');
+assert.notEqual(goalContext.goalRulesSignature(flatForm),goalContext.goalRulesSignature({...flatForm,Page:'/other'}));
+console.log('Initial goal suggestions: rule identity survives editor normalization and translated names');
+
+// Exercise the constructor and its actual WebSocket payload at the server limits.
+const constructorSource = dashboardSource.slice(dashboardSource.indexOf('    function inputField('), dashboardSource.indexOf('    renderFunnels(); renderGoals();'));
+function goalConstructor(configuredGoals, suggestedGoals = []) {
+    const constructorElements = new Map();
+    const configurationSockets = [];
+    const constructorModel = {goals: JSON.parse(JSON.stringify(configuredGoals)), suggestedGoals, saving: false};
+    function constructorElement(identifier) {
+        if (!constructorElements.has(identifier)) constructorElements.set(identifier, securityElement());
+        return constructorElements.get(identifier);
+    }
+    class ConfigurationSocket {
+        constructor() { this.listeners = {}; this.sent = []; configurationSockets.push(this); }
+        addEventListener(name, callback) { this.listeners[name] = callback; }
+        send(encodedConfiguration) { this.sent.push(JSON.parse(encodedConfiguration)); }
+        close() {}
+    }
+    const constructorContext = {
+        model: constructorModel,
+        document: {getElementById: constructorElement},
+        node: (tagName, text) => Object.assign(securityElement(), {tagName, textContent: text || ''}),
+        label: translationKey => translationKey,
+        dashboard: {dataset: {csrf: 'constructor-csrf'}},
+        location: {protocol: 'https:', host: 'site.example'},
+        WebSocket: ConfigurationSocket
+    };
+    vm.runInNewContext(constructorSource, constructorContext);
+    constructorContext.renderGoals();
+    return {model: constructorModel, element: constructorElement, sockets: configurationSockets};
+}
+for (const configuredCount of [0, ...Array.from({length: 25}, (_, goalIndex) => goalIndex + 8)]) {
+    const configuredGoals = Array.from({length: configuredCount}, (_, goalIndex) => goalIndex < 8
+        ? {Name: 'Goal ' + goalIndex, Primary: goalIndex === 0, Steps: [{Name: 'Viewed', Kind: 'page', Page: '/'}]}
+        : {Name: 'Goal ' + goalIndex, Kind: 'event', Match: 'registration', Page: '/signup'});
+    const constructor = goalConstructor(configuredGoals);
+    assert.equal(JSON.stringify(constructor.model.goals), JSON.stringify(configuredGoals), 'rendering must preserve single-event goals');
+    assert.equal(constructor.element('conversion-add-goal').disabled, configuredCount === 32);
+    constructor.element('conversion-add-goal').listeners.click();
+    assert.equal(constructor.model.goals.length, Math.min(configuredCount + 1, 32), 'manual additions must use all 32 slots');
+    assert.equal(constructor.element('conversion-add-goal').disabled, constructor.model.goals.length === 32);
+    constructor.element('conversion-save').listeners.click();
+    constructor.sockets[0].listeners.open();
+    const savedConfiguration = constructor.sockets[0].sent[0];
+    assert.equal(savedConfiguration.operation, 'configure');
+    assert.equal(savedConfiguration.csrf, 'constructor-csrf');
+    assert.deepEqual(savedConfiguration.goals.slice(0, configuredCount), configuredGoals);
+    assert.equal(savedConfiguration.goals.filter(goal => goal.Steps && goal.Steps.length).length, Math.min(configuredCount, 8), 'manual additions must not consume the separate eight-funnel capacity');
+    if (configuredCount < 32) assert.equal(savedConfiguration.goals.at(-1).Kind, 'page');
+}
+const suggestedConstructor = goalConstructor(Array.from({length: 7}, (_, goalIndex) => ({Name: 'Existing ' + goalIndex, Kind: 'page', Page: '/'})), [
+    {Name: 'Download', Steps: [{Kind: 'download'}]},
+    {Name: 'Contact', Steps: [{Kind: 'form-submit'}]}
+]);
+suggestedConstructor.element('conversion-suggest-goals').listeners.click();
+assert.equal(suggestedConstructor.model.goals.length, 8, 'automatic suggestions retain their smaller cap');
+assert.equal(suggestedConstructor.element('conversion-suggest-goals').disabled, true);
+assert.equal(suggestedConstructor.element('conversion-add-goal').disabled, false);
+suggestedConstructor.element('conversion-add-goal').listeners.click();
+suggestedConstructor.element('conversion-suggest-goals').listeners.click();
+assert.equal(suggestedConstructor.model.goals.length, 9, 'the automatic cap must not restrict manual additions');
+
+const formConstructor = goalConstructor([flatForm]);
+const formEditor = formConstructor.element('conversion-goals').children[0];
+formEditor.children[1].children.at(-1).listeners.click();
+assert.equal(formConstructor.model.goals[0].Steps, undefined, 'a single-event rule cannot be removed as a funnel step');
+formEditor.children.at(-1).listeners.click();
+assert.equal(formConstructor.model.goals[0].Steps.length, 2);
+assert.equal(goalContext.goalRulesSignature({...formConstructor.model.goals[0], Steps: formConstructor.model.goals[0].Steps.slice(0, 1)}), goalContext.goalRulesSignature(flatForm), 'adding a funnel step must preserve the original rule');
+console.log('Analytics constructor: 32 manual goals, eight suggestions, unchanged save rules and explicit funnel steps passed');

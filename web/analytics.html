@@ -751,13 +751,14 @@
     <input type="hidden" name="campaign" value="">
     <button class="btn btn-outline-secondary">{{index .T "ax_filter"}}</button>
   </form>
-      <p class="small">{{index .T "cx_map_hint"}}</p><div id="conversion-visitor-map" class="world-map-panel"></div><p id="conversion-map-status" class="small text-muted"></p>
+      <p class="small">{{index .T "cx_map_hint"}}</p><div id="conversion-visitor-map" class="world-map-panel"></div><p class="small mt-1"><a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap contributors</a> · <a href="https://www.openstreetmap.org/fixthemap" target="_blank" rel="noopener">{{index .T "cx_map_issue"}}</a></p><p id="conversion-map-status" class="small text-muted"></p>
       <details><summary>{{index .T "cx_visitors"}}</summary><div id="conversion-map-visitors"></div></details>
       <h3 class="h5 mt-4">{{index .T "ax_activity_days"}}</h3><div id="conversion-visit-calendar" class="activity-calendar-days"></div>
     </div></section>
     <section class="card mb-4"><div class="card-body"><h2 class="h4">{{index .T "cx_conversion"}}</h2>
       <p class="small">{{index .T "cx_window"}}</p><div id="conversion-funnels"></div>
-      <details><summary>{{index .T "cx_constructor"}}</summary><div id="conversion-goals" class="mt-3"></div>
+      <details><summary>{{index .T "cx_constructor"}}</summary><p class="small mt-2">{{index .T "cx_goal_help"}}</p><p class="small">{{index .T "cx_step_help"}}</p><p class="small">{{index .T "cx_goal_examples"}}</p>{{if .InitialGoalsError}}<p class="alert alert-warning">{{index .T "cx_automatic_error"}}</p>{{end}}<div id="conversion-goals" class="mt-3"></div>
+        <button type="button" id="conversion-suggest-goals" class="btn btn-outline-secondary">{{index .T "cx_suggest_goals"}}</button>
         <button type="button" id="conversion-add-goal" class="btn btn-outline-secondary">{{index .T "cx_add_goal"}}</button>
         <button type="button" id="conversion-save" class="btn btn-primary">{{index .T "ax_save"}}</button><p id="conversion-save-status" role="status"></p>
         <details class="mt-2"><summary>{{index .T "cx_custom"}}</summary><pre><code>SiteBrushAnalytics.event('purchase');
@@ -779,6 +780,7 @@ SiteBrushAnalytics.formResult('contact', true);</code></pre><p class="small">{{i
     </div></footer>
     <script type="application/json" id="conversion-site-catalog">{{.SiteTreeJSON}}</script>
     <script type="application/json" id="conversion-report">{{.ConversionJSON}}</script>
+    <script type="application/json" id="conversion-suggestions">{{.SuggestedGoalsJSON}}</script>
     <script type="application/json" id="conversion-configuration">{{.GoalsJSON}}</script>
     <script type="application/json" id="conversion-replay-preferences">{{.ReplayPreferencesJSON}}</script>
     <div id="conversion-labels" hidden>
@@ -794,6 +796,26 @@ SiteBrushAnalytics.formResult('contact', true);</code></pre><p class="small">{{i
       <span data-translation="cx_conversion">{{index .T "cx_conversion"}}</span>
       <span data-translation="cx_behaviour">{{index .T "cx_behaviour"}}</span>
       <span data-translation="cx_retention">{{index .T "cx_retention"}}</span>
+      <span data-translation="cx_goal_help">{{index .T "cx_goal_help"}}</span>
+      <span data-translation="cx_step_help">{{index .T "cx_step_help"}}</span>
+      <span data-translation="cx_goal_examples">{{index .T "cx_goal_examples"}}</span>
+      <span data-translation="cx_automatic_goal">{{index .T "cx_automatic_goal"}}</span>
+      <span data-translation="cx_automatic_error">{{index .T "cx_automatic_error"}}</span>
+      <span data-translation="cx_suggest_goals">{{index .T "cx_suggest_goals"}}</span>
+      <span data-translation="cx_unlinked_path">{{index .T "cx_unlinked_path"}}</span>
+      <span data-translation="cx_map_unavailable">{{index .T "cx_map_unavailable"}}</span>
+      <span data-translation="cx_map_issue">{{index .T "cx_map_issue"}}</span>
+      <span data-translation="cx_kind_page">{{index .T "cx_kind_page"}}</span>
+      <span data-translation="cx_kind_click">{{index .T "cx_kind_click"}}</span>
+      <span data-translation="cx_kind_scroll">{{index .T "cx_kind_scroll"}}</span>
+      <span data-translation="cx_kind_download">{{index .T "cx_kind_download"}}</span>
+      <span data-translation="cx_kind_form_start">{{index .T "cx_kind_form_start"}}</span>
+      <span data-translation="cx_kind_form_submit">{{index .T "cx_kind_form_submit"}}</span>
+      <span data-translation="cx_kind_form_success">{{index .T "cx_kind_form_success"}}</span>
+      <span data-translation="cx_kind_external_link">{{index .T "cx_kind_external_link"}}</span>
+      <span data-translation="cx_kind_event">{{index .T "cx_kind_event"}}</span>
+      <span data-translation="cx_kind_uri">{{index .T "cx_kind_uri"}}</span>
+      <span data-translation="cx_kind_action">{{index .T "cx_kind_action"}}</span>
       <span data-translation="cx_constructor">{{index .T "cx_constructor"}}</span>
       <span data-translation="cx_primary">{{index .T "cx_primary"}}</span>
       <span data-translation="cx_step">{{index .T "cx_step"}}</span>
@@ -1916,6 +1938,7 @@ SiteBrushAnalytics.formResult('contact', true);</code></pre><p class="small">{{i
   });
   const tileLayer = window.L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19,
+    referrerPolicy: 'origin',
     className: document.documentElement.getAttribute('data-bs-theme') === 'dark' ? 'osm-night-tiles' : '',
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
   });

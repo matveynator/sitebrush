@@ -204,6 +204,27 @@ func TestExperienceSourceEvidenceAndCleaning(t *testing.T) {
 	}
 }
 
+func TestExperienceGoalsAllow32WithSeparateFunnelLimit(t *testing.T) {
+	goals := make([]Goal, 32)
+	for goalIndex := range goals {
+		goals[goalIndex] = Goal{Name: fmt.Sprintf("Goal %d", goalIndex), Kind: "page", Page: "/"}
+		if goalIndex < 8 {
+			goals[goalIndex].Steps = []Goal{{Name: "Viewed", Kind: "page", Page: "/"}}
+		}
+	}
+	goals[0].Primary = true
+	if err := ValidateGoals(goals); err != nil {
+		t.Fatalf("32 goals including eight funnels must remain valid: %v", err)
+	}
+	if err := ValidateGoals(append(goals, Goal{Name: "Extra", Kind: "page", Page: "/"})); err == nil {
+		t.Fatal("33 goals were accepted")
+	}
+	goals[8].Steps = []Goal{{Name: "Viewed", Kind: "page", Page: "/"}}
+	if err := ValidateGoals(goals); err == nil {
+		t.Fatal("nine funnels were accepted")
+	}
+}
+
 func TestURIGoalsQueryFragmentAndPathCompatibility(t *testing.T) {
 	if got := SafeURI("/?b=2&utm_source=github&a=1&token=secret#download"); got != "/?a=1&b=2#download" {
 		t.Fatalf("canonical URI = %q", got)

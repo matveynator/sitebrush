@@ -32,6 +32,7 @@ const (
 	ReadUsage
 	ReadPreferences
 	SavePreferences
+	InitializeConfiguration
 )
 
 type StorageRequest struct {
@@ -278,7 +279,7 @@ func (store *Store) execute(root string, request StorageRequest, archivedHour ma
 		return StorageResult{Err: errors.New("unsafe analytics database")}
 	}
 	_, databaseErr := os.Stat(databasePath)
-	mutating := os.IsNotExist(databaseErr) || request.Operation == SaveBrowser || request.Operation == SaveSecurity || request.Operation == SaveConfiguration || request.Operation == SavePreferences || request.Operation == SaveTechnical
+	mutating := os.IsNotExist(databaseErr) || request.Operation == SaveBrowser || request.Operation == SaveSecurity || request.Operation == SaveConfiguration || request.Operation == InitializeConfiguration || request.Operation == SavePreferences || request.Operation == SaveTechnical
 	if request.Quota != nil {
 		defer func() {
 			if actual, actualErr := directoryBytes(directory); actualErr == nil {
@@ -390,9 +391,19 @@ func (store *Store) execute(root string, request StorageRequest, archivedHour ma
 			return StorageResult{Err: errors.New("preferences exceed storage budget")}
 		}
 		return StorageResult{Err: writeCheckpoint(boundary, database, "preferences", request.State)}
-	case SaveConfiguration:
+	case SaveConfiguration, InitializeConfiguration:
 		if len(request.State) > 16384 {
 			return StorageResult{Err: errors.New("configuration exceeds storage budget")}
+		}
+		if request.Operation == InitializeConfiguration {
+			var existing string
+			err := database.QueryRowContext(boundary, `SELECT body FROM checkpoints WHERE kind=?`, "configuration").Scan(&existing)
+			if err == nil {
+				return StorageResult{Text: existing}
+			}
+			if !errors.Is(err, sql.ErrNoRows) {
+				return StorageResult{Err: err}
+			}
 		}
 		return StorageResult{Err: writeCheckpoint(boundary, database, "configuration", request.State)}
 	case SaveSecurity:

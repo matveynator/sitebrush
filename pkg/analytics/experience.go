@@ -21,6 +21,7 @@ type Action struct {
 	Count  int    `json:"count"`
 }
 type Goal struct {
+	Automatic   bool   `json:",omitempty"`
 	SuccessPage string `json:",omitempty"`
 	Primary     bool   `json:",omitempty"`
 	Page        string `json:",omitempty"`
