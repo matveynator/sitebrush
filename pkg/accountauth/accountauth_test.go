@@ -20,7 +20,7 @@ func testDatabase(t *testing.T) *sql.DB {
 	}
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { db.Close() })
-	for _, query := range append(Schema(), `CREATE TABLE users(domain TEXT,email TEXT,password TEXT,is_admin INTEGER)`, `CREATE TABLE sessions(token TEXT,user_email TEXT,created_at TEXT,client_ip TEXT,security_version INTEGER)`, `INSERT INTO users VALUES('example.org','owner@example.org','password',1)`) {
+	for _, query := range append(Schema(), `CREATE TABLE users(domain TEXT,email TEXT,password TEXT,is_admin INTEGER)`, `CREATE TABLE sessions(token TEXT,user_email TEXT,created_at TEXT,client_ip TEXT,security_version INTEGER,last_used_at INTEGER NOT NULL DEFAULT 0)`, `INSERT INTO users VALUES('example.org','owner@example.org','password',1)`) {
 		if _, err := db.Exec(query); err != nil {
 			t.Fatal(err)
 		}
@@ -403,7 +403,6 @@ func TestPasswordSnapshotUsesSaltAndRejectsChangedPassword(t *testing.T) {
 		t.Fatal("obsolete fast snapshot accepted")
 	}
 }
-
 
 // BEGIN authentication replay and race regression tests.
 

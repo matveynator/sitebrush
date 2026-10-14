@@ -604,6 +604,19 @@ func (site *Site) recordConversion(event Event, now time.Time, limit int64) bool
 }
 
 // Reuse the bounded view sequence gate without retaining a second raw stream.
+// Retries must be acknowledged without reserving memory or changing aggregates.
+func (site *Site) BatchRecorded(event Event) bool {
+	if site.Conversion == nil {
+		return false
+	}
+	visitor := site.Conversion.Visitors[event.Visitor]
+	if visitor == nil {
+		return false
+	}
+	delivery := visitor.Deliveries[event.View]
+	return delivery != nil && delivery.Path == event.Path && delivery.Sequence >= event.Sequence
+}
+
 func visitorSequences(site *Site, event Event, now time.Time) bool {
 	visitor := site.Conversion.Visitors[event.Visitor]
 	if visitor.Deliveries == nil {

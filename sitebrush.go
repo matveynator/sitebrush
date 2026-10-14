@@ -129,7 +129,7 @@ const sitebrushHTTPWriteTimeout = 0
 const sitebrushHTTPIdleTimeout = 65 * time.Second
 const sitebrushHTTPReadHeaderTimeout = 5 * time.Second
 const sitebrushHTTP10KeepAliveBufferLimit = 1024 * 1024
-const currentSiteDatabaseSchemaVersion = 11
+const currentSiteDatabaseSchemaVersion = 12
 const siteDatabaseStartupMigrationTimeout = 30 * time.Second
 const pagePasswordSessionTTL = time.Hour
 const serviceMailRelayPath = "/?service_mail_relay"
@@ -722,14 +722,15 @@ type embeddedStaticAsset struct {
 }
 
 type guestStaticHTMLCacheRequest struct {
-	filePath     string
-	staticHTML   []byte
-	pagePath     string
-	domain       string
-	languageCode string
-	modTime      time.Time
-	size         int64
-	response     chan guestStaticHTMLCacheResponse
+	filePath      string
+	staticHTML    []byte
+	pagePath      string
+	domain        string
+	languageCode  string
+	analyticsOnly bool
+	modTime       time.Time
+	size          int64
+	response      chan guestStaticHTMLCacheResponse
 }
 
 type guestStaticHTMLCacheResponse struct {
@@ -3877,10 +3878,20 @@ func (a *App) retryAnalyticsReport(stop context.Context, domain string, report a
 	a.markAnalyticsLoss(domain)
 }
 
+// Admission transfers observation ownership to the worker. Network cancellation
+// ends the reply contact without discarding an already accepted visit.
 type browserAnalyticsEnvelope struct {
 	domain   string
 	event    browserstats.Event
 	received time.Time
+	reply    chan<- browserAnalyticsReceipt
+	stop     <-chan struct{}
+}
+type browserAnalyticsReceipt struct {
+	Operation string `json:"operation"`
+	View      string `json:"view"`
+	Sequence  int    `json:"sequence"`
+	Accepted  bool   `json:"accepted"`
 }
 type browserAnalyticsStorageJob struct {
 	limit  int64
@@ -3934,8 +3945,14 @@ func (a *App) browserAnalyticsSocket(w http.ResponseWriter, r *http.Request) {
 	websocket.Server{Handshake: func(*websocket.Config, *http.Request) error { return nil }, Handler: func(connection *websocket.Conn) {
 		defer connection.Close()
 		connection.MaxPayloadBytes = 16384
-		var previous time.Time
-		messages := 0
+		// One writer serializes configuration and worker replies for this session.
+		outbound := make(chan string, 8)
+		receipts := make(chan browserAnalyticsReceipt, 4)
+		sessionStop := make(chan struct{})
+		defer close(sessionStop)
+		go writeBrowserAnalyticsSession(connection, outbound, receipts, sessionStop)
+		messageWindowStarted := time.Now()
+		messageWindowCount := 0
 		rulesSent := false
 		preferences, _ := a.readAnalyticsReplayPreferences(domain)
 		preferencesReadAt := time.Now()
@@ -3951,13 +3968,18 @@ func (a *App) browserAnalyticsSocket(w http.ResponseWriter, r *http.Request) {
 				preferencesReadAt = now
 				rulesSent = false
 			}
-			if messages > 1 && now.Sub(previous) < time.Second {
+			// A small burst allowance tolerates network jitter and restored batches.
+			if now.Sub(messageWindowStarted) >= time.Second {
+				messageWindowStarted, messageWindowCount = now, 0
+			}
+			messageWindowCount++
+			if messageWindowCount > 4 {
 				return
 			}
-			messages++
-			previous = now
 			if reply, handled := a.analyticsConfigurationMessage(r, payload); handled {
-				if websocket.Message.Send(connection, reply) != nil {
+				select {
+				case outbound <- reply:
+				default:
 					return
 				}
 				continue
@@ -3972,13 +3994,15 @@ func (a *App) browserAnalyticsSocket(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				select {
-				case a.browserAnalytics <- browserAnalyticsEnvelope{domain, event, now}:
+				case a.browserAnalytics <- browserAnalyticsEnvelope{domain: domain, event: event, received: now, reply: receipts, stop: sessionStop}:
 				default:
 					a.markAnalyticsLoss(domain)
 					return
 				}
 				if !rulesSent {
-					if websocket.Message.Send(connection, a.analyticsURIRules(domain)) != nil {
+					select {
+					case outbound <- a.analyticsURIRules(domain):
+					default:
 						return
 					}
 					rulesSent = true
@@ -4022,13 +4046,51 @@ func (a *App) browserAnalyticsSocket(w http.ResponseWriter, r *http.Request) {
 			event.Source = event.Attribution.Name
 			event.Referrer = browserstats.SafeReferrer(event.Referrer)
 			select {
-			case a.browserAnalytics <- browserAnalyticsEnvelope{domain, event, now}:
+			case a.browserAnalytics <- browserAnalyticsEnvelope{domain: domain, event: event, received: now}:
 			default:
 				a.markAnalyticsLoss(domain)
 				return
 			}
 		}
 	}}.ServeHTTP(w, r)
+}
+
+func writeBrowserAnalyticsSession(connection *websocket.Conn, outbound <-chan string, receipts <-chan browserAnalyticsReceipt, stop <-chan struct{}) {
+	defer connection.Close()
+	for {
+		var message string
+		select {
+		case <-stop:
+			return
+		case message = <-outbound:
+		case receipt := <-receipts:
+			encoded, err := json.Marshal(receipt)
+			if err != nil {
+				return
+			}
+			message = string(encoded)
+		}
+		_ = connection.SetWriteDeadline(time.Now().Add(3 * time.Second))
+		if websocket.Message.Send(connection, message) != nil {
+			return
+		}
+	}
+}
+
+func acknowledgeBrowserAnalytics(envelope browserAnalyticsEnvelope, accepted bool) {
+	if envelope.reply == nil {
+		return
+	}
+	select {
+	case <-envelope.stop:
+		return
+	default:
+	}
+	select {
+	case envelope.reply <- browserAnalyticsReceipt{Operation: "ack", View: envelope.event.View, Sequence: envelope.event.Sequence, Accepted: accepted}:
+	case <-envelope.stop:
+	default:
+	}
 }
 
 func browserAnalyticsSource(campaign, referrer, host string) string {
@@ -4212,6 +4274,7 @@ func (a *App) runBrowserAnalytics(stopRequested <-chan struct{}) {
 				slot.pending = append(slot.pending, envelope)
 			} else {
 				slot.lost = true
+				acknowledgeBrowserAnalytics(envelope, false)
 			}
 			return
 		}
@@ -4223,12 +4286,18 @@ func (a *App) runBrowserAnalytics(stopRequested <-chan struct{}) {
 			slot.state.RecordPageChange(*envelope.event.Change)
 			return
 		}
+		if slot.state.BatchRecorded(envelope.event) {
+			acknowledgeBrowserAnalytics(envelope, true)
+			return
+		}
 		a.enrichConversionLocation(slot.state, &envelope.event, envelope.received, stopRequested)
 		slot.state.ProcessingLagMS = max(0, time.Since(envelope.received).Milliseconds())
 		slot.state.QueuePercent = len(a.browserAnalytics) * 100 / max(1, cap(a.browserAnalytics))
-		if !slot.state.Record(envelope.event, envelope.received, siteLimit) {
+		accepted := slot.state.Record(envelope.event, envelope.received, siteLimit)
+		if !accepted {
 			slot.lost = slot.lost || slot.state.Incomplete
 		}
+		acknowledgeBrowserAnalytics(envelope, accepted)
 	}
 	applyResult := func(result browserAnalyticsStorageResult) {
 		slot := slots[result.domain]
@@ -5011,7 +5080,7 @@ func (a *App) browserAnalyticsBeacon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	select {
-	case a.browserAnalytics <- browserAnalyticsEnvelope{a.analyticsEventDomain(r, ""), event, time.Now().UTC()}:
+	case a.browserAnalytics <- browserAnalyticsEnvelope{domain: a.analyticsEventDomain(r, ""), event: event, received: time.Now().UTC()}:
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		a.markAnalyticsLoss(a.analyticsEventDomain(r, ""))
@@ -5070,7 +5139,7 @@ func (a *App) analyticsConfigurationMessage(r *http.Request, encoded string) (st
 		Operation string `json:"operation"`
 		Error     string `json:"error,omitempty"`
 	}{Operation: command.Operation}
-	if !a.isAdminRequest(r) || command.CSRF == "" || command.CSRF != accountCSRF(r) {
+	if command.CSRF == "" || command.CSRF != accountCSRF(r) || !a.analyticsAdministratorAllowed(r) {
 		result.Error = "forbidden"
 	} else if command.Operation == "replay-session" {
 		return a.analyticsReplaySessionMessage(r, command.Session), true
@@ -5099,6 +5168,25 @@ func (a *App) analyticsConfigurationMessage(r *http.Request, encoded string) (st
 	}
 	payload, _ := json.Marshal(result)
 	return string(payload), true
+}
+
+// The public collector bypasses navigation gates; commands still use the
+// authenticated account's own IP policy, rather than another owner's allowlist.
+func (a *App) analyticsAdministratorAllowed(r *http.Request) bool {
+	cookie, err := r.Cookie("sitebrush_session")
+	if err != nil {
+		return false
+	}
+	domain := a.siteDomain(r.Context(), r)
+	var email string
+	var lastUsed int64
+	if a.db.QueryRowContext(r.Context(), `SELECT u.email,s.last_used_at FROM sessions s JOIN users u ON (u.domain||'|'||u.email)=s.user_email WHERE s.token=? AND u.domain=? AND u.is_admin=1`, cookie.Value, domain).Scan(&email, &lastUsed) != nil || lastUsed != 0 && !accountauth.SessionActive(lastUsed, time.Now()) {
+		return false
+	}
+	if a.adminIPLoginBlocked(r.Context(), domain, accountClientIP(r), email) {
+		return false
+	}
+	return a.isAdminRequest(r)
 }
 
 // The preview reads authored static HTML; it never renders a visitor session.
@@ -5387,7 +5475,7 @@ func (a *App) initializeAnalyticsGoals(r *http.Request, domain string, catalog b
 
 func analyticsScriptTag(content string) string {
 	digest := sha256.Sum256([]byte(content))
-	return `<script defer src="/p/static/analytics.js?v=` + url.QueryEscape(CompileVersion) + `-conversion2" data-sitebrush-owned="true" data-analytics-layout="` + hex.EncodeToString(digest[:8]) + `"></script>`
+	return `<script defer src="/p/static/analytics.js?v=` + url.QueryEscape(CompileVersion) + `-conversion3" data-sitebrush-owned="true" data-analytics-layout="` + hex.EncodeToString(digest[:8]) + `"></script>`
 }
 
 // The quota process talks to the existing site database channel. Analytics
@@ -5494,6 +5582,7 @@ func (a *App) enrichSecurityIncidents(state *browserstats.SecurityState, stop <-
 type browserAnalyticsDashboard struct {
 	Report          browserstats.Report
 	Available       bool
+	Error           bool
 	Days            int
 	Age             string
 	Cards           []analyticsMetricCard
@@ -5509,11 +5598,16 @@ func (a *App) browserAnalyticsView(r *http.Request, domain string) browserAnalyt
 	dashboard := browserAnalyticsDashboard{Days: days}
 	result := a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.ReadBrowserReport, Domain: domain, Stop: r.Context().Done()})
 	if result.Err != nil {
+		dashboard.Error = !errors.Is(result.Err, sql.ErrNoRows)
+		if dashboard.Error {
+			log.Printf("browser analytics report unavailable domain=%q error=%s", domain, diagnosticlog.SafeLogValue(result.Err.Error()))
+		}
 		return dashboard
 	}
 	encoded := result.Text
 	reports := map[string]browserstats.Report{}
 	if json.Unmarshal([]byte(encoded), &reports) != nil {
+		dashboard.Error = true
 		return dashboard
 	}
 	dashboard.Report, dashboard.Available = reports[strconv.Itoa(days)]
@@ -9970,6 +10064,10 @@ func (a *App) migrate(ctx context.Context) error {
 	if _, err := a.db.ExecContext(ctx, `DELETE FROM sessions WHERE security_version<1`); err != nil {
 		return err
 	}
+	// Existing authenticated browsers receive one migration grace period.
+	if _, err := a.db.ExecContext(ctx, `UPDATE sessions SET last_used_at=? WHERE last_used_at=0`, time.Now().Unix()); err != nil {
+		return err
+	}
 	_, _ = a.db.ExecContext(ctx, `UPDATE users SET domain=? WHERE domain IS NULL OR TRIM(domain)=''`, legacyDomain)
 	_, _ = a.db.ExecContext(ctx, `UPDATE pages SET domain=? WHERE domain IS NULL OR TRIM(domain)=''`, legacyDomain)
 	_, _ = a.db.ExecContext(ctx, `UPDATE revisions SET domain=? WHERE domain IS NULL OR TRIM(domain)=''`, legacyDomain)
@@ -10024,6 +10122,7 @@ func requiredSiteDatabaseColumns() []siteDatabaseColumnRequirement {
 		{"sessions", "user_agent", "TEXT NOT NULL DEFAULT ''"},
 		{"sessions", "language", "TEXT NOT NULL DEFAULT 'en'"},
 		{"sessions", "security_version", "INTEGER NOT NULL DEFAULT 0"},
+		{"sessions", "last_used_at", "INTEGER NOT NULL DEFAULT 0"},
 		{"sessions", "admin_ip_trust", "INTEGER NOT NULL DEFAULT 1"},
 		{"account_login_codes", "language", "TEXT NOT NULL DEFAULT 'en'"},
 		{"account_trusted_ips", "last_login", "INTEGER NOT NULL DEFAULT 0"},
@@ -10594,11 +10693,12 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	publicTrialEndpoint := publicTrialEndpointFromRequest(r)
-	if !localGuestStaticRequest && publicTrialEndpoint == publicTrialEndpointNone && a.serveStealthStaticForBlockedAdminIP(w, r, requestDomain, pagePath) {
-		return
-	}
+	// Public observations remain available when the administrator UI is hidden.
 	if r.URL.Path == "/_sitebrush/analytics" {
 		a.browserAnalyticsSocket(w, r)
+		return
+	}
+	if !localGuestStaticRequest && publicTrialEndpoint == publicTrialEndpointNone && a.serveStealthStaticForBlockedAdminIP(w, r, requestDomain, pagePath) {
 		return
 	}
 	if hasQueryFlag(r, "login") && !hasQueryFlag(r, "register") && !hasQueryFlag(r, "email_confirm") {
@@ -13533,7 +13633,8 @@ func (a *App) enforceAdminIPAllowlist(w http.ResponseWriter, r *http.Request, do
 		return true
 	}
 	var email string
-	err = a.db.QueryRowContext(r.Context(), `SELECT u.email FROM sessions s JOIN users u ON (u.domain||'|'||u.email)=s.user_email WHERE s.token=? AND u.domain=? AND u.is_admin=1 LIMIT 1`, cookie.Value, strings.TrimSpace(domain)).Scan(&email)
+	var lastUsed int64
+	err = a.db.QueryRowContext(r.Context(), `SELECT u.email,s.last_used_at FROM sessions s JOIN users u ON (u.domain||'|'||u.email)=s.user_email WHERE s.token=? AND u.domain=? AND u.is_admin=1 LIMIT 1`, cookie.Value, strings.TrimSpace(domain)).Scan(&email, &lastUsed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return true
 	}
@@ -13544,6 +13645,11 @@ func (a *App) enforceAdminIPAllowlist(w http.ResponseWriter, r *http.Request, do
 	if err != nil {
 		http.Error(w, "account access temporarily unavailable", http.StatusServiceUnavailable)
 		return false
+	}
+	now := time.Now()
+	if lastUsed != 0 && !accountauth.SessionActive(lastUsed, now) {
+		a.expireAdminSessionCookie(w, r)
+		return true
 	}
 	ip := canonicalAccountIP(accountClientIP(r))
 	if ip == "" {
@@ -13557,7 +13663,7 @@ func (a *App) enforceAdminIPAllowlist(w http.ResponseWriter, r *http.Request, do
 		return false
 	}
 	if policyEnabled == 0 {
-		return true
+		return a.renewAccountSession(w, r, domain, email, cookie.Value, now)
 	}
 	allowedRows, err := a.db.QueryContext(r.Context(), `SELECT client_ip FROM admin_allowed_ips WHERE domain=? AND email=?`, domain, email)
 	if err != nil {
@@ -13580,8 +13686,36 @@ func (a *App) enforceAdminIPAllowlist(w http.ResponseWriter, r *http.Request, do
 	}
 	if !ipAllowed {
 		a.expireAdminSessionCookie(w, r)
+		return true
+	}
+	return a.renewAccountSession(w, r, domain, email, cookie.Value, now)
+}
+
+// Only foreground navigation and mutations extend the idle period. Assets and
+// background requests must not keep an unattended account authenticated.
+func (a *App) renewAccountSession(w http.ResponseWriter, r *http.Request, domain, email, token string, now time.Time) bool {
+	if isLikelyStaticAssetPath(r.URL.Path) || r.Method == http.MethodHead || r.Method == http.MethodOptions ||
+		r.Method == http.MethodGet && r.Header.Get("Sec-Fetch-Dest") != "" && r.Header.Get("Sec-Fetch-Dest") != "document" || strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+		return true
+	}
+	result, err := a.db.ExecContext(r.Context(), `UPDATE sessions SET last_used_at=? WHERE token=? AND user_email=? AND last_used_at<=? AND (last_used_at=0 OR last_used_at>?)`, now.Unix(), token, domain+"|"+email, now.Unix(), now.Add(-accountauth.SessionTTL).Unix())
+	if err != nil {
+		http.Error(w, "account access temporarily unavailable", http.StatusServiceUnavailable)
+		return false
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		http.Error(w, "account access temporarily unavailable", http.StatusServiceUnavailable)
+		return false
+	}
+	if updated > 0 {
+		setAccountSessionCookie(w, r, token, now)
 	}
 	return true
+}
+
+func setAccountSessionCookie(w http.ResponseWriter, r *http.Request, token string, now time.Time) {
+	httpsecurity.SetSensitiveCookie(w, r, &http.Cookie{Name: "sitebrush_session", Value: token, MaxAge: int(accountauth.SessionTTL / time.Second), Expires: now.Add(accountauth.SessionTTL).UTC()})
 }
 
 func canonicalAccountIP(rawIP string) string {
@@ -14646,7 +14780,7 @@ func (a *App) completeAccountLogin(w http.ResponseWriter, r *http.Request, domai
 	a.storeProfileSessionDetails(r, outcome.Token)
 	a.clearFailedLoginAttempts(r.Context(), domain, clientIPAddress(r))
 	a.rememberAuthenticatedAdminIP(r, domain, time.Now().UTC())
-	httpsecurity.SetSensitiveCookie(w, r, &http.Cookie{Name: "sitebrush_session", Value: outcome.Token})
+	setAccountSessionCookie(w, r, outcome.Token, time.Now())
 	a.logHostingSupportEvent(r.Context(), "client_login", "success", outcome.Email, domain, "client signed in")
 	redirectPath := outcome.Path
 	if offerPasskey && accountpasskey.UserCount(r.Context(), a.db, domain, outcome.Email) == 0 {
@@ -14755,7 +14889,7 @@ func (a *App) finishAccountPasskeyLogin(w http.ResponseWriter, r *http.Request, 
 	a.storeProfileSessionDetails(r, sessionToken)
 	a.clearFailedLoginAttempts(r.Context(), domain, clientIPAddress(r))
 	a.rememberAuthenticatedAdminIP(r, domain, time.Now().UTC())
-	httpsecurity.SetSensitiveCookie(w, r, &http.Cookie{Name: "sitebrush_session", Value: sessionToken})
+	setAccountSessionCookie(w, r, sessionToken, time.Now())
 	a.logHostingSupportEvent(r.Context(), "client_login", "success", email, domain, "client signed in with passkey")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(map[string]string{"redirect": httpsecurity.LocalRedirectTarget(returnPath, "/")})
@@ -14811,10 +14945,14 @@ func (a *App) renderLoginPage(w http.ResponseWriter, r *http.Request, returnPath
 	translations := translationsForRequest(r)
 	domain := a.siteDomain(r.Context(), r)
 	passkeyStartURL := "?login&passkey_begin&return_path=" + url.QueryEscape(httpsecurity.LocalRedirectTarget(returnPath, "/"))
+	hasPasskeys := accountpasskey.Count(r.Context(), a.db, domain) > 0
+	passwordLoginURL := "?login&password_login=1&return_path=" + url.QueryEscape(httpsecurity.LocalRedirectTarget(returnPath, "/"))
 	a.render(w, r, "login.html", map[string]any{
 		"ReturnPath":           returnPath,
 		"Domain":               domain,
-		"HasPasskeys":          accountpasskey.Count(r.Context(), a.db, domain) > 0,
+		"HasPasskeys":          hasPasskeys,
+		"ShowPasswordForm":     !hasPasskeys || hasQueryFlag(r, "password_login") || r.Method == http.MethodPost,
+		"PasswordLoginURL":     passwordLoginURL,
 		"PasskeyStartURL":      passkeyStartURL,
 		"Email":                strings.TrimSpace(email),
 		"Status":               strings.TrimSpace(status),
@@ -24437,7 +24575,7 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 		if enabled, queryErr := a.adminStealthEnabled(r.Context(), domain, accountEmail); queryErr == nil {
 			adminStealthEnabled = enabled
 		}
-		rows, err := a.db.QueryContext(r.Context(), `SELECT token,client_ip,created_at,user_agent,language FROM sessions WHERE user_email=? ORDER BY created_at DESC LIMIT 50`, domain+"|"+accountEmail)
+		rows, err := a.db.QueryContext(r.Context(), `SELECT token,client_ip,created_at,user_agent,language FROM sessions WHERE user_email=? AND (last_used_at=0 OR last_used_at>?) AND last_used_at<=? ORDER BY created_at DESC LIMIT 50`, domain+"|"+accountEmail, time.Now().Add(-accountauth.SessionTTL).Unix(), time.Now().Unix())
 		if err == nil {
 			for rows.Next() {
 				entry := profileSessionView{}
@@ -24483,7 +24621,7 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 			})
 		}
 		profileSessionCount = len(profileSessions)
-		_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM sessions WHERE user_email=?`, domain+"|"+accountEmail).Scan(&profileSessionCount)
+		_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM sessions WHERE user_email=? AND (last_used_at=0 OR last_used_at>?) AND last_used_at<=?`, domain+"|"+accountEmail, time.Now().Add(-accountauth.SessionTTL).Unix(), time.Now().Unix()).Scan(&profileSessionCount)
 		adminAllowedIPCount = len(adminAllowedIPs)
 		if len(adminAllowedIPs) > 4 {
 			adminAllowedIPMore = append(adminAllowedIPMore, adminAllowedIPs[4:]...)
@@ -33544,7 +33682,7 @@ func (a *App) createSessionForDomainWithIPTrust(w http.ResponseWriter, r *http.R
 		return ""
 	}
 	a.storeProfileSessionDetails(r, token)
-	httpsecurity.SetSensitiveCookie(w, r, &http.Cookie{Name: "sitebrush_session", Value: token})
+	setAccountSessionCookie(w, r, token, time.Now())
 	return token
 }
 
@@ -33567,10 +33705,28 @@ func (a *App) currentAdminEmailForDomain(r *http.Request, domain string) (string
 		return "", false
 	}
 	var email, sessionIP string
+	var lastUsed int64
 	var adminIPTrust int
-	err = a.db.QueryRowContext(r.Context(), `SELECT u.email,s.client_ip,s.admin_ip_trust FROM sessions s JOIN users u ON (u.domain||'|'||u.email)=s.user_email WHERE s.token=? AND u.domain=? AND u.is_admin=1 LIMIT 1`, cookie.Value, strings.TrimSpace(domain)).Scan(&email, &sessionIP, &adminIPTrust)
-	if err != nil || strings.TrimSpace(email) == "" {
+	err = a.db.QueryRowContext(r.Context(), `SELECT u.email,s.client_ip,s.admin_ip_trust,s.last_used_at FROM sessions s JOIN users u ON (u.domain||'|'||u.email)=s.user_email WHERE s.token=? AND u.domain=? AND u.is_admin=1 LIMIT 1`, cookie.Value, strings.TrimSpace(domain)).Scan(&email, &sessionIP, &adminIPTrust, &lastUsed)
+	if err != nil || strings.TrimSpace(email) == "" || lastUsed != 0 && !accountauth.SessionActive(lastUsed, time.Now()) {
 		return "", false
+	}
+	if lastUsed == 0 {
+		// Old backups may lack an activity timestamp even after their schema upgrade.
+		result, updateErr := a.db.ExecContext(r.Context(), `UPDATE sessions SET last_used_at=? WHERE token=? AND user_email=? AND last_used_at=0`, time.Now().Unix(), cookie.Value, strings.TrimSpace(domain)+"|"+email)
+		if updateErr != nil {
+			return "", false
+		}
+		updated, updateErr := result.RowsAffected()
+		if updateErr != nil {
+			return "", false
+		}
+		if updated == 0 {
+			// Concurrent first use may have initialized the same legacy session.
+			if a.db.QueryRowContext(r.Context(), `SELECT last_used_at FROM sessions WHERE token=? AND user_email=?`, cookie.Value, strings.TrimSpace(domain)+"|"+email).Scan(&lastUsed) != nil || !accountauth.SessionActive(lastUsed, time.Now()) {
+				return "", false
+			}
+		}
 	}
 	// A valid browser session survives travel; only new sessions require a mail challenge.
 	ip := accountClientIP(r)
@@ -41905,8 +42061,25 @@ func (a *App) servePublishedStaticFileFromDisk(w http.ResponseWriter, r *http.Re
 			return false
 		}
 	}
-	_, _ = w.Write(staticContent)
+	// Stealth hides the editor menu, not public visitor observations.
+	visitorHTML, cacheErr := a.cachedVisitorHTMLFromContent(staticFilePath, staticContent, pagePath, domain, "", fileInfo, true)
+	if cacheErr != nil {
+		return false
+	}
+	_, _ = w.Write(visitorHTML)
 	return true
+}
+
+func injectPublishedAnalytics(html string) string {
+	if strings.Contains(html, `src="/p/static/analytics.js?v=`) {
+		return html
+	}
+	script := analyticsScriptTag(html)
+	closingBody := strings.LastIndex(strings.ToLower(html), "</body>")
+	if closingBody < 0 {
+		return html + script
+	}
+	return html[:closingBody] + script + html[closingBody:]
 }
 
 func (a *App) servePublishedStaticFileForAdmin(w http.ResponseWriter, r *http.Request, domain, pagePath string, adminEmail string) bool {
@@ -41979,30 +42152,42 @@ func (a *App) guestStaticHTML(staticFilePath, pagePath, domain, languageCode str
 }
 
 func (a *App) guestStaticHTMLFromContent(staticFilePath string, staticContent []byte, pagePath, domain, languageCode string, fileInfo os.FileInfo) ([]byte, error) {
+	return a.cachedVisitorHTMLFromContent(staticFilePath, staticContent, pagePath, domain, languageCode, fileInfo, false)
+}
+
+func buildPublishedVisitorHTMLBody(staticContent []byte, pagePath, domain, languageCode string, analyticsOnly bool) []byte {
+	if analyticsOnly {
+		return []byte(injectPublishedAnalytics(string(staticContent)))
+	}
+	return buildGuestStaticHTMLBody(staticContent, pagePath, domain, languageCode)
+}
+
+func (a *App) cachedVisitorHTMLFromContent(staticFilePath string, staticContent []byte, pagePath, domain, languageCode string, fileInfo os.FileInfo, analyticsOnly bool) ([]byte, error) {
 	if a.guestStaticHTMLCache == nil {
-		return buildGuestStaticHTMLBody(staticContent, pagePath, domain, languageCode), nil
+		return buildPublishedVisitorHTMLBody(staticContent, pagePath, domain, languageCode, analyticsOnly), nil
 	}
 	response := make(chan guestStaticHTMLCacheResponse, 1)
 	request := guestStaticHTMLCacheRequest{
-		filePath:     staticFilePath,
-		staticHTML:   staticContent,
-		pagePath:     pagePath,
-		domain:       domain,
-		languageCode: languageCode,
-		modTime:      fileInfo.ModTime(),
-		size:         fileInfo.Size(),
-		response:     response,
+		filePath:      staticFilePath,
+		staticHTML:    staticContent,
+		pagePath:      pagePath,
+		domain:        domain,
+		languageCode:  languageCode,
+		analyticsOnly: analyticsOnly,
+		modTime:       fileInfo.ModTime(),
+		size:          fileInfo.Size(),
+		response:      response,
 	}
 	select {
 	case a.guestStaticHTMLCache <- request:
 	default:
-		return buildGuestStaticHTMLBody(staticContent, pagePath, domain, languageCode), nil
+		return buildPublishedVisitorHTMLBody(staticContent, pagePath, domain, languageCode, analyticsOnly), nil
 	}
 	select {
 	case result := <-response:
 		return result.body, result.err
 	case <-time.After(2 * time.Second):
-		return buildGuestStaticHTMLBody(staticContent, pagePath, domain, languageCode), nil
+		return buildPublishedVisitorHTMLBody(staticContent, pagePath, domain, languageCode, analyticsOnly), nil
 	}
 }
 
@@ -42087,7 +42272,7 @@ func runGuestStaticHTMLCache(ctx context.Context, requests <-chan guestStaticHTM
 		case <-ctx.Done():
 			return
 		case request := <-requests:
-			cacheKey := strings.Join([]string{request.filePath, request.pagePath, request.domain, request.languageCode}, "\x00")
+			cacheKey := strings.Join([]string{request.filePath, request.pagePath, request.domain, request.languageCode, strconv.FormatBool(request.analyticsOnly)}, "\x00")
 			if cachedEntry, found := cacheEntries[cacheKey]; found {
 				if cachedEntry.modTime.Equal(request.modTime) && cachedEntry.size == request.size {
 					request.response <- guestStaticHTMLCacheResponse{body: cachedEntry.body}
@@ -42096,7 +42281,7 @@ func runGuestStaticHTMLCache(ctx context.Context, requests <-chan guestStaticHTM
 				usedBytes -= int64(len(cachedEntry.body))
 				delete(cacheEntries, cacheKey)
 			}
-			body := buildGuestStaticHTMLBody(request.staticHTML, request.pagePath, request.domain, request.languageCode)
+			body := buildPublishedVisitorHTMLBody(request.staticHTML, request.pagePath, request.domain, request.languageCode, request.analyticsOnly)
 			bodySize := int64(len(body))
 			if bodySize > limitBytes {
 				request.response <- guestStaticHTMLCacheResponse{body: body}

@@ -84,7 +84,7 @@ jobs:
       - name: Test analytics sessions and graceful shutdown
         run: >-
           go test -count=1 .
-          -run '^(TestAnalytics(SeparatesSession|LiveFlush|Rotation|DiskQuota)|TestConversion(Beacon|Configuration|Preview|Publication|InitialGoals)|TestHostingSnapshot(Schema|Compatibility)|TestBrowserAnalyticsWebSocketDelivery|TestMergedAudiencePercentages|TestControlDatabaseShutdown|TestControlReader|TestRepeatedInterrupt|TestSecurityBlockPagination|TestBlockedIPStatistics)'
+          -run '^(TestAccountSession|TestAnalytics(SeparatesSession|LiveFlush|Rotation|DiskQuota)|TestConversion(Beacon|Configuration|Preview|Publication|InitialGoals|Stealth|ReportRead)|TestHostingSnapshot(Schema|Compatibility)|TestBrowserAnalyticsWebSocketDelivery|TestMergedAudiencePercentages|TestControlDatabaseShutdown|TestControlReader|TestRepeatedInterrupt|TestSecurityBlockPagination|TestBlockedIPStatistics)'
       - name: Test security boundaries and demo
         run: >-
           go test -count=1 .
@@ -97,6 +97,7 @@ jobs:
           npm ci --ignore-scripts
           node document_test.cjs
           node ../../pkg/analytics/browser_test.cjs
+          node ../../pkg/accountpasskey/browser_test.cjs
           npx playwright install --with-deps chromium
       - name: Test conversion analytics on desktop and narrow mobile
         env:

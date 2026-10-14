@@ -7,24 +7,26 @@ function storage() {
     const contents = new Map();
     return {getItem: key => contents.get(key) || null, setItem: (key, text) => contents.set(key, String(text)), removeItem: key => contents.delete(key)};
 }
-function browser(localStorage, sessionStorage, pathname) {
+function browser(localStorage, sessionStorage, pathname, automaticAcknowledgement = true, beaconAccepted = true) {
     let clock = 2000;
     let identity = 0;
+    let timerIdentity = 0;
     const timers = [], windows = {}, documents = {}, sockets = [], intervals = [], beacons = [];
     class Socket {
         static OPEN = 1; static CLOSING = 2;
         constructor() {this.readyState=0;this.bufferedAmount=0;this.listeners={};this.sent=[];sockets.push(this);}
         addEventListener(name,callback){this.listeners[name]=callback;}
-        send(encoded){assert.ok(Buffer.byteLength(encoded)<=16384);this.sent.push(JSON.parse(encoded));}
+        send(encoded){assert.ok(Buffer.byteLength(encoded)<=16384);const batch=JSON.parse(encoded);this.sent.push(batch);if(automaticAcknowledgement)this.acknowledge(batch);}
+        acknowledge(batch){this.listeners.message({data:JSON.stringify({operation:'ack',view:batch.view,sequence:batch.sequence,accepted:true})});}
         close(){this.readyState=3;}
         open(){this.readyState=1;this.listeners.open();}
     }
-    const window={WebSocket:Socket,crypto:{getRandomValues:bytes=>bytes.fill(++identity)},setTimeout:(callback,delay)=>{timers.push({callback,delay});return timers.length;},setInterval:callback=>{intervals.push(callback);return intervals.length;},addEventListener:(name,callback)=>{windows[name]=callback;},innerHeight:600,innerWidth:1200,scrollY:0};
+    const window={WebSocket:Socket,crypto:{getRandomValues:bytes=>bytes.fill(++identity)},setTimeout:(callback,delay)=>{timers.push({callback,delay,at:clock+delay,identifier:++timerIdentity});return timerIdentity;},setInterval:callback=>{intervals.push(callback);return intervals.length;},clearTimeout:identifier=>{const scheduledTimer=timers.find(timer=>timer.identifier===identifier);if(scheduledTimer)scheduledTimer.cancelled=true;},addEventListener:(name,callback)=>{windows[name]=callback;},innerHeight:600,innerWidth:1200,scrollY:0};
     const document={readyState:'complete',visibilityState:'visible',referrer:'https://github.com/project?token=referrer-secret',documentElement:{scrollHeight:1200},body:{scrollHeight:1200},querySelectorAll:()=>[],addEventListener:(name,callback)=>{const previousCallback=documents[name];documents[name]=previousCallback?function documentCallbacks(event){previousCallback(event);callback(event);}:callback;}};
     const location={href:'https://site.example'+pathname+'?token=url-secret&utm_source=github&utm_campaign=launch',pathname,search:'?token=url-secret&utm_source=github&utm_campaign=launch',origin:'https://site.example',host:'site.example',protocol:'https:'};
-    vm.runInNewContext(source,{window,document,localStorage,sessionStorage,navigator:{sendBeacon:(address,blob)=>{beacons.push(blob);return true;}},location,URL,URLSearchParams,performance:{now:()=>clock},crypto:window.crypto,WebSocket:Socket,Uint8Array,TextEncoder,Date,console,Blob});
+    vm.runInNewContext(source,{window,document,localStorage,sessionStorage,navigator:{sendBeacon:(address,blob)=>{beacons.push(blob);return beaconAccepted;}},location,URL,URLSearchParams,performance:{now:()=>clock},crypto:window.crypto,WebSocket:Socket,Uint8Array,TextEncoder,Date,console,Blob});
     timers.shift().callback();
-    return {window,document,documents,windows,sockets,intervals,beacons,timers,advance:milliseconds=>{clock+=milliseconds;}};
+    return {window,document,documents,windows,sockets,intervals,beacons,timers,advance:milliseconds=>{clock+=milliseconds;},runTimers:()=>{for(const scheduledTimer of [...timers]){if(!scheduledTimer.cancelled&&!scheduledTimer.finished&&scheduledTimer.at<=clock){scheduledTimer.finished=true;scheduledTimer.callback();}}}};
 }
 (async function validateCollector() {
  const local=storage(),session=storage();const first=browser(local,session,'/');first.sockets[0].open();
@@ -228,3 +230,30 @@ formEditor.children.at(-1).listeners.click();
 assert.equal(formConstructor.model.goals[0].Steps.length, 2);
 assert.equal(goalContext.goalRulesSignature({...formConstructor.model.goals[0], Steps: formConstructor.model.goals[0].Steps.slice(0, 1)}), goalContext.goalRulesSignature(flatForm), 'adding a funnel step must preserve the original rule');
 console.log('Analytics constructor: 32 manual goals, eight suggestions, unchanged save rules and explicit funnel steps passed');
+
+// An unacknowledged delivery survives short visits and retries in sequence.
+const retryStorage = storage(), retrySession = storage();
+const retryBrowser = browser(retryStorage,retrySession,'/',false);
+retryBrowser.sockets[0].open();
+assert.equal(JSON.parse(retrySession.getItem('sitebrush.analytics.pending.v2')).length,1);
+retryBrowser.window.SiteBrushAnalytics.event('purchase');
+retryBrowser.advance(10000);retryBrowser.intervals[0]();
+assert.equal(retryBrowser.sockets[0].sent.length,1,'a later batch must wait for the first acknowledgement');
+assert.equal(JSON.parse(retrySession.getItem('sitebrush.analytics.pending.v2')).length,2);
+retryBrowser.sockets[0].acknowledge(retryBrowser.sockets[0].sent[0]);
+retryBrowser.advance(1000);retryBrowser.runTimers();
+assert.equal(retryBrowser.sockets[0].sent.length,2);
+retryBrowser.sockets[0].acknowledge(retryBrowser.sockets[0].sent[1]);
+assert.equal(retrySession.getItem('sitebrush.analytics.pending.v2'),null);
+const shortStorage=storage(),shortSession=storage();
+const shortVisit=browser(shortStorage,shortSession,'/',false,false);
+shortVisit.windows.pagehide();
+assert.equal(shortVisit.sockets[0].sent.length,0);
+const retained=JSON.parse(shortSession.getItem('sitebrush.analytics.pending.v2'));
+assert.equal(retained.length,1,'failed beacon must retain the first page event');
+const nextVisit=browser(shortStorage,shortSession,'/docs',false);nextVisit.sockets[0].open();
+assert.equal(nextVisit.sockets[0].sent[0].view,retained[0].envelope.view,'restore the previous view before sending the new one');
+for(let batchIndex=0;batchIndex<8;batchIndex++){nextVisit.window.SiteBrushAnalytics.event('purchase');nextVisit.advance(10000);nextVisit.intervals[0]();}
+assert.ok(JSON.parse(shortSession.getItem('sitebrush.analytics.pending.v2')).length<=4);
+assert.ok(Buffer.byteLength(shortSession.getItem('sitebrush.analytics.pending.v2'))<=65536);
+console.log('Analytics delivery: acknowledgement, ordered retry, short visits, failed beacon and bounded outbox passed');

@@ -17607,8 +17607,8 @@ func TestPasskeyReadyGreetingIsLocalizedAndUsesExistingLogin(t *testing.T) {
 					t.Fatalf("untranslated greeting %s", key)
 				}
 			}
-			if !strings.Contains(translations["auth_passkey_ready_text"], translations["auth_passkey_ready_button"]) {
-				t.Fatal("instruction does not name the displayed button")
+			if language == "ru" && translations["auth_passkey_ready_title"]+" "+translations["auth_passkey_ready_text"]+" "+translations["auth_passkey_ready_button"] != "Отлично! У нас есть ключ доступа. Нажмите сюда, чтобы войти без пароля." {
+				t.Fatal("passkey greeting does not match the requested text")
 			}
 			request := httptest.NewRequest(http.MethodGet, "https://example.org/?login&return_path=%2Fdocs", nil)
 			request.Header.Set("Accept-Language", language)
@@ -17626,8 +17626,14 @@ func TestPasskeyReadyGreetingIsLocalizedAndUsesExistingLogin(t *testing.T) {
 			if strings.Contains(page, translations["auth_passkey_offer_text"]) {
 				t.Fatal("login still offers to create a key")
 			}
-			if !strings.Contains(page, "data-passkey-login") || !strings.Contains(page, "return_path=%2Fdocs") || !strings.Contains(page, `data-passkey-finish="?login&passkey_finish"`) || !strings.Contains(page, `name="password"`) {
+			if !strings.Contains(page, "data-passkey-login") || !strings.Contains(page, "return_path=%2Fdocs") || !strings.Contains(page, `data-passkey-finish="?login&passkey_finish"`) || strings.Contains(page, `name="password"`) || !strings.Contains(page, "data-password-fallback") {
 				t.Fatal("existing login mechanisms or return path changed")
+			}
+			fallbackRequest := httptest.NewRequest(http.MethodGet, "https://example.org/?login&password_login=1&return_path=%2Fdocs", nil)
+			fallbackResponse := httptest.NewRecorder()
+			application.login(fallbackResponse, fallbackRequest)
+			if !strings.Contains(fallbackResponse.Body.String(), `name="password"`) || !strings.Contains(fallbackResponse.Body.String(), `value="/docs"`) {
+				t.Fatal("explicit password fallback lost its form or return path")
 			}
 		})
 	}

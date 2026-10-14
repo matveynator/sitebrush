@@ -8,6 +8,7 @@ const sitebrushEditorModel = {
   previewToken: '',
   mode: 'visual',
   sourceHTML: '',
+  viewport: null,
   sourceSnapshot: '',
   sourceCodeMirror: null,
   renderedBodyHTML: '',

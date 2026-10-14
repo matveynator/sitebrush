@@ -11,6 +11,7 @@
     const model = {
         visitor: '', persistent: false, tab: '', session: '', view: '', sequence: 0, path: '', evidence: null,
         signals: [], limited: false, connection: null, lastSent: -10000, started: 0,
+        batches: [], batchesRestored: false, deliveryTimer: null, lastDelivery: -10000,
         lastInteraction: 0, maximumScroll: 0, layout: '', device: '', retryCount: 0, nextConnect: 0,
         forms: new WeakMap(), sections: new WeakSet(), recentClicks: [], timers: [], uriRules: [], matchedRules: new Set(),
         replay: [], replayAllowed: false, replayPreferences: null, replayPolicySession: '', replayScroll: -1, replayScrollAt: 0, replayFields: new Map(), stopped: false
@@ -258,50 +259,98 @@
         while (new TextEncoder().encode(JSON.stringify(envelope)).length > 16384 && envelope.signals.length + envelope.replay.length > 1) { if (envelope.replay.length) envelope.replay.pop(); else envelope.signals.pop(); envelope.limited = true; }
         return envelope;
     }
+    function persistBatches() {
+        try {
+            if (!model.batches.length) sessionStorage.removeItem(pendingKey);
+            else sessionStorage.setItem(pendingKey,JSON.stringify(model.batches.map(function retainedBatch(batch) { return {expires:batch.expires,envelope:batch.envelope}; })));
+        } catch (storageError) { console.debug('SiteBrush analytics: retry storage unavailable',storageError.name); }
+    }
+    function restoreBatches() {
+        if (model.batchesRestored) return;
+        model.batchesRestored = true;
+        try {
+            const encodedBatches = sessionStorage.getItem(pendingKey) || 'null';
+            if (new TextEncoder().encode(encodedBatches).length > 65536) { model.limited = true; persistBatches(); return; }
+            const retainedBatches = JSON.parse(encodedBatches);
+            const candidates = Array.isArray(retainedBatches) ? retainedBatches : retainedBatches ? [retainedBatches] : [];
+            for (const candidate of candidates.slice(0,4)) {
+                if (!candidate.envelope || candidate.expires <= Date.now() || candidate.expires > Date.now()+1800000 || candidate.envelope.visitor !== model.visitor) continue;
+                model.batches.push({expires:candidate.expires,envelope:candidate.envelope,sentAt:null});
+            }
+        } catch (storageError) { console.debug('SiteBrush analytics: retry storage invalid',storageError.name); }
+        persistBatches();
+    }
+    function scheduleDelivery(delay) {
+        if (model.stopped || model.deliveryTimer !== null) return;
+        model.deliveryTimer = window.setTimeout(function deliverScheduledBatch() { model.deliveryTimer = null; deliverPendingBatch(); },delay);
+    }
+    function deliverPendingBatch() {
+        while (model.batches.length && model.batches[0].expires <= Date.now()) { model.batches.shift(); model.limited = true; persistBatches(); }
+        if (!model.batches.length || model.stopped) return;
+        if (!model.connection || model.connection.readyState >= WebSocket.CLOSING) { connect(); return; }
+        if (model.connection.readyState !== WebSocket.OPEN) return;
+        const batch = model.batches[0];
+        const elapsed = performance.now()-model.lastDelivery;
+        const retryDelay = batch.sentAt === null ? 1000-elapsed : 15000-(performance.now()-batch.sentAt);
+        if (retryDelay > 0) { scheduleDelivery(retryDelay); return; }
+        if (model.connection.bufferedAmount >= 16384) { scheduleDelivery(1000); return; }
+        batch.sentAt = performance.now(); model.lastDelivery = batch.sentAt;
+        model.connection.send(JSON.stringify(batch.envelope));
+        scheduleDelivery(15000);
+    }
     function flush(finalDelivery) {
-        if (!finalDelivery && performance.now() - model.lastSent < 1000) return;
+        if (!finalDelivery && performance.now()-model.lastSent < 1000) return;
         const envelope = encodeBatch();
-        if (!envelope) return;
-        if (finalDelivery && (model.signals.length > envelope.signals.length || model.replay.length > envelope.replay.length)) envelope.limited = true;
-        const encoded = JSON.stringify(envelope);
-        let sent = false;
-        if (finalDelivery && navigator.sendBeacon) sent = navigator.sendBeacon('/_sitebrush/analytics', new Blob([encoded], {type:'application/json'}));
-        if (!sent && model.connection && model.connection.readyState === WebSocket.OPEN && model.connection.bufferedAmount < 16384) { model.connection.send(encoded); sent = true; }
-        if (sent) {
+        if (envelope) {
+            if (model.batches.length >= 4) { model.limited = true; deliverPendingBatch(); return; }
+            if (finalDelivery && (model.signals.length > envelope.signals.length || model.replay.length > envelope.replay.length)) envelope.limited = true;
+            const retainedBatch = {expires:Date.now()+1800000,envelope:envelope,sentAt:null};
+            if (new TextEncoder().encode(JSON.stringify([...model.batches,retainedBatch])).length > 65536) { model.limited = true; deliverPendingBatch(); return; }
+            model.batches.push(retainedBatch);
             model.sequence = envelope.sequence; model.signals.splice(0,envelope.signals.length); model.replay.splice(0,envelope.replay.length); model.lastSent = performance.now();
-            try { sessionStorage.setItem(pendingKey,JSON.stringify({expires:Date.now()+1800000,envelope:envelope})); } catch (pendingError) { console.debug('SiteBrush analytics: retry unavailable',pendingError.name); }
+            // A successful send only queues bytes in the browser, not in the worker.
+            persistBatches();
         }
+        if (finalDelivery && navigator.sendBeacon) {
+            for (const batch of model.batches) {
+                if (!navigator.sendBeacon('/_sitebrush/analytics',new Blob([JSON.stringify(batch.envelope)],{type:'application/json'}))) break;
+            }
+        } else deliverPendingBatch();
     }
     function connect() {
-        if (model.connection && model.connection.readyState < WebSocket.CLOSING) return;
-        if (performance.now() < model.nextConnect) return;
-        model.nextConnect = performance.now() + 15000;
-        model.connection = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/_sitebrush/analytics');
-        model.connection.addEventListener('open', function connected() {
-            try {
-                const pendingBatch = JSON.parse(sessionStorage.getItem(pendingKey) || 'null');
-                sessionStorage.removeItem(pendingKey);
-                if (pendingBatch && pendingBatch.expires > Date.now() && pendingBatch.envelope.visitor === model.visitor && pendingBatch.envelope.view !== model.view) model.connection.send(JSON.stringify(pendingBatch.envelope));
-            } catch (pendingError) { console.debug('SiteBrush analytics: retry invalid',pendingError.name); }
-            flush(false);
+        if (model.connection && model.connection.readyState < WebSocket.CLOSING || model.stopped || performance.now() < model.nextConnect) return;
+        model.nextConnect = performance.now()+15000;
+        model.connection = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://')+location.host+'/_sitebrush/analytics');
+        model.connection.addEventListener('open',function connected() {
+            model.retryCount = 0;
+            for (const batch of model.batches) batch.sentAt = null;
+            flush(false); deliverPendingBatch();
         });
-        model.connection.addEventListener('message',function configuredRules(messageEvent) {
+        model.connection.addEventListener('message',function receivedMessage(messageEvent) {
             try {
                 const response = JSON.parse(messageEvent.data);
-                if (response.operation !== 'rules' || !Array.isArray(response.rules) || response.rules.length > 320) return;
-                configureReplay(response.replay);
-                model.uriRules = response.rules.filter(function knownRule(rule) { return validName(rule.name) && typeof rule.match === 'string' && rule.match.length <= 256; }).map(function ruleModel(rule) { return {Name:rule.name,Match:rule.match}; });
-                observeConfiguredURI();
-            } catch (ruleError) { console.debug('SiteBrush analytics: invalid goal rules',ruleError.name); }
+                if (response.operation === 'ack') {
+                    if (response.accepted) {
+                        model.batches = model.batches.filter(function unacknowledged(batch) { return batch.envelope.view !== response.view || batch.envelope.sequence !== response.sequence; });
+                        persistBatches();
+                        if (model.deliveryTimer !== null) { window.clearTimeout(model.deliveryTimer); model.deliveryTimer = null; }
+                        scheduleDelivery(Math.max(0,1000-(performance.now()-model.lastDelivery)));
+                    } else model.limited = true;
+                } else if (response.operation === 'rules') {
+                    model.uriRules = Array.isArray(response.goals) ? response.goals.filter(function uriGoal(goal) { return (goal.Kind === 'uri' || goal.Kind === 'path') && typeof goal.Match === 'string'; }) : [];
+                    observeConfiguredURI();
+                    if (response.replay) configureReplay(response.replay);
+                }
+            } catch (messageError) { console.debug('SiteBrush analytics: invalid server reply',messageError.name); }
         });
-        model.connection.addEventListener('close', function disconnected() {
-            if (model.retryCount >= 2 || model.stopped || !model.signals.length) return;
-            model.retryCount++; window.setTimeout(connect,model.retryCount * 15000);
+        model.connection.addEventListener('close',function disconnected() {
+            model.retryCount++; model.nextConnect = performance.now()+Math.min(60000,15000*model.retryCount);
+            if (!model.stopped && model.batches.length) scheduleDelivery(Math.min(60000,15000*model.retryCount));
         });
         model.connection.addEventListener('error',function failed() { console.debug('SiteBrush analytics: connection unavailable'); });
     }
     function startView() {
-        restoreIdentity(); model.view = randomIdentity(); model.sequence = 0;
+        restoreIdentity(); restoreBatches(); model.view = randomIdentity(); model.sequence = 0;
         model.nextConnect = 0; model.retryCount = 0;
         model.path = location.pathname.slice(0,256); model.evidence = sourceEvidence();
         model.started = performance.now(); model.lastInteraction = model.started;

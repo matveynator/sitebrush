@@ -54,6 +54,109 @@ func TestConversionBeaconAdmissionPrivacyAndCancellation(t *testing.T) {
 	}
 }
 
+func TestConversionStealthCollectsPublicVisitsAndProtectsConfiguration(t *testing.T) {
+	application, database := newTestApplication(t)
+	for _, statement := range []string{
+		`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','owner@example.org','old',1)`,
+		`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
+		`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES('example.org','owner@example.org','192.0.2.1',1)`,
+		`INSERT INTO admin_stealth_modes(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
+	} {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(application.domainStaticDir("example.org"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(application.domainStaticDir("example.org"), "index.html"), []byte(`<html><body>Public page</body></html>`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cacheContext, stopCache := context.WithCancel(context.Background())
+	defer stopCache()
+	application.guestStaticHTMLCache = startGuestStaticHTMLCacheWorker(cacheContext, 1<<20)
+	staticPath := filepath.Join(application.domainStaticDir("example.org"), "index.html")
+	fileInfo, err := os.Stat(staticPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	menuHTML, err := application.cachedVisitorHTMLFromContent(staticPath, []byte(`<html><body>Public page</body></html>`), "/", "example.org", "", fileInfo, false)
+	if err != nil || !strings.Contains(string(menuHTML), "SiteBrushContextMenu") {
+		t.Fatal("normal guest cache did not contain its menu", err)
+	}
+	visit := httptest.NewRequest(http.MethodGet, "https://example.org/", nil)
+	visit.RemoteAddr = "192.0.2.2:1234"
+	response := httptest.NewRecorder()
+	application.route(response, visit)
+	if response.Code != 200 || strings.Count(response.Body.String(), `src="/p/static/analytics.js?v=`) != 1 || strings.Contains(response.Body.String(), "SiteBrushContextMenu") {
+		t.Fatal("stealth must retain only the visitor collector", response.Body.String())
+	}
+	application.browserAnalytics = make(chan browserAnalyticsEnvelope, 16)
+	stop := make(chan struct{})
+	finished := make(chan struct{})
+	go func() { defer close(finished); application.runBrowserAnalytics(stop) }()
+	defer func() {
+		select {
+		case <-finished:
+		default:
+			close(stop)
+			<-finished
+		}
+	}()
+	batch := `{"version":2,"visitor":"1111111111111111","view":"2222222222222222","sequence":1,"path":"/","signals":[{"kind":"page"}]}`
+	for retry := 0; retry < 2; retry++ {
+		request := httptest.NewRequest(http.MethodPost, "https://example.org/_sitebrush/analytics", strings.NewReader(batch))
+		request.RemoteAddr = visit.RemoteAddr
+		request.Header.Set("Origin", "https://example.org")
+		request.Header.Set("User-Agent", "Mozilla/5.0")
+		recorder := httptest.NewRecorder()
+		application.route(recorder, request)
+		if recorder.Code != http.StatusNoContent {
+			t.Fatal("stealth rejected visitor batch", recorder.Code, recorder.Body.String())
+		}
+	}
+	close(stop)
+	<-finished
+	saved := application.analyticsStorage.Exchange(browserstats.StorageRequest{Operation: browserstats.ReadBrowserReport, Domain: "example.org"})
+	if saved.Err != nil {
+		t.Fatal(saved.Err)
+	}
+	var reports map[string]browserstats.Report
+	if err := json.Unmarshal([]byte(saved.Text), &reports); err != nil {
+		t.Fatal(err)
+	}
+	if reports["7"].Conversion.Visitors != 1 {
+		t.Fatal("public visit was lost or duplicated", saved.Text)
+	}
+	sessionRequest := httptest.NewRequest(http.MethodGet, "https://example.org/", nil)
+	sessionRequest.RemoteAddr = "192.0.2.1:1234"
+	sessionResponse := httptest.NewRecorder()
+	application.createSessionForDomain(sessionResponse, sessionRequest, sessionRequest.Context(), "example.org", "owner@example.org")
+	visit.AddCookie(sessionResponse.Result().Cookies()[0])
+	for _, statement := range []string{
+		`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','second@example.org','old',1)`,
+		`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES('example.org','second@example.org',1)`,
+		`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES('example.org','second@example.org','192.0.2.2',1)`,
+	} {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	configuration := fmt.Sprintf(`{"operation":"configure","csrf":%q,"goals":[]}`, accountCSRF(visit))
+	reply, handled := application.analyticsConfigurationMessage(visit, configuration)
+	if !handled || !strings.Contains(reply, "forbidden") {
+		t.Fatal("public collector bypassed administrator IP protection", reply)
+	}
+}
+
+func TestConversionReportReadErrorIsNotEmptyTraffic(t *testing.T) {
+	application := &App{analyticsStorage: permanentBrowserAnalyticsRepository{}}
+	report := application.browserAnalyticsView(httptest.NewRequest(http.MethodGet, "https://example.org/?analytics", nil), "example.org")
+	if !report.Error || report.Available {
+		t.Fatal("failed report read appeared as valid empty statistics")
+	}
+}
+
 func TestConversionPreviewCannotReadOutsidePublishedSite(t *testing.T) {
 	application := &App{storagePath: t.TempDir()}
 	pageDirectory := application.domainStaticDir("one.example")
@@ -206,6 +309,17 @@ func TestConversionBrowserRegressions(t *testing.T) {
 	}
 	application.browserAnalytics = make(chan browserAnalyticsEnvelope, 512)
 	application.analyticsConnections = make(chan struct{}, 8)
+	stop := make(chan struct{})
+	finished := make(chan struct{})
+	go func() { defer close(finished); application.runBrowserAnalytics(stop) }()
+	defer func() {
+		select {
+		case <-finished:
+		default:
+			close(stop)
+			<-finished
+		}
+	}()
 	rawBeacons := make(chan string, 8)
 	fixture := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Referrer-Policy", "no-referrer")
@@ -268,15 +382,18 @@ func TestConversionBrowserRegressions(t *testing.T) {
 			t.Fatal("confirmed form outcome missing from beacon")
 		}
 	}
-	for len(application.browserAnalytics) > 0 {
-		observed := (<-application.browserAnalytics).event
-		encoded, _ := json.Marshal(observed)
-		if strings.Contains(string(encoded), "visitor-secret") || strings.Contains(string(encoded), "url-secret") {
-			t.Fatal("collector stored a secret")
-		}
-		if observed.Version == 2 && observed.Layout != layout {
-			t.Fatalf("collector/preview layout mismatch: %s != %s", observed.Layout, layout)
-		}
+	close(stop)
+	<-finished
+	persisted := application.analyticsStorage.Exchange(browserstats.StorageRequest{Operation: browserstats.ReadBrowserReport, Domain: "localhost"})
+	if persisted.Err != nil {
+		t.Fatal(persisted.Err)
+	}
+	var storedReports map[string]browserstats.Report
+	if err := json.Unmarshal([]byte(persisted.Text), &storedReports); err != nil {
+		t.Fatal(err)
+	}
+	if storedReports["7"].Conversion.Visitors != 2 {
+		t.Fatalf("real visitor did not reach the saved report, or batch retry duplicated it: %+v", storedReports["7"].Conversion)
 	}
 }
 

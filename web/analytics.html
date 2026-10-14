@@ -740,6 +740,7 @@
 
   {{if eq .AnalyticsTab "analytics"}}
   <main id="conversion-dashboard" data-csrf="{{.AccountCSRF}}">
+    {{if .BrowserAnalytics.Error}}<p class="alert alert-danger" role="alert">{{index .T "cx_report_error"}}</p>{{end}}
     {{if .AnalyticsQuotaBlocked}}<p class="alert alert-warning">{{index .T "cx_storage_paused"}}</p>{{end}}
     {{if .Conversion.Incomplete}}<p class="alert alert-warning">{{index .T "ax_incomplete"}}</p>{{end}}
     <section class="card mb-4"><div class="card-body"><h2 class="h4">{{index .T "cx_visitor_map"}}</h2>
