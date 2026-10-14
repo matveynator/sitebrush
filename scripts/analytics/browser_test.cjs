@@ -1,4 +1,6 @@
 const assert = require('node:assert/strict');
+const os = require('node:os');
+const path = require('node:path');
 const {chromium} = require('../editor/node_modules/playwright');
 (async function analyticsBrowserChecks() {
  const launchOptions = {headless:true};
@@ -74,7 +76,7 @@ const {chromium} = require('../editor/node_modules/playwright');
    assert.equal(await suggestedGoalsButton.isEnabled(),false,'existing suggested goal must not be duplicated');
    await page.locator('#conversion-save').click();
    await page.locator('#conversion-save-status').filter({hasText:'Saved. Reports refresh within one minute.'}).waitFor();
-   await page.screenshot({path:'/private/tmp/sitebrush-analytics-'+viewport.width+'.png',fullPage:true});
+   await page.screenshot({path:path.join(os.tmpdir(),'sitebrush-analytics-'+viewport.width+'.png'),fullPage:true});
    assert.deepEqual(errors,[]);
    console.log('Analytics browser '+viewport.width+': funnels, tree, sandbox heatmap, privacy, constructor and WebSocket save passed');
    await context.close();

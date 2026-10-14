@@ -2,6 +2,7 @@ package analytics
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -192,5 +193,44 @@ func TestConversionAcceptsTabletWithoutFieldContents(t *testing.T) {
 	event.Signals = []Signal{{Kind: "field-value", Form: "key:contact", Field: "key:name"}}
 	if ValidSignals(event) {
 		t.Fatal("form field contents admitted")
+	}
+}
+
+func TestConversionInsightsDetectObservedExitsBeforeWindowCloses(t *testing.T) {
+	now := time.Now().UTC()
+	site := New(now)
+	site.Goals = []Goal{{Name: "Purchase", Primary: true, Steps: []Goal{{Name: "Pricing", Kind: "page", Page: "/pricing"}, {Name: "Purchase", Kind: "event", Match: "purchase"}}}}
+	for index := 0; index < 100; index++ {
+		identifier := fmt.Sprintf("%016x", index+1)
+		entry := conversionEvent(identifier, identifier, "/", 1, Signal{Kind: "page"})
+		if !site.Record(entry, now, 4<<20) {
+			t.Fatal("entry rejected", index)
+		}
+		if index >= 42 {
+			completed := conversionEvent(identifier, fmt.Sprintf("%016x", index+1001), "/pricing", 1, Signal{Kind: "page"}, Signal{Kind: "goal", Name: "purchase"})
+			if !site.Record(completed, now.Add(time.Minute), 4<<20) {
+				t.Fatal("completion rejected", index)
+			}
+		}
+	}
+	report := site.Report(now.Add(31*time.Minute), 7).Conversion
+	step := report.Funnels[0].Steps[0]
+	if step.Exited != 42 || step.Pending != 42 || step.Lost != 0 {
+		t.Fatal("observed exits were confused with final losses", step)
+	}
+	found := false
+	for _, insight := range report.Insights {
+		found = found || insight.Kind == "funnel" && insight.Subject == "Pricing" && insight.Rate == "42.0%"
+	}
+	if !found {
+		t.Fatal("early funnel departure insight missing", report.Insights)
+	}
+	returned := conversionEvent("0000000000000001", "ffffffffffffffff", "/pricing", 1, Signal{Kind: "page"}, Signal{Kind: "goal", Name: "purchase"})
+	if !site.Record(returned, now.Add(45*time.Minute), 4<<20) {
+		t.Fatal("returning visitor rejected")
+	}
+	updated := site.Report(now.Add(46*time.Minute), 7).Conversion.Funnels[0]
+	if updated.Completed != 59 || updated.Steps[0].Exited != 41 {
+		t.Fatal("observed departure prevented a later conversion", updated)
 	}
 }

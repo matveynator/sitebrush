@@ -45,7 +45,7 @@
                 const stepElement = node('div',undefined,'conversion-step');
                 stepElement.append(node('strong',step.Name === 'Visitors' ? label('cx_visitors') : step.Name),node('div',step.Users + ' ' + label('cx_visitors')),
                     node('small',label('cx_transition') + ': ' + step.Transition));
-                if (step.Drop) stepElement.append(node('div',label('cx_lost') + ': ' + step.Drop),node('small',label('cx_pending') + ': ' + step.Pending + ' · ' + label('cx_lost') + ': ' + step.Lost));
+                if (step.Drop) stepElement.append(node('div',label('cx_lost') + ': ' + step.Drop),node('small',label('cx_pending') + ': ' + step.Pending + ' · ' + label('cx_lost') + ': ' + step.Lost + ' · ' + label('cx_exit') + ': ' + (step.Exited || 0)));
                 steps.append(stepElement);
             }
             funnelContainer.append(steps);

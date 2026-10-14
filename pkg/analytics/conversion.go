@@ -101,6 +101,7 @@ type CohortAggregate struct {
 type ConversionStep struct {
 	Name                 string
 	Users, Pending, Lost int
+	Exited               int
 	Transition, Drop     string
 }
 type ConversionFunnel struct {
@@ -814,6 +815,11 @@ func (site *Site) conversionReport(now time.Time, days int) ConversionReport {
 				if index < len(steps)-1 && index == reached-1 {
 					if now.Sub(progress.Entered) < FunnelWindow {
 						funnel.Steps[index].Pending++
+						// Session exits are actionable before the conversion window closes.
+						// A later return can still complete this visitor's original funnel.
+						if now.Sub(visitor.Last) > 30*time.Minute {
+							funnel.Steps[index].Exited++
+						}
 					} else {
 						funnel.Steps[index].Lost++
 					}
@@ -1228,8 +1234,9 @@ func conversionInsights(report ConversionReport) []ConversionInsight {
 		}
 		for index := 0; index < len(funnel.Steps)-1; index++ {
 			step := funnel.Steps[index]
-			if step.Lost*100 >= step.Users*30 && step.Lost >= 30 {
-				insights = append(insights, ConversionInsight{Kind: "funnel", Subject: funnel.Steps[index+1].Name, Rate: percentage(step.Lost, step.Users)})
+			departed := step.Lost + step.Exited
+			if departed*100 >= step.Users*30 && departed >= 30 {
+				insights = append(insights, ConversionInsight{Kind: "funnel", Subject: funnel.Steps[index+1].Name, Rate: percentage(departed, step.Users)})
 				break
 			}
 		}
