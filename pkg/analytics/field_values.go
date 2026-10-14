@@ -22,8 +22,8 @@ func SafeFieldValue(name, text string) bool {
 }
 
 // Historical development snapshots may contain Values, but current reports do
-// not expose or aggregate them. Form drop-off is derived from structural field
-// identifiers and form outcomes instead of user-entered content.
+// not expose, aggregate, archive, or render them. Form drop-off is derived only
+// from structural field identifiers and form outcomes, never user-entered text.
 func conversionFieldValues(_ *ConversionState, _, _ time.Time) map[string][]FormFieldValue {
 	return nil
 }
