@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -34,13 +35,14 @@ func TestVisualEditorBrowserRegressions(t *testing.T) {
 	if os.Getenv("SITEBRUSH_EDITOR_BROWSER_TEST") != "1" {
 		t.Skip("set SITEBRUSH_EDITOR_BROWSER_TEST=1 after npm ci in scripts/editor and playwright install chromium")
 	}
-	application, rawDB := newTestApplication(t)
+	application := newRouterTestApplication(t)
+	fixtureContext := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), "localhost"))
 	staticAssets, err := buildEmbeddedStaticAssetCache(testStaticFiles(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	application.embeddedStaticAssets = staticAssets
-	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "editor@example.com", "old"); err != nil {
+	if _, err := application.db.ExecContext(fixtureContext, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "editor@example.com", "old"); err != nil {
 		t.Fatal(err)
 	}
 	fixtureHTML := `<!doctype html>
@@ -56,13 +58,14 @@ func TestVisualEditorBrowserRegressions(t *testing.T) {
 <img id="class-image" class="class-frame" src="/_editor-wide.svg" alt="class">
 <img id="responsive-image" class="responsive-frame" src="/_editor-wide.svg" alt="responsive">
 <img id="inline-image" src="/_editor-wide.svg" style="width: 180px; height: 120px; object-fit: contain;" alt="inline">
+<a id="gallery-link" href="/_editor-wide.svg" data-fancybox="gallery"><img id="gallery-image" src="/_editor-wide.svg" width="50" height="50" alt="gallery"></a>
 <p>Editable content</p>
 <script id="body-script">window.fixtureBodyScriptMustNotRun = true;</script>
 <iframe id="script-frame" title="Embedded script fixture" srcdoc="&lt;script&gt;window.fixtureNestedScriptMustNotRun = true;&lt;/script&gt;"></iframe>
 ` + strings.Repeat("<p>Long document for caret and scroll regression</p>\n", 100) + `</body></html>`
 	for fixtureIndex := 0; fixtureIndex < 40; fixtureIndex++ {
 		pagePath := fmt.Sprintf("/editor-%d", fixtureIndex)
-		if _, err := rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", pagePath, "Editor fixture", fixtureHTML); err != nil {
+		if _, err := application.db.ExecContext(fixtureContext, `INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", pagePath, "Editor fixture", fixtureHTML); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -71,7 +74,7 @@ func TestVisualEditorBrowserRegressions(t *testing.T) {
 		corruptedHTML := strings.Replace(fixtureHTML, "<p>Editable content</p>", copiedMetadata+copiedMetadata+"<p>Editable content</p>", 1)
 		for fixtureName, documentHTML := range map[string]string{"repeat": fixtureHTML, "corrupted": corruptedHTML} {
 			pagePath := fmt.Sprintf("/editor-%s-%d", fixtureName, viewportWidth)
-			if _, err := rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", pagePath, "Editor fixture", documentHTML); err != nil {
+			if _, err := application.db.ExecContext(fixtureContext, `INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", pagePath, "Editor fixture", documentHTML); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -93,7 +96,7 @@ func TestVisualEditorBrowserRegressions(t *testing.T) {
 				return
 			}
 			var storedHTML string
-			if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", request.URL.Query().Get("path")).Scan(&storedHTML); err != nil {
+			if err := application.db.QueryRowContext(request.Context(), `SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", request.URL.Query().Get("path")).Scan(&storedHTML); err != nil {
 				http.Error(writer, err.Error(), http.StatusNotFound)
 				return
 			}

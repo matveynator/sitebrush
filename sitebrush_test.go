@@ -4947,11 +4947,8 @@ func TestRegisterCreatesSiteDatabaseOnlyAfterConfirmedVerifiedDomain(t *testing.
 	loginRequest := httptest.NewRequest(http.MethodGet, "https://"+domain+"/?login", nil)
 	loginResponse := httptest.NewRecorder()
 	application.route(loginResponse, loginRequest)
-	if loginResponse.Code != http.StatusServiceUnavailable {
-		t.Fatalf("login with missing site database status = %d, want %d; body=%q", loginResponse.Code, http.StatusServiceUnavailable, loginResponse.Body.String())
-	}
-	if strings.Contains(loginResponse.Header().Get("Location"), "register") {
-		t.Fatalf("login with missing site database redirected to registration: %q", loginResponse.Header().Get("Location"))
+	if loginResponse.Code != http.StatusSeeOther || loginResponse.Header().Get("Location") != "/?register" {
+		t.Fatalf("missing site must offer registration: status=%d location=%q body=%q", loginResponse.Code, loginResponse.Header().Get("Location"), loginResponse.Body.String())
 	}
 	form := url.Values{}
 	form.Set("email", "admin@a.sitebrush.com")
@@ -7599,8 +7596,8 @@ func TestProfileChangeFormsWorkWithoutJavaScriptAndUnchangedEmailIsRejected(t *t
 	}
 	for _, expectedFragment := range []string{
 		`data-profile-email-form data-current-email="admin@example.com"`,
-		`class="authentication-card profile-form profile-account-card" method="post" action="?profile" data-profile-send-form data-profile-email-form`,
-		`class="authentication-card profile-form profile-account-card" method="post" action="?profile" data-profile-send-form data-profile-password-form`,
+		`class="authentication-card profile-form profile-account-card" method="post" action="/?profile" data-profile-send-form data-profile-email-form`,
+		`class="authentication-card profile-form profile-account-card" method="post" action="/?profile" data-profile-send-form data-profile-password-form`,
 		`type="submit" data-profile-email-submit`,
 		`type="submit" data-profile-password-submit`,
 		`submitButton.disabled = nextEmail.toLowerCase() === currentEmail.toLowerCase() || !emailInput.validity.valid`,
@@ -7666,6 +7663,9 @@ func TestProfileShowsAndRevokesOwnedAuthorizedSessions(t *testing.T) {
 		}
 	}
 
+	if _, err := rawDB.Exec(`UPDATE sessions SET created_at=? WHERE token=?`, time.Now().Add(time.Minute).UTC().Format(time.RFC3339), targetToken); err != nil {
+		t.Fatal(err)
+	}
 	profileRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?profile", nil)
 	profileRequest.AddCookie(currentCookie)
 	profileResponse := httptest.NewRecorder()
@@ -7673,13 +7673,13 @@ func TestProfileShowsAndRevokesOwnedAuthorizedSessions(t *testing.T) {
 	if profileResponse.Code != http.StatusOK {
 		t.Fatalf("profile status = %d, body=%q", profileResponse.Code, profileResponse.Body.String())
 	}
-	for _, expected := range []string{"Авторизованные сессии · 62", "IP-адреса для доступа администратора · 6", "Microsoft Edge", "Windows", "Язык: ru", "пока вы не выйдете из аккаунта", "Показать ещё (46)"} {
+	for _, expected := range []string{"Авторизованные сессии · 62", "IP-адреса для доступа администратора · 6", "Microsoft Edge", "Windows", "Язык: ru", "пока вы не выйдете из аккаунта", "session_page=2"} {
 		if !strings.Contains(profileResponse.Body.String(), expected) {
 			t.Fatalf("profile session list missing %q", expected)
 		}
 	}
-	if renderedSessions := strings.Count(profileResponse.Body.String(), `name="session_token"`); renderedSessions != 50 {
-		t.Fatalf("rendered %d sessions, want the bounded page of 50", renderedSessions)
+	if renderedSessions := strings.Count(profileResponse.Body.String(), `name="session_token"`); renderedSessions != profileSecurityPageSize {
+		t.Fatalf("rendered %d sessions, want the bounded page of 3", renderedSessions)
 	}
 
 	foreignRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/", nil)
@@ -8248,8 +8248,9 @@ func TestSavePageSynchronizesAddedSiteBrushTemplateClassByNormalizedInnerHTML(t 
 	if err := rawDB.QueryRow(`SELECT COUNT(*) FROM revisions WHERE domain=? AND page_path=?`, "localhost", "/about").Scan(&aboutRevisionCount); err != nil {
 		t.Fatalf("count about revisions: %v", err)
 	}
-	if aboutRevisionCount != 2 {
-		t.Fatalf("about revision count = %d, want 2", aboutRevisionCount)
+	// Class synchronization and content replacement are one user save.
+	if aboutRevisionCount != 1 {
+		t.Fatalf("about revision count = %d, want 1", aboutRevisionCount)
 	}
 }
 
@@ -18266,24 +18267,23 @@ func TestRunAdminIPResetCommandPersistsCIDR(t *testing.T) {
 	}
 }
 
-func TestAdminIPAllowlistChangesOnlyUseSessionCandidates(t *testing.T) {
+func TestAdminIPAllowlistAcceptsManualAddressesAndSubnets(t *testing.T) {
 	application, database := newTestApplication(t)
-	if _, err := database.Exec(`INSERT INTO account_session_ips(session_token,domain,email,client_ip,used_at) VALUES('old','example.org','owner@example.org','192.0.2.2',1)`); err != nil {
-		t.Fatal(err)
-	}
 	request := httptest.NewRequest(http.MethodPost, "https://example.org/?profile", nil)
 	request.RemoteAddr = "192.0.2.1:1234"
-	if err := application.updateAdminIPAllowlist(request, "example.org", "owner@example.org", "admin_ip_add", "192.0.2.2"); err != nil {
-		t.Fatalf("add valid session candidate: %v", err)
+	for _, address := range []string{"1.2.3.4", "192.0.2.2", "192.0.2.3", "198.51.100.0/24", "192.0.2.0/24", "2001:db8::1", "2001:db8:1::/64"} {
+		if err := application.updateAdminIPAllowlist(request, "example.org", "owner@example.org", "admin_ip_add", address); err != nil {
+			t.Fatalf("add manual address %s: %v", address, err)
+		}
+		var count int
+		if err := database.QueryRow(`SELECT COUNT(1) FROM admin_allowed_ips WHERE domain=? AND email=? AND client_ip=?`, "example.org", "owner@example.org", address).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("manual address %s not persisted: count=%d err=%v", address, count, err)
+		}
 	}
-	if err := application.updateAdminIPAllowlist(request, "example.org", "owner@example.org", "admin_ip_add", "192.0.2.3"); err == nil {
-		t.Fatal("accepted IP that was never used by a valid session")
-	}
-	if err := application.updateAdminIPAllowlist(request, "example.org", "owner@example.org", "admin_ip_add", "198.51.100.0/24"); err == nil {
-		t.Fatal("accepted subnet that contains no valid session address")
-	}
-	if err := application.updateAdminIPAllowlist(request, "example.org", "owner@example.org", "admin_ip_add", "192.0.2.0/24"); err != nil {
-		t.Fatalf("add subnet containing a valid session address: %v", err)
+	for _, address := range []string{"999.1.2.3", "192.0.2.0/33", "2001:db8::/129", "not-an-ip"} {
+		if err := application.updateAdminIPAllowlist(request, "example.org", "owner@example.org", "admin_ip_add", address); err == nil {
+			t.Fatalf("accepted invalid address %s", address)
+		}
 	}
 	if err := application.updateAdminIPAllowlist(request, "example.org", "owner@example.org", "admin_ip_remove", "192.0.2.2"); err != nil {
 		t.Fatalf("remove non-current address while subnet remains: %v", err)

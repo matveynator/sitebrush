@@ -56,10 +56,14 @@ async function runEditorRegressions() {
         return storedResponse.text();
       }
       async function saveWithButton(saveButton) {
-        await Promise.all([
-          page.waitForURL(browserURL => !browserURL.searchParams.has('visual')),
-          saveButton.click()
-        ]);
+        try {
+          await Promise.all([
+            page.waitForURL(browserURL => !browserURL.searchParams.has('visual')),
+            saveButton.click()
+          ]);
+        } catch (saveError) {
+          throw new Error(saveError.message + '\nImage error: ' + await page.locator('#imagePropertiesError').textContent() + '\nSave status: ' + await page.locator('#editorSaveStatus').textContent());
+        }
       }
       async function savedImageAttributes(pagePath, imageID) {
         const savedHTML = await storedHTML(pagePath);
@@ -69,7 +73,7 @@ async function runEditorRegressions() {
           return {
             src: savedImage.getAttribute('src'), width: savedImage.getAttribute('width'), height: savedImage.getAttribute('height'),
             inlineWidth: savedImage.style.width, inlineHeight: savedImage.style.height,
-            fit: savedImage.style.objectFit, position: savedImage.style.objectPosition, className: savedImage.className
+            fit: savedImage.style.objectFit, position: savedImage.style.objectPosition, className: savedImage.className, link: savedImage.closest('a') ? savedImage.closest('a').getAttribute('href') : ''
           };
         }, { savedHTML, imageID });
       }
@@ -103,6 +107,7 @@ async function runEditorRegressions() {
       await restoredContext.close();
       const originalDocument = await storedHTML(sourcePagePath);
       const visualControlCount = await page.locator('.jodit-toolbar__box button').count();
+      const visualToolbarHeight = (await page.locator('.jodit-toolbar__box').boundingBox()).height;
       assert.ok(visualControlCount > 15);
       await frameImage('attribute-image').hover();
       await page.waitForTimeout(400);
@@ -136,7 +141,7 @@ async function runEditorRegressions() {
       }
       assert.equal(await sourceHTML(), originalDocument);
       assert.deepEqual(await sourceEditor.evaluate(editorElement => [editorElement.CodeMirror.getScrollInfo().top, editorElement.CodeMirror.indexFromPos(editorElement.CodeMirror.getCursor())]), [0, 0]);
-      assert.equal(await page.locator('.jodit-toolbar__box button').count(), 3);
+      assert.equal(await page.locator('.jodit-toolbar__box button').count(), 5);
       for (const visualControlName of ['bold', 'italic', 'source', 'insertServerFile']) {
         assert.equal(await control(visualControlName).count(), 0, visualControlName + ' must be removed');
       }
@@ -145,7 +150,7 @@ async function runEditorRegressions() {
         assert.ok(await codeButton.isVisible());
         const buttonRectangle = await codeButton.boundingBox();
         assert.ok(buttonRectangle.x >= 0 && buttonRectangle.x + buttonRectangle.width <= viewport.width + 1, codeControlName + ' within viewport');
-        assert.ok(buttonRectangle.height >= 40, await codeButton.evaluate(buttonElement => buttonElement.outerHTML));
+        assert.ok(buttonRectangle.height >= 30 && buttonRectangle.height <= 40, await codeButton.evaluate(buttonElement => buttonElement.outerHTML));
       }
       assert.equal(await page.locator('.jodit-toolbar__box').evaluate(toolbarElement => toolbarElement.scrollWidth <= toolbarElement.clientWidth), true);
       assert.equal(await page.locator('.jodit-toolbar__box .jodit-toolbar-button__separator').count(), 0);
@@ -195,14 +200,15 @@ async function runEditorRegressions() {
       });
       await page.keyboard.insertText(' undo');
       assert.equal(await sourceHTML(), '<div>\n  text undo');
-      await sourceEditor.evaluate(editorElement => editorElement.CodeMirror.undo());
+      await control('undoSource').click();
       assert.equal(await sourceHTML(), '<div>\n  text');
-      await sourceEditor.evaluate(editorElement => editorElement.CodeMirror.redo());
+      await control('redoSource').click();
       assert.equal(await sourceHTML(), '<div>\n  text undo');
       assert.equal(await page.evaluate(() => sitebrushEditorModel.sourceHTML), '<div>\n  text undo');
       await control('cancelSource').click();
       await control('source').click();
       assert.equal(await sourceHTML(), originalDocument);
+      assert.ok(await sourceEditor.evaluate(editorElement => editorElement.CodeMirror.historySize().undo > 0), 'mode switch retains session history');
 
       // Typing midway through a long document must retain its caret and scroll.
       const caretStart = originalDocument.indexOf('Long document for caret') + 3000;
@@ -247,11 +253,13 @@ async function runEditorRegressions() {
       }
       await page.emulateMedia({ colorScheme: 'dark' });
       assert.equal(await sourceCursorIndex(), caretStart + 16);
-      assert.equal(await page.locator('.jodit-toolbar__box button').count(), 3);
+      assert.equal(await page.locator('.jodit-toolbar__box button').count(), 5);
       await page.emulateMedia({ colorScheme: 'light' });
       await control('cancelSource').click();
       assert.ok(await control('bold').isVisible());
       assert.equal(await page.locator('.jodit-toolbar__box button').count(), visualControlCount);
+      await page.waitForTimeout(100);
+      assert.equal((await page.locator('.jodit-toolbar__box').boundingBox()).height, visualToolbarHeight, 'visual toolbar height is unchanged after code mode');
       await control('source').click();
       assert.equal(await sourceHTML(), originalDocument);
       const modifiedDocument = originalDocument.replace('Editable content', 'Changed from source')
@@ -356,7 +364,7 @@ async function runEditorRegressions() {
       assert.equal(await page.locator('#imagePropertiesDialog').isVisible(), false);
 
       // Exercise the real upload dialog, original bytes and production save.
-      for (const imageID of ['attribute-image', 'class-image', 'responsive-image', 'inline-image']) {
+      for (const imageID of ['attribute-image', 'class-image', 'responsive-image', 'inline-image', 'gallery-image']) {
         const uploadPagePath = await openFixture();
         const originalArea = await frameImage(imageID).boundingBox();
         await frameImage(imageID).dblclick();
@@ -376,16 +384,9 @@ async function runEditorRegressions() {
         await fileChooser.setFiles({ name: 'replacement.png', mimeType: 'image/png', buffer: originalBytes });
         await page.locator('#uploadDialogName').waitFor();
         await page.locator('#uploadDialogUpload').waitFor({ state: 'visible' });
-        const uploadResponsePromise = page.waitForResponse(response => response.url().endsWith('?files') && response.request().method() === 'POST');
         await page.locator('#uploadDialogUpload').click();
-        const uploadResponse = await uploadResponsePromise;
-        assert.equal(uploadResponse.status(), 200);
         await page.locator('#uploadDialogOverlay').waitFor({ state: 'hidden' });
-        const uploadedSource = await page.locator('#imagePropertiesSource').inputValue();
-        assert.match(uploadedSource, /^\/p\/[a-f0-9]+\.png$/);
-        const uploadedFileResponse = await context.request.get(fixtureURL + uploadedSource);
-        assert.equal(uploadedFileResponse.status(), 200);
-        assert.ok((await uploadedFileResponse.body()).equals(originalBytes), 'replacement preserves original bytes');
+        assert.match(await page.locator('#imagePropertiesSource').inputValue(), /^blob:/);
         const preview = page.locator('#imagePropertiesPreview');
         await preview.evaluate(previewElement => previewElement.decode());
         assert.equal(await preview.evaluate(previewElement => getComputedStyle(previewElement).objectFit), 'cover');
@@ -393,9 +394,17 @@ async function runEditorRegressions() {
         assert.equal(await page.locator('#imagePropertiesHeight').inputValue(), String(Math.round(originalArea.height)));
         await page.locator('#imagePropertiesPosition').fill('25% 75%');
         await page.locator('#imagePropertiesPosition').press('Tab');
+        const uploadResponsePromise = page.waitForResponse(response => response.url().includes('?files&prepare_image') && response.request().method() === 'POST').then(async uploadResponse => { assert.equal(uploadResponse.status(), 200); return uploadResponse.json(); });
         await saveWithButton(page.locator('#imagePropertiesSave'));
+        const preparedUpload = await uploadResponsePromise;
+        if (imageID === 'gallery-image') {
+          assert.equal(preparedUpload.full.width, 100);
+          assert.equal(preparedUpload.full.height, 400);
+        } else assert.ok(!preparedUpload.full, 'unlinked image needs only a preview');
+        assert.ok(Math.abs(preparedUpload.preview.width/preparedUpload.preview.height-originalArea.width/originalArea.height) < .03, 'stored pixels match frame proportions');
         const savedAttributes = await savedImageAttributes(uploadPagePath, imageID);
-        assert.equal(savedAttributes.src, uploadedSource);
+        assert.equal(savedAttributes.src, preparedUpload.preview.url);
+        if (imageID === 'gallery-image') assert.equal(savedAttributes.link, preparedUpload.full.url);
         assert.equal(savedAttributes.fit, 'cover');
         assert.equal(savedAttributes.position, '25% 75%');
         if (imageID === 'attribute-image') {
@@ -477,30 +486,18 @@ async function runEditorRegressions() {
       const chooserPromise = page.waitForEvent('filechooser');
       await page.locator('#imagePropertiesReplace').click();
       await (await chooserPromise).setFiles({ name: 'replacement.svg', mimeType: 'image/svg+xml', buffer: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="100" height="400"><rect width="100" height="400" fill="orange"/></svg>') });
-      await page.route('**/*?files', interceptedRoute => interceptedRoute.fulfill({ status: 500, body: 'fixture upload failure' }));
       await page.locator('#uploadDialogUpload').click();
-      await page.waitForFunction(() => !document.getElementById('uploadDialogUpload').disabled && document.getElementById('uploadDialogError').textContent.length > 0);
+      await page.locator('#imagePropertiesPreview').evaluate(previewElement => previewElement.decode());
+      await page.route('**/*?files&prepare_image', interceptedRoute => interceptedRoute.fulfill({ status: 500, body: 'fixture upload failure' }));
+      await page.locator('#imagePropertiesSave').click();
+      await page.locator('#imagePropertiesError').getByText('fixture upload failure', {exact: false}).waitFor();
       assert.equal(await frameImage('class-image').getAttribute('src'), '/_editor-wide.svg');
-      await page.unroute('**/*?files');
-      let releaseDelayedUpload;
-      const delayedUpload = new Promise(resolve => { releaseDelayedUpload = resolve; });
-      let confirmUploadReceived;
-      const uploadReceived = new Promise(resolve => { confirmUploadReceived = resolve; });
-      await page.route('**/*?files', async interceptedRoute => {
-        const completedUpload = await interceptedRoute.fetch();
-        confirmUploadReceived();
-        await delayedUpload;
-        await interceptedRoute.fulfill({ response: completedUpload });
-      });
-      await page.locator('#uploadDialogUpload').click();
-      await uploadReceived;
-      await page.locator('#uploadDialogClose').click();
-      await page.locator('#imagePropertiesCancel').click();
+      await page.unroute('**/*?files&prepare_image');
+      assert.ok(await page.locator('#imagePropertiesSave').isEnabled(), 'failed preparation remains retryable');
+      await saveWithButton(page.locator('#imagePropertiesSave'));
+      await openFixture();
       await frameImage('attribute-image').dblclick();
-      releaseDelayedUpload();
-      await page.waitForTimeout(100);
-      assert.equal(await page.locator('#imagePropertiesSource').inputValue(), '/_editor-wide.svg', 'late upload cannot change another dialog');
-      await page.unroute('**/*?files');
+      assert.equal(await page.locator('#imagePropertiesSource').inputValue(), '/_editor-wide.svg', 'cancelled upload cannot change another image');
       await page.locator('#imagePropertiesClose').click();
 
       if (viewport.width === 320) {

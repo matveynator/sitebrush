@@ -90,7 +90,7 @@
         const query = parameters.toString();
         const fragment = /^#[A-Za-z0-9._~-]{1,64}$/.test(location.hash || '') ? location.hash : '';
         const observedURI = location.pathname + (query ? '?' + query : '') + fragment;
-        for (const rule of model.uriRules) { if (rule.Match === observedURI && !model.matchedRules.has(rule.Name)) { model.matchedRules.add(rule.Name); enqueue({kind:'goal',name:rule.Name}); } }
+        for (const rule of model.uriRules) { if (rule.match === observedURI && !model.matchedRules.has(rule.name)) { model.matchedRules.add(rule.name); enqueue({kind:'goal',name:rule.name}); } }
     }
     function recordInteraction() {
         if (performance.now() - model.lastInteraction > 1800000) { flush(true); startView(); }
@@ -337,7 +337,7 @@
                         scheduleDelivery(Math.max(0,1000-(performance.now()-model.lastDelivery)));
                     } else model.limited = true;
                 } else if (response.operation === 'rules') {
-                    model.uriRules = Array.isArray(response.goals) ? response.goals.filter(function uriGoal(goal) { return (goal.Kind === 'uri' || goal.Kind === 'path') && typeof goal.Match === 'string'; }) : [];
+                    model.uriRules = Array.isArray(response.rules) ? response.rules.filter(function uriRule(rule) { return rule && validName(rule.name) && typeof rule.match === 'string' && rule.match.startsWith('/'); }) : [];
                     observeConfiguredURI();
                     if (response.replay) configureReplay(response.replay);
                 }

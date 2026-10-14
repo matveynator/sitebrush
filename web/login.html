@@ -20,6 +20,7 @@
   </div>
   {{if .ShowTOTPForm}}
   <form class="authentication-card profile-form" method="post" action="?login">
+    <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
     <div class="auth-method-heading auth-method-heading-login">
       <img class="auth-method-illustration" src="/p/static/sitebrush-goofer-otp-small.png" alt="" width="112" height="102">
       <div class="auth-method-copy">
@@ -37,6 +38,7 @@
   </form>
   {{else if .ShowCodeForm}}
   <form class="authentication-card profile-form" method="post" action="?login">
+    <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
     <h2>{{index .T "auth_login_title"}}</h2><p>{{index .T "auth_new_ip"}}</p>
     {{if and .Status (not .EmailDelivery.Show)}}<p class="text-danger" role="status">{{.Status}}</p>{{end}}
     {{if .EmailDelivery.Show}}<div class="account-delivery" data-delivery-state="{{.EmailDelivery.Kind}}" data-account-delivery-id="{{.EmailDelivery.ID}}" data-account-delivery-proof="{{.LoginChallenge}}" data-sent="{{index .T "profile_email_delivery_success_summary"}}" data-failed="{{index .T "profile_email_delivery_error_summary"}}" data-pending="{{index .T "profile_email_delivery_pending_summary"}}"><p role="status" data-account-delivery-status>{{.EmailDelivery.Summary}}</p><details><summary>{{.EmailDelivery.LinkText}}</summary><pre data-account-delivery-log>{{.EmailDelivery.Log}}</pre></details></div>{{end}}
@@ -60,6 +62,7 @@
   {{end}}
   {{if or .ShowPasswordForm (not .HasPasskeys)}}
   <form class="card card-body authentication-card" method="post" action="?login">
+    <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
     <input type="hidden" name="return_path" value="{{.ReturnPath}}">
     {{if .Status}}<div class="alert alert-{{if .StatusClass}}{{.StatusClass}}{{else}}warning{{end}}" role="alert">{{.Status}}</div>{{end}}
     <p><input type="email" name="email" autocomplete="username" required class="form-control" placeholder="{{index .T "login_email_placeholder"}}" value="{{.Email}}"></p>

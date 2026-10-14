@@ -11,6 +11,7 @@ const sitebrushEditorModel = {
   viewport: null,
   sourceSnapshot: '',
   sourceCodeMirror: null,
+  sourceHistoryInitialized: false,
   renderedBodyHTML: '',
   visualButtons: [],
   imageDraft: null,
@@ -196,7 +197,27 @@ function initializeSitebrushSourceCodeMirror(sourceTextarea, editorInstance) {
     if (sourceChange.origin !== 'setValue') {
       sitebrushEditorModel.sourceHTML = codeMirrorEditor.getValue();
     }
+    renderSourceHistoryButtons(editorInstance);
   });
+}
+
+function renderSourceHistoryButtons(editorInstance) {
+  const sourceHistory = sitebrushEditorModel.sourceCodeMirror.historySize();
+  for (const historyAction of ['undo', 'redo']) {
+    const historyButton = editorInstance.container.querySelector('[data-ref="' + historyAction + 'Source"] button');
+    if (historyButton) historyButton.disabled = sourceHistory[historyAction] === 0;
+  }
+}
+
+function updateSourceDocument(sourceHTML) {
+  const sourceCodeMirror = sitebrushEditorModel.sourceCodeMirror;
+  if (sourceCodeMirror.getValue() === sourceHTML) return;
+  const lastSourceLine = sourceCodeMirror.lastLine();
+  sourceCodeMirror.doc.changeGeneration(true);
+  sourceCodeMirror.operation(function replaceSourceDocument() {
+    sourceCodeMirror.replaceRange(sourceHTML, {line: 0, ch: 0}, {line: lastSourceLine, ch: sourceCodeMirror.getLine(lastSourceLine).length}, '+sitebrush-mode');
+  });
+  sourceCodeMirror.doc.changeGeneration(true);
 }
 
 /* Jodit's hover/selection callbacks need scripting enabled in their document.
@@ -219,8 +240,13 @@ function enterSitebrushCodeMode(editorInstance) {
   sitebrushEditorModel.mode = 'code';
   const sourceCodeMirror = sitebrushEditorModel.sourceCodeMirror;
   sourceCodeMirror.setOption('lineSeparator', sitebrushEditorModel.sourceHTML.includes('\r\n') ? '\r\n' : null);
-  sourceCodeMirror.setValue(sitebrushEditorModel.sourceHTML);
-  sourceCodeMirror.clearHistory();
+  if (!sitebrushEditorModel.sourceHistoryInitialized) {
+    sourceCodeMirror.setValue(sitebrushEditorModel.sourceHTML);
+    sourceCodeMirror.clearHistory();
+    sitebrushEditorModel.sourceHistoryInitialized = true;
+  } else {
+    updateSourceDocument(sitebrushEditorModel.sourceHTML);
+  }
   editorInstance.setMode(Jodit.MODE_SOURCE);
   sourceCodeMirror.refresh();
   sourceCodeMirror.setCursor(0, 0);
@@ -233,6 +259,7 @@ function returnToSitebrushVisualMode(editorInstance, discardSourceChanges) {
     return;
   }
   const nextDocumentHTML = discardSourceChanges ? sitebrushEditorModel.sourceSnapshot : sitebrushEditorModel.sourceHTML;
+  if (discardSourceChanges) updateSourceDocument(nextDocumentHTML);
   const documentChanged = nextDocumentHTML !== sitebrushEditorModel.sourceSnapshot;
   sitebrushEditorModel.mode = 'visual';
   editorInstance.setMode(Jodit.MODE_WYSIWYG);
@@ -258,15 +285,20 @@ function returnToSitebrushVisualMode(editorInstance, discardSourceChanges) {
 
 function renderSitebrushEditorToolbar(editorInstance) {
   const codeButtons = [
-    { name: 'cancelSource', mode: Jodit.MODE_SPLIT, tooltip: editUIText.cancel, text: editUIText.cancel,
+    { name: 'undoSource', mode: Jodit.MODE_SPLIT, icon: 'undo', tooltip: editUIText.undo,
+      exec: function undoSourceEdit() { sitebrushEditorModel.sourceCodeMirror.undo(); } },
+    { name: 'redoSource', mode: Jodit.MODE_SPLIT, icon: 'redo', tooltip: editUIText.redo,
+      exec: function redoSourceEdit() { sitebrushEditorModel.sourceCodeMirror.redo(); } },
+    { name: 'cancelSource', iconURL: '/p/static/exit-editor.png', mode: Jodit.MODE_SPLIT, tooltip: editUIText.cancel, text: editUIText.cancel,
       exec: function cancelSourceDraft() { returnToSitebrushVisualMode(editorInstance, true); } },
-    { name: 'saveSource', mode: Jodit.MODE_SPLIT, tooltip: editUIText.save, text: editUIText.save,
+    { name: 'saveSource', iconURL: '/p/static/save-page.png', mode: Jodit.MODE_SPLIT, tooltip: editUIText.save, text: editUIText.save,
       exec: function saveSourceDraft() { submitVisualEditorForm(editorInstance); } },
-    { name: 'backToVisual', mode: Jodit.MODE_SPLIT, tooltip: editUIText.backToVisual, text: editUIText.backToVisual,
+    { name: 'backToVisual', icon: 'brush', mode: Jodit.MODE_SPLIT, tooltip: editUIText.backToVisual, text: editUIText.backToVisual,
       exec: function applySourceDraft() { returnToSitebrushVisualMode(editorInstance, false); } }
   ];
   editorInstance.container.classList.toggle('SiteBrushCodeMode', sitebrushEditorModel.mode === 'code');
   editorInstance.toolbar.build(sitebrushEditorModel.mode === 'code' ? codeButtons : sitebrushEditorModel.visualButtons);
+  renderSourceHistoryButtons(editorInstance);
   scheduleVisualEditorLayout(editorInstance);
 }
 function refreshVisualEditorDocumentStyles(editorInstance) {
@@ -330,6 +362,13 @@ function openImagePropertiesDialog(editorInstance, imageElement) {
     imageElement: imageElement,
     source: imageElement.getAttribute('src') || '',
     originalSource: imageElement.getAttribute('src') || '',
+    replacementFile: null,
+    replacementPreviewURL: '',
+    preparing: false,
+    preparationError: '',
+    positionError: '',
+    preparationController: null,
+    fullSizeReferences: imageFullSizeReferences(imageElement),
     width: Math.max(1, Math.round(imageRectangle.width)),
     height: Math.max(1, Math.round(imageRectangle.height)),
     areaRatio: imageRectangle.width / imageRectangle.height || 1,
@@ -486,13 +525,23 @@ function renderImagePropertiesStatus() {
   if (!imageDraft) {
     return;
   }
-  document.getElementById('imagePropertiesError').textContent = imageDraft.error;
-  document.getElementById('imagePropertiesSave').disabled = !!imageDraft.error || imageDraft.loadingPreview;
+  try {
+    imageCropPosition(imageDraft.position);
+    imageDraft.positionError = '';
+  } catch (positionError) {
+    imageDraft.positionError = positionError.message;
+  }
+  document.getElementById('imagePropertiesPosition').setAttribute('aria-invalid', String(!!imageDraft.positionError));
+  document.getElementById('imagePropertiesError').textContent = imageDraft.error || imageDraft.positionError || imageDraft.preparationError;
+  for (const draftControl of document.querySelectorAll('#imagePropertiesDialog input, #imagePropertiesDialog select, #imagePropertiesReplace')) draftControl.disabled = imageDraft.preparing;
+  document.getElementById('imagePropertiesSave').disabled = !!imageDraft.error || !!imageDraft.positionError || imageDraft.loadingPreview || imageDraft.preparing;
 }
 
 function closeImagePropertiesDialog() {
   const closedDraft = sitebrushEditorModel.imageDraft;
   sitebrushEditorModel.imageDraft = null;
+  if (closedDraft && closedDraft.preparationController) closedDraft.preparationController.abort();
+  if (closedDraft && closedDraft.replacementPreviewURL) URL.revokeObjectURL(closedDraft.replacementPreviewURL);
   renderImagePropertiesDialog();
   if (closedDraft && closedDraft.previousFocus) {
     closedDraft.previousFocus.focus({ preventScroll: true });
@@ -534,16 +583,136 @@ function changeImageAreaSize(changedSide, requestedSize) {
   renderImagePropertiesDialog();
 }
 
-function applyImagePropertiesDraft(editorInstance) {
+function imageFullSizeReferences(imageElement) {
+  const references = [];
+  const anchorElement = imageElement.closest('a');
+  function collectImageReference(referenceElement, attribute, explicitImageReference) {
+    if (!referenceElement || !referenceElement.hasAttribute(attribute)) return;
+    const referenceURL = referenceElement.getAttribute(attribute).trim();
+    if (!referenceURL || referenceURL.startsWith('#')) return;
+    let sameSource = false;
+    try {
+      const resolvedReference = new URL(referenceURL, visualEditorFrameBaseURL());
+      if (!['http:', 'https:', 'blob:', 'data:'].includes(resolvedReference.protocol)) return;
+      sameSource = resolvedReference.href === imageElement.src;
+    } catch (referenceURLError) { return; }
+    if (explicitImageReference || sameSource || referenceURL === imageElement.getAttribute('src') || /\.(?:a?png|jpe?g|gif|webp|svg|bmp|ico)(?:[?#]|$)/i.test(referenceURL)) references.push({element: referenceElement, attribute: attribute});
+  }
+  collectImageReference(anchorElement, 'href', !!(anchorElement && anchorElement.matches('[data-fancybox], [data-lightbox], [data-gallery], [rel*=lightbox], [rel*=gallery]')));
+  for (const attribute of ['data-full', 'data-full-src', 'data-fullsize', 'data-full-size', 'data-large', 'data-large-src', 'data-original', 'data-original-src', 'data-zoom-image']) {
+    collectImageReference(imageElement, attribute, true);
+    collectImageReference(anchorElement, attribute, true);
+  }
+  const galleryElement = imageElement.closest('[data-fancybox], [data-lightbox], [data-gallery]');
+  collectImageReference(galleryElement, 'data-src', true);
+  // Inert inline open handlers still belong to the source model. Updating a
+  // quoted image argument preserves the existing click behavior on publication.
+  for (const referenceElement of [imageElement, anchorElement]) {
+    if (!referenceElement || referenceElement.getAttribute('data-sitebrush-preview-owner') !== sitebrushEditorModel.previewToken) continue;
+    const attributeIndex = Number(referenceElement.getAttribute('data-sitebrush-preview-attributes'));
+    const originalAttributes = sitebrushEditorModel.previewAttributes[attributeIndex] || [];
+    for (const originalAttribute of originalAttributes) {
+      if (originalAttribute.name.toLowerCase() !== 'onclick') continue;
+      const openArgument = /(?:window\.open|openImage|showImage|openPhoto|showPhoto|openLightbox|lightbox\.open|fancybox\.open)\(\s*(['"])([^'"]+\.(?:a?png|jpe?g|gif|webp|svg|bmp|ico)(?:[?#][^'"]*)?)\1/i.exec(originalAttribute.text);
+      if (openArgument) references.push({originalAttribute: originalAttribute, previousURL: openArgument[2]});
+    }
+  }
+  return references;
+}
+
+function imageCropPosition(positionText) {
+  const components = positionText.trim().toLowerCase().split(/\s+/);
+  if (components.length === 1) {
+    if (components[0] === 'top' || components[0] === 'bottom') components.unshift('center');
+    else components.push('center');
+  }
+  if (((components[0] === 'top' || components[0] === 'bottom') && components[1] === 'center') || (['top', 'bottom', 'center'].includes(components[0]) && ['left', 'right'].includes(components[1]))) components.reverse();
+  if (components.length !== 2) throw new Error(editUIText.invalidImagePosition);
+  return components.map(function normalizedPosition(component, axisIndex) {
+    const keywords = axisIndex === 0 ? {left: 0, center: .5, right: 1} : {top: 0, center: .5, bottom: 1};
+    if (Object.prototype.hasOwnProperty.call(keywords, component)) return keywords[component];
+    if (/^[+-]?0(?:\.0+)?(?:px)?$/.test(component)) return 0;
+    if (/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)%$/.test(component)) {
+      const percentage = Number.parseFloat(component) / 100;
+      if (percentage >= 0 && percentage <= 1) return percentage;
+    }
+    throw new Error(editUIText.invalidImagePosition);
+  });
+}
+
+async function prepareImageDraftReplacement(imageDraft) {
+  const signal = imageDraft.preparationController.signal;
+  const cropPosition = imageCropPosition(imageDraft.position);
+  const requestBody = new FormData();
+  let replacementFile = imageDraft.replacementFile;
+  if (!replacementFile) {
+    const sourceURL = new URL(imageDraft.source, visualEditorFrameBaseURL());
+    if (['http:', 'https:'].includes(sourceURL.protocol) && sourceURL.origin !== new URL(visualEditorFrameBaseURL()).origin) {
+      requestBody.append('image_source', sourceURL.href);
+    } else {
+      const originalResponse = await fetch(sourceURL, {signal: signal});
+      if (!originalResponse.ok) throw new Error(editUIText.imagePreviewFailed);
+      replacementFile = await originalResponse.blob();
+    }
+  }
+  requestBody.append('action', 'prepare_image');
+  if (replacementFile) requestBody.append('upload_files', replacementFile, replacementFile.name || 'image');
+  const accountCSRFToken = document.querySelector('[name="account_csrf"]').value;
+  requestBody.append('account_csrf', accountCSRFToken);
+  requestBody.append('image_width', String(imageDraft.width));
+  requestBody.append('image_height', String(imageDraft.height));
+  requestBody.append('image_fit', imageDraft.fit);
+  requestBody.append('image_position_x', String(cropPosition[0]));
+  requestBody.append('image_position_y', String(cropPosition[1]));
+  requestBody.append('image_full', imageDraft.fullSizeReferences.length ? '1' : '0');
+  const preparedResponse = await fetch(currentPagePath + '?files&prepare_image', {method: 'POST', body: requestBody, headers: {'Accept': 'application/json', 'X-SiteBrush-CSRF': accountCSRFToken}, signal: signal});
+  if (!preparedResponse.ok) throw new Error(editUIText.imageResizeFailed + ': ' + await preparedResponse.text());
+  return preparedResponse.json();
+}
+
+async function applyImagePropertiesDraft(editorInstance) {
   const imageDraft = sitebrushEditorModel.imageDraft;
-  if (!imageDraft || imageDraft.error || !imageDraft.imageElement.isConnected) {
+  if (!imageDraft || imageDraft.error || imageDraft.positionError || imageDraft.preparing || !imageDraft.imageElement.isConnected) {
     return;
+  }
+  let preparedReplacement = null;
+  if (imageDraft.source !== imageDraft.originalSource) {
+    imageDraft.preparing = true;
+    imageDraft.preparationError = '';
+    imageDraft.preparationController = new AbortController();
+    renderImagePropertiesStatus();
+    try {
+      preparedReplacement = await prepareImageDraftReplacement(imageDraft);
+    } catch (preparationError) {
+      if (sitebrushEditorModel.imageDraft !== imageDraft) return;
+      imageDraft.preparing = false;
+      imageDraft.preparationError = preparationError.message || editUIText.imageResizeFailed;
+      renderImagePropertiesStatus();
+      return;
+    }
+    if (sitebrushEditorModel.imageDraft !== imageDraft || !imageDraft.imageElement.isConnected) return;
+    imageDraft.source = preparedReplacement.preview.url;
+    imageDraft.preparing = false;
   }
   const selectedImage = imageDraft.imageElement;
   selectedImage.setAttribute('src', imageDraft.source);
   if (imageDraft.source !== imageDraft.originalSource) {
     selectedImage.removeAttribute('srcset');
     selectedImage.removeAttribute('sizes');
+    const pictureElement = selectedImage.closest('picture');
+    if (pictureElement) {
+      for (const sourceElement of pictureElement.querySelectorAll('source')) {
+        sourceElement.setAttribute('srcset', imageDraft.source);
+        sourceElement.removeAttribute('sizes');
+        if (preparedReplacement) sourceElement.setAttribute('type', preparedReplacement.preview.mime);
+      }
+    }
+    if (preparedReplacement && preparedReplacement.full) {
+      for (const fullSizeReference of imageDraft.fullSizeReferences) {
+        if (fullSizeReference.originalAttribute) fullSizeReference.originalAttribute.text = fullSizeReference.originalAttribute.text.replace(fullSizeReference.previousURL, preparedReplacement.full.url);
+        else fullSizeReference.element.setAttribute(fullSizeReference.attribute, preparedReplacement.full.url);
+      }
+    }
   }
   if (imageDraft.dimensionsChanged) {
     for (const dimensionName of ['width', 'height']) {
@@ -607,13 +776,8 @@ function connectImagePropertiesDialog(editorInstance) {
   document.getElementById('imagePropertiesPosition').addEventListener('change', function changeCropPosition(changeEvent) {
     const positionText = changeEvent.target.value.trim();
     const imageDraft = sitebrushEditorModel.imageDraft;
-    if (!CSS.supports('object-position', positionText)) {
-      imageDraft.error = editUIText.invalidImagePosition;
-    } else {
-      imageDraft.error = '';
-      imageDraft.position = positionText;
-      imageDraft.positionChanged = true;
-    }
+    imageDraft.position = positionText;
+    imageDraft.positionChanged = true;
     renderImagePropertiesDialog();
   });
   document.getElementById('imagePropertiesSource').addEventListener('change', function changeImageSource(changeEvent) {
@@ -621,10 +785,12 @@ function connectImagePropertiesDialog(editorInstance) {
   });
   document.getElementById('imagePropertiesReplace').addEventListener('click', function uploadImageReplacement() {
     const receivingDraft = sitebrushEditorModel.imageDraft;
-    chooseAndUploadFiles(editorInstance, function receiveReplacementURL(storedFileURL, storedFileByteCount) {
-      if (sitebrushEditorModel.imageDraft === receivingDraft) {
-        replaceImageDraftSource(receivingDraft, storedFileURL, storedFileByteCount);
-      }
+    chooseAndUploadFiles(editorInstance, function receiveReplacementFile(selectedFile) {
+      if (sitebrushEditorModel.imageDraft !== receivingDraft) return;
+      if (receivingDraft.replacementPreviewURL) URL.revokeObjectURL(receivingDraft.replacementPreviewURL);
+      receivingDraft.replacementFile = selectedFile;
+      receivingDraft.replacementPreviewURL = URL.createObjectURL(selectedFile);
+      replaceImageDraftSource(receivingDraft, receivingDraft.replacementPreviewURL, selectedFile.size);
     });
   });
   document.getElementById('imagePropertiesPreview').addEventListener('error', function showImagePreviewError() {
@@ -646,6 +812,12 @@ function replaceImageDraftSource(imageDraft, sourceURL, storedFileByteCount) {
   if (!imageDraft) {
     return;
   }
+  if (sourceURL !== imageDraft.replacementPreviewURL) {
+    if (imageDraft.replacementPreviewURL) URL.revokeObjectURL(imageDraft.replacementPreviewURL);
+    imageDraft.replacementFile = null;
+    imageDraft.replacementPreviewURL = '';
+  }
+  imageDraft.preparationError = '';
   if (!sourceURL) {
     imageDraft.error = editUIText.imagePreviewFailed;
   } else {

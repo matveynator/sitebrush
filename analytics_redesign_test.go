@@ -242,13 +242,19 @@ func TestConversionBrowserRegressions(t *testing.T) {
 	if os.Getenv("SITEBRUSH_ANALYTICS_BROWSER_TEST") != "1" {
 		t.Skip("set SITEBRUSH_ANALYTICS_BROWSER_TEST=1 with scripts/editor Playwright installed")
 	}
-	application, rawDB := newTestApplication(t)
+	// Session renewal and analytics quota writes must use the production SQL
+	// owner rather than compete through independent raw SQLite connections.
+	application := newRouterTestApplication(t)
+	fixtureContext := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), "localhost"))
+	store := browserstats.OpenStore(filepath.Join(application.storagePath, "analytics"))
+	application.analyticsStorage = store
+	t.Cleanup(store.Close)
 	assets, err := buildEmbeddedStaticAssetCache(testStaticFiles(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	application.embeddedStaticAssets = assets
-	if _, err = rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "analytics@example.com", "old"); err != nil {
+	if _, err = application.db.ExecContext(fixtureContext, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "analytics@example.com", "old"); err != nil {
 		t.Fatal(err)
 	}
 	staticHTML := `<!doctype html><html lang="en"><head><title>Analytics fixture</title><style>section{height:600px}body{margin:20px}</style></head><body><main><section data-analytics-section="hero"><h1>Fixture</h1><a href="/download" data-analytics-key="download">Download</a><div data-analytics-key="dead">Looks clickable</div></section><section><form data-analytics-key="contact"><input id="name" name="name" value="field-secret"><input id="password" type="password" name="password" value="password-secret"><select id="plan" name="plan" data-analytics-key="plan"><option value="starter">Starter</option><option value="pro">Pro</option></select><textarea>textarea-secret</textarea><button>Submit</button></form></section></main><script>window.fixtureExecuted=true</script></body></html>`
@@ -264,7 +270,7 @@ func TestConversionBrowserRegressions(t *testing.T) {
 	}
 	layoutStart := strings.Index(preview, `data-analytics-layout="`) + len(`data-analytics-layout="`)
 	layout := strings.Split(preview[layoutStart:], `"`)[0]
-	if _, err = rawDB.Exec(`INSERT INTO published_pages(domain,path,title,html) VALUES('localhost','/','Home',''),('localhost','/docs/guide','Getting started','')`); err != nil {
+	if _, err = application.db.ExecContext(fixtureContext, `INSERT INTO published_pages(domain,path,title,html) VALUES('localhost','/','Home',''),('localhost','/docs/guide','Getting started','')`); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()

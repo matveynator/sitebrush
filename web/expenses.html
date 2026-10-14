@@ -3123,6 +3123,8 @@
     <input type="checkbox" name="public_trial_enabled" value="1" {{if .PublicTrialEnabled}}checked{{end}} {{if not .AutoRegistrationEnabled}}disabled{{end}} data-public-trial-toggle>
     <span>{{index .T "billing_registration_allow_test_drive"}}</span>
   </label>
+  <label>{{index .T "billing_registration_max_site_size"}} <input name="registration_max_site_size" class="form-control" value="{{.RegistrationMaxSize}}" required></label>
+  <label>{{index .T "billing_test_drive_max_site_size"}} <input name="public_trial_max_site_size" class="form-control" value="{{.TestDriveMaxSize}}" required></label>
   <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">{{index .T "billing_save"}}</button>
 </form>
 <script>
@@ -3151,6 +3153,7 @@
 <form method="post" action="?expenses" class="billing-demo-settings-form" data-billing-ajax-save><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
   <input type="hidden" name="billing_action" value="demo_settings">
   <input type="hidden" name="refresh_demo_site" value="0" data-refresh-demo-site-input>
+  <label>{{index .T "billing_demo_max_site_size"}} <input name="demo_site_max_size" class="form-control" value="{{.DemoMaxSize}}" required></label>
   <label>{{index .T "billing_demo_domain"}} <input name="demo_site_domain" type="text" class="form-control" value="{{.DemoSettings.Domain}}" placeholder="demo.example.com"></label>
   <label>{{index .T "billing_demo_source_url"}} <input name="demo_site_source_url" type="text" class="form-control" value="{{.DemoSettings.SourceURL}}" placeholder="example.com or https://example.com/"></label>
   <fieldset class="billing-demo-copy-scope">

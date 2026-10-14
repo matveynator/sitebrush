@@ -87,34 +87,18 @@
   .SiteBrushImageOverlay .SiteBrushUploadFooter { padding: 8px 10px; }
   .SiteBrushImageOverlay .SiteBrushUploadButton { min-height: 48px; }
 }
-.SiteBrushCodeMode .jodit-toolbar__box { overflow: visible; }
-.SiteBrushCodeMode .jodit-toolbar-editor-collection {
-  display: flex;
-  flex-wrap: wrap;
-  width: 100%;
-  box-sizing: border-box;
-}
-.SiteBrushCodeMode .jodit-ui-group {
-  display: flex;
-  flex-wrap: wrap;
-  flex: 1 1 0;
-  min-width: 0;
-  height: auto;
-}
-.SiteBrushCodeMode .jodit-toolbar-button {
-  flex: 1 1 80px;
-  min-width: 0;
-  min-height: 48px;
-  height: auto;
-}
-.SiteBrushCodeMode .jodit-toolbar-button__button {
-  width: 100%;
-  min-height: 48px;
-  height: auto;
-  white-space: normal;
-}
-.SiteBrushCodeMode .jodit-toolbar-button__text { white-space: normal; }
+/* Source controls share the visual toolbar's row height across mode changes. */
+.SiteBrushCodeMode .jodit-toolbar__box { overflow-x: auto; overflow-y: hidden; }
+.SiteBrushCodeMode .jodit-toolbar-editor-collection,
+.SiteBrushCodeMode .jodit-ui-group { display: flex; flex-wrap: nowrap; width: auto; flex: 0 0 auto; }
+.SiteBrushCodeMode .jodit-toolbar-button { flex: 0 0 auto; height: 36px; min-height: 36px; }
+.SiteBrushCodeMode .jodit-toolbar-button__button { height: 36px; min-height: 36px; white-space: nowrap; }
+.SiteBrushCodeMode .jodit-toolbar-button__text { white-space: nowrap; }
 .SiteBrushCodeMode .jodit-toolbar-button__trigger { display: none; }
+@media (max-width: 480px) {
+  .SiteBrushCodeMode .jodit-toolbar-button__text { display: none; }
+}
+
 #sitebrushSourceHTML {
   margin: 0;
   padding: 12px;
