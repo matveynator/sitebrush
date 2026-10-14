@@ -1,0 +1,303 @@
+name: Finish analytics redesign blockers
+
+on:
+  push:
+    branches: [analytics-redesign]
+    paths: [.github/workflows/pr180-finish.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: analytics-redesign
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Apply reviewed analytics fixes
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def replace(path, old, new, count=1):
+              file = Path(path)
+              text = file.read_text()
+              found = text.count(old)
+              if found != count:
+                  raise SystemExit(f"{path}: expected {count} occurrence(s), found {found}: {old[:100]!r}")
+              file.write_text(text.replace(old, new, count))
+
+          # Keep filesystem path construction inside the analytics storage boundary.
+          replace("sitebrush.go", '''func (a *App) analyticsDiskBytes(domain string) int64 {
+          \t// Disk reconciliation reads files, never opens the analytics database.
+          \treturn a.directorySizeInsideStorage(filepath.Join(a.storageRootDir(), "analytics", "site-"+url.PathEscape(domain)))
+          }''', '''func (a *App) analyticsDiskBytes(domain string) int64 {
+          \tif a.analyticsStorage == nil {
+          \t\treturn 0
+          \t}
+          \tresult := a.analyticsStorage.Exchange(browserstats.StorageRequest{Operation: browserstats.ReadUsage, Domain: domain})
+          \tif result.Err != nil {
+          \t\treturn 0
+          \t}
+          \treturn result.Bytes
+          }''')
+
+          # Validate and resolve analytics directories only inside store.go.
+          replace("pkg/analytics/store.go", '''\t\t\tresult := StorageResult{}
+          \t\t\tdatabasePath := filepath.Join(root, "site-"+url.PathEscape(request.Domain), DatabaseName(request.Domain))
+          \t\t\t_, databaseErr := os.Stat(databasePath)''', '''\t\t\tresult := StorageResult{}
+          \t\t\tdirectory, pathErr := storeDirectoryPath(root, request.Domain)
+          \t\t\tdatabaseErr := pathErr
+          \t\t\tif pathErr == nil {
+          \t\t\t\t_, databaseErr = os.Stat(filepath.Join(directory, DatabaseName(request.Domain)))
+          \t\t\t}''')
+          replace("pkg/analytics/store.go", '''func storeDirectory(root, domain string) (string, error) {
+          \tif domain == "" || len(domain) > 253 || strings.ContainsAny(domain, "\\x00\\r\\n") {
+          \t\treturn "", errors.New("invalid analytics domain")
+          \t}
+          \tdirectory := filepath.Join(root, "site-"+url.PathEscape(domain))
+          \tif err := os.MkdirAll(directory, 0700); err != nil {''', '''func storeDirectoryPath(root, domain string) (string, error) {
+          \tif domain == "" || len(domain) > 253 || strings.ContainsAny(domain, "\\x00\\r\\n/\\\\") {
+          \t\treturn "", errors.New("invalid analytics domain")
+          \t}
+          \tdirectory := filepath.Join(root, "site-"+url.PathEscape(domain))
+          \trelative, err := filepath.Rel(root, directory)
+          \tif err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
+          \t\treturn "", errors.New("unsafe analytics directory")
+          \t}
+          \treturn directory, nil
+          }
+
+          func storeDirectory(root, domain string) (string, error) {
+          \tdirectory, err := storeDirectoryPath(root, domain)
+          \tif err != nil {
+          \t\treturn "", err
+          \t}
+          \tif err := os.MkdirAll(directory, 0700); err != nil {''')
+          replace("pkg/analytics/store.go", '''func (store *Store) execute(root string, request StorageRequest, archivedHour map[string]string) StorageResult {
+          \tif request.Operation == ReadUsage {
+          \t\tdirectory := filepath.Join(root, "site-"+url.PathEscape(request.Domain))
+          \t\tusage, err := directoryBytes(directory)
+          \t\treturn StorageResult{Bytes: usage, Err: err}
+          \t}''', '''func (store *Store) execute(root string, request StorageRequest, archivedHour map[string]string) StorageResult {
+          \tif request.Operation == ReadUsage {
+          \t\tdirectory, err := storeDirectoryPath(root, request.Domain)
+          \t\tif err != nil {
+          \t\t\treturn StorageResult{Err: err}
+          \t\t}
+          \t\tinfo, err := os.Lstat(directory)
+          \t\tif os.IsNotExist(err) {
+          \t\t\treturn StorageResult{}
+          \t\t}
+          \t\tif err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+          \t\t\treturn StorageResult{Err: errors.New("unsafe analytics directory")}
+          \t\t}
+          \t\tusage, err := directoryBytes(directory)
+          \t\treturn StorageResult{Bytes: usage, Err: err}
+          \t}''')
+
+          # Device analytics: tablet plus screen, viewport and DPR are useful UX dimensions.
+          replace("pkg/analytics/conversion.go", '''type ConversionVisitor struct {
+          \tClient                      BrowserCharacteristics
+          \tFingerprint                 string''', '''type ConversionVisitor struct {
+          \tClient                      BrowserCharacteristics
+          \tFingerprint, Device         string''')
+          replace("pkg/analytics/conversion.go", '''\tTimezone   string  `json:"timezone,omitempty"`
+          \tWidth      int     `json:"width,omitempty"`
+          \tHeight     int     `json:"height,omitempty"`
+          \tColorDepth int     `json:"color_depth,omitempty"`''', '''\tTimezone       string  `json:"timezone,omitempty"`
+          \tWidth          int     `json:"width,omitempty"`
+          \tHeight         int     `json:"height,omitempty"`
+          \tViewportWidth  int     `json:"viewport_width,omitempty"`
+          \tViewportHeight int     `json:"viewport_height,omitempty"`
+          \tColorDepth     int     `json:"color_depth,omitempty"`''')
+          replace("pkg/analytics/conversion.go", '''return len(client.UserAgent) <= 256 && len(client.Platform) <= 64 && len(client.Language) <= 32 && len(client.Timezone) <= 64 && client.Width >= 0 && client.Width <= 32768 && client.Height >= 0 && client.Height <= 32768 && client.ColorDepth >= 0''', '''return len(client.UserAgent) <= 256 && len(client.Platform) <= 64 && len(client.Language) <= 32 && len(client.Timezone) <= 64 && client.Width >= 0 && client.Width <= 32768 && client.Height >= 0 && client.Height <= 32768 && client.ViewportWidth >= 0 && client.ViewportWidth <= 32768 && client.ViewportHeight >= 0 && client.ViewportHeight <= 32768 && client.ColorDepth >= 0''')
+          replace("pkg/analytics/conversion.go", '''\tAddress, Country, City, Source, Landing string''', '''\tAddress, Country, City, Source, Landing, Device string''')
+          replace("pkg/analytics/conversion.go", '''event.Device != "" && event.Device != "mobile" && event.Device != "desktop"''', '''event.Device != "" && event.Device != "mobile" && event.Device != "tablet" && event.Device != "desktop"''')
+          replace("pkg/analytics/conversion.go", '''\tif event.Fingerprint != "" {
+          \t\tvisitor.Fingerprint = event.Fingerprint
+          \t\tvisitor.Client = event.Client
+          \t}
+          \tvisitor.Last = now''', '''\tif event.Fingerprint != "" {
+          \t\tvisitor.Fingerprint = event.Fingerprint
+          \t\tvisitor.Client = event.Client
+          \t}
+          \tif event.Device != "" {
+          \t\tvisitor.Device = event.Device
+          \t}
+          \tvisitor.Last = now''')
+          replace("pkg/analytics/conversion.go", '''\t\t\tlocation.Source = visitor.Acquisition.Name
+          \t\t\tlocation.Landing = visitor.Landing''', '''\t\t\tlocation.Source = visitor.Acquisition.Name
+          \t\t\tlocation.Landing = visitor.Landing
+          \t\t\tlocation.Device = visitor.Device''')
+
+          # Browser collector sends structural device characteristics only, never form contents.
+          replace("web/static/analytics.js", '''    function browserCharacteristics() {
+              const screenCharacteristics = window.screen || {};''', '''    function deviceClass() {
+              const userAgent = navigator.userAgent || '';
+              const width = Math.min(window.innerWidth || 32768, (window.screen && window.screen.width) || 32768);
+              if (/iPad|Tablet|PlayBook|Silk/i.test(userAgent) || (/Android/i.test(userAgent) && !/Mobile/i.test(userAgent))) return 'tablet';
+              if (/Mobi|iPhone|iPod|Android/i.test(userAgent) || width < 768) return 'mobile';
+              return 'desktop';
+          }
+          function browserCharacteristics() {
+              const screenCharacteristics = window.screen || {};''')
+          replace("web/static/analytics.js", '''            width:Math.min(32768,Math.max(0,screenCharacteristics.width || 0)),height:Math.min(32768,Math.max(0,screenCharacteristics.height || 0)),
+                      color_depth:''', '''            width:Math.min(32768,Math.max(0,screenCharacteristics.width || 0)),height:Math.min(32768,Math.max(0,screenCharacteristics.height || 0)),
+                      viewport_width:Math.min(32768,Math.max(0,window.innerWidth || 0)),viewport_height:Math.min(32768,Math.max(0,window.innerHeight || 0)),
+                      color_depth:''')
+          replace("web/static/analytics.js", '''model.layout = layoutSignature(); model.device = window.innerWidth < 768 ? 'mobile' : 'desktop';''', '''model.layout = layoutSignature(); model.device = deviceClass();''')
+
+          # Dashboard shows useful environment dimensions, not internal fingerprints or raw form values.
+          dashboard = Path("web/static/analytics_dashboard.js")
+          text = dashboard.read_text()
+          old = '''        if (visitor.Fingerprint) card.append(node('div','Fingerprint: ' + visitor.Fingerprint));
+                  if (visitor.Client) card.append(node('small',[visitor.Client.user_agent,visitor.Client.platform,visitor.Client.language,visitor.Client.timezone].filter(Boolean).join(' · ')));'''
+          new = '''        if (visitor.Client) {
+                      const environment = visitorEnvironment(visitor);
+                      card.append(node('small',[environment.device,environment.os,environment.browser,environment.screen,environment.viewport,environment.dpr].filter(Boolean).join(' · ')));
+                  }'''
+          if text.count(old) != 1:
+              raise SystemExit("analytics_dashboard.js: visitor card block changed")
+          text = text.replace(old, new)
+          anchor = '''    function visitorCard(visitor) {'''
+          helpers = r'''    function browserLabel(userAgent) {
+              const agent = userAgent || ''; let match;
+              if ((match = agent.match(/Edg\/([\d.]+)/))) return 'Edge ' + match[1];
+              if ((match = agent.match(/OPR\/([\d.]+)/))) return 'Opera ' + match[1];
+              if ((match = agent.match(/Firefox\/([\d.]+)/))) return 'Firefox ' + match[1];
+              if ((match = agent.match(/(?:Chrome|CriOS)\/([\d.]+)/))) return 'Chrome ' + match[1];
+              if ((match = agent.match(/Version\/([\d.]+).*Safari/))) return 'Safari ' + match[1];
+              return agent ? 'Other browser' : '';
+          }
+          function osLabel(userAgent,platform) {
+              const agent = userAgent || ''; let match;
+              if ((match = agent.match(/Android\s+([\d.]+)/i))) return 'Android ' + match[1];
+              if ((match = agent.match(/(?:iPhone|CPU) OS ([\d_]+)/i))) return 'iOS/iPadOS ' + match[1].replaceAll('_','.');
+              if ((match = agent.match(/Mac OS X\s+([\d_]+)/i))) return 'macOS ' + match[1].replaceAll('_','.');
+              if ((match = agent.match(/Windows NT\s+([\d.]+)/i))) return 'Windows ' + match[1];
+              if (/Linux/i.test(agent) || /Linux/i.test(platform || '')) return 'Linux';
+              return platform || '';
+          }
+          function visitorEnvironment(visitor) {
+              const client = visitor.Client || {};
+              const userAgent = client.user_agent || '';
+              let device = visitor.Device || '';
+              if (!device) {
+                  if (/iPad|Tablet|PlayBook|Silk/i.test(userAgent) || (/Android/i.test(userAgent) && !/Mobile/i.test(userAgent))) device = 'tablet';
+                  else if (/Mobi|iPhone|iPod|Android/i.test(userAgent) || (client.viewport_width && client.viewport_width < 768)) device = 'mobile';
+                  else device = 'desktop';
+              }
+              return {
+                  device: device,
+                  os: osLabel(userAgent,client.platform),
+                  browser: browserLabel(userAgent),
+                  screen: client.width && client.height ? 'screen ' + client.width + '×' + client.height : '',
+                  viewport: client.viewport_width && client.viewport_height ? 'viewport ' + client.viewport_width + '×' + client.viewport_height : '',
+                  dpr: client.pixel_ratio ? 'DPR ' + client.pixel_ratio : ''
+              };
+          }
+          function environmentRows(visitors,key) {
+              const groups = new Map();
+              for (const visitor of visitors) {
+                  const environment = visitorEnvironment(visitor); const name = environment[key] || 'Unknown';
+                  const group = groups.get(name) || {name:name,visitors:0,completed:0}; group.visitors++; if (visitor.Goal) group.completed++; groups.set(name,group);
+              }
+              return Array.from(groups.values()).sort(function environmentOrder(left,right) { return right.visitors-left.visitors || left.name.localeCompare(right.name); }).slice(0,12).map(function environmentRow(group) { return [group.name,group.visitors,group.visitors ? Math.round(group.completed*1000/group.visitors)/10 + '%' : '0%']; });
+          }
+          function renderEnvironmentBreakdown(container) {
+              const visitors = model.report.Locations || [];
+              if (!visitors.length) return;
+              const block = details('Devices, OS, browsers & screens');
+              for (const dimension of [['device','Device'],['os','OS'],['browser','Browser'],['screen','Screen'],['viewport','Viewport']]) {
+                  const rows = environmentRows(visitors,dimension[0]);
+                  if (rows.length) block.append(node('h3',dimension[1],'h6 mt-3'),table([dimension[1],label('cx_visitors'),label('cx_conversion')],rows));
+              }
+              container.append(block);
+          }
+'''
+          if text.count(anchor) != 1:
+              raise SystemExit("analytics_dashboard.js: visitorCard anchor changed")
+          text = text.replace(anchor, helpers + anchor)
+          values = '''            if (form.Values && form.Values.length) formDetails.append(table([label('cx_element'),label('cx_field_values'),label('cx_visitors')],form.Values.map(function fieldContents(field) { return [field.Field,field.Text,field.Visitors]; })));
+'''
+          if text.count(values) != 1:
+              raise SystemExit("analytics_dashboard.js: form values block changed")
+          text = text.replace(values, '')
+          source_anchor = '''        container.append(sourceDetails);
+              }
+              function renderCohorts() {'''
+          source_new = '''        container.append(sourceDetails);
+                  renderEnvironmentBreakdown(container);
+              }
+              function renderCohorts() {'''
+          if text.count(source_anchor) != 1:
+              raise SystemExit("analytics_dashboard.js: source anchor changed")
+          text = text.replace(source_anchor, source_new)
+          dashboard.write_text(text)
+
+          # Documentation must describe what the implementation actually collects.
+          readme = Path("README.md")
+          text = readme.read_text()
+          old = '''A form submit is not a confirmed success. Set `data-analytics-key="contact"` on the form and call `SiteBrushAnalytics.formResult('contact', true)` after successful processing (`false` for failure), or configure a success page on a form-success step. Field drop-off uses structural field identifiers. Add `data-analytics-value="true"` to a safe input or select to retain its latest committed value for seven days; values appear in the expanded form report. At most 16 fields per form and 256 bytes per value are admitted. Passwords, tokens, hidden inputs, files and payment fields are excluded. Dead and rage clicks are observations to investigate, not proof that an interface is broken. Heatmaps use an inert, sanitized preview of the published page and refuse overlays when the published page version differs from the observed version.'''
+          new = '''A form submit is not a confirmed success. Set `data-analytics-key="contact"` on the form and call `SiteBrushAnalytics.formResult('contact', true)` after successful processing (`false` for failure), or configure a success page on a form-success step. Field drop-off uses structural field identifiers only. SiteBrush never records input, textarea, password, form-message, file, token or payment-field contents. Dead and rage clicks are observations to investigate, not proof that an interface is broken. Heatmaps use an inert, sanitized preview of the published page and refuse overlays when the published page version differs from the observed version.'''
+          if text.count(old) != 1:
+              raise SystemExit("README.md: form privacy paragraph changed")
+          text = text.replace(old,new)
+          old = '''There is no mousemove stream, raw event journal, replay recording, continuous keystroke recording. Browser characteristics (user agent, platform, language, timezone, screen and processor count) produce a site-scoped fingerprint; random browser identity remains the visitor key because fingerprints can collide.'''
+          new = '''There is no mousemove stream, raw event journal, video capture or continuous keystroke recording. Optional sampled session replay stores only bounded navigation, scroll, click/touch, focus, resize and error observations plus a sanitized published-page snapshot; field contents are never recorded. Browser characteristics (device class, user agent, platform, screen and viewport dimensions and pixel ratio) are retained as useful UX dimensions and also produce a site-scoped fingerprint; random browser identity remains the visitor key because fingerprints can collide.'''
+          if text.count(old) != 1:
+              raise SystemExit("README.md: collector paragraph changed")
+          text = text.replace(old,new)
+          old = '''Session replay and page-change impact are outside this release.'''
+          new = '''Sampled session replay and page-change impact are included in this release. Replay is optional and bounded; page-change impact compares conversion before and after published page changes without implementing a separate A/B-testing system.'''
+          if text.count(old) != 1:
+              raise SystemExit("README.md: release scope line changed")
+          readme.write_text(text)
+
+          # Focused regression coverage for privacy/device admission and storage paths.
+          conversion_test = Path("pkg/analytics/conversion_test.go")
+          conversion_test.write_text(conversion_test.read_text() + r'''
+
+          func TestConversionAcceptsTabletAndViewportWithoutFieldContents(t *testing.T) {
+          	event := Event{Version: 2, Visitor: "1111111111111111", View: "2222222222222222", Device: "tablet", Layout: "0123456789abcdef", Client: BrowserCharacteristics{Width: 2048, Height: 1536, ViewportWidth: 1024, ViewportHeight: 768, PixelRatio: 2}, Signals: []Signal{{Kind: "page"}}}
+          	if !Valid(event) {
+          		t.Fatal("tablet event with bounded screen/viewport dimensions rejected")
+          	}
+          	event.Signals = []Signal{{Kind: "field-value", Form: "key:contact", Field: "key:name", FieldText: "secret"}}
+          	if Valid(event) {
+          		t.Fatal("form field contents admitted")
+          	}
+          }
+          ''')
+          store_test = Path("pkg/analytics/store_test.go")
+          store_test.write_text(store_test.read_text() + r'''
+
+          func TestReadUsageRejectsPathLikeDomain(t *testing.T) {
+          	store := OpenStore(t.TempDir())
+          	defer store.Close()
+          	result := store.Exchange(StorageRequest{Operation: ReadUsage, Domain: "../outside"})
+          	if result.Err == nil {
+          		t.Fatal("path-like analytics domain accepted")
+          	}
+          }
+          ''')
+
+          Path(".github/workflows/pr180-finish.yml").unlink()
+      - name: Format and test
+        run: |
+          gofmt -w sitebrush.go pkg/analytics/conversion.go pkg/analytics/store.go pkg/analytics/conversion_test.go pkg/analytics/store_test.go
+          go test ./pkg/analytics
+          go test ./...
+      - name: Commit fixes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "analytics: finish privacy device and storage blockers"
+          git push origin HEAD:analytics-redesign
