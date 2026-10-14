@@ -134,14 +134,17 @@ It follows the pages and referenced resources and imports the files the site nee
 
 Double-click or double-tap an image in the visual editor to change its source,
 frame dimensions, fit and crop position. Replacement uploads use the site's
-normal file storage and keep the original file. Fill / Crop is the default;
-Fit shows the whole image, and Stretch requires an explicit choice. Cancel or
-Close discards the dialog draft; Save saves the whole page. Existing CSS sizing
-is preserved unless you explicitly resize the frame, so automatic height can
-change when replacing an image.
+normal file storage after preparing a cropped, resized preview for the current
+frame, with a 2× pixel budget for sharp displays. Fill / Crop is the default;
+Fit shows the whole image, and Stretch requires an explicit choice. GIF, WebP and APNG
+animation and SVG vector content are preserved. Existing gallery links receive a
+separate full-resolution version; an unlinked image stores only its preview.
+Cancel or Close discards the dialog draft; Save saves the whole page. Existing
+CSS sizing and frame proportions are preserved unless you resize the frame.
 
-HTML mode provides only Cancel, Save and Back to Visual, including on narrow
-phones. Save writes the HTML directly; Back applies it to the visual draft
+HTML mode provides Undo, Redo, Cancel, Save and Back to Visual in one compact row,
+including on narrow phones. Undo/Redo history lasts for the open editor session,
+including switches between visual and HTML modes. Save writes the HTML directly; Back applies it to the visual draft
 without saving, and Cancel restores the draft from before entering HTML mode.
 The source editor starts at the beginning and preserves untouched document
 metadata during visual edits.
@@ -553,6 +556,33 @@ The original PHP implementation was developed publicly from 2021 and remains ava
   ·
   <a href="https://demo.sitebrush.com/"><strong>Live demo</strong></a>
 </p>
+
+### Site creation limits and demo refresh
+
+Hosting settings contain independent maximum site sizes for public Test Drive,
+self-registration and the demo, each defaulting to **1 GB** (1024³ bytes).
+Registration and Test Drive use the smaller of that maximum and the tariff quota.
+Changing these defaults preserves existing site quotas; the configured demo uses
+its own current maximum. Usage includes pages, publication copies, revisions and
+files.
+
+A new hostname, or a deleted anonymous trial hostname, offers first-administrator
+registration when self-registration is enabled, and a request form when it is
+closed. Registration verifies DNS and email before creating the site database.
+A still-valid certificate is reused. A missing database for a site still present
+in the registration registry remains an availability error.
+
+Demo imports and snapshot restores are prepared in separate temporary storage
+and checked against the demo quota before replacing live content. Successful
+refreshes remove obsolete pages, publication files and revisions, so the tree
+matches the current template. Failed preparation preserves the working demo.
+
+Account cards share one grid. Sessions and administrator IPs appear together;
+sessions and administrator IPs have independent pages of three records, while
+other long lists show five records per page. Administrators can add any valid IP
+or subnet without a prior session from that address. Explicit IP and subnet
+allowlist entries are permanently allowed until removed. AI access appears only
+when links or sessions exist.
 
 ### Account confirmation and secure registration
 

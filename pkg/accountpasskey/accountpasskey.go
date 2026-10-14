@@ -90,7 +90,19 @@ func UserCount(ctx context.Context, database interface {
 func List(ctx context.Context, database interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }, domain, email string) ([]CredentialInfo, error) {
-	rows, err := database.QueryContext(ctx, `SELECT credential_id,created_at,last_used_at FROM account_passkeys WHERE domain=? AND email=? ORDER BY created_at DESC`, domain, email)
+	return ListPage(ctx, database, domain, email, 0, 0)
+}
+
+func ListPage(ctx context.Context, database interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, domain, email string, offset, limit int) ([]CredentialInfo, error) {
+	query := `SELECT credential_id,created_at,last_used_at FROM account_passkeys WHERE domain=? AND email=? ORDER BY created_at DESC,credential_id`
+	arguments := []any{domain, email}
+	if limit > 0 {
+		query += ` LIMIT ? OFFSET ?`
+		arguments = append(arguments, limit, offset)
+	}
+	rows, err := database.QueryContext(ctx, query, arguments...)
 	if err != nil {
 		return nil, err
 	}

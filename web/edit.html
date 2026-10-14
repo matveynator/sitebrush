@@ -206,6 +206,8 @@ const editUIText = {
   byteUnit: {{index .T "edit_file_unit_byte"}},
   kilobyteUnit: {{index .T "edit_file_unit_kb"}},
   megabyteUnit: {{index .T "edit_file_unit_mb"}},
+  undo: {{index .T "edit_undo"}},
+  redo: {{index .T "edit_redo"}},
   cancel: {{index .T "edit_cancel"}},
   save: {{index .T "edit_save"}},
   backToVisual: {{index .T "edit_back_to_visual"}},
@@ -561,7 +563,7 @@ function storedVisualEditorHTML(editorBodyHTML) {
 }
 
 function submitVisualEditorForm(visualHtmlEditor) {
-  if (sitebrushEditorModel.savingPage) {
+  if (sitebrushEditorModel.savingPage || (sitebrushEditorModel.imageDraft && sitebrushEditorModel.imageDraft.preparing)) {
     return;
   }
   const visualEditorFormElement = document.getElementById('visualEditorForm');
@@ -916,7 +918,12 @@ function uploadCurrentDialogFile() {
   rememberUploadResizeControls();
   const uploadRecipient = sitebrushEditorModel.uploadDialog.recipient;
   const uploadResolver = sitebrushEditorModel.uploadDialog.resolver;
-  resizeImageFile(selectedFile, outputName, uploadRecipient ? 0 : selectedResizeMaxSide())
+  if (uploadRecipient) {
+    uploadRecipient(namedUploadFile(selectedFile, outputName, selectedFile.type));
+    advanceUploadDialog();
+    return;
+  }
+  resizeImageFile(selectedFile, outputName, selectedResizeMaxSide())
     .then(function uploadAndInsertPreparedFile(preparedFileResult) {
       if (sitebrushEditorModel.uploadDialog.resolver !== uploadResolver) {
         return;

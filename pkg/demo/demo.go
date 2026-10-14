@@ -7,13 +7,17 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 )
 
 const ResetDelay = 30 * time.Minute
 
+const DefaultMaxSiteBytes int64 = 1024 * 1024 * 1024
+
 type Settings struct {
+	MaxSiteBytes   int64
 	Domain         string
 	SourceURL      string
 	CopyWholeSite  bool
@@ -160,6 +164,10 @@ func (store Store) Settings(ctx context.Context) Settings {
 		Domain:    settingText(ctx, store.DB, "demo_site_domain"),
 		SourceURL: settingText(ctx, store.DB, "demo_site_source_url"),
 	}
+	settings.MaxSiteBytes, _ = strconv.ParseInt(settingText(ctx, store.DB, "demo_site_max_bytes"), 10, 64)
+	if settings.MaxSiteBytes <= 0 {
+		settings.MaxSiteBytes = DefaultMaxSiteBytes
+	}
 	settings.CopyWholeSite = settingBool(ctx, store.DB, "demo_site_copy_whole_site", false)
 	settings.Enabled = settingBool(ctx, store.DB, "demo_site_enabled", strings.TrimSpace(settings.Domain) != "")
 	restoredDomain := settingText(ctx, store.DB, "demo_site_last_restored_domain")
@@ -170,6 +178,13 @@ func (store Store) Settings(ctx context.Context) Settings {
 }
 
 func (store Store) SaveSettings(ctx context.Context, domain, sourceURL string, copyWholeSite bool, enabled bool) error {
+	return store.SaveSettingsWithLimit(ctx, domain, sourceURL, copyWholeSite, enabled, store.Settings(ctx).MaxSiteBytes)
+}
+
+func (store Store) SaveSettingsWithLimit(ctx context.Context, domain, sourceURL string, copyWholeSite, enabled bool, maxSiteBytes int64) error {
+	if maxSiteBytes <= 0 {
+		return fmt.Errorf("demo site size limit must be positive")
+	}
 	domain = strings.TrimSpace(domain)
 	sourceURL = strings.TrimSpace(sourceURL)
 	copyWholeSiteValue := "0"
@@ -189,6 +204,7 @@ func (store Store) SaveSettings(ctx context.Context, domain, sourceURL string, c
 		name  string
 		value string
 	}{
+		{name: "demo_site_max_bytes", value: strconv.FormatInt(maxSiteBytes, 10)},
 		{name: "demo_site_enabled", value: enabledValue},
 		{name: "demo_site_domain", value: domain},
 		{name: "demo_site_source_url", value: sourceURL},

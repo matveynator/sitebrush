@@ -124,6 +124,10 @@ func ClassActionSetFromHTML(previousHTML, savedHTML string) ClassActionSet {
 		if !savedElement.hasTemplate {
 			continue
 		}
+		previousPeer, hasPreviousPeer := previousElementBySavedIndex[savedElementIndex]
+		if hasPreviousPeer && previousPeer.hasTemplate && strings.Join(previousPeer.classNames, " ") == strings.Join(savedElement.classNames, " ") {
+			continue
+		}
 		_, wasPlain := previousPlainKeys[savedElement.matchKey]
 		_, wasTemplate := previousTemplateKeys[savedElement.matchKey]
 		if wasPlain || !wasTemplate {
@@ -132,7 +136,6 @@ func ClassActionSetFromHTML(previousHTML, savedHTML string) ClassActionSet {
 				actionSet.addByContentKey[classContentElementKey(savedElement.tagName, savedElement.contentKey)] = classRewrite{classNames: savedElement.classNames}
 			}
 		}
-		previousPeer, hasPreviousPeer := previousElementBySavedIndex[savedElementIndex]
 		if hasPreviousPeer && !previousPeer.hasTemplate {
 			actionSet.addByKey[previousPeer.matchKey] = classRewrite{classNames: savedElement.classNames}
 			if previousPeer.contentKey != "" {

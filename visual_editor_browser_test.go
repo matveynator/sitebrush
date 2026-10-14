@@ -56,6 +56,7 @@ func TestVisualEditorBrowserRegressions(t *testing.T) {
 <img id="class-image" class="class-frame" src="/_editor-wide.svg" alt="class">
 <img id="responsive-image" class="responsive-frame" src="/_editor-wide.svg" alt="responsive">
 <img id="inline-image" src="/_editor-wide.svg" style="width: 180px; height: 120px; object-fit: contain;" alt="inline">
+<a id="gallery-link" href="/_editor-wide.svg" data-fancybox="gallery"><img id="gallery-image" src="/_editor-wide.svg" width="50" height="50" alt="gallery"></a>
 <p>Editable content</p>
 <script id="body-script">window.fixtureBodyScriptMustNotRun = true;</script>
 <iframe id="script-frame" title="Embedded script fixture" srcdoc="&lt;script&gt;window.fixtureNestedScriptMustNotRun = true;&lt;/script&gt;"></iframe>

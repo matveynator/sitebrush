@@ -35,6 +35,7 @@ import (
 	"math"
 	"math/big"
 	"mime"
+	"mime/multipart"
 	"net"
 	"net/http"
 	stdmail "net/mail"
@@ -74,6 +75,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/geoip"
 	"github.com/matveynator/sitebrush/v2/pkg/hostingandsupport"
 	"github.com/matveynator/sitebrush/v2/pkg/httpsecurity"
+	"github.com/matveynator/sitebrush/v2/pkg/imageprepare"
 	"github.com/matveynator/sitebrush/v2/pkg/mailout"
 	"github.com/matveynator/sitebrush/v2/pkg/outboundhttp"
 	"github.com/matveynator/sitebrush/v2/pkg/securitysync"
@@ -166,6 +168,7 @@ var sitebrushRuServiceMailRelayPublicKey = ""
 
 // App keeps only explicit dependencies to stay readable and easy to swap.
 type App struct {
+	imageJobs                      chan<- imageprepare.Job
 	analyticsStorage               browserstats.Repository
 	analyticsQuotaRequests         chan browserstats.DiskQuotaRequest
 	attackGuard                    *httpsecurity.AttackGuard
@@ -358,6 +361,7 @@ type hostingAndSupportPanelSnapshot struct {
 	DemoSettings             demo.Settings
 	AutoRegistrationEnabled  bool
 	PublicTrialEnabled       bool
+	CreationLimits           hostingandsupport.SiteSizeLimits
 	CommissionBPS            int
 	LocalCostPolicy          expenses.ServerPolicy
 	ShowCentralRegistry      bool
@@ -1435,20 +1439,29 @@ func (db *siteFileDatabase) ExecContext(ctx context.Context, query string, args 
 }
 
 func (db *siteFileDatabase) WriteTransaction(ctx context.Context, write func(*sql.Tx) error) error {
-	operation := siteDBOperation{
-		kind: siteDBWorkloadWrite,
-		run: func(runCtx context.Context, rawDatabase *sql.DB) siteDBOperationResponse {
-			transaction, err := rawDatabase.BeginTx(runCtx, nil)
-			if err != nil {
-				return siteDBOperationResponse{err: err}
-			}
+	return db.WriteTransactionWithFinish(ctx, write, nil)
+}
+
+// Filesystem compensation must finish in the SQL owner's turn before a later
+// save can publish. A commit failure is part of that same communication result.
+func (db *siteFileDatabase) WriteTransactionWithFinish(ctx context.Context, write func(*sql.Tx) error, finish func(error)) error {
+	operation := siteDBOperation{kind: siteDBWorkloadWrite, run: func(runCtx context.Context, rawDatabase *sql.DB) siteDBOperationResponse {
+		transaction, err := rawDatabase.BeginTx(runCtx, nil)
+		if err == nil {
 			defer transaction.Rollback()
-			if err := write(transaction); err != nil {
-				return siteDBOperationResponse{err: err}
+			err = write(transaction)
+			if err == nil {
+				err = transaction.Commit()
 			}
-			return siteDBOperationResponse{err: transaction.Commit()}
-		},
-	}
+			if err != nil {
+				_ = transaction.Rollback()
+			}
+		}
+		if finish != nil {
+			finish(err)
+		}
+		return siteDBOperationResponse{err: err}
+	}}
 	return db.runOperation(ctx, operation).err
 }
 
@@ -2225,6 +2238,14 @@ func (r *perSiteDBRouter) WriteTransaction(ctx context.Context, write func(*sql.
 		return err
 	}
 	return database.WriteTransaction(ctx, write)
+}
+
+func (r *perSiteDBRouter) WriteTransactionWithFinish(ctx context.Context, write func(*sql.Tx) error, finish func(error)) error {
+	database, err := r.databaseForContext(ctx)
+	if err != nil {
+		return err
+	}
+	return database.WriteTransactionWithFinish(ctx, write, finish)
 }
 
 func (r *perSiteDBRouter) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
@@ -9043,6 +9064,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application.db = siteDatabaseRouter
 	application.siteDatabaseRouter = siteDatabaseRouter
 	application.ensureAutoCertGuard()
+	application.imageJobs = imageprepare.Start(ctx.Done())
 	application.renderTemplates = startRenderTemplateProcess(ctx.Done())
 	application.demoSessionEvents = application.startDemoSessionEventProcess(ctx.Done())
 	application.demoSiteRuntime = application.startDemoSiteRuntimeProcess(ctx.Done())
@@ -13534,11 +13556,24 @@ func writeAIResult(w http.ResponseWriter, result aieditor.Result, resultErr erro
 func (a *App) serveStealthStaticForBlockedAdminIP(w http.ResponseWriter, r *http.Request, domain, pagePath string) bool {
 	stealthEnabled, err := a.adminStealthEnabled(r.Context(), domain, "")
 	if err != nil {
+		if errors.Is(err, errSiteDatabaseMissing) {
+			if a.maybeStartDemoSite(w, r, domain) {
+				return true
+			}
+			available, availabilityErr := a.missingSiteCanStartOnboarding(r.Context(), domain)
+			if availabilityErr != nil || !available {
+				w.Header().Set("Cache-Control", "no-store")
+				http.Error(w, "site security settings temporarily unavailable", http.StatusServiceUnavailable)
+				return true
+			}
+		}
 		if errors.Is(err, errSiteDatabaseMissing) && a.isRegistrationOnboardingRequest(r, domain) {
 			return false
 		}
-		if errors.Is(err, errSiteDatabaseMissing) && canonicalLocalDomain(domain) == "localhost" && localAccountRequest(r) &&
-			(r.Method == http.MethodGet || r.Method == http.MethodHead) {
+		if errors.Is(err, errSiteDatabaseMissing) && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+			if cookie, cookieErr := r.Cookie("sitebrush_session"); cookieErr == nil && cookie.Value != "" {
+				a.expireAdminSessionCookie(w, r)
+			}
 			httpsecurity.RedirectLocal(w, r, r.URL.Path+"?register", http.StatusSeeOther)
 			return true
 		}
@@ -13609,6 +13644,29 @@ WHERE stealth.domain=? AND stealth.enabled_at>0 AND (?='' OR stealth.email=?)`, 
 	return enabled > 0, nil
 }
 
+// Missing files do not erase an existing registration in the control registry.
+// Deleted anonymous trials remove their assignment and can enter onboarding.
+func (a *App) missingSiteCanStartOnboarding(ctx context.Context, domain string) (bool, error) {
+	if _, err := a.statInsideStorage(a.serverControlDBPath()); errors.Is(err, os.ErrNotExist) {
+		return true, nil
+	} else if err != nil {
+		return false, err
+	}
+	available := false
+	err := a.withServerControlDatabaseRead(ctx, "missing-site-registration", func(database *sql.DB) error {
+		var ownerCount, assignmentCount int
+		if err := database.QueryRowContext(ctx, `SELECT COUNT(1) FROM server_managers WHERE domain=?`, domain).Scan(&ownerCount); err != nil {
+			return err
+		}
+		if err := database.QueryRowContext(ctx, `SELECT COUNT(1) FROM site_service_assignments assignment WHERE assignment.domain=? AND (COALESCE(assignment.service_status,'')<>'trial' OR NOT EXISTS(SELECT 1 FROM public_trial_sites trial WHERE trial.domain=assignment.domain AND trial.status='active'))`, domain).Scan(&assignmentCount); err != nil {
+			return err
+		}
+		available = ownerCount+assignmentCount == 0
+		return nil
+	})
+	return available, err
+}
+
 // Registration handlers validate DNS and email ownership before bootstrapping
 // a site; confirmation routes must carry a live registration confirmation.
 func (a *App) isRegistrationOnboardingRequest(r *http.Request, domain string) bool {
@@ -13621,7 +13679,7 @@ func (a *App) isRegistrationOnboardingRequest(r *http.Request, domain string) bo
 		confirmation, found := a.registrationForDelivery(r, handle)
 		return found && confirmation.Action == "register" && normalizeDomainName(confirmation.Domain) == domain
 	}
-	return hasQueryFlag(r, "register")
+	return hasQueryFlag(r, "register") || hasQueryFlag(r, "site_request")
 }
 
 // An IP restriction removes the session before normal routing, so public pages
@@ -14159,6 +14217,7 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 			a.renderSetupPage(w, r, domain, email, translations["auth_local_setup"])
 			return
 		}
+		registrationLimit := a.registrationCreationQuota(r.Context())
 		registrationContext := contextWithSiteDatabaseCreation(contextWithDomain(r.Context(), domain))
 		result, err := a.db.ExecContext(registrationContext, `INSERT INTO users(domain,email,password,is_admin) SELECT ?,?,?,1 WHERE NOT EXISTS (SELECT 1 FROM users WHERE domain=? AND is_admin=1)`, domain, email, password, domain)
 		if err != nil {
@@ -14168,6 +14227,10 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 		count, countErr := result.RowsAffected()
 		if countErr != nil || count != 1 {
 			http.Error(w, "administrator already exists", http.StatusConflict)
+			return
+		}
+		if quotaErr := a.initializeRegistrationQuota(registrationContext, domain, registrationLimit); quotaErr != nil {
+			http.Error(w, "site quota initialization unavailable", http.StatusServiceUnavailable)
 			return
 		}
 		a.promoteFirstServerOwner(registrationContext, domain, email)
@@ -14930,6 +14993,26 @@ func (a *App) accountTransaction(ctx context.Context, write func(*sql.Tx) error)
 	return errors.New("account transactions unavailable")
 }
 
+func (a *App) siteContentTransaction(ctx context.Context, write func(*sql.Tx) error, finish func(error)) error {
+	if database, ok := a.db.(interface {
+		WriteTransactionWithFinish(context.Context, func(*sql.Tx) error, func(error)) error
+	}); ok {
+		return database.WriteTransactionWithFinish(ctx, write, finish)
+	}
+	err := a.accountTransaction(ctx, write)
+	finish(err)
+	return err
+}
+
+func (a *App) writeAtomicStorageFile(filename string, content []byte) error {
+	temporary := filename + ".sitebrush-" + randomAccessToken()
+	defer a.removeInsideStorage(temporary)
+	if err := a.writeFileInsideStorage(temporary, content, 0644); err != nil {
+		return err
+	}
+	return a.renameInsideStorage(temporary, filename)
+}
+
 func (a *App) renderAccountCode(w http.ResponseWriter, r *http.Request, token, email, status string, delivery ...emailDeliveryResult) {
 	var deliveryView profileEmailDeliveryView
 	if len(delivery) > 0 {
@@ -15135,6 +15218,7 @@ func publishDemoSiteRuntimeState(stop <-chan struct{}, requests chan<- demoSiteR
 func sameDemoSiteSettings(left, right demo.Settings) bool {
 	return normalizeDomainName(left.Domain) == normalizeDomainName(right.Domain) &&
 		strings.TrimSpace(left.SourceURL) == strings.TrimSpace(right.SourceURL) &&
+		demoSizeLimit(left) == demoSizeLimit(right) &&
 		left.CopyWholeSite == right.CopyWholeSite &&
 		left.Enabled == right.Enabled
 }
@@ -15310,9 +15394,12 @@ func (a *App) ensureDemoSiteReady(ctx context.Context, settings demo.Settings, r
 			return "", 0, statErr
 		}
 		adminEmail = demo.AdminEmail(domain)
-		if err := a.createManagedSite(ctx, domain, adminEmail, randomAccessToken(), defaultDomainStorageLimitBytes); err != nil {
+		if err := a.createManagedSite(ctx, domain, adminEmail, randomAccessToken(), demoSizeLimit(settings)); err != nil {
 			return "", 0, err
 		}
+	}
+	if err := a.initializeRegistrationQuota(contextWithDomain(ctx, domain), domain, demoSizeLimit(settings)); err != nil {
+		return "", 0, err
 	}
 	if refreshSnapshot || !a.demoSiteHasLandingPage(ctx, domain) {
 		if !refreshSnapshot {
@@ -15335,7 +15422,9 @@ func (a *App) ensureDemoSiteReady(ctx context.Context, settings demo.Settings, r
 			}
 			failedTotal = seedFailedTotal
 		} else {
-			a.createDemoWelcomePage(ctx, domain)
+			if _, err := a.seedDemoSiteContent(ctx, domain, settings, progressToken); err != nil {
+				return "", 0, err
+			}
 		}
 		if !a.demoSiteHasLandingPage(ctx, domain) {
 			return "", 0, fmt.Errorf("demo landing page was not created")
@@ -15424,7 +15513,183 @@ func (a *App) isDemoSiteDomain(ctx context.Context, domain string) bool {
 	return normalizeDomainName(settings.Domain) == normalizeDomainName(domain)
 }
 
+// A refresh imports into its own storage and SQL database. The live demo is
+// replaced only after a complete page set is available, including first import.
 func (a *App) seedDemoSiteContent(ctx context.Context, domain string, settings demo.Settings, progressToken string) (int, error) {
+	failed := 0
+	err := a.withStagedDemoContent(ctx, domain, demoSizeLimit(settings), func(staged *App) error {
+		var importErr error
+		failed, importErr = staged.importDemoSiteContent(contextWithDomain(ctx, domain), domain, settings, progressToken)
+		return importErr
+	})
+	return failed, err
+}
+
+func (a *App) withStagedDemoContent(ctx context.Context, domain string, limitBytes int64, prepare func(*App) error) error {
+	stagingRoot := filepath.Join(a.storageRootDir(), "scratch", "demo-"+randomAccessToken())
+	if err := a.mkdirAllInsideStorage(stagingRoot, 0o700); err != nil {
+		return err
+	}
+	defer a.removeAllInsideStorage(stagingRoot)
+	realRoot, err := a.existingPathInsideStorage(stagingRoot)
+	if err != nil {
+		return err
+	}
+	databasePath := filepath.Join(realRoot, "import.db")
+	stagedDB, err := sql.Open("sqlite", "file:"+databasePath)
+	if err != nil {
+		return err
+	}
+	defer stagedDB.Close()
+	staged := &App{db: stagedDB, storagePath: realRoot, storageRealRoot: realRoot, dbPath: databasePath, grabTracker: a.grabTracker, debug: a.debug}
+	domainContext := contextWithDomain(ctx, domain)
+	if err = staged.migrate(domainContext); err != nil {
+		return err
+	}
+	if err = staged.initializeRegistrationQuota(domainContext, domain, limitBytes); err != nil {
+		return err
+	}
+	if err = prepare(staged); err != nil {
+		return err
+	}
+	if !staged.demoSiteHasLandingPage(domainContext, domain) {
+		return errors.New("demo import has no landing page")
+	}
+	if staged.domainStorageUsage(domainContext, domain).totalBytes() > limitBytes {
+		return errors.New("storage limit reached: demo content exceeds quota")
+	}
+	return a.replaceDemoContent(domainContext, domain, staged)
+}
+
+func (a *App) replaceDemoContent(ctx context.Context, domain string, staged *App) error {
+	type contentTable struct {
+		name, columns string
+		rows          [][]any
+	}
+	tables := []contentTable{
+		{name: "pages", columns: "domain,path,title,html,published"},
+		{name: "published_pages", columns: "domain,path,title,html"},
+		{name: "revisions", columns: "domain,page_path,html,created_at,is_active"},
+		{name: "page_redirects", columns: "domain,old_path,new_path,created_at"},
+		{name: "file_metadata", columns: "domain,file_name,page_path,size,mime_type,created_at,updated_at,source,download_count"},
+		{name: "file_access_rules", columns: "domain,file_name,access_mode,token,expires_at,single_use_left,token_use_count"},
+	}
+	for tableIndex := range tables {
+		table := &tables[tableIndex]
+		rows, err := staged.db.QueryContext(ctx, "SELECT "+table.columns+" FROM "+table.name+" WHERE domain=?", domain)
+		if strings.HasPrefix(table.name, "file_") {
+			if rows != nil {
+				rows.Close()
+			}
+			rows, err = staged.db.QueryContext(ctx, "SELECT "+table.columns+" FROM "+table.name+" WHERE domain=?", domainStorageName(domain))
+		}
+		if err != nil {
+			return err
+		}
+		columnCount := len(strings.Split(table.columns, ","))
+		for rows.Next() {
+			record := make([]any, columnCount)
+			receivers := make([]any, columnCount)
+			for columnIndex := range record {
+				receivers[columnIndex] = &record[columnIndex]
+			}
+			if err = rows.Scan(receivers...); err != nil {
+				rows.Close()
+				return err
+			}
+			table.rows = append(table.rows, record)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
+		}
+	}
+	usage := staged.domainStorageUsage(ctx, domain)
+	type directorySwap struct {
+		live, next, previous string
+		oldMoved, newMoved   bool
+	}
+	swaps := []directorySwap{
+		{live: a.domainFilesDirForDomain(domain), next: staged.domainFilesDirForDomain(domain), previous: filepath.Join(staged.storageRootDir(), "previous-files")},
+		{live: a.domainStaticDir(domain), next: staged.domainStaticDir(domain), previous: filepath.Join(staged.storageRootDir(), "previous-static")},
+	}
+	restoreDirectories := func() {
+		for swapIndex := len(swaps) - 1; swapIndex >= 0; swapIndex-- {
+			swap := &swaps[swapIndex]
+			if swap.newMoved {
+				_ = a.renameInsideStorage(swap.live, swap.next)
+				swap.newMoved = false
+			}
+			if swap.oldMoved {
+				_ = a.renameInsideStorage(swap.previous, swap.live)
+				swap.oldMoved = false
+			}
+		}
+	}
+	err := a.siteContentTransaction(ctx, func(transaction *sql.Tx) (replaceErr error) {
+		defer func() {
+			if replaceErr != nil {
+				restoreDirectories()
+			}
+		}()
+		for _, table := range tables {
+			tableDomain := domain
+			if strings.HasPrefix(table.name, "file_") {
+				tableDomain = domainStorageName(domain)
+			}
+			if _, replaceErr = transaction.ExecContext(ctx, "DELETE FROM "+table.name+" WHERE domain=?", tableDomain); replaceErr != nil {
+				return replaceErr
+			}
+			placeholders := strings.TrimSuffix(strings.Repeat("?,", len(strings.Split(table.columns, ","))), ",")
+			for _, record := range table.rows {
+				if _, replaceErr = transaction.ExecContext(ctx, "INSERT INTO "+table.name+"("+table.columns+") VALUES("+placeholders+")", record...); replaceErr != nil {
+					return replaceErr
+				}
+			}
+		}
+		result, replaceErr := transaction.ExecContext(ctx, `UPDATE domain_storage_usage SET page_bytes=?,published_page_bytes=?,revision_bytes=?,file_bytes=?,published_static_bytes=?,import_queue_bytes=0,updated_at=? WHERE domain=? AND ?+COALESCE(analytics_bytes,0)+COALESCE(analytics_reserved_bytes,0)<=limit_bytes`, usage.PageBytes, usage.PublishedPageBytes, usage.RevisionBytes, usage.FileBytes, usage.PublishedStaticBytes, time.Now().UTC().Format(time.RFC3339), domain, usage.totalBytes())
+		if replaceErr != nil {
+			return replaceErr
+		}
+		affected, replaceErr := result.RowsAffected()
+		if replaceErr != nil {
+			return replaceErr
+		}
+		if affected != 1 {
+			return errors.New("storage limit reached: demo replacement exceeds quota")
+		}
+		for swapIndex := range swaps {
+			swap := &swaps[swapIndex]
+			if replaceErr = a.mkdirAllInsideStorage(filepath.Dir(swap.live), 0o755); replaceErr != nil {
+				return replaceErr
+			}
+			if replaceErr = a.mkdirAllInsideStorage(swap.next, 0o755); replaceErr != nil {
+				return replaceErr
+			}
+			if _, statErr := a.statInsideStorage(swap.live); statErr == nil {
+				if replaceErr = a.renameInsideStorage(swap.live, swap.previous); replaceErr != nil {
+					return replaceErr
+				}
+				swap.oldMoved = true
+			} else if !errors.Is(statErr, os.ErrNotExist) {
+				return statErr
+			}
+			if replaceErr = a.renameInsideStorage(swap.next, swap.live); replaceErr != nil {
+				return replaceErr
+			}
+			swap.newMoved = true
+		}
+		return nil
+	}, func(replaceErr error) {
+		if replaceErr != nil {
+			restoreDirectories()
+		}
+	})
+	return err
+}
+
+func (a *App) importDemoSiteContent(ctx context.Context, domain string, settings demo.Settings, progressToken string) (int, error) {
 	sourceURL := strings.TrimSpace(settings.SourceURL)
 	if sourceURL == "" {
 		a.createDemoWelcomePage(ctx, domain)
@@ -15442,6 +15707,9 @@ func (a *App) seedDemoSiteContent(ctx context.Context, domain string, settings d
 	if settings.CopyWholeSite {
 		importResult, err := a.importWholeRemoteSite(domainContext, grabImportRequest{Domain: domain, PagePath: "/", SourceURL: resolvedSourceURL.String(), RemoteSourceURL: resolvedSourceURL, HTML: string(htmlBytes), ProgressToken: progressToken, AutoDetectTemplates: true})
 		failedTotal := importResult.FailedTotal
+		if err == nil && importResult.RemainingPages > 0 {
+			err = errors.New("demo page import is incomplete")
+		}
 		return failedTotal, err
 	}
 	spider, importedHTML := prepareSinglePageImport(grabImportRequest{Domain: domain, PagePath: "/", SourceURL: resolvedSourceURL.String(), RemoteSourceURL: resolvedSourceURL, HTML: string(htmlBytes), ProgressToken: progressToken}, a.grabTracker)
@@ -15583,11 +15851,13 @@ func (a *App) demoGrabRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	demoCopyWholeSite := demoCopyWholeSiteFromRequest(r)
+	var demoLimitBytes int64
 	err := a.withServerControlDatabaseWrite(r.Context(), "demo-refresh-settings", func(database *sql.DB) error {
 		store := hostingandsupport.Store{DB: database}
 		if ownerDomain, found := store.OwnerDomain(r.Context()); found && normalizeDomainName(ownerDomain) == demoDomain {
 			return errors.New("Сайт владельца сервера нельзя использовать как публичный демо-сайт.")
 		}
+		demoLimitBytes = (demo.Store{DB: database}).Settings(r.Context()).MaxSiteBytes
 		return (demo.Store{DB: database}).SaveSettings(r.Context(), demoDomain, demoSourceURL, demoCopyWholeSite, true)
 	})
 	if err != nil {
@@ -15598,7 +15868,7 @@ func (a *App) demoGrabRefresh(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	settings := demo.Settings{Domain: demoDomain, SourceURL: demoSourceURL, CopyWholeSite: demoCopyWholeSite, Enabled: true}
+	settings := demo.Settings{Domain: demoDomain, SourceURL: demoSourceURL, CopyWholeSite: demoCopyWholeSite, Enabled: true, MaxSiteBytes: demoLimitBytes}
 	a.updateRuntimeDemoSiteState(r.Context(), a.demoSiteRefreshingState(r.Context(), settings))
 	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
 	failedResourceURLs := demoFailedResourceURLs(r)
@@ -15876,11 +16146,11 @@ func (a *App) restoreDemoSiteFromSnapshot(ctx context.Context, domain string) er
 	if err != nil {
 		return err
 	}
-	if err := a.clearDemoSiteContent(ctx, domain); err != nil {
-		return err
-	}
-	_, err = a.importDomainBackupZIP(contextWithDomain(ctx, domain), domain, "/", zipReader)
-	if err != nil {
+	limitBytes := a.storedDomainStorageUsage(contextWithDomain(ctx, domain), domain).LimitBytes
+	if err = a.withStagedDemoContent(ctx, domain, limitBytes, func(staged *App) error {
+		_, importErr := staged.importDomainBackupZIP(contextWithDomain(ctx, domain), domain, "/", zipReader)
+		return importErr
+	}); err != nil {
 		return err
 	}
 	return a.withServerControlDatabaseWrite(ctx, "demo-snapshot-restored", func(database *sql.DB) error {
@@ -16433,55 +16703,209 @@ func (a *App) savePage(w http.ResponseWriter, r *http.Request) {
 	}
 	resourceSpider, localizedHTML := localizeSavedPageExternalResources(r.Context(), domain, pagePath, html, r, a.grabTracker)
 	html = localizedHTML
-	newHTMLBytes := int64(len([]byte(html)))
-	previousTargetHTML := previousStoredHTML
-	if previousPath != pagePath {
-		previousTargetHTML = ""
-		_ = a.db.QueryRowContext(saveCtx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousTargetHTML)
-	}
-	pageDelta := newHTMLBytes - int64(len([]byte(previousTargetHTML)))
-	publishedPageDelta := int64(0)
-	publishedStaticDelta := int64(0)
 	fileDelta := a.estimateImportedFileDelta(domain, resourceSpider)
-	if !a.isDomainFrozen(saveCtx, domain) {
-		var previousPublishedHTML string
-		_ = a.db.QueryRowContext(saveCtx, `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousPublishedHTML)
-		publishedPageDelta = newHTMLBytes - int64(len([]byte(previousPublishedHTML)))
-		publishedStaticPath := filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath))
-		publishedStaticDelta = newHTMLBytes - a.fileSizeInsideStorage(publishedStaticPath)
-	}
-	if storageErr := a.applyDomainStorageDelta(saveCtx, domain, pageDelta, publishedPageDelta, newHTMLBytes, fileDelta, publishedStaticDelta); storageErr != nil {
-		sitebrushTemplateProgress.Publish(progressToken, templatePropagationProgressEvent{Stage: "error", Domain: domain, Path: pagePath, Error: storageErr.Error(), Done: true})
+	if storageErr := a.applyDomainStorageDelta(saveCtx, domain, 0, 0, 0, fileDelta, 0); storageErr != nil {
 		http.Error(w, storageErr.Error(), http.StatusInsufficientStorage)
 		return
 	}
 	if persistErr := a.persistSpiderAssets(saveCtx, resourceSpider, pagePath); persistErr != nil {
-		_ = a.applyDomainStorageDelta(saveCtx, domain, -pageDelta, -publishedPageDelta, -newHTMLBytes, -fileDelta, -publishedStaticDelta)
+		_ = a.applyDomainStorageDelta(saveCtx, domain, 0, 0, 0, -fileDelta, 0)
 		http.Error(w, persistErr.Error(), http.StatusBadGateway)
 		return
 	}
-	a.clearPageRedirectSource(saveCtx, domain, pagePath)
-	_, _ = a.db.ExecContext(saveCtx, `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, title, html)
-	if !a.isDomainFrozen(saveCtx, domain) {
-		_, _ = a.db.ExecContext(saveCtx, `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, title, html)
-		a.writePublishedStaticHTML(domain, pagePath, html)
-	}
-	_, _ = a.db.ExecContext(saveCtx, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, html, time.Now().Format(time.RFC3339))
-	if previousPath != pagePath {
-		a.registerPageRedirect(saveCtx, domain, previousPath, pagePath)
-	}
-	if pageContentKind(pagePath, html) == "html" {
-		sitebrushTemplateProgress.Publish(progressToken, templatePropagationProgressEvent{Stage: "start", Domain: domain, Path: pagePath, Message: "Saving page and scanning SiteBrush-Template pages"})
-		a.applyTemplateClassSynchronization(saveCtx, domain, previousStoredHTML, html, progressToken)
-		var synchronizedHTML string
-		if scanErr := a.db.QueryRowContext(saveCtx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&synchronizedHTML); scanErr == nil {
-			html = synchronizedHTML
-		}
-		a.applyTemplatePropagation(saveCtx, domain, html, progressToken)
-		sitebrushTemplateProgress.Publish(progressToken, templatePropagationProgressEvent{Stage: "done", Domain: domain, Path: pagePath, Done: true, Message: "Template update completed"})
+	if saveErr := a.persistFinalPageSave(saveCtx, domain, previousPath, pagePath, title, html); saveErr != nil {
+		sitebrushTemplateProgress.Publish(progressToken, templatePropagationProgressEvent{Stage: "error", Domain: domain, Path: pagePath, Error: saveErr.Error(), Done: true})
 		sitebrushTemplateProgress.Finish(progressToken)
+		status := http.StatusInternalServerError
+		if strings.Contains(saveErr.Error(), "storage limit") {
+			status = http.StatusInsufficientStorage
+		}
+		if strings.Contains(saveErr.Error(), "conflicting copies") {
+			status = http.StatusConflict
+		}
+		http.Error(w, saveErr.Error(), status)
+		return
 	}
+	sitebrushTemplateProgress.Publish(progressToken, templatePropagationProgressEvent{Stage: "done", Domain: domain, Path: pagePath, Done: true, Message: "Template update completed"})
+	sitebrushTemplateProgress.Finish(progressToken)
 	httpsecurity.RedirectLocal(w, r, pagePath, http.StatusFound)
+}
+
+// Page saves build one final document per page inside the database owner's
+// transaction. Template normalization never becomes a separate revision.
+func (a *App) persistFinalPageSave(ctx context.Context, domain, previousPath, pagePath, title, savedHTML string) error {
+	a.ensureDomainStorageUsageRow(ctx, domain)
+	a.rebuildDomainStorageUsage(ctx, domain)
+	type savedPage struct {
+		path, title, html string
+		published         bool
+	}
+	type publishedFileBackup struct {
+		path    string
+		content []byte
+		existed bool
+	}
+	backups := []publishedFileBackup{}
+	publicationChanges := []browserstats.PageChange{}
+	err := a.siteContentTransaction(ctx, func(transaction *sql.Tx) error {
+		pageRows, err := transaction.QueryContext(ctx, `SELECT path,title,html,published FROM pages WHERE domain=? ORDER BY path`, domain)
+		if err != nil {
+			return err
+		}
+		previousPages := []savedPage{}
+		previousHTML := ""
+		for pageRows.Next() {
+			var page savedPage
+			if err = pageRows.Scan(&page.path, &page.title, &page.html, &page.published); err != nil {
+				pageRows.Close()
+				return err
+			}
+			if page.path == previousPath {
+				previousHTML = page.html
+			}
+			previousPages = append(previousPages, page)
+		}
+		err = pageRows.Err()
+		pageRows.Close()
+		if err != nil {
+			return err
+		}
+		changedBlocks := map[string]string{}
+		classActions := sitebrushtemplate.ClassActionSet{}
+		if pageContentKind(pagePath, savedHTML) == "html" {
+			resolved, resolveErr := sitebrushtemplate.ResolveTemplateChanges(previousHTML, savedHTML)
+			if resolveErr != nil {
+				return resolveErr
+			}
+			savedHTML, _ = sitebrushtemplate.ReplaceBlocks(savedHTML, resolved)
+			classActions = sitebrushtemplate.ClassActionSetFromHTML(previousHTML, savedHTML)
+			savedHTML, _ = sitebrushtemplate.SynchronizeClasses(savedHTML, classActions)
+			oldBlocks := sitebrushtemplate.ExtractBlocks(previousHTML)
+			for identifier, block := range sitebrushtemplate.ExtractBlocks(savedHTML) {
+				if oldBlocks[identifier] != block {
+					changedBlocks[identifier] = block
+				}
+			}
+		}
+		frozen := 0
+		if err = transaction.QueryRowContext(ctx, `SELECT is_frozen FROM domain_states WHERE domain=?`, domain).Scan(&frozen); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		finalPages := []savedPage{}
+		targetFound := false
+		pageDelta, publishedDelta, revisionDelta, staticDelta := int64(0), int64(0), int64(0), int64(0)
+		for _, previousPage := range previousPages {
+			nextPage := previousPage
+			if previousPage.path == pagePath {
+				targetFound = true
+				nextPage.title, nextPage.html, nextPage.published = title, savedHTML, true
+			} else if pageContentKind(previousPage.path, previousPage.html) == "html" {
+				nextPage.html, _ = sitebrushtemplate.SynchronizeClasses(nextPage.html, classActions)
+				nextPage.html, _ = sitebrushtemplate.ReplaceBlocks(nextPage.html, changedBlocks)
+			}
+			if nextPage.html == previousPage.html && nextPage.title == previousPage.title && nextPage.published == previousPage.published {
+				continue
+			}
+			pageDelta += int64(len(nextPage.html) - len(previousPage.html))
+			finalPages = append(finalPages, nextPage)
+		}
+		if !targetFound {
+			finalPages = append(finalPages, savedPage{path: pagePath, title: title, html: savedHTML, published: true})
+			pageDelta += int64(len(savedHTML))
+		}
+		for _, finalPage := range finalPages {
+			revisionDelta += int64(len(finalPage.html))
+			if frozen != 1 {
+				previousPublished := ""
+				if err = transaction.QueryRowContext(ctx, `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, finalPage.path).Scan(&previousPublished); err != nil && !errors.Is(err, sql.ErrNoRows) {
+					return err
+				}
+				if previousPublished != "" && previousPublished != finalPage.html {
+					publicationChanges = append(publicationChanges, browserstats.PublicationChange(finalPage.path, previousPublished, finalPage.html, time.Now().UTC()))
+				}
+				publishedDelta += int64(len(finalPage.html) - len(previousPublished))
+				staticDelta += int64(len(finalPage.html)) - a.fileSizeInsideStorage(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(finalPage.path)))
+			}
+		}
+		totalDelta := pageDelta + publishedDelta + revisionDelta + staticDelta
+		now := time.Now().UTC().Format(time.RFC3339)
+		result, err := transaction.ExecContext(ctx, `UPDATE domain_storage_usage SET page_bytes=page_bytes+?,published_page_bytes=published_page_bytes+?,revision_bytes=revision_bytes+?,published_static_bytes=published_static_bytes+?,updated_at=? WHERE domain=? AND (?<=0 OR page_bytes+published_page_bytes+revision_bytes+file_bytes+published_static_bytes+COALESCE(import_queue_bytes,0)+COALESCE(analytics_bytes,0)+COALESCE(analytics_reserved_bytes,0)+?<=limit_bytes)`, pageDelta, publishedDelta, revisionDelta, staticDelta, now, domain, totalDelta, totalDelta)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected != 1 {
+			return errors.New("storage limit reached")
+		}
+		for _, finalPage := range finalPages {
+			if _, err = transaction.ExecContext(ctx, `INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,?) ON CONFLICT(domain,path) DO UPDATE SET title=excluded.title,html=excluded.html,published=excluded.published`, domain, finalPage.path, finalPage.title, finalPage.html, finalPage.published); err != nil {
+				return err
+			}
+			if frozen != 1 {
+				if _, err = transaction.ExecContext(ctx, `INSERT INTO published_pages(domain,path,title,html) VALUES(?,?,?,?) ON CONFLICT(domain,path) DO UPDATE SET title=excluded.title,html=excluded.html`, domain, finalPage.path, finalPage.title, finalPage.html); err != nil {
+					return err
+				}
+			}
+			if _, err = transaction.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, finalPage.path, finalPage.html, now); err != nil {
+				return err
+			}
+		}
+		if _, err = transaction.ExecContext(ctx, `DELETE FROM page_redirects WHERE domain=? AND old_path=?`, domain, pagePath); err != nil {
+			return err
+		}
+		if previousPath != pagePath {
+			if _, err = transaction.ExecContext(ctx, `UPDATE page_redirects SET new_path=?,created_at=? WHERE domain=? AND new_path=?`, pagePath, now, domain, previousPath); err != nil {
+				return err
+			}
+			if _, err = transaction.ExecContext(ctx, `INSERT INTO page_redirects(domain,old_path,new_path,created_at) VALUES(?,?,?,?) ON CONFLICT(domain,old_path) DO UPDATE SET new_path=excluded.new_path,created_at=excluded.created_at`, domain, previousPath, pagePath, now); err != nil {
+				return err
+			}
+		}
+		// Files are published in the same owner turn, so concurrent saves cannot
+		// publish an older document after the next save has already committed.
+		if frozen != 1 {
+			for _, finalPage := range finalPages {
+				staticPath := filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(finalPage.path))
+				previousBytes, readErr := a.readFileInsideStorage(staticPath)
+				if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+					return readErr
+				}
+				backups = append(backups, publishedFileBackup{path: staticPath, content: previousBytes, existed: readErr == nil})
+				if err = a.writeAtomicStorageFile(staticPath, []byte(finalPage.html)); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}, func(saveErr error) {
+		if saveErr != nil {
+			for index := len(backups) - 1; index >= 0; index-- {
+				backup := backups[index]
+				if backup.existed {
+					_ = a.writeAtomicStorageFile(backup.path, backup.content)
+				} else {
+					_ = a.removeInsideStorage(backup.path)
+				}
+			}
+			return
+		}
+		if a.browserAnalytics != nil {
+			for _, change := range publicationChanges {
+				select {
+				case a.browserAnalytics <- browserAnalyticsEnvelope{domain: domain, event: browserstats.Event{Change: &change}, received: change.At}:
+				default:
+					a.markAnalyticsLoss(domain)
+				}
+			}
+		}
+	})
+	if err == nil {
+		a.reportHostingSnapshotAsync(ctx)
+	}
+	return err
 }
 
 func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
@@ -16958,10 +17382,7 @@ func (a *App) runPublicTrialSitePreviewWithTemplateDetection(progressToken, requ
 	})
 	wholeSitePreview := wholeSitePreviewResult{PageCount: 1, ImportedPages: initialImportedPages, Spider: initialSpider}
 	if copyWholeSite {
-		freePreviewByteLimit := initialFreePlan.QuotaBytes
-		if freePreviewByteLimit <= 0 {
-			freePreviewByteLimit = defaultDomainStorageLimitBytes
-		}
+		freePreviewByteLimit := hostingandsupport.CreationQuota(a.creationSizeLimits(previewContext).TestDrive, initialFreePlan.QuotaBytes)
 		wholeSitePreview = previewWholeRemoteSiteResourcesWithLimit(previewContext, remoteSourceURL, string(htmlBytes), "/", a.grabTracker, progressToken, publicSourceOptions, freePreviewByteLimit)
 	} else {
 		initialSpider.collectPreviewNestedResources(initialRootResource, 0, "text/html")
@@ -17224,10 +17645,7 @@ func (a *App) publicTrialSiteCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
-	quotaBytes := preview.Plan.QuotaBytes
-	if quotaBytes <= 0 {
-		quotaBytes = defaultDomainStorageLimitBytes
-	}
+	quotaBytes := hostingandsupport.CreationQuota(a.creationSizeLimits(r.Context()).TestDrive, preview.Plan.QuotaBytes)
 	if err := a.createManagedSiteWithoutAdmin(r.Context(), trialDomain, quotaBytes); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -17855,6 +18273,11 @@ func (a *App) publishPublicTrialSourceRetry(progressToken string, pageURL *url.U
 
 func (a *App) smallestPublicTrialPlan(ctx context.Context, requiredBytes int64) (publicTrialPlanView, publicTrialPlanView, bool) {
 	plans := a.publicHostingAndSupportPlans(ctx)
+	limitBytes := a.creationSizeLimits(ctx).TestDrive
+	for index := range plans {
+		plans[index].QuotaBytes = hostingandsupport.CreationQuota(limitBytes, plans[index].QuotaBytes)
+		plans[index].QuotaLabel = hostingandsupport.FormatFileSize(plans[index].QuotaBytes)
+	}
 	if requiredBytes <= 0 {
 		requiredBytes = 1
 	}
@@ -21083,6 +21506,7 @@ func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, control
 		DemoSettings:             demoSettings,
 		AutoRegistrationEnabled:  autoRegistrationEnabled,
 		PublicTrialEnabled:       publicTrialEnabled,
+		CreationLimits:           a.creationSizeLimits(ctx),
 		CommissionBPS:            commissionBPS,
 		LocalCostPolicy:          localExpensePolicy,
 		ShowCentralRegistry:      showCentralRegistry,
@@ -21202,6 +21626,9 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 		"DemoNeverRestoredLabel":     translationOrDefault(translations, "billing_demo_never_restored", "No resets yet"),
 		"AutoRegistrationEnabled":    snapshot.AutoRegistrationEnabled,
 		"PublicTrialEnabled":         snapshot.PublicTrialEnabled,
+		"RegistrationMaxSize":        hostingandsupport.FormatQuotaInput(snapshot.CreationLimits.Registration),
+		"TestDriveMaxSize":           hostingandsupport.FormatQuotaInput(snapshot.CreationLimits.TestDrive),
+		"DemoMaxSize":                hostingandsupport.FormatQuotaInput(snapshot.DemoSettings.MaxSiteBytes),
 		"PublicTrialAvailable":       trialAvailability.Enabled,
 		"PublicTrialUnavailableText": trialUnavailableText,
 		"PublicTrialWildcardDomain":  trialAvailability.WildcardDomain,
@@ -22303,11 +22730,18 @@ func siteAdminEmailsFromDatabase(ctx context.Context, database *sql.DB, domain s
 
 func (a *App) saveHostingAndSupportSettingsFromForm(r *http.Request) string {
 	if err := a.withServerControlDatabaseWrite(r.Context(), "save-hosting-settings", func(database *sql.DB) error {
-		return (hostingandsupport.Store{DB: database}).SaveRegistrationSettings(
-			r.Context(),
-			r.FormValue("auto_registration_enabled") == "1",
-			r.FormValue("public_trial_enabled") == "1",
-		)
+		store := hostingandsupport.Store{DB: database}
+		limits := store.SiteSizeLimits(r.Context())
+		var err error
+		limits.Registration, err = parseCreationSize(r.FormValue("registration_max_site_size"), limits.Registration)
+		if err != nil {
+			return err
+		}
+		limits.TestDrive, err = parseCreationSize(r.FormValue("public_trial_max_site_size"), limits.TestDrive)
+		if err != nil {
+			return err
+		}
+		return store.SaveRegistrationSettingsWithLimits(r.Context(), r.FormValue("auto_registration_enabled") == "1", r.FormValue("public_trial_enabled") == "1", limits)
 	}); err != nil {
 		return err.Error()
 	}
@@ -22317,11 +22751,18 @@ func (a *App) saveHostingAndSupportSettingsFromForm(r *http.Request) string {
 
 func (a *App) saveHostingAndSupportRegistrationSettingsFromForm(r *http.Request) string {
 	if err := a.withServerControlDatabaseWrite(r.Context(), "save-registration-settings", func(database *sql.DB) error {
-		return (hostingandsupport.Store{DB: database}).SaveRegistrationSettings(
-			r.Context(),
-			r.FormValue("auto_registration_enabled") == "1",
-			r.FormValue("public_trial_enabled") == "1",
-		)
+		store := hostingandsupport.Store{DB: database}
+		limits := store.SiteSizeLimits(r.Context())
+		var err error
+		limits.Registration, err = parseCreationSize(r.FormValue("registration_max_site_size"), limits.Registration)
+		if err != nil {
+			return err
+		}
+		limits.TestDrive, err = parseCreationSize(r.FormValue("public_trial_max_site_size"), limits.TestDrive)
+		if err != nil {
+			return err
+		}
+		return store.SaveRegistrationSettingsWithLimits(r.Context(), r.FormValue("auto_registration_enabled") == "1", r.FormValue("public_trial_enabled") == "1", limits)
 	}); err != nil {
 		return err.Error()
 	}
@@ -22513,6 +22954,7 @@ func (a *App) saveHostingAndSupportDemoSettings(r *http.Request) string {
 	}
 	demoCopyWholeSite := demoCopyWholeSiteFromRequest(r)
 	var previousDemoSettings demo.Settings
+	var demoLimitBytes int64
 	err := a.withServerControlDatabaseWrite(r.Context(), "save-demo-settings", func(database *sql.DB) error {
 		store := hostingandsupport.Store{DB: database}
 		previousDemoSettings = (demo.Store{DB: database}).Settings(r.Context())
@@ -22521,12 +22963,17 @@ func (a *App) saveHostingAndSupportDemoSettings(r *http.Request) string {
 				return errors.New(translationOrDefault(translations, "billing_status_demo_owner_blocked", "The owner site cannot be used as the public demo site."))
 			}
 		}
-		return (demo.Store{DB: database}).SaveSettings(r.Context(), demoDomain, demoSourceURL, demoCopyWholeSite, demoEnabled)
+		var parseErr error
+		demoLimitBytes, parseErr = parseCreationSize(r.FormValue("demo_site_max_size"), previousDemoSettings.MaxSiteBytes)
+		if parseErr != nil {
+			return parseErr
+		}
+		return (demo.Store{DB: database}).SaveSettingsWithLimit(r.Context(), demoDomain, demoSourceURL, demoCopyWholeSite, demoEnabled, demoLimitBytes)
 	})
 	if err != nil {
 		return err.Error()
 	}
-	settings := demo.Settings{Domain: demoDomain, SourceURL: demoSourceURL, CopyWholeSite: demoCopyWholeSite, Enabled: demoEnabled}
+	settings := demo.Settings{Domain: demoDomain, SourceURL: demoSourceURL, CopyWholeSite: demoCopyWholeSite, Enabled: demoEnabled, MaxSiteBytes: demoLimitBytes}
 	if !demoEnabled {
 		a.updateRuntimeDemoSiteState(r.Context(), demoSiteRuntimeState{Settings: settings, Status: "disabled"})
 		for _, disabledDemoDomain := range demo.UniqueDomains(previousDemoSettings.Domain, demoDomain) {
@@ -22665,7 +23112,7 @@ func (a *App) approveSiteRegistrationRequestFromForm(r *http.Request) string {
 		return err.Error()
 	}
 	temporaryPassword := randomAccessToken()
-	if err := a.createManagedSite(r.Context(), siteRequest.Domain, siteRequest.Email, temporaryPassword, plan.QuotaBytes); err != nil {
+	if err := a.createManagedSite(r.Context(), siteRequest.Domain, siteRequest.Email, temporaryPassword, hostingandsupport.CreationQuota(a.creationSizeLimits(r.Context()).Registration, plan.QuotaBytes)); err != nil {
 		return err.Error()
 	}
 	serviceStatus := "paid"
@@ -24112,7 +24559,7 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 		if !a.isAdminRequest(r) {
 			httpsecurity.RedirectLocal(w, r, "?login", http.StatusFound)
 		} else {
-			httpsecurity.RedirectLocal(w, r, "?profile", http.StatusFound)
+			httpsecurity.RedirectLocal(w, r, profileFormAction(r), http.StatusFound)
 		}
 		return
 	}
@@ -24140,7 +24587,7 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 			httpsecurity.RedirectLocal(w, r, "?login", http.StatusFound)
 			return
 		}
-		httpsecurity.RedirectLocal(w, r, "?profile", http.StatusSeeOther)
+		httpsecurity.RedirectLocal(w, r, profileFormAction(r), http.StatusSeeOther)
 		return
 	}
 	if r.Method == http.MethodPost && (strings.HasPrefix(r.FormValue("profile_action"), "admin_ip_") || strings.HasPrefix(r.FormValue("profile_action"), "admin_stealth_")) {
@@ -24149,10 +24596,20 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := a.updateAdminIPAllowlist(r, domain, currentEmail, r.FormValue("profile_action"), r.FormValue("admin_ip")); err != nil {
-			http.Error(w, "account update unavailable", http.StatusBadRequest)
+			translations := translationsForRequest(r)
+			message := translations["admin_ip_update_failed"]
+			statusCode := http.StatusServiceUnavailable
+			var validationError adminIPValidationError
+			if errors.As(err, &validationError) {
+				message = translations[string(validationError)]
+				statusCode = http.StatusBadRequest
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(statusCode)
+			a.renderProfilePage(w, r, currentEmail, message, "danger", false, "", time.Time{}, false, profileEmailDeliveryView{}, profileEmailChangeView{})
 			return
 		}
-		httpsecurity.RedirectLocal(w, r, "?profile", http.StatusSeeOther)
+		httpsecurity.RedirectLocal(w, r, profileFormAction(r)+"#ProfileAdminIPs", http.StatusSeeOther)
 		return
 	}
 	profileAIAction := strings.TrimSpace(r.FormValue("profile_action"))
@@ -24193,7 +24650,7 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "AI editor access update unavailable", http.StatusBadRequest)
 			return
 		}
-		httpsecurity.RedirectLocal(w, r, "?profile", http.StatusSeeOther)
+		httpsecurity.RedirectLocal(w, r, profileFormAction(r), http.StatusSeeOther)
 		return
 	}
 	translations := translationsForRequest(r)
@@ -24359,6 +24816,12 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 	a.renderProfilePage(w, r, pendingProfileEmail, status, statusClass, showPasswordCodeForm, passwordConfirmationToken, time.Time{}, false, emailDeliveryView, emailChange)
 }
 
+// Validation carries a translation key; database failures remain unavailable
+// errors and never expose SQL details through the account form.
+type adminIPValidationError string
+
+func (validationError adminIPValidationError) Error() string { return string(validationError) }
+
 func (a *App) updateAdminIPAllowlist(r *http.Request, domain, email, action, rawIP string) error {
 	if action == "admin_stealth_enable" || action == "admin_stealth_disable" {
 		return a.accountTransaction(r.Context(), func(transaction *sql.Tx) error {
@@ -24371,7 +24834,7 @@ func (a *App) updateAdminIPAllowlist(r *http.Request, domain, email, action, raw
 				return err
 			}
 			if protectionEnabled == 0 {
-				return errors.New("administrator IP protection must be enabled first")
+				return adminIPValidationError("admin_ip_error_protection_required")
 			}
 			_, err := transaction.ExecContext(r.Context(), `INSERT INTO admin_stealth_modes(domain,email,enabled_at) VALUES(?,?,?)`, domain, email, time.Now().Unix())
 			return err
@@ -24387,7 +24850,7 @@ func (a *App) updateAdminIPAllowlist(r *http.Request, domain, email, action, raw
 				return err
 			}
 			if r.FormValue("static_ip_confirmation") != "yes" {
-				return errors.New("static IP confirmation is required")
+				return adminIPValidationError("admin_ip_error_static_confirmation")
 			}
 			// BEGIN current address coverage check.
 			currentIP := canonicalAccountIP(accountClientIP(r))
@@ -24409,7 +24872,7 @@ func (a *App) updateAdminIPAllowlist(r *http.Request, domain, email, action, raw
 				return rowsErr
 			}
 			if !currentIPAllowed {
-				return errors.New("allow the current IP before enabling protection")
+				return adminIPValidationError("admin_ip_error_allow_current")
 			}
 			// END current address coverage check.
 			_, err = transaction.ExecContext(r.Context(), `INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES(?,?,?)`, domain, email, time.Now().Unix())
@@ -24418,44 +24881,27 @@ func (a *App) updateAdminIPAllowlist(r *http.Request, domain, email, action, raw
 	}
 	ipRule, err := canonicalAdminIPRule(rawIP)
 	if err != nil {
-		return errors.New("invalid administrator IP or subnet")
+		return adminIPValidationError("admin_ip_error_invalid")
 	}
 	return a.accountTransaction(r.Context(), func(transaction *sql.Tx) error {
 		switch action {
 		case "admin_ip_add":
-			validSessionAddress := adminIPRuleContains(ipRule, accountClientIP(r))
-			candidateRows, err := transaction.QueryContext(r.Context(), `SELECT client_ip FROM account_session_ips WHERE domain=? AND email=?`, domain, email)
-			if err != nil {
-				return err
-			}
-			for candidateRows.Next() {
-				var candidateIP string
-				if candidateRows.Scan(&candidateIP) == nil && adminIPRuleContains(ipRule, candidateIP) {
-					validSessionAddress = true
-					break
-				}
-			}
-			rowsErr := candidateRows.Err()
-			_ = candidateRows.Close()
-			if rowsErr != nil {
-				return rowsErr
-			}
-			if !validSessionAddress {
-				return errors.New("IP address was not used in a valid account session")
-			}
-			_, err = transaction.ExecContext(r.Context(), `INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES(?,?,?,?)`, domain, email, ipRule, time.Now().Unix())
+			_, err = transaction.ExecContext(r.Context(), `INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) SELECT ?,?,?,? WHERE NOT EXISTS(SELECT 1 FROM admin_allowed_ips WHERE domain=? AND email=? AND client_ip=?)`, domain, email, ipRule, time.Now().Unix(), domain, email, ipRule)
 			return err
 		case "admin_ip_remove":
 			if adminIPRuleContains(ipRule, accountClientIP(r)) {
-				return errors.New("cannot remove the current administrator IP")
+				return adminIPValidationError("admin_ip_error_remove_current")
 			}
 			result, err := transaction.ExecContext(r.Context(), `DELETE FROM admin_allowed_ips WHERE domain=? AND email=? AND client_ip=? AND (SELECT COUNT(1) FROM admin_allowed_ips WHERE domain=? AND email=?)>1`, domain, email, ipRule, domain, email)
 			if err != nil {
 				return err
 			}
 			rowsAffected, err := result.RowsAffected()
-			if err != nil || rowsAffected == 0 {
-				return errors.New("administrator IP was not found or is the last allowed address")
+			if err != nil {
+				return err
+			}
+			if rowsAffected == 0 {
+				return adminIPValidationError("admin_ip_error_remove_last")
 			}
 			return nil
 		default:
@@ -24499,14 +24945,93 @@ func (a *App) resumeProfileEmailChange(w http.ResponseWriter, r *http.Request, t
 	a.renderProfilePage(w, r, confirmation.CurrentEmail, "", "", true, token, time.Time{}, false, profileEmailDeliveryView{}, emailChange)
 }
 
+func profileFormAction(r *http.Request) string {
+	pagePath := httpsecurity.LocalRedirectTarget(r.URL.EscapedPath(), "/")
+	parameters := url.Values{}
+	parameters.Set("profile", "")
+	for _, name := range []string{"session_page", "ip_page", "passkey_page", "ai_access_page", "ai_session_page"} {
+		page, _ := strconv.Atoi(r.URL.Query().Get(name))
+		if page > 1 && page <= 1000000 {
+			parameters.Set(name, strconv.Itoa(page))
+		}
+	}
+	if len(parameters) == 1 {
+		return pagePath + "?profile"
+	}
+	return pagePath + "?" + parameters.Encode()
+}
+
+const profilePageSize = 5
+const profileSecurityPageSize = 3
+
+type profilePagination struct {
+	Page, Pages, Count, Offset int
+	PreviousURL, NextURL       string
+}
+
+func profileListPagination(r *http.Request, parameter string, count, pageSize int) profilePagination {
+	page, _ := strconv.Atoi(r.URL.Query().Get(parameter))
+	if page < 1 {
+		page = 1
+	}
+	pages := (count + pageSize - 1) / pageSize
+	if pages < 1 {
+		pages = 1
+	}
+	if page > pages {
+		page = pages
+	}
+	pagination := profilePagination{Page: page, Pages: pages, Count: count, Offset: (page - 1) * pageSize}
+	pageURL := func(nextPage int) string {
+		parameters := r.URL.Query()
+		parameters.Set("profile", "")
+		parameters.Set(parameter, strconv.Itoa(nextPage))
+		return "?" + parameters.Encode()
+	}
+	if page > 1 {
+		pagination.PreviousURL = pageURL(page - 1)
+	}
+	if page < pages {
+		pagination.NextURL = pageURL(page + 1)
+	}
+	return pagination
+}
+
+func profileListOffset(r *http.Request, parameter string) int {
+	page, _ := strconv.Atoi(r.URL.Query().Get(parameter))
+	if page < 1 {
+		return 0
+	}
+	if page > 1000000 {
+		page = 1000000
+	}
+	return (page - 1) * profilePageSize
+}
+
 func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, status, statusClass string, showPasswordCodeForm bool, passwordConfirmationToken string, blockedUntil time.Time, hardLocked bool, emailDeliveryView profileEmailDeliveryView, emailChange profileEmailChangeView, totpSetupSecrets ...string) {
 	translations := translationsForRequest(r)
 	domain := a.siteDomain(r.Context(), r)
 	accountEmail, authenticated := a.currentAdminEmail(r)
+	adminIPStatus := ""
+	adminIPDraft := ""
+	if r.Method == http.MethodPost && (strings.HasPrefix(r.FormValue("profile_action"), "admin_ip_") || strings.HasPrefix(r.FormValue("profile_action"), "admin_stealth_")) {
+		adminIPStatus = status
+		if r.FormValue("profile_action") == "admin_ip_add" {
+			adminIPDraft = r.FormValue("admin_ip")
+		}
+	}
 	passkeys := []accountpasskey.CredentialInfo{}
+	passkeyCount := 0
+	passkeyPagination := profileListPagination(r, "passkey_page", 0, profilePageSize)
+	sessionPagination := profileListPagination(r, "session_page", 0, profileSecurityPageSize)
+	ipPagination := profileListPagination(r, "ip_page", 0, profileSecurityPageSize)
+	aiAccessPagination := profileListPagination(r, "ai_access_page", 0, profilePageSize)
+	aiSessionPagination := profileListPagination(r, "ai_session_page", 0, profilePageSize)
 	totpEnabled := false
 	if authenticated {
-		passkeys, _ = accountpasskey.List(r.Context(), a.db, domain, accountEmail)
+		_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM account_passkeys WHERE domain=? AND email=?`, domain, accountEmail).Scan(&passkeyCount)
+		passkeyPagination = profileListPagination(r, "passkey_page", passkeyCount, profilePageSize)
+		passkeys, _ = accountpasskey.ListPage(r.Context(), a.db, domain, accountEmail, passkeyPagination.Offset, profilePageSize)
 		totpEnabled = accounttotp.Enabled(r.Context(), a.db, domain, accountEmail)
 	}
 	totpSetupSecret := ""
@@ -24537,7 +25062,8 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 	aiEditorCapabilities := []profileAIEditorCapabilityView{}
 	aiEditorSessions := []profileAIEditorSessionView{}
 	if authenticated && a.aiCapabilities != nil {
-		if capabilities, listErr := a.aiCapabilities.ListCapabilities(accountEmail, domain); listErr == nil {
+		if capabilities, count, listErr := a.aiCapabilities.ListCapabilitiesPage(accountEmail, domain, profileListOffset(r, "ai_access_page"), profilePageSize); listErr == nil {
+			aiAccessPagination = profileListPagination(r, "ai_access_page", count, profilePageSize)
 			for _, capability := range capabilities {
 				aiEditorCapabilities = append(aiEditorCapabilities, profileAIEditorCapabilityView{
 					ID: capability.ID, Domain: capability.Domain,
@@ -24545,7 +25071,8 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 				})
 			}
 		}
-		if sessions, listErr := a.aiCapabilities.List(accountEmail, domain); listErr == nil {
+		if sessions, count, listErr := a.aiCapabilities.ListSessionsPage(accountEmail, domain, profileListOffset(r, "ai_session_page"), profilePageSize); listErr == nil {
+			aiSessionPagination = profileListPagination(r, "ai_session_page", count, profilePageSize)
 			for _, session := range sessions {
 				aiEditorSessions = append(aiEditorSessions, profileAIEditorSessionView{
 					ID: session.ID, CapabilityID: session.CapabilityID, Domain: session.Domain,
@@ -24575,7 +25102,10 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 		if enabled, queryErr := a.adminStealthEnabled(r.Context(), domain, accountEmail); queryErr == nil {
 			adminStealthEnabled = enabled
 		}
-		rows, err := a.db.QueryContext(r.Context(), `SELECT token,client_ip,created_at,user_agent,language FROM sessions WHERE user_email=? AND (last_used_at=0 OR last_used_at>?) AND last_used_at<=? ORDER BY created_at DESC LIMIT 50`, domain+"|"+accountEmail, time.Now().Add(-accountauth.SessionTTL).Unix(), time.Now().Unix())
+		sessionNow := time.Now()
+		_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM sessions WHERE user_email=? AND (last_used_at=0 OR last_used_at>?) AND last_used_at<=?`, domain+"|"+accountEmail, sessionNow.Add(-accountauth.SessionTTL).Unix(), sessionNow.Unix()).Scan(&profileSessionCount)
+		sessionPagination = profileListPagination(r, "session_page", profileSessionCount, profileSecurityPageSize)
+		rows, err := a.db.QueryContext(r.Context(), `SELECT token,client_ip,created_at,user_agent,language FROM sessions WHERE user_email=? AND (last_used_at=0 OR last_used_at>?) AND last_used_at<=? ORDER BY created_at DESC,token LIMIT ? OFFSET ?`, domain+"|"+accountEmail, sessionNow.Add(-accountauth.SessionTTL).Unix(), sessionNow.Unix(), profileSecurityPageSize, sessionPagination.Offset)
 		if err == nil {
 			for rows.Next() {
 				entry := profileSessionView{}
@@ -24599,7 +25129,9 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 			profileSessions[sessionIndex].Location = geography.Location
 			profileSessions[sessionIndex].GeoIPAttribution = geography.GeoIPAttribution
 		}
-		allowedRows, allowedErr := a.db.QueryContext(r.Context(), `SELECT client_ip FROM admin_allowed_ips WHERE domain=? AND email=? ORDER BY added_at,client_ip`, domain, accountEmail)
+		_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM admin_allowed_ips WHERE domain=? AND email=?`, domain, accountEmail).Scan(&adminAllowedIPCount)
+		ipPagination = profileListPagination(r, "ip_page", adminAllowedIPCount, profileSecurityPageSize)
+		allowedRows, allowedErr := a.db.QueryContext(r.Context(), `SELECT client_ip FROM admin_allowed_ips WHERE domain=? AND email=? ORDER BY added_at,client_ip LIMIT ? OFFSET ?`, domain, accountEmail, profileSecurityPageSize, ipPagination.Offset)
 		if allowedErr == nil {
 			for allowedRows.Next() {
 				var allowedIP string
@@ -24615,21 +25147,10 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 			adminAllowedIPs = append(adminAllowedIPs, adminAllowedIPView{
 				Rule:             allowedRule,
 				Current:          adminIPRuleContains(allowedRule, currentIP),
-				Removable:        len(adminIPRules) > 1 && !adminIPRuleContains(allowedRule, currentIP),
+				Removable:        adminAllowedIPCount > 1 && !adminIPRuleContains(allowedRule, currentIP),
 				Location:         geography.Location,
 				GeoIPAttribution: geography.GeoIPAttribution,
 			})
-		}
-		profileSessionCount = len(profileSessions)
-		_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM sessions WHERE user_email=? AND (last_used_at=0 OR last_used_at>?) AND last_used_at<=?`, domain+"|"+accountEmail, time.Now().Add(-accountauth.SessionTTL).Unix(), time.Now().Unix()).Scan(&profileSessionCount)
-		adminAllowedIPCount = len(adminAllowedIPs)
-		if len(adminAllowedIPs) > 4 {
-			adminAllowedIPMore = append(adminAllowedIPMore, adminAllowedIPs[4:]...)
-			adminAllowedIPs = adminAllowedIPs[:4]
-		}
-		if len(profileSessions) > 4 {
-			profileSessionsMore = append(profileSessionsMore, profileSessions[4:]...)
-			profileSessions = profileSessions[:4]
 		}
 		candidateRows, candidateErr := a.db.QueryContext(r.Context(), `SELECT client_ip FROM account_session_ips WHERE domain=? AND email=? GROUP BY client_ip ORDER BY MAX(used_at) DESC`, domain, accountEmail)
 		if candidateErr == nil {
@@ -24668,6 +25189,15 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 		"AdminStealthEnabled":        adminStealthEnabled,
 		"CurrentAdminIP":             canonicalAccountIP(accountClientIP(r)),
 		"Passkeys":                   passkeys,
+		"ProfileFormAction":          profileFormAction(r),
+		"AdminIPStatus":              adminIPStatus,
+		"AdminIPDraft":               adminIPDraft,
+		"PasskeyPagination":          passkeyPagination,
+		"SessionPagination":          sessionPagination,
+		"IPPagination":               ipPagination,
+		"AIAccessPagination":         aiAccessPagination,
+		"AISessionPagination":        aiSessionPagination,
+		"HasAIAccess":                aiAccessPagination.Count+aiSessionPagination.Count > 0,
 		"PasskeyOffer":               passkeyOffer,
 		"PasskeyContinuePath":        passkeyContinuePath,
 		"TOTPEnabled":                totpEnabled,
@@ -25522,12 +26052,40 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 			a.renderEmailConfirmationStatus(w, r, http.StatusConflict, translationOrDefault(confirmationTranslations, "email_confirmation_status_admin_exists", "Administrator already exists."))
 			return
 		}
+		if !localAccountRequest(r) && a.serverOwnerExists(confirmationContext) && !a.serverAutomaticRegistrationAllowed(confirmationContext) {
+			a.renderSiteRequestPage(w, r, confirmation.Domain, "", "", confirmation.Email, "", 0)
+			return
+		}
 		if dnsSetup, dnsSetupRequired := a.registrationDomainAddressSetupView(confirmationContext, confirmation.Domain, confirmation.LanguageCode); dnsSetupRequired {
 			a.renderEmailConfirmationStatus(w, r, http.StatusBadRequest, dnsSetup.PlainText)
 			return
 		}
+		registrationLimit := a.registrationCreationQuota(confirmationContext)
+		// A live trial keeps its assigned quota when its first owner registers.
+		var existingLimit int64
+		if a.db.QueryRowContext(confirmationContext, `SELECT limit_bytes FROM domain_storage_usage WHERE domain=?`, confirmation.Domain).Scan(&existingLimit) == nil && existingLimit > 0 {
+			registrationLimit = existingLimit
+		}
 		registerContext := contextWithSiteDatabaseCreation(confirmationContext)
-		if _, err := a.db.ExecContext(registerContext, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, confirmation.Domain, confirmation.Email, confirmation.Password); err != nil {
+		err := a.accountTransaction(registerContext, func(transaction *sql.Tx) error {
+			result, insertErr := transaction.ExecContext(registerContext, `INSERT INTO users(domain,email,password,is_admin) SELECT ?,?,?,1 WHERE NOT EXISTS(SELECT 1 FROM users WHERE domain=? AND is_admin=1)`, confirmation.Domain, confirmation.Email, confirmation.Password, confirmation.Domain)
+			if insertErr != nil {
+				return insertErr
+			}
+			inserted, insertErr := result.RowsAffected()
+			if insertErr != nil {
+				return insertErr
+			}
+			if inserted != 1 {
+				return errors.New("administrator already exists")
+			}
+			if _, insertErr = transaction.ExecContext(registerContext, `INSERT INTO domain_storage_usage(domain,limit_bytes,updated_at) SELECT ?,?,? WHERE NOT EXISTS(SELECT 1 FROM domain_storage_usage WHERE domain=?)`, confirmation.Domain, registrationLimit, time.Now().UTC().Format(time.RFC3339), confirmation.Domain); insertErr != nil {
+				return insertErr
+			}
+			_, insertErr = transaction.ExecContext(registerContext, `UPDATE domain_storage_usage SET limit_bytes=? WHERE domain=?`, registrationLimit, confirmation.Domain)
+			return insertErr
+		})
+		if err != nil {
 			a.renderEmailConfirmationStatus(w, r, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -30965,6 +31523,9 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 			if freeBytes < 0 {
 				freeBytes = 0
 			}
+			if hasQueryFlag(r, "prepare_image") {
+				freeBytes = imageprepare.SourceByteLimit
+			}
 			r.Body = http.MaxBytesReader(w, r.Body, freeBytes+fileUploadMultipartOverheadBytes)
 			if err := r.ParseMultipartForm(fileUploadMultipartMemoryBytes); err != nil {
 				if strings.Contains(strings.ToLower(err.Error()), "too large") {
@@ -30989,6 +31550,10 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 		}
 		fileName := safeRelativeAssetPath(r.PostFormValue("name"))
 		action := r.PostFormValue("action")
+		if action == "prepare_image" && hasQueryFlag(r, "prepare_image") {
+			a.prepareImageReplacement(w, r, currentPath)
+			return
+		}
 		if action == "upload" {
 			a.uploadFiles(w, r, currentPath)
 			return
@@ -31205,6 +31770,182 @@ func (a *App) listManagedFiles(ctx context.Context, r *http.Request, currentPath
 		return fileList[leftIndex].CreatedUnix > fileList[rightIndex].CreatedUnix
 	})
 	return fileList, nil
+}
+
+type preparedImageFileView struct {
+	URL    string `json:"url"`
+	MIME   string `json:"mime"`
+	Width  int    `json:"width"`
+	Height int    `json:"height"`
+	Bytes  int    `json:"bytes"`
+}
+
+type preparedImageReplacementView struct {
+	Preview preparedImageFileView  `json:"preview"`
+	Full    *preparedImageFileView `json:"full,omitempty"`
+}
+
+type imageUploadSource struct {
+	file multipart.File
+	form *multipart.Form
+}
+
+func (source *imageUploadSource) Read(destination []byte) (int, error) {
+	return source.file.Read(destination)
+}
+func (source *imageUploadSource) Close() error {
+	closeErr := source.file.Close()
+	removeErr := source.form.RemoveAll()
+	if closeErr != nil {
+		return closeErr
+	}
+	return removeErr
+}
+
+// HTTP remains the upload compatibility adapter; image work owns its source
+// and replies through a bounded channel with an explicit consumer lifetime.
+func (a *App) prepareImageReplacement(w http.ResponseWriter, r *http.Request, currentPath string) {
+	if r.MultipartForm == nil || len(r.MultipartForm.File["upload_files"]) != 1 {
+		http.Error(w, "one replacement image is required", http.StatusBadRequest)
+		return
+	}
+	header := r.MultipartForm.File["upload_files"][0]
+	uploaded, err := header.Open()
+	if err != nil {
+		_ = r.MultipartForm.RemoveAll()
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	source := &imageUploadSource{file: uploaded, form: r.MultipartForm}
+	sourceOwned := true
+	defer func() {
+		if sourceOwned {
+			_ = source.Close()
+		}
+	}()
+	width, _ := strconv.Atoi(r.PostFormValue("image_width"))
+	height, _ := strconv.Atoi(r.PostFormValue("image_height"))
+	positionX, xErr := strconv.ParseFloat(r.PostFormValue("image_position_x"), 64)
+	positionY, yErr := strconv.ParseFloat(r.PostFormValue("image_position_y"), 64)
+	if xErr != nil || yErr != nil {
+		http.Error(w, "invalid image position", http.StatusBadRequest)
+		return
+	}
+	options := imageprepare.Options{Width: width, Height: height, Fit: r.PostFormValue("image_fit"), PositionX: positionX, PositionY: positionY, Full: r.PostFormValue("image_full") == "1"}
+	session := make(chan struct{})
+	defer close(session)
+	jobs := a.imageJobs
+	if jobs == nil {
+		jobs = imageprepare.Start(session)
+	}
+	reply := make(chan imageprepare.Result, 1)
+	select {
+	case jobs <- imageprepare.Job{Reader: source, MIME: header.Header.Get("Content-Type"), Options: options, Reply: reply, Session: session}:
+		sourceOwned = false
+	default:
+		http.Error(w, imageprepare.ErrBusy.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	var prepared imageprepare.Result
+	select {
+	case prepared = <-reply:
+	case <-r.Context().Done():
+		return
+	}
+	if prepared.Err != nil {
+		http.Error(w, prepared.Err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+	result, err := a.storePreparedImageReplacement(r, currentPath, prepared)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInsufficientStorage)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(result)
+}
+
+func (a *App) storePreparedImageReplacement(r *http.Request, currentPath string, prepared imageprepare.Result) (preparedImageReplacementView, error) {
+	domain := a.siteDomain(r.Context(), r)
+	files := []imageprepare.File{prepared.Preview}
+	if prepared.Full != nil {
+		files = append(files, *prepared.Full)
+	}
+	type preparedFileWrite struct {
+		name    string
+		file    imageprepare.File
+		missing bool
+	}
+	writes := []preparedFileWrite{}
+	names := map[string]bool{}
+	views := make([]preparedImageFileView, len(files))
+	for index, file := range files {
+		digest := sha256.Sum256(file.Content)
+		name := hex.EncodeToString(digest[:]) + file.Extension
+		if !names[name] {
+			writes = append(writes, preparedFileWrite{name: name, file: file})
+			names[name] = true
+		}
+		views[index] = preparedImageFileView{URL: "/p/" + name, MIME: file.MIME, Width: file.Width, Height: file.Height, Bytes: len(file.Content)}
+	}
+	a.ensureDomainStorageUsageRow(r.Context(), domain)
+	a.rebuildDomainStorageUsage(r.Context(), domain)
+	created := []string{}
+	err := a.siteContentTransaction(r.Context(), func(transaction *sql.Tx) error {
+		reserved := int64(0)
+		for index := range writes {
+			target := filepath.Join(a.domainFilesDirForDomain(domain), writes[index].name)
+			info, statErr := a.statInsideStorage(target)
+			if errors.Is(statErr, os.ErrNotExist) {
+				writes[index].missing = true
+				reserved += int64(len(writes[index].file.Content))
+			} else if statErr != nil {
+				return statErr
+			} else if !info.Mode().IsRegular() {
+				return errors.New("image destination is not a file")
+			}
+		}
+		now := time.Now().UTC().Format(time.RFC3339)
+		result, err := transaction.ExecContext(r.Context(), `UPDATE domain_storage_usage SET file_bytes=file_bytes+?,updated_at=? WHERE domain=? AND (?=0 OR page_bytes+published_page_bytes+revision_bytes+file_bytes+published_static_bytes+COALESCE(import_queue_bytes,0)+COALESCE(analytics_bytes,0)+COALESCE(analytics_reserved_bytes,0)+?<=limit_bytes)`, reserved, now, domain, reserved, reserved)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected != 1 {
+			return errors.New("storage limit reached")
+		}
+		for _, write := range writes {
+			target := filepath.Join(a.domainFilesDirForDomain(domain), write.name)
+			if write.missing {
+				if err := a.writeAtomicStorageFile(target, write.file.Content); err != nil {
+					return err
+				}
+				created = append(created, target)
+			}
+			if _, err := transaction.ExecContext(r.Context(), `INSERT INTO file_metadata(domain,file_name,page_path,size,mime_type,created_at,updated_at,source,download_count) VALUES(?,?,?,?,?,?,?,?,0) ON CONFLICT(domain,file_name) DO UPDATE SET page_path=excluded.page_path,size=excluded.size,mime_type=excluded.mime_type,updated_at=excluded.updated_at,source=excluded.source`, domainStorageName(domain), write.name, currentPath, len(write.file.Content), write.file.MIME, now, now, "upload"); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, func(storeErr error) {
+		if storeErr != nil {
+			for _, filename := range created {
+				_ = a.removeInsideStorage(filename)
+			}
+		}
+	})
+	if err != nil {
+		return preparedImageReplacementView{}, err
+	}
+	result := preparedImageReplacementView{Preview: views[0]}
+	if len(views) > 1 {
+		result.Full = &views[1]
+	}
+	a.reportHostingSnapshotAsync(r.Context())
+	return result, nil
 }
 
 func (a *App) uploadFiles(w http.ResponseWriter, r *http.Request, currentPath string) {
@@ -32911,6 +33652,45 @@ func (a *App) serverAutomaticRegistrationAllowed(ctx context.Context) bool {
 	return allowed
 }
 
+// Creation policies come from the control database, before a site DB exists.
+func (a *App) creationSizeLimits(ctx context.Context) hostingandsupport.SiteSizeLimits {
+	limits := hostingandsupport.SiteSizeLimits{Registration: hostingandsupport.DefaultCreationLimitBytes, TestDrive: hostingandsupport.DefaultCreationLimitBytes}
+	_ = a.withServerControlDatabaseRead(ctx, "creation-size-limits", func(database *sql.DB) error {
+		limits = (hostingandsupport.Store{DB: database}).SiteSizeLimits(ctx)
+		return nil
+	})
+	return limits
+}
+
+func (a *App) registrationCreationQuota(ctx context.Context) int64 {
+	limitBytes := a.creationSizeLimits(ctx).Registration
+	_ = a.withServerControlDatabaseRead(ctx, "registration-plan-quota", func(database *sql.DB) error {
+		if plan, found := (hostingandsupport.Store{DB: database}).DefaultPlan(ctx); found {
+			limitBytes = hostingandsupport.CreationQuota(limitBytes, plan.QuotaBytes)
+		}
+		return nil
+	})
+	return limitBytes
+}
+
+func parseCreationSize(requestedSize string, previousBytes int64) (int64, error) {
+	if strings.TrimSpace(requestedSize) == "" {
+		return hostingandsupport.CreationQuota(previousBytes, 0), nil
+	}
+	bytes, _, err := hostingandsupport.ParseQuotaLimitBytes(requestedSize)
+	return bytes, err
+}
+
+func demoSizeLimit(settings demo.Settings) int64 {
+	return hostingandsupport.CreationQuota(settings.MaxSiteBytes, 0)
+}
+
+func (a *App) initializeRegistrationQuota(ctx context.Context, domain string, limitBytes int64) error {
+	a.ensureDomainStorageUsageRow(ctx, domain)
+	_, err := a.db.ExecContext(ctx, `UPDATE domain_storage_usage SET limit_bytes=?,updated_at=? WHERE domain=?`, limitBytes, time.Now().UTC().Format(time.RFC3339), domain)
+	return err
+}
+
 func (a *App) domainStorageUsage(ctx context.Context, domain string) domainStorageUsage {
 	a.rebuildDomainStorageUsage(ctx, domain)
 	a.ensureDomainStorageUsageRow(ctx, domain)
@@ -33681,7 +34461,7 @@ func (a *App) createSessionForDomainWithIPTrust(w http.ResponseWriter, r *http.R
 	if sessionErr != nil {
 		return ""
 	}
-	a.storeProfileSessionDetails(r, token)
+	a.storeProfileSessionDetails(r.WithContext(ctx), token)
 	setAccountSessionCookie(w, r, token, time.Now())
 	return token
 }

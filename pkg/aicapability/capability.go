@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -67,23 +68,25 @@ type SessionInfo struct {
 }
 
 type managerRequest struct {
-	kind       string
-	domain     string
-	owner      string
-	scopes     []string
-	token      string
-	capability Capability
-	session    Session
-	sessionID  string
-	duration   time.Duration
-	newScopes  []string
-	pagePath   string
-	task       string
-	sessions   []SessionInfo
-	reply      chan managerResponse
+	offset, limit int
+	kind          string
+	domain        string
+	owner         string
+	scopes        []string
+	token         string
+	capability    Capability
+	session       Session
+	sessionID     string
+	duration      time.Duration
+	newScopes     []string
+	pagePath      string
+	task          string
+	sessions      []SessionInfo
+	reply         chan managerResponse
 }
 
 type managerResponse struct {
+	total        int
 	capability   Capability
 	capabilities []Capability
 	session      Session
@@ -170,7 +173,18 @@ func (manager *Manager) run() {
 					capability.Scopes = append([]string(nil), capability.Scopes...)
 					result = append(result, capability)
 				}
-				request.reply <- managerResponse{capabilities: result}
+				sort.Slice(result, func(left, right int) bool {
+					if result[left].Created.Equal(result[right].Created) {
+						return result[left].ID < result[right].ID
+					}
+					return result[left].Created.After(result[right].Created)
+				})
+				total := len(result)
+				if request.limit > 0 {
+					start, end := pageRange(total, request.offset, request.limit)
+					result = result[start:end]
+				}
+				request.reply <- managerResponse{capabilities: result, total: total}
 			case "list":
 				result := make([]SessionInfo, 0, len(sessions))
 				now := time.Now().UTC()
@@ -183,7 +197,18 @@ func (manager *Manager) run() {
 					}
 					result = append(result, SessionInfo{ID: sessionKey[:12], CapabilityID: session.CapabilityID, Domain: session.Domain, Owner: session.Owner, Scopes: append([]string(nil), session.Scopes...), Created: session.Created, Expires: session.Expires})
 				}
-				request.reply <- managerResponse{sessions: result}
+				sort.Slice(result, func(left, right int) bool {
+					if result[left].Created.Equal(result[right].Created) {
+						return result[left].ID < result[right].ID
+					}
+					return result[left].Created.After(result[right].Created)
+				})
+				total := len(result)
+				if request.limit > 0 {
+					start, end := pageRange(total, request.offset, request.limit)
+					result = result[start:end]
+				}
+				request.reply <- managerResponse{sessions: result, total: total}
 			case "revoke-session":
 				_, session, found := findSession(sessions, request.sessionID)
 				capability, capabilityFound := capabilities[session.CapabilityID]
@@ -524,4 +549,32 @@ func findSession(sessions map[string]Session, sessionID string) (string, Session
 		foundSession = session
 	}
 	return foundKey, foundSession, foundKey != ""
+}
+
+// Pagination stays with the process that owns capability and session records.
+func pageRange(total, offset, limit int) (int, int) {
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= total {
+		offset = 0
+		if total > 0 {
+			offset = ((total - 1) / limit) * limit
+		}
+	}
+	end := total
+	if limit < total-offset {
+		end = offset + limit
+	}
+	return offset, end
+}
+
+func (manager *Manager) ListCapabilitiesPage(owner, domain string, offset, limit int) ([]Capability, int, error) {
+	response := manager.request(managerRequest{kind: "list-capabilities", owner: strings.ToLower(strings.TrimSpace(owner)), domain: normalizeDomain(domain), offset: offset, limit: limit, reply: make(chan managerResponse, 1)})
+	return response.capabilities, response.total, response.err
+}
+
+func (manager *Manager) ListSessionsPage(owner, domain string, offset, limit int) ([]SessionInfo, int, error) {
+	response := manager.request(managerRequest{kind: "list", owner: strings.ToLower(strings.TrimSpace(owner)), domain: normalizeDomain(domain), offset: offset, limit: limit, reply: make(chan managerResponse, 1)})
+	return response.sessions, response.total, response.err
 }
