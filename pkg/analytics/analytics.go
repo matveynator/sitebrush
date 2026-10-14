@@ -14,17 +14,15 @@ const MaximumPages = 64
 
 // Event carries cumulative engagement so retransmission cannot inflate totals.
 type Event struct {
-	Replay          []ReplayEvent          `json:"replay,omitempty"`
-	ReplayRecording bool                   `json:"replay_recording,omitempty"`
-	ReplayAllowed   bool                   `json:"-"`
-	Change          *PageChange            `json:"-"`
-	Client          BrowserCharacteristics `json:"client,omitempty"`
-	Fingerprint     string                 `json:"-"`
-	Location        VisitorLocation        `json:"-"`
-	Version         int                    `json:"version,omitempty"`
-	Signals         []Signal               `json:"signals,omitempty"`
-	Layout          string                 `json:"layout,omitempty"`
-	Device          string                 `json:"device,omitempty"`
+	Replay          []ReplayEvent   `json:"replay,omitempty"`
+	ReplayRecording bool            `json:"replay_recording,omitempty"`
+	ReplayAllowed   bool            `json:"-"`
+	Change          *PageChange     `json:"-"`
+	Location        VisitorLocation `json:"-"`
+	Version         int             `json:"version,omitempty"`
+	Signals         []Signal        `json:"signals,omitempty"`
+	Layout          string          `json:"layout,omitempty"`
+	Device          string          `json:"device,omitempty"`
 	BrowserContext
 	Attribution Attribution `json:"-"`
 	Visitor     string      `json:"visitor"`
@@ -668,9 +666,6 @@ func (site *Site) Report(now time.Time, days int) Report {
 
 func Valid(event Event) bool {
 	if !ValidReplay(event.Replay) {
-		return false
-	}
-	if !ValidBrowserCharacteristics(event.Client) {
 		return false
 	}
 	if event.Version != 0 && event.Version != 2 || !ValidSignals(event) {

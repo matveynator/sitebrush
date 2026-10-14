@@ -5048,13 +5048,6 @@ func (a *App) prepareConversionEvent(event *browserstats.Event, r *http.Request)
 	event.Browser = ""
 	event.OS = ""
 	event.Address = canonicalAccountIP(accountClientIP(r))
-	event.Client.UserAgent = browserstats.CleanText(r.UserAgent(), 256)
-	event.Client.Platform = browserstats.CleanText(event.Client.Platform, 64)
-	event.Client.Language = browserstats.CleanText(event.Client.Language, 32)
-	event.Client.Timezone = browserstats.CleanText(event.Client.Timezone, 64)
-	characteristics, _ := json.Marshal(event.Client)
-	fingerprint := sha256.Sum256(append([]byte(a.analyticsEventDomain(r, "")+"\n"), characteristics...))
-	event.Fingerprint = hex.EncodeToString(fingerprint[:])
 	if (len(event.Replay) > 0 || event.ReplayRecording) && !event.ReplayAllowed {
 		preferences, _ := a.readAnalyticsReplayPreferences(a.analyticsEventDomain(r, ""))
 		event.ReplayAllowed = browserstats.ReplaySampled(event.Session, preferences)
@@ -5139,7 +5132,9 @@ func (a *App) analyticsPublishedPage(domain, pathname string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	file, err := os.Open(resolved)
+	// Opening through the jail keeps confinement in force during the read,
+	// including when a filesystem entry changes after path validation.
+	file, err := a.openFileInsideStorage(resolved)
 	if err != nil {
 		return "", err
 	}
@@ -5394,28 +5389,15 @@ func (a *App) runAnalyticsDiskQuota(requests <-chan browserstats.DiskQuotaReques
 	}
 }
 func (a *App) analyticsDiskBytes(domain string) int64 {
-	if a.analyticsStorage != nil {
-		result := a.analyticsStorage.Exchange(browserstats.StorageRequest{Operation: browserstats.ReadUsage, Domain: domain})
-		if result.Err == nil && result.Bytes > 0 {
-			return result.Bytes
-		}
-	}
-	// Startup and quota reconciliation can run before the analytics worker.
-	// Compare the requested site with existing directory entries, then build
-	// the filesystem path from the entry returned by os.ReadDir rather than
-	// from request-derived domain text.
-	root := filepath.Join(a.storageRootDir(), "analytics")
-	expected := "site-" + url.PathEscape(domain)
-	entries, err := os.ReadDir(root)
-	if err != nil {
+	if a.analyticsStorage == nil {
 		return 0
 	}
-	for _, entry := range entries {
-		if entry.Name() == expected && entry.IsDir() {
-			return a.directorySizeInsideStorage(filepath.Join(root, entry.Name()))
-		}
+	result := a.analyticsStorage.Exchange(browserstats.StorageRequest{Operation: browserstats.ReadUsage, Domain: domain})
+	if result.Err != nil {
+		log.Printf("analytics usage unavailable domain=%q: %v", domain, result.Err)
+		return 0
 	}
-	return 0
+	return result.Bytes
 }
 func analyticsStorageText(bytes int64) string { return formatFileSize(bytes) }
 
@@ -32818,7 +32800,16 @@ func (a *App) rebuildDomainStorageUsage(ctx context.Context, domain string) {
 	var importQueueBytes int64
 	_ = a.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(storage_bytes),0) FROM whole_site_import_pages WHERE domain=?`, domain).Scan(&importQueueBytes)
 	a.ensureDomainStorageUsageRow(ctx, domain)
-	_, _ = a.db.ExecContext(ctx, `UPDATE domain_storage_usage SET analytics_bytes=? WHERE domain=?`, a.analyticsDiskBytes(domain), domain)
+	// Retain the last reconciled usage while the analytics worker is unavailable.
+	// Startup or a failed measurement must not release disk quota already in use.
+	if a.analyticsStorage != nil {
+		result := a.analyticsStorage.Exchange(browserstats.StorageRequest{Operation: browserstats.ReadUsage, Domain: domain})
+		if result.Err == nil {
+			_, _ = a.db.ExecContext(ctx, `UPDATE domain_storage_usage SET analytics_bytes=? WHERE domain=?`, result.Bytes, domain)
+		} else {
+			log.Printf("analytics usage reconciliation failed domain=%q: %v", domain, result.Err)
+		}
+	}
 	_, _ = a.db.ExecContext(ctx, `UPDATE domain_storage_usage SET page_bytes=?, published_page_bytes=?, revision_bytes=?, file_bytes=?, published_static_bytes=?, import_queue_bytes=?, updated_at=?, limit_bytes=COALESCE(NULLIF(limit_bytes,0),?) WHERE domain=?`,
 		pageBytes, publishedPageBytes, revisionBytes, fileBytes, publishedStaticBytes, importQueueBytes, time.Now().UTC().Format(time.RFC3339), defaultDomainStorageLimitBytes, domain)
 }

@@ -13,7 +13,7 @@
         signals: [], limited: false, connection: null, lastSent: -10000, started: 0,
         lastInteraction: 0, maximumScroll: 0, layout: '', device: '', retryCount: 0, nextConnect: 0,
         forms: new WeakMap(), sections: new WeakSet(), recentClicks: [], timers: [], uriRules: [], matchedRules: new Set(),
-        replay: [], replayAllowed: false, replayPreferences: null, replayPolicySession: '', replayScroll: -1, replayScrollAt: 0, replayFields: new Map(), client: null, stopped: false
+        replay: [], replayAllowed: false, replayPreferences: null, replayPolicySession: '', replayScroll: -1, replayScrollAt: 0, replayFields: new Map(), stopped: false
     };
 
     function randomIdentity() {
@@ -211,15 +211,6 @@
         if (/Mobi|iPhone|iPod|Android/i.test(userAgent) || width < 768) return 'mobile';
         return 'desktop';
     }
-    function browserCharacteristics() {
-        const screenCharacteristics = window.screen || {};
-        let timezoneName = '';
-        try { timezoneName = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (timezoneError) { console.debug('SiteBrush analytics: timezone unavailable',timezoneError.name); }
-        return {platform:String(navigator.platform || '').slice(0,64),language:String(navigator.language || '').slice(0,32),timezone:timezoneName.slice(0,64),
-            width:Math.min(32768,Math.max(0,screenCharacteristics.width || 0)),height:Math.min(32768,Math.max(0,screenCharacteristics.height || 0)),
-            viewport_width:Math.min(32768,Math.max(0,window.innerWidth || 0)),viewport_height:Math.min(32768,Math.max(0,window.innerHeight || 0)),
-            color_depth:Math.min(64,Math.max(0,screenCharacteristics.colorDepth || 0)),pixel_ratio:Math.min(16,Math.max(0,window.devicePixelRatio || 1)),processors:Math.min(256,Math.max(0,navigator.hardwareConcurrency || 0))};
-    }
     function enqueueReplay(action) {
         if (!model.replayAllowed || model.stopped) return;
         action.at = Math.floor(performance.now()-model.started);
@@ -263,7 +254,7 @@
     function encodeBatch() {
         if (!model.signals.length && !model.replay.length) return null;
         const evidence = model.evidence;
-        const envelope = {replay:model.replay.slice(0,20),replay_recording:model.replayAllowed,client:model.client,version:2,visitor:model.visitor,persistent:model.persistent,tab:model.tab,session:model.session,view:model.view,sequence:model.sequence + 1,path:model.path,uri:model.path,layout:model.layout,device:model.device,referrer:evidence.referrer,campaign:evidence.campaign,signals:model.signals.slice(0,20),limited:model.limited};
+        const envelope = {replay:model.replay.slice(0,20),replay_recording:model.replayAllowed,version:2,visitor:model.visitor,persistent:model.persistent,tab:model.tab,session:model.session,view:model.view,sequence:model.sequence + 1,path:model.path,uri:model.path,layout:model.layout,device:model.device,referrer:evidence.referrer,campaign:evidence.campaign,signals:model.signals.slice(0,20),limited:model.limited};
         while (new TextEncoder().encode(JSON.stringify(envelope)).length > 16384 && envelope.signals.length + envelope.replay.length > 1) { if (envelope.replay.length) envelope.replay.pop(); else envelope.signals.pop(); envelope.limited = true; }
         return envelope;
     }
@@ -310,7 +301,6 @@
         model.connection.addEventListener('error',function failed() { console.debug('SiteBrush analytics: connection unavailable'); });
     }
     function startView() {
-        model.client = browserCharacteristics();
         restoreIdentity(); model.view = randomIdentity(); model.sequence = 0;
         model.nextConnect = 0; model.retryCount = 0;
         model.path = location.pathname.slice(0,256); model.evidence = sourceEvidence();

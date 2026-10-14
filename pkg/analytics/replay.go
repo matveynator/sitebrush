@@ -113,15 +113,19 @@ func (site *Site) recordReplay(event Event, now time.Time, limit int64) {
 		state.Used += 2048
 	}
 	session.Last = now
-	for _, goal := range site.Goals {
-		if goal.Primary || len(site.Goals) == 1 {
-			session.GoalConfigured = true
-			if visitor := state.Visitors[event.Visitor]; visitor != nil {
-				if progress := visitor.Funnels[GoalKey(goal)]; progress != nil && len(progress.Reached) == len(goalSteps(goal)) {
-					session.Completed = true
-				}
+	if len(site.Goals) > 0 {
+		primary := site.Goals[0]
+		for _, goal := range site.Goals {
+			if goal.Primary {
+				primary = goal
+				break
 			}
-			break
+		}
+		session.GoalConfigured = true
+		if visitor := state.Visitors[event.Visitor]; visitor != nil {
+			if progress := visitor.Funnels[GoalKey(primary)]; progress != nil && len(progress.Reached) == len(goalSteps(primary)) {
+				session.Completed = true
+			}
 		}
 	}
 

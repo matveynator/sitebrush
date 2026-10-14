@@ -45,6 +45,32 @@ func TestReplaySamplingPrivacyDeduplicationAndExpiry(t *testing.T) {
 		t.Fatal("replay expiry changed ordinary analytics")
 	}
 }
+
+func TestReplayUsesReportPrimaryGoalForDropOff(t *testing.T) {
+	for _, explicitPrimary := range []bool{false, true} {
+		now := time.Now().UTC()
+		site := New(now)
+		site.Goals = []Goal{{Name: "Purchase", Kind: "event", Match: "purchase"}, {Name: "Trial", Kind: "event", Match: "trial", Primary: explicitPrimary}}
+		event := conversionEvent("1111111111111111", "2222222222222222", "/", 1, Signal{Kind: "page"}, Signal{Kind: "goal", Name: "purchase"})
+		event.ReplayAllowed = true
+		event.Replay = []ReplayEvent{{Kind: "navigation"}}
+		if !site.Record(event, now, 4<<20) {
+			t.Fatal("sampled visit rejected")
+		}
+		site.Prune(now.Add(31 * time.Minute))
+		summaries := site.Report(now.Add(31*time.Minute), 7).Conversion.Sessions
+		if len(summaries) != 1 {
+			t.Fatal("replay disagrees with report primary goal", explicitPrimary, summaries)
+		}
+		hasDrop := false
+		for _, reason := range summaries[0].Reasons {
+			hasDrop = hasDrop || reason == "funnel-drop"
+		}
+		if hasDrop != explicitPrimary {
+			t.Fatal("incorrect funnel drop classification", explicitPrimary, summaries)
+		}
+	}
+}
 func TestReplayDocumentIsInertAndVersionBound(t *testing.T) {
 	content := `<html><body><input value="password-secret"><textarea>private-message</textarea><script data-sitebrush-owned="true" data-analytics-layout="abcdef0123456789">execute()</script><button data-analytics-key="download">Download</button></body></html>`
 	snapshot, err := ReplayDocument(content, "/", "abcdef0123456789")

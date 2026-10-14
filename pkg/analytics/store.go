@@ -183,12 +183,16 @@ func (store *Store) run(root string, requests <-chan StorageRequest, done chan<-
 			default:
 			}
 			result := StorageResult{}
-			directory, pathErr := storeDirectoryPath(root, request.Domain)
-			databaseErr := pathErr
-			if pathErr == nil {
-				_, databaseErr = os.Stat(filepath.Join(directory, DatabaseName(request.Domain)))
+			cachedPreferences := request.Operation == ReadPreferences && preferencesKnown && time.Since(preferencesReadAt) < time.Minute
+			if cachedPreferences {
+				directory, pathErr := storeDirectoryPath(root, request.Domain)
+				cachedPreferences = pathErr == nil
+				if cachedPreferences {
+					_, databaseErr := os.Stat(filepath.Join(directory, DatabaseName(request.Domain)))
+					cachedPreferences = databaseErr == nil
+				}
 			}
-			if request.Operation == ReadPreferences && preferencesKnown && time.Since(preferencesReadAt) < time.Minute && databaseErr == nil {
+			if cachedPreferences {
 				result = preferences
 			} else {
 				result = store.execute(root, request, archivedHour)
@@ -368,6 +372,18 @@ func (store *Store) execute(root string, request StorageRequest, archivedHour ma
 		}
 		var body string
 		err := database.QueryRowContext(boundary, `SELECT body FROM checkpoints WHERE kind=?`, kind).Scan(&body)
+		if err == nil && (kind == "browser-state" || kind == "browser-report") {
+			cleaned, cleanErr := sanitizeBrowserCheckpoint(body)
+			if cleanErr != nil {
+				return StorageResult{Err: cleanErr}
+			}
+			if cleaned != body {
+				if err := writeCheckpoint(boundary, database, kind, cleaned); err != nil {
+					return StorageResult{Err: err}
+				}
+				body = cleaned
+			}
+		}
 		return StorageResult{Text: body, Err: err}
 	case SavePreferences:
 		if len(request.State) > 1024 {
@@ -468,9 +484,6 @@ func writeDailyArchive(directory, encoded string, now time.Time) error {
 		report.Experience.Recent = nil
 		report.Conversion.Locations = nil
 		report.Conversion.Sessions = nil
-		for index := range report.Conversion.Forms {
-			report.Conversion.Forms[index].Values = nil
-		}
 		parsed, err := time.Parse("2006-01-02", date)
 		if err != nil || date != parsed.Format("2006-01-02") || parsed.After(now) || parsed.Before(dayStart(now).AddDate(0, 0, -archiveLimitDays+1)) {
 			continue

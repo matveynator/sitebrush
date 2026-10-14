@@ -11,8 +11,8 @@ import (
 	"time"
 )
 
-// Conversion state belongs to the existing site worker. No event journal or DOM
-// snapshots are retained; contact identifiers only connect bounded observations.
+// Conversion state belongs to one site worker. Contact identifiers connect
+// bounded observations; sampled replay owns its separate short-lived budget.
 const MaximumSignals = 20
 const MaximumBehaviourElements = 200
 const FunnelWindow = 90 * 24 * time.Hour
@@ -24,16 +24,14 @@ const formBudget int64 = 2048
 const deliveryBudget int64 = 768
 
 type Signal struct {
-	FieldName string `json:"field_name,omitempty"`
-	FieldText string `json:"field_text,omitempty"`
-	Kind      string `json:"kind"`
-	Name      string `json:"name,omitempty"`
-	Element   string `json:"element,omitempty"`
-	Form      string `json:"form,omitempty"`
-	Field     string `json:"field,omitempty"`
-	Scroll    int    `json:"scroll,omitempty"`
-	Filled    bool   `json:"filled,omitempty"`
-	At        int64  `json:"at"`
+	Kind    string `json:"kind"`
+	Name    string `json:"name,omitempty"`
+	Element string `json:"element,omitempty"`
+	Form    string `json:"form,omitempty"`
+	Field   string `json:"field,omitempty"`
+	Scroll  int    `json:"scroll,omitempty"`
+	Filled  bool   `json:"filled,omitempty"`
+	At      int64  `json:"at"`
 }
 type FunnelProgress struct {
 	Device   string
@@ -45,8 +43,7 @@ type FunnelProgress struct {
 	Campaign Campaign
 }
 type ConversionVisitor struct {
-	Client                      BrowserCharacteristics
-	Fingerprint, Device         string
+	Device                      string
 	Location                    VisitorLocation
 	Deliveries                  map[string]*View
 	First, Last                 time.Time
@@ -78,7 +75,6 @@ type ElementObservation struct {
 	Depth                                     int
 }
 type FormObservation struct {
-	Values                                        map[string]RecordedField
 	StartedAt, SubmittedAt, CompletedAt, FailedAt time.Time
 	Date, Page, Form, Session, LastField          string
 	Last                                          time.Time
@@ -143,7 +139,6 @@ type BehaviourPage struct {
 	Elements, Scroll, Sections []BehaviourRow
 }
 type ConversionForm struct {
-	Values                                                   []FormFieldValue
 	Page, Form                                               string
 	Viewed, Started, Submitted, Completed, Failed, Abandoned int
 	Fields                                                   []Row
@@ -163,27 +158,7 @@ type ConversionInsight struct {
 	Users                   int
 	Rate, Factor            string
 }
-type BrowserCharacteristics struct {
-	UserAgent      string  `json:"user_agent,omitempty"`
-	Platform       string  `json:"platform,omitempty"`
-	Language       string  `json:"language,omitempty"`
-	Timezone       string  `json:"timezone,omitempty"`
-	Width          int     `json:"width,omitempty"`
-	Height         int     `json:"height,omitempty"`
-	ViewportWidth  int     `json:"viewport_width,omitempty"`
-	ViewportHeight int     `json:"viewport_height,omitempty"`
-	ColorDepth     int     `json:"color_depth,omitempty"`
-	PixelRatio     float64 `json:"pixel_ratio,omitempty"`
-	Processors     int     `json:"processors,omitempty"`
-}
-
-func ValidBrowserCharacteristics(client BrowserCharacteristics) bool {
-	return len(client.UserAgent) <= 256 && len(client.Platform) <= 64 && len(client.Language) <= 32 && len(client.Timezone) <= 64 && client.Width >= 0 && client.Width <= 32768 && client.Height >= 0 && client.Height <= 32768 && client.ViewportWidth >= 0 && client.ViewportWidth <= 32768 && client.ViewportHeight >= 0 && client.ViewportHeight <= 32768 && client.ColorDepth >= 0 && client.ColorDepth <= 64 && client.PixelRatio >= 0 && client.PixelRatio <= 16 && client.Processors >= 0 && client.Processors <= 256
-}
-
 type VisitorLocation struct {
-	Client                                          BrowserCharacteristics
-	Fingerprint                                     string
 	Address, Country, City, Source, Landing, Device string
 	Latitude, Longitude                             float64
 	Known                                           bool
@@ -287,14 +262,11 @@ func ValidSignals(event Event) bool {
 	previous := int64(0)
 	for _, signal := range event.Signals {
 		switch signal.Kind {
-		case "page", "click", "scroll", "download", "form-view", "form-start", "form-submit", "form-success", "form-failed", "field", "field-value", "external-link", "goal", "rage-click", "dead-click", "section":
+		case "page", "click", "scroll", "download", "form-view", "form-start", "form-submit", "form-success", "form-failed", "field", "external-link", "goal", "rage-click", "dead-click", "section":
 		default:
 			return false
 		}
 		if signal.Name != "" && !safeEventName(signal.Name) || signal.Element != "" && !safeStructuralKey(signal.Element) || signal.Form != "" && !safeStructuralKey(signal.Form) || signal.Field != "" && !safeStructuralKey(signal.Field) || signal.Scroll < 0 || signal.Scroll > 100 || signal.At < previous || signal.At > 24*60*60*1000 {
-			return false
-		}
-		if !SafeFieldValue(signal.FieldName, signal.FieldText) || (signal.Kind == "field-value" && (signal.Form == "" || signal.Field == "")) || (signal.Kind != "field-value" && (signal.FieldName != "" || signal.FieldText != "")) {
 			return false
 		}
 		previous = signal.At
@@ -384,10 +356,6 @@ func (site *Site) recordConversion(event Event, now time.Time, limit int64) bool
 			visitor.Location = VisitorLocation{Address: event.Address}
 		}
 		visitor.Location.Last = now
-	}
-	if event.Fingerprint != "" {
-		visitor.Fingerprint = event.Fingerprint
-		visitor.Client = event.Client
 	}
 	if event.Device != "" {
 		visitor.Device = event.Device
@@ -574,7 +542,7 @@ func (site *Site) recordConversion(event Event, now time.Time, limit int64) bool
 			observation.LastAt = occurred
 			observation.Count++
 			observation.Depth = max(observation.Depth, signal.Scroll)
-		case "form-view", "form-start", "form-submit", "form-success", "form-failed", "field", "field-value":
+		case "form-view", "form-start", "form-submit", "form-success", "form-failed", "field":
 			if signal.Form == "" {
 				continue
 			}
@@ -625,21 +593,6 @@ func (site *Site) recordConversion(event Event, now time.Time, limit int64) bool
 				}
 			case "field":
 				observation.LastField = signal.Field
-			case "field-value":
-				if !SafeFieldValue(signal.FieldName, signal.FieldText) {
-					continue
-				}
-				if observation.Values == nil {
-					observation.Values = map[string]RecordedField{}
-				}
-				if _, exists := observation.Values[signal.Field]; !exists {
-					if len(observation.Values) >= 16 {
-						state.Incomplete = true
-						continue
-					}
-					state.Used += 512
-				}
-				observation.Values[signal.Field] = RecordedField{Text: signal.FieldText, At: occurred}
 			}
 		}
 	}
@@ -736,18 +689,13 @@ func (site *Site) pruneConversion(now time.Time) {
 			}
 		}
 		for key, form := range visitor.Forms {
-			for field, record := range form.Values {
-				if now.Sub(record.At) > 7*24*time.Hour {
-					delete(form.Values, field)
-				}
-			}
 			if now.Sub(form.Last) > 7*24*time.Hour {
 				form.Session = ""
 			}
 			if form.Date < dayKey(now.AddDate(0, 0, -89)) {
 				delete(visitor.Forms, key)
 			} else {
-				state.Used += formBudget + int64(len(form.Values))*512
+				state.Used += formBudget
 			}
 		}
 		state.Used += int64(len(visitor.Funnels)) * progressBudget
@@ -800,7 +748,7 @@ func weekStart(now time.Time) time.Time {
 }
 
 // Reports read owned state. Visitor metadata serves the authenticated map;
-// long-lived daily archives remove visitor metadata and recorded field values.
+// long-lived daily archives remove visitor metadata.
 func (site *Site) conversionReport(now time.Time, days int) ConversionReport {
 	result := ConversionReport{Version: 2, Incomplete: site.Incomplete}
 	state := site.Conversion
@@ -995,8 +943,6 @@ func (site *Site) conversionReport(now time.Time, days int) ConversionReport {
 		}
 		if active {
 			location := visitor.Location
-			location.Client = visitor.Client
-			location.Fingerprint = visitor.Fingerprint
 			location.Source = visitor.Acquisition.Name
 			location.Landing = visitor.Landing
 			location.Device = visitor.Device
@@ -1202,9 +1148,7 @@ func (site *Site) conversionReport(now time.Time, days int) ConversionReport {
 		}
 		result.Behaviour = append(result.Behaviour, *page)
 	}
-	fieldValues := conversionFieldValues(state, start, now)
 	for key, form := range forms {
-		form.Values = fieldValues[key]
 		form.Fields = rows(formFields[key])
 		result.Forms = append(result.Forms, *form)
 	}

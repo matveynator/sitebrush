@@ -479,7 +479,7 @@ http://your-domain.example
 
 ## Visitor analytics
 
-Analytics is one screen ordered by conversion, user paths, behaviour, traffic quality and retention. Technical request totals, browsers, operating systems, response times and geography are not Analytics reports. Security keeps its independent observations and dashboard.
+Analytics is one screen: the visitor map and daily square calendar appear first, followed by conversion, user paths, behaviour, traffic quality and retention. Year and day selection sit beside the visitor map. Technical request totals, browsers, operating systems and response times are not Analytics reports. Security keeps its independent observations and dashboard.
 
 Use **Goals and funnels** to choose the primary outcome and ordered steps. A visitor can complete a funnel across sessions within 90 days of entry. Reports select visitors by entry date and count a browser once per configuration version. The entry source stays attached when the visitor returns. Open windows show preliminary losses; editing a rule creates a new version without rewriting previous outcomes. A random first-party browser identity expires after 90 days without activity. Different browsers and devices are not joined.
 
@@ -489,15 +489,41 @@ A form submit is not a confirmed success. Set `data-analytics-key="contact"` on 
 
 The user-path report overlays entrances, visitors, conversions and exits on the published site tree, using page titles from the editor’s catalog. Expanding a page shows observed next steps separately from its URL hierarchy. The catalog is limited to 1,000 pages and branches render only when expanded; no page bodies are loaded for the tree.
 
-Traffic reports connect acquisition evidence to primary-goal conversion. Referrer origins and UTM source/medium/campaign are retained; search queries are not inferred. Weekly retention uses first known browser visits and labels incomplete weeks. Clearing browser storage starts a new observed identity. Temporary identities cannot establish long-term retention.
+Traffic reports connect acquisition evidence to primary-goal conversion. Available referrer URLs and UTM source/medium/campaign are retained; credentials and secret query parameters are removed; search queries are not inferred. Weekly retention uses first known browser visits and labels incomplete weeks. Clearing browser storage starts a new observed identity. Temporary identities cannot establish long-term retention.
 
-The collector batches up to 20 events every ten seconds, with a 100-event local queue and a 16 KiB message ceiling. WebSocket is the normal transport; `sendBeacon` is the unload compatibility adapter. Both feed the same bounded worker and deduplication gate. There is no mousemove stream, raw event journal, video capture or continuous keystroke recording. Optional sampled session replay stores only bounded navigation, scroll, click/touch, focus, resize and error observations plus a sanitized published-page snapshot; field contents are never recorded. Browser characteristics (device class, user agent, platform, screen and viewport dimensions and pixel ratio) are retained as useful UX dimensions and also produce a site-scoped fingerprint; random browser identity remains the visitor key because fingerprints can collide. The visitor map retains server-derived IP addresses with approximate GeoIP coordinates in bounded browser state; they expire after 90 inactive days and are never used as identity keys. IP addresses, fingerprints and recorded field values are stripped from long-lived daily archives. The map includes all retained visitors in the selected period, including source and landing page. Unknown locations remain in the visitor list. The daily square calendar retains unique visitor totals for approximately 13 months. Overload preserves admitted observations, rejects later work and marks the report incomplete; serving a page never waits for SQL or analytics persistence.
+The collector batches up to 20 events every ten seconds, with a 100-event local queue and a 16 KiB message ceiling. WebSocket is the normal transport; `sendBeacon` is the unload compatibility adapter. Both feed the same bounded worker and deduplication gate. There is no mousemove stream, raw event journal, video capture or continuous keystroke recording. Optional sampled session replay stores only bounded navigation, scroll, click/touch, focus, resize and error observations plus a sanitized published-page snapshot; field contents are never recorded. Only the mobile/tablet/desktop class is retained to explain conversion and page behaviour. User agents are inspected transiently to exclude automation; fingerprints, OS, browser, language, timezone, screen and processor profiles are not collected. The visitor map retains server-derived IP addresses with approximate GeoIP coordinates in bounded browser state; they expire after 90 inactive days and are never used as identity keys. IP addresses and visitor locations are stripped from long-lived daily archives. On first read, the storage worker removes obsolete field values, fingerprints and client profiles from development checkpoints while preserving aggregate counts. The map includes all retained visitors in the selected period, including source and landing page. Unknown locations remain in the visitor list. The daily square calendar retains unique visitor totals for approximately 13 months. Overload preserves admitted observations, rejects later work and marks the report incomplete; serving a page never waits for SQL or analytics persistence.
 
 Hourly goal completion counts expire after 30 days; daily summaries and cohort totals survive for approximately 13 months. Browser identity state and bounded behaviour summaries expire after 90 inactive days; session contacts last only while active. Form contact labels are removed after seven days while bounded aggregate outcomes remain available for the 90-day report window. Existing technical checkpoints are removed when conversion state is saved. Historical request data is not reconstructed as conversion or paths.
 
 Analytics is stored separately in `storage/analytics/site-<domain>/<domain>.analytics.db`, with one session channel and one SQL worker per site. Existing `analytics.db` files are renamed by that worker on first access. The analytics database, SQLite journals, archives and temporary files count toward the site’s disk quota and appear as a separate storage component. A write reserves space through the site quota worker, then reconciles the actual file size. Quota checks for page edits include live analytics reservations. Collection marks its growth as blocked when the quota cannot admit a write.
 
-Sampled session replay and page-change impact are included in this release. Replay is optional and bounded; page-change impact compares conversion before and after published page changes without implementing a separate A/B-testing system.
+Sampled session replay and page-change impact are included in this release. Replay defaults to off; when enabled, it samples 5% of sessions (configurable from 1% to 10%), keeps at most 24 sessions with 256 actions each and expires them after seven days. Playback uses sanitized authored snapshots and does not reconstruct arbitrary dynamic DOM changes. Sessions with dead/rage clicks, failed forms, UI errors or stopped funnels are prioritized in the report. Page-change impact uses actual publication timestamps, equal seven-day before/after visit windows and seven-day conversion follow-up. Small samples, overlapping changes and unfinished windows are labeled; historical changes predating this feature are not reconstructed. This is a before/after observation, not an A/B test or a claim of causation.
+
+### Redesign readiness — PR #180, 2026-10-14
+
+These percentages estimate implementation and verification readiness against the requested scope; they are not test coverage or a traffic-based guarantee. Browser and production-load checks remain manual. The unweighted estimate across the 17 requirements is approximately **96%**.
+
+| Requirement | Ready | Remaining work / boundary |
+| --- | ---: | --- |
+| 1. Remove technical reports; retain map/calendar | 100% | Implemented; IP and available referrer evidence remain. |
+| 2. One Analytics screen and priority order | 100% | Implemented, with map/calendar above conversion. |
+| 3. Goals and standard/custom events | 100% | Configure the site's actual business goals. |
+| 4. Graphical paths and actual site tree | 90% | Observed routes and exits work; unexpected-route highlighting is not explicit. |
+| 5. Click/scroll heatmaps; dead/rage clicks | 95% | Verify overlays and section identifiers on the actual site's layouts. |
+| 6. Optional sampled event replay | 90% | Verify playback on actual pages; arbitrary dynamic DOM changes are not reconstructed. |
+| 7. Traffic source to conversion and referrer URLs | 100% | Only URLs actually exposed by the browser are available. |
+| 8. Known search attribution, no guessed queries | 100% | Search Console integration is future work outside this scope. |
+| 9. Structural form drop-off and outcomes | 100% | Wire confirmed success/failure callbacks or success pages for each form. |
+| 10. Weekly retention cohorts | 100% | Real cohorts need time to mature. |
+| 11. Publication change impact | 90% | Validate editor publication paths manually; old changes are not backfilled. Results need observation time. |
+| 12. Deterministic significant insights | 95% | Verify thresholds against real traffic; at most three insights are shown. |
+| 13. Batching, bounded channels and lightweight capture | 90% | Measure ingestion/report latency and memory under representative traffic. |
+| 14. Bounded retention and aggregated storage | 100% | Hourly/daily summaries and expiry are implemented; replay expires after seven days. |
+| 15. Minimal data and field-content privacy | 100% | New values/profiles are removed from the protocol; legacy checkpoints are sanitized on read. |
+| 16. Compact UI with progressive disclosure | 95% | Check narrow screens, labels and accessibility manually. |
+| 17. Actionable rather than technical metrics | 95% | Assess each report on real site tasks after goals are configured. |
+
+Separate per-site analytics SQL databases, channel workers and disk-quota accounting are implemented. Visitor-map completeness is limited by the explicit retention and memory budgets, not an arbitrary 200-visitor cap. CI security checks must be green before merging; browser screenshots and a full load benchmark are not acceptance evidence from this audit.
 
 ## Security analytics
 

@@ -151,8 +151,28 @@ func TestStoreContainsOnlyThreeBoundedCheckpoints(t *testing.T) {
 func TestReadUsageRejectsPathLikeDomain(t *testing.T) {
 	store := OpenStore(t.TempDir())
 	defer store.Close()
-	result := store.Exchange(StorageRequest{Operation: ReadUsage, Domain: "../outside"})
-	if result.Err == nil {
-		t.Fatal("path-like analytics domain accepted")
+	for _, domain := range []string{"../outside", "/outside", `..\outside`, "site\x00name"} {
+		result := store.Exchange(StorageRequest{Operation: ReadUsage, Domain: domain})
+		if result.Err == nil {
+			t.Fatal("path-like analytics domain accepted", domain)
+		}
+	}
+}
+
+func TestReadUsageDoesNotCreateOrFollowSiteDirectory(t *testing.T) {
+	root := t.TempDir()
+	store := OpenStore(root)
+	defer store.Close()
+	if result := store.Exchange(StorageRequest{Operation: ReadUsage, Domain: "missing.example"}); result.Err != nil || result.Bytes != 0 {
+		t.Fatal("missing site usage", result)
+	}
+	if _, err := os.Stat(filepath.Join(root, "site-missing.example")); !os.IsNotExist(err) {
+		t.Fatal("usage created a site directory", err)
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(root, "site-linked.example")); err != nil {
+		t.Fatal(err)
+	}
+	if result := store.Exchange(StorageRequest{Operation: ReadUsage, Domain: "linked.example"}); result.Err == nil {
+		t.Fatal("usage followed a symlink")
 	}
 }

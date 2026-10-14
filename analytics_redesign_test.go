@@ -19,7 +19,7 @@ import (
 
 func TestConversionBeaconAdmissionPrivacyAndCancellation(t *testing.T) {
 	application := &App{browserAnalytics: make(chan browserAnalyticsEnvelope, 1)}
-	payload := `{"version":2,"visitor":"1111111111111111","view":"2222222222222222","sequence":1,"path":"/","referrer":"https://github.com/project?token=private","signals":[{"kind":"page","at":0}],"address":"private","language":"private","timezone":"private"}`
+	payload := `{"version":2,"visitor":"1111111111111111","view":"2222222222222222","sequence":1,"path":"/","referrer":"https://github.com/project?token=private","signals":[{"kind":"page","at":0}],"address":"private","language":"private","timezone":"private","client":{"user_agent":"private"},"fingerprint":"private"}`
 	request := httptest.NewRequest("POST", "http://localhost/_sitebrush/analytics", strings.NewReader(payload))
 	request.Header.Set("Origin", "http://localhost")
 	request.Header.Set("User-Agent", "Mozilla/5.0")
@@ -32,9 +32,6 @@ func TestConversionBeaconAdmissionPrivacyAndCancellation(t *testing.T) {
 	encoded, _ := json.Marshal(event)
 	if strings.Contains(string(encoded), "private") {
 		t.Fatalf("metadata persisted: %s", encoded)
-	}
-	if len(event.Fingerprint) != 64 {
-		t.Fatal("browser fingerprint not computed")
 	}
 	if event.Source != "GitHub" && event.Source != "github.com" {
 		t.Fatalf("source %q", event.Source)
@@ -54,6 +51,39 @@ func TestConversionBeaconAdmissionPrivacyAndCancellation(t *testing.T) {
 	application.browserAnalyticsBeacon(response, request)
 	if response.Code != 503 {
 		t.Fatal("full queue did not terminate admission")
+	}
+}
+
+func TestConversionPreviewCannotReadOutsidePublishedSite(t *testing.T) {
+	application := &App{storagePath: t.TempDir()}
+	pageDirectory := application.domainStaticDir("one.example")
+	otherDirectory := application.domainStaticDir("two.example")
+	for _, directory := range []string{pageDirectory, otherDirectory} {
+		if err := os.MkdirAll(directory, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(pageDirectory, "index.html"), []byte("published"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if body, err := application.analyticsPublishedPage("one.example", "/"); err != nil || body != "published" {
+		t.Fatal("published page unavailable", body, err)
+	}
+	for _, directory := range []string{t.TempDir(), otherDirectory} {
+		secret := filepath.Join(directory, "private.html")
+		if err := os.WriteFile(secret, []byte("private-content"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(pageDirectory, "linked.html")
+		if err := os.Symlink(secret, link); err != nil {
+			t.Fatal(err)
+		}
+		if body, err := application.analyticsPublishedPage("one.example", "/linked.html"); err == nil || body != "" {
+			t.Fatal("preview escaped published site", body, err)
+		}
+		if err := os.Remove(link); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -180,7 +210,7 @@ func TestConversionBrowserRegressions(t *testing.T) {
 		for _, signal := range observation.Signals {
 			foundSuccess = foundSuccess || signal.Kind == "form-success"
 			foundFieldState = foundFieldState || signal.Kind == "field" && signal.Field == "key:plan"
-			if signal.Kind == "field-value" || signal.FieldText != "" || signal.FieldName != "" {
+			if signal.Kind == "field-value" {
 				t.Fatal("form contents were emitted by collector")
 			}
 		}
@@ -204,9 +234,6 @@ func TestConversionBrowserRegressions(t *testing.T) {
 		if strings.Contains(string(encoded), "visitor-secret") || strings.Contains(string(encoded), "url-secret") {
 			t.Fatal("collector stored a secret")
 		}
-		if observed.Version == 2 && (len(observed.Fingerprint) != 64 || observed.Client.UserAgent == "") {
-			t.Fatal("fingerprint/browser characteristics missing")
-		}
 		if observed.Version == 2 && observed.Layout != layout {
 			t.Fatalf("collector/preview layout mismatch: %s != %s", observed.Layout, layout)
 		}
@@ -215,6 +242,9 @@ func TestConversionBrowserRegressions(t *testing.T) {
 
 func TestAnalyticsDiskQuotaAccountingAndGrowthLimit(t *testing.T) {
 	application, database := newTestApplication(t)
+	store := browserstats.OpenStore(filepath.Join(application.storageRootDir(), "analytics"))
+	defer store.Close()
+	application.analyticsStorage = store
 	application.ensureDomainStorageUsageRow(context.Background(), "localhost")
 	if _, err := database.Exec(`UPDATE domain_storage_usage SET page_bytes=100,limit_bytes=1000 WHERE domain='localhost'`); err != nil {
 		t.Fatal(err)
@@ -266,6 +296,20 @@ func TestAnalyticsDiskQuotaAccountingAndGrowthLimit(t *testing.T) {
 	usage = application.storedDomainStorageUsage(context.Background(), "localhost")
 	if usage.AnalyticsReservedBytes != 750 {
 		t.Fatal("reconciliation erased a live growth reservation")
+	}
+}
+
+func TestAnalyticsDiskQuotaKeepsUsageWithoutStorageWorker(t *testing.T) {
+	application, database := newTestApplication(t)
+	application.analyticsStorage = nil
+	application.ensureDomainStorageUsageRow(context.Background(), "localhost")
+	if _, err := database.Exec(`UPDATE domain_storage_usage SET analytics_bytes=200,analytics_reserved_bytes=100 WHERE domain='localhost'`); err != nil {
+		t.Fatal(err)
+	}
+	application.rebuildDomainStorageUsage(context.Background(), "localhost")
+	usage := application.storedDomainStorageUsage(context.Background(), "localhost")
+	if usage.AnalyticsBytes != 200 || usage.AnalyticsReservedBytes != 100 {
+		t.Fatal("worker unavailability released occupied disk quota", usage)
 	}
 }
 
