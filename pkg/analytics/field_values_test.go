@@ -33,7 +33,7 @@ func TestFormAnalyticsRejectsFieldContentsAndKeepsStructuralOutcomes(t *testing.
 		t.Fatal("structural form analytics rejected")
 	}
 	report := site.Report(now.Add(time.Hour), 7).Conversion
-	if len(report.Forms) != 1 || report.Forms[0].Started != 1 || report.Forms[0].Submitted != 1 || report.Forms[0].Succeeded != 1 {
+	if len(report.Forms) != 1 || report.Forms[0].Started != 1 || report.Forms[0].Submitted != 1 || report.Forms[0].Completed != 1 {
 		t.Fatal("structural form outcomes missing", report.Forms)
 	}
 	if len(report.Forms[0].Values) != 0 {
