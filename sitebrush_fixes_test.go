@@ -9,6 +9,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -294,6 +295,92 @@ func TestPreparedImageUploadStoresActualCropAndSinglePageRevision(t *testing.T) 
 	var count int
 	if err = db.QueryRow(`SELECT COUNT(1) FROM revisions`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("revisions=%d err=%v", count, err)
+	}
+}
+
+func TestPreparedExternalImageUsesValidatedServerDownloadWithoutCORS(t *testing.T) {
+	application, database := newTestApplication(t)
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('localhost','owner@example.com','old',1)`); err != nil {
+		t.Fatal(err)
+	}
+	cookie := newAdminSessionCookie(t, application, "owner@example.com")
+	csrfRequest := httptest.NewRequest(http.MethodGet, "http://localhost/?visual", nil)
+	csrfRequest.AddCookie(cookie)
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, image.NewNRGBA(image.Rect(0, 0, 400, 200))); err != nil {
+		t.Fatal(err)
+	}
+	downloads := make(chan string, 10)
+	previousClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			downloads <- request.URL.String()
+			if request.Header.Get("Cookie") != "" || request.Header.Get("X-SiteBrush-CSRF") != "" {
+				t.Error("site authentication must not reach an external image host")
+			}
+			response := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"image/png"}}, Body: io.NopCloser(bytes.NewReader(encoded.Bytes())), ContentLength: int64(encoded.Len()), Request: request}
+			if request.URL.Path == "/missing.png" {
+				response.StatusCode = http.StatusNotFound
+			}
+			if request.URL.Path == "/oversized.png" {
+				response.ContentLength = imageprepare.SourceByteLimit + 1
+			}
+			return response, nil
+		})}
+	}
+	defer func() { newGrabHTTPClient = previousClient }()
+	for _, scenario := range []struct {
+		source string
+		status int
+	}{
+		{"https://images.example/photo.png", http.StatusOK},
+		{"https://images.example/missing.png", http.StatusUnprocessableEntity},
+		{"https://images.example/oversized.png", http.StatusUnprocessableEntity},
+		{"http://127.0.0.1/private.png", http.StatusBadRequest},
+		{"http://192.168.1.227/private.png", http.StatusBadRequest},
+		{"http://169.254.169.254/latest/meta-data", http.StatusBadRequest},
+		{"http://[::1]/private.png", http.StatusBadRequest},
+		{"https://user:password@images.example/photo.png", http.StatusBadRequest},
+		{"file:///private/image.png", http.StatusBadRequest},
+	} {
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		for field, text := range map[string]string{"action": "prepare_image", "image_source": scenario.source, "image_width": "50", "image_height": "50", "image_fit": "cover", "image_position_x": "0.25", "image_position_y": "0.75", "account_csrf": accountCSRF(csrfRequest)} {
+			if err := writer.WriteField(field, text); err != nil {
+				t.Fatal(err)
+			}
+		}
+		writer.Close()
+		request := httptest.NewRequest(http.MethodPost, "http://localhost/?files&prepare_image", &body)
+		request.Header.Set("Content-Type", writer.FormDataContentType())
+		request.Header.Set("Origin", "null")
+		request.Header.Set("X-SiteBrush-CSRF", accountCSRF(csrfRequest))
+		request.AddCookie(cookie)
+		response := httptest.NewRecorder()
+		application.route(response, request)
+		if response.Code != scenario.status {
+			t.Fatalf("source=%s status=%d body=%s", scenario.source, response.Code, response.Body.String())
+		}
+		if scenario.status == http.StatusBadRequest {
+			select {
+			case downloaded := <-downloads:
+				t.Fatalf("blocked source was downloaded: %s", downloaded)
+			default:
+			}
+			continue
+		}
+		if downloaded := <-downloads; downloaded != scenario.source {
+			t.Fatalf("downloaded=%s want=%s", downloaded, scenario.source)
+		}
+		if scenario.status == http.StatusOK {
+			var prepared preparedImageReplacementView
+			if err := json.Unmarshal(response.Body.Bytes(), &prepared); err != nil || prepared.Preview.Width != 100 || prepared.Preview.Height != 100 {
+				t.Fatalf("external image was not cropped: %+v err=%v", prepared, err)
+			}
+			if _, err := application.statInsideStorage(filepath.Join(application.domainFilesDirForDomain("localhost"), filepath.Base(prepared.Preview.URL))); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 }
 

@@ -31786,7 +31786,7 @@ type preparedImageReplacementView struct {
 }
 
 type imageUploadSource struct {
-	file multipart.File
+	file io.ReadCloser
 	form *multipart.Form
 }
 
@@ -31802,27 +31802,87 @@ func (source *imageUploadSource) Close() error {
 	return removeErr
 }
 
+// The image worker opens external sources only after admission. The existing
+// download transport validates public DNS addresses and each redirect hop.
+type imageURLSource struct {
+	request *http.Request
+	client  *http.Client
+	body    io.ReadCloser
+}
+
+func (source *imageURLSource) Read(destination []byte) (int, error) {
+	if source.body == nil {
+		// #nosec G704 -- admission validates the URL and the transport pins public DNS and validates redirects.
+		response, err := source.client.Do(source.request)
+		if err != nil {
+			return 0, err
+		}
+		source.body = response.Body
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			return 0, fmt.Errorf("remote image download failed: HTTP %d", response.StatusCode)
+		}
+		if response.ContentLength > imageprepare.SourceByteLimit {
+			return 0, errors.New("remote image exceeds preparation budget")
+		}
+	}
+	return source.body.Read(destination)
+}
+
+func (source *imageURLSource) Close() error {
+	source.client.CloseIdleConnections()
+	if source.body != nil {
+		return source.body.Close()
+	}
+	return nil
+}
+
 // HTTP remains the upload compatibility adapter; image work owns its source
 // and replies through a bounded channel with an explicit consumer lifetime.
 func (a *App) prepareImageReplacement(w http.ResponseWriter, r *http.Request, currentPath string) {
-	if r.MultipartForm == nil || len(r.MultipartForm.File["upload_files"]) != 1 {
+	if r.MultipartForm == nil {
 		http.Error(w, "one replacement image is required", http.StatusBadRequest)
 		return
 	}
-	header := r.MultipartForm.File["upload_files"][0]
-	uploaded, err := header.Open()
-	if err != nil {
-		_ = r.MultipartForm.RemoveAll()
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	source := &imageUploadSource{file: uploaded, form: r.MultipartForm}
+	source := &imageUploadSource{form: r.MultipartForm}
 	sourceOwned := true
 	defer func() {
 		if sourceOwned {
-			_ = source.Close()
+			if source.file != nil {
+				_ = source.Close()
+			} else {
+				_ = source.form.RemoveAll()
+			}
 		}
 	}()
+	uploads := r.MultipartForm.File["upload_files"]
+	remoteSource := strings.TrimSpace(r.PostFormValue("image_source"))
+	sourceMIME := ""
+	switch {
+	case len(uploads) == 1 && remoteSource == "":
+		var openErr error
+		source.file, openErr = uploads[0].Open()
+		if openErr != nil {
+			http.Error(w, "replacement image unavailable", http.StatusBadRequest)
+			return
+		}
+		sourceMIME = uploads[0].Header.Get("Content-Type")
+	case len(uploads) == 0 && remoteSource != "":
+		sourceURL, parseErr := url.Parse(remoteSource)
+		if parseErr != nil || requirePublicOutboundURL(sourceURL) != nil {
+			http.Error(w, "invalid public image URL", http.StatusBadRequest)
+			return
+		}
+		request, requestErr := http.NewRequestWithContext(r.Context(), http.MethodGet, sourceURL.String(), nil)
+		if requestErr != nil {
+			http.Error(w, "invalid public image URL", http.StatusBadRequest)
+			return
+		}
+		applyGrabRequestHeaders(request, grabSourceOptions{})
+		source.file = &imageURLSource{request: request, client: newGrabHTTPClient()}
+	default:
+		http.Error(w, "one replacement image is required", http.StatusBadRequest)
+		return
+	}
 	width, _ := strconv.Atoi(r.PostFormValue("image_width"))
 	height, _ := strconv.Atoi(r.PostFormValue("image_height"))
 	positionX, xErr := strconv.ParseFloat(r.PostFormValue("image_position_x"), 64)
@@ -31840,7 +31900,7 @@ func (a *App) prepareImageReplacement(w http.ResponseWriter, r *http.Request, cu
 	}
 	reply := make(chan imageprepare.Result, 1)
 	select {
-	case jobs <- imageprepare.Job{Reader: source, MIME: header.Header.Get("Content-Type"), Options: options, Reply: reply, Session: session}:
+	case jobs <- imageprepare.Job{Reader: source, MIME: sourceMIME, Options: options, Reply: reply, Session: session}:
 		sourceOwned = false
 	default:
 		http.Error(w, imageprepare.ErrBusy.Error(), http.StatusServiceUnavailable)

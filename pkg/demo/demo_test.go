@@ -39,6 +39,45 @@ func TestDemoHelpers(t *testing.T) {
 	}
 }
 
+func TestDemoSizeLimitSurvivesLegacyUpdatesAndFailedSaves(t *testing.T) {
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "demo-limit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(`CREATE TABLE server_settings(name TEXT PRIMARY KEY,value TEXT,updated_at TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	store := Store{DB: database}
+	ctx := context.Background()
+	if store.Settings(ctx).MaxSiteBytes != DefaultMaxSiteBytes {
+		t.Fatal("demo default is not 1 GB")
+	}
+	if err := store.SaveSettingsWithLimit(ctx, "demo.example", "https://source.example", true, true, 512<<20); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveSettings(ctx, "demo.example", "https://next.example", false, true); err != nil {
+		t.Fatal(err)
+	}
+	previous := store.Settings(ctx)
+	if previous.MaxSiteBytes != 512<<20 || previous.SourceURL != "https://next.example" {
+		t.Fatal("legacy settings update reset the demo limit")
+	}
+	if err := store.SaveSettingsWithLimit(ctx, "other.example", "", false, false, 0); err == nil || store.Settings(ctx) != previous {
+		t.Fatal("invalid demo limit changed settings")
+	}
+	if _, err := database.Exec(`CREATE TRIGGER reject_demo_source BEFORE UPDATE ON server_settings WHEN NEW.name='demo_site_source_url' BEGIN SELECT RAISE(ABORT,'source rejected'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveSettingsWithLimit(ctx, "other.example", "https://other.example", true, false, 1234); err == nil || store.Settings(ctx) != previous {
+		t.Fatal("failed demo save partially changed the quota or domain")
+	}
+	database.Close()
+	if err := store.SaveSettingsWithLimit(ctx, "demo.example", "", false, true, 1234); err == nil {
+		t.Fatal("closed database accepted demo settings")
+	}
+}
+
 func TestDemoRequestAndSessionHelpers(t *testing.T) {
 	for _, request := range []*http.Request{
 		httptest.NewRequest(http.MethodGet, "https://example.com/page", nil),

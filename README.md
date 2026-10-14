@@ -136,6 +136,9 @@ Double-click or double-tap an image in the visual editor to change its source,
 frame dimensions, fit and crop position. Replacement uploads use the site's
 normal file storage after preparing a cropped, resized preview for the current
 frame, with a 2× pixel budget for sharp displays. Fill / Crop is the default;
+External image URLs use the validated server downloader and do not need browser
+CORS permission. Crop position accepts percentages from 0% to 100% and the
+left/center/right/top/bottom keywords; unsupported positions are rejected before Save.
 Fit shows the whole image, and Stretch requires an explicit choice. GIF, WebP and APNG
 animation and SVG vector content are preserved. Existing gallery links receive a
 separate full-resolution version; an unlinked image stores only its preview.

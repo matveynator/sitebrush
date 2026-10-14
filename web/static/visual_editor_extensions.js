@@ -366,6 +366,7 @@ function openImagePropertiesDialog(editorInstance, imageElement) {
     replacementPreviewURL: '',
     preparing: false,
     preparationError: '',
+    positionError: '',
     preparationController: null,
     fullSizeReferences: imageFullSizeReferences(imageElement),
     width: Math.max(1, Math.round(imageRectangle.width)),
@@ -524,9 +525,16 @@ function renderImagePropertiesStatus() {
   if (!imageDraft) {
     return;
   }
-  document.getElementById('imagePropertiesError').textContent = imageDraft.error || imageDraft.preparationError;
+  try {
+    imageCropPosition(imageDraft.position);
+    imageDraft.positionError = '';
+  } catch (positionError) {
+    imageDraft.positionError = positionError.message;
+  }
+  document.getElementById('imagePropertiesPosition').setAttribute('aria-invalid', String(!!imageDraft.positionError));
+  document.getElementById('imagePropertiesError').textContent = imageDraft.error || imageDraft.positionError || imageDraft.preparationError;
   for (const draftControl of document.querySelectorAll('#imagePropertiesDialog input, #imagePropertiesDialog select, #imagePropertiesReplace')) draftControl.disabled = imageDraft.preparing;
-  document.getElementById('imagePropertiesSave').disabled = !!imageDraft.error || imageDraft.loadingPreview || imageDraft.preparing;
+  document.getElementById('imagePropertiesSave').disabled = !!imageDraft.error || !!imageDraft.positionError || imageDraft.loadingPreview || imageDraft.preparing;
 }
 
 function closeImagePropertiesDialog() {
@@ -613,49 +621,58 @@ function imageFullSizeReferences(imageElement) {
 }
 
 function imageCropPosition(positionText) {
-  const components = positionText.trim().split(/\s+/);
-  const keywords = {left: 0, top: 0, center: .5, right: 1, bottom: 1};
+  const components = positionText.trim().toLowerCase().split(/\s+/);
   if (components.length === 1) {
     if (components[0] === 'top' || components[0] === 'bottom') components.unshift('center');
     else components.push('center');
   }
-  if ((components[0] === 'top' || components[0] === 'bottom') && (components[1] === 'left' || components[1] === 'right' || components[1] === 'center')) components.reverse();
-  return components.map(function normalizedPosition(component) {
+  if (((components[0] === 'top' || components[0] === 'bottom') && components[1] === 'center') || (['top', 'bottom', 'center'].includes(components[0]) && ['left', 'right'].includes(components[1]))) components.reverse();
+  if (components.length !== 2) throw new Error(editUIText.invalidImagePosition);
+  return components.map(function normalizedPosition(component, axisIndex) {
+    const keywords = axisIndex === 0 ? {left: 0, center: .5, right: 1} : {top: 0, center: .5, bottom: 1};
     if (Object.prototype.hasOwnProperty.call(keywords, component)) return keywords[component];
-    if (component === '0' || component === '0px') return 0;
-    if (/^-?\d+(?:\.\d+)?%$/.test(component)) return Math.max(0, Math.min(1, Number.parseFloat(component)/100));
+    if (/^[+-]?0(?:\.0+)?(?:px)?$/.test(component)) return 0;
+    if (/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)%$/.test(component)) {
+      const percentage = Number.parseFloat(component) / 100;
+      if (percentage >= 0 && percentage <= 1) return percentage;
+    }
     throw new Error(editUIText.invalidImagePosition);
   });
 }
 
 async function prepareImageDraftReplacement(imageDraft) {
   const signal = imageDraft.preparationController.signal;
+  const cropPosition = imageCropPosition(imageDraft.position);
+  const requestBody = new FormData();
   let replacementFile = imageDraft.replacementFile;
   if (!replacementFile) {
-    const originalResponse = await fetch(new URL(imageDraft.source, visualEditorFrameBaseURL()), {signal: signal});
-    if (!originalResponse.ok) throw new Error(editUIText.imagePreviewFailed);
-    replacementFile = await originalResponse.blob();
+    const sourceURL = new URL(imageDraft.source, visualEditorFrameBaseURL());
+    if (['http:', 'https:'].includes(sourceURL.protocol) && sourceURL.origin !== new URL(visualEditorFrameBaseURL()).origin) {
+      requestBody.append('image_source', sourceURL.href);
+    } else {
+      const originalResponse = await fetch(sourceURL, {signal: signal});
+      if (!originalResponse.ok) throw new Error(editUIText.imagePreviewFailed);
+      replacementFile = await originalResponse.blob();
+    }
   }
-  const cropPosition = imageCropPosition(imageDraft.position);
-  if (cropPosition.length !== 2) throw new Error(editUIText.invalidImagePosition);
-  const requestBody = new FormData();
   requestBody.append('action', 'prepare_image');
-  requestBody.append('upload_files', replacementFile, replacementFile.name || 'image');
-  requestBody.append('account_csrf', document.querySelector('[name="account_csrf"]').value);
+  if (replacementFile) requestBody.append('upload_files', replacementFile, replacementFile.name || 'image');
+  const accountCSRFToken = document.querySelector('[name="account_csrf"]').value;
+  requestBody.append('account_csrf', accountCSRFToken);
   requestBody.append('image_width', String(imageDraft.width));
   requestBody.append('image_height', String(imageDraft.height));
   requestBody.append('image_fit', imageDraft.fit);
   requestBody.append('image_position_x', String(cropPosition[0]));
   requestBody.append('image_position_y', String(cropPosition[1]));
   requestBody.append('image_full', imageDraft.fullSizeReferences.length ? '1' : '0');
-  const preparedResponse = await fetch(currentPagePath + '?files&prepare_image', {method: 'POST', body: requestBody, headers: {'Accept': 'application/json'}, signal: signal});
+  const preparedResponse = await fetch(currentPagePath + '?files&prepare_image', {method: 'POST', body: requestBody, headers: {'Accept': 'application/json', 'X-SiteBrush-CSRF': accountCSRFToken}, signal: signal});
   if (!preparedResponse.ok) throw new Error(editUIText.imageResizeFailed + ': ' + await preparedResponse.text());
   return preparedResponse.json();
 }
 
 async function applyImagePropertiesDraft(editorInstance) {
   const imageDraft = sitebrushEditorModel.imageDraft;
-  if (!imageDraft || imageDraft.error || imageDraft.preparing || !imageDraft.imageElement.isConnected) {
+  if (!imageDraft || imageDraft.error || imageDraft.positionError || imageDraft.preparing || !imageDraft.imageElement.isConnected) {
     return;
   }
   let preparedReplacement = null;
@@ -759,13 +776,8 @@ function connectImagePropertiesDialog(editorInstance) {
   document.getElementById('imagePropertiesPosition').addEventListener('change', function changeCropPosition(changeEvent) {
     const positionText = changeEvent.target.value.trim();
     const imageDraft = sitebrushEditorModel.imageDraft;
-    if (!CSS.supports('object-position', positionText)) {
-      imageDraft.error = editUIText.invalidImagePosition;
-    } else {
-      imageDraft.error = '';
-      imageDraft.position = positionText;
-      imageDraft.positionChanged = true;
-    }
+    imageDraft.position = positionText;
+    imageDraft.positionChanged = true;
     renderImagePropertiesDialog();
   });
   document.getElementById('imagePropertiesSource').addEventListener('change', function changeImageSource(changeEvent) {
