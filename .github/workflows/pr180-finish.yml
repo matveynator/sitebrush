@@ -22,7 +22,31 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Apply reviewed fixes
-        run: python3 scripts/pr180_fix.py
+        run: |
+          python3 scripts/pr180_fix.py
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('pkg/analytics/conversion_test.go')
+          text = path.read_text()
+          old = '''\tif !Valid(event) {
+          \t\tt.Fatal("tablet event with bounded screen/viewport dimensions rejected")
+          \t}'''
+          new = '''\tif !ValidSignals(event) || !ValidBrowserCharacteristics(event.Client) {
+          \t\tt.Fatal("tablet event with bounded screen/viewport dimensions rejected")
+          \t}'''
+          if text.count(old) != 1:
+              raise SystemExit('tablet regression assertion changed')
+          text = text.replace(old, new)
+          old = '''\tif Valid(event) {
+          \t\tt.Fatal("form field contents admitted")
+          \t}'''
+          new = '''\tif ValidSignals(event) {
+          \t\tt.Fatal("form field contents admitted")
+          \t}'''
+          if text.count(old) != 1:
+              raise SystemExit('field privacy regression assertion changed')
+          path.write_text(text.replace(old, new))
+          PY
       - name: Format and test
         run: |
           gofmt -w sitebrush.go pkg/analytics/conversion.go pkg/analytics/store.go pkg/analytics/conversion_test.go pkg/analytics/store_test.go
