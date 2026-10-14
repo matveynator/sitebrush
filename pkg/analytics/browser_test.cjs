@@ -131,3 +131,30 @@ vm.runInNewContext(analyticsTemplate.slice(searchFocusStart, searchFocusEnd), se
 assert.equal(focusedSearch, false);
 assert.equal(scrolledSearch, false);
 console.log('security analytics: country pagination, unique IP visibility and targeted search focus passed');
+
+// Verify the annual scale contract across sparse and busy years: only maxima
+// use the darkest green, and the legend covers every count without overlap.
+const dashboardSource = fs.readFileSync(path.join(__dirname, '../../web/static/analytics_dashboard.js'), 'utf8');
+const calendarHelpers = dashboardSource.slice(dashboardSource.indexOf('    function calendarActivityLevel('), dashboardSource.indexOf('    function renderVisitCalendar('));
+const calendarContext = {};
+vm.runInNewContext(calendarHelpers, calendarContext);
+for (const annualMaximum of [0,1,2,3,4,7,100,1000]) {
+    const intervals = calendarContext.calendarActivityRanges(annualMaximum);
+    for (let visitorCount = 0; visitorCount <= annualMaximum; visitorCount++) {
+        const level = calendarContext.calendarActivityLevel(visitorCount,annualMaximum);
+        assert.equal(level === 4, annualMaximum > 0 && visitorCount === annualMaximum);
+        const containing = intervals.filter(interval => visitorCount >= interval.minimumVisitors && visitorCount <= interval.maximumVisitors);
+        assert.equal(containing.length,1,'legend must cover every count exactly once');
+        assert.equal(containing[0].level,level,'legend must match the calendar cell');
+    }
+}
+console.log('Analytics calendar: annual maximum, sparse years and exact legend ranges passed');
+
+const signatureHelper = dashboardSource.slice(dashboardSource.indexOf('    function goalRulesSignature('), dashboardSource.indexOf('    function renderGoals('));
+const goalContext = {};
+vm.runInNewContext(signatureHelper, goalContext);
+const flatForm = {Name:'Contact',Kind:'form-submit',Page:'/contact',Element:'key:contact'};
+const editedForm = {Name:'Контакты',Primary:true,Steps:[{Name:'Send',Kind:'form-submit',Page:'/contact',Element:'key:contact'}]};
+assert.equal(goalContext.goalRulesSignature(flatForm),goalContext.goalRulesSignature(editedForm),'flat and edited goals with the same rules must deduplicate');
+assert.notEqual(goalContext.goalRulesSignature(flatForm),goalContext.goalRulesSignature({...flatForm,Page:'/other'}));
+console.log('Initial goal suggestions: rule identity survives editor normalization and translated names');

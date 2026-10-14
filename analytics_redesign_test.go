@@ -96,6 +96,45 @@ func TestConversionConfigurationRequiresAdminAndCSRF(t *testing.T) {
 	}
 }
 
+func TestConversionInitialGoalsUsePublishedCatalogOnce(t *testing.T) {
+	application, database := newTestApplication(t)
+	if _, err := database.Exec(`INSERT INTO published_pages(domain,path,title,html) VALUES('localhost','/','Home',''),('localhost','/contact','Contact','')`); err != nil {
+		t.Fatal(err)
+	}
+	root := application.domainStaticDir("localhost")
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for filename, content := range map[string]string{"index.html": `<a href="/contact">Contact</a>`, "contact.html": `<form data-analytics-key="contact"><input value="private-secret"></form>`} {
+		if err := os.WriteFile(filepath.Join(root, filename), []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request := httptest.NewRequest("GET", "http://localhost/?analytics", nil)
+	catalog := application.analyticsPublishedCatalog(request, "localhost")
+	if catalog.Unavailable || len(catalog.Pages) != 2 || !catalog.Pages[0].Inspected {
+		t.Fatal("published catalog unavailable", catalog)
+	}
+	if err := application.initializeAnalyticsGoals(request, "localhost", catalog); err != nil {
+		t.Fatal(err)
+	}
+	goals, err := application.readAnalyticsGoals("localhost")
+	if err != nil || len(goals) != 2 || goals[0].Kind != "form-submit" || !goals[0].Automatic {
+		t.Fatal("published form and actual route not initialized", goals, err)
+	}
+	result := application.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.SaveConfiguration, Domain: "localhost", State: `[]`})
+	if result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	if err := application.initializeAnalyticsGoals(request, "localhost", catalog); err != nil {
+		t.Fatal(err)
+	}
+	goals, err = application.readAnalyticsGoals("localhost")
+	if err != nil || len(goals) != 0 {
+		t.Fatal("explicitly cleared goals were re-created", goals, err)
+	}
+}
+
 func TestConversionBrowserRegressions(t *testing.T) {
 	if os.Getenv("SITEBRUSH_ANALYTICS_BROWSER_TEST") != "1" {
 		t.Skip("set SITEBRUSH_ANALYTICS_BROWSER_TEST=1 with scripts/editor Playwright installed")
@@ -169,6 +208,7 @@ func TestConversionBrowserRegressions(t *testing.T) {
 	application.analyticsConnections = make(chan struct{}, 8)
 	rawBeacons := make(chan string, 8)
 	fixture := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Referrer-Policy", "no-referrer")
 		if request.URL.Path == "/_sitebrush/analytics" && request.Method == http.MethodPost {
 			payload, readErr := io.ReadAll(io.LimitReader(request.Body, 16385))
 			if readErr != nil {
