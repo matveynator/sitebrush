@@ -79,7 +79,7 @@ func TestConversionBrowserRegressions(t *testing.T) {
 	if _, err = rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "analytics@example.com", "old"); err != nil {
 		t.Fatal(err)
 	}
-	staticHTML := `<!doctype html><html lang="en"><head><title>Analytics fixture</title><style>section{height:600px}body{margin:20px}</style></head><body><main><section data-analytics-section="hero"><h1>Fixture</h1><a href="/download" data-analytics-key="download">Download</a><div data-analytics-key="dead">Looks clickable</div></section><section><form data-analytics-key="contact"><input id="name" name="name" value="field-secret"><input id="password" type="password" name="password" data-analytics-value="true" value="password-secret"><select id="plan" name="plan" data-analytics-key="plan" data-analytics-value="true"><option value="starter">Starter</option><option value="pro">Pro</option></select><textarea>textarea-secret</textarea><button>Submit</button></form></section></main><script>window.fixtureExecuted=true</script></body></html>`
+	staticHTML := `<!doctype html><html lang="en"><head><title>Analytics fixture</title><style>section{height:600px}body{margin:20px}</style></head><body><main><section data-analytics-section="hero"><h1>Fixture</h1><a href="/download" data-analytics-key="download">Download</a><div data-analytics-key="dead">Looks clickable</div></section><section><form data-analytics-key="contact"><input id="name" name="name" value="field-secret"><input id="password" type="password" name="password" value="password-secret"><select id="plan" name="plan" data-analytics-key="plan"><option value="starter">Starter</option><option value="pro">Pro</option></select><textarea>textarea-secret</textarea><button>Submit</button></form></section></main><script>window.fixtureExecuted=true</script></body></html>`
 	if err = os.MkdirAll(application.domainStaticDir("localhost"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -168,16 +168,21 @@ func TestConversionBrowserRegressions(t *testing.T) {
 	}
 	for len(rawBeacons) > 0 {
 		payload := <-rawBeacons
-		if strings.Contains(payload, "visitor-secret") || strings.Contains(payload, "url-secret") || strings.Contains(payload, "field-secret") || strings.Contains(payload, "textarea-secret") || strings.Contains(payload, "password-secret") {
-			t.Fatal("raw client batch contained field contents or a secret")
+		if strings.Contains(payload, "visitor-secret") || strings.Contains(payload, "url-secret") || strings.Contains(payload, "field-secret") || strings.Contains(payload, "textarea-secret") || strings.Contains(payload, "password-secret") || strings.Contains(payload, "starter") || strings.Contains(payload, "pro") {
+			t.Fatal("raw client batch contained form field contents")
 		}
 		var observation browserstats.Event
 		if json.Unmarshal([]byte(payload), &observation) != nil {
 			t.Fatal("malformed beacon")
 		}
 		foundSuccess := false
+		foundFieldState := false
 		for _, signal := range observation.Signals {
 			foundSuccess = foundSuccess || signal.Kind == "form-success"
+			foundFieldState = foundFieldState || signal.Kind == "field" && signal.Field == "key:plan"
+			if signal.Kind == "field-value" || signal.FieldText != "" || signal.FieldName != "" {
+				t.Fatal("form contents were emitted by collector")
+			}
 		}
 		if len(observation.Replay) == 0 {
 			t.Fatal("sampled replay absent from production batch")
@@ -186,12 +191,8 @@ func TestConversionBrowserRegressions(t *testing.T) {
 		if strings.Contains(string(replayJSON), "pro") || strings.Contains(string(replayJSON), "secret") {
 			t.Fatal("replay copied field values")
 		}
-		foundSafeField := false
-		for _, signal := range observation.Signals {
-			foundSafeField = foundSafeField || signal.Kind == "field-value" && signal.Field == "key:plan" && signal.FieldText == "pro"
-		}
-		if !foundSafeField {
-			t.Fatal("explicitly marked safe field was not recorded")
+		if !foundFieldState {
+			t.Fatal("structural form field state was not recorded")
 		}
 		if !foundSuccess {
 			t.Fatal("confirmed form outcome missing from beacon")
