@@ -31872,6 +31872,7 @@ func (a *App) prepareImageReplacement(w http.ResponseWriter, r *http.Request, cu
 			http.Error(w, "invalid public image URL", http.StatusBadRequest)
 			return
 		}
+		// #nosec G704 -- the URL is validated here; the public-only download transport pins DNS and checks every redirect.
 		request, requestErr := http.NewRequestWithContext(r.Context(), http.MethodGet, sourceURL.String(), nil)
 		if requestErr != nil {
 			http.Error(w, "invalid public image URL", http.StatusBadRequest)

@@ -28,6 +28,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/demo"
 	"github.com/matveynator/sitebrush/v2/pkg/hostingandsupport"
 	"github.com/matveynator/sitebrush/v2/pkg/imageprepare"
+	"github.com/matveynator/sitebrush/v2/pkg/outboundhttp"
 	htmlparser "golang.org/x/net/html"
 )
 
@@ -313,7 +314,7 @@ func TestPreparedExternalImageUsesValidatedServerDownloadWithoutCORS(t *testing.
 	downloads := make(chan string, 10)
 	previousClient := newGrabHTTPClient
 	newGrabHTTPClient = func() *http.Client {
-		return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Client{CheckRedirect: outboundhttp.CheckRedirect, Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 			downloads <- request.URL.String()
 			if request.Header.Get("Cookie") != "" || request.Header.Get("X-SiteBrush-CSRF") != "" {
 				t.Error("site authentication must not reach an external image host")
@@ -324,6 +325,10 @@ func TestPreparedExternalImageUsesValidatedServerDownloadWithoutCORS(t *testing.
 			}
 			if request.URL.Path == "/oversized.png" {
 				response.ContentLength = imageprepare.SourceByteLimit + 1
+			}
+			if request.URL.Path == "/redirect-private.png" {
+				response.StatusCode = http.StatusTemporaryRedirect
+				response.Header.Set("Location", "http://127.0.0.1/private.png")
 			}
 			return response, nil
 		})}
@@ -336,6 +341,7 @@ func TestPreparedExternalImageUsesValidatedServerDownloadWithoutCORS(t *testing.
 		{"https://images.example/photo.png", http.StatusOK},
 		{"https://images.example/missing.png", http.StatusUnprocessableEntity},
 		{"https://images.example/oversized.png", http.StatusUnprocessableEntity},
+		{"https://images.example/redirect-private.png", http.StatusUnprocessableEntity},
 		{"http://127.0.0.1/private.png", http.StatusBadRequest},
 		{"http://192.168.1.227/private.png", http.StatusBadRequest},
 		{"http://169.254.169.254/latest/meta-data", http.StatusBadRequest},
