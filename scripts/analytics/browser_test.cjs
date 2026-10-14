@@ -77,7 +77,11 @@ assert.ok(['chromium','webkit'].includes(browserEngine),'Unsupported browser eng
    }
    assert.equal(await suggestedGoalsButton.isEnabled(),false,'existing suggested goal must not be duplicated');
    await page.locator('#conversion-save').click();
-   await page.locator('#conversion-save-status').filter({hasText:'Saved. Reports refresh within one minute.'}).waitFor();
+   try {
+    await page.locator('#conversion-save-status').filter({hasText:'Saved. Reports refresh within one minute.'}).waitFor();
+   } catch (saveError) {
+    throw new Error(saveError.message+'\nConfiguration status: '+await page.locator('#conversion-save-status').textContent());
+   }
    await page.screenshot({path:path.join(os.tmpdir(),'sitebrush-analytics-'+viewport.width+'.png'),fullPage:true});
    assert.deepEqual(errors,[]);
    console.log('Analytics browser '+viewport.width+': funnels, tree, sandbox heatmap, privacy, constructor and WebSocket save passed');
