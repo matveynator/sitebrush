@@ -21,9 +21,15 @@ type Action struct {
 	Count  int    `json:"count"`
 }
 type Goal struct {
-	Name  string
-	Kind  string
-	Match string
+	SuccessPage string `json:",omitempty"`
+	Primary     bool   `json:",omitempty"`
+	Page        string `json:",omitempty"`
+	Element     string `json:",omitempty"`
+	Threshold   int    `json:",omitempty"`
+	Steps       []Goal `json:",omitempty"`
+	Name        string
+	Kind        string
+	Match       string
 }
 type BrowserContext struct {
 	Limited                  bool     `json:"limited"`
@@ -291,10 +297,53 @@ func ValidateGoals(goals []Goal) error {
 	if len(goals) > 32 {
 		return fmt.Errorf("maximum 32 goals")
 	}
+	funnels, primary := 0, 0
+	names := map[string]bool{}
 	for _, goal := range goals {
-		if goal.Name == "" || len(goal.Name) > 64 || goal.Match == "" || len(goal.Match) > 256 || (goal.Kind != "action" && goal.Kind != "path" && goal.Kind != "uri") || ((goal.Kind == "path" || goal.Kind == "uri") && SafeURI(goal.Match) != goal.Match) {
-			return fmt.Errorf("invalid goal: %s", goal.Name)
+		if goal.Name == "" || len(goal.Name) > 64 || names[goal.Name] {
+			return fmt.Errorf("invalid or duplicate goal name")
 		}
+		names[goal.Name] = true
+		if goal.Primary {
+			primary++
+		}
+		if len(goal.Steps) > 0 {
+			funnels++
+			if len(goal.Steps) > 10 {
+				return fmt.Errorf("maximum ten steps")
+			}
+		}
+		for _, step := range goalSteps(goal) {
+			if step.SuccessPage != "" && (step.Kind != "form-success" || SafePath(step.SuccessPage) != step.SuccessPage || step.Element == "") {
+				return fmt.Errorf("invalid form success page")
+			}
+			if len(step.Steps) > 0 || len(step.Match) > 256 || len(step.Page) > 256 || step.Page != "" && SafePath(step.Page) != step.Page || step.Element != "" && !safeStructuralKey(step.Element) {
+				return fmt.Errorf("invalid goal rule")
+			}
+			switch step.Kind {
+			case "path", "uri":
+				if step.Match == "" || SafeURI(step.Match) != step.Match {
+					return fmt.Errorf("invalid goal path")
+				}
+			case "action", "event":
+				if !safeEventName(step.Match) {
+					return fmt.Errorf("invalid event name")
+				}
+			case "scroll":
+				if step.Threshold < 1 || step.Threshold > 100 {
+					return fmt.Errorf("invalid scroll threshold")
+				}
+			case "page", "click", "download", "form-start", "form-submit", "form-success", "external-link":
+				if step.Match != "" && !safeEventName(step.Match) {
+					return fmt.Errorf("invalid event match")
+				}
+			default:
+				return fmt.Errorf("invalid goal kind")
+			}
+		}
+	}
+	if funnels > 8 || primary > 1 {
+		return fmt.Errorf("maximum eight funnels and one primary goal")
 	}
 	return nil
 }

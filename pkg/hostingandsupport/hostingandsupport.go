@@ -73,6 +73,8 @@ type Plan struct {
 }
 
 type Site struct {
+	AnalyticsBytes       int64
+	AnalyticsLabel       string
 	Domain               string
 	IsDemo               bool
 	IsMainDomain         bool
@@ -140,12 +142,13 @@ type SiteRequest struct {
 }
 
 type SiteUsage struct {
-	Domain       string
-	Aliases      []string
-	UsedBytes    int64
-	LimitBytes   int64
-	AdminEmails  []string
-	DatabasePath string
+	AnalyticsBytes int64
+	Domain         string
+	Aliases        []string
+	UsedBytes      int64
+	LimitBytes     int64
+	AdminEmails    []string
+	DatabasePath   string
 }
 
 const billingIncludedMegabytes int64 = 500
@@ -351,6 +354,7 @@ type HostingSnapshotProcess struct {
 }
 
 type HostingSnapshotSite struct {
+	AnalyticsBytes int64    `json:"analytics_bytes,omitempty"`
 	Domain         string   `json:"domain"`
 	OwnerEmail     string   `json:"owner_email"`
 	UsedBytes      int64    `json:"used_bytes"`
@@ -471,6 +475,8 @@ type ServerResourceCheck struct {
 }
 
 type ClientHostingSite struct {
+	AnalyticsBytes        int64
+	AnalyticsLabel        string
 	Domain                string
 	OwnerEmail            string
 	UsedBytes             int64
@@ -911,6 +917,7 @@ func requiredHostingAndSupportColumns() []hostingAndSupportColumn {
 		{tableName: "client_hosting_sites", columnName: "plan_status", definition: "TEXT"},
 		{tableName: "client_hosting_sites", columnName: "plan_paid_status", definition: "TEXT"},
 		{tableName: "client_hosting_sites", columnName: "is_demo", definition: "INTEGER DEFAULT 0"},
+		{tableName: "client_hosting_sites", columnName: "analytics_bytes", definition: "INTEGER DEFAULT 0"},
 		{tableName: "registry_installation_plans", columnName: "paid_status", definition: "TEXT"},
 		{tableName: "registry_sync_events", columnName: "summary_json", definition: "TEXT"},
 		{tableName: "sitebrush_com_keys", columnName: "private_key_path", definition: "TEXT"},
@@ -2422,8 +2429,8 @@ func (store Store) SaveHostingSnapshot(ctx context.Context, snapshot HostingSnap
 		if site.IsDemo {
 			demoFlag = 1
 		}
-		_, err = transaction.ExecContext(ctx, `INSERT INTO client_hosting_sites(installation_id,domain,owner_email,used_bytes,limit_bytes,plan_name,plan_status,plan_paid_status,admin_emails,is_demo,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-			installationID, domain, strings.ToLower(strings.TrimSpace(site.OwnerEmail)), site.UsedBytes, site.LimitBytes, strings.TrimSpace(site.PlanName), strings.TrimSpace(site.PlanStatus), strings.TrimSpace(site.PlanPaidStatus), strings.Join(adminEmails, ","), demoFlag, now)
+		_, err = transaction.ExecContext(ctx, `INSERT INTO client_hosting_sites(installation_id,domain,owner_email,used_bytes,limit_bytes,plan_name,plan_status,plan_paid_status,admin_emails,is_demo,analytics_bytes,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+			installationID, domain, strings.ToLower(strings.TrimSpace(site.OwnerEmail)), site.UsedBytes, site.LimitBytes, strings.TrimSpace(site.PlanName), strings.TrimSpace(site.PlanStatus), strings.TrimSpace(site.PlanPaidStatus), strings.Join(adminEmails, ","), demoFlag, site.AnalyticsBytes, now)
 		if err == nil {
 			err = upsertRegistryAccountTx(ctx, transaction, site.OwnerEmail, now)
 		}
@@ -2901,7 +2908,7 @@ func (store Store) loadAllVerifiedServiceMailRecipients(ctx context.Context, rec
 }
 
 func (store Store) loadAllClientHostingSites(ctx context.Context, sitesByInstallation map[string][]ClientHostingSite) {
-	rows, err := store.DB.QueryContext(ctx, `SELECT installation_id,domain,COALESCE(owner_email,''),COALESCE(used_bytes,0),COALESCE(limit_bytes,0),COALESCE(plan_name,''),COALESCE(plan_status,''),COALESCE(plan_paid_status,''),COALESCE(admin_emails,''),COALESCE(is_demo,0) FROM client_hosting_sites ORDER BY installation_id ASC,used_bytes DESC,domain ASC`)
+	rows, err := store.DB.QueryContext(ctx, `SELECT installation_id,domain,COALESCE(owner_email,''),COALESCE(used_bytes,0),COALESCE(limit_bytes,0),COALESCE(plan_name,''),COALESCE(plan_status,''),COALESCE(plan_paid_status,''),COALESCE(admin_emails,''),COALESCE(is_demo,0),COALESCE(analytics_bytes,0) FROM client_hosting_sites ORDER BY installation_id ASC,used_bytes DESC,domain ASC`)
 	if err != nil {
 		return
 	}
@@ -2911,12 +2918,15 @@ func (store Store) loadAllClientHostingSites(ctx context.Context, sitesByInstall
 		var site ClientHostingSite
 		var adminEmails string
 		var demoFlag int
-		if scanErr := rows.Scan(&installationID, &site.Domain, &site.OwnerEmail, &site.UsedBytes, &site.LimitBytes, &site.PlanName, &site.PlanStatus, &site.PlanPaidStatus, &adminEmails, &demoFlag); scanErr != nil {
+		if scanErr := rows.Scan(&installationID, &site.Domain, &site.OwnerEmail, &site.UsedBytes, &site.LimitBytes, &site.PlanName, &site.PlanStatus, &site.PlanPaidStatus, &adminEmails, &demoFlag, &site.AnalyticsBytes); scanErr != nil {
 			continue
 		}
 		site.IsDemo = demoFlag != 0
 		site.AdminEmails = normalizedHostingEmails(strings.Split(adminEmails, ","))
 		site.UsedLabel = FormatFileSize(site.UsedBytes)
+		if site.AnalyticsBytes > 0 {
+			site.AnalyticsLabel = FormatFileSize(site.AnalyticsBytes)
+		}
 		site.LimitLabel = FormatFileSize(site.LimitBytes)
 		billingPrice := BillingPriceForUsedBytes(site.UsedBytes)
 		site.BillingUsageLabel = BillingUsageLabel(site.UsedBytes)
@@ -3662,12 +3672,13 @@ func BuildSitesWithDemoAndMainDomain(usages []SiteUsage, plans []Plan, assignmen
 		isDemo := strings.TrimSpace(usage.Domain) != "" && strings.EqualFold(strings.TrimSpace(usage.Domain), strings.TrimSpace(demoDomain))
 		isMainDomain := mainDomain != "" && strings.EqualFold(strings.TrimSpace(usage.Domain), mainDomain)
 		sites = append(sites, Site{
-			Domain:            usage.Domain,
-			IsDemo:            isDemo,
-			IsMainDomain:      isMainDomain,
-			Aliases:           strings.Join(usage.Aliases, ", "),
-			UsedBytes:         usage.UsedBytes,
-			UsedLabel:         FormatFileSize(usage.UsedBytes),
+			Domain:         usage.Domain,
+			IsDemo:         isDemo,
+			IsMainDomain:   isMainDomain,
+			Aliases:        strings.Join(usage.Aliases, ", "),
+			UsedBytes:      usage.UsedBytes,
+			UsedLabel:      FormatFileSize(usage.UsedBytes),
+			AnalyticsBytes: usage.AnalyticsBytes, AnalyticsLabel: FormatFileSize(usage.AnalyticsBytes),
 			LimitLabel:        FormatFileSize(usage.LimitBytes),
 			FreeLabel:         FormatFileSize(freeBytes),
 			UsedPercent:       usedPercent,

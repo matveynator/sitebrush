@@ -116,6 +116,7 @@ type ServerView struct {
 }
 
 type ServerSiteView struct {
+	AnalyticsLabel       string
 	Domain               string
 	URL                  string
 	OwnerEmail           string
@@ -381,6 +382,7 @@ func BuildLocalServerView(input LocalServerViewInput) ServerView {
 			PaidStatus:           siteRow.BillingStatusText,
 			UsedBytes:            siteRow.UsedBytes,
 			UsedLabel:            siteRow.UsedLabel,
+			AnalyticsLabel:       siteRow.AnalyticsLabel,
 			LimitLabel:           siteRow.LimitLabel,
 			QuotaInput:           siteRow.QuotaInput,
 			CanEditQuota:         true,
@@ -487,6 +489,7 @@ func BuildRemoteServerView(clientHosting ClientHosting, invoices []Invoice, late
 			PaidStatus:           billingPrice.StatusText,
 			UsedBytes:            site.UsedBytes,
 			UsedLabel:            site.UsedLabel,
+			AnalyticsLabel:       site.AnalyticsLabel,
 			LimitLabel:           site.LimitLabel,
 			OverLimit:            site.OverLimit,
 			InvoiceLabel:         InvoiceLabelForDomain(invoices, site.Domain),

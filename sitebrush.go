@@ -167,6 +167,7 @@ var sitebrushRuServiceMailRelayPublicKey = ""
 // App keeps only explicit dependencies to stay readable and easy to swap.
 type App struct {
 	analyticsStorage               browserstats.Repository
+	analyticsQuotaRequests         chan browserstats.DiskQuotaRequest
 	attackGuard                    *httpsecurity.AttackGuard
 	throttleGuard                  *httpsecurity.ThrottleGuard
 	securityAnalytics              chan siteAnalyticsEvent
@@ -2885,13 +2886,16 @@ type fileMetadata struct {
 }
 
 type domainStorageUsage struct {
-	PageBytes            int64
-	PublishedPageBytes   int64
-	RevisionBytes        int64
-	FileBytes            int64
-	PublishedStaticBytes int64
-	ImportQueueBytes     int64
-	LimitBytes           int64
+	AnalyticsReservedBytes int64
+	AnalyticsLimited       bool
+	AnalyticsBytes         int64
+	PageBytes              int64
+	PublishedPageBytes     int64
+	RevisionBytes          int64
+	FileBytes              int64
+	PublishedStaticBytes   int64
+	ImportQueueBytes       int64
+	LimitBytes             int64
 }
 
 type authIPFailure struct {
@@ -3516,45 +3520,8 @@ func (a *App) analyticsMiddleware(next http.Handler) http.Handler {
 			default:
 			}
 		}
-		if len(a.analyticsEvents) >= cap(a.analyticsEvents) {
-			if r.URL.Path != "/_sitebrush/analytics" {
-				a.markAnalyticsLoss(a.analyticsEventDomain(r, ""))
-			}
-			return
-		}
-		if !shouldRecordAnalyticsRequest(r) {
-			return
-		}
-		contentSource := writer.Header().Get("X-Sitebrush-Source")
-		if contentSource == "" && isLikelyStaticAssetPath(r.URL.Path) {
-			contentSource = "static"
-		}
-		if contentSource == "" {
-			contentSource = "request"
-		}
-		event := siteAnalyticsEvent{
-			Domain:        a.analyticsEventDomain(r, contentSource),
-			Path:          analyticsBoundedString(redactAICapabilityPath(r.URL.Path), 512),
-			Method:        r.Method,
-			StatusCode:    writer.statusCode,
-			ContentSource: contentSource,
-			OccurredAt:    startedAt.UTC(),
-			Duration:      time.Since(startedAt),
-			RemoteAddress: analyticsBoundedString(r.RemoteAddr, 64),
-			Forwarded:     analyticsBoundedString(r.Header.Get("Forwarded"), 256),
-			ForwardedFor:  analyticsBoundedString(r.Header.Get("X-Forwarded-For"), 256),
+		// Security owns request observations; conversion owns browser observations.
 
-			UserAgent:      analyticsBoundedString(r.UserAgent(), 256),
-			Referer:        analyticsRequestReferrer(r.Referer()),
-			AcceptLanguage: analyticsBoundedString(r.Header.Get("Accept-Language"), 64),
-			GeoCountryCode: analyticsBoundedString(analyticsGeoCountryCodeFromRequest(r), 8),
-			GeoCity:        analyticsBoundedString(analyticsGeoCityFromRequest(r), 128),
-			GeoSource:      analyticsBoundedString(analyticsGeoSourceFromRequest(r), 64),
-			IsAdmin:        a.analyticsEventIsAdmin(r, contentSource),
-			IsAsset:        isLikelyStaticAssetPath(r.URL.Path) || analyticsFileContentType(writer.Header().Get("Content-Type")),
-			IsController:   r.URL.RawQuery != "" && isSitebrushControllerQuery(r.URL.Query()),
-		}
-		a.enqueueAnalyticsEvent(event)
 	})
 }
 
@@ -3679,6 +3646,9 @@ func (a *App) startAnalyticsWorkers(ctx context.Context) {
 	}
 	store := browserstats.OpenStore(filepath.Join(a.storageRootDir(), "analytics"))
 	a.analyticsStorage = store
+	a.analyticsQuotaRequests = make(chan browserstats.DiskQuotaRequest, 16)
+	quotaDone := make(chan struct{})
+	go a.runAnalyticsDiskQuota(a.analyticsQuotaRequests, ctx.Done(), quotaDone)
 	a.securityAnalytics = make(chan siteAnalyticsEvent, 1024)
 	a.securityLosses = make(chan string, 64)
 	a.analyticsShutdownRequested = ctx.Done()
@@ -3695,9 +3665,10 @@ func (a *App) startAnalyticsWorkers(ctx context.Context) {
 				a.runBrowserAnalytics(ctx.Done())
 			}
 		}()
-		a.runAnalyticsEventWriter(ctx)
+		<-ctx.Done()
 		<-browserFinished
 		<-securityFinished
+		<-quotaDone
 	}()
 }
 
@@ -3938,6 +3909,10 @@ type browserAnalyticsSlot struct {
 // Admission is bounded before upgrading. A browser connection owns its read loop
 // and session lifetime; slow or abusive clients cannot enter the SQL subsystem.
 func (a *App) browserAnalyticsSocket(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		a.browserAnalyticsBeacon(w, r)
+		return
+	}
 	origin, err := url.Parse(r.Header.Get("Origin"))
 	expectedScheme := requestScheme(r)
 	if err != nil || origin.Host != r.Host || origin.Scheme != expectedScheme || origin.User != nil || origin.Path != "" {
@@ -3958,9 +3933,12 @@ func (a *App) browserAnalyticsSocket(w http.ResponseWriter, r *http.Request) {
 	domain := a.analyticsEventDomain(r, "")
 	websocket.Server{Handshake: func(*websocket.Config, *http.Request) error { return nil }, Handler: func(connection *websocket.Conn) {
 		defer connection.Close()
-		connection.MaxPayloadBytes = 4096
+		connection.MaxPayloadBytes = 16384
 		var previous time.Time
 		messages := 0
+		rulesSent := false
+		preferences, _ := a.readAnalyticsReplayPreferences(domain)
+		preferencesReadAt := time.Now()
 		for {
 			_ = connection.SetReadDeadline(time.Now().Add(75 * time.Second))
 			var payload string
@@ -3968,14 +3946,44 @@ func (a *App) browserAnalyticsSocket(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			now := time.Now().UTC()
-			if messages > 0 && now.Sub(previous) < time.Second {
+			if now.Sub(preferencesReadAt) >= time.Minute {
+				preferences, _ = a.readAnalyticsReplayPreferences(domain)
+				preferencesReadAt = now
+				rulesSent = false
+			}
+			if messages > 1 && now.Sub(previous) < time.Second {
 				return
 			}
 			messages++
 			previous = now
+			if reply, handled := a.analyticsConfigurationMessage(r, payload); handled {
+				if websocket.Message.Send(connection, reply) != nil {
+					return
+				}
+				continue
+			}
 			var event browserstats.Event
 			if json.Unmarshal([]byte(payload), &event) != nil || !browserstats.Valid(event) {
 				return
+			}
+			if event.Version == 2 {
+				event.ReplayAllowed = browserstats.ReplaySampled(event.Session, preferences)
+				if !a.prepareConversionEvent(&event, r) {
+					return
+				}
+				select {
+				case a.browserAnalytics <- browserAnalyticsEnvelope{domain, event, now}:
+				default:
+					a.markAnalyticsLoss(domain)
+					return
+				}
+				if !rulesSent {
+					if websocket.Message.Send(connection, a.analyticsURIRules(domain)) != nil {
+						return
+					}
+					rulesSent = true
+				}
+				continue
 			}
 			if event.URI != "" {
 				event.URI = browserstats.SafeURI(event.URI)
@@ -3997,8 +4005,7 @@ func (a *App) browserAnalyticsSocket(w http.ResponseWriter, r *http.Request) {
 			}
 			event.Attribution = browserstats.SourceWithAgent(event.Campaign, event.Referrer, r.Host, r.UserAgent())
 			event.Path = browserstats.SafePath(event.Path)
-			event.Browser = analyticsBrowserName(r.UserAgent())
-			event.OS = analyticsOSName(r.UserAgent())
+			// Agent strings are used only at admission to exclude automation.
 			event.ClientClass = browserstats.ClientClass(r.UserAgent())
 			if event.ClientClass == "unknown" {
 				if analyticsIsBot(r.UserAgent()) {
@@ -4007,7 +4014,7 @@ func (a *App) browserAnalyticsSocket(w http.ResponseWriter, r *http.Request) {
 					event.ClientClass = "human-likely"
 				}
 			}
-			event.Address = clientIPAddress(r)
+
 			for index := range event.Actions {
 				event.Actions[index].Target = browserstats.SafeTarget(event.Actions[index].Target)
 				event.Actions[index].Name = browserstats.CleanText(event.Actions[index].Name, 64)
@@ -4082,8 +4089,9 @@ func (a *App) browserAnalyticsStorage(jobs <-chan browserAnalyticsStorageJob, re
 				if goals, goalErr := a.readAnalyticsGoals(job.domain); goalErr == nil {
 					job.state.Goals = goals
 				}
-				a.enrichBrowserSessions(job.state, stop)
+				// This worker owns the state until compact snapshots have been prepared.
 				job.state.Prune(time.Now().UTC())
+				a.captureAnalyticsReplayPages(job.domain, job.state, stop)
 				snapshot, marshalErr := json.Marshal(job.state)
 				reports := map[string]browserstats.Report{}
 				for _, days := range []int{1, 7, 30, 90} {
@@ -4161,6 +4169,9 @@ func (a *App) analyticsStorageExchange(request browserstats.StorageRequest) brow
 	if !a.analyticsSiteAvailable(request.Domain) {
 		return browserstats.StorageResult{Err: errAnalyticsSiteUnavailable}
 	}
+	if a.analyticsQuotaRequests != nil {
+		request.Quota = a.analyticsQuotaRequests
+	}
 	return a.analyticsStorage.Exchange(request)
 }
 
@@ -4186,7 +4197,7 @@ func (a *App) runBrowserAnalytics(stopRequested <-chan struct{}) {
 	if limit <= 0 {
 		limit = defaultAnalyticsMemoryLimitBytes
 	}
-	siteLimit := limit / 32
+	siteLimit := limit / 16
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	lastFlush := time.Now()
@@ -4204,6 +4215,15 @@ func (a *App) runBrowserAnalytics(stopRequested <-chan struct{}) {
 			}
 			return
 		}
+		if envelope.event.Change != nil {
+			if slot.state.Used+1024 > siteLimit {
+				slot.state.Incomplete = true
+				return
+			}
+			slot.state.RecordPageChange(*envelope.event.Change)
+			return
+		}
+		a.enrichConversionLocation(slot.state, &envelope.event, envelope.received, stopRequested)
 		slot.state.ProcessingLagMS = max(0, time.Since(envelope.received).Milliseconds())
 		slot.state.QueuePercent = len(a.browserAnalytics) * 100 / max(1, cap(a.browserAnalytics))
 		if !slot.state.Record(envelope.event, envelope.received, siteLimit) {
@@ -4392,6 +4412,9 @@ func (a *App) runBrowserAnalytics(stopRequested <-chan struct{}) {
 			allScheduled := true
 			for _, slot := range slots {
 				if slot.state != nil && !slot.busy {
+					if slot.state.Conversion != nil {
+						slot.dirty = true
+					}
 					for _, session := range slot.state.Experience.Recent {
 						if !session.Complete && now.Sub(session.Last) > 30*time.Minute {
 							slot.dirty = true
@@ -4785,6 +4808,43 @@ func securityBlockReasonFirstObservation(block httpsecurity.SecurityBlock, reaso
 	return false
 }
 
+// IP addresses support the requested visitor map, never identity generation.
+// GeoIP lookup happens in the analytics process, away from public page delivery.
+func (a *App) enrichConversionLocation(state *browserstats.Site, event *browserstats.Event, now time.Time, stop <-chan struct{}) {
+	if event.Version != 2 || event.Address == "" {
+		return
+	}
+	previous := browserstats.VisitorLocation{}
+	if state.Conversion != nil {
+		if visitor := state.Conversion.Visitors[event.Visitor]; visitor != nil {
+			previous = visitor.Location
+		}
+	}
+	if previous.Address == event.Address && (previous.Known || now.Sub(previous.CheckedAt) < time.Minute) {
+		event.Location = previous
+		return
+	}
+	event.Location = browserstats.VisitorLocation{Address: event.Address, CheckedAt: now}
+	if a.geoIP == nil {
+		return
+	}
+	select {
+	case <-stop:
+		return
+	default:
+	}
+	boundary, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	location, found := a.geoIP.Lookup(boundary, event.Address)
+	cancel()
+	if found {
+		event.Location.Country = location.CountryCode
+		event.Location.City = location.City
+		event.Location.Latitude = math.Round(location.Latitude*10) / 10
+		event.Location.Longitude = math.Round(location.Longitude*10) / 10
+		event.Location.Known = true
+	}
+}
+
 func (a *App) enrichBrowserSessions(state *browserstats.Site, stop <-chan struct{}) {
 	if a.geoIP == nil {
 		return
@@ -4821,6 +4881,19 @@ func (a *App) loadAnalyticsGoals(domain string) []browserstats.Goal {
 	return goals
 }
 func (a *App) readAnalyticsGoals(domain string) ([]browserstats.Goal, error) {
+	if a.analyticsStorage != nil {
+		result := a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.ReadConfiguration, Domain: domain, Limit: 16384})
+		if result.Err == nil {
+			var goals []browserstats.Goal
+			if err := json.Unmarshal([]byte(result.Text), &goals); err != nil {
+				return nil, err
+			}
+			return goals, browserstats.ValidateGoals(goals)
+		}
+		if !errors.Is(result.Err, sql.ErrNoRows) {
+			return nil, result.Err
+		}
+	}
 	if a.db == nil {
 		return nil, nil
 	}
@@ -4862,44 +4935,44 @@ func (a *App) saveAnalyticsGoals(w http.ResponseWriter, r *http.Request, domain 
 		return false
 	}
 	var goals []browserstats.Goal
-	for _, line := range strings.Split(r.Form.Get("goals"), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		parts := strings.SplitN(line, "|", 3)
-		if len(parts) != 3 {
-			http.Error(w, "name | action/uri | exact match", http.StatusBadRequest)
+	if encodedConfiguration := r.Form.Get("configuration"); encodedConfiguration != "" {
+		if json.Unmarshal([]byte(encodedConfiguration), &goals) != nil {
+			http.Error(w, "invalid configuration", http.StatusBadRequest)
 			return false
 		}
-		name := strings.TrimSpace(parts[0])
-		kind := strings.ToLower(strings.TrimSpace(parts[1]))
-		match := strings.TrimSpace(parts[2])
-		if kind == "path" {
-			kind = "uri"
-		}
-		if kind == "uri" {
-			match = browserstats.SafeURI(match)
-			if match == "" {
-				http.Error(w, "invalid goals", http.StatusBadRequest)
+	} else {
+		for _, line := range strings.Split(r.Form.Get("goals"), "\n") {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			parts := strings.SplitN(line, "|", 3)
+			if len(parts) != 3 {
+				http.Error(w, "name | action/uri | exact match", http.StatusBadRequest)
 				return false
 			}
+			name := strings.TrimSpace(parts[0])
+			kind := strings.ToLower(strings.TrimSpace(parts[1]))
+			match := strings.TrimSpace(parts[2])
+			if kind == "path" {
+				kind = "uri"
+			}
+			if kind == "uri" {
+				match = browserstats.SafeURI(match)
+				if match == "" {
+					http.Error(w, "invalid goals", http.StatusBadRequest)
+					return false
+				}
+			}
+			goals = append(goals, browserstats.Goal{Name: name, Kind: kind, Match: match})
 		}
-		goals = append(goals, browserstats.Goal{Name: name, Kind: kind, Match: match})
 	}
 	if browserstats.ValidateGoals(goals) != nil {
 		http.Error(w, "invalid goals", http.StatusBadRequest)
 		return false
 	}
 	encoded, _ := json.Marshal(goals)
-	var exists int
-	err = a.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM analytics_configuration WHERE domain=?`, domain).Scan(&exists)
-	if err == nil {
-		if exists == 0 {
-			_, err = a.db.ExecContext(r.Context(), `INSERT INTO analytics_configuration(domain,goals) VALUES(?,?)`, domain, string(encoded))
-		} else {
-			_, err = a.db.ExecContext(r.Context(), `UPDATE analytics_configuration SET goals=? WHERE domain=?`, string(encoded), domain)
-		}
-	}
+	response := a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.SaveConfiguration, Domain: domain, State: string(encoded), Stop: r.Context().Done()})
+	err = response.Err
 	if err != nil {
 		http.Error(w, "cannot save goals", http.StatusInternalServerError)
 		return false
@@ -4907,6 +4980,424 @@ func (a *App) saveAnalyticsGoals(w http.ResponseWriter, r *http.Request, domain 
 	http.Redirect(w, r, r.URL.Path+"?analytics", http.StatusSeeOther)
 	return true
 }
+
+// Conversion analytics boundary adapters keep the single-file entry point runnable.
+func analyticsGoalsJSON(goals []browserstats.Goal) string {
+	encoded, _ := json.Marshal(goals)
+	return string(encoded)
+}
+
+// Beacon is a compatibility adapter into the same bounded channel as WebSocket.
+func (a *App) browserAnalyticsBeacon(w http.ResponseWriter, r *http.Request) {
+	origin, err := url.Parse(r.Header.Get("Origin"))
+	if err != nil || origin.Host != r.Host || origin.Scheme != requestScheme(r) || a.browserAnalytics == nil {
+		http.Error(w, "invalid analytics origin", http.StatusForbidden)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 16384)
+	decoder := json.NewDecoder(r.Body)
+	var event browserstats.Event
+	if decoder.Decode(&event) != nil || !browserstats.Valid(event) || event.Version != 2 {
+		http.Error(w, "invalid analytics batch", http.StatusBadRequest)
+		return
+	}
+	var trailing any
+	if decoder.Decode(&trailing) != io.EOF {
+		http.Error(w, "invalid analytics batch", http.StatusBadRequest)
+		return
+	}
+	if !a.prepareConversionEvent(&event, r) {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	select {
+	case a.browserAnalytics <- browserAnalyticsEnvelope{a.analyticsEventDomain(r, ""), event, time.Now().UTC()}:
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		a.markAnalyticsLoss(a.analyticsEventDomain(r, ""))
+		http.Error(w, "analytics busy", http.StatusServiceUnavailable)
+	}
+}
+func (a *App) prepareConversionEvent(event *browserstats.Event, r *http.Request) bool {
+	if event.Referrer == "" {
+		if cookie, cookieErr := r.Cookie("sitebrush_analytics_referrer"); cookieErr == nil {
+			if decoded, decodeErr := url.QueryUnescape(cookie.Value); decodeErr == nil {
+				event.Referrer = decoded
+			}
+		}
+	}
+	class := browserstats.ClientClass(r.UserAgent())
+	if class != "unknown" && class != "human-likely" {
+		return false
+	}
+	event.ClientClass = "human-likely"
+	event.Path = browserstats.SafePath(event.Path)
+	event.URI = event.Path
+
+	// Exact available links explain acquisition; credentials and secret query
+	// parameters are removed at this boundary before any observation is stored.
+	event.Referrer = browserstats.SafeReferrer(event.Referrer)
+	event.Attribution = browserstats.SourceWithAgent(event.Campaign, event.Referrer, r.Host, r.UserAgent())
+	event.Source = event.Attribution.Name
+	event.Campaign.Content = ""
+	event.Campaign.Term = ""
+	event.Language = ""
+	event.PageLanguage = ""
+	event.Timezone = ""
+	event.Offset = nil
+	event.Browser = ""
+	event.OS = ""
+	event.Address = canonicalAccountIP(accountClientIP(r))
+	event.Client.UserAgent = browserstats.CleanText(r.UserAgent(), 256)
+	event.Client.Platform = browserstats.CleanText(event.Client.Platform, 64)
+	event.Client.Language = browserstats.CleanText(event.Client.Language, 32)
+	event.Client.Timezone = browserstats.CleanText(event.Client.Timezone, 64)
+	characteristics, _ := json.Marshal(event.Client)
+	fingerprint := sha256.Sum256(append([]byte(a.analyticsEventDomain(r, "")+"\n"), characteristics...))
+	event.Fingerprint = hex.EncodeToString(fingerprint[:])
+	if (len(event.Replay) > 0 || event.ReplayRecording) && !event.ReplayAllowed {
+		preferences, _ := a.readAnalyticsReplayPreferences(a.analyticsEventDomain(r, ""))
+		event.ReplayAllowed = browserstats.ReplaySampled(event.Session, preferences)
+	}
+	event.Actions = nil
+	return true
+}
+func (a *App) analyticsConfigurationMessage(r *http.Request, encoded string) (string, bool) {
+	var command struct {
+		Operation string                         `json:"operation"`
+		CSRF      string                         `json:"csrf"`
+		Goals     []browserstats.Goal            `json:"goals"`
+		Replay    browserstats.ReplayPreferences `json:"replay"`
+		Session   string                         `json:"session"`
+	}
+	if json.Unmarshal([]byte(encoded), &command) != nil || command.Operation == "" {
+		return "", false
+	}
+	result := struct {
+		Operation string `json:"operation"`
+		Error     string `json:"error,omitempty"`
+	}{Operation: command.Operation}
+	if !a.isAdminRequest(r) || command.CSRF == "" || command.CSRF != accountCSRF(r) {
+		result.Error = "forbidden"
+	} else if command.Operation == "replay-session" {
+		return a.analyticsReplaySessionMessage(r, command.Session), true
+	} else if command.Operation == "configure-replay" {
+		if command.Replay.Sample == 0 {
+			command.Replay.Sample = 5
+		}
+		if err := browserstats.ValidateReplayPreferences(command.Replay); err != nil {
+			result.Error = err.Error()
+		} else {
+			encodedPreferences, _ := json.Marshal(command.Replay)
+			response := a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.SavePreferences, Domain: a.siteDomain(r.Context(), r), State: string(encodedPreferences), Stop: r.Context().Done()})
+			if response.Err != nil {
+				result.Error = response.Err.Error()
+			}
+		}
+	} else if command.Operation != "configure" {
+		result.Error = "unknown operation"
+	} else if err := browserstats.ValidateGoals(command.Goals); err != nil {
+		result.Error = err.Error()
+	} else {
+		response := a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.SaveConfiguration, Domain: a.siteDomain(r.Context(), r), State: analyticsGoalsJSON(command.Goals), Stop: r.Context().Done()})
+		if response.Err != nil {
+			result.Error = response.Err.Error()
+		}
+	}
+	payload, _ := json.Marshal(result)
+	return string(payload), true
+}
+
+// The preview reads authored static HTML; it never renders a visitor session.
+func (a *App) analyticsBehaviourPreview(w http.ResponseWriter, r *http.Request, domain string) {
+	pathname := r.URL.Query().Get("preview")
+	if browserstats.SafePath(pathname) != pathname || !strings.HasPrefix(pathname, "/") {
+		http.Error(w, "invalid page", http.StatusBadRequest)
+		return
+	}
+	content, err := a.analyticsPublishedPage(domain, pathname)
+	if err != nil {
+		http.Error(w, "page unavailable", http.StatusNotFound)
+		return
+	}
+	content = string(buildGuestStaticHTMLBody([]byte(content), pathname, domain, "en"))
+	preview, err := browserstats.BehaviourPreview(strings.NewReader(content), pathname)
+	if err != nil {
+		http.Error(w, "preview unavailable", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; form-action 'none'; base-uri 'none'; script-src 'none'; sandbox allow-same-origin")
+	w.Write([]byte(preview))
+}
+
+func (a *App) analyticsPublishedPage(domain, pathname string) (string, error) {
+	root := a.domainStaticDir(domain)
+	candidate := filepath.Join(root, staticRelativePathForPage(pathname))
+	resolved, err := a.existingPathInsideStorageSubtree(root, candidate)
+	if err != nil {
+		return "", err
+	}
+	file, err := os.Open(resolved)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	content, err := io.ReadAll(io.LimitReader(file, 2<<20))
+	return string(content), err
+}
+
+func (a *App) analyticsReplayPreferencesJSON(domain string) template.JS {
+	preferences, err := a.readAnalyticsReplayPreferences(domain)
+	if err != nil {
+		log.Printf("analytics replay preferences unavailable domain=%q: %v", domain, err)
+	}
+	encoded, _ := json.Marshal(preferences)
+	return template.JS(encoded)
+}
+func (a *App) readAnalyticsReplayPreferences(domain string) (browserstats.ReplayPreferences, error) {
+	preferences := browserstats.ReplayPreferences{Sample: 5}
+	result := a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.ReadPreferences, Domain: domain, Limit: 1024})
+	if errors.Is(result.Err, sql.ErrNoRows) || result.Err == nil && result.Text == "" {
+		return preferences, nil
+	}
+	if result.Err != nil {
+		return preferences, result.Err
+	}
+	if err := json.Unmarshal([]byte(result.Text), &preferences); err != nil {
+		return browserstats.ReplayPreferences{Sample: 5}, err
+	}
+	if err := browserstats.ValidateReplayPreferences(preferences); err != nil {
+		return browserstats.ReplayPreferences{Sample: 5}, err
+	}
+	return preferences, nil
+}
+func (a *App) captureAnalyticsReplayPages(domain string, state *browserstats.Site, stop <-chan struct{}) {
+	if state.Conversion == nil || state.Conversion.Replay == nil {
+		return
+	}
+	replay := state.Conversion.Replay
+	siteLimit := a.analyticsMemoryLimit
+	if siteLimit <= 0 {
+		siteLimit = defaultAnalyticsMemoryLimitBytes
+	}
+	siteLimit /= 16
+	remaining := 2
+	for _, page := range replay.Pages {
+		if page.HTML != "" || page.Unavailable {
+			continue
+		}
+		if remaining == 0 {
+			return
+		}
+		remaining--
+		select {
+		case <-stop:
+			return
+		default:
+		}
+		content, err := a.analyticsPublishedPage(domain, page.Path)
+		if err == nil {
+			content = string(buildGuestStaticHTMLBody([]byte(content), page.Path, domain, "en"))
+			content, err = browserstats.ReplayDocument(content, page.Path, page.Layout)
+		}
+		if err != nil || replay.Used+int64(len(content))+256 > siteLimit/8 || state.Conversion.Used+int64(len(content))+256 > siteLimit {
+			page.Unavailable = true
+			continue
+		}
+		page.HTML = content
+		replay.Used += int64(len(content)) + 256
+		state.Conversion.Used += int64(len(content)) + 256
+		state.Used = state.Conversion.Used
+	}
+}
+func (a *App) analyticsReplaySessionMessage(r *http.Request, identifier string) string {
+	result := struct {
+		Operation string                      `json:"operation"`
+		Error     string                      `json:"error,omitempty"`
+		Session   *browserstats.ReplaySession `json:"session,omitempty"`
+		Pages     []*browserstats.ReplayPage  `json:"pages,omitempty"`
+	}{Operation: "replay-session"}
+	if len(identifier) != 16 {
+		result.Error = "invalid session"
+	} else {
+		response := a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.LoadHistory, Domain: a.siteDomain(r.Context(), r), Limit: 6 << 20, Stop: r.Context().Done()})
+		state := browserstats.New(time.Now().UTC())
+		if response.Err != nil || json.Unmarshal([]byte(response.Text), state) != nil || state.Conversion == nil || state.Conversion.Replay == nil {
+			result.Error = "session unavailable"
+		} else {
+			state.Prune(time.Now().UTC())
+			result.Session = state.Conversion.Replay.Sessions[identifier]
+			if result.Session == nil {
+				result.Error = "session expired"
+			} else {
+				visited := map[string]bool{}
+				for _, event := range result.Session.Events {
+					key := event.Path + "\x1f" + event.Layout
+					if !visited[key] && len(result.Pages) < 8 {
+						visited[key] = true
+						if page := state.Conversion.Replay.Pages[key]; page != nil {
+							result.Pages = append(result.Pages, page)
+						}
+					}
+				}
+			}
+		}
+	}
+	encoded, _ := json.Marshal(result)
+	return string(encoded)
+}
+
+func analyticsConversionJSON(report browserstats.ConversionReport) template.JS {
+	encoded, _ := json.Marshal(report)
+	return template.JS(encoded)
+}
+
+// Only configured URI matches leave the browser. Query values and fragments are
+// never part of an observation, while existing URI goals keep their semantics.
+func (a *App) analyticsURIRules(domain string) string {
+	goals, err := a.readAnalyticsGoals(domain)
+	if err != nil {
+		return `{"operation":"rules","rules":[]}`
+	}
+	type rule struct {
+		Name  string `json:"name"`
+		Match string `json:"match"`
+	}
+	result := struct {
+		Operation string                         `json:"operation"`
+		Rules     []rule                         `json:"rules"`
+		Replay    browserstats.ReplayPreferences `json:"replay"`
+	}{Operation: "rules", Rules: []rule{}}
+	result.Replay, _ = a.readAnalyticsReplayPreferences(domain)
+	matches := map[string]bool{}
+	for _, goal := range goals {
+		steps := goal.Steps
+		if len(steps) == 0 {
+			steps = []browserstats.Goal{goal}
+		}
+		for _, step := range steps {
+			if step.Kind != "uri" && step.Kind != "path" {
+				continue
+			}
+			if !matches[step.Match] {
+				matches[step.Match] = true
+				result.Rules = append(result.Rules, rule{Name: browserstats.URIEventName(step.Match), Match: step.Match})
+			}
+		}
+	}
+	encoded, _ := json.Marshal(result)
+	return string(encoded)
+}
+
+// The admin report reuses the editor's page catalog without reading page bodies
+// or adding SQL work to public page delivery.
+func (a *App) analyticsSiteTree(r *http.Request, domain string, journeys []*browserstats.ConversionPath) template.JS {
+	tree := browserstats.SiteTree{}
+	rows, err := a.db.QueryContext(r.Context(), `SELECT path,title FROM published_pages WHERE domain=? ORDER BY path LIMIT 1001`, domain)
+	if err != nil {
+		tree.Unavailable = true
+	} else {
+		pages := []browserstats.PublishedPage{}
+		for rows.Next() {
+			var page browserstats.PublishedPage
+			if err = rows.Scan(&page.Path, &page.Title); err != nil {
+				break
+			}
+			if len(pages) == 1000 {
+				tree.Truncated = true
+				break
+			}
+			pages = append(pages, page)
+		}
+		if err == nil {
+			err = rows.Err()
+		}
+		_ = rows.Close()
+		if err != nil {
+			tree.Unavailable = true
+		} else {
+			truncated := tree.Truncated
+			tree = browserstats.BuildSiteTree(pages, journeys)
+			tree.Truncated = tree.Truncated || truncated
+		}
+	}
+	encoded, _ := json.Marshal(tree)
+	return template.JS(encoded)
+}
+
+func analyticsScriptTag(content string) string {
+	digest := sha256.Sum256([]byte(content))
+	return `<script defer src="/p/static/analytics.js?v=` + url.QueryEscape(CompileVersion) + `-conversion2" data-sitebrush-owned="true" data-analytics-layout="` + hex.EncodeToString(digest[:8]) + `"></script>`
+}
+
+// The quota process talks to the existing site database channel. Analytics
+// reserves growth before writing, then replaces the reservation with disk usage.
+func (a *App) runAnalyticsDiskQuota(requests <-chan browserstats.DiskQuotaRequest, stop <-chan struct{}, done chan<- struct{}) {
+	defer close(done)
+	for {
+		select {
+		case <-stop:
+			return
+		case request, open := <-requests:
+			if !open {
+				return
+			}
+			select {
+			case <-request.Stop:
+				continue
+			default:
+			}
+			boundary, cancel := context.WithTimeout(contextWithDomain(context.Background(), request.Domain), 5*time.Second)
+			finished := make(chan struct{})
+			go func() {
+				select {
+				case <-stop:
+					cancel()
+				case <-request.Stop:
+					cancel()
+				case <-finished:
+				}
+			}()
+			a.ensureDomainStorageUsageRow(boundary, request.Domain)
+			var err error
+			if request.Final {
+				_, err = a.db.ExecContext(boundary, `UPDATE domain_storage_usage SET analytics_bytes=?,analytics_reserved_bytes=0,updated_at=? WHERE domain=?`, request.Bytes, time.Now().UTC().Format(time.RFC3339), request.Domain)
+			} else {
+				var actual int64
+				err = a.db.QueryRowContext(boundary, `SELECT COALESCE(analytics_bytes,0) FROM domain_storage_usage WHERE domain=?`, request.Domain).Scan(&actual)
+				if err == nil {
+					reserved := max(int64(0), request.Bytes-actual)
+					result, updateErr := a.db.ExecContext(boundary, `UPDATE domain_storage_usage SET analytics_reserved_bytes=?,analytics_limited=0,updated_at=? WHERE domain=? AND (?=0 OR page_bytes+published_page_bytes+revision_bytes+file_bytes+published_static_bytes+COALESCE(import_queue_bytes,0)+COALESCE(analytics_bytes,0)+?<=limit_bytes)`, reserved, time.Now().UTC().Format(time.RFC3339), request.Domain, reserved, reserved)
+					err = updateErr
+					if err == nil {
+						count, countErr := result.RowsAffected()
+						err = countErr
+						if count == 0 && err == nil {
+							_, _ = a.db.ExecContext(boundary, `UPDATE domain_storage_usage SET analytics_limited=1 WHERE domain=?`, request.Domain)
+							err = errors.New("site disk quota does not allow analytics growth")
+						}
+					}
+				}
+			}
+
+			close(finished)
+			cancel()
+			select {
+			case request.Reply <- err:
+			case <-request.Stop:
+			case <-stop:
+				return
+			}
+		}
+	}
+}
+func (a *App) analyticsDiskBytes(domain string) int64 {
+	// Disk reconciliation reads files, never opens the analytics database.
+	return a.directorySizeInsideStorage(filepath.Join(a.storageRootDir(), "analytics", "site-"+url.PathEscape(domain)))
+}
+func analyticsStorageText(bytes int64) string { return formatFileSize(bytes) }
 
 func (a *App) enrichSecurityIncidents(state *browserstats.SecurityState, stop <-chan struct{}) {
 	if a.geoIP == nil {
@@ -6792,6 +7283,10 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	domain := a.siteDomain(r.Context(), r)
+	if r.URL.Query().Get("preview") != "" {
+		a.analyticsBehaviourPreview(w, r, domain)
+		return
+	}
 	selectedTab := analyticsSelectedTab(r)
 	if r.Method == http.MethodPost {
 		if strings.TrimSpace(r.FormValue("security_action")) != "" {
@@ -6808,6 +7303,10 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 	}
 	experience := browserDashboard.Report.Experience.View(filter)
 	goals := a.loadAnalyticsGoals(domain)
+	if len(browserDashboard.Report.Conversion.Funnels) == 0 && len(goals) > 0 {
+		browserDashboard.Report.Conversion = browserstats.EmptyConversionReport(goals)
+	}
+	browserDashboard.Report.Conversion.Incomplete = browserDashboard.Report.Conversion.Incomplete || browserDashboard.Report.Incomplete
 	experience.GoalsConfigured = len(goals) > 0
 	goalCounts := make(map[string]int)
 	for _, row := range experience.GoalRows {
@@ -7033,37 +7532,13 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		return security.Incidents[left].Last.After(security.Incidents[right].Last)
 	})
 	unknownGeo := 0
-	for _, session := range experience.Recent {
-		if !session.GeoKnown {
-			unknownGeo++
-		}
-	}
 	serverRequests := 0
-	for _, group := range security.Groups {
-		if filter.Traffic == "all" || (filter.Traffic == "bots" && group.Class != "unknown") {
-			serverRequests += group.Count
-		}
-	}
-	mapJSON, _ := json.Marshal(experience.Recent)
+	mapJSON := []byte("[]")
 	serverNow := time.Now()
 	_, serverTimezoneOffsetSeconds := serverNow.Zone()
-	report, found := a.loadAnalyticsReport(r.Context(), domain, browserDashboard.Days)
-	if !found {
-		report = analyticsPreparedReport{GeneratedAt: time.Now().UTC().Format(time.RFC3339)}
-	}
-	report = analyticsSeparateLegacyCounters(report)
-	// Human page opens require browser observations; HTTP totals remain technical.
-	humanExperience := browserDashboard.Report.Experience.View(browserstats.ExperienceFilter{Traffic: "human"})
-	report.HumanSessions = humanExperience.Sessions
-	report.PageViews = humanExperience.Views
+	report := analyticsPreparedReport{}
 	serverLocalHours := [24]int{}
-	for _, row := range report.HourlyActivity {
-		hour, hourErr := strconv.Atoi(strings.TrimSuffix(row.Label, ":00"))
-		if hourErr == nil && hour >= 0 && hour < len(serverLocalHours) {
-			serverLocalHours[hour] = row.Count
-		}
-	}
-	serverHoursJSON, _ := json.Marshal(serverLocalHours)
+	serverHoursJSON := []byte("[]")
 	securityHoursJSON, _ := json.Marshal(security.EventHours)
 	securityCountriesJSON, _ := json.Marshal(security.Countries)
 	securityCountryIPsJSON, _ := json.Marshal(security.CountryIPs)
@@ -7093,8 +7568,13 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		"LocalBlockPage": localBlockPage, "GlobalBlockPage": globalBlockPage,
 		"SecurityActivityCountriesJSON": template.JS(securityActivityCountriesJSON),
 		"SecurityCountryIPsJSON":        template.JS(securityCountryIPsJSON), "SecurityDailyCountryIPsJSON": template.JS(securityDailyCountryIPsJSON),
-		"ReturnPath":       requestedReturnPath(r),
-		"AnalyticsTab":     selectedTab,
+		"ReturnPath":            requestedReturnPath(r),
+		"AnalyticsTab":          selectedTab,
+		"ReplayPreferencesJSON": a.analyticsReplayPreferencesJSON(domain),
+		"SiteTreeJSON":          a.analyticsSiteTree(r, domain, browserDashboard.Report.Conversion.Paths),
+		"AnalyticsDiskUsage":    analyticsStorageText(a.analyticsDiskBytes(domain)),
+		"AnalyticsQuotaBlocked": a.storedDomainStorageUsage(r.Context(), domain).AnalyticsLimited,
+		"Conversion":            browserDashboard.Report.Conversion, "GoalsJSON": template.JS(analyticsGoalsJSON(goals)), "ConversionJSON": analyticsConversionJSON(browserDashboard.Report.Conversion),
 		"Report":           analyticsReportView(report, translationsForRequest(r)),
 		"BrowserAnalytics": browserDashboard,
 		"Experience":       experience, "ExperienceFilter": filter, "Security": security, "SecurityTypeAxes": analyticsSecurityTypeAxes(), "SecurityBlocks": securityBlocks, "SecurityLocalBlocks": securityLocalBlocks, "SecurityGlobalBlocks": securityGlobalBlocks, "SecurityAllowlist": securityAllowlist, "SecurityThrottles": securityThrottles, "SecuritySettings": securitySettings, "GoalsText": strings.Join(goalLines, "\n"), "SessionMapJSON": template.JS(mapJSON), "PeriodOptions": []int{1, 7, 30, 90}, "UnknownGeo": unknownGeo, "ServerRequests": serverRequests, "ServerLocalHours": serverLocalHours, "ServerHoursJSON": template.JS(serverHoursJSON), "SecurityHoursJSON": template.JS(securityHoursJSON), "SecurityCountriesJSON": template.JS(securityCountriesJSON), "SecurityTypesJSON": template.JS(securityTypesJSON), "ActivityDaysJSON": template.JS(activityDaysJSON), "ActivityHoursJSON": template.JS(activityHoursJSON), "SecurityActivityDaysJSON": template.JS(securityActivityDaysJSON), "SecurityActivityHoursJSON": template.JS(securityActivityHoursJSON), "SecurityActivityTypesJSON": template.JS(securityActivityTypesJSON), "SecurityActivitySeverityJSON": template.JS(securityActivitySeverityJSON), "ActivitySessionsJSON": template.JS(activitySessionsJSON), "SecurityIncidentsJSON": template.JS(securityIncidentsJSON), "ServerTimezone": time.Local.String(), "ServerNowRFC3339": serverNow.Format(time.RFC3339), "ServerNowDisplay": serverNow.Format("02 Jan 2006 15:04:05"), "ServerTimezoneOffsetSeconds": serverTimezoneOffsetSeconds,
@@ -9518,6 +9998,9 @@ func requiredSiteDatabaseColumns() []siteDatabaseColumnRequirement {
 		{tableName: "domain_storage_usage", columnName: "file_bytes", definition: "INTEGER DEFAULT 0"},
 		{tableName: "domain_storage_usage", columnName: "published_static_bytes", definition: "INTEGER DEFAULT 0"},
 		{tableName: "domain_storage_usage", columnName: "import_queue_bytes", definition: "INTEGER DEFAULT 0"},
+		{tableName: "domain_storage_usage", columnName: "analytics_bytes", definition: "INTEGER DEFAULT 0"},
+		{tableName: "domain_storage_usage", columnName: "analytics_reserved_bytes", definition: "INTEGER DEFAULT 0"},
+		{tableName: "domain_storage_usage", columnName: "analytics_limited", definition: "INTEGER DEFAULT 0"},
 		{tableName: "whole_site_import_pages", columnName: "link_offset", definition: "INTEGER NOT NULL DEFAULT 0"},
 		{tableName: "whole_site_import_pages", columnName: "storage_bytes", definition: "INTEGER NOT NULL DEFAULT 0"},
 		{tableName: "domain_storage_usage", columnName: "limit_bytes", definition: "INTEGER DEFAULT 10737418240"},
@@ -20697,6 +21180,7 @@ type hostingAndSupportClientHostingView struct {
 }
 
 type hostingAndSupportClientSiteView struct {
+	AnalyticsLabel    string
 	Domain            string
 	URL               string
 	UsedBytes         int64
@@ -20759,6 +21243,7 @@ type hostingAndSupportClientAccumulator struct {
 }
 
 type hostingAndSupportClientSiteSource struct {
+	analyticsLabel    string
 	ip                string
 	dnsMatchesServer  bool
 	dnsCheckAvailable bool
@@ -20807,6 +21292,7 @@ func (a *App) hostingAndSupportClients(ctx context.Context, billingStore hosting
 			url:               siteRow.URL,
 			usedBytes:         siteRow.UsedBytes,
 			usedLabel:         siteRow.UsedLabel,
+			analyticsLabel:    siteRow.AnalyticsLabel,
 			limitLabel:        siteRow.LimitLabel,
 			billingUsageLabel: siteRow.BillingUsageLabel,
 			billingPriceLabel: siteRow.BillingPriceLabel,
@@ -20914,6 +21400,9 @@ func (a *App) hostingAndSupportClients(ctx context.Context, billingStore hosting
 			}
 			client.domains[domain] = struct{}{}
 			siteSource := client.sites[domain]
+			if site.AnalyticsLabel != "" {
+				siteSource.analyticsLabel = site.AnalyticsLabel
+			}
 			if site.UsedBytes > siteSource.usedBytes {
 				siteSource.usedBytes = site.UsedBytes
 				siteSource.usedLabel = site.UsedLabel
@@ -21247,6 +21736,7 @@ func hostingAndSupportClientSiteViews(sites map[string]hostingAndSupportClientSi
 			URL:               strings.TrimSpace(siteSource.url),
 			UsedBytes:         siteSource.usedBytes,
 			UsedLabel:         siteSource.usedLabel,
+			AnalyticsLabel:    siteSource.analyticsLabel,
 			LimitBytes:        siteSource.limitBytes,
 			LimitLabel:        siteSource.limitLabel,
 			BillingUsageLabel: siteSource.billingUsageLabel,
@@ -21386,12 +21876,13 @@ func (a *App) hostingAndSupportSiteRows(ctx context.Context, controlDatabase *sq
 	for _, row := range rows {
 		billingUsedBytes := a.managedSiteBillingDiskBytes(row, deletionBackupSizesByDomain)
 		usages = append(usages, hostingandsupport.SiteUsage{
-			Domain:       row.Domain,
-			Aliases:      row.Aliases,
-			UsedBytes:    billingUsedBytes,
-			LimitBytes:   row.LimitBytes,
-			AdminEmails:  row.AdminEmails,
-			DatabasePath: row.DatabasePath,
+			Domain:         row.Domain,
+			Aliases:        row.Aliases,
+			UsedBytes:      billingUsedBytes,
+			AnalyticsBytes: row.AnalyticsBytes,
+			LimitBytes:     row.LimitBytes,
+			AdminEmails:    row.AdminEmails,
+			DatabasePath:   row.DatabasePath,
 		})
 	}
 	siteRows := hostingandsupport.BuildSitesWithDemoAndMainDomain(usages, plans, assignments, currentDomain, demoDomain, mainDomain)
@@ -22456,6 +22947,7 @@ func (a *App) managedSiteDeletionSizeBytes(row siteQuotaRow) int64 {
 
 func (a *App) managedSiteBillingDiskBytes(row siteQuotaRow, deletionBackupSizesByDomain map[string]int64) int64 {
 	totalBytes := a.managedSiteDeletionSizeBytes(row)
+	totalBytes += a.analyticsDiskBytes(row.Domain)
 	totalBytes += deletionBackupSizesByDomain[normalizeQuotaDomainName(row.Domain)]
 	return totalBytes
 }
@@ -27297,6 +27789,7 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 		billingUsedBytes := a.managedSiteBillingDiskBytes(row, deletionBackupSizesByDomain)
 		site := hostingandsupport.HostingSnapshotSite{
 			Domain:         row.Domain,
+			AnalyticsBytes: row.AnalyticsBytes,
 			OwnerEmail:     hostingandsupport.FirstHostingSnapshotEmail(row.AdminEmails),
 			UsedBytes:      billingUsedBytes,
 			LimitBytes:     row.LimitBytes,
@@ -30649,6 +31142,7 @@ type siteQuotaDatabaseCandidate struct {
 }
 
 type siteQuotaRow struct {
+	AnalyticsBytes            int64
 	Domain                    string
 	Aliases                   []string
 	UsedBytes                 int64
@@ -30905,13 +31399,14 @@ func siteQuotaRowsFromOpenDatabase(ctx context.Context, storagePath string, cand
 		application.ensureDomainStorageUsageRow(domainContext, domain)
 		usage := application.storedDomainStorageUsage(domainContext, domain)
 		rows = append(rows, siteQuotaRow{
-			Domain:       domain,
-			Aliases:      siteAliasesInDatabase(ctx, rawDatabase, domain),
-			UsedBytes:    usage.totalBytes(),
-			LimitBytes:   usage.LimitBytes,
-			AdminEmails:  siteAdminEmailsFromDatabase(ctx, rawDatabase, domain),
-			FilesPath:    application.domainFilesDirForDomain(domain),
-			DatabasePath: candidate.path,
+			Domain:         domain,
+			Aliases:        siteAliasesInDatabase(ctx, rawDatabase, domain),
+			UsedBytes:      usage.totalBytes(),
+			AnalyticsBytes: usage.AnalyticsBytes,
+			LimitBytes:     usage.LimitBytes,
+			AdminEmails:    siteAdminEmailsFromDatabase(ctx, rawDatabase, domain),
+			FilesPath:      application.domainFilesDirForDomain(domain),
+			DatabasePath:   candidate.path,
 		})
 	}
 	return rows, nil
@@ -31090,13 +31585,14 @@ func updateSiteQuotaLimit(ctx context.Context, storagePath, dbPath, rawDomain st
 	}
 	usage := application.domainStorageUsage(commandContext, domain)
 	return siteQuotaRow{
-		Domain:       domain,
-		Aliases:      siteAliasesInDatabase(commandContext, rawDatabase, domain),
-		UsedBytes:    usage.totalBytes(),
-		LimitBytes:   usage.LimitBytes,
-		AdminEmails:  siteAdminEmailsFromDatabase(commandContext, rawDatabase, domain),
-		FilesPath:    application.domainFilesDirForDomain(domain),
-		DatabasePath: candidate.path,
+		Domain:         domain,
+		Aliases:        siteAliasesInDatabase(commandContext, rawDatabase, domain),
+		UsedBytes:      usage.totalBytes(),
+		AnalyticsBytes: usage.AnalyticsBytes,
+		LimitBytes:     usage.LimitBytes,
+		AdminEmails:    siteAdminEmailsFromDatabase(commandContext, rawDatabase, domain),
+		FilesPath:      application.domainFilesDirForDomain(domain),
+		DatabasePath:   candidate.path,
 	}, nil
 }
 
@@ -31140,13 +31636,14 @@ func (a *App) updateSiteQuotaLimitInDatabase(ctx context.Context, rawDatabase *s
 	}
 	usage := application.domainStorageUsage(commandContext, domain)
 	return siteQuotaRow{
-		Domain:       domain,
-		Aliases:      siteAliasesInDatabase(commandContext, rawDatabase, domain),
-		UsedBytes:    usage.totalBytes(),
-		LimitBytes:   usage.LimitBytes,
-		AdminEmails:  siteAdminEmailsFromDatabase(commandContext, rawDatabase, domain),
-		FilesPath:    application.domainFilesDirForDomain(domain),
-		DatabasePath: candidate.path,
+		Domain:         domain,
+		Aliases:        siteAliasesInDatabase(commandContext, rawDatabase, domain),
+		UsedBytes:      usage.totalBytes(),
+		AnalyticsBytes: usage.AnalyticsBytes,
+		LimitBytes:     usage.LimitBytes,
+		AdminEmails:    siteAdminEmailsFromDatabase(commandContext, rawDatabase, domain),
+		FilesPath:      application.domainFilesDirForDomain(domain),
+		DatabasePath:   candidate.path,
 	}, nil
 }
 
@@ -31676,6 +32173,9 @@ func siteQuotaRowLine(row siteQuotaRow, index int, selected bool, width int) (st
 		hostingAndSupportText = " | billing:main"
 	}
 	lineText := fmt.Sprintf("[%d] %s | %s | %s | aliases:%d%s", index, row.Domain, usageText, stateText, len(row.Aliases), hostingAndSupportText)
+	if row.AnalyticsBytes > 0 {
+		lineText += fmt.Sprintf(" | analytics:%s", formatCompactFileSize(row.AnalyticsBytes))
+	}
 	lineText = truncateDisplayText(lineText, width)
 	if selected {
 		return lineText, terminalCyan() + terminalBold()
@@ -31886,7 +32386,7 @@ func terminalReset() string {
 }
 
 func (usage domainStorageUsage) totalBytes() int64 {
-	return usage.PageBytes + usage.PublishedPageBytes + usage.RevisionBytes + usage.FileBytes + usage.PublishedStaticBytes + usage.ImportQueueBytes
+	return usage.PageBytes + usage.PublishedPageBytes + usage.RevisionBytes + usage.FileBytes + usage.PublishedStaticBytes + usage.ImportQueueBytes + usage.AnalyticsBytes
 }
 
 func (a *App) serverControlDBPath() string {
@@ -32155,6 +32655,7 @@ func (a *App) domainStorageUsage(ctx context.Context, domain string) domainStora
 	a.ensureDomainStorageUsageRow(ctx, domain)
 	usage := domainStorageUsage{LimitBytes: defaultDomainStorageLimitBytes}
 	_ = a.db.QueryRowContext(ctx, `SELECT page_bytes,published_page_bytes,revision_bytes,file_bytes,published_static_bytes,COALESCE(import_queue_bytes,0),limit_bytes FROM domain_storage_usage WHERE domain=?`, domain).Scan(&usage.PageBytes, &usage.PublishedPageBytes, &usage.RevisionBytes, &usage.FileBytes, &usage.PublishedStaticBytes, &usage.ImportQueueBytes, &usage.LimitBytes)
+	_ = a.db.QueryRowContext(ctx, `SELECT COALESCE(analytics_bytes,0),COALESCE(analytics_reserved_bytes,0),COALESCE(analytics_limited,0) FROM domain_storage_usage WHERE domain=?`, domain).Scan(&usage.AnalyticsBytes, &usage.AnalyticsReservedBytes, &usage.AnalyticsLimited)
 	if usage.LimitBytes <= 0 {
 		usage.LimitBytes = defaultDomainStorageLimitBytes
 	}
@@ -32164,6 +32665,7 @@ func (a *App) domainStorageUsage(ctx context.Context, domain string) domainStora
 func (a *App) storedDomainStorageUsage(ctx context.Context, domain string) domainStorageUsage {
 	usage := domainStorageUsage{LimitBytes: defaultDomainStorageLimitBytes}
 	_ = a.db.QueryRowContext(ctx, `SELECT page_bytes,published_page_bytes,revision_bytes,file_bytes,published_static_bytes,COALESCE(import_queue_bytes,0),limit_bytes FROM domain_storage_usage WHERE domain=?`, domain).Scan(&usage.PageBytes, &usage.PublishedPageBytes, &usage.RevisionBytes, &usage.FileBytes, &usage.PublishedStaticBytes, &usage.ImportQueueBytes, &usage.LimitBytes)
+	_ = a.db.QueryRowContext(ctx, `SELECT COALESCE(analytics_bytes,0),COALESCE(analytics_reserved_bytes,0),COALESCE(analytics_limited,0) FROM domain_storage_usage WHERE domain=?`, domain).Scan(&usage.AnalyticsBytes, &usage.AnalyticsReservedBytes, &usage.AnalyticsLimited)
 	if usage.LimitBytes <= 0 {
 		usage.LimitBytes = defaultDomainStorageLimitBytes
 	}
@@ -32198,7 +32700,7 @@ WHERE domain=?
   AND revision_bytes+?>=0
   AND file_bytes+?>=0
   AND published_static_bytes+?>=0
-  AND page_bytes+published_page_bytes+revision_bytes+file_bytes+published_static_bytes+COALESCE(import_queue_bytes,0)+?<=limit_bytes`,
+  AND page_bytes+published_page_bytes+revision_bytes+file_bytes+published_static_bytes+COALESCE(import_queue_bytes,0)+COALESCE(analytics_bytes,0)+COALESCE(analytics_reserved_bytes,0)+?<=limit_bytes`,
 			pageDelta, publishedPageDelta, revisionDelta, fileDelta, publishedStaticDelta, now, domain,
 			pageDelta, publishedPageDelta, revisionDelta, fileDelta, publishedStaticDelta, totalDelta)
 		if err != nil {
@@ -32219,7 +32721,7 @@ WHERE domain=?
 	}
 	if updatedRowsCount == 0 {
 		usage := a.domainStorageUsage(ctx, domain)
-		projectedBytes := usage.totalBytes() + totalDelta
+		projectedBytes := usage.totalBytes() + usage.AnalyticsReservedBytes + totalDelta
 		if totalDelta > 0 && projectedBytes > usage.LimitBytes {
 			limitErr := fmt.Errorf(
 				"storage limit reached: %s used + %s required by this operation = %s projected / %s limit",
@@ -32296,6 +32798,7 @@ func (a *App) rebuildDomainStorageUsage(ctx context.Context, domain string) {
 	var importQueueBytes int64
 	_ = a.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(storage_bytes),0) FROM whole_site_import_pages WHERE domain=?`, domain).Scan(&importQueueBytes)
 	a.ensureDomainStorageUsageRow(ctx, domain)
+	_, _ = a.db.ExecContext(ctx, `UPDATE domain_storage_usage SET analytics_bytes=? WHERE domain=?`, a.analyticsDiskBytes(domain), domain)
 	_, _ = a.db.ExecContext(ctx, `UPDATE domain_storage_usage SET page_bytes=?, published_page_bytes=?, revision_bytes=?, file_bytes=?, published_static_bytes=?, import_queue_bytes=?, updated_at=?, limit_bytes=COALESCE(NULLIF(limit_bytes,0),?) WHERE domain=?`,
 		pageBytes, publishedPageBytes, revisionBytes, fileBytes, publishedStaticBytes, importQueueBytes, time.Now().UTC().Format(time.RFC3339), defaultDomainStorageLimitBytes, domain)
 }
@@ -41480,7 +41983,7 @@ func runGuestStaticHTMLCache(ctx context.Context, requests <-chan guestStaticHTM
 
 func buildGuestStaticHTMLBody(staticContent []byte, pagePath, domain, languageCode string) []byte {
 	html := rewriteLegacyPublicTrialWidgetReference(string(staticContent))
-	menuScript := buildGuestContextMenuScriptForLanguage(pagePath, domain, languageCode) + `<script defer src="/p/static/analytics.js?v=` + url.QueryEscape(CompileVersion) + `" data-sitebrush-owned="true"></script>`
+	menuScript := buildGuestContextMenuScriptForLanguage(pagePath, domain, languageCode) + analyticsScriptTag(html)
 	lowerHTML := strings.ToLower(html)
 	bodyCloseIndex := strings.LastIndex(lowerHTML, "</body>")
 	if bodyCloseIndex < 0 {
@@ -41500,7 +42003,7 @@ func rewriteLegacyPublicTrialWidgetReference(html string) string {
 
 func (a *App) injectPublicContextMenu(r *http.Request, pagePath, html string) string {
 	html = rewriteLegacyPublicTrialWidgetReference(html)
-	menuScript := buildGuestContextMenuScriptForLanguage(pagePath, domainFromContext(r.Context()), preferredLanguageCode(r.Header.Get("Accept-Language"))) + `<script defer src="/p/static/analytics.js?v=` + url.QueryEscape(CompileVersion) + `" data-sitebrush-owned="true"></script>`
+	menuScript := buildGuestContextMenuScriptForLanguage(pagePath, domainFromContext(r.Context()), preferredLanguageCode(r.Header.Get("Accept-Language"))) + analyticsScriptTag(html)
 	lowerHTML := strings.ToLower(html)
 	bodyCloseIndex := strings.LastIndex(lowerHTML, "</body>")
 	if bodyCloseIndex < 0 {
@@ -41512,7 +42015,22 @@ func (a *App) injectPublicContextMenu(r *http.Request, pagePath, html string) st
 func (a *App) writePublishedStaticHTML(domain, pagePath, html string) {
 	staticRoot := a.domainStaticDir(domain)
 	staticFilePath := filepath.Join(staticRoot, staticRelativePathForPage(pagePath))
-	_ = a.writeFileInsideStorage(staticFilePath, []byte(html), 0o644)
+	previous := ""
+	if a.browserAnalytics != nil {
+		previous, _ = a.analyticsPublishedPage(domain, pagePath)
+	}
+	if err := a.writeFileInsideStorage(staticFilePath, []byte(html), 0o644); err != nil {
+		log.Printf("published page write failed domain=%q page=%q: %v", domain, pagePath, err)
+		return
+	}
+	if a.browserAnalytics != nil && previous != "" && previous != html {
+		change := browserstats.PublicationChange(pagePath, previous, html, time.Now().UTC())
+		select {
+		case a.browserAnalytics <- browserAnalyticsEnvelope{domain: domain, event: browserstats.Event{Change: &change}, received: change.At}:
+		default:
+			a.markAnalyticsLoss(domain)
+		}
+	}
 }
 
 func (a *App) removePublishedStaticFile(domain, pagePath string) {

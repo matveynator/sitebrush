@@ -27,53 +27,109 @@ const (
 	SaveTechnical
 	ReadSecurity
 	SaveSecurity
+	ReadConfiguration
+	SaveConfiguration
+	ReadUsage
+	ReadPreferences
+	SavePreferences
 )
 
 type StorageRequest struct {
-	Operation Operation
-	Domain    string
-	State     string
-	Report    string
-	Archive   string
-	Limit     int64
-	Stop      <-chan struct{}
-	reply     chan StorageResult
-	abandoned <-chan struct{}
+	Operation  Operation
+	Domain     string
+	State      string
+	Report     string
+	Archive    string
+	Limit      int64
+	Stop       <-chan struct{}
+	Quota      chan<- DiskQuotaRequest
+	quotaFinal bool
+	reply      chan StorageResult
+	abandoned  <-chan struct{}
 }
 type StorageResult struct {
-	Text string
-	Err  error
+	Text  string
+	Err   error
+	Bytes int64
 }
 type Repository interface {
 	Exchange(StorageRequest) StorageResult
 }
 
+type DiskQuotaRequest struct {
+	Final  bool
+	Domain string
+	Bytes  int64
+	Reply  chan error
+	Stop   <-chan struct{}
+}
 type Store struct {
-	queues [2]chan StorageRequest
-	stop   chan struct{}
-	done   [2]chan struct{}
+	requests chan StorageRequest
+	stop     chan struct{}
+	done     chan struct{}
+}
+type storeSession struct {
+	requests chan StorageRequest
+	done     chan struct{}
+	last     time.Time
 }
 
 const databaseLimitBytes int64 = 16 << 20
 const archiveLimitBytes int64 = 32 << 20
-const archiveLimitDays = 90
+const archiveLimitDays = 400
 
-// Each shard owns its connections and serializes all operations for a domain.
-// Opening per operation also releases file handles between saves and deletions.
+// Each site has one session channel and one database worker. The dispatcher
+// transfers jobs without opening databases or waiting for another site's SQL.
 func OpenStore(root string) *Store {
-	store := &Store{stop: make(chan struct{})}
-	for index := range store.queues {
-		store.queues[index] = make(chan StorageRequest, 2)
-		store.done[index] = make(chan struct{})
-		go store.run(root, store.queues[index], store.done[index])
-	}
+	store := &Store{requests: make(chan StorageRequest, 32), stop: make(chan struct{}), done: make(chan struct{})}
+	go store.route(root)
 	return store
 }
-
-func (store *Store) Close() {
-	close(store.stop)
-	for _, done := range store.done {
-		<-done
+func (store *Store) Close() { close(store.stop); <-store.done }
+func (store *Store) route(root string) {
+	defer close(store.done)
+	sessions := map[string]*storeSession{}
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-store.stop:
+			for _, session := range sessions {
+				<-session.done
+			}
+			return
+		case now := <-ticker.C:
+			for domain, session := range sessions {
+				if now.Sub(session.last) > 5*time.Minute {
+					close(session.requests)
+					<-session.done
+					delete(sessions, domain)
+				}
+			}
+		case request := <-store.requests:
+			session := sessions[request.Domain]
+			if session == nil {
+				if len(sessions) >= 128 {
+					select {
+					case request.reply <- StorageResult{Err: errors.New("analytics site worker limit reached")}:
+					default:
+					}
+					continue
+				}
+				session = &storeSession{requests: make(chan StorageRequest, 2), done: make(chan struct{}), last: time.Now()}
+				sessions[request.Domain] = session
+				go store.run(root, session.requests, session.done)
+			}
+			session.last = time.Now()
+			select {
+			case session.requests <- request:
+			default:
+				select {
+				case request.reply <- StorageResult{Err: errors.New("analytics site queue full")}:
+				default:
+				}
+			}
+		}
 	}
 }
 
@@ -82,16 +138,12 @@ func (store *Store) Exchange(request StorageRequest) StorageResult {
 	abandoned := make(chan struct{})
 	defer close(abandoned)
 	request.abandoned = abandoned
-	shard := 0
-	for _, character := range request.Domain {
-		shard = (shard + int(character)) % len(store.queues)
-	}
 	select {
 	case <-request.Stop:
 		return StorageResult{Err: errors.New("analytics request canceled")}
 	case <-store.stop:
 		return StorageResult{Err: errors.New("analytics store closed")}
-	case store.queues[shard] <- request:
+	case store.requests <- request:
 	default:
 		return StorageResult{Err: errors.New("analytics storage queue full")}
 	}
@@ -112,11 +164,17 @@ func (store *Store) Exchange(request StorageRequest) StorageResult {
 func (store *Store) run(root string, requests <-chan StorageRequest, done chan<- struct{}) {
 	defer close(done)
 	archivedHour := map[string]string{}
+	var preferences StorageResult
+	preferencesKnown := false
+	preferencesReadAt := time.Time{}
 	for {
 		select {
 		case <-store.stop:
 			return
-		case request := <-requests:
+		case request, open := <-requests:
+			if !open {
+				return
+			}
 			select {
 			case <-request.abandoned:
 				continue
@@ -124,7 +182,25 @@ func (store *Store) run(root string, requests <-chan StorageRequest, done chan<-
 				continue
 			default:
 			}
-			result := store.execute(root, request, archivedHour)
+			result := StorageResult{}
+			databasePath := filepath.Join(root, "site-"+url.PathEscape(request.Domain), DatabaseName(request.Domain))
+			_, databaseErr := os.Stat(databasePath)
+			if request.Operation == ReadPreferences && preferencesKnown && time.Since(preferencesReadAt) < time.Minute && databaseErr == nil {
+				result = preferences
+			} else {
+				result = store.execute(root, request, archivedHour)
+				if request.Operation == ReadPreferences && (result.Err == nil || errors.Is(result.Err, sql.ErrNoRows)) {
+					preferences = result
+					preferencesKnown = true
+					preferencesReadAt = time.Now()
+				}
+				if request.Operation == SavePreferences && result.Err == nil {
+					preferences = StorageResult{Text: request.State}
+					preferencesKnown = true
+					preferencesReadAt = time.Now()
+				}
+			}
+
 			select {
 			case request.reply <- result:
 			case <-store.stop:
@@ -151,13 +227,66 @@ func storeDirectory(root, domain string) (string, error) {
 }
 
 func (store *Store) execute(root string, request StorageRequest, archivedHour map[string]string) StorageResult {
+	if request.Operation == ReadUsage {
+		directory := filepath.Join(root, "site-"+url.PathEscape(request.Domain))
+		usage, err := directoryBytes(directory)
+		return StorageResult{Bytes: usage, Err: err}
+	}
 	directory, err := storeDirectory(root, request.Domain)
 	if err != nil {
 		return StorageResult{Err: err}
 	}
-	databasePath := filepath.Join(directory, "analytics.db")
+	databasePath := filepath.Join(directory, DatabaseName(request.Domain))
+	legacyPath := filepath.Join(directory, "analytics.db")
+	if _, pathErr := os.Lstat(databasePath); os.IsNotExist(pathErr) {
+		if legacy, legacyErr := os.Lstat(legacyPath); legacyErr == nil && legacy.Mode().IsRegular() {
+			if renameErr := os.Rename(legacyPath, databasePath); renameErr != nil {
+				return StorageResult{Err: renameErr}
+			}
+		}
+	}
 	if info, err := os.Lstat(databasePath); err == nil && !info.Mode().IsRegular() {
 		return StorageResult{Err: errors.New("unsafe analytics database")}
+	}
+	_, databaseErr := os.Stat(databasePath)
+	mutating := os.IsNotExist(databaseErr) || request.Operation == SaveBrowser || request.Operation == SaveSecurity || request.Operation == SaveConfiguration || request.Operation == SavePreferences || request.Operation == SaveTechnical
+	if request.Quota != nil {
+		defer func() {
+			if actual, actualErr := directoryBytes(directory); actualErr == nil {
+				cleanup := request
+				cleanup.Stop = nil
+				cleanup.abandoned = nil
+				cleanup.quotaFinal = true
+				_ = store.diskQuota(cleanup, actual)
+			}
+		}()
+	}
+	// Expiry must reclaim space before quota admission, including when the site is full.
+	if mutating {
+		archiveDirectory := filepath.Join(directory, "archives")
+		if archiveInfo, archiveErr := os.Lstat(archiveDirectory); archiveErr == nil {
+			if !archiveInfo.IsDir() || archiveInfo.Mode()&os.ModeSymlink != 0 {
+				return StorageResult{Err: errors.New("unsafe analytics archive directory")}
+			}
+			if pruneErr := pruneArchives(archiveDirectory, time.Now().UTC(), archiveLimitBytes); pruneErr != nil {
+				return StorageResult{Err: pruneErr}
+			}
+		} else if !os.IsNotExist(archiveErr) {
+			return StorageResult{Err: archiveErr}
+		}
+	}
+	if mutating && request.Quota != nil {
+		usage, usageErr := directoryBytes(directory)
+		if usageErr != nil {
+			return StorageResult{Err: usageErr}
+		}
+		reservation := usage + int64(len(request.State)+len(request.Report)+len(request.Archive)) + 65536
+		if fileInfo, statErr := os.Stat(databasePath); statErr == nil {
+			reservation += fileInfo.Size()
+		}
+		if quotaErr := store.diskQuota(request, reservation); quotaErr != nil {
+			return StorageResult{Err: quotaErr}
+		}
 	}
 	database, err := sql.Open("sqlite", databasePath)
 	if err != nil {
@@ -194,9 +323,13 @@ func (store *Store) execute(root string, request StorageRequest, archivedHour ma
 		kind = "technical-report"
 	case ReadSecurity:
 		kind = "security-summary"
+	case ReadConfiguration:
+		kind = "configuration"
+	case ReadPreferences:
+		kind = "preferences"
 	}
 	switch request.Operation {
-	case LoadHistory, ReadBrowserReport, ReadTechnicalReport, ReadSecurity:
+	case LoadHistory, ReadBrowserReport, ReadTechnicalReport, ReadSecurity, ReadConfiguration, ReadPreferences:
 		var size int64
 		if err := database.QueryRowContext(boundary, `SELECT LENGTH(body) FROM checkpoints WHERE kind=?`, kind).Scan(&size); err != nil {
 			return StorageResult{Err: err}
@@ -211,6 +344,16 @@ func (store *Store) execute(root string, request StorageRequest, archivedHour ma
 		var body string
 		err := database.QueryRowContext(boundary, `SELECT body FROM checkpoints WHERE kind=?`, kind).Scan(&body)
 		return StorageResult{Text: body, Err: err}
+	case SavePreferences:
+		if len(request.State) > 1024 {
+			return StorageResult{Err: errors.New("preferences exceed storage budget")}
+		}
+		return StorageResult{Err: writeCheckpoint(boundary, database, "preferences", request.State)}
+	case SaveConfiguration:
+		if len(request.State) > 16384 {
+			return StorageResult{Err: errors.New("configuration exceeds storage budget")}
+		}
+		return StorageResult{Err: writeCheckpoint(boundary, database, "configuration", request.State)}
 	case SaveSecurity:
 		if len(request.State) > 2<<20 {
 			return StorageResult{Err: errors.New("security summary exceeds storage budget")}
@@ -231,6 +374,13 @@ func (store *Store) execute(root string, request StorageRequest, archivedHour ma
 		}
 		if err = writeCheckpoint(boundary, transaction, "browser-state", request.State); err == nil {
 			err = writeCheckpoint(boundary, transaction, "browser-report", request.Report)
+		}
+		if err != nil {
+			_ = transaction.Rollback()
+			return StorageResult{Err: err}
+		}
+		if err == nil && strings.Contains(request.State, `"conversion":`) {
+			_, err = transaction.ExecContext(boundary, `DELETE FROM checkpoints WHERE kind=?`, "technical-report")
 		}
 		if err != nil {
 			_ = transaction.Rollback()
@@ -286,13 +436,24 @@ func writeDailyArchive(directory, encoded string, now time.Time) error {
 	if err := os.MkdirAll(archiveDirectory, 0700); err != nil {
 		return err
 	}
+	if info, err := os.Lstat(archiveDirectory); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("unsafe analytics archive directory")
+	}
 	for date, report := range summaries {
 		report.Experience.Recent = nil
+		report.Conversion.Locations = nil
+		report.Conversion.Sessions = nil
+		for index := range report.Conversion.Forms {
+			report.Conversion.Forms[index].Values = nil
+		}
 		parsed, err := time.Parse("2006-01-02", date)
 		if err != nil || date != parsed.Format("2006-01-02") || parsed.After(now) || parsed.Before(dayStart(now).AddDate(0, 0, -archiveLimitDays+1)) {
 			continue
 		}
 		destination := filepath.Join(archiveDirectory, date+".json.gz")
+		if info, err := os.Lstat(destination); err == nil && !info.Mode().IsRegular() {
+			return errors.New("unsafe analytics archive file")
+		}
 		if parsed.Before(dayStart(now)) {
 			if previous, err := os.Open(destination); err == nil {
 				archived, decodeErr := DecodeArchive(previous)
@@ -389,4 +550,69 @@ func DecodeArchive(reader io.Reader) (Report, error) {
 		return report, fmt.Errorf("read analytics archive: %w", err)
 	}
 	return report, nil
+}
+
+func DatabaseName(domain string) string { return url.PathEscape(domain) + ".analytics.db" }
+func directoryBytes(directory string) (int64, error) {
+	entries, err := os.ReadDir(directory)
+	if os.IsNotExist(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	var total int64
+	for _, entry := range entries {
+		if entry.Type()&os.ModeSymlink != 0 {
+			return 0, errors.New("unsafe analytics storage")
+		}
+		if entry.IsDir() {
+			if entry.Name() != "archives" {
+				continue
+			}
+			nested, nestedErr := directoryBytes(filepath.Join(directory, entry.Name()))
+			if nestedErr != nil {
+				return 0, nestedErr
+			}
+			total += nested
+		} else {
+			info, infoErr := entry.Info()
+			if infoErr != nil {
+				return 0, infoErr
+			}
+			total += info.Size()
+		}
+	}
+	return total, nil
+}
+func (store *Store) diskQuota(request StorageRequest, bytes int64) error {
+	reply := make(chan error, 1)
+	contact := make(chan struct{})
+	defer close(contact)
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	job := DiskQuotaRequest{Domain: request.Domain, Bytes: bytes, Reply: reply, Stop: contact, Final: request.quotaFinal}
+	select {
+	case request.Quota <- job:
+	case <-timer.C:
+		return errors.New("analytics quota deadline exceeded")
+	case <-request.Stop:
+		return errors.New("analytics quota canceled")
+	case <-store.stop:
+		return errors.New("analytics store closed")
+	case <-request.abandoned:
+		return errors.New("analytics quota contact closed")
+	}
+	select {
+	case err := <-reply:
+		return err
+	case <-timer.C:
+		return errors.New("analytics quota deadline exceeded")
+	case <-request.Stop:
+		return errors.New("analytics quota canceled")
+	case <-store.stop:
+		return errors.New("analytics store closed")
+	case <-request.abandoned:
+		return errors.New("analytics quota contact closed")
+	}
 }

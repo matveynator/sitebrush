@@ -93,7 +93,7 @@ func TestSecurityBoundaryAnalyticsStoreRejectsDomainInjectionAndSymlinkDatabase(
 	if err := os.WriteFile(outside, []byte("outside"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	databasePath := filepath.Join(directory, "analytics.db")
+	databasePath := filepath.Join(directory, DatabaseName("example.org"))
 	if err := os.Symlink(outside, databasePath); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
@@ -147,9 +147,9 @@ func TestSecurityBoundaryAnalyticsArchiveRejectsMalformedOrOversizedData(t *test
 	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
 	report := Report{Generated: now, PeriodEnd: now, Views: 1}
 	encoded, _ := json.Marshal(map[string]Report{
-		"not-a-date": report,
+		"not-a-date":                 report,
 		dayKey(now.AddDate(0, 0, 1)): report,
-		dayKey(now.AddDate(0, 0, -100)): report,
+		dayKey(now.AddDate(0, 0, -archiveLimitDays-1)): report,
 	})
 	directory := t.TempDir()
 	if err := writeDailyArchive(directory, string(encoded), now); err != nil {
