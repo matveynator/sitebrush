@@ -91,6 +91,12 @@ jobs:
           -run 'Test(StorageJail|PublishedStaticRejectsSymlink|PublicOutbound|RequirePublicOutboundURL|ParseGrabSourceURL|ParseOptionalGrabSourceIP|LogoutRedirectsToSameURI|AutoCertDiskCache|AutomaticSSLCertificateCacheName|SecurityBoundaryGlobalSyncStopsWhenSignalChannelCloses|SecurityBoundarySecuritySignalCannotForgeQuorumWithEmbeddedInstallationIDs|SecurityBoundaryBackupImport|SecurityBoundaryProfileSensitiveActionsRequireCSRF|SecurityBoundaryFileUpload|SecurityBoundaryAuthenticatedMutation|SecurityBoundaryClientIPAddress|SecurityBoundaryMissingPageEscapesReflectedPath|SecurityBoundaryServiceEndpointsRejectMalformedJSON|SecurityBoundaryHostingSnapshotRejectsOversizedBody)'
       - name: Test demo landing
         run: go test -count=1 . -run '^TestDemoSiteVisitorGetsEditorSessionAndCleanupDeletesSite$'
+      - name: Test editor, account and site lifecycle regressions
+        env:
+          SITEBRUSH_SERVICE_MAIL_MODE: local
+        run: >-
+          go test -count=1 .
+          -run '^(TestAnalyticsServerRulesProduceBrowserConversion|TestFinalPageSaveCreatesOneRevisionPerChangedPage|TestDemoRefreshReplacesPageSetAndFirstImportCreatesDatabase|TestUnknownAndDeletedHostnamesOfferRegistrationOrRequest|TestPreparedImageUploadStoresActualCropAndSinglePageRevision|TestCreationLimitsAreIndependentAndPreserveExistingSites|TestRecreatedSiteKeepsCertificateAndRejectsExpiredCache|TestProfilePaginatesAIAccessAndKeepsSessionIPOrder|TestProfileSecurityCardsShareGridAndPaginateThreeRecords|TestProfileAdminIPUpdatesKeepSettingsAndShowValidation|TestLANPasswordLoginAcceptsFormWithStaleCookieAndOpaqueOrigin|TestPageSaveRollsBackPublicationWhenAnotherPageCannotBeWritten|TestDemoSnapshotRestoreHonorsNewQuotaBeforeReplacingContent|TestConcurrentIdenticalPageSavesCreateOneRevision|TestPreparedImageDeduplicatesPreviewAndFullStorage|TestMissingRegisteredDatabaseDoesNotOfferNewOwnership|TestClosedRegistrationRejectsPreviouslyIssuedConfirmation)$'
       - name: Install editor browser test dependencies
         working-directory: scripts/editor
         run: |
