@@ -152,33 +152,11 @@
             formState.lastField = fieldElement;
             if (!formState.started) { enqueue({kind:'form-start',form:formKey}); formState.started = true; }
             const fieldKey = structuralKey(fieldElement);
-            if (fieldKey) enqueue({kind:'field',form:formKey,field:fieldKey,filled:formEvent.type === 'input'});
+            if (fieldKey) {
+                const filled = ['checkbox','radio'].includes(fieldElement.type) ? fieldElement.checked : typeof fieldElement.value === 'string' && fieldElement.value.length > 0;
+                enqueue({kind:'field',form:formKey,field:fieldKey,filled:filled});
+            }
         } else { if (!formState.started) { enqueue({kind:'form-start',form:formKey}); formState.started=true; } enqueue({kind:'form-submit',form:formKey}); }
-    }
-    function boundedFieldText(fieldText) {
-        let boundedText = ''; let byteCount = 0;
-        const encoder = new TextEncoder();
-        for (const character of fieldText) { const characterBytes = encoder.encode(character).length; if (byteCount+characterBytes>256) break; byteCount += characterBytes; boundedText += character; }
-        return boundedText;
-    }
-    function recordFieldValue(fieldElement) {
-        if (!fieldElement.hasAttribute || !fieldElement.hasAttribute('data-analytics-value') || !fieldElement.form || !['INPUT','SELECT'].includes(fieldElement.tagName)) return;
-        const descriptor = [fieldElement.type,fieldElement.name,fieldElement.id,fieldElement.autocomplete].filter(Boolean).join(' ').slice(0,128);
-        if (['password','hidden','file'].includes(fieldElement.type) || /password|passwd|secret|token|authorization|credit|card|cvc|cvv|cc-|otp|passcode|парол/i.test(descriptor)) return;
-        const formKey = structuralKey(fieldElement.form); const fieldKey = structuralKey(fieldElement);
-        if (!formKey || !fieldKey) return;
-        const fieldText = boundedFieldText(String(['checkbox','radio'].includes(fieldElement.type) ? fieldElement.checked : fieldElement.value || '').replace(/[\r\n\u0000]/g,' '));
-        if (/^(bearer |eyJ)/i.test(fieldText)) return;
-        let formState = model.forms.get(fieldElement.form);
-        if (!formState) { formState = {viewed:false,started:false}; model.forms.set(fieldElement.form,formState); }
-        if (!formState.fieldTexts) formState.fieldTexts = new Map();
-        if (formState.fieldTexts.get(fieldKey) === fieldText) return;
-        formState.fieldTexts.set(fieldKey,fieldText);
-        enqueue({kind:'field-value',form:formKey,field:fieldKey,field_name:descriptor,field_text:fieldText});
-    }
-    function captureChangedField(changeEvent) { recordFieldValue(changeEvent.target); }
-    function captureSubmittedFields(submitEvent) {
-        for (const fieldElement of Array.from(submitEvent.target.querySelectorAll('input[data-analytics-value],select[data-analytics-value]')).slice(0,16)) recordFieldValue(fieldElement);
     }
     function observeSections() {
         if (typeof IntersectionObserver !== 'function') return;
@@ -345,8 +323,6 @@
         document.addEventListener('focusin',formInteraction,{capture:true,passive:true});
         document.addEventListener('input',formInteraction,{capture:true,passive:true});
         document.addEventListener('submit',formInteraction,{capture:true,passive:true});
-        document.addEventListener('change',captureChangedField,{capture:true,passive:true});
-        document.addEventListener('submit',captureSubmittedFields,{capture:true,passive:true});
         let scrollScheduled = false;
         window.addEventListener('scroll',function scheduleScroll() { if (scrollScheduled) return; scrollScheduled = true; window.setTimeout(function sampleScroll() { scrollScheduled = false; recordScroll(); replayScroll(); },250); },{passive:true});
         window.addEventListener('popstate',function navigated() { flush(true); startView(); });
