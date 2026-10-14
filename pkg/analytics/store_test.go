@@ -63,7 +63,7 @@ func TestStoreIsolatedFromEditingAndDeletion(t *testing.T) {
 	if strings.Contains(string(body), "private-identity") || !strings.Contains(string(body), `"Views":12`) {
 		t.Fatal("archive was not an anonymous summary")
 	}
-	if err := os.Remove(filepath.Join(directory, "analytics.db")); err != nil {
+	if err := os.Remove(filepath.Join(directory, DatabaseName("example.org"))); err != nil {
 		t.Fatal(err)
 	}
 	if result := store.Exchange(StorageRequest{Operation: ReadBrowserReport, Domain: "example.org"}); !errors.Is(result.Err, sql.ErrNoRows) {
@@ -103,7 +103,7 @@ func TestArchiveRetentionQuotaAndCompletedDay(t *testing.T) {
 	if err != nil || decoded.Views != 9 {
 		t.Fatalf("partial archive not finalized: %+v %v", decoded, err)
 	}
-	old := filepath.Join(directory, "archives", dayKey(now.AddDate(0, 0, -91))+".json.gz")
+	old := filepath.Join(directory, "archives", dayKey(now.AddDate(0, 0, -archiveLimitDays-1))+".json.gz")
 	if err := os.WriteFile(old, []byte("expired"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestStoreContainsOnlyThreeBoundedCheckpoints(t *testing.T) {
 		}
 	}
 	directory, _ := storeDirectory(root, "example.org")
-	database, err := sql.Open("sqlite", filepath.Join(directory, "analytics.db"))
+	database, err := sql.Open("sqlite", filepath.Join(directory, DatabaseName("example.org")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,8 +142,37 @@ func TestStoreContainsOnlyThreeBoundedCheckpoints(t *testing.T) {
 	if err := database.QueryRow(`SELECT COUNT(*) FROM checkpoints`).Scan(&count); err != nil || count != 3 {
 		t.Fatalf("checkpoint count=%d err=%v", count, err)
 	}
-	info, err := os.Stat(filepath.Join(directory, "analytics.db"))
+	info, err := os.Stat(filepath.Join(directory, DatabaseName("example.org")))
 	if err != nil || info.Size() > databaseLimitBytes {
 		t.Fatal("database size limit exceeded", err)
+	}
+}
+
+func TestReadUsageRejectsPathLikeDomain(t *testing.T) {
+	store := OpenStore(t.TempDir())
+	defer store.Close()
+	for _, domain := range []string{"../outside", "/outside", `..\outside`, "site\x00name"} {
+		result := store.Exchange(StorageRequest{Operation: ReadUsage, Domain: domain})
+		if result.Err == nil {
+			t.Fatal("path-like analytics domain accepted", domain)
+		}
+	}
+}
+
+func TestReadUsageDoesNotCreateOrFollowSiteDirectory(t *testing.T) {
+	root := t.TempDir()
+	store := OpenStore(root)
+	defer store.Close()
+	if result := store.Exchange(StorageRequest{Operation: ReadUsage, Domain: "missing.example"}); result.Err != nil || result.Bytes != 0 {
+		t.Fatal("missing site usage", result)
+	}
+	if _, err := os.Stat(filepath.Join(root, "site-missing.example")); !os.IsNotExist(err) {
+		t.Fatal("usage created a site directory", err)
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(root, "site-linked.example")); err != nil {
+		t.Fatal(err)
+	}
+	if result := store.Exchange(StorageRequest{Operation: ReadUsage, Domain: "linked.example"}); result.Err == nil {
+		t.Fatal("usage followed a symlink")
 	}
 }

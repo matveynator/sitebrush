@@ -727,169 +727,172 @@
       <small class="text-muted">| {{index .T "analytics_title"}}</small>
     </h1>
     <div class="page-header-actions">
-      <span class="btn btn-outline-secondary disabled">Server <span id="analytics-server-clock" data-server-time="{{.ServerNowRFC3339}}" data-server-timezone="{{.ServerTimezone}}" data-server-offset="{{.ServerTimezoneOffsetSeconds}}">{{.ServerNowDisplay}}</span> · {{.ServerTimezone}}</span>
+      {{if eq .AnalyticsTab "security"}}<span class="btn btn-outline-secondary disabled">Server <span id="analytics-server-clock" data-server-time="{{.ServerNowRFC3339}}" data-server-timezone="{{.ServerTimezone}}" data-server-offset="{{.ServerTimezoneOffsetSeconds}}">{{.ServerNowDisplay}}</span> · {{.ServerTimezone}}</span>{{end}}
       <a id="analytics-return-link" class="btn btn-outline-secondary analytics-back-link" href="{{.ReturnPath}}" data-fallback="{{.ReturnPath}}">{{index .T "back_to_uri"}}</a>
     </div>
   </div>
 
-  {{if eq .AnalyticsTab "analytics"}}
-  <form method="get" class="d-flex flex-wrap gap-2 mb-3">
-    <input type="hidden" name="analytics" value="">
-    <input type="hidden" name="tab" value="analytics">
-    <select name="days" aria-label="{{index .T "analytics_period"}}" class="form-select w-auto">{{range $days := .PeriodOptions}}<option value="{{$days}}" {{if eq $.BrowserAnalytics.Days $days}}selected{{end}}>{{$days}} {{index $.T "ax_days"}}</option>{{end}}</select>
-    <select name="traffic" class="form-select w-auto" aria-label="{{index .T "ax_audience"}}"><option value="human" {{if eq .ExperienceFilter.Traffic "human"}}selected{{end}}>{{index .T "ax_humans"}}</option><option value="bots" {{if eq .ExperienceFilter.Traffic "bots"}}selected{{end}}>{{index .T "ax_bots"}}</option><option value="all" {{if eq .ExperienceFilter.Traffic "all"}}selected{{end}}>{{index .T "ax_all"}}</option></select>
-    <input type="hidden" name="campaign" value="">
-    <button class="btn btn-outline-secondary">{{index .T "ax_filter"}}</button>
-  </form>
-  {{end}}
+
   <nav class="analytics-tabs" aria-label="Analytics sections">
     <a href="?analytics&amp;tab=analytics&amp;days={{.BrowserAnalytics.Days}}" class="{{if eq .AnalyticsTab "analytics"}}active{{end}}">{{index .T "analytics_title"}}</a>
     <a href="?analytics&amp;tab=security" class="{{if eq .AnalyticsTab "security"}}active{{end}}">{{index .T "ax_security"}}</a>
   </nav>
 
   {{if eq .AnalyticsTab "analytics"}}
-  <nav class="d-flex flex-wrap gap-3 mb-4"><a href="#session-map">{{index .T "ax_map"}}</a><a href="#sources">{{index .T "ax_sources"}}</a><a href="#journeys">{{index .T "ax_journeys"}}</a><a href="#sessions">{{index .T "ax_sessions"}}</a></nav>
-  <section id="session-map" class="card world-map-card mb-4">
-    <div class="card-body">
-      <h2 class="h5">{{index .T "ax_map"}}</h2>
-      <p class="small">{{index .T "ax_map_hint"}}</p>
-      <div class="world-map-layout">
-        <div id="analytics-visitor-map" class="world-map-panel" aria-label="{{.Report.MapTitle}}">
-          <div id="analytics-session-map-overlay" class="world-map-empty">{{index .T "analytics_no_data"}}</div>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <dialog id="analytics-map-sessions" class="card" style="width:min(760px,90vw);max-height:80vh;overflow:auto;margin:auto" aria-labelledby="analytics-map-sessions-title">
-    <div class="card-body"><form method="dialog"><button class="btn btn-outline-secondary float-end" aria-label="Close">×</button></form><h2 id="analytics-map-sessions-title" class="h5">{{index .T "ax_sessions"}}</h2><div id="analytics-map-sessions-list"></div></div>
-  </dialog>
-
-  <section class="card activity-calendar-card activity-calendar-days mb-4" data-activity-calendar="visitors" data-color="green">
-    <div class="card-body"><h2 class="h5">{{index .T "ax_activity_days"}}</h2><p class="small text-muted">{{index .T "ax_activity_heatmap_hint"}}</p>
-      <div class="activity-calendar-year-tabs" data-calendar-years></div><div class="activity-calendar-scroll"><div class="activity-calendar-inner"><div class="activity-calendar-months" data-calendar-months aria-hidden="true"></div><div class="activity-calendar-grid" data-calendar-grid aria-label="{{index .T "ax_activity_days"}}"></div></div></div>
-      <div class="activity-calendar-legend" aria-label="{{index .T "ax_activity_days"}}"><span>{{index .T "ax_activity_less"}}</span><i class="activity-calendar-day" data-level="0"></i><i class="activity-calendar-day" data-level="1"></i><i class="activity-calendar-day" data-level="2"></i><i class="activity-calendar-day" data-level="3"></i><i class="activity-calendar-day" data-level="4"></i><span>{{index .T "ax_activity_more"}}</span></div>
-      <div class="small text-muted" data-calendar-selection></div>
-      <div class="activity-calendar-drill" data-calendar-drill hidden><h3 class="h6" data-calendar-hour-title></h3><div class="hourly-chart activity-calendar-hour-chart" data-calendar-hour-chart></div><div class="activity-calendar-details" data-calendar-details></div></div>
-    </div>
-    <script type="application/json" data-calendar-days>{{.ActivityDaysJSON}}</script><script type="application/json" data-calendar-hours>{{.ActivityHoursJSON}}</script><script type="application/json" data-calendar-details-data>{{.ActivitySessionsJSON}}</script>
-  </section>
-
-  <div class="hourly-chart-grid">
-    <section class="card"><div class="card-body">
-      <h2 class="h5">Requests by server local hour</h2>
-      <p class="small text-muted">Selected period · server local time ({{.ServerTimezone}}). Use this to compare load and choose maintenance windows.</p>
-      <div id="analytics-server-hour-chart" class="hourly-chart" aria-label="Requests by server local hour"></div>
+  <main id="conversion-dashboard" data-csrf="{{.AccountCSRF}}">
+    {{if .AnalyticsQuotaBlocked}}<p class="alert alert-warning">{{index .T "cx_storage_paused"}}</p>{{end}}
+    {{if .Conversion.Incomplete}}<p class="alert alert-warning">{{index .T "ax_incomplete"}}</p>{{end}}
+    <section class="card mb-4"><div class="card-body"><h2 class="h4">{{index .T "cx_visitor_map"}}</h2>
+      <div id="conversion-calendar-years"></div>
+  <form method="get" class="d-flex flex-wrap gap-2 mb-3">
+    <input type="hidden" name="analytics" value="">
+    <input type="hidden" name="tab" value="analytics">
+    <select name="days" aria-label="{{index .T "analytics_period"}}" class="form-select w-auto">{{range $days := .PeriodOptions}}<option value="{{$days}}" {{if eq $.BrowserAnalytics.Days $days}}selected{{end}}>{{$days}} {{index $.T "ax_days"}}</option>{{end}}</select>
+    <input type="hidden" name="campaign" value="">
+    <button class="btn btn-outline-secondary">{{index .T "ax_filter"}}</button>
+  </form>
+      <p class="small">{{index .T "cx_map_hint"}}</p><div id="conversion-visitor-map" class="world-map-panel"></div><p id="conversion-map-status" class="small text-muted"></p>
+      <details><summary>{{index .T "cx_visitors"}}</summary><div id="conversion-map-visitors"></div></details>
+      <h3 class="h5 mt-4">{{index .T "ax_activity_days"}}</h3><div id="conversion-visit-calendar" class="activity-calendar-days"></div>
     </div></section>
-  </div>
-  <details id="analytics-goals" class="card mb-4"><summary class="card-body d-flex align-items-center justify-content-between gap-3"><span><strong>{{index .T "ax_goals"}}</strong><span class="small text-muted d-block">{{if .Experience.GoalsConfigured}}{{index .T "ax_meaningful"}}: {{.Experience.GoalRate}} · {{.Experience.GoalSessions}} / {{.Experience.Sessions}}{{else}}{{index .T "ax_goals_not_configured"}}{{end}}</span></span><span class="small text-nowrap">{{index .T "ax_goals_edit"}}</span></summary><div class="card-body border-top"><p>{{index .T "ax_goals_hint"}}</p><p>{{index .T "ax_goals_examples_hint"}}</p><pre class="border rounded p-3">{{index .T "ax_goals_examples"}}</pre><p class="small">{{index .T "ax_goals_action_example"}}</p><pre class="border rounded p-3"><code>&lt;a href="/download/" sitebrush-data-analytics-action="download"&gt;Download&lt;/a&gt;</code></pre><form method="post" action="?analytics"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}"><textarea class="form-control" name="goals" rows="5" maxlength="12000" placeholder="Download | action | download">{{.GoalsText}}</textarea><button class="btn btn-outline-secondary mt-2">{{index .T "ax_save"}}</button></form></div></details>
-  <section id="sources" class="card mb-4"><div class="card-body">
-    <h2 class="h5">{{index .T "ax_sources"}}</h2><p class="small">{{index .T "ax_attribution_hint"}}</p>
-    <div class="table-responsive"><table class="table"><thead><tr><th>{{index .T "ax_source"}}</th><th>{{index .T "ax_sessions"}}</th><th>{{index .T "ax_views"}}</th><th>{{index .T "ax_actions"}}</th>{{if .Experience.GoalsConfigured}}<th>{{index .T "ax_meaningful"}}</th>{{end}}<th>{{index .T "ax_returns"}}</th></tr></thead><tbody>
-    {{range .Experience.Sources}}<tr><td>{{.Label}}<small class="d-block text-break">{{.Evidence}} · {{.Campaign}}{{if ne .Referrer .Campaign}} · {{.Referrer}}{{end}}</small></td><td>{{.Sessions}}</td><td>{{.Views}}</td><td>{{.Actions}}</td>{{if $.Experience.GoalsConfigured}}<td>{{.GoalRate}}{{range $goal,$count := .GoalCounts}}<small class="d-block">{{$goal}} — {{$count}}</small>{{end}}</td>{{end}}<td>{{.Returning}}</td></tr>{{else}}<tr><td colspan="{{if .Experience.GoalsConfigured}}6{{else}}5{{end}}">{{index .T "analytics_no_data"}}</td></tr>{{end}}
-    </tbody></table></div>
-  </div></section>
-  <section id="browser-overview" class="mb-4">
-    <h2 class="h5">{{index .T "ax_overview"}}</h2>
-    <p class="small">{{index .T "ax_observation_hint"}}</p>
-    <p class="small">{{.BrowserAnalytics.Age}}</p>
-    {{if or .Experience.Incomplete .BrowserAnalytics.Report.Incomplete}}<p class="alert alert-warning">{{index .T "ax_incomplete"}}</p>{{end}}
-    {{if not .BrowserAnalytics.Report.Experience.Version}}<p>{{index .T "ax_new_history"}}</p>{{end}}
-    {{if ne .ExperienceFilter.Traffic "human"}}<p>{{index .T "ax_bot_overview"}}: {{.ServerRequests}} · {{index .T "ax_all_hint"}}</p>{{end}}
-    <div class="metric-grid">
-      <div class="card metric-card"><div class="card-body">{{index .T "ax_sessions"}}<div class="metric-value">{{.Experience.Sessions}}</div></div></div>
-      <div class="card metric-card"><div class="card-body">{{index .T "ax_actions"}}<div class="metric-value">{{.Experience.Actions}}</div></div></div>
-      {{if .Experience.GoalsConfigured}}<div class="card metric-card"><div class="card-body">{{index .T "ax_meaningful"}}<div class="metric-value">{{.Experience.GoalRate}}</div></div></div>{{end}}
+    <section class="card mb-4"><div class="card-body"><h2 class="h4">{{index .T "cx_conversion"}}</h2>
+      <p class="small">{{index .T "cx_window"}}</p><div id="conversion-funnels"></div>
+      <details><summary>{{index .T "cx_constructor"}}</summary><div id="conversion-goals" class="mt-3"></div>
+        <button type="button" id="conversion-add-goal" class="btn btn-outline-secondary">{{index .T "cx_add_goal"}}</button>
+        <button type="button" id="conversion-save" class="btn btn-primary">{{index .T "ax_save"}}</button><p id="conversion-save-status" role="status"></p>
+        <details class="mt-2"><summary>{{index .T "cx_custom"}}</summary><pre><code>SiteBrushAnalytics.event('purchase');
+SiteBrushAnalytics.formResult('contact', true);</code></pre><p class="small">{{index .T "cx_confirmed"}}</p></details>
+      </details>
+    </div></section>
+    <section class="card mb-4"><div class="card-body"><h2 class="h4">{{index .T "ax_journeys"}}</h2><p class="small">{{index .T "cx_paths_hint"}}</p><div id="conversion-site-tree"></div><details><summary>{{index .T "cx_observed_paths"}}</summary><div id="conversion-paths"></div></details></div></section>
+    <section class="card mb-4"><div class="card-body"><h2 class="h4">{{index .T "cx_behaviour"}}</h2><div id="conversion-insights"></div><div id="conversion-behaviour"></div>
+      <details><summary>{{index .T "cx_forms"}}</summary><p class="small">{{index .T "cx_confirmed"}}</p><div id="conversion-forms"></div></details>
+      <details><summary>{{index .T "cx_sessions"}}</summary><p class="small">{{index .T "cx_replay_hint"}}</p><div id="conversion-replay-settings"></div><p id="conversion-replay-status" role="status"></p><div id="conversion-sessions"></div><div id="conversion-replay-player"></div></details>
+    </div></section>
 
-    </div>
-    {{if .Experience.Insights}}<div class="mt-3"><h3 class="h6">{{index .T "ax_insights"}}</h3><p class="small">{{index .T "ax_insights_hint"}}</p><ul>{{range .Experience.Insights}}<li>{{index $.T (print "ax_insight_" .Kind)}} · {{.Label}}: {{.Numerator}} / {{.Denominator}}</li>{{end}}</ul></div>{{end}}
-  </section>
+    <section class="card mb-4"><div class="card-body"><h2 class="h4">{{index .T "ax_source"}}</h2><div id="conversion-sources"></div></div></section>
+    <section class="card mb-4"><div class="card-body"><h2 class="h4">{{index .T "cx_retention"}}</h2><p class="small">{{index .T "cx_retention_hint"}}</p><div id="conversion-cohorts"></div></div></section>
+    <details class="card mb-4"><summary class="card-body">{{index .T "cx_page_changes"}}</summary><div id="conversion-page-impact" class="card-body"></div></details>
+    <footer id="conversion-storage" class="mb-4"><div>
 
-  <section class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_actions"}}</h2><ul>{{range .Experience.GoalRows}}<li>{{.Label}} — {{.Count}}{{if eq .Count 0}} · {{index $.T "ax_not_observed"}}{{end}}</li>{{end}}{{range .Experience.ActionRows}}<li>{{.Label}} — {{.Count}}</li>{{else}}<li>{{index .T "analytics_no_data"}}</li>{{end}}</ul></div></section>
-  <section id="journeys" class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_journeys"}}</h2><p class="small">{{index .T "ax_recent_hint"}}</p><ul>{{range .Experience.Journeys}}<li>{{.Label}} <strong>× {{.Sessions}}</strong></li>{{else}}<li>{{index .T "analytics_no_data"}}</li>{{end}}</ul></div></section>
-  <section id="browser-content" class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_content"}}</h2><p class="small">{{index .T "ax_exit_hint"}}</p>
-    <div class="table-responsive"><table class="table"><thead><tr><th>{{index .T "ax_page"}}</th><th>{{index .T "ax_sessions"}}</th><th>{{index .T "ax_views"}}</th><th>{{index .T "ax_active"}}</th><th>50% ↓</th><th>{{index .T "ax_action_rate"}}</th><th>{{index .T "ax_next"}}</th><th>{{index .T "ax_end"}}</th></tr></thead><tbody>{{range .Experience.Pages}}<tr><td>{{.Label}}</td><td>{{.Sessions}}</td><td>{{.Views}}</td><td>{{.AverageActive}}</td><td>{{.ScrollRate}}</td><td>{{.ActionRate}}</td><td>{{.NextRate}}</td><td>{{.EndRate}}</td></tr>{{end}}</tbody></table></div>
-  </div></section>
-  <section id="sessions" class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_sessions"}}</h2><p class="small">{{index .T "ax_recent_hint"}}</p>
-    {{range .Experience.Recent}}<details class="border-bottom py-2"><summary>{{if eq .Class "human-likely"}}👤{{else}}🤖{{end}} <time data-relative-time="{{.Started.Format "2006-01-02T15:04:05Z07:00"}}">{{.When}}</time> · {{.Source.Name}} → {{.Landing}} · {{.Language}} · {{.Browser}} / {{.OS}} · active {{.Active}}</summary>
-    <p class="small mb-1">{{if .Address}}IP: <code class="analytics-session-ip" data-ip="{{.Address}}">{{.Address}}</code> · {{end}}{{index $.T "ax_first_source"}}: {{.FirstSource}} · {{if .Country}}{{.Country}}{{if .City}}, {{.City}}{{end}}{{else}}unknown location{{end}}</p>
-    {{if .Returning}}<p class="small mb-1">Returned after {{.ReturnAfter}} · {{.FirstSource}} → {{.Source.Name}} · {{if .Goal}}goal reached{{else}}no configured goal yet{{end}}</p>{{end}}
-    <p class="small text-break">Referer: {{if .Referrer}}{{.Referrer}}{{else}}{{index $.T "analytics_no_data"}}{{end}} · {{.Source.Evidence}} · {{.ID}}</p>
-    {{if .GoalCounts}}<ul>{{range $goal,$count := .GoalCounts}}<li>{{$goal}} — {{$count}}</li>{{end}}</ul>{{end}}
-    {{range .Tabs}}<ol class="mb-1">{{range .}}<li>{{.}}</li>{{end}}</ol>{{end}}{{if .Limited}}<p>{{index $.T "ax_incomplete"}}</p>{{end}}</details>{{else}}<p>{{index .T "analytics_no_data"}}</p>{{end}}
-  </div></section>
-
-  <section class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_languages"}}</h2><div class="table-responsive"><table class="table"><thead><tr><th>{{index .T "ax_language"}}</th><th>{{index .T "ax_sessions"}}</th>{{if .Experience.GoalsConfigured}}<th>{{index .T "ax_meaningful"}}</th>{{end}}</tr></thead><tbody>{{range .Experience.Languages}}<tr><td>{{.Label}}</td><td>{{.Sessions}}</td>{{if $.Experience.GoalsConfigured}}<td>{{.GoalRate}}</td>{{end}}</tr>{{end}}</tbody></table></div></div></section>
-  <section id="browser-returns" class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_returns"}}</h2><p class="small">{{index .T "analytics_browser_retention_hint"}}</p>
-    <div class="mb-3">{{range .BrowserAnalytics.Report.Retention}}<span class="me-3">D{{.Day}}: {{.Returned}} / {{.Eligible}}</span>{{end}}</div>
-    {{range .Experience.Recent}}{{if .Returning}}<div class="border-bottom py-2"><strong>Returned after {{.ReturnAfter}}</strong><div class="small">{{if .Address}}<code>{{.Address}}</code> · {{end}}{{.FirstSource}} → {{.Source.Name}} → {{.Landing}} · {{.Language}} · {{.Browser}} / {{.OS}} · {{if .Goal}}goal reached{{else}}no configured goal yet{{end}}</div></div>{{end}}{{end}}
-    {{range .BrowserAnalytics.ReturnSections}}<h3 class="h6 mt-3">{{.Title}}</h3><ul>{{range .Rows}}<li>{{.Label}}: {{.Value}}</li>{{end}}</ul>{{end}}
-  </div></section>
-  <details class="card mb-4"><summary class="card-body">{{index .T "ax_crawlers"}}</summary><div class="card-body"><p class="small">{{index .T "ax_bot_hint"}}</p><p class="small text-muted"><code>Go-http-client/1.1</code> is the standard Go HTTP client identity. SiteBrush classifies it as automation; it is not considered malicious unless its request behavior independently triggers a security rule.</p><div class="table-responsive"><table class="table"><thead><tr><th>{{index .T "ax_audience"}}</th><th>User-Agent</th><th>{{index .T "ax_page"}}</th><th>{{index .T "ax_requests"}}</th></tr></thead><tbody>{{range .Security.Groups}}{{if ne .Class "unknown"}}<tr><td>{{index $.T (print "ax_class_" .Class)}}</td><td>{{.Agent}}</td><td>{{.Path}}</td><td>{{.Count}}</td></tr>{{end}}{{end}}</tbody></table></div></div></details>
-
-  {{end}}
-  {{if eq .AnalyticsTab "analytics"}}
-  <section id="technical-analytics" class="card mt-4"><div class="card-body">
-  <h2 class="h5">{{index .T "analytics_browser_technical"}}</h2>
-  <p class="small">{{index .T "analytics_browser_technical_hint"}}</p>
-  <div class="alert alert-secondary">
-    <div><strong>{{index .T "analytics_generated_at"}}:</strong> {{.Report.GeneratedAt}}</div>
-    <div><strong>{{index .T "analytics_period"}}:</strong> {{.Report.Period}}</div>
-    <div class="small">{{index .T "analytics_refresh_hint"}}</div>
-  </div>
-
-  <div class="metric-grid mb-4">
-    {{range .Report.Cards}}
-    <section class="card metric-card">
-      <div class="card-body">
-        <div class="text-muted small">{{.Label}}</div>
-        <div class="metric-value">{{if .Link}}<a href="{{.Link}}" aria-label="{{.Label}} — {{.Hint}}">{{.Value}}</a>{{else}}{{.Value}}{{end}}</div>
-        <div class="text-muted small mt-2">{{.Hint}}</div>
-        {{if .Link}}<a class="small d-inline-block mt-2" href="{{.Link}}">{{index $.T "analytics_error_details"}}</a>{{end}}
-      </div>
-    </section>
-    {{end}}
-  </div>
-
-
-
-  <div class="report-grid">
-    {{range .Report.Sections}}
-    <section class="card" {{if .ID}}id="{{.ID}}"{{end}}>
-      <div class="card-body">
-        <h2 class="h5">{{.Title}}</h2>
-        {{if .Description}}<p class="text-muted small">{{.Description}}</p>{{end}}
-        {{if .Rows}}
-        <div class="table-responsive">
-          <table class="table table-sm analytics-table align-middle mb-0">
-            <thead>
-              <tr>
-                <th>{{index $.T "analytics_table_dimension"}}</th>
-                <th>{{index $.T "analytics_table_value"}}</th>
-                <th>{{index $.T "analytics_table_share"}}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {{range .Rows}}
-              <tr>
-                <td class="analytics-label">{{.Label}}{{if .Detail}}<div class="text-muted small">{{.Detail}}</div>{{end}}</td>
-                <td>{{.Value}}</td>
-                <td class="analytics-share-cell" data-share="{{.Percent}}">
-                  <span class="analytics-share-number">{{if .Percent}}{{.Percent}}{{else}}{{index $.T "analytics_no_data"}}{{end}}</span>
-                </td>
-              </tr>
-              {{end}}
-            </tbody>
-          </table>
-        </div>
-        {{else}}
-        <p class="text-muted mb-0">{{index $.T "analytics_no_data"}}</p>
-        {{end}}
-      </div>
-    </section>
-    {{end}}
-  </div>
-</div></section>
+<p class="small text-muted">{{index .T "cx_privacy"}}</p><details><summary>{{index .T "cx_storage"}}: {{.AnalyticsDiskUsage}}</summary><p class="small">{{index .T "cx_storage_hint"}}</p></details>
+    </div></footer>
+    <script type="application/json" id="conversion-site-catalog">{{.SiteTreeJSON}}</script>
+    <script type="application/json" id="conversion-report">{{.ConversionJSON}}</script>
+    <script type="application/json" id="conversion-configuration">{{.GoalsJSON}}</script>
+    <script type="application/json" id="conversion-replay-preferences">{{.ReplayPreferencesJSON}}</script>
+    <div id="conversion-labels" hidden>
+      <span data-translation="analytics_no_data">{{index .T "analytics_no_data"}}</span>
+      <span data-translation="ax_save">{{index .T "ax_save"}}</span>
+      <span data-translation="ax_page">{{index .T "ax_page"}}</span>
+      <span data-translation="ax_source">{{index .T "ax_source"}}</span>
+      <span data-translation="ax_goals">{{index .T "ax_goals"}}</span>
+      <span data-translation="ax_journeys">{{index .T "ax_journeys"}}</span>
+      <span data-translation="ax_days">{{index .T "ax_days"}}</span>
+      <span data-translation="ax_filter">{{index .T "ax_filter"}}</span>
+      <span data-translation="ax_incomplete">{{index .T "ax_incomplete"}}</span>
+      <span data-translation="cx_conversion">{{index .T "cx_conversion"}}</span>
+      <span data-translation="cx_behaviour">{{index .T "cx_behaviour"}}</span>
+      <span data-translation="cx_retention">{{index .T "cx_retention"}}</span>
+      <span data-translation="cx_constructor">{{index .T "cx_constructor"}}</span>
+      <span data-translation="cx_primary">{{index .T "cx_primary"}}</span>
+      <span data-translation="cx_step">{{index .T "cx_step"}}</span>
+      <span data-translation="cx_add_goal">{{index .T "cx_add_goal"}}</span>
+      <span data-translation="cx_add_step">{{index .T "cx_add_step"}}</span>
+      <span data-translation="cx_biggest_drop">{{index .T "cx_biggest_drop"}}</span>
+      <span data-translation="cx_pending">{{index .T "cx_pending"}}</span>
+      <span data-translation="cx_completed">{{index .T "cx_completed"}}</span>
+      <span data-translation="cx_form_viewed">{{index .T "cx_form_viewed"}}</span>
+      <span data-translation="cx_form_started">{{index .T "cx_form_started"}}</span>
+      <span data-translation="cx_form_submit">{{index .T "cx_form_submit"}}</span>
+      <span data-translation="cx_form_success">{{index .T "cx_form_success"}}</span>
+      <span data-translation="cx_form_failed">{{index .T "cx_form_failed"}}</span>
+      <span data-translation="cx_field_drop">{{index .T "cx_field_drop"}}</span>
+      <span data-translation="cx_dead">{{index .T "cx_dead"}}</span>
+      <span data-translation="cx_rage">{{index .T "cx_rage"}}</span>
+      <span data-translation="cx_preview">{{index .T "cx_preview"}}</span>
+      <span data-translation="cx_version">{{index .T "cx_version"}}</span>
+      <span data-translation="cx_transition">{{index .T "cx_transition"}}</span>
+      <span data-translation="cx_lost">{{index .T "cx_lost"}}</span>
+      <span data-translation="cx_preview_changed">{{index .T "cx_preview_changed"}}</span>
+      <span data-translation="cx_insight_scroll">{{index .T "cx_insight_scroll"}}</span>
+      <span data-translation="cx_insight_dead">{{index .T "cx_insight_dead"}}</span>
+      <span data-translation="cx_insight_source">{{index .T "cx_insight_source"}}</span>
+      <span data-translation="cx_save_error">{{index .T "cx_save_error"}}</span>
+      <span data-translation="cx_saved">{{index .T "cx_saved"}}</span>
+      <span data-translation="cx_remove">{{index .T "cx_remove"}}</span>
+      <span data-translation="cx_visitors">{{index .T "cx_visitors"}}</span>
+      <span data-translation="cx_clicks">{{index .T "cx_clicks"}}</span>
+      <span data-translation="cx_scroll">{{index .T "cx_scroll"}}</span>
+      <span data-translation="cx_element">{{index .T "cx_element"}}</span>
+      <span data-translation="cx_event">{{index .T "cx_event"}}</span>
+      <span data-translation="cx_name">{{index .T "cx_name"}}</span>
+      <span data-translation="cx_match">{{index .T "cx_match"}}</span>
+      <span data-translation="cx_threshold">{{index .T "cx_threshold"}}</span>
+      <span data-translation="cx_forms">{{index .T "cx_forms"}}</span>
+      <span data-translation="cx_exit">{{index .T "cx_exit"}}</span>
+      <span data-translation="cx_rate">{{index .T "cx_rate"}}</span>
+      <span data-translation="cx_week">{{index .T "cx_week"}}</span>
+      <span data-translation="cx_custom">{{index .T "cx_custom"}}</span>
+      <span data-translation="cx_optional">{{index .T "cx_optional"}}</span>
+      <span data-translation="cx_success_page">{{index .T "cx_success_page"}}</span>
+    <span data-translation="cx_entrances">{{index .T "cx_entrances"}}</span>
+      <span data-translation="cx_next_steps">{{index .T "cx_next_steps"}}</span>
+      <span data-translation="cx_tree_unavailable">{{index .T "cx_tree_unavailable"}}</span>
+      <span data-translation="cx_tree_partial">{{index .T "cx_tree_partial"}}</span>
+          <span data-translation="cx_privacy">{{index .T "cx_privacy"}}</span>
+      <span data-translation="cx_window">{{index .T "cx_window"}}</span>
+      <span data-translation="cx_confirmed">{{index .T "cx_confirmed"}}</span>
+      <span data-translation="cx_paths_hint">{{index .T "cx_paths_hint"}}</span>
+      <span data-translation="cx_retention_hint">{{index .T "cx_retention_hint"}}</span>
+      <span data-translation="cx_storage">{{index .T "cx_storage"}}</span>
+      <span data-translation="cx_storage_hint">{{index .T "cx_storage_hint"}}</span>
+      <span data-translation="cx_storage_paused">{{index .T "cx_storage_paused"}}</span>
+      <span data-translation="cx_observed_paths">{{index .T "cx_observed_paths"}}</span>
+      <span data-translation="cx_map_hint">{{index .T "cx_map_hint"}}</span>
+      <span data-translation="cx_unknown_location">{{index .T "cx_unknown_location"}}</span>
+      <span data-translation="cx_landing">{{index .T "cx_landing"}}</span>
+      <span data-translation="cx_visitor_map">{{index .T "cx_visitor_map"}}</span>
+      <span data-translation="cx_sessions">{{index .T "cx_sessions"}}</span>
+      <span data-translation="cx_replay_hint">{{index .T "cx_replay_hint"}}</span>
+      <span data-translation="cx_replay_enabled">{{index .T "cx_replay_enabled"}}</span>
+      <span data-translation="cx_replay_sample">{{index .T "cx_replay_sample"}}</span>
+      <span data-translation="cx_replay_play">{{index .T "cx_replay_play"}}</span>
+      <span data-translation="cx_replay_pause">{{index .T "cx_replay_pause"}}</span>
+      <span data-translation="cx_replay_expired">{{index .T "cx_replay_expired"}}</span>
+      <span data-translation="cx_replay_snapshot">{{index .T "cx_replay_snapshot"}}</span>
+      <span data-translation="cx_replay_limited">{{index .T "cx_replay_limited"}}</span>
+      <span data-translation="cx_page_changes">{{index .T "cx_page_changes"}}</span>
+      <span data-translation="cx_impact_hint">{{index .T "cx_impact_hint"}}</span>
+      <span data-translation="cx_before">{{index .T "cx_before"}}</span>
+      <span data-translation="cx_after">{{index .T "cx_after"}}</span>
+      <span data-translation="cx_impact_small">{{index .T "cx_impact_small"}}</span>
+      <span data-translation="cx_impact_partial">{{index .T "cx_impact_partial"}}</span>
+      <span data-translation="cx_impact_other">{{index .T "cx_impact_other"}}</span>
+      <span data-translation="cx_insight_device">{{index .T "cx_insight_device"}}</span>
+      <span data-translation="cx_insight_funnel">{{index .T "cx_insight_funnel"}}</span>
+</div>
+  </main>
+  <style>
+    #conversion-visitor-map {height:360px}
+    #conversion-visit-calendar .activity-calendar-grid {min-height:72px}
+    #conversion-visit-calendar .activity-calendar-legend .activity-calendar-day {display:inline-block;width:12px;height:12px;border:1px solid var(--bs-border-color);border-radius:2px}
+    .conversion-steps {display:flex;flex-wrap:wrap;gap:12px;margin-block:16px}
+    .conversion-step {flex:1;min-width:130px;padding:12px;border:1px solid var(--bs-border-color);border-radius:8px}
+    .conversion-tree {list-style:none;padding-inline-start:20px;border-inline-start:2px solid var(--bs-border-color)}
+    .conversion-tree li {margin-block:12px;position:relative}
+    .conversion-tree li::before {content:'';position:absolute;inset-inline-start:-20px;top:12px;width:16px;border-top:2px solid var(--bs-border-color)}
+    .conversion-tree small {display:block;color:var(--bs-secondary-color)}
+    .conversion-editor {border:1px solid var(--bs-border-color);padding:12px;margin-block:12px;border-radius:8px}
+    .conversion-editor input,.conversion-editor select {max-width:100%;min-width:120px}
+    .conversion-editor-row {display:flex;flex-wrap:wrap;gap:8px;margin-block:8px;align-items:end}
+    .conversion-editor-row label {flex:1}
+    .conversion-heatmap-frame {width:100%;height:65vh;border:1px solid var(--bs-border-color)}
+    .conversion-scroll-row {display:grid;grid-template-columns:80px 1fr 70px;gap:12px;align-items:center;margin-block:10px}
+    #conversion-dashboard details {margin-block:12px} #conversion-dashboard summary {cursor:pointer}
+  </style>
+  <script src="/p/static/leaflet.min.js"></script>
+  <script src="/p/static/analytics_dashboard.js" defer></script>
   {{end}}
   {{if eq .AnalyticsTab "security"}}
   <section class="card world-map-card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_blocked_map"}}</h2><p class="small">{{index .T "ax_blocked_stats_hint"}} · {{index .T "ax_unknown_geo"}}: {{.SecurityIPSummary.UnknownLocations}}</p><div id="analytics-blocked-ip-map" class="world-map-panel"><div id="analytics-blocked-map-overlay" class="world-map-empty">{{index .T "analytics_no_data"}}</div></div></div></section>
@@ -1113,112 +1116,10 @@
   </div></section>
   {{end}}
 </div>
-<script type="application/json" id="analytics-map-points">{{.SessionMapJSON}}</script>
+{{if eq .AnalyticsTab "security"}}
 <script type="application/json" id="analytics-blocked-map-points">{{.SecurityBlockedMapJSON}}</script>
-<script type="application/json" id="analytics-server-hours">{{.ServerHoursJSON}}</script>
 <script src="/p/static/leaflet.min.js"></script>
 <script>
-(function renderAnalyticsDistributionCharts() {
-  const themeStyle = getComputedStyle(document.documentElement);
-  const palette = [1, 2, 3, 4, 5].map(function (index) {
-    return themeStyle.getPropertyValue('--theme-chart-' + index).trim();
-  });
-  const analyticsCards = document.querySelectorAll('.report-grid > section.card');
-
-  function parseSharePercent(valueText) {
-    const numericValue = parseFloat((valueText || '').replace(',', '.').replace('%', ''));
-    if (!Number.isFinite(numericValue)) return 0;
-    return Math.max(0, Math.min(100, numericValue));
-  }
-
-  function drawDonutChart(canvasElement, values, colors) {
-    const context = canvasElement.getContext('2d');
-    if (!context) return;
-    const width = canvasElement.width;
-    const height = canvasElement.height;
-    const centerX = width / 2;
-    const centerY = height / 2;
-    const radius = Math.min(width, height) / 2 - 4;
-    const innerRadius = radius * 0.62;
-    const sum = values.reduce((runningTotal, value) => runningTotal + value, 0);
-    context.clearRect(0, 0, width, height);
-    if (sum <= 0) return;
-    let startAngle = -Math.PI / 2;
-    for (let index = 0; index < values.length; index += 1) {
-      const sweep = (values[index] / sum) * Math.PI * 2;
-      context.beginPath();
-      context.moveTo(centerX, centerY);
-      context.arc(centerX, centerY, radius, startAngle, startAngle + sweep);
-      context.closePath();
-      context.fillStyle = colors[index];
-      context.fill();
-      startAngle += sweep;
-    }
-    context.globalCompositeOperation = 'destination-out';
-    context.beginPath();
-    context.arc(centerX, centerY, innerRadius, 0, Math.PI * 2);
-    context.fill();
-    context.globalCompositeOperation = 'source-over';
-  }
-
-  for (const analyticsCard of analyticsCards) {
-    const tableRows = analyticsCard.querySelectorAll('tbody tr');
-    const values = [];
-    const labels = [];
-    const colors = [];
-    for (let rowIndex = 0; rowIndex < tableRows.length; rowIndex += 1) {
-      const currentRow = tableRows[rowIndex];
-      const labelCell = currentRow.querySelector('.analytics-label');
-      const shareCell = currentRow.querySelector('.analytics-share-cell');
-      if (!shareCell) continue;
-      const shareValueRaw = shareCell.getAttribute('data-share') || '';
-      const shareValue = parseSharePercent(shareValueRaw);
-      const color = palette[rowIndex % palette.length];
-      if (shareValue > 0) {
-        values.push(shareValue);
-        labels.push(labelCell ? labelCell.textContent.trim() : '');
-        colors.push(color);
-      }
-    }
-
-    if (values.length > 1) {
-      const tableWrapper = analyticsCard.querySelector('.table-responsive');
-      if (tableWrapper) {
-        const chartContainer = document.createElement('div');
-        chartContainer.className = 'analytics-chart-wrap';
-        const canvas = document.createElement('canvas');
-        canvas.className = 'analytics-chart-canvas';
-        canvas.width = 120;
-        canvas.height = 120;
-        chartContainer.appendChild(canvas);
-        const legend = document.createElement('ul');
-        legend.className = 'analytics-chart-legend';
-        const legendCount = Math.min(5, values.length);
-        for (let legendIndex = 0; legendIndex < legendCount; legendIndex += 1) {
-          const legendItem = document.createElement('li');
-          const dot = document.createElement('span');
-          dot.className = 'analytics-chart-dot';
-          dot.style.background = colors[legendIndex];
-          const label = document.createElement('span');
-          label.className = 'analytics-chart-label';
-          label.textContent = labels[legendIndex];
-          const value = document.createElement('span');
-          value.className = 'analytics-chart-value';
-          value.textContent = values[legendIndex].toFixed(1).replace('.0', '') + '%';
-          legendItem.appendChild(dot);
-          legendItem.appendChild(label);
-          legendItem.appendChild(value);
-          legend.appendChild(legendItem);
-        }
-        chartContainer.appendChild(legend);
-        tableWrapper.parentNode.insertBefore(chartContainer, tableWrapper);
-        drawDonutChart(canvas, values, colors);
-      }
-    }
-  }
-
-})();
-
 (function renderSecurityCharts() {
   'use strict';
 
@@ -1786,45 +1687,6 @@
   for (const calendar of document.querySelectorAll('[data-activity-calendar]')) renderCalendar(calendar);
 })();
 
-(function renderAnalyticsHourlyCharts() {
-  function parseHours(elementID) {
-    const element = document.getElementById(elementID);
-    if (!element) return [];
-    try {
-      const values = JSON.parse(element.textContent || '[]');
-      return Array.isArray(values) ? values.slice(0, 24) : [];
-    } catch (error) {
-      return [];
-    }
-  }
-
-  function renderHours(chartID, counts, maximum) {
-    const chart = document.getElementById(chartID);
-    if (!chart) return;
-    for (let hour = 0; hour < 24; hour += 1) {
-      const count = Number(counts[hour]) || 0;
-      const bar = document.createElement('div');
-      bar.className = 'hourly-chart-bar';
-      bar.style.height = (maximum > 0 ? Math.max(1, count * 100 / maximum) : 1) + '%';
-      bar.setAttribute('title', String(hour).padStart(2, '0') + ':00 · ' + count);
-      const value = document.createElement('span');
-      value.className = 'hourly-chart-value';
-      value.textContent = String(count);
-      const label = document.createElement('span');
-      label.className = 'hourly-chart-label';
-      label.textContent = hour % 3 === 0 ? String(hour).padStart(2, '0') : '';
-      bar.appendChild(value);
-      bar.appendChild(label);
-      chart.appendChild(bar);
-    }
-  }
-
-  const serverHours = parseHours('analytics-server-hours');
-  let sharedMaximum = 0;
-  for (const count of serverHours) sharedMaximum = Math.max(sharedMaximum, Number(count) || 0);
-  renderHours('analytics-server-hour-chart', serverHours, sharedMaximum);
-})();
-
 (function renderAnalyticsMaps() {
   'use strict';
   function renderMap(mapID, pointsID, overlayID, dialogID, listID, blockedMap) {
@@ -2074,7 +1936,6 @@
   if (bounds.length === 1) map.setView(bounds[0], 4);
   if (bounds.length > 1) map.fitBounds(bounds, {padding:[28,28], maxZoom:5});
   }
-  renderMap('analytics-visitor-map', 'analytics-map-points', 'analytics-session-map-overlay', 'analytics-map-sessions', 'analytics-map-sessions-list', false);
   renderMap('analytics-blocked-ip-map', 'analytics-blocked-map-points', 'analytics-blocked-map-overlay', 'analytics-blocked-map-dialog', 'analytics-blocked-map-list', true);
 })();
 
@@ -2242,5 +2103,6 @@
   window.setInterval(renderServerClock, 1000);
 })();
 </script>
+{{end}}
 </body>
 </html>

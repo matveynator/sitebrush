@@ -14,6 +14,15 @@ const MaximumPages = 64
 
 // Event carries cumulative engagement so retransmission cannot inflate totals.
 type Event struct {
+	Replay          []ReplayEvent   `json:"replay,omitempty"`
+	ReplayRecording bool            `json:"replay_recording,omitempty"`
+	ReplayAllowed   bool            `json:"-"`
+	Change          *PageChange     `json:"-"`
+	Location        VisitorLocation `json:"-"`
+	Version         int             `json:"version,omitempty"`
+	Signals         []Signal        `json:"signals,omitempty"`
+	Layout          string          `json:"layout,omitempty"`
+	Device          string          `json:"device,omitempty"`
 	BrowserContext
 	Attribution Attribution `json:"-"`
 	Visitor     string      `json:"visitor"`
@@ -96,6 +105,7 @@ type Day struct {
 }
 
 type Site struct {
+	Conversion      *ConversionState `json:"conversion,omitempty"`
 	Goals           []Goal
 	Experience      Experience
 	ProcessingLagMS int64
@@ -119,6 +129,7 @@ type Retention struct {
 	Returned int
 }
 type Report struct {
+	Conversion          ConversionReport
 	Experience          ExperienceReport
 	ProcessingLagMS     int64
 	QueuePercent        int
@@ -167,6 +178,10 @@ func dayStart(now time.Time) time.Time {
 
 // Recount also discards stale state before a restored snapshot is admitted.
 func (site *Site) Prune(now time.Time) {
+	if site.Conversion != nil {
+		site.pruneConversion(now)
+		return
+	}
 	cutoff := dayKey(dayStart(now.UTC()).AddDate(0, 0, -RetentionDays+1))
 	site.pruneExperience(now)
 	site.Used = 1024 + site.experienceBytes()
@@ -258,6 +273,13 @@ func increment(counters map[string]int, label string) {
 }
 
 func (site *Site) Record(event Event, now time.Time, limit int64) bool {
+	if event.Version == 2 {
+		return site.recordConversion(event, now, limit)
+	}
+	if site.Conversion != nil {
+		site.Conversion.Incomplete = true
+		return false
+	}
 	if dayKey(site.LastEvent) != dayKey(now) {
 		site.Prune(now)
 	}
@@ -529,6 +551,9 @@ func merge(target, source map[string]int) {
 }
 
 func (site *Site) Report(now time.Time, days int) Report {
+	if site.Conversion != nil {
+		return Report{Conversion: site.conversionReport(now, days), Generated: now, Days: days, PeriodStart: dayStart(now.UTC()).AddDate(0, 0, -days+1), PeriodEnd: now, Incomplete: site.Conversion.Incomplete}
+	}
 	start := dayStart(now.UTC()).AddDate(0, 0, -days+1)
 	report := Report{ProcessingLagMS: site.ProcessingLagMS, QueuePercent: site.QueuePercent, EstimatedBytes: site.Used, ComparisonAvailable: days*2 <= RetentionDays && !site.Started.After(start.AddDate(0, 0, -days)), PeriodStart: start, PeriodEnd: now, Generated: now, Started: site.Started, Days: days, Incomplete: site.Incomplete, HistoryLimited: site.HistoryLimited}
 	pages, sources, entries, exits, transitions, insights := map[string]int{}, map[string]int{}, map[string]int{}, map[string]int{}, map[string]int{}, map[string]int{}
@@ -640,6 +665,12 @@ func (site *Site) Report(now time.Time, days int) Report {
 }
 
 func Valid(event Event) bool {
+	if !ValidReplay(event.Replay) {
+		return false
+	}
+	if event.Version != 0 && event.Version != 2 || !ValidSignals(event) {
+		return false
+	}
 	if len(event.Visitor) < 16 || len(event.Visitor) > 64 || len(event.View) < 16 || len(event.View) > 64 || event.Sequence < 1 || event.Sequence > 100000 || event.ActiveMS < 0 || event.ActiveMS > 24*60*60*1000 || event.Scroll < 0 || event.Scroll > 100 {
 		return false
 	}

@@ -166,7 +166,7 @@
                   {{range $siteIndex, $site := $client.Sites}}
                   <div class="expense-simple-site">
                     <span>{{if $site.URL}}<a href="{{$site.URL}}" target="_blank" rel="noopener noreferrer">{{$site.Domain}}</a>{{else}}{{$site.Domain}}{{end}}{{range $certificate := $site.CertificateDomains}}<br><small>{{if $certificate.Valid}}<span class="status-ok">{{$certificate.Domain}} · {{index $.T "domain_settings_ssl_valid"}} · {{$certificate.ExpiresAt}} ({{$certificate.Remaining}})</span>{{else}}<span class="status-bad">{{$certificate.Domain}} · {{index $.T "domain_settings_ssl_invalid"}}{{if $certificate.LastError}} · {{$certificate.LastError}}{{end}}</span>{{end}} {{if $certificate.CanRenew}}<button type="button" class="btn btn-outline-primary btn-sm" data-certificate-renew="{{$certificate.Domain}}">{{index $.T "domain_settings_ssl_renew_now"}}</button><span data-certificate-renew-status="{{$certificate.Domain}}" aria-live="polite"></span>{{end}}</small>{{end}}</span>
-                    <span>{{$site.UsedLabel}} · {{$site.BillingPriceLabel}}</span>
+                    <span>{{$site.UsedLabel}} · {{$site.BillingPriceLabel}}{{if $site.AnalyticsLabel}}<small class="d-block">{{index $.T "cx_storage"}}: {{$site.AnalyticsLabel}}</small>{{end}}</span>
                     <span>
                       {{if $site.CanEditQuota}}<button type="button" class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#simpleQuota{{$serverIndex}}_{{$clientIndex}}_{{$siteIndex}}">{{index $.T "billing_quota"}}: {{$site.LimitLabel}}</button>
                       {{else}}{{index $.T "billing_quota"}}: {{$site.LimitLabel}}{{end}}
@@ -1055,7 +1055,7 @@
                   <div class="billing-client-site-row {{if $site.OverLimit}}billing-client-site-over-limit{{end}}">
                     {{if $site.URL}}<a href="{{$site.URL}}" target="_blank" rel="noopener noreferrer">{{$site.Domain}}</a>{{else}}<span>{{$site.Domain}}</span>{{end}}
                     <div class="hosting-server-site-quota">
-                      <span>{{$site.UsedLabel}} /</span>
+                      <span>{{$site.UsedLabel}} /{{if $site.AnalyticsLabel}}<small class="d-block">{{index $.T "cx_storage"}}: {{$site.AnalyticsLabel}}</small>{{end}}</span>
                       {{if $site.CanEditQuota}}
                       <button type="button" class="hosting-server-quota-button" data-hosting-quota-edit="hostingQuotaEditor{{$serverIndex}}_{{$clientIndex}}_{{$siteIndex}}">{{$site.LimitLabel}}</button>
                       <form id="hostingQuotaEditor{{$serverIndex}}_{{$clientIndex}}_{{$siteIndex}}" class="hosting-server-quota-editor" data-hosting-quota-editor data-hosting-quota-modal="hostingQuotaModal{{$serverIndex}}_{{$clientIndex}}_{{$siteIndex}}" hidden>
@@ -1294,7 +1294,7 @@
                 {{range $user.Sites}}
                 <div class="billing-user-site-line">
                   {{if .URL}}<a href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.Domain}}</a>{{else}}<span>{{.Domain}}</span>{{end}}
-                  <span>{{.UsedLabel}} / {{if .LimitLabel}}{{.LimitLabel}}{{else}}лимит не передан{{end}}</span>
+                  <span>{{.UsedLabel}} / {{if .LimitLabel}}{{.LimitLabel}}{{else}}лимит не передан{{end}}{{if .AnalyticsLabel}}<small class="d-block">{{index $.T "cx_storage"}}: {{.AnalyticsLabel}}</small>{{end}}</span>
                   <span>{{.BillingUsageLabel}} · {{.BillingPriceLabel}} · {{.BillingStatusText}}</span>
                   <span>{{.Status}}{{if .InstallationIP}} · {{.InstallationIP}}{{end}}{{if .OverLimit}} · превышение лимита{{end}}</span>
                   {{if .HostingOwner}}<span>владелец хостинга: {{.HostingOwner}}</span>{{end}}

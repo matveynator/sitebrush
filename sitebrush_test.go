@@ -3218,22 +3218,7 @@ func TestLatestServerBinaryDownloadURL(t *testing.T) {
 	}
 }
 
-func TestAnalyticsErrorsLinkToDetails(t *testing.T) {
-	view := analyticsReportView(analyticsPreparedReport{SessionMetricsVersion: analyticsSessionMetricsFormatVersion, ErrorCount: 12, ErrorPaths: []analyticsCountRow{{Label: "/missing", Count: 12}}}, translationsForLanguageCode("ru"))
-	foundCard, foundSection := false, false
-	for _, card := range view.Cards {
-		if card.Link == "#analytics-errors" {
-			foundCard = card.Value == "12"
-		}
-	}
-	for _, section := range view.Sections {
-		if section.ID == "analytics-errors" {
-			foundSection = len(section.Rows) == 1 && section.Rows[0].Value == "12"
-		}
-	}
-	if !foundCard || !foundSection {
-		t.Fatal("error counter is not connected to its detail section")
-	}
+func TestAnalyticsRemovesTechnicalReports(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "password"); err != nil {
 		t.Fatal(err)
@@ -3242,11 +3227,13 @@ func TestAnalyticsErrorsLinkToDetails(t *testing.T) {
 	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
 	response := httptest.NewRecorder()
 	application.route(response, request)
-	if response.Code != 200 || !strings.Contains(response.Body.String(), `href="#analytics-errors"`) || !strings.Contains(response.Body.String(), `id="analytics-errors"`) {
-		t.Fatal("rendered error counter has no usable detail link")
+	if response.Code != 200 {
+		t.Fatal(response.Code)
 	}
-	if !strings.Contains(response.Body.String(), `href="#analytics-errors">Подробности ошибок</a>`) {
-		t.Fatal("explicit error detail link is missing")
+	for _, fragment := range []string{`id="technical-analytics"`, `id="analytics-errors"`, `id="session-map"`, `data-activity-calendar="visitors"`, `id="analytics-server-hour-chart"`} {
+		if strings.Contains(response.Body.String(), fragment) {
+			t.Fatalf("technical report retained: %s", fragment)
+		}
 	}
 }
 
@@ -3492,14 +3479,15 @@ func TestAnalyticsPageRequiresAdminAndRendersPreparedReport(t *testing.T) {
 		t.Fatalf("admin status = %d, body=%q", adminResponse.Code, adminResponse.Body.String())
 	}
 	body := adminResponse.Body.String()
-	for _, expectedFragment := range []string{"Analytics", "Total requests", "/docs", `href="/docs"`, `data-activity-calendar="visitors"`, "Activity by day (UTC)", `id="analytics-server-hour-chart"`, `<details id="analytics-goals"`, "Goals are not configured", "Edit goals"} {
+	for _, expectedFragment := range []string{"Analytics", "Conversion", "Behaviour", "Retention", `id="conversion-dashboard"`, `id="conversion-configuration"`, `analytics_dashboard.js`} {
 		if !strings.Contains(body, expectedFragment) {
-			t.Fatalf("analytics page missing %q in %s", expectedFragment, body)
+			t.Fatalf("analytics missing %q", expectedFragment)
 		}
 	}
-	if strings.Contains(body, "analytics-local-hour-chart") || strings.Contains(body, "Visitor local time") || strings.Contains(body, `id="analytics-goals" open`) {
-		t.Fatalf("analytics page still shows visitor local time or expands goal editor by default")
+	if strings.Contains(body, `id="technical-analytics"`) {
+		t.Fatal("technical data leaked into Analytics")
 	}
+
 	securityRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs?analytics&tab=security", nil)
 	securityRequest.Header.Set("Accept-Language", "en")
 	securityRequest.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
@@ -12973,7 +12961,7 @@ func TestSimplifiedExpenseLabelsExistInEveryLanguage(t *testing.T) {
 	}
 }
 
-func TestGuestStaticAnalyticsAvoidsDatabaseAndEnqueuesEvent(t *testing.T) {
+func TestGuestStaticAnalyticsAvoidsDatabaseAndUsesBrowserCollector(t *testing.T) {
 	storagePath := t.TempDir()
 	application := &App{db: panicSQLExecutor{t: t}, storagePath: storagePath, analyticsEvents: make(chan siteAnalyticsEvent, 1)}
 	staticFilePath := filepath.Join(application.domainStaticDir("localhost"), "index.html")
@@ -12990,16 +12978,11 @@ func TestGuestStaticAnalyticsAvoidsDatabaseAndEnqueuesEvent(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200, body=%q", response.Code, response.Body.String())
 	}
-	select {
-	case event := <-application.analyticsEvents:
-		if event.ContentSource != "static" {
-			t.Fatalf("content source = %q, want static", event.ContentSource)
-		}
-		if event.Domain != "localhost" {
-			t.Fatalf("domain = %q, want localhost", event.Domain)
-		}
-	default:
-		t.Fatal("guest static request did not enqueue analytics event")
+	if len(application.analyticsEvents) != 0 {
+		t.Fatal("guest delivery collected a technical HTTP event")
+	}
+	if !strings.Contains(response.Body.String(), "/p/static/analytics.js") || !strings.Contains(response.Body.String(), "data-analytics-layout") {
+		t.Fatal("guest page lacks the batched browser collector or published version")
 	}
 }
 
@@ -15827,8 +15810,8 @@ func TestAnalyticsAdmissionWithStalledStorage(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("HTTP response waited for analytics")
 	}
-	if len(app.analyticsLosses) == 0 {
-		t.Fatal("overflow was not signalled")
+	if len(app.analyticsEvents) != 0 {
+		t.Fatal("request statistics are still collected")
 	}
 	cancel()
 	close(database.release)
@@ -16173,7 +16156,8 @@ func TestBrowserAnalyticsDashboardRendersSavedHistory(t *testing.T) {
 	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old"); err != nil {
 		t.Fatal(err)
 	}
-	report := browserstats.Report{Generated: time.Now().UTC(), PeriodStart: time.Now().UTC(), PeriodEnd: time.Now().UTC(), Days: 7, Views: 42, Visitors: 7, Incomplete: true, Insights: []browserstats.Row{{Label: "<script>alert(1)</script>", Count: 1}}}
+	report := browserstats.Report{Generated: time.Now().UTC(), Days: 7, Conversion: browserstats.ConversionReport{Version: 2, Incomplete: true, Funnels: []browserstats.ConversionFunnel{{Name: "<script>alert(1)</script>", Users: 7, Completed: 2, Rate: "28.6%"}}}}
+
 	encoded, err := json.Marshal(map[string]browserstats.Report{"7": report})
 	if err != nil {
 		t.Fatal(err)
@@ -16186,7 +16170,7 @@ func TestBrowserAnalyticsDashboardRendersSavedHistory(t *testing.T) {
 	request.AddCookie(newAdminSessionCookie(t, app, "admin@example.com"))
 	response := httptest.NewRecorder()
 	app.analyticsPage(response, request)
-	for _, fragment := range []string{`id="browser-overview"`, "Часть наблюдений", "browser-returns", `id="technical-analytics"`} {
+	for _, fragment := range []string{`id="conversion-dashboard"`, "Часть наблюдений", `id="conversion-funnels"`, `id="conversion-cohorts"`} {
 		if !strings.Contains(response.Body.String(), fragment) {
 			t.Fatalf("dashboard missing %q", fragment)
 		}
@@ -16213,14 +16197,10 @@ func TestAnalyticsStaticInjectionAndDomainIsolation(t *testing.T) {
 		request := httptest.NewRequest("GET", "http://"+host+"/", nil)
 		request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "no-analytics-auth-query"})
 		handler.ServeHTTP(httptest.NewRecorder(), request)
-		event := <-app.analyticsEvents
-		expected := host
-		if host == "localhost:8080" {
-			expected = "localhost"
+		if len(app.analyticsEvents) != 0 {
+			t.Fatal("static page collected technical analytics")
 		}
-		if event.Domain != expected {
-			t.Fatalf("domain %q, want %q", event.Domain, expected)
-		}
+
 	}
 }
 
@@ -16412,6 +16392,8 @@ func (repository testAnalyticsRepository) Exchange(request browserstats.StorageR
 		var body string
 		err := repository.database.QueryRowContext(ctx, "SELECT "+column+" FROM "+table+" WHERE domain=?", request.Domain).Scan(&body)
 		return browserstats.StorageResult{Text: body, Err: err}
+	case browserstats.ReadConfiguration:
+		return browserstats.StorageResult{Err: sql.ErrNoRows}
 	case browserstats.ReadSecurity:
 		return browserstats.StorageResult{Err: sql.ErrNoRows}
 	case browserstats.SaveSecurity:
@@ -16552,9 +16534,8 @@ func TestAnalyticsVerifiedAliasSharesPrimaryReports(t *testing.T) {
 			t.Fatal("collector shutdown timed out")
 		}
 	}
-	technical, available := app.loadAnalyticsReport(context.Background(), "primary.example", 7)
-	if !available || technical.TotalRequests != 2 {
-		t.Fatalf("technical report: %+v, available=%v", technical, available)
+	if len(app.analyticsEvents) != 0 {
+		t.Fatal("technical requests are still collected")
 	}
 	result := store.Exchange(browserstats.StorageRequest{Operation: browserstats.ReadBrowserReport, Domain: "primary.example"})
 	reports := map[string]browserstats.Report{}
@@ -16641,7 +16622,7 @@ func TestAnalyticsAliasResolutionPreservesRouterFailure(t *testing.T) {
 	}
 }
 
-func TestAnalyticsGoalsRemainInSiteDatabase(t *testing.T) {
+func TestAnalyticsGoalsUseSeparateSiteAnalyticsDatabase(t *testing.T) {
 	app, database := newTestApplication(t)
 	form := url.Values{"goals": {"Download | action | download\nDocs | path | /docs/"}}
 	request := httptest.NewRequest("POST", "http://localhost/?analytics", strings.NewReader(form.Encode()))
@@ -16656,8 +16637,8 @@ func TestAnalyticsGoalsRemainInSiteDatabase(t *testing.T) {
 		t.Fatalf("goals %+v %v", goals, err)
 	}
 	var count int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM analytics_configuration WHERE domain=?`, "localhost").Scan(&count); err != nil || count != 1 {
-		t.Fatal("configuration not in editing database", err)
+	if err := database.QueryRow(`SELECT COUNT(*) FROM analytics_configuration WHERE domain=?`, "localhost").Scan(&count); err != nil || count != 0 {
+		t.Fatal("configuration leaked into editing database", err)
 	}
 	foreign := httptest.NewRequest("POST", "http://localhost/?analytics", strings.NewReader(form.Encode()))
 	foreign.Header.Set("Origin", "https://attacker.example")

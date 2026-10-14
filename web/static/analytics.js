@@ -1,319 +1,335 @@
-/* Each page owns a bounded, cumulative observation. Delivery never gates navigation. */
+/* A page owns a bounded event queue. Navigation never waits for delivery. */
 (function sitebrushAnalytics() {
     'use strict';
-    if (window.SiteBrushAnalyticsStarted) return;
+    const controllerParameters = new URLSearchParams(location.search);
+    if (window.SiteBrushAnalyticsStarted || ['analytics','visual','edit','login','register','profile','revisions','revision_preview','preview','page_password'].some(function controllerPage(flag) { return controllerParameters.has(flag); })) return;
     window.SiteBrushAnalyticsStarted = true;
-    const storageKey = 'sitebrush.analytics.browser.v1';
+    const publishedLayout = document.currentScript ? document.currentScript.getAttribute('data-analytics-layout') : '';
+    const visitorKey = 'sitebrush.analytics.browser.v2';
+    const pendingKey = 'sitebrush.analytics.pending.v2';
     const lifetime = 90 * 86400000;
-    const sensitiveParameters = new Set([
-        'login_challenge', 'profile_resume', 'recovery_token', 'email_confirm', 'registration_form_token',
-        'recovery_code', 'login_code', 'password_confirmation_code', 'token', 'access_token', 'id_token',
-        'secret', 'password', 'passwd', 'auth', 'authorization', 'session', 'sessionid', 'session_id',
-        'api_key', 'apikey', 'key', 'code', 'gclid', 'yclid', 'fbclid'
-    ]);
     const model = {
-        tab: '', session: '', actions: [], sentActions: '', sentURI: '', visitor: '', persistent: false, view: '', sequence: 0,
-        activeMilliseconds: 0, maximumScroll: 0, lastSample: 0,
-        lastInteraction: 0, lastScrollSample: 0, connection: null,
-        pendingTimer: null, deliveryAfter: 0, lastSent: 0, sentActive: 0, sentScroll: 0, firstSent: false, stopped: false, retryCount: 0
+        visitor: '', persistent: false, tab: '', session: '', view: '', sequence: 0, path: '', evidence: null,
+        signals: [], limited: false, connection: null, lastSent: -10000, started: 0,
+        lastInteraction: 0, maximumScroll: 0, layout: '', device: '', retryCount: 0, nextConnect: 0,
+        forms: new WeakMap(), sections: new WeakSet(), recentClicks: [], timers: [], uriRules: [], matchedRules: new Set(),
+        replay: [], replayAllowed: false, replayPreferences: null, replayPolicySession: '', replayScroll: -1, replayScrollAt: 0, replayFields: new Map(), stopped: false
     };
 
-    function boundedText(text, maximum) {
-        let result = ''; let size = 0;
-        for (const character of String(text || '')) {
-            size += new TextEncoder().encode(character).length;
-            if (size > maximum) break;
-            result += character;
+    function randomIdentity() {
+        const identityBytes = new Uint8Array(16);
+        crypto.getRandomValues(identityBytes);
+        return Array.from(identityBytes, function hexadecimal(identityByte) { return identityByte.toString(16).padStart(2, '0'); }).join('');
+    }
+    function validName(eventName) { return /^[A-Za-z0-9_-]{1,64}$/.test(eventName || ''); }
+    function structuralKey(element) {
+        if (!element || element.nodeType !== 1) return '';
+        const explicitKey = element.getAttribute('data-analytics-key');
+        if (validName(explicitKey)) return 'key:' + explicitKey;
+        const segments = [];
+        let currentElement = element;
+        while (currentElement && currentElement.nodeType === 1 && segments.length < 12) {
+            let ordinal = 1;
+            let previousElement = currentElement.previousElementSibling;
+            while (previousElement) { if (previousElement.tagName === currentElement.tagName) ordinal++; previousElement = previousElement.previousElementSibling; }
+            segments.unshift(currentElement.tagName.toLowerCase() + ':' + ordinal);
+            currentElement = currentElement.parentElement;
         }
-        return result;
+        const elementKey = segments.join('>');
+        return elementKey.length <= 180 ? elementKey : '';
     }
-
-    function removeSensitiveParameters(parameters, removeCampaignParameters) {
-        for (const key of Array.from(parameters.keys())) {
-            const lower = key.toLowerCase();
-            if (sensitiveParameters.has(lower) || (removeCampaignParameters && lower.startsWith('utm_'))) parameters.delete(key);
-        }
-        parameters.sort();
-    }
-
-    function createIdentity() {
-        const randomBytes = new Uint8Array(16);
-        crypto.getRandomValues(randomBytes);
-        return Array.from(randomBytes, function hexadecimal(randomByte) {
-            return randomByte.toString(16).padStart(2, '0');
-        }).join('');
-    }
-
-    function restoreVisitor() {
-        const currentTime = Date.now();
-        model.visitor = createIdentity();
+    function restoreIdentity() {
+        model.visitor = randomIdentity();
+        model.tab = randomIdentity();
+        model.session = randomIdentity();
         try {
-            const storedText = localStorage.getItem(storageKey);
-            const storedVisitor = storedText ? JSON.parse(storedText) : null;
-            if (storedVisitor && /^[a-f0-9]{32}$/.test(storedVisitor.identity) &&
-                storedVisitor.expires > currentTime && storedVisitor.expires <= currentTime + lifetime) {
-                model.visitor = storedVisitor.identity;
-            } else {
-                localStorage.setItem(storageKey, JSON.stringify({ identity: model.visitor, expires: currentTime + lifetime }));
-            }
+            const previousVisitor = JSON.parse(localStorage.getItem(visitorKey) || 'null');
+            if (previousVisitor && /^[a-f0-9]{32}$/.test(previousVisitor.identity) && previousVisitor.expires > Date.now() && previousVisitor.expires <= Date.now() + lifetime) model.visitor = previousVisitor.identity;
+            localStorage.setItem(visitorKey, JSON.stringify({identity: model.visitor, expires: Date.now() + lifetime}));
             model.persistent = true;
-        } catch (storageError) {
-            console.debug('SiteBrush analytics: browser history unavailable', storageError.name);
-        }
-    }
-
-    function restoreSession() {
-        const now = Date.now();
-        try {
-            model.tab = sessionStorage.getItem('sitebrush.analytics.tab') || createIdentity();
+            model.tab = sessionStorage.getItem('sitebrush.analytics.tab') || model.tab;
             sessionStorage.setItem('sitebrush.analytics.tab', model.tab);
-            const previous = JSON.parse(localStorage.getItem('sitebrush.analytics.session') || 'null');
-            model.session = previous && now - previous.last < 1800000 ? previous.identity : createIdentity();
-            localStorage.setItem('sitebrush.analytics.session', JSON.stringify({identity: model.session, last: now}));
-        } catch (sessionError) {
-            model.tab = model.tab || createIdentity();
-            model.session = model.session || createIdentity();
-            console.debug('SiteBrush analytics: temporary session', sessionError.name);
-        }
+            const previousSession = JSON.parse(localStorage.getItem('sitebrush.analytics.session') || 'null');
+            if (previousSession && /^[a-f0-9]{32}$/.test(previousSession.identity) && Date.now() - previousSession.last < 1800000) model.session = previousSession.identity;
+            localStorage.setItem('sitebrush.analytics.session', JSON.stringify({identity: model.session, last: Date.now()}));
+        } catch (storageError) { console.debug('SiteBrush analytics: temporary identity', storageError.name); }
     }
-
-    function currentURI() {
+    function sourceEvidence() {
         const parameters = new URLSearchParams(location.search);
-        removeSensitiveParameters(parameters, true);
+        function campaignField(fieldName) {
+            const campaignText = parameters.get('utm_' + fieldName) || '';
+            return /^[A-Za-z0-9 _.-]{0,64}$/.test(campaignText) ? campaignText : '';
+        }
+        let referrer = '';
+        try { const referrerURL = new URL(document.referrer); if (referrerURL.protocol === 'http:' || referrerURL.protocol === 'https:') { referrerURL.username = ''; referrerURL.password = ''; referrerURL.hash = ''; for (const parameterName of Array.from(referrerURL.searchParams.keys())) { if (/^(token|access_token|id_token|secret|password|passwd|auth|authorization|session|sessionid|session_id|api_key|apikey|key|code|login_challenge|profile_resume|recovery_token|email_confirm|registration_form_token|recovery_code|login_code|password_confirmation_code|gclid|yclid|fbclid)$/i.test(parameterName)) referrerURL.searchParams.delete(parameterName); } referrer = referrerURL.href.slice(0,1024); } } catch (referrerError) { if (document.referrer) referrer = 'unknown-referrer'; }
+        return {referrer: referrer, campaign: {Source: campaignField('source'), Medium: campaignField('medium'), Name: campaignField('campaign')}};
+    }
+    function enqueue(signal) {
+        if (model.stopped) return;
+        signal.at = Math.floor(performance.now() - model.started);
+        if (model.signals.length >= 100) { model.limited = true; return; }
+        model.signals.push(signal);
+        if (model.connection && model.connection.readyState >= WebSocket.CLOSING && document.visibilityState === 'visible') connect();
+        if (model.signals.length >= 20) flush(false);
+    }
+    function businessEvent(eventName) {
+        if (!validName(eventName)) { console.error('SiteBrush analytics: invalid event name'); return; }
+        enqueue({kind: 'goal', name: eventName});
+    }
+    function legacyAction(actionName) { businessEvent(actionName); }
+    function formResult(formKey, success) {
+        if (!validName(formKey) || typeof success !== 'boolean') { console.error('SiteBrush analytics: invalid form result'); return; }
+        enqueue({kind: success ? 'form-success' : 'form-failed', form: 'key:' + formKey});
+    }
+    function observeConfiguredURI() {
+        const parameters = new URLSearchParams(location.search);
+        const privateParameters = new Set(['token','access_token','id_token','password','passwd','secret','auth','authorization','session','sessionid','session_id','api_key','apikey','key','code','gclid','yclid','fbclid','login_challenge','profile_resume','recovery_token','email_confirm','registration_form_token','recovery_code','login_code','password_confirmation_code']);
+        for (const parameterName of Array.from(parameters.keys())) { if (privateParameters.has(parameterName.toLowerCase()) || parameterName.toLowerCase().startsWith('utm_')) parameters.delete(parameterName); }
+        parameters.sort();
         const query = parameters.toString();
         const fragment = /^#[A-Za-z0-9._~-]{1,64}$/.test(location.hash || '') ? location.hash : '';
-        const pathname = boundedText(location.pathname || '/', 256) || '/';
-        const result = pathname + (query ? '?' + query : '') + fragment;
-        return new TextEncoder().encode(result).length <= 256 ? result : pathname;
+        const observedURI = location.pathname + (query ? '?' + query : '') + fragment;
+        for (const rule of model.uriRules) { if (rule.Match === observedURI && !model.matchedRules.has(rule.Name)) { model.matchedRules.add(rule.Name); enqueue({kind:'goal',name:rule.Name}); } }
     }
-
-    function cleanTarget(address) {
-        try {
-            const destination = new URL(address, location.href);
-            if (destination.protocol !== 'http:' && destination.protocol !== 'https:') return destination.protocol;
-            return (destination.origin === location.origin ? '' : destination.hostname) + destination.pathname.slice(0, 120);
-        } catch (targetError) { return ''; }
-    }
-
-    function recordAction(name, target) {
-        if (!/^[a-zA-Z0-9_-]{1,64}$/.test(name)) return;
-        recordInteraction();
-        const destination = cleanTarget(target || location.pathname);
-        const existing = model.actions.find(function matches(action) { return action.name === name && action.target === destination; });
-        if (existing) existing.count = Math.min(10000, existing.count + 1);
-        else if (model.actions.length < 8) model.actions.push({name: name, target: destination, count: 1});
-        sendObservation(true);
-    }
-
-    function clicked(clickEvent) {
-        const element = clickEvent.target.closest ? clickEvent.target.closest('[sitebrush-data-analytics-action],[data-analytics-action],a[href]') : null;
-        if (!element) return;
-        const address = element.getAttribute('href') || location.pathname;
-        let actionName = element.getAttribute('sitebrush-data-analytics-action') || element.getAttribute('data-analytics-action');
-        if (!actionName) {
-            if (element.hasAttribute('download')) actionName = 'download';
-            else {
-                try { actionName = new URL(address, location.href).origin === location.origin ? 'next-page' : 'outbound'; }
-                catch (addressError) { return; }
-            }
-        }
-        recordAction(actionName, address);
-    }
-
-    function campaignFields() {
-        const parameters = new URLSearchParams(location.search);
-        function field(name) { return boundedText(parameters.get('utm_' + name), 64); }
-        return {Source: field('source'), Medium: field('medium'), Name: field('campaign'), Content: field('content'), Term: field('term'), Google: parameters.has('gclid'), Yandex: parameters.has('yclid'), Facebook: parameters.has('fbclid')};
-    }
-
-    function updateActiveTime() {
-        const currentTime = performance.now();
-        if (document.visibilityState === 'visible') {
-            const activeEnd = Math.min(currentTime, model.lastInteraction + 30000);
-            model.activeMilliseconds += Math.max(0, activeEnd - model.lastSample);
-        }
-        model.lastSample = currentTime;
-    }
-
-    function updateScroll() {
-        const currentTime = performance.now();
-        if (currentTime - model.lastScrollSample < 250) return;
-        model.lastScrollSample = currentTime;
-        const pageHeight = Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0);
-        const bottomPosition = window.scrollY + window.innerHeight;
-        model.maximumScroll = Math.max(model.maximumScroll, Math.min(100, Math.floor(bottomPosition * 100 / Math.max(1, pageHeight))));
-    }
-
     function recordInteraction() {
-        if (performance.now() - model.lastInteraction > 30 * 60000) startView();
-        updateActiveTime();
+        if (performance.now() - model.lastInteraction > 1800000) { flush(true); startView(); }
         model.lastInteraction = performance.now();
-        updateScroll();
-        connect();
+        try { localStorage.setItem('sitebrush.analytics.session', JSON.stringify({identity:model.session,last:Date.now()})); } catch (sessionError) { /* Temporary sessions require no persistence. */ }
     }
-
-    function sourceDescription() {
-        const parameters = new URLSearchParams(location.search);
-        const campaignSource = parameters.get('utm_source');
-        if (!campaignSource) return '';
-        return boundedText('utm:' + campaignSource + '/' + (parameters.get('utm_medium') || '') + '/' + (parameters.get('utm_campaign') || ''), 128);
+    function recordScroll() {
+        recordInteraction();
+        const pageHeight = Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0, window.innerHeight);
+        const depth = Math.min(100, Math.floor((window.scrollY + window.innerHeight) / pageHeight * 100 / 10) * 10);
+        if (depth > model.maximumScroll) { model.maximumScroll = depth; enqueue({kind:'scroll',scroll:depth}); }
     }
-
-    function referrerAddress() {
-        if (!document.referrer) return '';
-        try {
-            const referrer = new URL(document.referrer);
-            if (referrer.protocol !== 'http:' && referrer.protocol !== 'https:') return '';
-            referrer.username = '';
-            referrer.password = '';
-            referrer.hash = '';
-            removeSensitiveParameters(referrer.searchParams, false);
-            return boundedText(referrer.href, 1024);
-        } catch (referrerError) {
-            console.debug('SiteBrush analytics: invalid referrer', referrerError.name);
-            return '';
+    function recordClick(clickEvent) {
+        recordInteraction();
+        const clickedElement = clickEvent.target.closest ? clickEvent.target.closest('*') : null;
+        const elementKey = structuralKey(clickedElement);
+        if (!elementKey) return;
+        enqueue({kind:'click',element:elementKey});
+        const actionElement = clickedElement.closest('[sitebrush-data-analytics-action],[data-analytics-action],a[href]');
+        if (actionElement) {
+            const actionName = actionElement.getAttribute('sitebrush-data-analytics-action') || actionElement.getAttribute('data-analytics-action');
+            if (actionName) businessEvent(actionName);
+            if (actionElement.hasAttribute('download') || /\.(zip|gz|tgz|tar|bz2|xz|7z|rar|pdf|exe|msi|dmg|pkg|deb|rpm|appimage|apk|epub|docx?|xlsx?|pptx?)$/i.test(new URL(actionElement.href,location.href).pathname)) enqueue({kind:'download',name:'download',element:structuralKey(actionElement)});
+            else if (actionElement.hasAttribute('href')) {
+                try { if (new URL(actionElement.getAttribute('href'), location.href).origin !== location.origin) enqueue({kind:'external-link',name:'outbound',element:structuralKey(actionElement)}); } catch (addressError) { /* Invalid destinations are not useful analytics. */ }
+            }
         }
-    }
-
-    function retainPendingAction() {
-        if (!model.actions.length) return;
-        try { sessionStorage.setItem('sitebrush.analytics.pending', JSON.stringify({expires: Date.now() + 1800000, visitor: model.visitor, view: model.view, sequence: model.sequence + 1, path: location.pathname.slice(0, 512), uri: currentURI(), tab: model.tab, session: model.session, persistent: model.persistent, actions: model.actions, active_ms: Math.floor(model.activeMilliseconds), scroll: model.maximumScroll, language: (navigator.language || '').slice(0,32), page_language: document.documentElement.lang.slice(0,32), source: sourceDescription(), referrer: referrerAddress(), campaign: campaignFields()})); }
-        catch (pendingError) { console.debug('SiteBrush analytics: pending action unavailable', pendingError.name); }
-    }
-
-    function beginDelivery() {
-        let pending = null;
-        try {
-            const pendingText = sessionStorage.getItem('sitebrush.analytics.pending');
-            if (pendingText && pendingText.length < 8192) pending = JSON.parse(pendingText);
-            sessionStorage.removeItem('sitebrush.analytics.pending');
-        } catch (pendingError) { console.debug('SiteBrush analytics: pending action invalid', pendingError.name); }
-        if (pending && pending.visitor === model.visitor && pending.view !== model.view && pending.expires > Date.now()) {
-            delete pending.expires;
-            while (new TextEncoder().encode(JSON.stringify(pending)).length > 4000 && pending.actions.length) {pending.actions = pending.actions.slice(0,-1);pending.limited = true;}
-            model.connection.send(JSON.stringify(pending));
-            model.lastSent = performance.now(); model.deliveryAfter = model.lastSent + 1100;
-            window.setTimeout(function sendCurrentView() { sendObservation(true); }, 1150);
-        } else sendObservation(true);
-    }
-
-    function sendObservation(force) {
-        updateActiveTime();
-        updateScroll();
         const currentTime = performance.now();
-        if (currentTime < model.deliveryAfter) { if (force) retainPendingAction(); return; }
-        const uri = currentURI();
-        if (model.firstSent && Math.floor(model.activeMilliseconds) === model.sentActive && model.maximumScroll === model.sentScroll && JSON.stringify(model.actions) === model.sentActions && uri === model.sentURI) return;
-        if (model.stopped || !model.connection || model.connection.readyState !== WebSocket.OPEN) { if (force) retainPendingAction(); return; }
-        if (model.firstSent && currentTime - model.lastSent < (force ? 1100 : 30000)) {
-            if (force && !model.pendingTimer) model.pendingTimer = window.setTimeout(function sendPendingAction() { model.pendingTimer = null; sendObservation(true); }, 1150 - (currentTime - model.lastSent));
-            if (force) retainPendingAction();
-            return;
+        model.recentClicks = model.recentClicks.filter(function recent(click) { return currentTime - click.at <= 2000; });
+        model.recentClicks.push({element:elementKey,at:currentTime});
+        if (model.recentClicks.length > 10) model.recentClicks.shift();
+        if (model.recentClicks.filter(function sameElement(click) { return click.element === elementKey; }).length === 3) enqueue({kind:'rage-click',element:elementKey});
+        if (clickedElement.closest('a,button,input,select,textarea,label,[role="button"],[role="link"],[contenteditable]')) return;
+        if (typeof MutationObserver !== 'function' || model.timers.length >= 8) return;
+        const initialView = model.view;
+        const initialFocus = document.activeElement;
+        const initialPath = location.pathname;
+        let interfaceChanged = false;
+        const changeObserver = new MutationObserver(function changed() { interfaceChanged = true; });
+        changeObserver.observe(document.body, {childList:true,subtree:true,attributes:true});
+        const timer = window.setTimeout(function checkClickResult() {
+            changeObserver.disconnect();
+            model.timers = model.timers.filter(function keepTimer(pendingTimer) { return pendingTimer !== timer; });
+            if (model.view === initialView && !interfaceChanged && document.activeElement === initialFocus && location.pathname === initialPath) enqueue({kind:'dead-click',element:elementKey});
+        }, 1000);
+        model.timers.push(timer);
+    }
+    function formInteraction(formEvent) {
+        recordInteraction();
+        const fieldElement = formEvent.target;
+        const formElement = fieldElement.form || (fieldElement.closest ? fieldElement.closest('form') : null);
+        if (!formElement) return;
+        const formKey = structuralKey(formElement);
+        if (!formKey) return;
+        let formState = model.forms.get(formElement);
+        if (!formState) { formState = {viewed:false,started:false}; model.forms.set(formElement, formState); }
+        if (!formState.viewed) { enqueue({kind:'form-view',form:formKey}); formState.viewed = true; }
+        if (formEvent.type !== 'submit') {
+            if (formEvent.type === 'input' && formState.lastField === fieldElement) return;
+            formState.lastField = fieldElement;
+            if (!formState.started) { enqueue({kind:'form-start',form:formKey}); formState.started = true; }
+            const fieldKey = structuralKey(fieldElement);
+            if (fieldKey) {
+                const filled = ['checkbox','radio'].includes(fieldElement.type) ? fieldElement.checked : typeof fieldElement.value === 'string' && fieldElement.value.length > 0;
+                enqueue({kind:'field',form:formKey,field:fieldKey,filled:filled});
+            }
+        } else { if (!formState.started) { enqueue({kind:'form-start',form:formKey}); formState.started=true; } enqueue({kind:'form-submit',form:formKey}); }
+    }
+    function observeSections() {
+        if (typeof IntersectionObserver !== 'function') return;
+        const sectionObserver = new IntersectionObserver(function reached(entries) {
+            for (const entry of entries) {
+                if (!entry.isIntersecting || model.sections.has(entry.target)) continue;
+                model.sections.add(entry.target);
+                const sectionKey = structuralKey(entry.target);
+                if (entry.target.tagName === 'FORM') {
+                    enqueue({kind:'form-view',form:sectionKey});
+                    const formState = model.forms.get(entry.target) || {viewed:false,started:false};
+                    formState.viewed = true; model.forms.set(entry.target, formState);
+                } else enqueue({kind:'section',element:sectionKey});
+                sectionObserver.unobserve(entry.target);
+            }
+        }, {threshold:0});
+        for (const section of Array.from(document.querySelectorAll('main section,body > section,form,[data-analytics-section]')).slice(0,200)) sectionObserver.observe(section);
+    }
+    function layoutSignature() {
+        if (/^[a-f0-9]{16}$/.test(publishedLayout || '')) return publishedLayout;
+        let signature = 2166136261;
+        if (!document.createTreeWalker || !document.body) return signature.toString(16);
+        const parentOrdinals = new WeakMap();
+        const parentSegments = new WeakMap();
+        parentSegments.set(document.body,structuralKey(document.body).split('>'));
+        const layoutWalker = document.createTreeWalker(document.body,1);
+        let currentElement = layoutWalker.nextNode();
+        let inspected = 0;
+        while (currentElement && inspected < 1000) {
+            inspected++;
+            let siblings = parentOrdinals.get(currentElement.parentElement);
+            if (!siblings) { siblings = new Map(); parentOrdinals.set(currentElement.parentElement,siblings); }
+            const tagName = currentElement.tagName.toLowerCase();
+            const ordinal = (siblings.get(tagName) || 0) + 1; siblings.set(tagName,ordinal);
+            const ancestorSegments = parentSegments.get(currentElement.parentElement) || [];
+            const segments = ancestorSegments.slice(-11).concat(tagName + ':' + ordinal);
+            parentSegments.set(currentElement,segments);
+            if (!currentElement.closest('[data-sitebrush-admin],script,style')) {
+                const explicitKey = currentElement.getAttribute('data-analytics-key');
+                let elementKey = validName(explicitKey) ? 'key:' + explicitKey : segments.join('>');
+                if (elementKey.length > 180) elementKey = '';
+                for (const character of elementKey) signature = Math.imul(signature ^ character.charCodeAt(0),16777619) >>> 0;
+            }
+            currentElement = layoutWalker.nextNode();
         }
-        if (model.connection.bufferedAmount > 4096) {
-            model.stopped = true;
-            model.connection.close();
-            return;
-        }
-        model.sequence++;
-        const observation = {
-            visitor: model.visitor, persistent: model.persistent,
-            tab: model.tab, session: model.session, actions: model.actions,
-            language: (navigator.language || '').slice(0, 32), page_language: document.documentElement.lang.slice(0, 32),
-            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || '', offset: new Date().getTimezoneOffset(),
-            campaign: campaignFields(),
-            view: model.view, sequence: model.sequence,
-            path: location.pathname.slice(0, 512), uri: uri,
-            referrer: referrerAddress(), source: sourceDescription(),
-            active_ms: Math.floor(model.activeMilliseconds), scroll: model.maximumScroll
-        };
+        return signature.toString(16);
+    }
+    function deviceClass() {
+        const userAgent = navigator.userAgent || '';
+        const width = Math.min(window.innerWidth || 32768, (window.screen && window.screen.width) || 32768);
+        if (/iPad|Tablet|PlayBook|Silk/i.test(userAgent) || (/Android/i.test(userAgent) && !/Mobile/i.test(userAgent))) return 'tablet';
+        if (/Mobi|iPhone|iPod|Android/i.test(userAgent) || width < 768) return 'mobile';
+        return 'desktop';
+    }
+    function enqueueReplay(action) {
+        if (!model.replayAllowed || model.stopped) return;
+        action.at = Math.floor(performance.now()-model.started);
+        const previousAction=model.replay[model.replay.length-1];
+        if (previousAction && ['resize','scroll'].includes(action.kind) && previousAction.kind===action.kind && action.at-previousAction.at<250) { model.replay[model.replay.length-1]=action;return; }
+        if (model.replay.length>=100) { model.limited=true; return; }
+        model.replay.push(action);
+    }
+    async function configureReplay(preferences) {
+        if (model.replayPreferences && preferences && model.replayPolicySession===model.session && preferences.enabled===model.replayPreferences.enabled && preferences.sample===model.replayPreferences.sample) return;
+        model.replayPolicySession=model.session;
+        model.replayPreferences = preferences; model.replayAllowed=false;
+        if (!preferences || !preferences.enabled || !crypto.subtle) return;
         try {
-            let encoded = JSON.stringify(observation);
-            while (new TextEncoder().encode(encoded).length > 4000 && observation.actions.length) {
-                observation.actions = observation.actions.slice(0, -1); observation.limited = true; encoded = JSON.stringify(observation);
-            }
-            if (new TextEncoder().encode(encoded).length > 4000) return;
-            model.connection.send(encoded);
-            model.firstSent = true;
-            model.sentActive = observation.active_ms;
-            model.sentScroll = observation.scroll;
-            model.sentActions = JSON.stringify(model.actions);
-            model.sentURI = observation.uri;
-            try { sessionStorage.removeItem('sitebrush.analytics.pending'); } catch (pendingError) { console.debug('SiteBrush analytics: pending cleanup unavailable', pendingError.name); }
-            model.lastSent = currentTime;
-        } catch (connectionError) {
-            model.stopped = true;
-            console.debug('SiteBrush analytics: delivery stopped', connectionError.name);
+            const sessionIdentity = model.session;
+            const digest = new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(sessionIdentity)));
+            let sampleBucket = 0;
+            for (const digestByte of digest.slice(0,8)) sampleBucket = (sampleBucket*256+digestByte)%100;
+            if (sessionIdentity !== model.session || sampleBucket >= preferences.sample) return;
+            model.replayAllowed=true;
+            enqueueReplay({kind:'navigation',width:Math.min(32768,window.innerWidth),height:Math.min(32768,window.innerHeight)});
+        } catch (sampleError) { console.error('SiteBrush replay: sampling unavailable',sampleError.name); }
+    }
+    function replayInteraction(interactionEvent) {
+        if (!model.replayAllowed) return;
+        const targetElement = interactionEvent.target;
+        if (!targetElement || !targetElement.tagName) return;
+        const elementKey = structuralKey(targetElement); if (!elementKey) return;
+        let kind = interactionEvent.type === 'touchstart' ? 'touch' : interactionEvent.type === 'focusin' ? 'focus' : interactionEvent.type === 'input' ? 'field' : 'click';
+        let filled=false;
+        if (kind==='field') { filled=['checkbox','radio'].includes(targetElement.type) ? targetElement.checked : typeof targetElement.value==='string' && targetElement.value.length>0; if (model.replayFields.get(elementKey)===filled) return;model.replayFields.set(elementKey,filled); }
+        enqueueReplay({kind:kind,element:elementKey,filled:filled});
+    }
+    function replayScroll() {
+        if (!model.replayAllowed || performance.now()-model.replayScrollAt<1000) return;
+        const extent = Math.max(1,document.documentElement.scrollHeight-window.innerHeight);
+        const scrollPercent = Math.min(100,Math.max(0,Math.round(window.scrollY*100/extent)));
+        if (Math.abs(scrollPercent-model.replayScroll)<5) return;
+        model.replayScroll=scrollPercent;model.replayScrollAt=performance.now();enqueueReplay({kind:'scroll',scroll:scrollPercent});
+    }
+    function encodeBatch() {
+        if (!model.signals.length && !model.replay.length) return null;
+        const evidence = model.evidence;
+        const envelope = {replay:model.replay.slice(0,20),replay_recording:model.replayAllowed,version:2,visitor:model.visitor,persistent:model.persistent,tab:model.tab,session:model.session,view:model.view,sequence:model.sequence + 1,path:model.path,uri:model.path,layout:model.layout,device:model.device,referrer:evidence.referrer,campaign:evidence.campaign,signals:model.signals.slice(0,20),limited:model.limited};
+        while (new TextEncoder().encode(JSON.stringify(envelope)).length > 16384 && envelope.signals.length + envelope.replay.length > 1) { if (envelope.replay.length) envelope.replay.pop(); else envelope.signals.pop(); envelope.limited = true; }
+        return envelope;
+    }
+    function flush(finalDelivery) {
+        if (!finalDelivery && performance.now() - model.lastSent < 1000) return;
+        const envelope = encodeBatch();
+        if (!envelope) return;
+        if (finalDelivery && (model.signals.length > envelope.signals.length || model.replay.length > envelope.replay.length)) envelope.limited = true;
+        const encoded = JSON.stringify(envelope);
+        let sent = false;
+        if (finalDelivery && navigator.sendBeacon) sent = navigator.sendBeacon('/_sitebrush/analytics', new Blob([encoded], {type:'application/json'}));
+        if (!sent && model.connection && model.connection.readyState === WebSocket.OPEN && model.connection.bufferedAmount < 16384) { model.connection.send(encoded); sent = true; }
+        if (sent) {
+            model.sequence = envelope.sequence; model.signals.splice(0,envelope.signals.length); model.replay.splice(0,envelope.replay.length); model.lastSent = performance.now();
+            try { sessionStorage.setItem(pendingKey,JSON.stringify({expires:Date.now()+1800000,envelope:envelope})); } catch (pendingError) { console.debug('SiteBrush analytics: retry unavailable',pendingError.name); }
         }
     }
-
     function connect() {
-        if (model.stopped || document.visibilityState !== 'visible') return;
         if (model.connection && model.connection.readyState < WebSocket.CLOSING) return;
+        if (performance.now() < model.nextConnect) return;
+        model.nextConnect = performance.now() + 15000;
         model.connection = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/_sitebrush/analytics');
-        model.connection.addEventListener('open', beginDelivery);
-        model.connection.addEventListener('error', function failed() {
-            console.debug('SiteBrush analytics: connection unavailable');
+        model.connection.addEventListener('open', function connected() {
+            try {
+                const pendingBatch = JSON.parse(sessionStorage.getItem(pendingKey) || 'null');
+                sessionStorage.removeItem(pendingKey);
+                if (pendingBatch && pendingBatch.expires > Date.now() && pendingBatch.envelope.visitor === model.visitor && pendingBatch.envelope.view !== model.view) model.connection.send(JSON.stringify(pendingBatch.envelope));
+            } catch (pendingError) { console.debug('SiteBrush analytics: retry invalid',pendingError.name); }
+            flush(false);
         });
-        model.connection.addEventListener('close', function closed() {
-            if (model.retryCount >= 2 || model.stopped || performance.now() - model.lastInteraction > 30000) return;
-            model.retryCount++;
-            window.setTimeout(connect, model.retryCount * 15000);
+        model.connection.addEventListener('message',function configuredRules(messageEvent) {
+            try {
+                const response = JSON.parse(messageEvent.data);
+                if (response.operation !== 'rules' || !Array.isArray(response.rules) || response.rules.length > 320) return;
+                configureReplay(response.replay);
+                model.uriRules = response.rules.filter(function knownRule(rule) { return validName(rule.name) && typeof rule.match === 'string' && rule.match.length <= 256; }).map(function ruleModel(rule) { return {Name:rule.name,Match:rule.match}; });
+                observeConfiguredURI();
+            } catch (ruleError) { console.debug('SiteBrush analytics: invalid goal rules',ruleError.name); }
         });
+        model.connection.addEventListener('close', function disconnected() {
+            if (model.retryCount >= 2 || model.stopped || !model.signals.length) return;
+            model.retryCount++; window.setTimeout(connect,model.retryCount * 15000);
+        });
+        model.connection.addEventListener('error',function failed() { console.debug('SiteBrush analytics: connection unavailable'); });
     }
-
     function startView() {
-        restoreSession();
-        model.actions = []; model.sentActions = ""; model.sentURI = "";
-        model.view = createIdentity();
-        model.sequence = 0;
-        model.activeMilliseconds = 0;
-        model.maximumScroll = 0;
-        model.deliveryAfter = 0;
-        model.firstSent = false;
-        model.lastSample = performance.now();
-        model.lastInteraction = model.lastSample;
-        model.stopped = false;
-        model.retryCount = 0;
-        connect();
+        restoreIdentity(); model.view = randomIdentity(); model.sequence = 0;
+        model.nextConnect = 0; model.retryCount = 0;
+        model.path = location.pathname.slice(0,256); model.evidence = sourceEvidence();
+        model.started = performance.now(); model.lastInteraction = model.started;
+        model.maximumScroll = 0; model.signals = []; model.replay=[]; model.replayScroll=-1; model.replayScrollAt=0; model.replayFields=new Map(); model.limited = false; model.matchedRules = new Set();
+        model.forms = new WeakMap(); model.sections = new WeakSet(); model.recentClicks = [];
+        model.layout = layoutSignature(); model.device = deviceClass();
+        enqueue({kind:'page'}); recordScroll(); observeSections(); observeConfiguredURI(); connect(); if (model.replayPreferences) configureReplay(model.replayPreferences);
     }
-
     function start() {
-        if (!window.crypto || !window.WebSocket || new URLSearchParams(location.search).has('analytics')) return;
-        restoreVisitor();
+        if (!window.crypto || !window.WebSocket) return;
         startView();
-        window.SiteBrushAnalytics = Object.freeze({action: recordAction});
-        document.addEventListener('click', clicked, {capture: true, passive: true});
-        for (const eventName of ['pointerdown', 'keydown', 'scroll']) {
-            window.addEventListener(eventName, recordInteraction, { passive: true });
-        }
-        for (const eventName of ['hashchange', 'popstate']) {
-            window.addEventListener(eventName, function locationChanged() { recordInteraction(); sendObservation(true); }, { passive: true });
-        }
-        document.addEventListener('visibilitychange', function visibilityChanged() {
-            if (document.visibilityState === 'hidden') {
-                // Account for the visible interval before resetting the sampling clock.
-                const currentTime = performance.now();
-                model.activeMilliseconds += Math.max(0, Math.min(currentTime, model.lastInteraction + 30000) - model.lastSample);
-                model.lastSample = currentTime;
-                sendObservation(true);
-            } else {
-                model.lastSample = performance.now();
-                if (model.lastSample - model.lastInteraction > 30 * 60000) startView();
-                else connect();
-            }
-        });
-        window.addEventListener('pagehide', function pageHidden() {
-            sendObservation(true);
-            model.stopped = true;
-            if (model.connection) model.connection.close();
-        });
-        window.addEventListener('pageshow', function pageRestored(pageEvent) {
-            if (pageEvent.persisted) startView();
-        });
-        window.setInterval(function sample() { if (document.visibilityState === 'visible') sendObservation(false); }, 30000);
+        window.SiteBrushAnalytics = Object.freeze({action:legacyAction,event:businessEvent,formResult:formResult});
+        document.addEventListener('click',recordClick,{capture:true,passive:true});
+        for (const replayEventName of ['click','touchstart','focusin','input']) document.addEventListener(replayEventName,replayInteraction,{capture:true,passive:true});
+        window.addEventListener('resize',function replayResize() { enqueueReplay({kind:'resize',width:Math.min(32768,window.innerWidth),height:Math.min(32768,window.innerHeight)}); });
+        window.addEventListener('error',function replayError() { enqueueReplay({kind:'error'}); });
+        document.addEventListener('focusin',formInteraction,{capture:true,passive:true});
+        document.addEventListener('input',formInteraction,{capture:true,passive:true});
+        document.addEventListener('submit',formInteraction,{capture:true,passive:true});
+        let scrollScheduled = false;
+        window.addEventListener('scroll',function scheduleScroll() { if (scrollScheduled) return; scrollScheduled = true; window.setTimeout(function sampleScroll() { scrollScheduled = false; recordScroll(); replayScroll(); },250); },{passive:true});
+        window.addEventListener('popstate',function navigated() { flush(true); startView(); });
+        window.addEventListener('hashchange',observeConfiguredURI);
+        document.addEventListener('visibilitychange',function visibilityChanged() { if (document.visibilityState === 'hidden') flush(true); else connect(); });
+        window.addEventListener('pagehide',function pageHidden() { flush(true); model.stopped = true; if (model.connection) model.connection.close(); });
+        window.addEventListener('pageshow',function pageRestored(pageEvent) { if (pageEvent.persisted) { model.stopped = false; startView(); } });
+        window.setInterval(function sendBatch() { if (document.visibilityState === 'visible') flush(false); },10000);
     }
-
-    if (document.readyState === 'complete') window.setTimeout(start, 0);
-    else window.addEventListener('load', start, { once: true });
+    if (document.readyState === 'complete') window.setTimeout(start,0);
+    else window.addEventListener('load',start,{once:true});
 })();
