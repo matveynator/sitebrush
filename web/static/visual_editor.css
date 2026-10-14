@@ -97,7 +97,7 @@
 .SiteBrushCodeMode .jodit-ui-group {
   display: flex;
   flex-wrap: wrap;
-  width: 100%;
+  flex: 1 1 0;
   min-width: 0;
   height: auto;
 }
@@ -147,10 +147,11 @@
   background: var(--field-bg);
   color: var(--field-text);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 14px;
+  font-size: 16px;
   line-height: 1.45;
 }
 .jodit-source .CodeMirror-gutters { background: var(--surface-soft); border-color: var(--field-border); }
+.jodit-source .CodeMirror textarea { font-size: 16px !important; }
 .jodit-source .CodeMirror-linenumber { color: var(--hint); }
 .jodit-source .CodeMirror-cursor { border-left-color: var(--field-text); }
 .jodit-source .CodeMirror-selected { background: rgba(26,101,216,.22); }

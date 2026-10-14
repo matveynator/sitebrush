@@ -26,7 +26,7 @@ func TestAuthAttackConcurrentTOTPReplayCreatesOneSession(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := database.Exec(`CREATE TABLE sessions(token TEXT,user_email TEXT,created_at TEXT,client_ip TEXT,security_version INTEGER)`); err != nil {
+	if _, err := database.Exec(`CREATE TABLE sessions(token TEXT,user_email TEXT,created_at TEXT,client_ip TEXT,security_version INTEGER,last_used_at INTEGER NOT NULL DEFAULT 0)`); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Unix(1_800_200_000, 0).UTC()
@@ -102,7 +102,7 @@ func TestAuthAttackTOTPChallengeRollbackDoesNotCreateSession(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := database.Exec(`CREATE TABLE sessions(token TEXT,user_email TEXT,created_at TEXT,client_ip TEXT,security_version INTEGER)`); err != nil {
+	if _, err := database.Exec(`CREATE TABLE sessions(token TEXT,user_email TEXT,created_at TEXT,client_ip TEXT,security_version INTEGER,last_used_at INTEGER NOT NULL DEFAULT 0)`); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Unix(1_800_200_000, 0).UTC()

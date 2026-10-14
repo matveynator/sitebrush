@@ -1,5 +1,7 @@
 const assert = require('node:assert/strict');
-const { chromium } = require('playwright');
+const { chromium, webkit } = require('playwright');
+const browserEngine = process.env.SITEBRUSH_BROWSER_ENGINE || 'chromium';
+assert.ok(['chromium','webkit'].includes(browserEngine), 'Unsupported browser engine');
 
 const fixtureURL = process.env.SITEBRUSH_EDITOR_URL;
 const cookieText = process.env.SITEBRUSH_EDITOR_COOKIE;
@@ -8,10 +10,10 @@ const cookieSeparator = cookieText.indexOf('=');
 
 async function runEditorRegressions() {
   const launchOptions = { headless: true };
-  if (process.env.SITEBRUSH_EDITOR_CHROMIUM) {
+  if (browserEngine === 'chromium' && process.env.SITEBRUSH_EDITOR_CHROMIUM) {
     launchOptions.executablePath = process.env.SITEBRUSH_EDITOR_CHROMIUM;
   }
-  const browser = await chromium.launch(launchOptions);
+  const browser = await (browserEngine === 'webkit' ? webkit : chromium).launch(launchOptions);
   let fixtureIndex = 0;
   try {
     for (const viewport of [{ width: 1280, height: 800 }, { width: 320, height: 568 }]) {
@@ -90,6 +92,15 @@ async function runEditorRegressions() {
 
       // The old toolbar has enough controls to exceed this mobile viewport.
       const sourcePagePath = await openFixture();
+      const sessionCookies = await context.cookies(fixtureURL);
+      const persistentSession = sessionCookies.find(cookie => cookie.name === 'sitebrush_session');
+      assert.ok(persistentSession && persistentSession.httpOnly && persistentSession.expires > Date.now()/1000 + 14*86400, 'authenticated navigation must issue a persistent 15-day cookie');
+      const restoredContext = await browser.newContext({viewport,storageState:await context.storageState()});
+      const restoredPage = await restoredContext.newPage();
+      await restoredPage.goto(fixtureURL + sourcePagePath + '?visual');
+      await restoredPage.locator('[data-ref=source] button').waitFor();
+      assert.ok(restoredPage.url().includes('?visual'), 'restoring browser storage must preserve authorization');
+      await restoredContext.close();
       const originalDocument = await storedHTML(sourcePagePath);
       const visualControlCount = await page.locator('.jodit-toolbar__box button').count();
       assert.ok(visualControlCount > 15);
@@ -216,6 +227,24 @@ async function runEditorRegressions() {
       await page.setViewportSize({ width: viewport.width, height: viewport.height - 20 });
       assert.equal(await sourceCursorIndex(), caretStart + 16);
       await page.setViewportSize(viewport);
+      if (viewport.width === 320) {
+        await page.evaluate(() => {
+          const visibleViewport = window.visualViewport;
+          for (const [metricName, metricSize] of [['height', 260], ['offsetTop', 60]]) Object.defineProperty(visibleViewport, metricName, {configurable: true, value: metricSize});
+          visibleViewport.dispatchEvent(new Event('resize'));
+        });
+        await page.waitForTimeout(100);
+        const keyboardToolbar = await page.locator('.jodit-toolbar__box').boundingBox();
+        const keyboardSource = await sourceEditor.boundingBox();
+        assert.ok(keyboardToolbar.y >= 59 && keyboardToolbar.y + keyboardToolbar.height <= 321, 'toolbar must remain within the area above the keyboard');
+        assert.ok(keyboardSource.y + keyboardSource.height <= 321, 'source must fit the visible keyboard viewport');
+        assert.equal(await sourceCursorIndex(), caretStart + 16);
+        await page.evaluate(() => {
+          delete window.visualViewport.height; delete window.visualViewport.offsetTop;
+          window.visualViewport.dispatchEvent(new Event('resize'));
+        });
+        await page.waitForTimeout(100);
+      }
       await page.emulateMedia({ colorScheme: 'dark' });
       assert.equal(await sourceCursorIndex(), caretStart + 16);
       assert.equal(await page.locator('.jodit-toolbar__box button').count(), 3);

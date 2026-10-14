@@ -18,6 +18,7 @@ import (
 
 const CodeTTL = 15 * time.Minute
 const TrustTTL = 90 * 24 * time.Hour
+const SessionTTL = 15 * 24 * time.Hour
 const CodeSendCooldown = 10 * time.Second
 const CodeSendLimit = 30
 const sessionIPCandidateLimit = 128
@@ -82,7 +83,7 @@ func Session(ctx context.Context, tx *sql.Tx, domain, email, ip string, now time
 	if err != nil {
 		return "", err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO sessions(token,user_email,created_at,client_ip,security_version) VALUES(?,?,?,?,1)`, token, domain+"|"+email, now.UTC().Format(time.RFC3339), ip)
+	_, err = tx.ExecContext(ctx, `INSERT INTO sessions(token,user_email,created_at,client_ip,security_version,last_used_at) VALUES(?,?,?,?,1,?)`, token, domain+"|"+email, now.UTC().Format(time.RFC3339), ip, now.Unix())
 	if err != nil {
 		return token, err
 	}
@@ -96,6 +97,11 @@ func Session(ctx context.Context, tx *sql.Tx, domain, email, ip string, now time
 		return token, err
 	}
 	return token, nil
+}
+
+// Session age is independent of address history and the authentication method.
+func SessionActive(lastUsed int64, now time.Time) bool {
+	return lastUsed > now.Add(-SessionTTL).Unix() && lastUsed <= now.Unix()
 }
 
 func pruneSessionIPCandidates(ctx context.Context, tx *sql.Tx, domain, email string) error {

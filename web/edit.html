@@ -8,7 +8,7 @@
   })();
   </script>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>{{index .T "edit_title_prefix"}} {{.Path}}</title>
   <link rel="stylesheet" href="/p/static/jodit.min.css" />
   <link rel="stylesheet" href="/p/static/codemirror/codemirror.min.css" />
@@ -47,9 +47,9 @@
     html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
     body { background: var(--page-bg); color: var(--text-main); font-family: var(--theme-font-sans); }
     input, select, button { font: inherit; }
-    .editor-page { width: 100vw; height: 100vh; min-height: 0; display: flex; flex-direction: column; padding: 0; box-sizing: border-box; overflow: hidden; }
+    .editor-page { position: fixed; left: var(--editor-viewport-left, 0px); top: var(--editor-viewport-top, 0px); width: var(--editor-viewport-width, 100%); height: var(--editor-viewport-height, 100dvh); min-height: 0; display: flex; flex-direction: column; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); box-sizing: border-box; overflow: hidden; }
     .editor-host { flex: 1 1 auto; width: 100%; min-width: 0; min-height: 0; }
-    .jodit-container:not(.jodit_inline) { flex: 1 1 auto; width: 100vw !important; height: 100vh !important; min-width: 0 !important; min-height: 0 !important; max-width: none !important; max-height: none !important; display: flex !important; flex-direction: column !important; border: 0 !important; border-radius: 0 !important; overflow: hidden !important; }
+    .jodit-container:not(.jodit_inline) { flex: 1 1 auto; width: 100% !important; height: 100% !important; min-width: 0 !important; min-height: 0 !important; max-width: 100% !important; max-height: 100% !important; display: flex !important; flex-direction: column !important; border: 0 !important; border-radius: 0 !important; overflow: hidden !important; }
     .jodit-container:not(.jodit_inline) .jodit-toolbar__box { flex: 0 0 auto; width: 100% !important; max-width: none !important; }
     .jodit-container:not(.jodit_inline) .jodit-workplace { flex: 1 1 auto !important; width: 100% !important; max-width: none !important; min-width: 0 !important; min-height: 0 !important; max-height: none !important; overflow: hidden !important; }
     .jodit-container:not(.jodit_inline) .jodit-wysiwyg_iframe { width: 100% !important; height: 100% !important; border: 0 !important; background: var(--page-bg); }
@@ -386,34 +386,52 @@ function syncVisualEditorTheme(visualHtmlEditor) {
   syncVisualEditorFrameTheme(visualHtmlEditor, colorScheme);
 }
 
+function updateVisualEditorViewport() {
+  const visibleViewport = window.visualViewport;
+  sitebrushEditorModel.viewport = {
+    width: Math.max(1, Math.floor(visibleViewport ? visibleViewport.width : window.innerWidth || document.documentElement.clientWidth)),
+    height: Math.max(1, Math.floor(visibleViewport ? visibleViewport.height : window.innerHeight || document.documentElement.clientHeight)),
+    top: visibleViewport ? visibleViewport.offsetTop : 0,
+    left: visibleViewport ? visibleViewport.offsetLeft : 0
+  };
+}
+
 function resizeVisualEditorWorkspace(visualHtmlEditor) {
-  if (!visualHtmlEditor || !visualHtmlEditor.container) {
+  if (!visualHtmlEditor || !visualHtmlEditor.container || !sitebrushEditorModel.viewport) {
     return;
   }
-  const viewportWidth = Math.max(1, Math.round(window.innerWidth || document.documentElement.clientWidth || 0));
-  const viewportHeight = Math.max(1, Math.round(window.innerHeight || document.documentElement.clientHeight || 0));
+  const viewportWidth = sitebrushEditorModel.viewport.width;
+  const viewportHeight = sitebrushEditorModel.viewport.height;
+  document.documentElement.style.setProperty('--editor-viewport-width', viewportWidth + 'px');
+  document.documentElement.style.setProperty('--editor-viewport-height', viewportHeight + 'px');
+  document.documentElement.style.setProperty('--editor-viewport-top', sitebrushEditorModel.viewport.top + 'px');
+  document.documentElement.style.setProperty('--editor-viewport-left', sitebrushEditorModel.viewport.left + 'px');
   const editorContainer = visualHtmlEditor.container;
+  const editorHost = document.querySelector('.editor-page');
+  const hostStyle = editorHost ? window.getComputedStyle(editorHost) : null;
+  const workspaceWidth = editorHost ? Math.max(1, editorHost.clientWidth - parseFloat(hostStyle.paddingLeft) - parseFloat(hostStyle.paddingRight)) : viewportWidth;
+  const workspaceHeight = editorHost ? Math.max(1, editorHost.clientHeight - parseFloat(hostStyle.paddingTop) - parseFloat(hostStyle.paddingBottom)) : viewportHeight;
   const editorToolbar = editorContainer.querySelector('.jodit-toolbar__box');
   const editorStatusbar = editorContainer.querySelector('.jodit-status-bar');
   const toolbarHeight = editorToolbar ? editorToolbar.getBoundingClientRect().height : 0;
   const statusbarHeight = editorStatusbar && editorStatusbar.offsetParent !== null ? editorStatusbar.getBoundingClientRect().height : 0;
-  const workplaceHeight = Math.max(1, viewportHeight - toolbarHeight - statusbarHeight);
-  setVisualEditorStyle(editorContainer, 'width', viewportWidth + 'px');
-  setVisualEditorStyle(editorContainer, 'height', viewportHeight + 'px');
+  const workplaceHeight = Math.max(1, workspaceHeight - toolbarHeight - statusbarHeight);
+  setVisualEditorStyle(editorContainer, 'width', workspaceWidth + 'px');
+  setVisualEditorStyle(editorContainer, 'height', workspaceHeight + 'px');
   setVisualEditorStyle(editorContainer, 'maxWidth', 'none');
   setVisualEditorStyle(editorContainer, 'maxHeight', 'none');
   setVisualEditorStyle(editorContainer, 'minWidth', '0px');
-  setVisualEditorStyle(editorContainer, 'minHeight', viewportHeight + 'px');
+  setVisualEditorStyle(editorContainer, 'minHeight', '0px');
   setVisualEditorStyle(editorContainer, 'display', 'flex');
   setVisualEditorStyle(editorContainer, 'flexDirection', 'column');
   setVisualEditorStyle(editorContainer, 'overflow', 'hidden');
   if (editorToolbar) {
-    setVisualEditorStyle(editorToolbar, 'width', viewportWidth + 'px');
+    setVisualEditorStyle(editorToolbar, 'width', workspaceWidth + 'px');
     setVisualEditorStyle(editorToolbar, 'maxWidth', 'none');
     setVisualEditorStyle(editorToolbar, 'flex', '0 0 auto');
   }
   if (visualHtmlEditor.workplace) {
-    setVisualEditorStyle(visualHtmlEditor.workplace, 'width', viewportWidth + 'px');
+    setVisualEditorStyle(visualHtmlEditor.workplace, 'width', workspaceWidth + 'px');
     setVisualEditorStyle(visualHtmlEditor.workplace, 'height', workplaceHeight + 'px');
     setVisualEditorStyle(visualHtmlEditor.workplace, 'minHeight', workplaceHeight + 'px');
     setVisualEditorStyle(visualHtmlEditor.workplace, 'maxHeight', workplaceHeight + 'px');
@@ -422,7 +440,7 @@ function resizeVisualEditorWorkspace(visualHtmlEditor) {
     setVisualEditorStyle(visualHtmlEditor.workplace, 'overflow', 'hidden');
   }
   if (visualHtmlEditor.iframe) {
-    setVisualEditorStyle(visualHtmlEditor.iframe, 'width', viewportWidth + 'px');
+    setVisualEditorStyle(visualHtmlEditor.iframe, 'width', workspaceWidth + 'px');
     setVisualEditorStyle(visualHtmlEditor.iframe, 'height', workplaceHeight + 'px');
     setVisualEditorStyle(visualHtmlEditor.iframe, 'minHeight', workplaceHeight + 'px');
     setVisualEditorStyle(visualHtmlEditor.iframe, 'maxHeight', workplaceHeight + 'px');
@@ -445,6 +463,7 @@ function setVisualEditorStyle(element, propertyName, propertyValue) {
 }
 
 function syncVisualEditorLayout(visualHtmlEditor) {
+  updateVisualEditorViewport();
   resizeVisualEditorWorkspace(visualHtmlEditor);
   syncVisualEditorTheme(visualHtmlEditor);
 }
@@ -1045,6 +1064,7 @@ function createVisualHtmlEditor() {
     disablePlugins: ['source', 'imageProperties'],
     wrapNodes: { exclude: new Set(['hr', 'style', 'br', 'meta', 'link', 'title', 'script', 'base', 'head', 'html', 'body']), emptyBlockAfterInit: false },
     toolbarAdaptive: false,
+    toolbarSticky: false,
     showCharsCounter: false,
     showWordsCounter: false,
     showXPathInStatusbar: false,
@@ -1103,6 +1123,10 @@ window.addEventListener('resize', function onVisualEditorWindowResize() {
 window.addEventListener('orientationchange', function onVisualEditorOrientationChange() {
   scheduleVisualEditorLayout(visualHtmlEditor);
 });
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', function onVisualEditorVisibleResize() { scheduleVisualEditorLayout(visualHtmlEditor); });
+  window.visualViewport.addEventListener('scroll', function onVisualEditorVisibleScroll() { scheduleVisualEditorLayout(visualHtmlEditor); });
+}
 window.requestAnimationFrame(function afterVisualEditorPaint() {
   scheduleVisualEditorLayout(visualHtmlEditor);
 });

@@ -17,9 +17,9 @@
     "edit_back_to_visual": "Back to Visual",
     "edit_error_image_size": "Enter a frame size between 1 and 12000 pixels.",
     "edit_error_image_position": "Enter a valid object-position, for example 50% 50%.",
-    "auth_passkey_ready_title": "Passkey sign-in is already set up!",
-    "auth_passkey_ready_text": "A passkey is already registered for this site. Click “Sign in with a passkey” and confirm with Face ID, Touch ID, your fingerprint or your device PIN. If your passkey is saved on another device, select it in the sign-in window.",
-    "auth_passkey_ready_button": "Sign in with a passkey",
+    "auth_passkey_ready_title": "Great!",
+    "auth_passkey_ready_text": "We have a passkey.",
+    "auth_passkey_ready_button": "Click here to sign in without a password.",
     "analytics_error_details": "Error details",
     "ax_event_count": "Events",
     "ax_not_blocked": "Not blocked",
@@ -1338,7 +1338,9 @@
     "cx_impact_partial": "The observation window is still open.",
     "cx_impact_other": "Other page changes overlap this window.",
     "cx_insight_device": "Mobile conversion is {rate} lower than desktop.",
-    "cx_insight_funnel": "{rate} of visitors leave before {page}."
+    "cx_insight_funnel": "{rate} of visitors leave before {page}.",
+    "auth_password_fallback": "Sign in with a password",
+    "cx_report_error": "Unable to load analytics. Refresh the page to try again."
   },
   "fr": {
     "edit_saving": "Enregistrement de la page…",
@@ -1358,9 +1360,9 @@
     "edit_back_to_visual": "Retour au mode visuel",
     "edit_error_image_size": "Saisissez une dimension entre 1 et 12000 pixels.",
     "edit_error_image_position": "Saisissez une position object-position valide, par exemple 50% 50%.",
-    "auth_passkey_ready_title": "La connexion par clé d’accès est déjà configurée !",
-    "auth_passkey_ready_text": "Une clé d’accès est déjà enregistrée pour ce site. Cliquez sur « Se connecter avec une clé d’accès » et confirmez avec Face ID, Touch ID, votre empreinte digitale ou le code PIN de votre appareil. Si votre clé est enregistrée sur un autre appareil, sélectionnez-le dans la fenêtre de connexion.",
-    "auth_passkey_ready_button": "Se connecter avec une clé d’accès",
+    "auth_passkey_ready_title": "Parfait !",
+    "auth_passkey_ready_text": "Nous avons une clé d’accès.",
+    "auth_passkey_ready_button": "Cliquez ici pour vous connecter sans mot de passe.",
     "auth_email_changed_title": "Adresse e-mail modifiée",
     "auth_email_changed_reason": "L’adresse e-mail de gestion du site a changé. La modification a été confirmée via la nouvelle adresse indiquée ci-dessous.",
     "auth_email_changed_time": "Confirmation (UTC)",
@@ -2525,7 +2527,9 @@
     "cx_impact_partial": "La période d’observation est encore ouverte.",
     "cx_impact_other": "D’autres modifications chevauchent cette période.",
     "cx_insight_device": "La conversion mobile est inférieure de {rate} à celle sur ordinateur.",
-    "cx_insight_funnel": "{rate} des visiteurs quittent avant {page}."
+    "cx_insight_funnel": "{rate} des visiteurs quittent avant {page}.",
+    "auth_password_fallback": "Se connecter avec un mot de passe",
+    "cx_report_error": "Impossible de charger les statistiques. Actualisez la page pour réessayer."
   },
   "ru": {
     "edit_saving": "Сохранение страницы…",
@@ -2545,9 +2549,9 @@
     "edit_back_to_visual": "Вернуться в визуальный режим",
     "edit_error_image_size": "Введите размер области от 1 до 12000 пикселей.",
     "edit_error_image_position": "Введите допустимую позицию object-position, например 50% 50%.",
-    "auth_passkey_ready_title": "Вход по ключу уже настроен!",
-    "auth_passkey_ready_text": "Для этого сайта уже есть ключ доступа. Нажмите «Войти по ключу» и подтвердите вход с помощью Face ID, Touch ID, отпечатка пальца или PIN-кода устройства. Если ключ сохранён на другом устройстве, выберите его в открывшемся окне.",
-    "auth_passkey_ready_button": "Войти по ключу",
+    "auth_passkey_ready_title": "Отлично!",
+    "auth_passkey_ready_text": "У нас есть ключ доступа.",
+    "auth_passkey_ready_button": "Нажмите сюда, чтобы войти без пароля.",
     "analytics_error_details": "Подробности ошибок",
     "ax_event_count": "События",
     "ax_not_blocked": "Без блокировки",
@@ -3866,7 +3870,9 @@
     "cx_impact_partial": "Окно наблюдения ещё открыто.",
     "cx_impact_other": "В этом окне были и другие изменения страницы.",
     "cx_insight_device": "Мобильная конверсия на {rate} ниже, чем на компьютерах.",
-    "cx_insight_funnel": "{rate} посетителей уходят до шага «{page}»."
+    "cx_insight_funnel": "{rate} посетителей уходят до шага «{page}».",
+    "auth_password_fallback": "Войти паролем",
+    "cx_report_error": "Не удалось загрузить статистику. Обновите страницу, чтобы повторить попытку."
   },
   "ja": {
     "edit_saving": "ページを保存中…",
@@ -3886,9 +3892,9 @@
     "edit_back_to_visual": "ビジュアル編集に戻る",
     "edit_error_image_size": "枠のサイズを1〜12000ピクセルで入力してください。",
     "edit_error_image_position": "有効なobject-positionを入力してください。例：50% 50%。",
-    "auth_passkey_ready_title": "パスキーでログインする準備ができています！",
-    "auth_passkey_ready_text": "このサイトにはすでにパスキーが登録されています。「パスキーでログイン」を押し、Face ID、Touch ID、指紋認証、または端末のPINで確認してください。パスキーを別の端末に保存している場合は、ログイン画面でその端末を選択してください。",
-    "auth_passkey_ready_button": "パスキーでログイン",
+    "auth_passkey_ready_title": "準備できました！",
+    "auth_passkey_ready_text": "パスキーがあります。",
+    "auth_passkey_ready_button": "ここを押すと、パスワードなしでログインできます。",
     "auth_email_changed_title": "メールアドレスが変更されました",
     "auth_email_changed_reason": "サイトを管理するメールアドレスが変更されました。変更は以下の新しいメールアドレスから確認されました。",
     "auth_email_changed_time": "確認日時（UTC）",
@@ -5049,7 +5055,9 @@
     "cx_impact_partial": "観測期間はまだ終了していません。",
     "cx_impact_other": "同じ期間に他のページ変更があります。",
     "cx_insight_device": "モバイルのコンバージョンはデスクトップより{rate}低いです。",
-    "cx_insight_funnel": "訪問者の{rate}が{page}の前に離脱します。"
+    "cx_insight_funnel": "訪問者の{rate}が{page}の前に離脱します。",
+    "auth_password_fallback": "パスワードでログイン",
+    "cx_report_error": "統計を読み込めませんでした。ページを再読み込みして、もう一度お試しください。"
   },
   "it": {
     "edit_saving": "Salvataggio della pagina…",
@@ -5069,9 +5077,9 @@
     "edit_back_to_visual": "Torna alla modalità visuale",
     "edit_error_image_size": "Inserisci una dimensione tra 1 e 12000 pixel.",
     "edit_error_image_position": "Inserisci una posizione object-position valida, ad esempio 50% 50%.",
-    "auth_passkey_ready_title": "L’accesso con passkey è già configurato!",
-    "auth_passkey_ready_text": "Per questo sito è già registrata una passkey. Premi «Accedi con una passkey» e conferma con Face ID, Touch ID, la tua impronta digitale o il PIN del dispositivo. Se la passkey è salvata su un altro dispositivo, selezionalo nella finestra di accesso.",
-    "auth_passkey_ready_button": "Accedi con una passkey",
+    "auth_passkey_ready_title": "Ottimo!",
+    "auth_passkey_ready_text": "Abbiamo una passkey.",
+    "auth_passkey_ready_button": "Premi qui per accedere senza password.",
     "auth_email_changed_title": "Indirizzo email modificato",
     "auth_email_changed_reason": "L’indirizzo email per gestire il sito è cambiato. La modifica è stata confermata tramite il nuovo indirizzo indicato sotto.",
     "auth_email_changed_time": "Confermato il (UTC)",
@@ -6232,7 +6240,9 @@
     "cx_impact_partial": "La finestra di osservazione è ancora aperta.",
     "cx_impact_other": "Altre modifiche si sovrappongono a questa finestra.",
     "cx_insight_device": "La conversione mobile è inferiore del {rate} rispetto al desktop.",
-    "cx_insight_funnel": "Il {rate} dei visitatori esce prima di {page}."
+    "cx_insight_funnel": "Il {rate} dei visitatori esce prima di {page}.",
+    "auth_password_fallback": "Accedi con una password",
+    "cx_report_error": "Impossibile caricare le statistiche. Ricarica la pagina per riprovare."
   },
   "sv": {
     "edit_saving": "Sparar sidan…",
@@ -6252,9 +6262,9 @@
     "edit_back_to_visual": "Tillbaka till visuellt läge",
     "edit_error_image_size": "Ange en ramstorlek mellan 1 och 12000 pixlar.",
     "edit_error_image_position": "Ange en giltig object-position, till exempel 50% 50%.",
-    "auth_passkey_ready_title": "Inloggning med nyckel är redan klar!",
-    "auth_passkey_ready_text": "En inloggningsnyckel är redan registrerad för den här webbplatsen. Tryck på ”Logga in med nyckel” och bekräfta med Face ID, Touch ID, ditt fingeravtryck eller enhetens PIN-kod. Om nyckeln är sparad på en annan enhet väljer du den i inloggningsfönstret.",
-    "auth_passkey_ready_button": "Logga in med nyckel",
+    "auth_passkey_ready_title": "Toppen!",
+    "auth_passkey_ready_text": "Vi har en åtkomstnyckel.",
+    "auth_passkey_ready_button": "Tryck här för att logga in utan lösenord.",
     "auth_email_changed_title": "E-postadressen har ändrats",
     "auth_email_changed_reason": "E-postadressen för att hantera webbplatsen har ändrats. Ändringen bekräftades via den nya adressen nedan.",
     "auth_email_changed_time": "Bekräftad (UTC)",
@@ -7415,7 +7425,9 @@
     "cx_impact_partial": "Observationsperioden är fortfarande öppen.",
     "cx_impact_other": "Andra sidändringar överlappar perioden.",
     "cx_insight_device": "Mobilkonverteringen är {rate} lägre än på dator.",
-    "cx_insight_funnel": "{rate} av besökarna lämnar före {page}."
+    "cx_insight_funnel": "{rate} av besökarna lämnar före {page}.",
+    "auth_password_fallback": "Logga in med lösenord",
+    "cx_report_error": "Det gick inte att läsa in statistiken. Uppdatera sidan och försök igen."
   },
   "fi": {
     "edit_saving": "Tallennetaan sivua…",
@@ -7435,9 +7447,9 @@
     "edit_back_to_visual": "Takaisin visuaaliseen tilaan",
     "edit_error_image_size": "Anna kehyksen koko väliltä 1–12000 pikseliä.",
     "edit_error_image_position": "Anna kelvollinen object-position, esimerkiksi 50% 50%.",
-    "auth_passkey_ready_title": "Kirjautuminen pääsyavaimella on jo käytössä!",
-    "auth_passkey_ready_text": "Tälle sivustolle on jo rekisteröity pääsyavain. Paina ”Kirjaudu pääsyavaimella” ja vahvista Face ID:llä, Touch ID:llä, sormenjäljelläsi tai laitteen PIN-koodilla. Jos pääsyavain on tallennettu toiselle laitteelle, valitse se kirjautumisikkunassa.",
-    "auth_passkey_ready_button": "Kirjaudu pääsyavaimella",
+    "auth_passkey_ready_title": "Hienoa!",
+    "auth_passkey_ready_text": "Meillä on pääsyavain.",
+    "auth_passkey_ready_button": "Kirjaudu ilman salasanaa painamalla tästä.",
     "auth_email_changed_title": "Sähköpostiosoite on vaihdettu",
     "auth_email_changed_reason": "Sivuston hallinnan sähköpostiosoite on vaihdettu. Muutos vahvistettiin alla olevan uuden osoitteen kautta.",
     "auth_email_changed_time": "Vahvistettu (UTC)",
@@ -8598,7 +8610,9 @@
     "cx_impact_partial": "Havaintojakso on vielä avoin.",
     "cx_impact_other": "Muut sivumuutokset osuvat samaan jaksoon.",
     "cx_insight_device": "Mobiilikonversio on {rate} heikompi kuin tietokoneella.",
-    "cx_insight_funnel": "{rate} kävijöistä poistuu ennen kohtaa {page}."
+    "cx_insight_funnel": "{rate} kävijöistä poistuu ennen kohtaa {page}.",
+    "auth_password_fallback": "Kirjaudu salasanalla",
+    "cx_report_error": "Tilastoja ei voitu ladata. Päivitä sivu ja yritä uudelleen."
   },
   "mn": {
     "edit_saving": "Хуудсыг хадгалж байна…",
@@ -8618,9 +8632,9 @@
     "edit_back_to_visual": "Визуал горимд буцах",
     "edit_error_image_size": "Хүрээний хэмжээг 1–12000 пикселийн хооронд оруулна уу.",
     "edit_error_image_position": "Зөв object-position оруулна уу, жишээ нь 50% 50%.",
-    "auth_passkey_ready_title": "Түлхүүрээр нэвтрэх тохиргоо бэлэн боллоо!",
-    "auth_passkey_ready_text": "Энэ сайтад нэвтрэх түлхүүр аль хэдийн бүртгэгдсэн байна. «Түлхүүрээр нэвтрэх» товчийг дарж Face ID, Touch ID, хурууны хээ эсвэл төхөөрөмжийн PIN кодоор баталгаажуулна уу. Түлхүүр өөр төхөөрөмж дээр хадгалагдсан бол нэвтрэх цонхноос тухайн төхөөрөмжийг сонгоно уу.",
-    "auth_passkey_ready_button": "Түлхүүрээр нэвтрэх",
+    "auth_passkey_ready_title": "Маш сайн!",
+    "auth_passkey_ready_text": "Бидэнд нэвтрэх түлхүүр байна.",
+    "auth_passkey_ready_button": "Нууц үггүй нэвтрэхийн тулд энд дарна уу.",
     "auth_email_changed_title": "Имэйл хаяг өөрчлөгдлөө",
     "auth_email_changed_reason": "Сайтыг удирдах имэйл хаяг өөрчлөгдлөө. Өөрчлөлтийг доор заасан шинэ имэйл хаягаар баталгаажуулсан.",
     "auth_email_changed_time": "Баталгаажуулсан цаг (UTC)",
@@ -9781,7 +9795,9 @@
     "cx_impact_partial": "Ажиглалтын хугацаа нээлттэй байна.",
     "cx_impact_other": "Энэ хугацаанд бусад өөрчлөлт давхцсан.",
     "cx_insight_device": "Гар утасны хөрвөлт компьютероос {rate} бага.",
-    "cx_insight_funnel": "Зочдын {rate} нь {page}-ээс өмнө гардаг."
+    "cx_insight_funnel": "Зочдын {rate} нь {page}-ээс өмнө гардаг.",
+    "auth_password_fallback": "Нууц үгээр нэвтрэх",
+    "cx_report_error": "Статистикийг ачаалж чадсангүй. Хуудсыг шинэчилж дахин оролдоно уу."
   },
   "zh": {
     "edit_saving": "正在保存页面…",
@@ -9801,9 +9817,9 @@
     "edit_back_to_visual": "返回可视化编辑",
     "edit_error_image_size": "请输入1至12000像素之间的画框尺寸。",
     "edit_error_image_position": "请输入有效的object-position，例如50% 50%。",
-    "auth_passkey_ready_title": "通行密钥登录已设置好！",
-    "auth_passkey_ready_text": "此网站已注册通行密钥。点击“使用通行密钥登录”，然后通过 Face ID、Touch ID、指纹或设备 PIN 码确认。如果通行密钥保存在其他设备上，请在登录窗口中选择该设备。",
-    "auth_passkey_ready_button": "使用通行密钥登录",
+    "auth_passkey_ready_title": "太好了！",
+    "auth_passkey_ready_text": "我们已有通行密钥。",
+    "auth_passkey_ready_button": "点击这里，无需密码即可登录。",
     "auth_email_changed_title": "电子邮箱地址已更改",
     "auth_email_changed_reason": "管理此网站的电子邮箱地址已更改。该更改已通过下方的新邮箱地址确认。",
     "auth_email_changed_time": "确认时间（UTC）",
@@ -10964,7 +10980,9 @@
     "cx_impact_partial": "观察窗口尚未结束。",
     "cx_impact_other": "同一窗口内还有其他页面修改。",
     "cx_insight_device": "移动端转化率比桌面端低{rate}。",
-    "cx_insight_funnel": "{rate}的访客在{page}之前离开。"
+    "cx_insight_funnel": "{rate}的访客在{page}之前离开。",
+    "auth_password_fallback": "使用密码登录",
+    "cx_report_error": "无法加载统计数据。请刷新页面后重试。"
   },
   "he": {
     "edit_saving": "שמירת הדף…",
@@ -10984,9 +11002,9 @@
     "edit_back_to_visual": "חזרה לעריכה חזותית",
     "edit_error_image_size": "יש להזין גודל מסגרת בין 1 ל-12000 פיקסלים.",
     "edit_error_image_position": "יש להזין object-position תקין, לדוגמה 50% 50%.",
-    "auth_passkey_ready_title": "הכניסה באמצעות מפתח גישה כבר מוגדרת!",
-    "auth_passkey_ready_text": "כבר רשום מפתח גישה לאתר הזה. לחצו על „כניסה באמצעות מפתח גישה” ואשרו באמצעות Face ID, Touch ID, טביעת אצבע או קוד ה-PIN של המכשיר. אם המפתח שמור במכשיר אחר, בחרו בו בחלון הכניסה.",
-    "auth_passkey_ready_button": "כניסה באמצעות מפתח גישה",
+    "auth_passkey_ready_title": "מעולה!",
+    "auth_passkey_ready_text": "יש לנו מפתח גישה.",
+    "auth_passkey_ready_button": "לחצו כאן כדי להיכנס ללא סיסמה.",
     "auth_email_changed_title": "כתובת האימייל שונתה",
     "auth_email_changed_reason": "כתובת האימייל לניהול האתר שונתה. השינוי אושר באמצעות הכתובת החדשה המופיעה למטה.",
     "auth_email_changed_time": "מועד האישור (UTC)",
@@ -12147,7 +12165,9 @@
     "cx_impact_partial": "חלון התצפית עדיין פתוח.",
     "cx_impact_other": "שינויים נוספים חופפים לחלון הזה.",
     "cx_insight_device": "המרה במובייל נמוכה ב-{rate} ממחשב.",
-    "cx_insight_funnel": "{rate} מהמבקרים עוזבים לפני {page}."
+    "cx_insight_funnel": "{rate} מהמבקרים עוזבים לפני {page}.",
+    "auth_password_fallback": "כניסה באמצעות סיסמה",
+    "cx_report_error": "לא ניתן לטעון את הנתונים. רעננו את הדף ונסו שוב."
   },
   "fa": {
     "edit_saving": "در حال ذخیره صفحه…",
@@ -12167,9 +12187,9 @@
     "edit_back_to_visual": "بازگشت به حالت بصری",
     "edit_error_image_size": "اندازه قاب را بین ۱ تا ۱۲۰۰۰ پیکسل وارد کنید.",
     "edit_error_image_position": "یک object-position معتبر وارد کنید، مانند 50% 50%.",
-    "auth_passkey_ready_title": "ورود با کلید عبور از قبل آماده است!",
-    "auth_passkey_ready_text": "برای این سایت یک کلید عبور ثبت شده است. روی «ورود با کلید عبور» بزنید و با Face ID، Touch ID، اثر انگشت یا پین دستگاه خود تأیید کنید. اگر کلید عبور روی دستگاه دیگری ذخیره شده است، آن دستگاه را در پنجرهٔ ورود انتخاب کنید.",
-    "auth_passkey_ready_button": "ورود با کلید عبور",
+    "auth_passkey_ready_title": "عالی است!",
+    "auth_passkey_ready_text": "ما کلید دسترسی داریم.",
+    "auth_passkey_ready_button": "برای ورود بدون گذرواژه اینجا را بزنید.",
     "auth_email_changed_title": "نشانی ایمیل تغییر کرد",
     "auth_email_changed_reason": "نشانی ایمیل مدیریت سایت تغییر کرد. این تغییر از طریق نشانی ایمیل جدید زیر تأیید شد.",
     "auth_email_changed_time": "زمان تأیید (UTC)",
@@ -13330,7 +13350,9 @@
     "cx_impact_partial": "بازه مشاهده هنوز باز است.",
     "cx_impact_other": "تغییرات دیگری در این بازه هم‌پوشانی دارند.",
     "cx_insight_device": "تبدیل موبایل {rate} کمتر از رایانه است.",
-    "cx_insight_funnel": "{rate} بازدیدکنندگان پیش از {page} خارج می‌شوند."
+    "cx_insight_funnel": "{rate} بازدیدکنندگان پیش از {page} خارج می‌شوند.",
+    "auth_password_fallback": "ورود با گذرواژه",
+    "cx_report_error": "آمار بارگیری نشد. صفحه را تازه‌سازی کنید و دوباره تلاش کنید."
   },
   "de": {
     "edit_saving": "Seite wird gespeichert…",
@@ -13350,9 +13372,9 @@
     "edit_back_to_visual": "Zurück zur visuellen Ansicht",
     "edit_error_image_size": "Geben Sie eine Rahmengröße zwischen 1 und 12000 Pixeln ein.",
     "edit_error_image_position": "Geben Sie eine gültige object-position ein, zum Beispiel 50% 50%.",
-    "auth_passkey_ready_title": "Die Anmeldung mit Passkey ist schon eingerichtet!",
-    "auth_passkey_ready_text": "Für diese Website ist bereits ein Passkey registriert. Klicken Sie auf „Mit Passkey anmelden“ und bestätigen Sie mit Face ID, Touch ID, Ihrem Fingerabdruck oder der Geräte-PIN. Wenn Ihr Passkey auf einem anderen Gerät gespeichert ist, wählen Sie es im Anmeldefenster aus.",
-    "auth_passkey_ready_button": "Mit Passkey anmelden",
+    "auth_passkey_ready_title": "Prima!",
+    "auth_passkey_ready_text": "Wir haben einen Passkey.",
+    "auth_passkey_ready_button": "Hier klicken, um sich ohne Passwort anzumelden.",
     "auth_email_changed_title": "E-Mail-Adresse geändert",
     "auth_email_changed_reason": "Die E-Mail-Adresse zur Verwaltung dieser Website wurde geändert. Die Änderung wurde über die unten angegebene neue Adresse bestätigt.",
     "auth_email_changed_time": "Bestätigt am (UTC)",
@@ -14513,7 +14535,9 @@
     "cx_impact_partial": "Das Beobachtungsfenster ist noch offen.",
     "cx_impact_other": "Weitere Seitenänderungen überlappen dieses Fenster.",
     "cx_insight_device": "Die mobile Conversion ist {rate} niedriger als am Desktop.",
-    "cx_insight_funnel": "{rate} der Besucher verlassen die Seite vor {page}."
+    "cx_insight_funnel": "{rate} der Besucher verlassen die Seite vor {page}.",
+    "auth_password_fallback": "Mit Passwort anmelden",
+    "cx_report_error": "Die Statistik konnte nicht geladen werden. Laden Sie die Seite neu und versuchen Sie es erneut."
   },
   "tr": {
     "edit_saving": "Sayfa kaydediliyor…",
@@ -14533,9 +14557,9 @@
     "edit_back_to_visual": "Görsel düzenlemeye dön",
     "edit_error_image_size": "1 ile 12000 piksel arasında bir çerçeve boyutu girin.",
     "edit_error_image_position": "Geçerli bir object-position girin, örneğin 50% 50%.",
-    "auth_passkey_ready_title": "Geçiş anahtarıyla giriş zaten hazır!",
-    "auth_passkey_ready_text": "Bu site için bir geçiş anahtarı zaten kayıtlı. «Geçiş anahtarıyla giriş yap» düğmesine basın ve Face ID, Touch ID, parmak iziniz veya cihazınızın PIN koduyla onaylayın. Anahtarınız başka bir cihazda kayıtlıysa giriş penceresinde o cihazı seçin.",
-    "auth_passkey_ready_button": "Geçiş anahtarıyla giriş yap",
+    "auth_passkey_ready_title": "Harika!",
+    "auth_passkey_ready_text": "Bir geçiş anahtarımız var.",
+    "auth_passkey_ready_button": "Parolasız giriş yapmak için buraya dokunun.",
     "auth_email_changed_title": "E-posta adresi değiştirildi",
     "auth_email_changed_reason": "Siteyi yönetmek için kullanılan e-posta adresi değiştirildi. Değişiklik aşağıdaki yeni e-posta adresi üzerinden onaylandı.",
     "auth_email_changed_time": "Onay zamanı (UTC)",
@@ -15696,7 +15720,9 @@
     "cx_impact_partial": "Gözlem penceresi hâlâ açık.",
     "cx_impact_other": "Diğer sayfa değişiklikleri bu pencereyle örtüşüyor.",
     "cx_insight_device": "Mobil dönüşüm masaüstünden {rate} daha düşük.",
-    "cx_insight_funnel": "Ziyaretçilerin {rate} kadarı {page} öncesinde ayrılıyor."
+    "cx_insight_funnel": "Ziyaretçilerin {rate} kadarı {page} öncesinde ayrılıyor.",
+    "auth_password_fallback": "Parolayla giriş yap",
+    "cx_report_error": "İstatistikler yüklenemedi. Sayfayı yenileyip tekrar deneyin."
   },
   "kk": {
     "edit_saving": "Бет сақталуда…",
@@ -15716,9 +15742,9 @@
     "edit_back_to_visual": "Визуалды режимге оралу",
     "edit_error_image_size": "Жақтау өлшемін 1–12000 пиксель аралығында енгізіңіз.",
     "edit_error_image_position": "Жарамды object-position енгізіңіз, мысалы 50% 50%.",
-    "auth_passkey_ready_title": "Кілтпен кіру дайын!",
-    "auth_passkey_ready_text": "Бұл сайт үшін кіру кілті тіркелген. «Кілтпен кіру» түймесін басып, Face ID, Touch ID, саусақ ізі немесе құрылғының PIN коды арқылы растаңыз. Кілт басқа құрылғыда сақталған болса, ашылған кіру терезесінде сол құрылғыны таңдаңыз.",
-    "auth_passkey_ready_button": "Кілтпен кіру",
+    "auth_passkey_ready_title": "Керемет!",
+    "auth_passkey_ready_text": "Бізде кіру кілті бар.",
+    "auth_passkey_ready_button": "Құпиясөзсіз кіру үшін осында басыңыз.",
     "auth_email_changed_title": "Электрондық пошта мекенжайы өзгертілді",
     "auth_email_changed_reason": "Сайтты басқаруға арналған электрондық пошта мекенжайы өзгертілді. Өзгеріс төмендегі жаңа пошта мекенжайы арқылы расталды.",
     "auth_email_changed_time": "Растау уақыты (UTC)",
@@ -16879,7 +16905,9 @@
     "cx_impact_partial": "Бақылау терезесі әлі ашық.",
     "cx_impact_other": "Осы терезеде басқа бет өзгерістері де болды.",
     "cx_insight_device": "Мобильді конверсия компьютерден {rate} төмен.",
-    "cx_insight_funnel": "Келушілердің {rate} бөлігі {page} қадамына дейін шығады."
+    "cx_insight_funnel": "Келушілердің {rate} бөлігі {page} қадамына дейін шығады.",
+    "auth_password_fallback": "Құпиясөзбен кіру",
+    "cx_report_error": "Статистика жүктелмеді. Бетті жаңартып, қайталап көріңіз."
   },
   "es": {
     "edit_saving": "Guardando la página…",
@@ -16899,9 +16927,9 @@
     "edit_back_to_visual": "Volver al modo visual",
     "edit_error_image_size": "Introduzca un tamaño de marco entre 1 y 12000 píxeles.",
     "edit_error_image_position": "Introduzca una object-position válida, por ejemplo 50% 50%.",
-    "auth_passkey_ready_title": "¡El acceso con clave ya está configurado!",
-    "auth_passkey_ready_text": "Este sitio ya tiene una clave de acceso registrada. Pulsa «Entrar con clave de acceso» y confirma con Face ID, Touch ID, tu huella digital o el PIN del dispositivo. Si tu clave está guardada en otro dispositivo, selecciónalo en la ventana de acceso.",
-    "auth_passkey_ready_button": "Entrar con clave de acceso",
+    "auth_passkey_ready_title": "¡Genial!",
+    "auth_passkey_ready_text": "Tenemos una clave de acceso.",
+    "auth_passkey_ready_button": "Pulsa aquí para iniciar sesión sin contraseña.",
     "auth_email_changed_title": "Dirección de correo cambiada",
     "auth_email_changed_reason": "La dirección de correo que administra el sitio ha cambiado. El cambio se confirmó mediante la nueva dirección indicada abajo.",
     "auth_email_changed_time": "Confirmado el (UTC)",
@@ -18062,7 +18090,9 @@
     "cx_impact_partial": "La ventana de observación sigue abierta.",
     "cx_impact_other": "Otros cambios coinciden con esta ventana.",
     "cx_insight_device": "La conversión móvil es {rate} menor que la de escritorio.",
-    "cx_insight_funnel": "El {rate} de visitantes sale antes de {page}."
+    "cx_insight_funnel": "El {rate} de visitantes sale antes de {page}.",
+    "auth_password_fallback": "Iniciar sesión con contraseña",
+    "cx_report_error": "No se pudieron cargar las estadísticas. Actualiza la página para intentarlo de nuevo."
   },
   "pt": {
     "edit_saving": "A guardar a página…",
@@ -18082,9 +18112,9 @@
     "edit_back_to_visual": "Voltar ao modo visual",
     "edit_error_image_size": "Introduza um tamanho de moldura entre 1 e 12000 píxeis.",
     "edit_error_image_position": "Introduza uma object-position válida, por exemplo 50% 50%.",
-    "auth_passkey_ready_title": "O acesso com chave já está configurado!",
-    "auth_passkey_ready_text": "Já existe uma chave de acesso registada para este site. Clique em «Entrar com chave de acesso» e confirme com Face ID, Touch ID, a sua impressão digital ou o PIN do dispositivo. Se a chave estiver guardada noutro dispositivo, selecione-o na janela de acesso.",
-    "auth_passkey_ready_button": "Entrar com chave de acesso",
+    "auth_passkey_ready_title": "Ótimo!",
+    "auth_passkey_ready_text": "Temos uma chave de acesso.",
+    "auth_passkey_ready_button": "Clique aqui para entrar sem senha.",
     "auth_email_changed_title": "Endereço de e-mail alterado",
     "auth_email_changed_reason": "O endereço de e-mail que administra o site foi alterado. A alteração foi confirmada pelo novo endereço indicado abaixo.",
     "auth_email_changed_time": "Confirmado em (UTC)",
@@ -19245,6 +19275,8 @@
     "cx_impact_partial": "A janela de observação continua aberta.",
     "cx_impact_other": "Outras alterações coincidem com esta janela.",
     "cx_insight_device": "A conversão móvel é {rate} inferior à de computador.",
-    "cx_insight_funnel": "{rate} dos visitantes sai antes de {page}."
+    "cx_insight_funnel": "{rate} dos visitantes sai antes de {page}.",
+    "auth_password_fallback": "Entrar com senha",
+    "cx_report_error": "Não foi possível carregar as estatísticas. Atualize a página e tente novamente."
   }
 }

@@ -117,13 +117,27 @@
     if (statusElement) statusElement.textContent = message;
   }
 
+  var passkeyLoginModel = {available: false, submitting: false, message: ''};
+  function renderPasskeyLogin(loginControl) {
+    loginControl.hidden = !passkeyLoginModel.available;
+    loginControl.disabled = passkeyLoginModel.submitting;
+    var passkeyLoginPanel = document.querySelector('[data-passkey-login-panel]');
+    if (passkeyLoginPanel) passkeyLoginPanel.hidden = !passkeyLoginModel.available;
+    showPasskeyStatus(loginControl, passkeyLoginModel.message);
+  }
+
   var loginButton = document.querySelector('[data-passkey-login]');
   if (loginButton) {
-    if (!passkeysSupported()) {
-      loginButton.hidden = true;
+    passkeyLoginModel.available = passkeysSupported();
+    renderPasskeyLogin(loginButton);
+    if (!passkeyLoginModel.available) {
+      var passwordFallback = document.querySelector('[data-password-fallback]');
+      if (passwordFallback) window.location.replace(passwordFallback.href);
     } else {
       loginButton.addEventListener('click', async function startPasskeyLogin() {
-        loginButton.disabled = true;
+        passkeyLoginModel.submitting = true;
+        passkeyLoginModel.message = '';
+        renderPasskeyLogin(loginButton);
         try {
           var startURL = loginButton.getAttribute('data-passkey-start');
           var finishURL = loginButton.getAttribute('data-passkey-finish');
@@ -136,8 +150,9 @@
           if (passkeyError && passkeyError.name === 'SecurityError') {
             loginMessage = loginButton.getAttribute('data-passkey-unavailable') || loginMessage;
           }
-          showPasskeyStatus(loginButton, loginMessage);
-          loginButton.disabled = false;
+          passkeyLoginModel.message = loginMessage;
+          passkeyLoginModel.submitting = false;
+          renderPasskeyLogin(loginButton);
         }
       });
     }

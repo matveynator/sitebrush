@@ -1,11 +1,13 @@
 const assert = require('node:assert/strict');
 const os = require('node:os');
 const path = require('node:path');
-const {chromium} = require('../editor/node_modules/playwright');
+const {chromium,webkit} = require('../editor/node_modules/playwright');
+const browserEngine = process.env.SITEBRUSH_BROWSER_ENGINE || 'chromium';
+assert.ok(['chromium','webkit'].includes(browserEngine),'Unsupported browser engine');
 (async function analyticsBrowserChecks() {
  const launchOptions = {headless:true};
- if(process.env.SITEBRUSH_EDITOR_CHROMIUM)launchOptions.executablePath=process.env.SITEBRUSH_EDITOR_CHROMIUM;
- const browser=await chromium.launch(launchOptions);
+ if(browserEngine==='chromium'&&process.env.SITEBRUSH_EDITOR_CHROMIUM)launchOptions.executablePath=process.env.SITEBRUSH_EDITOR_CHROMIUM;
+ const browser=await(browserEngine==='webkit'?webkit:chromium).launch(launchOptions);
  try {
   for(const viewport of [{width:1280,height:800},{width:320,height:568}]) {
    const context=await browser.newContext({viewport,locale:'en-US'});
@@ -84,11 +86,11 @@ const {chromium} = require('../editor/node_modules/playwright');
   const visitorContext = await browser.newContext({userAgent:'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'});
   await visitorContext.addInitScript(session=>localStorage.setItem('sitebrush.analytics.session',JSON.stringify({identity:session,last:Date.now()})),process.env.SITEBRUSH_ANALYTICS_SAMPLE_SESSION);
   const visitorPage = await visitorContext.newPage();
-  const sentFrames = []; let replayConfigured; const configured=new Promise(resolve=>{replayConfigured=resolve;});
-  visitorPage.on('websocket',socket=>{socket.on('framesent',frame=>{sentFrames.push(JSON.parse(frame.payload));});socket.on('framereceived',frame=>{const response=JSON.parse(frame.payload);if(response.operation==='rules'&&response.replay.enabled)replayConfigured();});});
+  const sentFrames = []; let replayConfigured, batchAcknowledged; const configured=new Promise(resolve=>{replayConfigured=resolve;}); const acknowledged=new Promise(resolve=>{batchAcknowledged=resolve;});
+  visitorPage.on('websocket',socket=>{socket.on('framesent',frame=>{sentFrames.push(JSON.parse(frame.payload));});socket.on('framereceived',frame=>{const response=JSON.parse(frame.payload);if(response.operation==='rules'&&response.replay.enabled)replayConfigured();if(response.operation==='ack'&&response.accepted)batchAcknowledged();});});
   await visitorPage.goto(process.env.SITEBRUSH_ANALYTICS_URL+'/?utm_source=github&token=url-secret');
   await visitorPage.waitForFunction(()=>!!window.SiteBrushAnalytics);
-  await configured; await visitorPage.waitForTimeout(100);
+  await configured; await acknowledged;
   await visitorPage.locator('#name').fill('visitor-secret');
   await visitorPage.locator('#plan').selectOption('pro');
   await visitorPage.locator('#password').fill('password-secret');
