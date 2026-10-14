@@ -204,12 +204,20 @@
         }
         return signature.toString(16);
     }
+    function deviceClass() {
+        const userAgent = navigator.userAgent || '';
+        const width = Math.min(window.innerWidth || 32768, (window.screen && window.screen.width) || 32768);
+        if (/iPad|Tablet|PlayBook|Silk/i.test(userAgent) || (/Android/i.test(userAgent) && !/Mobile/i.test(userAgent))) return 'tablet';
+        if (/Mobi|iPhone|iPod|Android/i.test(userAgent) || width < 768) return 'mobile';
+        return 'desktop';
+    }
     function browserCharacteristics() {
         const screenCharacteristics = window.screen || {};
         let timezoneName = '';
         try { timezoneName = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (timezoneError) { console.debug('SiteBrush analytics: timezone unavailable',timezoneError.name); }
         return {platform:String(navigator.platform || '').slice(0,64),language:String(navigator.language || '').slice(0,32),timezone:timezoneName.slice(0,64),
             width:Math.min(32768,Math.max(0,screenCharacteristics.width || 0)),height:Math.min(32768,Math.max(0,screenCharacteristics.height || 0)),
+            viewport_width:Math.min(32768,Math.max(0,window.innerWidth || 0)),viewport_height:Math.min(32768,Math.max(0,window.innerHeight || 0)),
             color_depth:Math.min(64,Math.max(0,screenCharacteristics.colorDepth || 0)),pixel_ratio:Math.min(16,Math.max(0,window.devicePixelRatio || 1)),processors:Math.min(256,Math.max(0,navigator.hardwareConcurrency || 0))};
     }
     function enqueueReplay(action) {
@@ -309,7 +317,7 @@
         model.started = performance.now(); model.lastInteraction = model.started;
         model.maximumScroll = 0; model.signals = []; model.replay=[]; model.replayScroll=-1; model.replayScrollAt=0; model.replayFields=new Map(); model.limited = false; model.matchedRules = new Set();
         model.forms = new WeakMap(); model.sections = new WeakSet(); model.recentClicks = [];
-        model.layout = layoutSignature(); model.device = window.innerWidth < 768 ? 'mobile' : 'desktop';
+        model.layout = layoutSignature(); model.device = deviceClass();
         enqueue({kind:'page'}); recordScroll(); observeSections(); observeConfiguredURI(); connect(); if (model.replayPreferences) configureReplay(model.replayPreferences);
     }
     function start() {

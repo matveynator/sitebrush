@@ -5394,8 +5394,28 @@ func (a *App) runAnalyticsDiskQuota(requests <-chan browserstats.DiskQuotaReques
 	}
 }
 func (a *App) analyticsDiskBytes(domain string) int64 {
-	// Disk reconciliation reads files, never opens the analytics database.
-	return a.directorySizeInsideStorage(filepath.Join(a.storageRootDir(), "analytics", "site-"+url.PathEscape(domain)))
+	if a.analyticsStorage != nil {
+		result := a.analyticsStorage.Exchange(browserstats.StorageRequest{Operation: browserstats.ReadUsage, Domain: domain})
+		if result.Err == nil && result.Bytes > 0 {
+			return result.Bytes
+		}
+	}
+	// Startup and quota reconciliation can run before the analytics worker.
+	// Compare the requested site with existing directory entries, then build
+	// the filesystem path from the entry returned by os.ReadDir rather than
+	// from request-derived domain text.
+	root := filepath.Join(a.storageRootDir(), "analytics")
+	expected := "site-" + url.PathEscape(domain)
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return 0
+	}
+	for _, entry := range entries {
+		if entry.Name() == expected && entry.IsDir() {
+			return a.directorySizeInsideStorage(filepath.Join(root, entry.Name()))
+		}
+	}
+	return 0
 }
 func analyticsStorageText(bytes int64) string { return formatFileSize(bytes) }
 

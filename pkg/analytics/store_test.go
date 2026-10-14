@@ -147,3 +147,12 @@ func TestStoreContainsOnlyThreeBoundedCheckpoints(t *testing.T) {
 		t.Fatal("database size limit exceeded", err)
 	}
 }
+
+func TestReadUsageRejectsPathLikeDomain(t *testing.T) {
+	store := OpenStore(t.TempDir())
+	defer store.Close()
+	result := store.Exchange(StorageRequest{Operation: ReadUsage, Domain: "../outside"})
+	if result.Err == nil {
+		t.Fatal("path-like analytics domain accepted")
+	}
+}

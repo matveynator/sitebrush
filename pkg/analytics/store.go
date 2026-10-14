@@ -183,8 +183,11 @@ func (store *Store) run(root string, requests <-chan StorageRequest, done chan<-
 			default:
 			}
 			result := StorageResult{}
-			databasePath := filepath.Join(root, "site-"+url.PathEscape(request.Domain), DatabaseName(request.Domain))
-			_, databaseErr := os.Stat(databasePath)
+			directory, pathErr := storeDirectoryPath(root, request.Domain)
+			databaseErr := pathErr
+			if pathErr == nil {
+				_, databaseErr = os.Stat(filepath.Join(directory, DatabaseName(request.Domain)))
+			}
 			if request.Operation == ReadPreferences && preferencesKnown && time.Since(preferencesReadAt) < time.Minute && databaseErr == nil {
 				result = preferences
 			} else {
@@ -211,11 +214,23 @@ func (store *Store) run(root string, requests <-chan StorageRequest, done chan<-
 	}
 }
 
-func storeDirectory(root, domain string) (string, error) {
-	if domain == "" || len(domain) > 253 || strings.ContainsAny(domain, "\x00\r\n") {
+func storeDirectoryPath(root, domain string) (string, error) {
+	if domain == "" || len(domain) > 253 || strings.ContainsAny(domain, "\x00\r\n/\\") {
 		return "", errors.New("invalid analytics domain")
 	}
 	directory := filepath.Join(root, "site-"+url.PathEscape(domain))
+	relative, err := filepath.Rel(root, directory)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
+		return "", errors.New("unsafe analytics directory")
+	}
+	return directory, nil
+}
+
+func storeDirectory(root, domain string) (string, error) {
+	directory, err := storeDirectoryPath(root, domain)
+	if err != nil {
+		return "", err
+	}
 	if err := os.MkdirAll(directory, 0700); err != nil {
 		return "", err
 	}
@@ -228,7 +243,17 @@ func storeDirectory(root, domain string) (string, error) {
 
 func (store *Store) execute(root string, request StorageRequest, archivedHour map[string]string) StorageResult {
 	if request.Operation == ReadUsage {
-		directory := filepath.Join(root, "site-"+url.PathEscape(request.Domain))
+		directory, err := storeDirectoryPath(root, request.Domain)
+		if err != nil {
+			return StorageResult{Err: err}
+		}
+		info, err := os.Lstat(directory)
+		if os.IsNotExist(err) {
+			return StorageResult{}
+		}
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return StorageResult{Err: errors.New("unsafe analytics directory")}
+		}
 		usage, err := directoryBytes(directory)
 		return StorageResult{Bytes: usage, Err: err}
 	}

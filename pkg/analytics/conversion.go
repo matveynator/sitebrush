@@ -46,7 +46,7 @@ type FunnelProgress struct {
 }
 type ConversionVisitor struct {
 	Client                      BrowserCharacteristics
-	Fingerprint                 string
+	Fingerprint, Device         string
 	Location                    VisitorLocation
 	Deliveries                  map[string]*View
 	First, Last                 time.Time
@@ -164,29 +164,31 @@ type ConversionInsight struct {
 	Rate, Factor            string
 }
 type BrowserCharacteristics struct {
-	UserAgent  string  `json:"user_agent,omitempty"`
-	Platform   string  `json:"platform,omitempty"`
-	Language   string  `json:"language,omitempty"`
-	Timezone   string  `json:"timezone,omitempty"`
-	Width      int     `json:"width,omitempty"`
-	Height     int     `json:"height,omitempty"`
-	ColorDepth int     `json:"color_depth,omitempty"`
-	PixelRatio float64 `json:"pixel_ratio,omitempty"`
-	Processors int     `json:"processors,omitempty"`
+	UserAgent      string  `json:"user_agent,omitempty"`
+	Platform       string  `json:"platform,omitempty"`
+	Language       string  `json:"language,omitempty"`
+	Timezone       string  `json:"timezone,omitempty"`
+	Width          int     `json:"width,omitempty"`
+	Height         int     `json:"height,omitempty"`
+	ViewportWidth  int     `json:"viewport_width,omitempty"`
+	ViewportHeight int     `json:"viewport_height,omitempty"`
+	ColorDepth     int     `json:"color_depth,omitempty"`
+	PixelRatio     float64 `json:"pixel_ratio,omitempty"`
+	Processors     int     `json:"processors,omitempty"`
 }
 
 func ValidBrowserCharacteristics(client BrowserCharacteristics) bool {
-	return len(client.UserAgent) <= 256 && len(client.Platform) <= 64 && len(client.Language) <= 32 && len(client.Timezone) <= 64 && client.Width >= 0 && client.Width <= 32768 && client.Height >= 0 && client.Height <= 32768 && client.ColorDepth >= 0 && client.ColorDepth <= 64 && client.PixelRatio >= 0 && client.PixelRatio <= 16 && client.Processors >= 0 && client.Processors <= 256
+	return len(client.UserAgent) <= 256 && len(client.Platform) <= 64 && len(client.Language) <= 32 && len(client.Timezone) <= 64 && client.Width >= 0 && client.Width <= 32768 && client.Height >= 0 && client.Height <= 32768 && client.ViewportWidth >= 0 && client.ViewportWidth <= 32768 && client.ViewportHeight >= 0 && client.ViewportHeight <= 32768 && client.ColorDepth >= 0 && client.ColorDepth <= 64 && client.PixelRatio >= 0 && client.PixelRatio <= 16 && client.Processors >= 0 && client.Processors <= 256
 }
 
 type VisitorLocation struct {
-	Client                                  BrowserCharacteristics
-	Fingerprint                             string
-	Address, Country, City, Source, Landing string
-	Latitude, Longitude                     float64
-	Known                                   bool
-	CheckedAt, Last                         time.Time
-	Days                                    []string
+	Client                                          BrowserCharacteristics
+	Fingerprint                                     string
+	Address, Country, City, Source, Landing, Device string
+	Latitude, Longitude                             float64
+	Known                                           bool
+	CheckedAt, Last                                 time.Time
+	Days                                            []string
 }
 type ConversionDay struct {
 	Date     string
@@ -274,7 +276,7 @@ func safeEventName(name string) bool {
 	return true
 }
 func ValidSignals(event Event) bool {
-	if len(event.Signals) > MaximumSignals || len(event.Layout) > 32 || (event.Device != "" && event.Device != "mobile" && event.Device != "desktop") {
+	if len(event.Signals) > MaximumSignals || len(event.Layout) > 32 || (event.Device != "" && event.Device != "mobile" && event.Device != "tablet" && event.Device != "desktop") {
 		return false
 	}
 	for _, letter := range event.Layout {
@@ -386,6 +388,9 @@ func (site *Site) recordConversion(event Event, now time.Time, limit int64) bool
 	if event.Fingerprint != "" {
 		visitor.Fingerprint = event.Fingerprint
 		visitor.Client = event.Client
+	}
+	if event.Device != "" {
+		visitor.Device = event.Device
 	}
 	visitor.Last = now
 	if visitor.Persistent {
@@ -994,6 +999,7 @@ func (site *Site) conversionReport(now time.Time, days int) ConversionReport {
 			location.Fingerprint = visitor.Fingerprint
 			location.Source = visitor.Acquisition.Name
 			location.Landing = visitor.Landing
+			location.Device = visitor.Device
 			for date := range visitor.Days {
 				if date >= dayKey(start) && date <= dayKey(now) {
 					location.Days = append(location.Days, date)

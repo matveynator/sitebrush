@@ -63,13 +63,56 @@
         if (branch.Exits) branchElement.append(node('small','↳ ' + label('cx_exit') + ' · ' + branch.Exits));
         return branchElement;
     }
+    function browserLabel(userAgent) {
+        const agent = userAgent || ''; let match;
+        if ((match = agent.match(/Edg\/([\d.]+)/))) return 'Edge ' + match[1];
+        if ((match = agent.match(/OPR\/([\d.]+)/))) return 'Opera ' + match[1];
+        if ((match = agent.match(/Firefox\/([\d.]+)/))) return 'Firefox ' + match[1];
+        if ((match = agent.match(/(?:Chrome|CriOS)\/([\d.]+)/))) return 'Chrome ' + match[1];
+        if ((match = agent.match(/Version\/([\d.]+).*Safari/))) return 'Safari ' + match[1];
+        return agent ? 'Other browser' : '';
+    }
+    function osLabel(userAgent,platform) {
+        const agent = userAgent || ''; let match;
+        if ((match = agent.match(/Android\s+([\d.]+)/i))) return 'Android ' + match[1];
+        if ((match = agent.match(/(?:iPhone|CPU) OS ([\d_]+)/i))) return 'iOS/iPadOS ' + match[1].replaceAll('_','.');
+        if ((match = agent.match(/Mac OS X\s+([\d_]+)/i))) return 'macOS ' + match[1].replaceAll('_','.');
+        if ((match = agent.match(/Windows NT\s+([\d.]+)/i))) return 'Windows ' + match[1];
+        if (/Linux/i.test(agent) || /Linux/i.test(platform || '')) return 'Linux';
+        return platform || '';
+    }
+    function visitorEnvironment(visitor) {
+        const client = visitor.Client || {}; const userAgent = client.user_agent || ''; let device = visitor.Device || '';
+        if (!device) {
+            if (/iPad|Tablet|PlayBook|Silk/i.test(userAgent) || (/Android/i.test(userAgent) && !/Mobile/i.test(userAgent))) device = 'tablet';
+            else if (/Mobi|iPhone|iPod|Android/i.test(userAgent) || (client.viewport_width && client.viewport_width < 768)) device = 'mobile';
+            else device = 'desktop';
+        }
+        return {device:device,os:osLabel(userAgent,client.platform),browser:browserLabel(userAgent),
+            screen:client.width && client.height ? 'screen ' + client.width + '×' + client.height : '',
+            viewport:client.viewport_width && client.viewport_height ? 'viewport ' + client.viewport_width + '×' + client.viewport_height : '',
+            dpr:client.pixel_ratio ? 'DPR ' + client.pixel_ratio : ''};
+    }
+    function environmentRows(visitors,key) {
+        const groups = new Map();
+        for (const visitor of visitors) { const env = visitorEnvironment(visitor); const name = env[key] || 'Unknown'; const group = groups.get(name) || {name:name,visitors:0,completed:0}; group.visitors++; if (visitor.Goal) group.completed++; groups.set(name,group); }
+        return Array.from(groups.values()).sort(function order(left,right) { return right.visitors-left.visitors || left.name.localeCompare(right.name); }).slice(0,12).map(function row(group) { return [group.name,group.visitors,group.visitors ? Math.round(group.completed*1000/group.visitors)/10 + '%' : '0%']; });
+    }
+    function renderEnvironmentBreakdown(container) {
+        const visitors = model.report.Locations || []; if (!visitors.length) return;
+        const block = details('Devices, OS, browsers & screens');
+        for (const dimension of [['device','Device'],['os','OS'],['browser','Browser'],['screen','Screen'],['viewport','Viewport']]) { const rows = environmentRows(visitors,dimension[0]); if (rows.length) block.append(node('h3',dimension[1],'h6 mt-3'),table([dimension[1],label('cx_visitors'),label('cx_conversion')],rows)); }
+        container.append(block);
+    }
     function visitorCard(visitor) {
         const card = node('div'); card.append(node('strong',visitor.Address || label('cx_unknown_location')),
             node('div',[visitor.Country,visitor.City].filter(Boolean).join(' · ')),node('div',label('ax_source') + ': ' + (visitor.Source || 'direct')),
             node('div',label('cx_landing') + ': ' + visitor.Landing),node('small',visitor.Last ? new Date(visitor.Last).toLocaleString() : ''));
         card.style.overflowWrap = 'anywhere';
-        if (visitor.Fingerprint) card.append(node('div','Fingerprint: ' + visitor.Fingerprint));
-        if (visitor.Client) card.append(node('small',[visitor.Client.user_agent,visitor.Client.platform,visitor.Client.language,visitor.Client.timezone].filter(Boolean).join(' · ')));
+        if (visitor.Client) {
+            const environment = visitorEnvironment(visitor);
+            card.append(node('small',[environment.device,environment.os,environment.browser,environment.screen,environment.viewport,environment.dpr].filter(Boolean).join(' · ')));
+        }
         return card;
     }
     function renderVisitorCards(visitors,container) {
@@ -256,7 +299,6 @@
             formDetails.append(table([label('cx_form_viewed'),label('cx_form_started'),label('cx_form_submit'),label('cx_form_success'),label('cx_form_failed')],[[form.Viewed,form.Started,form.Submitted,form.Completed,form.Failed]]));
             formDetails.append(node('p',label('cx_field_drop') + ': ' + form.Abandoned));
             if (form.Fields && form.Fields.length) formDetails.append(table([label('cx_element'),label('cx_visitors')],form.Fields.map(function fieldRow(field) { return [field.Label,field.Count]; })));
-            if (form.Values && form.Values.length) formDetails.append(table([label('cx_element'),label('cx_field_values'),label('cx_visitors')],form.Values.map(function fieldContents(field) { return [field.Field,field.Text,field.Visitors]; })));
             container.append(formDetails);
         }
     }
@@ -362,6 +404,7 @@
         const sourceDetails = details(label('cx_optional'));
         sourceDetails.append(table([label('ax_source'),label('cx_visitors'),label('cx_conversion'), 'UTM', 'Referrer',label('ax_page')],(model.report.Referrers || sources).map(function sourceRow(source) { return [source.Name,source.Visitors,source.Rate,source.Campaign,referrerLink(source.Referrer),source.Landing]; })));
         container.append(sourceDetails);
+        renderEnvironmentBreakdown(container);
     }
     function renderCohorts() {
         const container = document.getElementById('conversion-cohorts'); container.replaceChildren();

@@ -183,3 +183,14 @@ func TestSourceQualityAggregatesExactReferrersAndLandingPages(t *testing.T) {
 		t.Fatal("exact referrer links fragmented source quality", report.Sources, report.Referrers)
 	}
 }
+
+func TestConversionAcceptsTabletAndViewportWithoutFieldContents(t *testing.T) {
+	event := Event{Version: 2, Visitor: "1111111111111111", View: "2222222222222222", Device: "tablet", Layout: "0123456789abcdef", Client: BrowserCharacteristics{Width: 2048, Height: 1536, ViewportWidth: 1024, ViewportHeight: 768, PixelRatio: 2}, Signals: []Signal{{Kind: "page"}}}
+	if !ValidSignals(event) || !ValidBrowserCharacteristics(event.Client) {
+		t.Fatal("tablet event with bounded screen/viewport dimensions rejected")
+	}
+	event.Signals = []Signal{{Kind: "field-value", Form: "key:contact", Field: "key:name", FieldText: "secret"}}
+	if ValidSignals(event) {
+		t.Fatal("form field contents admitted")
+	}
+}
