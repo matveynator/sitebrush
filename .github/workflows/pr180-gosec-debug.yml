@@ -1,0 +1,24 @@
+name: Diagnose analytics path finding
+
+on:
+  push:
+    branches:
+      - analytics-redesign
+    paths:
+      - .github/workflows/pr180-gosec-debug.yml
+
+permissions:
+  contents: read
+
+jobs:
+  gosec:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: analytics-redesign
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.9"
+      - run: go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0
+      - run: gosec -include=G703,G704 -fmt=text ./...
