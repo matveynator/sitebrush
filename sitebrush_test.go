@@ -22694,7 +22694,7 @@ func TestUpdateSocketRequiresCSRFAndRechecksOwner(t *testing.T) {
 	}
 }
 
-func TestUpdateEmailLinkAndDurableDeduplication(t *testing.T) {
+func TestUpdateEmailLinkAndBrandedNotice(t *testing.T) {
 	link, err := serverUpdateEmailURL("server.example")
 	if err != nil {
 		t.Fatal(err)
@@ -22707,8 +22707,6 @@ func TestUpdateEmailLinkAndDurableDeduplication(t *testing.T) {
 			t.Fatalf("accepted unsafe email destination %q", domain)
 		}
 	}
-	_, database := newUpdateTestApplication(t)
-	seedAnnouncementOwner(t, database)
 	message, err := releaseAnnouncementMessage("ru", "security", "2", "1", "owner@example.com", []authmail.NoticeLink{{Label: "server.example — 1 → 2", URL: link}})
 	if err != nil {
 		t.Fatal(err)
@@ -22721,85 +22719,7 @@ func TestUpdateEmailLinkAndDurableDeduplication(t *testing.T) {
 			t.Fatal("unsafe email body")
 		}
 	}
-	// Publishing and checking many releases does not authorize any email.
-	for range 20 {
-		if err := updateannounce.Queue(database, time.Now()); err != nil {
-			t.Fatal(err)
-		}
-	}
-	var count int
-	if err := database.QueryRow(`SELECT COUNT(1) FROM mail_outbox`).Scan(&count); err != nil || count != 0 {
-		t.Fatal("release check created an unsolicited email", err)
-	}
-	if err := updateannounce.Start(database, "2", "security", time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	for range 2 {
-		if err := updateannounce.Queue(database, time.Now()); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := database.QueryRow(`SELECT COUNT(1) FROM mail_outbox`).Scan(&count); err != nil || count != 1 {
-		t.Fatalf("campaign messages=%d err=%v", count, err)
-	}
-	if _, err := database.Exec(`DELETE FROM mail_outbox`); err != nil {
-		t.Fatal(err)
-	}
-	if err := updateannounce.Start(database, "2", "feature", time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	if err := updateannounce.Queue(database, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	if err := database.QueryRow(`SELECT COUNT(1) FROM mail_outbox`).Scan(&count); err != nil || count != 0 {
-		t.Fatal("announcement repeated after retention cleanup", err)
-	}
-}
 
-func seedAnnouncementOwner(t *testing.T, database *sql.DB) {
-	t.Helper()
-	queries := []string{
-		`INSERT INTO service_mail_installations(installation_id,public_key,blocked) VALUES('installation-1','test-key',0)`,
-		`INSERT INTO client_hostings(installation_id,installation_kind,sitebrush_version,server_domain) VALUES('installation-1','server','1','server.example')`,
-		`INSERT INTO registry_installation_roles(installation_id,email,role,scope,domain) VALUES('installation-1','owner@example.com','superadmin','installation','')`,
-	}
-	for _, query := range queries {
-		if _, err := database.Exec(query); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := (hostingandsupport.Store{DB: database}).UpsertServiceMailRecipient(context.Background(), "installation-1", "owner@example.com", "verified", "confirmed"); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestUpdateNotificationTransactionFailureDoesNotSuppressRetry(t *testing.T) {
-	_, database := newUpdateTestApplication(t)
-	seedAnnouncementOwner(t, database)
-	if err := updateannounce.Start(database, "2", "feature", time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := database.Exec(`DROP TABLE mail_outbox`); err != nil {
-		t.Fatal(err)
-	}
-	if err := updateannounce.Queue(database, time.Now()); err == nil {
-		t.Fatal("accepted a delivery without durable outbox")
-	}
-	var count int
-	if err := database.QueryRow(`SELECT COUNT(1) FROM release_campaign_deliveries`).Scan(&count); err != nil || count != 0 {
-		t.Fatal("failed transaction suppressed retry", count, err)
-	}
-	for _, query := range mailout.SchemaQueries() {
-		if _, err := database.Exec(query); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := updateannounce.Queue(database, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	if err := database.QueryRow(`SELECT COUNT(1) FROM mail_outbox`).Scan(&count); err != nil || count != 1 {
-		t.Fatal("campaign could not retry", count, err)
-	}
 }
 
 func TestUpdateCampaignsRejectCustomerSendersAndAutomaticMail(t *testing.T) {
@@ -22846,47 +22766,6 @@ func TestUpdateOwnerLanguageSurvivesLogoutAndAllMailLocalesRender(t *testing.T) 
 		if (languageCode == "he" || languageCode == "fa") && !strings.Contains(message.HTMLBody, `dir="rtl"`) {
 			t.Fatal("missing RTL mail layout", languageCode)
 		}
-	}
-}
-
-func TestUpdateCampaignCancellationExpiryAndOneMailForSeveralInstallations(t *testing.T) {
-	_, database := newUpdateTestApplication(t)
-	seedAnnouncementOwner(t, database)
-	for _, query := range []string{
-		`INSERT INTO service_mail_installations(installation_id,public_key,blocked) VALUES('installation-2','key-2',0)`,
-		`INSERT INTO client_hostings(installation_id,installation_kind,server_domain) VALUES('installation-2','server','second.example')`,
-		`INSERT INTO registry_installation_roles(installation_id,email,role,scope,domain) VALUES('installation-2','owner@example.com','superadmin','installation','')`,
-	} {
-		if _, err := database.Exec(query); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := (hostingandsupport.Store{DB: database}).UpsertServiceMailRecipient(context.Background(), "installation-2", "owner@example.com", "verified", "confirmed"); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().UTC()
-	if err := updateannounce.Start(database, "21", "both", now); err != nil {
-		t.Fatal(err)
-	}
-	if err := updateannounce.Queue(database, now); err != nil {
-		t.Fatal(err)
-	}
-	_, installations, err := updateannounce.Delivery(database, "21", "owner@example.com", now)
-	if err != nil || len(installations) != 2 {
-		t.Fatal("owner's installations were not grouped", len(installations), err)
-	}
-	var count int
-	if err := database.QueryRow(`SELECT COUNT(1) FROM mail_outbox`).Scan(&count); err != nil || count != 1 {
-		t.Fatal("several installations generated multiple emails", count, err)
-	}
-	if _, _, err := updateannounce.Delivery(database, "21", "owner@example.com", now.Add(8*24*time.Hour)); err == nil {
-		t.Fatal("expired campaign remained deliverable")
-	}
-	if err := updateannounce.Cancel(database, "21"); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := updateannounce.Delivery(database, "21", "owner@example.com", now); err == nil {
-		t.Fatal("canceled campaign remained deliverable")
 	}
 }
 

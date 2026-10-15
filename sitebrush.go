@@ -43762,12 +43762,12 @@ func runManualUpgrade(storagePath, databasePath, port string, debug bool) error 
 		deadline := time.NewTimer(20 * time.Second)
 		defer deadline.Stop()
 		for {
-			if _, err := appupdate.Exchange(storagePath, appupdate.Request{Action: "status"}, stop); err == nil {
+			if response, err := appupdate.Exchange(storagePath, appupdate.Request{Action: "status"}, stop); err == nil && !response.State.Busy {
 				break
 			}
 			select {
 			case <-deadline.C:
-				return errors.New("could not start local maintenance supervisor")
+				return errors.New("local maintenance supervisor is not ready; an operation or artifact cleanup may still be running")
 			case <-time.After(100 * time.Millisecond):
 			}
 		}
@@ -43825,6 +43825,9 @@ func runManualUpgrade(storagePath, databasePath, port string, debug bool) error 
 			fmt.Fprintln(os.Stdout, lastStage)
 		}
 		if !response.State.Busy {
+			if response.State.CleanupError != "" {
+				fmt.Fprintf(os.Stdout, "Artifact cleanup: %s\n", response.State.CleanupError)
+			}
 			if response.State.OperationError != "" {
 				return errors.New(response.State.OperationError)
 			}

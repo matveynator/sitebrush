@@ -84,7 +84,7 @@
       if (updateResponse.Preview) updateModel.preview = updateResponse.Preview;
       if (updateResponse.Campaigns) updateModel.campaigns = updateResponse.Campaigns;
       if (updateResponse.State && updateResponse.State.current && updateResponse.State.current.version) updateModel.state = updateResponse.State;
-      updateModel.error = updateResponse.Error || (updateModel.state && updateModel.state.error) || '';
+      updateModel.error = updateResponse.Error || (updateModel.state && (updateModel.state.error || updateModel.state.cleanup_error)) || '';
       renderUpdate();
     });
     updateModel.socket.addEventListener('close', function handleUpdateClose() {

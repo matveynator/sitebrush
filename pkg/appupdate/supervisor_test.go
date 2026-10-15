@@ -41,6 +41,16 @@ func runUpdateFixture() int {
 		return false
 	}
 	exists := func(name string) bool { _, err := os.Stat(filepath.Join(root, name)); return err == nil }
+	if contains("-fixture-wait") {
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		return 0
+	}
+	if contains("-update-supervisor") {
+		if err := os.WriteFile(filepath.Join(root, "maintenance-started"), []byte("yes"), 0600); err != nil {
+			return 14
+		}
+		return 0
+	}
 	if contains("-update-preflight") {
 		if exists("reject-preflight") {
 			return 2
@@ -146,6 +156,10 @@ func startFixtureSupervisor(t *testing.T, root string, scenario string) (Options
 		t.Fatal(err)
 	}
 	manifest, publicKey, privateKey := testRelease(t, payload)
+	if scenario == "third-release" {
+		manifest.Version = "3"
+		manifest.Sequence = 3
+	}
 	if strings.HasPrefix(scenario, "incompatible") {
 		manifest.Compatibility = Compatibility{Generation: 2, ReadsFrom: 2, ReadsThrough: 2, WritesCompatible: false, MigratesFrom: 1}
 	}
@@ -180,7 +194,11 @@ func startFixtureSupervisor(t *testing.T, root string, scenario string) (Options
 		result <- runErr
 	}()
 	t.Cleanup(func() {
-		close(stop)
+		select {
+		case <-stop:
+		default:
+			close(stop)
+		}
 		select {
 		case <-done:
 		case <-time.After(60 * time.Second):
@@ -189,7 +207,7 @@ func startFixtureSupervisor(t *testing.T, root string, scenario string) (Options
 	})
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		if _, err := Exchange(root, Request{Action: "status"}, make(chan struct{})); err == nil {
+		if response, err := Exchange(root, Request{Action: "status"}, make(chan struct{})); err == nil && !response.State.Busy {
 			break
 		}
 		select {
@@ -492,4 +510,143 @@ func serverPathArgument(arguments []string) string {
 		}
 	}
 	return ""
+}
+
+func TestSuccessiveUpdatesAndRollbackPruneSupersededArtifacts(t *testing.T) {
+	root := t.TempDir()
+	_, done, stop := startFixtureSupervisor(t, root, "success")
+	original := fixtureExchange(t, root, "status", "").State.Current.Binary
+	checked := checkedFixture(t, root)
+	fixtureExchange(t, root, "upgrade", checked.ManifestHash)
+	second := awaitFixture(t, root)
+	if second.Stage != "completed" || second.CleanupError != "" {
+		t.Fatal(second)
+	}
+	firstBackup := second.Backup
+	close(stop)
+	<-done
+	startFixtureSupervisor(t, root, "third-release")
+	checked = checkedFixture(t, root)
+	fixtureExchange(t, root, "upgrade", checked.ManifestHash)
+	third := awaitFixture(t, root)
+	if third.Current.Version != "3" || third.Previous.Version != "2" || third.CleanupError != "" {
+		t.Fatal(third)
+	}
+	for _, obsolete := range []string{original, firstBackup} {
+		if _, err := os.Stat(filepath.Join(root, Directory, obsolete)); !os.IsNotExist(err) {
+			t.Fatal("superseded upgrade artifact retained", obsolete, err)
+		}
+	}
+	fixtureExchange(t, root, "rollback", "")
+	rolled := awaitFixture(t, root)
+	if rolled.Current.Version != "2" || rolled.Previous.Version != "3" || rolled.CleanupError != "" {
+		t.Fatal(rolled)
+	}
+	if _, err := os.Stat(filepath.Join(root, Directory, third.Backup)); !os.IsNotExist(err) {
+		t.Fatal("superseded snapshot survived rollback", err)
+	}
+	for _, retained := range []string{rolled.Current.Binary, rolled.Previous.Binary, rolled.Backup} {
+		if _, err := os.Stat(filepath.Join(root, Directory, retained)); err != nil {
+			t.Fatal("active artifact lost", retained, err)
+		}
+	}
+}
+
+func TestFailedPreparationRetainsLastWorkingSnapshot(t *testing.T) {
+	root := t.TempDir()
+	startFixtureSupervisor(t, root, "success")
+	checked := checkedFixture(t, root)
+	fixtureExchange(t, root, "upgrade", checked.ManifestHash)
+	second := awaitFixture(t, root)
+	if err := os.WriteFile(filepath.Join(root, "reject-preflight"), []byte("yes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fixtureExchange(t, root, "rollback", "")
+	rolled := awaitFixture(t, root)
+	if rolled.Stage != "rolled_back" {
+		t.Fatal(rolled)
+	}
+	checked = checkedFixture(t, root)
+	fixtureExchange(t, root, "upgrade", checked.ManifestHash)
+	failed := awaitFixture(t, root)
+	if failed.Stage != "failed" || failed.RetainedBackup != rolled.Backup || failed.CleanupError != "" {
+		t.Fatal(failed)
+	}
+	if _, err := os.Stat(filepath.Join(root, Directory, rolled.Backup)); err != nil {
+		t.Fatal("failed preparation deleted last recovery snapshot", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, Directory, second.Backup)); !os.IsNotExist(err) {
+		t.Fatal("superseded snapshot retained", err)
+	}
+}
+
+func TestStartupPrunesOrphanedArtifactsWithoutTouchingWorkingContent(t *testing.T) {
+	root := t.TempDir()
+	orphan := strings.Repeat("a", 32)
+	for _, name := range []string{filepath.Join(root, Directory, orphan, "backup", "partial"), filepath.Join(root, Directory, "versions", orphan, "candidate"), filepath.Join(root, "user-content")} {
+		if err := os.MkdirAll(filepath.Dir(name), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(name, []byte("keep user content"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	startFixtureSupervisor(t, root, "success")
+	for _, name := range []string{filepath.Join(root, Directory, orphan), filepath.Join(root, Directory, "versions", orphan)} {
+		if _, err := os.Stat(name); !os.IsNotExist(err) {
+			t.Fatal("startup left orphaned artifacts", name, err)
+		}
+	}
+	if contents, err := os.ReadFile(filepath.Join(root, "user-content")); err != nil || string(contents) != "keep user content" {
+		t.Fatal("cleanup changed working content", err)
+	}
+	for _, request := range []Request{{Action: "unknown"}, {Action: "attach"}, {Action: "upgrade"}, {Action: "rollback"}, {Action: "server_ready", Detail: "evil.example:80"}} {
+		if _, err := Exchange(root, request, nil); err == nil {
+			t.Fatal("invalid command accepted", request.Action)
+		}
+	}
+	response, err := Exchange(root, Request{Action: "notification_status", Detail: "legacy mail status"}, nil)
+	if err != nil || response.State.NotificationError != "legacy mail status" {
+		t.Fatal(response, err)
+	}
+}
+
+func TestRestartFinishesInterruptedCleanupWithoutRestoringOldData(t *testing.T) {
+	root := t.TempDir()
+	_, done, stop := startFixtureSupervisor(t, root, "success")
+	checked := checkedFixture(t, root)
+	fixtureExchange(t, root, "upgrade", checked.ManifestHash)
+	completed := awaitFixture(t, root)
+	if completed.Stage != "completed" {
+		t.Fatal(completed)
+	}
+	close(stop)
+	<-done
+	if err := os.WriteFile(filepath.Join(root, "after-activation"), []byte("accepted user write"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed.Busy = true
+	if err := atomicJSON(store, "state.json", completed); err != nil {
+		t.Fatal(err)
+	}
+	orphan := strings.Repeat("f", 32)
+	if err := store.MkdirAll(filepath.Join(orphan, "backup"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	startFixtureSupervisor(t, root, "success")
+	recovered := fixtureExchange(t, root, "status", "").State
+	if recovered.Stage != "completed" || recovered.Error != "" || recovered.CleanupError != "" || recovered.Current.Version != "2" {
+		t.Fatal("cleanup interruption changed the committed operation", recovered)
+	}
+	if contents, err := os.ReadFile(filepath.Join(root, "after-activation")); err != nil || string(contents) != "accepted user write" {
+		t.Fatal("cleanup recovery overwrote new user data", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, Directory, orphan)); !os.IsNotExist(err) {
+		t.Fatal("interrupted cleanup was not retried", err)
+	}
 }

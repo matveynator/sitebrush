@@ -134,6 +134,9 @@ func (hub *Hub) Check(id string, key ed25519.PublicKey, stop <-chan struct{}) (S
 }
 
 func certificate(id string, key ed25519.PrivateKey) (tls.Certificate, error) {
+	if len(key) != ed25519.PrivateKeySize {
+		return tls.Certificate{}, errors.New("invalid installation private key")
+	}
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
 		return tls.Certificate{}, err
@@ -223,12 +226,18 @@ func (hub *Hub) Listen(address string, key ed25519.PrivateKey, keys KeyLookup, s
 	}
 }
 
-func Agent(address, id string, key ed25519.PrivateKey, central ed25519.PublicKey, status func() (Status, error), stop <-chan struct{}) error {
+// The central contact uses an installation signing identity, not a Web PKI
+// hostname. Every connection must verify that pinned key; an empty trust input
+// is an error rather than an option to disable verification.
+func verifiedCentralTLS(id string, key ed25519.PrivateKey, central ed25519.PublicKey) (*tls.Config, error) {
+	if len(central) != ed25519.PublicKeySize {
+		return nil, errors.New("invalid central public key")
+	}
 	identity, err := certificate(id, key)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	configuration := &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{identity}, InsecureSkipVerify: true, VerifyConnection: func(connection tls.ConnectionState) error {
+	return &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{identity}, InsecureSkipVerify: true, VerifyConnection: func(connection tls.ConnectionState) error {
 		// The application pins an Ed25519 identity instead of a public CA name.
 		if len(connection.PeerCertificates) != 1 {
 			return errors.New("missing central certificate")
@@ -238,7 +247,18 @@ func Agent(address, id string, key ed25519.PrivateKey, central ed25519.PublicKey
 			return errors.New("central identity mismatch")
 		}
 		return nil
-	}}
+	}}, nil
+}
+
+func Agent(address, id string, key ed25519.PrivateKey, central ed25519.PublicKey, status func() (Status, error), stop <-chan struct{}) error {
+	if status == nil {
+		return errors.New("missing installation status source")
+	}
+	configuration, err := verifiedCentralTLS(id, key, central)
+	if err != nil {
+		return err
+	}
+
 	connection, err := netchan.Dial[Contact](address, netchan.Config{Capacity: 8, TLS: configuration})
 	if err != nil {
 		return err

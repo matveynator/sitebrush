@@ -83,3 +83,79 @@ func TestTwentySequentialDataMigrationsResumeAfterFailure(t *testing.T) {
 		t.Fatal("migration gap accepted")
 	}
 }
+
+func TestRecoverableWorkRetriesAndEnsureRepairsWithoutDuplicateMarkers(t *testing.T) {
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "recover.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	calls := 0
+	step := Step{ID: "external-files", Revision: "1", Recoverable: func() error {
+		calls++
+		if calls == 1 {
+			return errors.New("incomplete filesystem copy")
+		}
+		return nil
+	}}
+	if err := Run(database, "files", []Step{step}); err == nil {
+		t.Fatal("incomplete external work was marked complete")
+	}
+	if count, err := Check(database, "files", []Step{step}); err != nil || count != 0 {
+		t.Fatal("failed work retained marker", count, err)
+	}
+	if err := Run(database, "files", []Step{step}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run(database, "files", []Step{step}); err != nil || calls != 2 {
+		t.Fatal("completed external work reran", calls, err)
+	}
+	step.Ensure = true
+	if err := Run(database, "files", []Step{step}); err != nil || calls != 3 {
+		t.Fatal("explicit repair was skipped", calls, err)
+	}
+	if count, err := Check(database, "files", []Step{step}); err != nil || count != 1 {
+		t.Fatal("repair duplicated completion", count, err)
+	}
+	if err := Run(database, "sql", []Step{SQL("table", `CREATE TABLE protected(content TEXT)`), SQL("seed", `INSERT INTO protected(content) VALUES(?)`, "kept")}); err != nil {
+		t.Fatal(err)
+	}
+	var content string
+	if err := database.QueryRow(`SELECT content FROM protected`).Scan(&content); err != nil || content != "kept" {
+		t.Fatal(content, err)
+	}
+	if err := Run(database, "sql", []Step{SQL("changed", `CREATE TABLE changed(content TEXT)`)}); err == nil {
+		t.Fatal("mismatched history was applied")
+	}
+}
+
+func TestInvalidPlansAndUnavailableDatabaseFailClosed(t *testing.T) {
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "invalid.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	for _, steps := range [][]Step{
+		{{ID: "", Revision: "1"}}, {{ID: "one", Revision: ""}},
+		{{ID: "one", Revision: "1"}, {ID: "one", Revision: "1"}},
+		{{ID: "one", Revision: "1"}},
+		{{ID: "one", Revision: "1", Apply: func(*sql.Tx) error { return nil }, Recoverable: func() error { return nil }}},
+	} {
+		if err := Run(database, "invalid", steps); err == nil {
+			t.Fatal("invalid migration plan accepted")
+		}
+	}
+	if _, err := Check(database, "invalid", []Step{{}}); err == nil {
+		t.Fatal("invalid read plan accepted")
+	}
+	if _, err := Check(database, "absent", nil); err == nil {
+		t.Fatal("missing journal accepted")
+	}
+	if err := Run(database, "bad-sql", []Step{SQL("bad", `INSERT INTO missing_table VALUES(1)`)}); err == nil {
+		t.Fatal("bad SQL was recorded")
+	}
+	database.Close()
+	if err := Run(database, "closed", []Step{SQL("table", `CREATE TABLE closed(content TEXT)`)}); err == nil {
+		t.Fatal("closed database accepted")
+	}
+}

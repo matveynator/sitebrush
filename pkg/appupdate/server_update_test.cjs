@@ -88,6 +88,8 @@ assert.equal(ordinary.element('[data-update-error]').hidden, false);
 assert.equal(ordinary.element('[data-update-rollback]').disabled, false);
 ordinary.element('[data-update-rollback]').dispatch('click');
 assert.equal(ordinary.socket.commands.at(-1).action, 'rollback');
+ordinary.socket.reply({State: {stage: 'rolled_back', current: {version: '1'}, cleanup_error: 'Old snapshot could not be removed', rollback_available: true}});
+assert.equal(ordinary.element('[data-update-error]').textContent, 'Old snapshot could not be removed');
 ordinary.windowEvents.get('pagehide')();
 assert.equal(ordinary.element('[data-update-rollback]').disabled, true);
 

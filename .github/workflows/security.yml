@@ -110,11 +110,17 @@ jobs:
               go tool cover -func="$profile"
             fi
           done < <(go list ./pkg/... ./scripts/...)
+      - name: Cover application update and migration boundaries
+        run: >-
+          go test -count=1 -covermode=atomic
+          -coverpkg=./pkg/appupdate,./pkg/updateannounce,./pkg/migrations,./pkg/authmail,./pkg/hostingandsupport,./pkg/serviceinstall
+          -coverprofile=application-update-coverage.out
+          -run 'Test(ServerUpdate|Update|AccountLegacySessionsInvalidatedOnce|AdminIPOptInMigrationRunsForPreviousSchemaVersion)' .
       - name: Upload coverage
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6
         with:
           fail_ci_if_error: true
-          files: coverage.out
+          files: coverage.out,application-update-coverage.out
           use_oidc: true
       - name: Enforce lock-free architecture
         run: go test -count=1 ./scripts/architecture

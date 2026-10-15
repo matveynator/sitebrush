@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -25,7 +26,7 @@ func TestServiceInstallFilesystemAndCommandHelpers(t *testing.T) {
 		t.Fatalf("installed binary = %q, %v", installedBinary, err)
 	}
 	installedInfo, err := os.Stat(destinationPath)
-	if err != nil || installedInfo.Mode().Perm() != 0o755 {
+	if err != nil || (runtime.GOOS != "windows" && installedInfo.Mode().Perm() != 0o755) {
 		t.Fatalf("installed mode = %v, %v", installedInfo, err)
 	}
 	if err := copyExecutable(filepath.Join(directory, "missing"), filepath.Join(directory, "missing-destination")); err == nil {
@@ -202,7 +203,6 @@ func TestServiceMetadataRoundTripAndResultOutput(t *testing.T) {
 	printResult(nil, result, "en")
 	printUninstallResult(nil, result, "en")
 }
-
 
 func TestServiceInstallOrchestrationWithInjectedBoundaries(t *testing.T) {
 	probe := runtimeProbe{goos: "linux", goarch: "amd64", osVersion: "test"}

@@ -79,15 +79,19 @@ func Run(options Options, stop <-chan struct{}) error {
 		return err
 	}
 	if state.Busy {
-		if !state.WritesOpened && state.Backup != "" {
-			if err := restore(options.StoragePath, store, state.Backup); err != nil {
-				maintenanceSession.Close()
-				return fmt.Errorf("interrupted update recovery: %w", err)
+		// Terminal stages are written before pruning. An interrupted cleanup
+		// must not turn a committed update into a failed version operation.
+		if state.Stage != "completed" && state.Stage != "rolled_back" {
+			if !state.WritesOpened && state.Backup != "" {
+				if err := restore(options.StoragePath, store, state.Backup); err != nil {
+					maintenanceSession.Close()
+					return fmt.Errorf("interrupted update recovery: %w", err)
+				}
 			}
+			state.Stage = "failed"
+			state.Error = "Interrupted version operation recovered before startup"
 		}
 		state.Busy = false
-		state.Stage = "failed"
-		state.Error = "Interrupted version operation recovered before startup"
 		if err := atomicJSON(store, "state.json", state); err != nil {
 			maintenanceSession.Close()
 			return err
@@ -118,6 +122,8 @@ func Run(options Options, stop <-chan struct{}) error {
 	go acceptContacts(listener, requests, sessions, stop)
 	progress := make(chan transition)
 	finished := make(chan State, 1)
+	state.Busy = true
+	go func(initial State) { finished <- settleOperation(store, initial, progress, stop) }(state)
 	checks := make(chan catalogResult, 1)
 	catalog := NewCatalog(options.PublicKey)
 	if options.Catalog != nil {
@@ -291,6 +297,9 @@ func Run(options Options, stop <-chan struct{}) error {
 				state.Error = ""
 				state.OperationError = ""
 				state.Stage = "preparing"
+				if state.Backup != "" {
+					state.RetainedBackup = state.Backup
+				}
 				state.Backup = ""
 				state.Candidate = nil
 				state.WritesOpened = false
@@ -300,7 +309,7 @@ func Run(options Options, stop <-chan struct{}) error {
 				response.State = state
 				go func(initial State, action string) {
 					result := perform(options, store, catalog, worker, initial, action, progress, stop)
-					finished <- result
+					finished <- settleOperation(store, result, progress, stop)
 				}(state, request.Action)
 			default:
 				response.Error = "unknown update command"
@@ -310,6 +319,23 @@ func Run(options Options, stop <-chan struct{}) error {
 			}
 		}
 	}
+}
+
+func settleOperation(store *os.Root, state State, progress chan<- transition, stop <-chan struct{}) State {
+	if state.Backup != "" && (state.Stage == "completed" || state.Stage == "rolled_back") {
+		state.RetainedBackup = ""
+	}
+	state.Busy = true
+	state.CleanupError = ""
+	reply := make(chan error, 1)
+	progress <- transition{state: state, reply: reply}
+	if err := <-reply; err != nil {
+		state.CleanupError = "cleanup journal: " + err.Error()
+	} else if err := pruneArtifacts(store, state, stop); err != nil {
+		state.CleanupError = err.Error()
+	}
+	state.Busy = false
+	return state
 }
 
 func acceptContacts(listener *netchan.Listener[Request], requests chan<- Request, sessions chan struct{}, stop <-chan struct{}) {

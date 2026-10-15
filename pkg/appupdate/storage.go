@@ -36,6 +36,7 @@ type State struct {
 	HighestSequence   uint64    `json:"highest_sequence"`
 	Operation         string    `json:"operation,omitempty"`
 	Backup            string    `json:"backup,omitempty"`
+	RetainedBackup    string    `json:"retained_backup,omitempty"`
 	Candidate         *Version  `json:"candidate,omitempty"`
 	WritesOpened      bool      `json:"writes_opened"`
 	RollbackAvailable bool      `json:"rollback_available"`
@@ -44,6 +45,94 @@ type State struct {
 	Busy              bool      `json:"busy"`
 	OperationError    string    `json:"operation_error,omitempty"`
 	NotificationError string    `json:"notification_error,omitempty"`
+	CleanupError      string    `json:"cleanup_error,omitempty"`
+}
+
+// Pruning uses only references from a durably acknowledged journal. It runs
+// under the version-operation owner, so a new download cannot race deletion.
+func pruneArtifacts(store *os.Root, state State, stop <-chan struct{}) error {
+	if !state.Busy {
+		return errors.New("artifact pruning requires exclusive operation ownership")
+	}
+	versions := make(map[string]bool)
+	operations := make(map[string]bool)
+	for _, binary := range []*Version{&state.Current, state.Previous, state.Candidate} {
+		if binary == nil {
+			continue
+		}
+		parts := strings.Split(filepath.ToSlash(binary.Binary), "/")
+		if !filepath.IsLocal(binary.Binary) || filepath.Clean(binary.Binary) != binary.Binary || len(parts) != 3 || parts[0] != "versions" {
+			return errors.New("unsafe retained binary reference")
+		}
+		versions[parts[1]] = true
+	}
+	for _, backup := range []string{state.Backup, state.RetainedBackup} {
+		if backup == "" {
+			continue
+		}
+		parts := strings.Split(filepath.ToSlash(backup), "/")
+		if !filepath.IsLocal(backup) || filepath.Clean(backup) != backup || len(parts) != 2 || parts[1] != "backup" {
+			return errors.New("unsafe retained backup reference")
+		}
+		operations[parts[0]] = true
+	}
+	// A manually invoked launcher can itself reside in the version tree.
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	for _, executablePath := range []string{state.Launcher, executable} {
+		relative, err := filepath.Rel(store.Name(), executablePath)
+		if err != nil || !filepath.IsLocal(relative) {
+			continue
+		}
+		parts := strings.Split(filepath.ToSlash(relative), "/")
+		if len(parts) == 3 && parts[0] == "versions" {
+			versions[parts[1]] = true
+		}
+	}
+	for _, tree := range []struct {
+		name string
+		keep map[string]bool
+	}{{".", operations}, {"versions", versions}} {
+		directory, err := store.Open(tree.name)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		for {
+			entries, readErr := directory.ReadDir(64)
+			for _, entry := range entries {
+				select {
+				case <-stop:
+					directory.Close()
+					return errors.New("artifact cleanup canceled")
+				default:
+				}
+				decoded, err := hex.DecodeString(entry.Name())
+				if err != nil || len(decoded) != 16 || entry.Name() != strings.ToLower(entry.Name()) || tree.keep[entry.Name()] {
+					continue
+				}
+				if err := store.RemoveAll(filepath.Join(tree.name, entry.Name())); err != nil {
+					directory.Close()
+					return err
+				}
+			}
+			if readErr != nil {
+				directory.Close()
+				if readErr != io.EOF {
+					return readErr
+				}
+				break
+			}
+		}
+		if err := syncDirectory(store, tree.name); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // InstalledVersion reads metadata without creating storage. A standalone build
