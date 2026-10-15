@@ -103,8 +103,12 @@ jobs:
           while IFS= read -r package; do
             safe_name="${package//\//_}"
             profile="package-coverage/${safe_name}.out"
-            output="$(go test -count=1 -covermode=atomic -coverprofile="$profile" "$package" 2>&1)"
+            package_test_status=0
+            output="$(go test -count=1 -covermode=atomic -coverprofile="$profile" "$package" 2>&1)" || package_test_status=$?
             printf '%s\n' "$output"
+            if [ "$package_test_status" -ne 0 ]; then
+              exit "$package_test_status"
+            fi
             if printf '%s\n' "$output" | grep -q '\[no statements\]'; then
               continue
             fi
