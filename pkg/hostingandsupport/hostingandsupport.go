@@ -18,6 +18,8 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/demo"
 	"github.com/matveynator/sitebrush/v2/pkg/expenses"
 	"github.com/matveynator/sitebrush/v2/pkg/mailout"
+	"github.com/matveynator/sitebrush/v2/pkg/migrations"
+	"github.com/matveynator/sitebrush/v2/pkg/updateannounce"
 )
 
 const DefaultStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
@@ -644,13 +646,87 @@ type DeletionBackupMetadata struct {
 	OriginalStaticDir string   `json:"original_static_dir"`
 }
 
+// CheckMigrations verifies readiness without repairing the database or advancing
+// its schema. Update probation must fail instead of hiding an incomplete step.
+func CheckMigrations(ctx context.Context, database *sql.DB) error {
+	version, err := schemaMigrationVersion(ctx, database, "billing")
+	if err != nil {
+		return err
+	}
+	complete, err := hostingAndSupportSchemaComplete(ctx, database)
+	if err != nil {
+		return err
+	}
+	if version < currentBillingSchemaVersion || !complete {
+		return fmt.Errorf("required server database migrations are incomplete")
+	}
+	completed, err := migrations.Check(database, "billing-schema-v27", hostingSchemaSteps(ctx, false))
+	if err != nil {
+		return err
+	}
+	if completed != len(hostingSchemaSteps(ctx, false)) {
+		return fmt.Errorf("required billing migration steps are incomplete")
+	}
+	completed, err = migrations.Check(database, "release-campaigns-v1", announcementSchemaSteps())
+	if err != nil {
+		return err
+	}
+	if completed != len(announcementSchemaSteps()) {
+		return fmt.Errorf("required release campaign migration steps are incomplete")
+	}
+	completed, err = migrations.Check(database, "billing-data-v27", []migrations.Step{{ID: "legacy-data-through-27", Revision: "1"}})
+	if err != nil {
+		return err
+	}
+	if completed != 1 {
+		return fmt.Errorf("required billing data migrations are incomplete")
+	}
+	return nil
+}
+
+// Source checks are read-only so the updater can reject an unsupported path
+// while the installed process and its untouched databases remain available.
+func CheckMigrationSource(ctx context.Context, database *sql.DB) error {
+	found, err := tableExists(ctx, database, "schema_migrations")
+	if err != nil {
+		return err
+	}
+	if found {
+		version, err := schemaMigrationVersion(ctx, database, "billing")
+		if err != nil {
+			return err
+		}
+		if version > currentBillingSchemaVersion {
+			return fmt.Errorf("billing schema %d is newer than this binary", version)
+		}
+	}
+	found, err = tableExists(ctx, database, "application_migration_steps")
+	if err != nil || !found {
+		return err
+	}
+	if _, err = migrations.Check(database, "billing-schema-v27", hostingSchemaSteps(ctx, false)); err != nil {
+		return err
+	}
+	if _, err = migrations.Check(database, "release-campaigns-v1", announcementSchemaSteps()); err != nil {
+		return err
+	}
+	_, err = migrations.Check(database, "billing-data-v27", []migrations.Step{{ID: "legacy-data-through-27", Revision: "1"}})
+	return err
+}
+
 func Migrate(ctx context.Context, database *sql.DB) error {
+	if err := CheckMigrationSource(ctx, database); err != nil {
+		return err
+	}
 	if _, err := database.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations(component TEXT PRIMARY KEY,version INTEGER,updated_at TEXT);`); err != nil {
 		return fmt.Errorf("create schema_migrations: %w", err)
 	}
 	schemaVersion, err := schemaMigrationVersion(ctx, database, "billing")
 	if err != nil {
 		return fmt.Errorf("read billing schema version: %w", err)
+	}
+	if schemaVersion > currentBillingSchemaVersion {
+		return fmt.Errorf("billing schema %d is newer than supported %d", schemaVersion, currentBillingSchemaVersion)
 	}
 	// Do not trust the recorded schema version alone. Older releases may have
 	// advanced it without adding every required table or column, so always
@@ -662,17 +738,96 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("verify billing schema: %w", err)
 	}
-	if schemaComplete {
-		if schemaVersion < currentBillingSchemaVersion {
-			if err := (Store{DB: database}).BackfillPublicTrialSites(ctx); err != nil {
-				return fmt.Errorf("backfill public trial sites: %w", err)
-			}
-			if err := setSchemaMigrationVersion(ctx, database, "billing", currentBillingSchemaVersion); err != nil {
-				return fmt.Errorf("write billing schema version: %w", err)
-			}
-		}
-		return nil
+	steps := hostingSchemaSteps(ctx, !schemaComplete || schemaVersion < currentBillingSchemaVersion)
+	if err := migrations.Run(database, "billing-schema-v27", steps); err != nil {
+		return err
 	}
+	announcementSteps := announcementSchemaSteps()
+	campaignsFound, err := tableExists(ctx, database, "release_campaigns")
+	if err != nil {
+		return err
+	}
+	deliveriesFound, err := tableExists(ctx, database, "release_campaign_deliveries")
+	if err != nil {
+		return err
+	}
+	for index := range announcementSteps {
+		announcementSteps[index].Ensure = !campaignsFound || !deliveriesFound
+	}
+	if err := migrations.Run(database, "release-campaigns-v1", announcementSteps); err != nil {
+		return err
+	}
+
+	dataSteps := []migrations.Step{{ID: "legacy-data-through-27", Revision: "1", Ensure: !schemaComplete || schemaVersion < currentBillingSchemaVersion, Recoverable: func() error {
+		if schemaComplete && schemaVersion >= currentBillingSchemaVersion {
+			return nil
+		}
+		return migrateLegacyBillingData(ctx, database)
+	}}}
+	if err := migrations.Run(database, "billing-data-v27", dataSteps); err != nil {
+		return err
+	}
+	if err := setSchemaMigrationVersion(ctx, database, "billing", currentBillingSchemaVersion); err != nil {
+		return fmt.Errorf("write billing schema version: %w", err)
+	}
+	return nil
+}
+
+func announcementSchemaSteps() []migrations.Step {
+	steps := []migrations.Step{}
+	for index, query := range updateannounce.SchemaQueries() {
+		steps = append(steps, migrations.SQL("campaign-table-"+strconv.Itoa(index+1), query))
+	}
+	return steps
+}
+
+func migrateLegacyBillingData(ctx context.Context, database *sql.DB) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := database.ExecContext(ctx, `INSERT OR IGNORE INTO server_settings(name,value,updated_at) VALUES('auto_registration_enabled','1',?)`, now); err != nil {
+		return err
+	}
+	if _, err := database.ExecContext(ctx, `INSERT OR IGNORE INTO server_settings(name,value,updated_at) VALUES('public_trial_enabled','0',?)`, now); err != nil {
+		return err
+	}
+	if _, err := database.ExecContext(ctx, `INSERT OR IGNORE INTO server_settings(name,value,updated_at) VALUES('deletion_backup_retention_days',?,?)`, strconv.Itoa(DefaultDeletionBackupRetentionDays), now); err != nil {
+		return err
+	}
+	if _, err := database.ExecContext(ctx, `INSERT OR IGNORE INTO server_settings(name,value,updated_at) VALUES('service_mail_relay_enabled','1',?)`, now); err != nil {
+		return err
+	}
+	if _, err := database.ExecContext(ctx, `INSERT OR IGNORE INTO server_settings(name,value,updated_at) VALUES('sitebrush_commission_bps','500',?)`, now); err != nil {
+		return err
+	}
+	if _, err := database.ExecContext(ctx, `INSERT OR IGNORE INTO payment_providers(provider,enabled,display_name,payment_url,instructions,updated_at) VALUES('sitebrush_com',1,'SiteBrush.com demo payments','/?hosting_and_support_demo_payment&invoice={invoice}','Предустановленная демо-оплата через SiteBrush.com.',?)`, now); err != nil {
+		return err
+	}
+	if _, err := database.ExecContext(ctx, `UPDATE payment_providers SET enabled=1,display_name='SiteBrush.com demo payments',payment_url='/?hosting_and_support_demo_payment&invoice={invoice}',instructions='Предустановленная демо-оплата через SiteBrush.com.',updated_at=? WHERE provider='sitebrush_com'`, now); err != nil {
+		return err
+	}
+	if _, err := database.ExecContext(ctx, `INSERT OR IGNORE INTO payment_providers(provider,enabled,display_name,payment_url,instructions,updated_at) VALUES('stripe',0,'Stripe','','Stripe Checkout or Payment Link URL template',?)`, now); err != nil {
+		return err
+	}
+	if _, err := database.ExecContext(ctx, `INSERT OR IGNORE INTO payment_providers(provider,enabled,display_name,payment_url,instructions,updated_at) VALUES('paypal',0,'PayPal','','PayPal payment URL template',?)`, now); err != nil {
+		return err
+	}
+	if _, err := database.ExecContext(ctx, `INSERT OR IGNORE INTO payment_providers(provider,enabled,display_name,payment_url,instructions,updated_at) VALUES('sbp',0,'СБП','','СБП: банк, телефон, получатель или QR/link template',?)`, now); err != nil {
+		return err
+	}
+	if _, err := database.ExecContext(ctx, `INSERT OR IGNORE INTO site_service_plans(name,quota_bytes,site_limit,analytics_report_limit,price,currency,billing_period,is_default,created_at,updated_at) VALUES('Free',?,1,0,'0','USD','monthly',1,?,?)`,
+		DefaultStorageLimitBytes, now, now); err != nil {
+		return err
+	}
+	if _, err := database.ExecContext(ctx, `INSERT OR IGNORE INTO server_expense_policies(installation_id,expense_mode,disk_rate_per_100_gb_minor,actual_monthly_expense_minor,currency,free_site_threshold_bytes,effective_at,created_at)
+		SELECT installation_id,'actual',1500,monthly_cost_minor,currency,100000000,effective_at,created_at FROM hosting_server_cost_policies WHERE monthly_cost_minor>0`); err != nil {
+		return err
+	}
+	if err := (Store{DB: database}).BackfillPublicTrialSites(ctx); err != nil {
+		return fmt.Errorf("backfill public trial sites: %w", err)
+	}
+	return nil
+}
+
+func hostingSchemaSteps(ctx context.Context, repair bool) []migrations.Step {
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS server_managers(domain TEXT,email TEXT,role TEXT,scope_domain TEXT,created_at TEXT,PRIMARY KEY(domain,email,role,scope_domain));`,
 		`CREATE TABLE IF NOT EXISTS server_settings(name TEXT PRIMARY KEY,value TEXT,updated_at TEXT);`,
@@ -737,45 +892,23 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 	}
 	queries = append(queries, mailout.SchemaQueries()...)
 	queries = append(queries, demo.SchemaQueries()...)
+	steps := make([]migrations.Step, 0, len(queries)+len(requiredHostingAndSupportColumns()))
 	for queryIndex, query := range queries {
-		if _, err := database.ExecContext(ctx, query); err != nil {
-			return fmt.Errorf("billing schema statement %d: %w", queryIndex+1, err)
-		}
+		step := migrations.SQL(fmt.Sprintf("schema-%03d", queryIndex+1), query)
+		step.Ensure = repair
+		steps = append(steps, step)
 	}
 	for _, column := range requiredHostingAndSupportColumns() {
-		found, err := hostingAndSupportColumnExists(ctx, database, column.tableName, column.columnName)
-		if err != nil {
-			return fmt.Errorf("check billing column %s.%s: %w", column.tableName, column.columnName, err)
-		}
-		if found {
-			continue
-		}
-		if _, err := database.ExecContext(ctx, `ALTER TABLE `+column.tableName+` ADD COLUMN `+column.columnName+` `+column.definition); err != nil {
-			return fmt.Errorf("add billing column %s.%s: %w", column.tableName, column.columnName, err)
-		}
+		steps = append(steps, migrations.Step{ID: "column-" + column.tableName + "-" + column.columnName, Revision: column.definition, Ensure: repair, Apply: func(transaction *sql.Tx) error {
+			found, err := hostingAndSupportColumnExists(ctx, transaction, column.tableName, column.columnName)
+			if err != nil || found {
+				return err
+			}
+			_, err = transaction.Exec(`ALTER TABLE ` + column.tableName + ` ADD COLUMN ` + column.columnName + ` ` + column.definition)
+			return err
+		}})
 	}
-	now := time.Now().UTC().Format(time.RFC3339)
-	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO server_settings(name,value,updated_at) VALUES('auto_registration_enabled','1',?)`, now)
-	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO server_settings(name,value,updated_at) VALUES('public_trial_enabled','0',?)`, now)
-	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO server_settings(name,value,updated_at) VALUES('deletion_backup_retention_days',?,?)`, strconv.Itoa(DefaultDeletionBackupRetentionDays), now)
-	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO server_settings(name,value,updated_at) VALUES('service_mail_relay_enabled','1',?)`, now)
-	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO server_settings(name,value,updated_at) VALUES('sitebrush_commission_bps','500',?)`, now)
-	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO payment_providers(provider,enabled,display_name,payment_url,instructions,updated_at) VALUES('sitebrush_com',1,'SiteBrush.com demo payments','/?hosting_and_support_demo_payment&invoice={invoice}','Предустановленная демо-оплата через SiteBrush.com.',?)`, now)
-	_, _ = database.ExecContext(ctx, `UPDATE payment_providers SET enabled=1,display_name='SiteBrush.com demo payments',payment_url='/?hosting_and_support_demo_payment&invoice={invoice}',instructions='Предустановленная демо-оплата через SiteBrush.com.',updated_at=? WHERE provider='sitebrush_com'`, now)
-	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO payment_providers(provider,enabled,display_name,payment_url,instructions,updated_at) VALUES('stripe',0,'Stripe','','Stripe Checkout or Payment Link URL template',?)`, now)
-	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO payment_providers(provider,enabled,display_name,payment_url,instructions,updated_at) VALUES('paypal',0,'PayPal','','PayPal payment URL template',?)`, now)
-	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO payment_providers(provider,enabled,display_name,payment_url,instructions,updated_at) VALUES('sbp',0,'СБП','','СБП: банк, телефон, получатель или QR/link template',?)`, now)
-	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO site_service_plans(name,quota_bytes,site_limit,analytics_report_limit,price,currency,billing_period,is_default,created_at,updated_at) VALUES('Free',?,1,0,'0','USD','monthly',1,?,?)`,
-		DefaultStorageLimitBytes, now, now)
-	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO server_expense_policies(installation_id,expense_mode,disk_rate_per_100_gb_minor,actual_monthly_expense_minor,currency,free_site_threshold_bytes,effective_at,created_at)
-		SELECT installation_id,'actual',1500,monthly_cost_minor,currency,100000000,effective_at,created_at FROM hosting_server_cost_policies WHERE monthly_cost_minor>0`)
-	if err := (Store{DB: database}).BackfillPublicTrialSites(ctx); err != nil {
-		return fmt.Errorf("backfill public trial sites: %w", err)
-	}
-	if err := setSchemaMigrationVersion(ctx, database, "billing", currentBillingSchemaVersion); err != nil {
-		return fmt.Errorf("write billing schema version: %w", err)
-	}
-	return nil
+	return steps
 }
 
 func migratePublicTrialSiteHistoryTable(ctx context.Context, database *sql.DB) error {
@@ -924,7 +1057,9 @@ func requiredHostingAndSupportColumns() []hostingAndSupportColumn {
 	}
 }
 
-func hostingAndSupportColumnExists(ctx context.Context, database Database, tableName, columnName string) (bool, error) {
+func hostingAndSupportColumnExists(ctx context.Context, database interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, tableName, columnName string) (bool, error) {
 	rows, err := database.QueryContext(ctx, `PRAGMA table_info(`+tableName+`)`)
 	if err != nil {
 		return false, err

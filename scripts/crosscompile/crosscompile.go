@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"crypto/md5"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -13,6 +15,8 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+
+	"github.com/matveynator/sitebrush/v2/pkg/appupdate"
 )
 
 type buildMode string
@@ -86,6 +90,7 @@ func main() {
 	var (
 		programName         = flag.String("program", "sitebrush", "program name used in binary names")
 		versionFlag         = flag.String("version", "", "version folder under binaries/; defaults to GITHUB_RUN_NUMBER, then git rev-list count, then git describe")
+		signUpdates         = flag.Bool("sign-updates", false, "sign the complete server matrix using SITEBRUSH_RELEASE_PRIVATE_KEY")
 		outputRoot          = flag.String("output-dir", "binaries", "root output directory for generated artifacts")
 		modeFlag            = flag.String("mode", string(modeAll), "build scope: all, server-app, or desktop-app")
 		targetOS            = flag.String("os", "", "optional GOOS target filter, for example linux")
@@ -157,6 +162,20 @@ func main() {
 		}
 	}
 
+	if *signUpdates {
+		encodedKey := strings.TrimSpace(os.Getenv("SITEBRUSH_RELEASE_PRIVATE_KEY"))
+		privateKey, err := base64.StdEncoding.DecodeString(encodedKey)
+		if err != nil || len(privateKey) != ed25519.PrivateKeySize {
+			fatalf("invalid SITEBRUSH_RELEASE_PRIVATE_KEY")
+		}
+		commit, err := runOutput(repoRoot, "git", "rev-parse", "HEAD")
+		if err != nil {
+			fatalf("resolve release commit: %v", err)
+		}
+		if err := appupdate.Publish(filepath.Join(outputDir, "server-app"), version, strings.TrimSpace(commit), ed25519.PrivateKey(privateKey)); err != nil {
+			fatalf("sign update manifest: %v", err)
+		}
+	}
 	if err := updateLatestSymlink(filepath.Join(repoRoot, *outputRoot), version); err != nil {
 		fatalf("update latest symlink: %v", err)
 	}

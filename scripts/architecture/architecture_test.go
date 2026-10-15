@@ -14,6 +14,20 @@ import (
 	"testing"
 )
 
+func TestApplicationTestsStayInPrimaryTestFile(t *testing.T) {
+	moduleRoot, err := findModuleRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootTests, err := filepath.Glob(filepath.Join(moduleRoot, "*_test.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rootTests) != 1 || filepath.Base(rootTests[0]) != "sitebrush_test.go" {
+		t.Fatalf("application tests must stay in sitebrush_test.go; feature tests belong in their packages: %v", rootTests)
+	}
+}
+
 func TestGitHubActionsUseImmutableCommitReferences(t *testing.T) {
 	moduleRoot, err := findModuleRoot()
 	if err != nil {
@@ -342,5 +356,53 @@ func writeGoFile(t *testing.T, directory string, source string) {
 	path := filepath.Join(directory, "fixture.go")
 	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestUpdaterUsesChannelLifecycleAndEmbeddedTrust(t *testing.T) {
+	moduleRoot, err := findModuleRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	updateDirectory := filepath.Join(moduleRoot, "pkg", "appupdate")
+	entries, err := os.ReadDir(updateDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
+			continue
+		}
+		parsed, err := parser.ParseFile(token.NewFileSet(), filepath.Join(updateDirectory, entry.Name()), nil, parser.ParseComments)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, imported := range parsed.Imports {
+			name, err := strconv.Unquote(imported.Path.Value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch name {
+			case "context", "sync", "sync/atomic", "C":
+				t.Errorf("updater %s introduces prohibited lifecycle or synchronization import %s", entry.Name(), name)
+			}
+		}
+		for _, declaration := range parsed.Decls {
+			general, ok := declaration.(*ast.GenDecl)
+			if !ok || general.Tok != token.VAR {
+				continue
+			}
+			embedded := false
+			if general.Doc != nil {
+				for _, comment := range general.Doc.List {
+					if strings.HasPrefix(comment.Text, "//go:embed ") {
+						embedded = true
+					}
+				}
+			}
+			if !embedded {
+				t.Errorf("updater %s declares mutable package state", entry.Name())
+			}
+		}
 	}
 }

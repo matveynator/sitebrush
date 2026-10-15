@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="{{.LanguageCode}}" dir="{{.TextDirection}}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{{index .T "update_title"}}</title>
+  <link rel="stylesheet" href="/p/static/technical_pages.css">
+  <script defer src="/p/static/server_update.js"></script>
+</head>
+<body class="technical-page">
+<main class="container" data-server-update data-csrf="{{.AccountCSRF}}"
+  data-waiting="{{index .T "update_connecting"}}" data-unavailable="{{index .T "update_unavailable"}}">
+  <header class="page-header"><h1>{{index .T "update_title"}}</h1><a href="/?expenses">{{index .T "menu_expenses"}}</a></header>
+  <dl>
+    <dt>{{index .T "update_current_version"}}</dt><dd data-update-current>—</dd>
+    <dt>{{index .T "update_available_version"}}</dt><dd data-update-available>—</dd>
+  </dl>
+  <p role="status" aria-live="polite" data-update-status>{{index .T "update_connecting"}}</p>
+  <p role="alert" data-update-error hidden></p>
+  <p data-update-rollback-reason hidden>{{index .T "update_rollback_unavailable"}}</p>
+  <p data-update-notification-error hidden>{{index .T "update_notification_unavailable"}}</p>
+  <button type="button" class="btn btn-outline-secondary" data-update-check disabled>{{index .T "update_check"}}</button>
+  <button type="button" class="btn btn-primary" data-update-install disabled>{{index .T "update_install"}}</button>
+  <button type="button" class="btn btn-outline-secondary" data-update-rollback disabled>{{index .T "update_rollback"}}</button>
+  <p>{{index .T "update_maintenance_notice"}}</p>
+  {{if .CentralAnnouncements}}
+  <section data-announcements data-campaign-counts="{{index .T "announcement_counts"}}" data-recipient-count="{{index .T "announcement_recipients"}}">
+    <h2>{{index .T "announcement_title"}}</h2>
+    <select data-announcement-reason aria-label="{{index .T "announcement_title"}}">
+      <option value="security">{{index .T "announcement_reason_security"}}</option>
+      <option value="feature">{{index .T "announcement_reason_feature"}}</option>
+      <option value="both">{{index .T "announcement_reason_both"}}</option>
+    </select>
+    <button type="button" class="btn btn-outline-secondary" data-announcement-preview>{{index .T "announcement_preview"}}</button>
+    <button type="button" class="btn btn-primary" data-announcement-send disabled>{{index .T "announcement_send"}}</button>
+    <p data-announcement-recipients></p>
+    <iframe data-announcement-email hidden sandbox title="{{index .T "announcement_preview"}}" style="width:100%;height:520px;border:0"></iframe>
+    <ul data-announcement-campaigns></ul>
+    <template data-announcement-cancel-label>{{index .T "announcement_cancel"}}</template>
+  </section>
+  {{end}}
+  <div hidden data-update-labels>
+    <span data-stage="current">{{index .T "update_stage_current"}}</span>
+    <span data-stage="available">{{index .T "update_stage_available"}}</span>
+    <span data-stage="preparing">{{index .T "update_stage_preparing"}}</span>
+    <span data-stage="downloading">{{index .T "update_stage_downloading"}}</span>
+    <span data-stage="verifying">{{index .T "update_stage_verifying"}}</span>
+    <span data-stage="backing_up">{{index .T "update_stage_backing_up"}}</span>
+    <span data-stage="installing">{{index .T "update_stage_installing"}}</span>
+    <span data-stage="restarting">{{index .T "update_stage_restarting"}}</span>
+    <span data-stage="checking">{{index .T "update_stage_checking"}}</span>
+    <span data-stage="activating">{{index .T "update_stage_activating"}}</span>
+    <span data-stage="completed">{{index .T "update_stage_completed"}}</span>
+    <span data-stage="failed">{{index .T "update_stage_failed"}}</span>
+    <span data-stage="rolling_back">{{index .T "update_stage_rolling_back"}}</span>
+    <span data-stage="rolled_back">{{index .T "update_stage_rolled_back"}}</span>
+  </div>
+</main>
+</body>
+</html>
