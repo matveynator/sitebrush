@@ -23074,7 +23074,7 @@ func TestBrowserAnalyticsShutdownPersistsFirstQueuedVisit(t *testing.T) {
 }
 
 func TestUpdateDevelopmentBuildNeverContactsStaleSupervisor(t *testing.T) {
-	application, _ := newUpdateTestApplication(t)
+	application, database := newUpdateTestApplication(t)
 	application.developmentMode = true
 	cookie := newAdminSessionCookie(t, application, "owner@example.com")
 	request := httptest.NewRequest(http.MethodGet, "http://localhost/?server_update_ws", nil)
@@ -23109,6 +23109,35 @@ func TestUpdateDevelopmentBuildNeverContactsStaleSupervisor(t *testing.T) {
 		}
 		if response.State.Current.Version != CompileVersion || response.State.Stage != "unsupported" || !strings.Contains(response.Error, "numbered server build") {
 			t.Fatalf("development %s: %+v", action, response)
+		}
+	}
+	for _, action := range []string{"campaign_preview", "campaign_start", "campaign_cancel"} {
+		if err := websocket.JSON.Send(connection, map[string]string{"action": action, "csrf": csrf, "version": "2", "reason": "security", "manifest_hash": "confirmed"}); err != nil {
+			t.Fatal(err)
+		}
+		var response serverUpdateResponse
+		if err := websocket.JSON.Receive(connection, &response); err != nil {
+			t.Fatal(err)
+		}
+		if response.Error != "release announcements are unavailable in development builds" {
+			t.Fatalf("development %s: %+v", action, response)
+		}
+	}
+	if _, err := application.centralAnnouncementIdentity(); err == nil || !strings.Contains(err.Error(), "development builds") {
+		t.Fatalf("development central authority: %v", err)
+	}
+	page := httptest.NewRecorder()
+	pageRequest := httptest.NewRequest(http.MethodGet, "http://localhost/?server_update", nil)
+	pageRequest.AddCookie(cookie)
+	pageRequest = pageRequest.WithContext(contextWithDomain(pageRequest.Context(), "localhost"))
+	application.serverUpdatePage(page, pageRequest)
+	if page.Code != http.StatusOK || strings.Contains(page.Body.String(), "data-announcements") {
+		t.Fatalf("development campaign controls exposed: %d", page.Code)
+	}
+	for _, table := range []string{"release_campaigns", "release_campaign_deliveries", "mail_outbox"} {
+		var count int
+		if err := database.QueryRow("SELECT COUNT(1) FROM " + table).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("development queued %s: %d %v", table, count, err)
 		}
 	}
 	status, err := application.announcementLiveStatus()

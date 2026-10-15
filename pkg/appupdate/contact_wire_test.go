@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/matveynator/netchan"
 )
 
 func TestContactResultsValidateProtocolAndAllowFutureFields(t *testing.T) {
@@ -161,5 +163,182 @@ func TestSupervisorUpdatesAcrossAdditiveDomainSchemaChanges(t *testing.T) {
 	rolled := awaitFixture(t, root)
 	if rolled.Stage != "rolled_back" || rolled.Current.Version != "1" {
 		t.Fatalf("schema-compatible rollback: %+v", rolled)
+	}
+}
+
+func TestLifecycleBridgesRevokeBrokenConsumers(t *testing.T) {
+	t.Run("closed request stream", func(t *testing.T) {
+		tasks := make(chan ChildTask)
+		close(tasks)
+		done := make(chan struct{})
+		go sendChildWire(tasks, nil, nil, done)
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("closed task stream retained bridge")
+		}
+	})
+	t.Run("revoked result consumer", func(t *testing.T) {
+		tasks := make(chan ChildTask, 1)
+		reply := make(chan ChildResult)
+		close(reply)
+		remote := make(chan wireChildTask, 1)
+		done := make(chan struct{})
+		tasks <- ChildTask{Action: "probe", Reply: reply}
+		go sendChildWire(tasks, remote, nil, done)
+		task := <-remote
+		task.Reply <- []byte(`{"Address":"localhost:80"}`)
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("revoked result consumer retained bridge")
+		}
+	})
+	t.Run("closed inbound session", func(t *testing.T) {
+		session := make(chan wireChildTask)
+		close(session)
+		done := make(chan struct{})
+		go receiveChildWire(session, nil, nil, done)
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("closed session retained bridge")
+		}
+	})
+	for _, scenario := range []string{"closed child tasks", "closed child reply", "oversized child result", "revoked wire reply"} {
+		t.Run(scenario, func(t *testing.T) {
+			tasks := make(chan ChildTask)
+			session := make(chan wireChildTask, 1)
+			reply := make(chan []byte, 1)
+			stop := make(chan struct{})
+			done := make(chan struct{})
+			defer close(stop)
+			if scenario == "closed child tasks" {
+				close(tasks)
+			}
+			if scenario == "revoked wire reply" {
+				close(reply)
+			}
+			go receiveChildWire(session, tasks, stop, done)
+			session <- wireChildTask{Action: "probe", Reply: reply}
+			if scenario != "closed child tasks" {
+				task := <-tasks
+				switch scenario {
+				case "closed child reply":
+					close(task.Reply)
+				case "oversized child result":
+					task.Reply <- ChildResult{Error: strings.Repeat("x", contactPayloadLimit)}
+				default:
+					task.Reply <- ChildResult{}
+				}
+			}
+			if scenario == "closed child tasks" || scenario == "closed child reply" {
+				select {
+				case payload := <-reply:
+					var result ChildResult
+					if err := json.Unmarshal(payload, &result); err != nil || result.Error == "" {
+						t.Fatalf("closed child accepted: %s %v", payload, err)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("closed child did not return failure")
+				}
+				close(session)
+			}
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("broken lifecycle retained bridge")
+			}
+		})
+	}
+	closed := make(chan wireChildTask)
+	close(closed)
+	if result := exchangeChildWire(closed, "probe", nil); result.Error == "" {
+		t.Fatal("closed network capability accepted")
+	}
+}
+
+func TestChildContactRejectsStartupFailureAndRevokedLifecycle(t *testing.T) {
+	for _, scenario := range []string{"rejected", "invalid result", "revoked lifecycle"} {
+		t.Run(scenario, func(t *testing.T) {
+			root := t.TempDir()
+			store, err := openStore(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			configuration, err := tlsIdentity(store, true)
+			store.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			listener, err := netchan.Listen[wireRequest](Address(root), netchan.Config{TLS: configuration, Capacity: 4})
+			if err != nil {
+				t.Fatal(err)
+			}
+			serverStop := make(chan struct{})
+			serverDone := make(chan struct{})
+			serverResult := make(chan error, 1)
+			go func() {
+				defer close(serverDone)
+				select {
+				case connection, open := <-listener.Channels:
+					if !open {
+						return
+					}
+					defer connection.Abort()
+					var attached wireRequest
+					select {
+					case attached = <-connection.Receive:
+					case <-serverStop:
+						return
+					}
+					response, _ := encodeContactResult(Response{})
+					if scenario == "rejected" {
+						response, _ = encodeContactResult(Response{Error: "fixture rejected startup"})
+					}
+					if scenario == "invalid result" {
+						response.Result = []byte("broken")
+					}
+					if err := connection.Deliver(response); err != nil {
+						serverResult <- err
+						return
+					}
+					if scenario == "revoked lifecycle" {
+						close(attached.Child)
+					}
+					<-serverStop
+				case <-serverStop:
+				}
+			}()
+			defer func() { close(serverStop); listener.Close(); <-serverDone }()
+			stop := make(chan struct{})
+			result := make(chan error, 1)
+			clientDone := make(chan struct{})
+			go func() { defer close(clientDone); result <- ChildContact(root, make(chan ChildTask), stop) }()
+			defer func() {
+				close(stop)
+				select {
+				case <-clientDone:
+				case <-time.After(5 * time.Second):
+					t.Error("child contact did not stop")
+				}
+			}()
+			select {
+			case err := <-result:
+				if err == nil {
+					t.Fatal("broken supervisor contact accepted")
+				}
+				if scenario == "rejected" && !strings.Contains(err.Error(), "fixture rejected startup") {
+					t.Fatalf("startup failure not propagated: %v", err)
+				}
+				if scenario == "revoked lifecycle" && !strings.Contains(err.Error(), "lifecycle contact terminated") {
+					t.Fatalf("revoked lifecycle remained attached: %v", err)
+				}
+			case err := <-serverResult:
+				t.Fatal(err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("broken contact did not terminate")
+			}
+		})
 	}
 }

@@ -44286,6 +44286,9 @@ func serverUpdateEmailURL(domain string) (string, error) {
 // Campaign authorization is tied to both the server owner and the pinned
 // central signing identity. Host headers cannot turn a customer into sitebrush.com.
 func (a *App) centralAnnouncementIdentity() (ed25519.PrivateKey, error) {
+	if a.developmentMode {
+		return nil, errors.New("release announcements are unavailable in development builds")
+	}
 	var domain string
 	if err := a.withServerControlDatabaseRead(context.Background(), "announcement-central-domain", func(database *sql.DB) error {
 		domain, _ = (hostingandsupport.Store{DB: database}).OwnerDomain(context.Background())
