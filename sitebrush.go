@@ -4374,6 +4374,42 @@ func (a *App) runBrowserAnalytics(stopRequested <-chan struct{}) {
 		}
 	}
 
+	// Draining shutdown uses the same admission path as normal consumption. A
+	// queued first visit must create its slot before it can be persisted.
+	admit := func(envelope browserAnalyticsEnvelope) bool {
+		envelope.domain = a.resolveAnalyticsDomain(envelope.domain, resolutions)
+		if envelope.domain == "" {
+			return false
+		}
+		slot := slots[envelope.domain]
+		if slot == nil {
+			if len(slots) >= 8 {
+				for domain, candidate := range slots {
+					if !candidate.busy && !candidate.saving && !candidate.dirty {
+						delete(slots, domain)
+						break
+					}
+				}
+				if len(slots) >= 8 {
+					a.markAnalyticsLoss(envelope.domain)
+					return false
+				}
+			}
+			slot = &browserAnalyticsSlot{lost: lostDomains[envelope.domain]}
+			delete(lostDomains, envelope.domain)
+			select {
+			case jobs <- browserAnalyticsStorageJob{domain: envelope.domain, load: true, limit: siteLimit}:
+				slot.busy = true
+				slots[envelope.domain] = slot
+			default:
+				a.markAnalyticsLoss(envelope.domain)
+				return false
+			}
+		}
+		record(slot, envelope)
+		return true
+	}
+
 	for {
 		select {
 		case <-stopRequested:
@@ -4381,12 +4417,7 @@ func (a *App) runBrowserAnalytics(stopRequested <-chan struct{}) {
 			defer deadline.Stop()
 			for len(a.browserAnalytics) > 0 {
 				envelope := <-a.browserAnalytics
-				if a.siteDatabaseRouter != nil {
-					envelope.domain = resolutions[envelope.domain].domain
-				}
-				if slot := slots[envelope.domain]; slot != nil {
-					record(slot, envelope)
-				}
+				admit(envelope)
 			}
 			for {
 				var outbound chan browserAnalyticsStorageJob
@@ -4432,36 +4463,9 @@ func (a *App) runBrowserAnalytics(stopRequested <-chan struct{}) {
 				lostDomains[domain] = true
 			}
 		case envelope := <-a.browserAnalytics:
-			envelope.domain = a.resolveAnalyticsDomain(envelope.domain, resolutions)
-			if envelope.domain == "" {
+			if !admit(envelope) {
 				continue
 			}
-			slot := slots[envelope.domain]
-			if slot == nil {
-				if len(slots) >= 8 {
-					for domain, candidate := range slots {
-						if !candidate.busy && !candidate.saving && !candidate.dirty {
-							delete(slots, domain)
-							break
-						}
-					}
-					if len(slots) >= 8 {
-						a.markAnalyticsLoss(envelope.domain)
-						continue
-					}
-				}
-				slot = &browserAnalyticsSlot{lost: lostDomains[envelope.domain]}
-				delete(lostDomains, envelope.domain)
-				select {
-				case jobs <- browserAnalyticsStorageJob{domain: envelope.domain, load: true, limit: siteLimit}:
-					slot.busy = true
-					slots[envelope.domain] = slot
-				default:
-					a.markAnalyticsLoss(envelope.domain)
-					continue
-				}
-			}
-			record(slot, envelope)
 			processed++
 			if processed%128 == 0 {
 				select {
@@ -44065,7 +44069,17 @@ func openUpdateReadOnlyDatabase(databasePath string) (*sql.DB, error) {
 	if _, err := os.Stat(databasePath); err != nil {
 		return nil, err
 	}
-	address := url.URL{Scheme: "file", Path: databasePath}
+	absolute, err := filepath.Abs(databasePath)
+	if err != nil {
+		return nil, err
+	}
+	// SQLite URI paths use forward slashes and /C:/ for Windows drives.
+	// Escaping the native drive as a URI authority makes preflight fail.
+	uriPath := filepath.ToSlash(absolute)
+	if !strings.HasPrefix(uriPath, "/") {
+		uriPath = "/" + uriPath
+	}
+	address := url.URL{Scheme: "file", Path: uriPath}
 	query := url.Values{}
 	query.Set("mode", "ro")
 	address.RawQuery = query.Encode()

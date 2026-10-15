@@ -127,7 +127,7 @@ jobs:
       - name: Test analytics sessions and graceful shutdown
         run: >-
           go test -count=1 .
-          -run '^(TestAccountSession|TestAnalytics(SeparatesSession|LiveFlush|Rotation|DiskQuota)|TestConversion(Beacon|Configuration|Preview|Publication|InitialGoals|Stealth|ReportRead)|TestHostingSnapshot(Schema|Compatibility)|TestBrowserAnalyticsWebSocketDelivery|TestMergedAudiencePercentages|TestControlDatabaseShutdown|TestControlReader|TestRepeatedInterrupt|TestSecurityBlockPagination|TestBlockedIPStatistics)'
+          -run '^(TestAccountSession|TestAnalytics(SeparatesSession|LiveFlush|Rotation|DiskQuota)|TestConversion(Beacon|Configuration|Preview|Publication|InitialGoals|Stealth|ReportRead)|TestHostingSnapshot(Schema|Compatibility)|TestBrowserAnalytics(Shutdown|WebSocketDelivery)|TestMergedAudiencePercentages|TestControlDatabaseShutdown|TestControlReader|TestRepeatedInterrupt|TestSecurityBlockPagination|TestBlockedIPStatistics)'
       - name: Test security boundaries and demo
         run: >-
           go test -count=1 .

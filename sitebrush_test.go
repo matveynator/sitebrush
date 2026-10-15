@@ -23007,3 +23007,56 @@ func TestUpdateMaintenanceChecksEverySiteAndMigrationJournal(t *testing.T) {
 		t.Fatal("preflight accepted a future site database schema")
 	}
 }
+
+func TestUpdateReadOnlyDatabaseEscapesNativePaths(t *testing.T) {
+	filename := filepath.Join(t.TempDir(), "read only-#-%-данные.db")
+	database, err := sql.Open("sqlite", filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`CREATE TABLE preserved(content TEXT); INSERT INTO preserved(content) VALUES('working')`); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	readonly, err := openUpdateReadOnlyDatabase(filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readonly.Close()
+	var content string
+	if err := readonly.QueryRow(`SELECT content FROM preserved`).Scan(&content); err != nil || content != "working" {
+		t.Fatal("preflight opened the wrong database", content, err)
+	}
+	if _, err := readonly.Exec(`INSERT INTO preserved(content) VALUES('changed')`); err == nil {
+		t.Fatal("preflight can modify persistent data")
+	}
+}
+
+func TestBrowserAnalyticsShutdownPersistsFirstQueuedVisit(t *testing.T) {
+	application, _ := newTestApplication(t)
+	for index := 0; index < 24; index++ {
+		domain := fmt.Sprintf("shutdown-%02d.example", index)
+		application.browserAnalytics = make(chan browserAnalyticsEnvelope, 1)
+		application.browserAnalytics <- browserAnalyticsEnvelope{domain: domain, received: time.Now().UTC(), event: browserstats.Event{Version: 2, Visitor: "1111111111111111", View: "2222222222222222", Sequence: 1, Path: "/", Signals: []browserstats.Signal{{Kind: "page"}}}}
+		stop := make(chan struct{})
+		close(stop)
+		finished := make(chan struct{})
+		go func() { defer close(finished); application.runBrowserAnalytics(stop) }()
+		select {
+		case <-finished:
+		case <-time.After(3 * time.Second):
+			t.Fatal("queued visit was not drained before shutdown")
+		}
+		saved := application.analyticsStorage.Exchange(browserstats.StorageRequest{Operation: browserstats.ReadBrowserReport, Domain: domain})
+		if saved.Err != nil {
+			t.Fatalf("first queued visit for %s was lost: %v", domain, saved.Err)
+		}
+		var reports map[string]browserstats.Report
+		if err := json.Unmarshal([]byte(saved.Text), &reports); err != nil || reports["7"].Conversion.Visitors != 1 {
+			t.Fatal("shutdown lost or duplicated the queued visit", saved.Text, err)
+		}
+	}
+}
