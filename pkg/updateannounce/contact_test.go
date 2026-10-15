@@ -38,6 +38,7 @@ func TestLiveContactAuthenticatesAndReturnsCurrentVersion(t *testing.T) {
 		listenerDone <- hub.Listen(address, centralKey, func(id string) (ed25519.PublicKey, error) { return peer, nil }, stop)
 	}()
 	agentDone := make(chan error, 1)
+	connectionStatuses := make(chan string, 1)
 	versions := make(chan string, 2)
 	requests := make(chan chan string)
 	go func() {
@@ -63,7 +64,7 @@ func TestLiveContactAuthenticatesAndReturnsCurrentVersion(t *testing.T) {
 	}
 	go func() {
 		for {
-			err := Agent(address, "server-1", peerKey, central, status, stop)
+			err := AgentWithStatus(address, "server-1", peerKey, central, status, connectionStatuses, stop)
 			select {
 			case <-stop:
 				agentDone <- err
@@ -86,6 +87,14 @@ func TestLiveContactAuthenticatesAndReturnsCurrentVersion(t *testing.T) {
 	}
 	if current.Version != "1" || current.Owners[0].Language != "fr" {
 		t.Fatal("wrong signed status", current)
+	}
+	select {
+	case status := <-connectionStatuses:
+		if status != "" {
+			t.Fatal("successful contact did not clear the notification warning", status)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("successful contact did not report its availability")
 	}
 	installations := []Installation{{ID: "server-1", Key: base64.StdEncoding.EncodeToString(peer), Domain: "server.example"}}
 	selection, err := hub.Select(installations, "21", "owner@example.com", stop)

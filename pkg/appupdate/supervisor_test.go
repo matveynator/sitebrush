@@ -334,6 +334,13 @@ func TestSupervisorUpdateRollbackAndFailures(t *testing.T) {
 				t.Fatal("accepted concurrent version change")
 			}
 			state := awaitFixture(t, root)
+			if state.Progress.Action != "upgrade" || state.Progress.FromVersion != "1" || state.Progress.TargetVersion != "2" || state.Progress.StartedAt.IsZero() || state.Progress.FinishedAt.Before(state.Progress.StartedAt) || state.Progress.Stage != state.Stage || len(state.Progress.Events) == 0 {
+				t.Fatalf("missing durable operation details: %+v", state.Progress)
+			}
+			lastEvent := state.Progress.Events[len(state.Progress.Events)-1]
+			if lastEvent.Code != "finished" || lastEvent.Stage != state.Stage {
+				t.Fatalf("missing terminal event: %+v", lastEvent)
+			}
 			if scenario == "success" || scenario == "incompatible" {
 				if state.Stage != "completed" || state.Current.Version != "2" || state.Previous == nil || state.Previous.Version != "1" {
 					t.Fatalf("update state=%+v", state)
@@ -354,10 +361,16 @@ func TestSupervisorUpdateRollbackAndFailures(t *testing.T) {
 					if rolled.Stage != "rolled_back" || rolled.Current.Version != "1" {
 						t.Fatalf("manual rollback: %+v", rolled)
 					}
+					if rolled.Progress.Action != "rollback" || rolled.Progress.TargetVersion != "1" || rolled.Progress.FinishedAt.IsZero() {
+						t.Fatal("manual rollback reused update progress", rolled.Progress)
+					}
 				}
 			} else {
 				if state.Current.Version != "1" || state.OperationError == "" {
 					t.Fatalf("failure damaged current state: %+v", state)
+				}
+				if state.Progress.FailedStage == "" {
+					t.Fatal("failure lost its original stage")
 				}
 				if strings.HasPrefix(scenario, "reject-") && scenario != "reject-preflight" {
 					if state.Stage != "rolled_back" {
@@ -400,6 +413,8 @@ func TestRecoveryRestoresInterruptedMigration(t *testing.T) {
 	state.Busy = true
 	state.WritesOpened = false
 	state.Stage = "installing"
+	state.Progress = OperationProgress{Action: "upgrade", Stage: "installing", StartedAt: time.Now().Add(-time.Minute).UTC(), StageAt: time.Now().UTC()}
+	state.Progress.event("installing", "stage_started", "")
 	if err := atomicJSON(store, "state.json", state); err != nil {
 		t.Fatal(err)
 	}
@@ -415,6 +430,9 @@ func TestRecoveryRestoresInterruptedMigration(t *testing.T) {
 	recovered := fixtureExchange(t, root, "status", "").State
 	if recovered.Busy || recovered.Current.Version != "1" {
 		t.Fatalf("recovered state=%+v", recovered)
+	}
+	if recovered.Progress.Stage != "failed" || recovered.Progress.FinishedAt.IsZero() || recovered.Progress.Events[len(recovered.Progress.Events)-1].Code != "interrupted" {
+		t.Fatal("interrupted operation lost its diagnostic journal", recovered.Progress)
 	}
 }
 

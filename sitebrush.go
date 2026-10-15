@@ -8791,7 +8791,7 @@ func versionOnlyRequested(args []string) bool {
 
 func main() {
 	if versionOnlyRequested(os.Args[1:]) {
-		fmt.Println(installedSitebrushVersion(defaultAppStoragePath(), false))
+		fmt.Println(CompileVersion)
 		return
 	}
 
@@ -8843,7 +8843,7 @@ func main() {
 		log.Fatal("-upgrade cannot be combined with another command")
 	}
 	if *versionMode || *legacyVersionMode {
-		fmt.Println(installedSitebrushVersion(*storagePath, flagWasProvided("path")))
+		fmt.Println(CompileVersion)
 		return
 	}
 	desktopMode := false
@@ -44222,12 +44222,24 @@ func runManualUpgrade(storagePath, databasePath, port string, debug bool) error 
 		return err
 	}
 	lastStage := ""
+	var lastSequence uint64
+	var lastWork appupdate.WorkProgress
 	for {
 		response, err = appupdate.Exchange(storagePath, appupdate.Request{Action: "status"}, stop)
 		if err != nil {
 			return err
 		}
-		if response.State.Stage != lastStage {
+		if response.State.Progress.Action != "" {
+			lastSequence, err = appupdate.WriteOperationEvents(os.Stdout, response.State.Progress, lastSequence)
+			if err != nil {
+				return err
+			}
+			work := response.State.Progress.Work
+			if work != lastWork && (work.TotalBytes > 0 || work.TotalFiles > 0) {
+				fmt.Fprintf(os.Stdout, "%s bytes=%d/%d files=%d/%d speed=%.0f B/s elapsed=%s\n", response.State.Stage, work.Bytes, work.TotalBytes, work.Files, work.TotalFiles, work.Speed, time.Since(response.State.Progress.StartedAt).Round(time.Second))
+				lastWork = work
+			}
+		} else if response.State.Stage != lastStage {
 			lastStage = response.State.Stage
 			fmt.Fprintln(os.Stdout, lastStage)
 		}
@@ -44559,7 +44571,7 @@ func (a *App) serverUpdatePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, centralErr := a.centralAnnouncementIdentity()
-	view := map[string]any{"T": translationsForRequest(r), "AccountCSRF": accountCSRF(r), "CentralAnnouncements": centralErr == nil}
+	view := map[string]any{"T": translationsForRequest(r), "AccountCSRF": accountCSRF(r), "CentralAnnouncements": centralErr == nil, "ServerVersion": CompileVersion}
 	a.render(w, r, "server_update.html", view)
 }
 
@@ -44587,7 +44599,7 @@ func (a *App) serverUpdateSocket(w http.ResponseWriter, r *http.Request) {
 			if !a.updateAuthorized(r) || command.CSRF == "" || subtle.ConstantTimeCompare([]byte(command.CSRF), []byte(accountCSRF(r))) != 1 {
 				return
 			}
-			response := serverUpdateResponse{}
+			response := serverUpdateResponse{ServerVersion: CompileVersion}
 			switch command.Action {
 			case "status", "check", "upgrade", "rollback":
 				if a.developmentMode {
@@ -44698,8 +44710,9 @@ type releaseAnnouncementPreview struct {
 }
 type serverUpdateResponse struct {
 	appupdate.Response
-	Preview   *releaseAnnouncementPreview `json:",omitempty"`
-	Campaigns []updateannounce.Campaign   `json:",omitempty"`
+	ServerVersion string
+	Preview       *releaseAnnouncementPreview `json:",omitempty"`
+	Campaigns     []updateannounce.Campaign   `json:",omitempty"`
 }
 
 func (a *App) previewReleaseAnnouncement(reason, language string, stop <-chan struct{}) (releaseAnnouncementPreview, error) {
@@ -44794,6 +44807,8 @@ func (a *App) startAnnouncementSubsystems(stop <-chan struct{}) {
 	if a.desktopMode || runningInContainer() {
 		return
 	}
+	notificationStatuses := make(chan string, 1)
+	go a.runUpdateNotificationStatus(notificationStatuses, stop)
 	go func() {
 		for {
 			select {
@@ -44804,10 +44819,15 @@ func (a *App) startAnnouncementSubsystems(stop <-chan struct{}) {
 			id, _, key, err := a.serviceMailLocalKeyPair(context.Background())
 			central, decodeErr := updateannounce.DecodeKey(sitebrushComServiceMailRelayPublicKey)
 			if err == nil && decodeErr == nil {
-				err = updateannounce.Agent(updateannounce.Address, id, key, central, a.announcementLiveStatus, stop)
+				err = updateannounce.AgentWithStatus(updateannounce.Address, id, key, central, a.announcementLiveStatus, notificationStatuses, stop)
 			}
 			if err != nil {
 				log.Printf("UPDATE announcement contact: %s", diagnosticlog.SafeLogValue(err.Error()))
+				select {
+				case notificationStatuses <- err.Error():
+				case <-stop:
+					return
+				}
 			}
 			select {
 			case <-stop:
@@ -44816,6 +44836,30 @@ func (a *App) startAnnouncementSubsystems(stop <-chan struct{}) {
 			}
 		}
 	}()
+}
+
+func (a *App) runUpdateNotificationStatus(statuses <-chan string, stop <-chan struct{}) {
+	for {
+		select {
+		case <-stop:
+			return
+		case status, open := <-statuses:
+			if !open {
+				return
+			}
+			if len(status) > 512 {
+				status = strings.ToValidUTF8(status[:512], "?")
+			}
+			if _, err := appupdate.Exchange(a.storagePath, appupdate.Request{Action: "notification_status", Detail: status}, stop); err != nil {
+				select {
+				case <-stop:
+					return
+				default:
+					log.Printf("UPDATE notification status: %s", diagnosticlog.SafeLogValue(err.Error()))
+				}
+			}
+		}
+	}
 }
 
 func (a *App) announcementLiveStatus() (updateannounce.Status, error) {
@@ -44961,22 +45005,6 @@ func runStoppedUpdateSupervisor(config serverRunConfig) error {
 		return err
 	}
 	return appupdate.Run(appupdate.Options{Catalog: &catalog, StoragePath: config.StoragePath, Executable: executable, Version: CompileVersion, Compatibility: appupdate.CurrentCompatibility(), Arguments: arguments, PublicKey: publicKey, Output: os.Stdout, Stopped: true}, serverContext.Done())
-}
-
-func installedSitebrushVersion(storagePath string, explicitPath bool) string {
-	executable, err := os.Executable()
-	if err != nil {
-		return CompileVersion
-	}
-	if !explicitPath {
-		if stored, found := serviceinstall.StoredOptions(); found {
-			storagePath = stored.StoragePath
-		}
-	}
-	if installed := appupdate.InstalledVersion(storagePath, executable); installed != "" {
-		return installed
-	}
-	return CompileVersion
 }
 
 func serverRuntimeArgument(arguments []string, name string) string {

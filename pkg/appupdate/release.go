@@ -249,6 +249,10 @@ func (catalog Catalog) Check(stop <-chan struct{}) (Manifest, string, error) {
 }
 
 func (catalog Catalog) Download(manifest Manifest, destination string, stop <-chan struct{}) error {
+	return catalog.downloadProgress(manifest, destination, stop, nil)
+}
+
+func (catalog Catalog) downloadProgress(manifest Manifest, destination string, stop <-chan struct{}, updates chan<- WorkProgress) error {
 	if err := manifest.Validate(); err != nil {
 		return err
 	}
@@ -271,7 +275,10 @@ func (catalog Catalog) Download(manifest Manifest, destination string, stop <-ch
 	}()
 	var failure error
 	if catalog.mirror != nil {
-		failure = catalog.mirror.download(manifest, catalog.PublicKey, file, stop)
+		if err := sendWork(updates, WorkProgress{Code: "source", Detail: "NetChan " + catalog.mirror.Address}, stop); err != nil {
+			return err
+		}
+		failure = catalog.mirror.downloadProgress(manifest, catalog.PublicKey, file, stop, updates)
 		if failure == nil {
 			failure = verifyReleaseFile(file, artifact, stop)
 		}
@@ -282,6 +289,10 @@ func (catalog Catalog) Download(manifest Manifest, destination string, stop <-ch
 			complete = true
 			return nil
 		}
+		if err := sendWork(updates, WorkProgress{Code: "fallback", Detail: failure.Error()}, stop); err != nil {
+			return err
+		}
+		failure = nil
 	}
 	addresses := make([]string, 0, len(catalog.artifactBases)+1)
 	for _, base := range catalog.artifactBases {
@@ -294,6 +305,18 @@ func (catalog Catalog) Download(manifest Manifest, destination string, stop <-ch
 			return errors.New("release download canceled")
 		default:
 		}
+		if failure != nil {
+			if err := sendWork(updates, WorkProgress{Code: "fallback", Detail: failure.Error()}, stop); err != nil {
+				return err
+			}
+		}
+		parsed, err := url.Parse(address)
+		if err != nil {
+			return err
+		}
+		if err := sendWork(updates, WorkProgress{Code: "source", Detail: "HTTPS " + parsed.Hostname()}, stop); err != nil {
+			return err
+		}
 		if err := file.Truncate(0); err != nil {
 			return err
 		}
@@ -305,7 +328,12 @@ func (catalog Catalog) Download(manifest Manifest, destination string, stop <-ch
 			failure = err
 			continue
 		}
-		_, copyErr := io.Copy(file, io.LimitReader(response.Body, artifact.Size+1))
+		counter := &progressWriter{output: file, updates: updates, stop: stop, work: WorkProgress{TotalBytes: artifact.Size}}
+		if err := counter.report(); err != nil {
+			response.Body.Close()
+			return err
+		}
+		_, copyErr := io.Copy(counter, io.LimitReader(response.Body, artifact.Size+1))
 		closeErr := response.Body.Close()
 		if copyErr != nil {
 			failure = copyErr
@@ -318,6 +346,9 @@ func (catalog Catalog) Download(manifest Manifest, destination string, stop <-ch
 		if err := verifyReleaseFile(file, artifact, stop); err != nil {
 			failure = err
 			continue
+		}
+		if err := counter.report(); err != nil {
+			return err
 		}
 		if err := file.Close(); err != nil {
 			return err

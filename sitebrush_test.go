@@ -164,6 +164,35 @@ func TestVersionCommandPrintsOnlyVersionWithoutCreatingStorage(t *testing.T) {
 	}
 }
 
+func TestInstalledVersionCommandIgnoresStaleUpdaterJournal(t *testing.T) {
+	binaryPath := filepath.Join(t.TempDir(), "sitebrush-version")
+	if runtime.GOOS == "windows" {
+		binaryPath += ".exe"
+	}
+	build := exec.Command("go", "build", "-o", binaryPath, "-ldflags=-X main.CompileVersion=920", ".")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build: %v\n%s", err, output)
+	}
+	storagePath := t.TempDir()
+	journalPath := filepath.Join(storagePath, appupdate.Directory)
+	if err := os.MkdirAll(journalPath, 0700); err != nil {
+		t.Fatal(err)
+	}
+	journal, err := json.Marshal(appupdate.State{Launcher: binaryPath, Current: appupdate.Version{Version: "919"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(journalPath, "state.json"), journal, 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, versionFlag := range []string{"--version", "-version", "-v"} {
+		output, err := exec.Command(binaryPath, versionFlag, "-path", storagePath).CombinedOutput()
+		if err != nil || string(output) != "920\n" {
+			t.Fatalf("%s selected stale metadata: %q, %v", versionFlag, output, err)
+		}
+	}
+}
+
 func TestEffectiveGrabResourceContentTypeTrustsJavaScriptExtension(t *testing.T) {
 	contentType := crawler.EffectiveResourceContentType("http://oldkmv.uprof.info/js/CurrentTime.js", "text/html; charset=windows-1251")
 	if contentType != "application/javascript" {
@@ -22758,9 +22787,12 @@ func TestUpdateSocketRequiresCSRFAndRechecksOwner(t *testing.T) {
 	if err := websocket.JSON.Send(connection, map[string]string{"action": "unknown", "csrf": csrf}); err != nil {
 		t.Fatal(err)
 	}
-	var response struct{ Error string }
+	var response struct{ Error, ServerVersion string }
 	if err := websocket.JSON.Receive(connection, &response); err != nil || response.Error != "Unknown update command" {
 		t.Fatalf("valid session failed: %+v %v", response, err)
+	}
+	if response.ServerVersion != CompileVersion {
+		t.Fatal("update adapter omitted the actual HTTP server version", response.ServerVersion)
 	}
 	if _, err := database.Exec(`DELETE FROM server_managers`); err != nil {
 		t.Fatal(err)

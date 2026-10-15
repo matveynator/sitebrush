@@ -5,24 +5,52 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>{{index .T "update_title"}}</title>
   <link rel="stylesheet" href="/p/static/technical_pages.css">
+  <link rel="stylesheet" href="/p/static/server_update.css">
   <script defer src="/p/static/server_update.js"></script>
 </head>
 <body class="technical-page">
-<main class="container" data-server-update data-csrf="{{.AccountCSRF}}"
-  data-waiting="{{index .T "update_connecting"}}" data-unavailable="{{index .T "update_unavailable"}}">
+<main class="container" data-server-update data-csrf="{{.AccountCSRF}}" data-server-version="{{.ServerVersion}}"
+  data-log-empty="{{index .T "update_log_empty"}}" data-waiting="{{index .T "update_connecting"}}" data-unavailable="{{index .T "update_unavailable"}}">
   <header class="page-header"><h1>{{index .T "update_title"}}</h1><a href="/?expenses">{{index .T "menu_expenses"}}</a></header>
-  <dl>
-    <dt>{{index .T "update_current_version"}}</dt><dd data-update-current>—</dd>
-    <dt>{{index .T "update_available_version"}}</dt><dd data-update-available>—</dd>
-  </dl>
-  <p role="status" aria-live="polite" data-update-status>{{index .T "update_connecting"}}</p>
-  <p role="alert" data-update-error hidden></p>
-  <p data-update-rollback-reason hidden>{{index .T "update_rollback_unavailable"}}</p>
-  <p data-update-notification-error hidden>{{index .T "update_notification_unavailable"}}</p>
-  <button type="button" class="btn btn-outline-secondary" data-update-check disabled>{{index .T "update_check"}}</button>
-  <button type="button" class="btn btn-primary" data-update-install disabled>{{index .T "update_install"}}</button>
-  <button type="button" class="btn btn-outline-secondary" data-update-rollback disabled>{{index .T "update_rollback"}}</button>
-  <p>{{index .T "update_maintenance_notice"}}</p>
+  <p class="update-introduction">{{index .T "update_maintenance_notice"}}</p>
+  <section class="update-versions" aria-label="{{index .T "update_versions"}}">
+    <div class="update-card"><span>{{index .T "update_running_version"}}</span><strong data-update-current>—</strong><small data-update-selected hidden></small></div>
+    <div class="update-card"><span>{{index .T "update_available_version"}}</span><strong data-update-available>—</strong></div>
+    <div class="update-card"><span>{{index .T "update_previous_version"}}</span><strong data-update-previous>—</strong><small data-update-rollback-reason hidden>{{index .T "update_rollback_unavailable"}}</small></div>
+  </section>
+  <section class="update-card update-operation" aria-labelledby="update-operation-heading">
+    <div class="update-operation-header">
+      <div><p class="update-eyebrow" data-update-operation>{{index .T "update_title"}}</p><h2 id="update-operation-heading" role="status" aria-live="polite" data-update-status>{{index .T "update_connecting"}}</h2><p class="update-version-route" data-update-route></p></div>
+      <strong class="update-percentage" data-update-percent>—</strong>
+    </div>
+    <div class="update-progress" role="progressbar" aria-label="{{index .T "update_progress"}}" aria-valuemin="0" aria-valuemax="100" data-update-progress><div data-update-progress-fill></div></div>
+    <div class="update-progress-caption"><span>{{index .T "update_progress_by_steps"}}</span><span data-update-work></span></div>
+    <p class="update-connection"><span role="status" aria-live="polite" data-update-connection></span><span aria-live="off" data-update-last-contact></span></p>
+    <dl class="update-metrics">
+      <div><dt>{{index .T "update_started"}}</dt><dd data-update-started>—</dd></div>
+      <div><dt>{{index .T "update_elapsed"}}</dt><dd data-update-elapsed>—</dd></div>
+      <div><dt>{{index .T "update_stage_elapsed"}}</dt><dd data-update-stage-elapsed>—</dd></div>
+      <div><dt>{{index .T "update_remaining"}}</dt><dd data-update-remaining>—</dd></div>
+    </dl>
+    <p class="update-error" role="alert" data-update-error hidden></p>
+    <p class="update-warning" data-update-cleanup-error hidden></p>
+    <p class="update-warning" data-update-notification-error hidden>{{index .T "update_notification_unavailable"}}</p>
+    <div class="update-actions">
+      <button type="button" class="btn btn-primary" data-update-install disabled>{{index .T "update_install"}}</button>
+      <button type="button" class="btn btn-outline-secondary" data-update-check disabled>{{index .T "update_check"}}</button>
+      <button type="button" class="btn btn-outline-secondary" data-update-rollback disabled>{{index .T "update_rollback"}}</button>
+    </div>
+  </section>
+  <section class="update-card update-steps-card" aria-labelledby="update-steps-heading" data-update-steps-card hidden>
+    <h2 id="update-steps-heading">{{index .T "update_steps"}}</h2>
+    <ol class="update-steps" data-update-steps></ol>
+  </section>
+  <details class="update-card update-journal" data-update-journal open>
+    <summary>{{index .T "update_log"}} <span data-update-event-count></span></summary>
+    <div class="update-log-actions"><button type="button" class="btn btn-outline-secondary btn-sm" data-update-copy>{{index .T "update_copy_log"}}</button><button type="button" class="btn btn-outline-secondary btn-sm" data-update-download>{{index .T "update_download_log"}}</button><span role="status" data-update-copy-status></span></div>
+    <p class="update-warning" data-update-truncated hidden>{{index .T "update_log_truncated"}}</p>
+    <pre class="update-log" data-update-log tabindex="0">{{index .T "update_log_empty"}}</pre>
+  </details>
   {{if .CentralAnnouncements}}
   <section data-announcements data-campaign-counts="{{index .T "announcement_counts"}}" data-recipient-count="{{index .T "announcement_recipients"}}">
     <h2>{{index .T "announcement_title"}}</h2>
@@ -40,11 +68,46 @@
   </section>
   {{end}}
   <div hidden data-update-labels>
+    <span data-label="log_truncated">{{index .T "update_log_truncated"}}</span>
+    <span data-label="upgrade">{{index .T "update_ui_upgrade"}}</span>
+    <span data-label="rollback">{{index .T "update_ui_rollback"}}</span>
+    <span data-label="auto_rollback">{{index .T "update_ui_auto_rollback"}}</span>
+    <span data-label="calculating">{{index .T "update_ui_calculating"}}</span>
+    <span data-label="stage_remaining">{{index .T "update_ui_stage_remaining"}}</span>
+    <span data-label="files">{{index .T "update_ui_files"}}</span>
+    <span data-label="speed">{{index .T "update_ui_speed"}}</span>
+    <span data-label="reconnecting">{{index .T "update_ui_reconnecting"}}</span>
+    <span data-label="last_contact">{{index .T "update_ui_last_contact"}}</span>
+    <span data-label="connected">{{index .T "update_ui_connected"}}</span>
+    <span data-label="selected">{{index .T "update_ui_selected"}}</span>
+    <span data-label="step_waiting">{{index .T "update_ui_step_waiting"}}</span>
+    <span data-label="step_running">{{index .T "update_ui_step_running"}}</span>
+    <span data-label="step_done">{{index .T "update_ui_step_done"}}</span>
+    <span data-label="step_failed">{{index .T "update_ui_step_failed"}}</span>
+    <span data-label="copied">{{index .T "update_ui_copied"}}</span>
+    <span data-label="copy_failed">{{index .T "update_ui_copy_failed"}}</span>
+    <span data-label="stage_started">{{index .T "update_ui_stage_started"}}</span>
+    <span data-label="stage_finished">{{index .T "update_ui_stage_finished"}}</span>
+    <span data-label="stage_failed">{{index .T "update_ui_stage_failed"}}</span>
+    <span data-label="source">{{index .T "update_ui_source"}}</span>
+    <span data-label="fallback">{{index .T "update_ui_fallback"}}</span>
+    <span data-label="download_verified">{{index .T "update_ui_download_verified"}}</span>
+    <span data-label="manifest_verified">{{index .T "update_ui_manifest_verified"}}</span>
+    <span data-label="cleanup_started">{{index .T "update_ui_cleanup_started"}}</span>
+    <span data-label="cleanup_warning">{{index .T "update_ui_cleanup_warning"}}</span>
+    <span data-label="finished">{{index .T "update_ui_finished"}}</span>
+    <span data-label="interrupted">{{index .T "update_ui_interrupted"}}</span>
+    <span data-label="finished_current">{{index .T "update_ui_finished_current"}}</span>
+    <span data-label="cleanup">{{index .T "update_ui_cleanup"}}</span>
+    <span data-label="unsupported">{{index .T "update_ui_unsupported"}}</span>
+    <span data-label="checking_release">{{index .T "update_ui_checking_release"}}</span>
+    <span data-label="no_telemetry">{{index .T "update_ui_no_telemetry"}}</span>
     <span data-stage="current">{{index .T "update_stage_current"}}</span>
     <span data-stage="available">{{index .T "update_stage_available"}}</span>
     <span data-stage="preparing">{{index .T "update_stage_preparing"}}</span>
     <span data-stage="downloading">{{index .T "update_stage_downloading"}}</span>
     <span data-stage="verifying">{{index .T "update_stage_verifying"}}</span>
+    <span data-stage="inspecting">{{index .T "update_stage_inspecting"}}</span>
     <span data-stage="backing_up">{{index .T "update_stage_backing_up"}}</span>
     <span data-stage="installing">{{index .T "update_stage_installing"}}</span>
     <span data-stage="restarting">{{index .T "update_stage_restarting"}}</span>

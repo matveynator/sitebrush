@@ -242,6 +242,9 @@ func TestSnapshotRestoresInternalReleasePublicationLinks(t *testing.T) {
 	if err := os.Symlink("42", link); err != nil {
 		t.Fatal(err)
 	}
+	if err := checkBackupSpace(root); err != nil {
+		t.Fatal("preflight rejected a publication link accepted by snapshots", err)
+	}
 	store, err := openStore(root)
 	if err != nil {
 		t.Fatal(err)
@@ -295,6 +298,9 @@ func TestSnapshotRejectsEscapingPrivateAndDanglingLinks(t *testing.T) {
 			defer store.Close()
 			if err := os.Symlink(target, filepath.Join(root, "link")); err != nil {
 				t.Fatal(err)
+			}
+			if err := checkBackupSpace(root); err == nil {
+				t.Fatal("unsafe link passed backup preflight", target)
 			}
 			if _, err := snapshot(root, store, strings.Repeat("b", 32), nil); err == nil {
 				t.Fatal("unsafe link accepted", target)

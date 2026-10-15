@@ -186,6 +186,10 @@ func manifestIdentity(manifest Manifest) string {
 }
 
 func (client ReleaseClient) download(manifest Manifest, key ed25519.PublicKey, file *os.File, stop <-chan struct{}) error {
+	return client.downloadProgress(manifest, key, file, stop, nil)
+}
+
+func (client ReleaseClient) downloadProgress(manifest Manifest, key ed25519.PublicKey, file *os.File, stop <-chan struct{}, updates chan<- WorkProgress) error {
 	artifact, err := manifest.Artifact(runtime.GOOS, runtime.GOARCH)
 	if err != nil {
 		return err
@@ -199,7 +203,7 @@ func (client ReleaseClient) download(manifest Manifest, key ed25519.PublicKey, f
 			return errors.New("release download canceled")
 		default:
 		}
-		failure = client.transfer(manifest, artifact, key, file, stop)
+		failure = client.transferProgress(manifest, artifact, key, file, stop, updates)
 		if failure == nil {
 			return nil
 		}
@@ -208,6 +212,10 @@ func (client ReleaseClient) download(manifest Manifest, key ed25519.PublicKey, f
 }
 
 func (client ReleaseClient) transfer(manifest Manifest, artifact Artifact, key ed25519.PublicKey, file *os.File, stop <-chan struct{}) error {
+	return client.transferProgress(manifest, artifact, key, file, stop, nil)
+}
+
+func (client ReleaseClient) transferProgress(manifest Manifest, artifact Artifact, key ed25519.PublicKey, file *os.File, stop <-chan struct{}, updates chan<- WorkProgress) error {
 	offset, err := file.Seek(0, io.SeekEnd)
 	if err != nil {
 		return err
@@ -236,6 +244,10 @@ func (client ReleaseClient) transfer(manifest Manifest, artifact Artifact, key e
 		return errors.New("release mirror changed confirmed metadata")
 	}
 	replies := make(chan ReleaseChunk, 1)
+	counter := &progressWriter{output: file, updates: updates, stop: stop, work: WorkProgress{Bytes: offset, TotalBytes: artifact.Size}}
+	if err := counter.report(); err != nil {
+		return err
+	}
 	for {
 		if err := sendChannel(response.Session, ReleaseCredit{Offset: offset, Reply: replies}, stop, 5*time.Second); err != nil {
 			return err
@@ -264,7 +276,7 @@ func (client ReleaseClient) transfer(manifest Manifest, artifact Artifact, key e
 		if chunk.Offset != offset || len(chunk.Bytes) > releaseChunkSize || int64(len(chunk.Bytes)) > artifact.Size-offset || chunk.Final != (offset+int64(len(chunk.Bytes)) == artifact.Size) || (!chunk.Final && len(chunk.Bytes) == 0) {
 			return errors.New("invalid release chunk offset, length or final marker")
 		}
-		if _, err := file.Write(chunk.Bytes); err != nil {
+		if _, err := counter.Write(chunk.Bytes); err != nil {
 			return err
 		}
 		offset += int64(len(chunk.Bytes))
@@ -272,7 +284,7 @@ func (client ReleaseClient) transfer(manifest Manifest, artifact Artifact, key e
 			if err := sendChannel(response.Session, ReleaseCredit{Offset: offset, Finish: true}, stop, 5*time.Second); err != nil {
 				return fmt.Errorf("complete release transfer: %w", err)
 			}
-			return nil
+			return counter.report()
 		}
 	}
 }
