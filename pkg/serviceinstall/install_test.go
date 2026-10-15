@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -307,7 +308,7 @@ func TestInteractiveUninstallWizardEditsServiceName(t *testing.T) {
 	if options.ServiceName != "sitebrush-test" {
 		t.Fatalf("service name = %q, want sitebrush-test", options.ServiceName)
 	}
-	if !strings.Contains(output.String(), "Sitebrush service uninstall") || !strings.Contains(output.String(), "/etc/systemd/system/sitebrush.service") {
+	if !strings.Contains(output.String(), "Sitebrush service uninstall") || !strings.Contains(output.String(), filepath.Join("/etc/systemd/system", "sitebrush.service")) {
 		t.Fatalf("wizard output did not explain uninstall plan:\n%s", output.String())
 	}
 }

@@ -20,6 +20,47 @@ env:
   CGO_ENABLED: "0"
 
 jobs:
+  update_native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-14, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: '0'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.26.9'
+          cache: true
+      - name: Test update packages and process lifecycle
+        shell: bash
+        run: go test -count=1 -timeout=180s ./pkg/appupdate ./pkg/updateannounce ./pkg/migrations ./pkg/authmail ./pkg/serviceinstall ./scripts/architecture
+      # Durable migration fixtures perform many filesystem flushes on Windows.
+      # Individual contact/process deadlines remain bounded by their tests.
+      - name: Test server authorization and database maintenance
+        shell: bash
+        run: go test -v -count=1 -timeout=600s -run 'Test(ServerUpdate|Update)' .
+
+  update_crosscompile:
+    runs-on: ubuntu-22.04
+    env:
+      CGO_ENABLED: '0'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.26.9'
+          cache: true
+      - name: Compile every native server platform
+        run: go run ./scripts/crosscompile -mode server-app -version "${GITHUB_RUN_NUMBER}" -output-dir /tmp/sitebrush-update-builds
+
   tests:
     name: tests
     runs-on: ubuntu-22.04
@@ -73,18 +114,24 @@ jobs:
               go tool cover -func="$profile"
             fi
           done < <(go list ./pkg/... ./scripts/...)
+      - name: Cover application update and migration boundaries
+        run: >-
+          go test -count=1 -covermode=atomic
+          -coverpkg=./pkg/appupdate,./pkg/updateannounce,./pkg/migrations,./pkg/authmail,./pkg/hostingandsupport,./pkg/serviceinstall
+          -coverprofile=application-update-coverage.out
+          -run 'Test(ServerUpdate|Update|AccountLegacySessionsInvalidatedOnce|AdminIPOptInMigrationRunsForPreviousSchemaVersion)' .
       - name: Upload coverage
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6
         with:
           fail_ci_if_error: true
-          files: coverage.out
+          files: coverage.out,application-update-coverage.out
           use_oidc: true
       - name: Enforce lock-free architecture
         run: go test -count=1 ./scripts/architecture
       - name: Test analytics sessions and graceful shutdown
         run: >-
           go test -count=1 .
-          -run '^(TestAccountSession|TestAnalytics(SeparatesSession|LiveFlush|Rotation|DiskQuota)|TestConversion(Beacon|Configuration|Preview|Publication|InitialGoals|Stealth|ReportRead)|TestHostingSnapshot(Schema|Compatibility)|TestBrowserAnalyticsWebSocketDelivery|TestMergedAudiencePercentages|TestControlDatabaseShutdown|TestControlReader|TestRepeatedInterrupt|TestSecurityBlockPagination|TestBlockedIPStatistics)'
+          -run '^(TestAccountSession|TestAnalytics(SeparatesSession|LiveFlush|Rotation|DiskQuota)|TestConversion(Beacon|Configuration|Preview|Publication|InitialGoals|Stealth|ReportRead)|TestHostingSnapshot(Schema|Compatibility)|TestBrowserAnalytics(Shutdown|WebSocketDelivery)|TestMergedAudiencePercentages|TestControlDatabaseShutdown|TestControlReader|TestRepeatedInterrupt|TestSecurityBlockPagination|TestBlockedIPStatistics)'
       - name: Test security boundaries and demo
         run: >-
           go test -count=1 .
@@ -102,7 +149,8 @@ jobs:
         run: |
           npm ci --ignore-scripts
           node document_test.cjs
-          node image_replacement_test.cjs
+          node ../../pkg/appupdate/server_update_test.cjs
+          node ../../pkg/imageprepare/image_replacement_test.cjs
           node ../../pkg/analytics/browser_test.cjs
           node ../../pkg/accountpasskey/browser_test.cjs
           npx playwright install --with-deps chromium

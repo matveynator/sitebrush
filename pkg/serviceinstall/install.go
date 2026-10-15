@@ -31,6 +31,20 @@ type Options struct {
 	Output      io.Writer
 }
 
+// StoredOptions lets local maintenance commands reuse the installed service's
+// configuration without installing, starting, or modifying that service.
+func StoredOptions() (Options, bool) {
+	manager, err := detectServiceManager(newRuntimeProbe())
+	if err != nil {
+		return Options{}, false
+	}
+	metadata, found := readServiceMetadata(manager.Name, "sitebrush")
+	if !found {
+		return Options{}, false
+	}
+	return Options{Port: metadata.Port, StoragePath: metadata.StoragePath, DBPath: metadata.DBPath, BinaryPath: metadata.BinaryPath, WorkingDir: metadata.WorkingDir}, true
+}
+
 var ErrCancelled = errors.New("service action cancelled by user")
 
 type Result struct {

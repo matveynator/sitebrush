@@ -20,6 +20,9 @@ import (
 	"fmt"
 	stdhtml "html"
 	"html/template"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"io/fs"
 	"math/big"
@@ -47,6 +50,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/aieditor"
 	"github.com/matveynator/sitebrush/v2/pkg/aiprovider"
 	browserstats "github.com/matveynator/sitebrush/v2/pkg/analytics"
+	"github.com/matveynator/sitebrush/v2/pkg/authmail"
 	"github.com/matveynator/sitebrush/v2/pkg/channelacme"
 	"github.com/matveynator/sitebrush/v2/pkg/crawler"
 	"github.com/matveynator/sitebrush/v2/pkg/demo"
@@ -55,10 +59,14 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/expenses"
 	"github.com/matveynator/sitebrush/v2/pkg/hostingandsupport"
 	"github.com/matveynator/sitebrush/v2/pkg/httpsecurity"
+	"github.com/matveynator/sitebrush/v2/pkg/imageprepare"
 	"github.com/matveynator/sitebrush/v2/pkg/mailout"
+	"github.com/matveynator/sitebrush/v2/pkg/outboundhttp"
 	"github.com/matveynator/sitebrush/v2/pkg/securitysync"
 	"github.com/matveynator/sitebrush/v2/pkg/sitebrushtemplate"
+	"github.com/matveynator/sitebrush/v2/pkg/updateannounce"
 	"golang.org/x/net/dns/dnsmessage"
+	htmlparser "golang.org/x/net/html"
 	"golang.org/x/net/websocket"
 	"golang.org/x/text/encoding/charmap"
 	_ "modernc.org/sqlite"
@@ -335,12 +343,19 @@ func cachedAutoCertPEMForTest(t *testing.T, domain string, notBefore time.Time, 
 
 func newTestApplication(t *testing.T) (*App, *sql.DB) {
 	t.Helper()
+	return newTestApplicationWithDatabase(t, func(filename string) (*sql.DB, error) {
+		return sql.Open("sqlite", filename)
+	})
+}
+
+func newTestApplicationWithDatabase(t *testing.T, openDatabase func(string) (*sql.DB, error)) (*App, *sql.DB) {
+	t.Helper()
 	storagePath := t.TempDir()
 	storageRealRoot, err := prepareStorageJailRoot(storagePath)
 	if err != nil {
 		t.Fatalf("prepare storage root: %v", err)
 	}
-	rawDB, err := sql.Open("sqlite", filepath.Join(storagePath, "sitebrush.db"))
+	rawDB, err := openDatabase(filepath.Join(storagePath, "sitebrush.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2579,6 +2594,7 @@ func TestMobileServicePageDesignCoversEverySharedTemplate(t *testing.T) {
 		"profile.html",
 		"recover.html",
 		"revisions.html",
+		"server_update.html",
 		"setup.html",
 	}
 	coveredTemplates := make([]string, 0, len(expectedTemplates))
@@ -17500,7 +17516,7 @@ func TestAdminIPOptInMigrationRunsForPreviousSchemaVersion(t *testing.T) {
 	}, results)
 	result := <-results
 	if result.kind != "applied" || result.previousVersion != currentSiteDatabaseSchemaVersion-1 || result.currentVersion != currentSiteDatabaseSchemaVersion {
-		t.Fatalf("migration result=%+v", result)
+		t.Fatalf("migration result=%+v error=%v", result, result.err)
 	}
 
 	database, err = sql.Open("sqlite", databasePath)
@@ -20691,5 +20707,2367 @@ func TestMergedAudiencePercentagesExcludeLegacyRequestCounters(t *testing.T) {
 	}
 	if merged.LegacyAudience["countries"][0].Count != 50 || merged.Countries[0].Count != 2 || merged.LegacyMapPoints[0].Count != 50 || merged.MapPoints[0].Count != 2 {
 		t.Fatalf("legacy technical evidence was lost or mixed: %+v", merged)
+	}
+}
+
+func TestAccountSessionPersistentCookieAndRollingIdleExpiry(t *testing.T) {
+	application, database := newTestApplication(t)
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('localhost','idle@example.org','old',1)`); err != nil {
+		t.Fatal(err)
+	}
+	cookie := newAdminSessionCookie(t, application, "idle@example.org")
+	if cookie.MaxAge != 1296000 || !cookie.HttpOnly || cookie.SameSite != http.SameSiteLaxMode || cookie.Expires.Before(time.Now().Add(accountauth.SessionTTL-time.Minute)) {
+		t.Fatalf("login cookie is not persistent: %+v", cookie)
+	}
+	for _, scenario := range []struct {
+		name, destination string
+		idle              time.Duration
+		renewed, active   bool
+	}{
+		{"foreground", "document", 14 * 24 * time.Hour, true, true},
+		{"background", "empty", 14 * 24 * time.Hour, false, true},
+		{"expired", "document", 16 * 24 * time.Hour, false, false},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			lastUsed := time.Now().Add(-scenario.idle).Unix()
+			if _, err := database.Exec(`UPDATE sessions SET last_used_at=? WHERE token=?`, lastUsed, cookie.Value); err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodGet, "http://localhost/?profile", nil)
+			request.Header.Set("Sec-Fetch-Dest", scenario.destination)
+			request.AddCookie(cookie)
+			response := httptest.NewRecorder()
+			if !application.enforceAdminIPAllowlist(response, request, "localhost") {
+				t.Fatal(response.Body.String())
+			}
+			if application.isAdminRequest(request) != scenario.active {
+				t.Fatal("incorrect authentication state")
+			}
+			var observed int64
+			if err := database.QueryRow(`SELECT last_used_at FROM sessions WHERE token=?`, cookie.Value).Scan(&observed); err != nil {
+				t.Fatal(err)
+			}
+			if (observed > lastUsed) != scenario.renewed {
+				t.Fatal("background or expired session renewed")
+			}
+			if scenario.renewed && len(response.Result().Cookies()) != 1 {
+				t.Fatal("renewed browser cookie missing")
+			}
+		})
+	}
+	if _, err := database.Exec(`DELETE FROM sessions WHERE token=?`, cookie.Value); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "http://localhost/?profile", nil)
+	response := httptest.NewRecorder()
+	if !application.renewAccountSession(response, request, "localhost", "idle@example.org", cookie.Value, time.Now()) || len(response.Result().Cookies()) != 0 {
+		t.Fatal("revoked session was recreated")
+	}
+}
+
+func TestConversionBeaconAdmissionPrivacyAndCancellation(t *testing.T) {
+	application := &App{browserAnalytics: make(chan browserAnalyticsEnvelope, 1)}
+	payload := `{"version":2,"visitor":"1111111111111111","view":"2222222222222222","sequence":1,"path":"/","referrer":"https://github.com/project?token=private","signals":[{"kind":"page","at":0}],"address":"private","language":"private","timezone":"private","client":{"user_agent":"private"},"fingerprint":"private"}`
+	request := httptest.NewRequest("POST", "http://localhost/_sitebrush/analytics", strings.NewReader(payload))
+	request.Header.Set("Origin", "http://localhost")
+	request.Header.Set("User-Agent", "Mozilla/5.0")
+	response := httptest.NewRecorder()
+	application.browserAnalyticsBeacon(response, request)
+	if response.Code != 204 {
+		t.Fatal(response.Code, response.Body.String())
+	}
+	event := (<-application.browserAnalytics).event
+	encoded, _ := json.Marshal(event)
+	if strings.Contains(string(encoded), "private") {
+		t.Fatalf("metadata persisted: %s", encoded)
+	}
+	if event.Source != "GitHub" && event.Source != "github.com" {
+		t.Fatalf("source %q", event.Source)
+	}
+	request = httptest.NewRequest("POST", "http://localhost/_sitebrush/analytics", strings.NewReader(payload))
+	request.Header.Set("Origin", "https://external.example")
+	response = httptest.NewRecorder()
+	application.browserAnalyticsBeacon(response, request)
+	if response.Code != 403 {
+		t.Fatal("foreign origin admitted")
+	}
+	application.browserAnalytics <- browserAnalyticsEnvelope{}
+	request = httptest.NewRequest("POST", "http://localhost/_sitebrush/analytics", strings.NewReader(payload))
+	request.Header.Set("Origin", "http://localhost")
+	request.Header.Set("User-Agent", "Mozilla/5.0")
+	response = httptest.NewRecorder()
+	application.browserAnalyticsBeacon(response, request)
+	if response.Code != 503 {
+		t.Fatal("full queue did not terminate admission")
+	}
+}
+
+func TestConversionStealthCollectsPublicVisitsAndProtectsConfiguration(t *testing.T) {
+	application, database := newTestApplication(t)
+	for _, statement := range []string{
+		`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','owner@example.org','old',1)`,
+		`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
+		`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES('example.org','owner@example.org','192.0.2.1',1)`,
+		`INSERT INTO admin_stealth_modes(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
+	} {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(application.domainStaticDir("example.org"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(application.domainStaticDir("example.org"), "index.html"), []byte(`<html><body>Public page</body></html>`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cacheContext, stopCache := context.WithCancel(context.Background())
+	defer stopCache()
+	application.guestStaticHTMLCache = startGuestStaticHTMLCacheWorker(cacheContext, 1<<20)
+	staticPath := filepath.Join(application.domainStaticDir("example.org"), "index.html")
+	fileInfo, err := os.Stat(staticPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	menuHTML, err := application.cachedVisitorHTMLFromContent(staticPath, []byte(`<html><body>Public page</body></html>`), "/", "example.org", "", fileInfo, false)
+	if err != nil || !strings.Contains(string(menuHTML), "SiteBrushContextMenu") {
+		t.Fatal("normal guest cache did not contain its menu", err)
+	}
+	visit := httptest.NewRequest(http.MethodGet, "https://example.org/", nil)
+	visit.RemoteAddr = "192.0.2.2:1234"
+	response := httptest.NewRecorder()
+	application.route(response, visit)
+	if response.Code != 200 || strings.Count(response.Body.String(), `src="/p/static/analytics.js?v=`) != 1 || strings.Contains(response.Body.String(), "SiteBrushContextMenu") {
+		t.Fatal("stealth must retain only the visitor collector", response.Body.String())
+	}
+	application.browserAnalytics = make(chan browserAnalyticsEnvelope, 16)
+	stop := make(chan struct{})
+	finished := make(chan struct{})
+	go func() { defer close(finished); application.runBrowserAnalytics(stop) }()
+	defer func() {
+		select {
+		case <-finished:
+		default:
+			close(stop)
+			<-finished
+		}
+	}()
+	batch := `{"version":2,"visitor":"1111111111111111","view":"2222222222222222","sequence":1,"path":"/","signals":[{"kind":"page"}]}`
+	for retry := 0; retry < 2; retry++ {
+		request := httptest.NewRequest(http.MethodPost, "https://example.org/_sitebrush/analytics", strings.NewReader(batch))
+		request.RemoteAddr = visit.RemoteAddr
+		request.Header.Set("Origin", "https://example.org")
+		request.Header.Set("User-Agent", "Mozilla/5.0")
+		recorder := httptest.NewRecorder()
+		application.route(recorder, request)
+		if recorder.Code != http.StatusNoContent {
+			t.Fatal("stealth rejected visitor batch", recorder.Code, recorder.Body.String())
+		}
+	}
+	close(stop)
+	<-finished
+	saved := application.analyticsStorage.Exchange(browserstats.StorageRequest{Operation: browserstats.ReadBrowserReport, Domain: "example.org"})
+	if saved.Err != nil {
+		t.Fatal(saved.Err)
+	}
+	var reports map[string]browserstats.Report
+	if err := json.Unmarshal([]byte(saved.Text), &reports); err != nil {
+		t.Fatal(err)
+	}
+	if reports["7"].Conversion.Visitors != 1 {
+		t.Fatal("public visit was lost or duplicated", saved.Text)
+	}
+	sessionRequest := httptest.NewRequest(http.MethodGet, "https://example.org/", nil)
+	sessionRequest.RemoteAddr = "192.0.2.1:1234"
+	sessionResponse := httptest.NewRecorder()
+	application.createSessionForDomain(sessionResponse, sessionRequest, sessionRequest.Context(), "example.org", "owner@example.org")
+	visit.AddCookie(sessionResponse.Result().Cookies()[0])
+	for _, statement := range []string{
+		`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','second@example.org','old',1)`,
+		`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES('example.org','second@example.org',1)`,
+		`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES('example.org','second@example.org','192.0.2.2',1)`,
+	} {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	configuration := fmt.Sprintf(`{"operation":"configure","csrf":%q,"goals":[]}`, accountCSRF(visit))
+	reply, handled := application.analyticsConfigurationMessage(visit, configuration)
+	if !handled || !strings.Contains(reply, "forbidden") {
+		t.Fatal("public collector bypassed administrator IP protection", reply)
+	}
+}
+
+func TestConversionReportReadErrorIsNotEmptyTraffic(t *testing.T) {
+	application := &App{analyticsStorage: permanentBrowserAnalyticsRepository{}}
+	report := application.browserAnalyticsView(httptest.NewRequest(http.MethodGet, "https://example.org/?analytics", nil), "example.org")
+	if !report.Error || report.Available {
+		t.Fatal("failed report read appeared as valid empty statistics")
+	}
+}
+
+func TestConversionPreviewCannotReadOutsidePublishedSite(t *testing.T) {
+	application := &App{storagePath: t.TempDir()}
+	pageDirectory := application.domainStaticDir("one.example")
+	otherDirectory := application.domainStaticDir("two.example")
+	for _, directory := range []string{pageDirectory, otherDirectory} {
+		if err := os.MkdirAll(directory, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(pageDirectory, "index.html"), []byte("published"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if body, err := application.analyticsPublishedPage("one.example", "/"); err != nil || body != "published" {
+		t.Fatal("published page unavailable", body, err)
+	}
+	for _, directory := range []string{t.TempDir(), otherDirectory} {
+		secret := filepath.Join(directory, "private.html")
+		if err := os.WriteFile(secret, []byte("private-content"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(pageDirectory, "linked.html")
+		if err := os.Symlink(secret, link); err != nil {
+			t.Fatal(err)
+		}
+		if body, err := application.analyticsPublishedPage("one.example", "/linked.html"); err == nil || body != "" {
+			t.Fatal("preview escaped published site", body, err)
+		}
+		if err := os.Remove(link); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestConversionConfigurationRequiresAdminAndCSRF(t *testing.T) {
+	application, _ := newTestApplication(t)
+	request := httptest.NewRequest("GET", "http://localhost/_sitebrush/analytics", nil)
+	reply, handled := application.analyticsConfigurationMessage(request, `{"operation":"configure","goals":[]}`)
+	if !handled || !strings.Contains(reply, "forbidden") {
+		t.Fatal("anonymous configuration accepted")
+	}
+}
+
+func TestConversionInitialGoalsUsePublishedCatalogOnce(t *testing.T) {
+	application, database := newTestApplication(t)
+	if _, err := database.Exec(`INSERT INTO published_pages(domain,path,title,html) VALUES('localhost','/','Home',''),('localhost','/contact','Contact','')`); err != nil {
+		t.Fatal(err)
+	}
+	root := application.domainStaticDir("localhost")
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for filename, content := range map[string]string{"index.html": `<a href="/contact">Contact</a>`, "contact.html": `<form data-analytics-key="contact"><input value="private-secret"></form>`} {
+		if err := os.WriteFile(filepath.Join(root, filename), []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request := httptest.NewRequest("GET", "http://localhost/?analytics", nil)
+	catalog := application.analyticsPublishedCatalog(request, "localhost")
+	if catalog.Unavailable || len(catalog.Pages) != 2 || !catalog.Pages[0].Inspected {
+		t.Fatal("published catalog unavailable", catalog)
+	}
+	if err := application.initializeAnalyticsGoals(request, "localhost", catalog); err != nil {
+		t.Fatal(err)
+	}
+	goals, err := application.readAnalyticsGoals("localhost")
+	if err != nil || len(goals) != 2 || goals[0].Kind != "form-submit" || !goals[0].Automatic {
+		t.Fatal("published form and actual route not initialized", goals, err)
+	}
+	result := application.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.SaveConfiguration, Domain: "localhost", State: `[]`})
+	if result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	if err := application.initializeAnalyticsGoals(request, "localhost", catalog); err != nil {
+		t.Fatal(err)
+	}
+	goals, err = application.readAnalyticsGoals("localhost")
+	if err != nil || len(goals) != 0 {
+		t.Fatal("explicitly cleared goals were re-created", goals, err)
+	}
+}
+
+func TestConversionBrowserRegressions(t *testing.T) {
+	if os.Getenv("SITEBRUSH_ANALYTICS_BROWSER_TEST") != "1" {
+		t.Skip("set SITEBRUSH_ANALYTICS_BROWSER_TEST=1 with scripts/editor Playwright installed")
+	}
+	// Session renewal and analytics quota writes must use the production SQL
+	// owner rather than compete through independent raw SQLite connections.
+	application := newRouterTestApplication(t)
+	fixtureContext := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), "localhost"))
+	store := browserstats.OpenStore(filepath.Join(application.storagePath, "analytics"))
+	application.analyticsStorage = store
+	t.Cleanup(store.Close)
+	assets, err := buildEmbeddedStaticAssetCache(testStaticFiles(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.embeddedStaticAssets = assets
+	if _, err = application.db.ExecContext(fixtureContext, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "analytics@example.com", "old"); err != nil {
+		t.Fatal(err)
+	}
+	staticHTML := `<!doctype html><html lang="en"><head><title>Analytics fixture</title><style>section{height:600px}body{margin:20px}</style></head><body><main><section data-analytics-section="hero"><h1>Fixture</h1><a href="/download" data-analytics-key="download">Download</a><div data-analytics-key="dead">Looks clickable</div></section><section><form data-analytics-key="contact"><input id="name" name="name" value="field-secret"><input id="password" type="password" name="password" value="password-secret"><select id="plan" name="plan" data-analytics-key="plan"><option value="starter">Starter</option><option value="pro">Pro</option></select><textarea>textarea-secret</textarea><button>Submit</button></form></section></main><script>window.fixtureExecuted=true</script></body></html>`
+	if err = os.MkdirAll(application.domainStaticDir("localhost"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(application.domainStaticDir("localhost"), "index.html"), []byte(staticHTML), 0644); err != nil {
+		t.Fatal(err)
+	}
+	preview, err := browserstats.BehaviourPreview(strings.NewReader(string(buildGuestStaticHTMLBody([]byte(staticHTML), "/", "localhost", "en"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	layoutStart := strings.Index(preview, `data-analytics-layout="`) + len(`data-analytics-layout="`)
+	layout := strings.Split(preview[layoutStart:], `"`)[0]
+	if _, err = application.db.ExecContext(fixtureContext, `INSERT INTO published_pages(domain,path,title,html) VALUES('localhost','/','Home',''),('localhost','/docs/guide','Getting started','')`); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	state := browserstats.New(now)
+	state.Goals = []browserstats.Goal{{Name: "Download", Primary: true, Kind: "event", Match: "download"}}
+	event := browserstats.Event{Version: 2, Visitor: "1111111111111111", View: "2222222222222222", Sequence: 1, Path: "/", Layout: layout, Device: "desktop", Persistent: true, Signals: []browserstats.Signal{{Kind: "page"}, {Kind: "click", Element: "key:download"}, {Kind: "scroll", Scroll: 60}, {Kind: "goal", Name: "download"}}, Attribution: browserstats.Attribution{Name: "GitHub", Kind: "referral"}}
+	event.Referrer = "https://github.com/sitebrush/releases?tag=v1"
+	event.Address = "192.0.2.9"
+	event.Location = browserstats.VisitorLocation{Address: event.Address, Known: true, Country: "GB", City: "London", Latitude: 51.5, Longitude: -0.1}
+	preferences := browserstats.ReplayPreferences{Enabled: true, Sample: 5}
+	sampledSession := ""
+	for index := 0; index < 1000; index++ {
+		candidate := fmt.Sprintf("%032x", index)
+		if browserstats.ReplaySampled(candidate, preferences) {
+			sampledSession = candidate
+			break
+		}
+	}
+	if sampledSession == "" {
+		t.Fatal("no sampled session found")
+	}
+	event.Session = sampledSession
+	event.ReplayAllowed = true
+	event.ReplayRecording = true
+	event.Replay = []browserstats.ReplayEvent{{Kind: "navigation", Width: 1280, Height: 800}, {Kind: "click", Element: "key:download", At: 1000}}
+	state.Record(event, now, 4<<20)
+	state.RecordPageChange(browserstats.PublicationChange("/", `<a href="/download">Download</a>`, `<a href="/download">Download for Linux</a>`, now.Add(-24*time.Hour)))
+	application.captureAnalyticsReplayPages("localhost", state, nil)
+	encodedPreferences, _ := json.Marshal(preferences)
+	if result := application.analyticsStorage.Exchange(browserstats.StorageRequest{Operation: browserstats.SavePreferences, Domain: "localhost", State: string(encodedPreferences)}); result.Err != nil {
+		t.Fatal(result.Err)
+	}
+
+	report := state.Report(now, 7)
+	reports, _ := json.Marshal(map[string]browserstats.Report{"7": report, "30": report, "90": report, "1": report})
+	snapshot, _ := json.Marshal(state)
+	if result := application.analyticsStorage.Exchange(browserstats.StorageRequest{Operation: browserstats.SaveConfiguration, Domain: "localhost", State: analyticsGoalsJSON(state.Goals)}); result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	if result := application.analyticsStorage.Exchange(browserstats.StorageRequest{Operation: browserstats.SaveBrowser, Domain: "localhost", State: string(snapshot), Report: string(reports)}); result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	application.browserAnalytics = make(chan browserAnalyticsEnvelope, 512)
+	application.analyticsConnections = make(chan struct{}, 8)
+	stop := make(chan struct{})
+	finished := make(chan struct{})
+	go func() { defer close(finished); application.runBrowserAnalytics(stop) }()
+	defer func() {
+		select {
+		case <-finished:
+		default:
+			close(stop)
+			<-finished
+		}
+	}()
+	rawBeacons := make(chan string, 8)
+	fixture := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Referrer-Policy", "no-referrer")
+		if request.URL.Path == "/_sitebrush/analytics" && request.Method == http.MethodPost {
+			payload, readErr := io.ReadAll(io.LimitReader(request.Body, 16385))
+			if readErr != nil {
+				http.Error(writer, "invalid fixture payload", 400)
+				return
+			}
+			request.Body = io.NopCloser(strings.NewReader(string(payload)))
+			rawBeacons <- string(payload)
+		}
+		if strings.HasPrefix(request.URL.Path, "/p/static/") {
+			application.serveEmbeddedStaticAsset(writer, request)
+			return
+		}
+		application.route(writer, request)
+	}))
+	defer fixture.Close()
+	cookie := newAdminSessionCookie(t, application, "analytics@example.com")
+	command := exec.Command("node", "scripts/analytics/browser_test.cjs")
+	command.Env = append(os.Environ(), "SITEBRUSH_ANALYTICS_URL="+strings.Replace(fixture.URL, "127.0.0.1", "localhost", 1), "SITEBRUSH_ANALYTICS_COOKIE="+cookie.Name+"="+cookie.Value, "SITEBRUSH_ANALYTICS_SAMPLE_SESSION="+sampledSession)
+	output, err := command.CombinedOutput()
+	t.Log(string(output))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rawBeacons) == 0 {
+		t.Fatal("unload beacon did not reach the server")
+	}
+	for len(rawBeacons) > 0 {
+		payload := <-rawBeacons
+		if strings.Contains(payload, "visitor-secret") || strings.Contains(payload, "url-secret") || strings.Contains(payload, "field-secret") || strings.Contains(payload, "textarea-secret") || strings.Contains(payload, "password-secret") || strings.Contains(payload, "starter") || strings.Contains(payload, "pro") {
+			t.Fatal("raw client batch contained form field contents")
+		}
+		var observation browserstats.Event
+		if json.Unmarshal([]byte(payload), &observation) != nil {
+			t.Fatal("malformed beacon")
+		}
+		foundSuccess := false
+		foundFieldState := false
+		for _, signal := range observation.Signals {
+			foundSuccess = foundSuccess || signal.Kind == "form-success"
+			foundFieldState = foundFieldState || signal.Kind == "field" && signal.Field == "key:plan"
+			if signal.Kind == "field-value" {
+				t.Fatal("form contents were emitted by collector")
+			}
+		}
+		if len(observation.Replay) == 0 {
+			t.Fatal("sampled replay absent from production batch")
+		}
+		replayJSON, _ := json.Marshal(observation.Replay)
+		if strings.Contains(string(replayJSON), "pro") || strings.Contains(string(replayJSON), "secret") {
+			t.Fatal("replay copied field values")
+		}
+		if !foundFieldState {
+			t.Fatal("structural form field state was not recorded")
+		}
+		if !foundSuccess {
+			t.Fatal("confirmed form outcome missing from beacon")
+		}
+	}
+	close(stop)
+	<-finished
+	persisted := application.analyticsStorage.Exchange(browserstats.StorageRequest{Operation: browserstats.ReadBrowserReport, Domain: "localhost"})
+	if persisted.Err != nil {
+		t.Fatal(persisted.Err)
+	}
+	var storedReports map[string]browserstats.Report
+	if err := json.Unmarshal([]byte(persisted.Text), &storedReports); err != nil {
+		t.Fatal(err)
+	}
+	if storedReports["7"].Conversion.Visitors != 2 {
+		t.Fatalf("real visitor did not reach the saved report, or batch retry duplicated it: %+v", storedReports["7"].Conversion)
+	}
+}
+
+func TestAnalyticsDiskQuotaAccountingAndGrowthLimit(t *testing.T) {
+	application, database := newTestApplication(t)
+	store := browserstats.OpenStore(filepath.Join(application.storageRootDir(), "analytics"))
+	defer store.Close()
+	application.analyticsStorage = store
+	application.ensureDomainStorageUsageRow(context.Background(), "localhost")
+	if _, err := database.Exec(`UPDATE domain_storage_usage SET page_bytes=100,limit_bytes=1000 WHERE domain='localhost'`); err != nil {
+		t.Fatal(err)
+	}
+	requests := make(chan browserstats.DiskQuotaRequest, 2)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go application.runAnalyticsDiskQuota(requests, stop, done)
+	defer func() { close(stop); <-done }()
+	update := func(bytes int64, final bool) error {
+		reply := make(chan error, 1)
+		requests <- browserstats.DiskQuotaRequest{Domain: "localhost", Bytes: bytes, Final: final, Reply: reply}
+		return <-reply
+	}
+	if err := update(400, false); err != nil {
+		t.Fatal(err)
+	}
+	usage := application.storedDomainStorageUsage(context.Background(), "localhost")
+	if usage.AnalyticsReservedBytes != 400 || usage.totalBytes() != 100 {
+		t.Fatalf("reservation counted as actual bytes: %#v", usage)
+	}
+	if err := update(400, true); err != nil {
+		t.Fatal(err)
+	}
+	usage = application.storedDomainStorageUsage(context.Background(), "localhost")
+	if usage.AnalyticsBytes != 400 || usage.AnalyticsReservedBytes != 0 || usage.totalBytes() != 500 {
+		t.Fatalf("analytics not included separately: %#v", usage)
+	}
+	if err := update(950, false); err == nil {
+		t.Fatal("analytics exceeded site's disk quota")
+	}
+	if err := update(200, true); err != nil {
+		t.Fatal("cleanup cannot release quota", err)
+	}
+	directory := filepath.Join(application.storageRootDir(), "analytics", "site-localhost")
+	if err := os.MkdirAll(directory, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "usage-fixture"), make([]byte, 200), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.applyDomainStorageDelta(context.Background(), "localhost", 900, 0, 0, 0, 0); err == nil {
+		t.Fatal("page write ignored analytics disk usage")
+	}
+	if err := update(950, false); err != nil {
+		t.Fatal(err)
+	}
+	application.rebuildDomainStorageUsage(context.Background(), "localhost")
+	usage = application.storedDomainStorageUsage(context.Background(), "localhost")
+	if usage.AnalyticsReservedBytes != 750 {
+		t.Fatal("reconciliation erased a live growth reservation")
+	}
+}
+
+func TestAnalyticsDiskQuotaKeepsUsageWithoutStorageWorker(t *testing.T) {
+	application, database := newTestApplication(t)
+	application.analyticsStorage = nil
+	application.ensureDomainStorageUsageRow(context.Background(), "localhost")
+	if _, err := database.Exec(`UPDATE domain_storage_usage SET analytics_bytes=200,analytics_reserved_bytes=100 WHERE domain='localhost'`); err != nil {
+		t.Fatal(err)
+	}
+	application.rebuildDomainStorageUsage(context.Background(), "localhost")
+	usage := application.storedDomainStorageUsage(context.Background(), "localhost")
+	if usage.AnalyticsBytes != 200 || usage.AnalyticsReservedBytes != 100 {
+		t.Fatal("worker unavailability released occupied disk quota", usage)
+	}
+}
+
+func TestConversionPublicationSignalsUseSiteChannel(t *testing.T) {
+	application := &App{storagePath: t.TempDir(), browserAnalytics: make(chan browserAnalyticsEnvelope, 1)}
+	application.writePublishedStaticHTML("localhost", "/pricing", `<a href="/download">Download</a>`)
+	if len(application.browserAnalytics) != 0 {
+		t.Fatal("initial publication treated as a conversion experiment")
+	}
+	application.writePublishedStaticHTML("localhost", "/pricing", `<a href="/download">Download for Linux</a>`)
+	change := (<-application.browserAnalytics).event.Change
+	if change == nil || change.Page != "/pricing" || change.BeforeLabel != "Download" || change.AfterLabel != "Download for Linux" {
+		t.Fatal("publication was not linked to analytics", change)
+	}
+	application.writePublishedStaticHTML("localhost", "/pricing", `<a href="/download">Download for Linux</a>`)
+	if len(application.browserAnalytics) != 0 {
+		t.Fatal("unchanged publication enqueued a change")
+	}
+}
+
+func TestHostingSnapshotSchemaCompatibilityPreservesSignedTotals(t *testing.T) {
+	for _, olderPeer := range []bool{false, true} {
+		application, _ := newTestApplication(t)
+		snapshot := hostingandsupport.HostingSnapshot{Version: 4, Sites: []hostingandsupport.HostingSnapshotSite{{Domain: "example.org", UsedBytes: 1000, AnalyticsBytes: 400}}}
+		attempts := 0
+		request := serviceMailRequest{CodeKind: "hosting_snapshot", HostingSnapshot: &snapshot}
+		err := application.sendSignedRequestCompatible(context.Background(), request, func(payload []byte) error {
+			attempts++
+			var incoming serviceMailRequest
+			if err := json.Unmarshal(payload, &incoming); err != nil {
+				return err
+			}
+			if olderPeer {
+				incoming.HostingSnapshot.Sites[0].AnalyticsBytes = 0
+			}
+			if verifyServiceMailRequestSignature(incoming) != nil {
+				return serviceMailRelayRejection{Transport: "netchan", StatusCode: http.StatusForbidden, Message: "signature verification failed"}
+			}
+			if incoming.HostingSnapshot.Sites[0].UsedBytes != 1000 {
+				t.Fatal("compatibility discarded occupied disk")
+			}
+			return nil
+		})
+		expectedAttempts := 1
+		if olderPeer {
+			expectedAttempts = 2
+		}
+		if err != nil || attempts != expectedAttempts || snapshot.Sites[0].AnalyticsBytes != 400 {
+			t.Fatal("compatibility failed or changed caller state", err, attempts, snapshot)
+		}
+	}
+}
+
+func TestHostingSnapshotCompatibilityStillRejectsTampering(t *testing.T) {
+	application, _ := newTestApplication(t)
+	request := serviceMailRequest{CodeKind: "hosting_snapshot", HostingSnapshot: &hostingandsupport.HostingSnapshot{Sites: []hostingandsupport.HostingSnapshotSite{{UsedBytes: 1000, AnalyticsBytes: 400}}}}
+	attempts := 0
+	err := application.sendSignedRequestCompatible(context.Background(), request, func(payload []byte) error {
+		attempts++
+		var incoming serviceMailRequest
+		if err := json.Unmarshal(payload, &incoming); err != nil {
+			return err
+		}
+		incoming.HostingSnapshot.Sites[0].UsedBytes++
+		if verifyServiceMailRequestSignature(incoming) == nil {
+			t.Fatal("tampered total accepted")
+		}
+		return serviceMailRelayRejection{StatusCode: http.StatusForbidden, Message: "signature verification failed"}
+	})
+	var rejection serviceMailRelayRejection
+	if attempts != 2 || !errors.As(err, &rejection) {
+		t.Fatal("tampered payload not rejected after bounded retry", attempts, err)
+	}
+}
+
+func TestAnalyticsServerRulesProduceBrowserConversion(t *testing.T) {
+	application, _ := newTestApplication(t)
+	goals := []browserstats.Goal{{Name: "Buy", Kind: "uri", Match: "/offer?plan=small#buy", Primary: true}, {Name: "Buy path", Kind: "path", Match: "/offer?plan=small#buy"}}
+	encoded, _ := json.Marshal(goals)
+	result := application.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.SaveConfiguration, Domain: "localhost", State: string(encoded)})
+	if result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	payload := application.analyticsURIRules("localhost")
+	command := exec.Command("node", "pkg/analytics/uri_rules_test.cjs", payload)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("browser rules: %v: %s", err, output)
+	}
+	var envelopes []browserstats.Event
+	if err = json.Unmarshal(output, &envelopes); err != nil {
+		t.Fatal(err, string(output))
+	}
+	site := browserstats.New(time.Now())
+	site.Goals = goals
+	matches := 0
+	for _, event := range envelopes {
+		for _, signal := range event.Signals {
+			if signal.Kind == "goal" {
+				matches++
+				if signal.Name != browserstats.URIEventName(goals[0].Match) {
+					t.Fatal("wrong URI signal")
+				}
+			}
+		}
+		site.Record(event, time.Now(), 8<<20)
+	}
+	if matches != 1 {
+		t.Fatalf("URI signals=%d, want 1", matches)
+	}
+	report := site.Report(time.Now(), 90).Conversion
+	for _, funnel := range report.Funnels {
+		if funnel.Completed != 1 {
+			t.Fatalf("URI signal did not complete funnel: %+v", funnel)
+		}
+	}
+	if len(report.Funnels) != 2 {
+		t.Fatalf("missing conversion funnels: %+v", report)
+	}
+}
+
+func TestFinalPageSaveCreatesOneRevisionPerChangedPage(t *testing.T) {
+	for _, templateEdit := range []bool{false, true} {
+		t.Run(fmt.Sprint(templateEdit), func(t *testing.T) {
+			application, db := newTestApplication(t)
+			before := `<section class="SiteBrush-Template shared"><img src="/p/shared.png"></section><img src="/p/local.png">`
+			for _, pagePath := range []string{"/", "/about"} {
+				if _, err := db.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES('localhost',?,?,?,1)`, pagePath, pagePath, before); err != nil {
+					t.Fatal(err)
+				}
+			}
+			after := strings.Replace(before, "/p/local.png", "/p/replaced.png", 1)
+			if templateEdit {
+				after = strings.Replace(before, "/p/shared.png", "/p/replaced.png", 1)
+			}
+			if err := application.persistFinalPageSave(context.Background(), "localhost", "/", "/", "/", after); err != nil {
+				t.Fatal(err)
+			}
+			if err := application.persistFinalPageSave(context.Background(), "localhost", "/", "/", "/", after); err != nil {
+				t.Fatal(err)
+			}
+			for _, pagePath := range []string{"/", "/about"} {
+				var count int
+				if err := db.QueryRow(`SELECT COUNT(1) FROM revisions WHERE domain='localhost' AND page_path=?`, pagePath).Scan(&count); err != nil {
+					t.Fatal(err)
+				}
+				expected := 1
+				if pagePath == "/about" && !templateEdit {
+					expected = 0
+				}
+				if count != expected {
+					t.Fatalf("%s has %d revisions, want %d", pagePath, count, expected)
+				}
+			}
+		})
+	}
+}
+
+func TestDemoRefreshReplacesPageSetAndFirstImportCreatesDatabase(t *testing.T) {
+	previousClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			html := `<!doctype html><html><body><a href="/about">About</a><p>Home</p></body></html>`
+			if strings.HasPrefix(request.URL.Path, "/about") {
+				html = `<!doctype html><html><body><p>About</p></body></html>`
+			}
+			return fakeGrabResponse{contentType: "text/html", body: html}.httpResponse(request), nil
+		})}
+	}
+	defer func() { newGrabHTTPClient = previousClient }()
+	application := newRouterTestApplication(t)
+	control := setupBillingOwnerForTest(t, application, "owner.example", "owner@example.com", true)
+	defer control.Close()
+	domain := "demo-clean.example"
+	settings := demo.Settings{Domain: domain, Enabled: true, SourceURL: "https://template.example/", CopyWholeSite: true, MaxSiteBytes: 8 << 20}
+	if _, _, err := application.ensureDemoSiteReady(context.Background(), settings, true, ""); err != nil {
+		t.Fatal(err)
+	}
+	domainContext := contextWithDomain(context.Background(), domain)
+	if _, err := application.db.ExecContext(domainContext, `INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?, ?,1)`, domain, "/obsolete", "Old", "old page"); err != nil {
+		t.Fatal(err)
+	}
+	application.writePublishedStaticHTML(domain, "/obsolete", "old page")
+	if _, err := application.db.ExecContext(domainContext, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, "/obsolete", "old page", time.Now().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, _, err := application.ensureDemoSiteReady(context.Background(), settings, true, ""); err != nil {
+			t.Fatal(err)
+		}
+		var count int
+		if err := application.db.QueryRowContext(domainContext, `SELECT COUNT(1) FROM pages WHERE domain=?`, domain).Scan(&count); err != nil || count != 2 {
+			t.Fatalf("pages=%d err=%v", count, err)
+		}
+		for _, table := range []string{"pages", "published_pages", "revisions"} {
+			column := "path"
+			if table == "revisions" {
+				column = "page_path"
+			}
+			if err := application.db.QueryRowContext(domainContext, `SELECT COUNT(1) FROM `+table+` WHERE domain=? AND `+column+`='/obsolete'`, domain).Scan(&count); err != nil || count != 0 {
+				t.Fatalf("stale %s count=%d err=%v", table, count, err)
+			}
+		}
+		if _, err := os.Stat(filepath.Join(application.domainStaticDir(domain), "obsolete.html")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("old publication exists: %v", err)
+		}
+	}
+}
+
+func TestUnknownAndDeletedHostnamesOfferRegistrationOrRequest(t *testing.T) {
+	for _, automatic := range []bool{false, true} {
+		for _, deleted := range []bool{false, true} {
+			t.Run(fmt.Sprintf("automatic=%t/deleted=%t", automatic, deleted), func(t *testing.T) {
+				application := newRouterTestApplication(t)
+				control := setupBillingOwnerForTest(t, application, "owner.example", "owner@example.com", automatic)
+				defer control.Close()
+				domain := "new.owner.example"
+				if deleted {
+					if err := application.createManagedSite(context.Background(), domain, "previous@example.com", "old", 1<<20); err != nil {
+						t.Fatal(err)
+					}
+					ctx := contextWithDomain(context.Background(), domain)
+					if _, err := application.db.ExecContext(ctx, `SELECT 1`); err != nil {
+						t.Fatal(err)
+					}
+					if err := application.deleteDemoManagedSiteWithoutBackup(ctx, domain); err != nil {
+						t.Fatal(err)
+					}
+				}
+				for _, path := range []string{"/", "/old", "/?login"} {
+					request := httptest.NewRequest(http.MethodGet, "https://"+domain+path, nil)
+					request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "stale-session"})
+					response := httptest.NewRecorder()
+					application.route(response, request)
+					if response.Code != http.StatusSeeOther || !strings.HasSuffix(response.Header().Get("Location"), "?register") {
+						t.Fatalf("status=%d location=%q body=%s", response.Code, response.Header().Get("Location"), response.Body.String())
+					}
+				}
+				request := httptest.NewRequest(http.MethodGet, "https://"+domain+"/?register", nil)
+				response := httptest.NewRecorder()
+				application.route(response, request)
+				expected := `action="?register"`
+				if !automatic {
+					expected = `action="?site_request"`
+				}
+				if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), expected) {
+					t.Fatalf("wrong onboarding: %d %s", response.Code, response.Body.String())
+				}
+				databasePath := filepath.Join(siteDatabaseRootPath(application.serverControlDBPath()), domainStorageName(domain)+".db")
+				if _, err := os.Stat(databasePath); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("opening registration created DB: %v", err)
+				}
+				if !automatic {
+					plan, _ := (hostingandsupport.Store{DB: control}).DefaultPlan(context.Background())
+					form := url.Values{"name": {"New owner"}, "email": {"new@example.com"}, "phone": {"123"}, "plan_id": {fmt.Sprint(plan.ID)}}
+					request = httptest.NewRequest(http.MethodPost, "https://"+domain+"/?site_request", strings.NewReader(form.Encode()))
+					request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+					response = httptest.NewRecorder()
+					application.route(response, request)
+					var count int
+					if err := control.QueryRow(`SELECT COUNT(1) FROM site_registration_requests WHERE domain=?`, domain).Scan(&count); err != nil || count != 1 {
+						t.Fatalf("request count=%d err=%v status=%d body=%s", count, err, response.Code, response.Body.String())
+					}
+					if _, err := os.Stat(databasePath); !errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("request created DB: %v", err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestPreparedImageUploadStoresActualCropAndSinglePageRevision(t *testing.T) {
+	application, db := newTestApplication(t)
+	if _, err := db.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('localhost','owner@example.com','old',1)`); err != nil {
+		t.Fatal(err)
+	}
+	original := `<img id="icon" src="/p/old.png" width="50" height="50">`
+	if _, err := db.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES('localhost','/','/',?,1)`, original); err != nil {
+		t.Fatal(err)
+	}
+	cookie := newAdminSessionCookie(t, application, "owner@example.com")
+	source := image.NewNRGBA(image.Rect(0, 0, 1000, 500))
+	for y := 0; y < 500; y++ {
+		for x := 0; x < 1000; x++ {
+			source.SetNRGBA(x, y, color.NRGBA{G: 255, A: 255})
+		}
+	}
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, source); err != nil {
+		t.Fatal(err)
+	}
+	var body bytes.Buffer
+	multipartWriter := multipart.NewWriter(&body)
+	part, err := multipartWriter.CreateFormFile("upload_files", "replacement.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	part.Write(encoded.Bytes())
+	for field, text := range map[string]string{"action": "prepare_image", "image_width": "50", "image_height": "50", "image_fit": "cover", "image_position_x": "0.5", "image_position_y": "0.5", "image_full": "0"} {
+		multipartWriter.WriteField(field, text)
+	}
+	multipartWriter.Close()
+	request := httptest.NewRequest(http.MethodPost, "http://localhost/?files&prepare_image", &body)
+	request.Header.Set("Content-Type", multipartWriter.FormDataContentType())
+	request.Header.Set("Accept", "application/json")
+	request.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("upload=%d %s", response.Code, response.Body.String())
+	}
+	var prepared preparedImageReplacementView
+	if err = json.Unmarshal(response.Body.Bytes(), &prepared); err != nil {
+		t.Fatal(err)
+	}
+	if prepared.Full != nil || prepared.Preview.Width != 100 || prepared.Preview.Height != 100 {
+		t.Fatalf("unexpected stored image: %+v", prepared)
+	}
+	content, err := os.ReadFile(filepath.Join(application.domainFilesDirForDomain("localhost"), filepath.Base(prepared.Preview.URL)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := png.Decode(bytes.NewReader(content))
+	if err != nil || decoded.Bounds() != image.Rect(0, 0, 100, 100) {
+		t.Fatalf("stored crop bounds err=%v", err)
+	}
+	form := url.Values{"path": {"/"}, "title": {"/"}, "html": {strings.Replace(original, "/p/old.png", prepared.Preview.URL, 1)}}
+	request = httptest.NewRequest(http.MethodPost, "http://localhost/?save", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.AddCookie(cookie)
+	response = httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusFound {
+		t.Fatalf("save=%d %s", response.Code, response.Body.String())
+	}
+	var count int
+	if err = db.QueryRow(`SELECT COUNT(1) FROM revisions`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("revisions=%d err=%v", count, err)
+	}
+}
+
+func TestPreparedExternalImageUsesValidatedServerDownloadWithoutCORS(t *testing.T) {
+	application, database := newTestApplication(t)
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('localhost','owner@example.com','old',1)`); err != nil {
+		t.Fatal(err)
+	}
+	cookie := newAdminSessionCookie(t, application, "owner@example.com")
+	csrfRequest := httptest.NewRequest(http.MethodGet, "http://localhost/?visual", nil)
+	csrfRequest.AddCookie(cookie)
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, image.NewNRGBA(image.Rect(0, 0, 400, 200))); err != nil {
+		t.Fatal(err)
+	}
+	downloads := make(chan string, 10)
+	previousClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{CheckRedirect: outboundhttp.CheckRedirect, Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			downloads <- request.URL.String()
+			if request.Header.Get("Cookie") != "" || request.Header.Get("X-SiteBrush-CSRF") != "" {
+				t.Error("site authentication must not reach an external image host")
+			}
+			response := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"image/png"}}, Body: io.NopCloser(bytes.NewReader(encoded.Bytes())), ContentLength: int64(encoded.Len()), Request: request}
+			if request.URL.Path == "/missing.png" {
+				response.StatusCode = http.StatusNotFound
+			}
+			if request.URL.Path == "/oversized.png" {
+				response.ContentLength = imageprepare.SourceByteLimit + 1
+			}
+			if request.URL.Path == "/redirect-private.png" {
+				response.StatusCode = http.StatusTemporaryRedirect
+				response.Header.Set("Location", "http://127.0.0.1/private.png")
+			}
+			return response, nil
+		})}
+	}
+	defer func() { newGrabHTTPClient = previousClient }()
+	for _, scenario := range []struct {
+		source string
+		status int
+	}{
+		{"https://images.example/photo.png", http.StatusOK},
+		{"https://images.example/missing.png", http.StatusUnprocessableEntity},
+		{"https://images.example/oversized.png", http.StatusUnprocessableEntity},
+		{"https://images.example/redirect-private.png", http.StatusUnprocessableEntity},
+		{"http://127.0.0.1/private.png", http.StatusBadRequest},
+		{"http://192.168.1.227/private.png", http.StatusBadRequest},
+		{"http://169.254.169.254/latest/meta-data", http.StatusBadRequest},
+		{"http://[::1]/private.png", http.StatusBadRequest},
+		{"https://user:password@images.example/photo.png", http.StatusBadRequest},
+		{"file:///private/image.png", http.StatusBadRequest},
+	} {
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		for field, text := range map[string]string{"action": "prepare_image", "image_source": scenario.source, "image_width": "50", "image_height": "50", "image_fit": "cover", "image_position_x": "0.25", "image_position_y": "0.75", "account_csrf": accountCSRF(csrfRequest)} {
+			if err := writer.WriteField(field, text); err != nil {
+				t.Fatal(err)
+			}
+		}
+		writer.Close()
+		request := httptest.NewRequest(http.MethodPost, "http://localhost/?files&prepare_image", &body)
+		request.Header.Set("Content-Type", writer.FormDataContentType())
+		request.Header.Set("Origin", "null")
+		request.Header.Set("X-SiteBrush-CSRF", accountCSRF(csrfRequest))
+		request.AddCookie(cookie)
+		response := httptest.NewRecorder()
+		application.route(response, request)
+		if response.Code != scenario.status {
+			t.Fatalf("source=%s status=%d body=%s", scenario.source, response.Code, response.Body.String())
+		}
+		if scenario.status == http.StatusBadRequest {
+			select {
+			case downloaded := <-downloads:
+				t.Fatalf("blocked source was downloaded: %s", downloaded)
+			default:
+			}
+			continue
+		}
+		if downloaded := <-downloads; downloaded != scenario.source {
+			t.Fatalf("downloaded=%s want=%s", downloaded, scenario.source)
+		}
+		if scenario.status == http.StatusOK {
+			var prepared preparedImageReplacementView
+			if err := json.Unmarshal(response.Body.Bytes(), &prepared); err != nil || prepared.Preview.Width != 100 || prepared.Preview.Height != 100 {
+				t.Fatalf("external image was not cropped: %+v err=%v", prepared, err)
+			}
+			if _, err := application.statInsideStorage(filepath.Join(application.domainFilesDirForDomain("localhost"), filepath.Base(prepared.Preview.URL))); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
+func TestCreationLimitsAreIndependentAndPreserveExistingSites(t *testing.T) {
+	application := newRouterTestApplication(t)
+	control := setupBillingOwnerForTest(t, application, "owner.example", "owner@example.com", true)
+	defer control.Close()
+	store := hostingandsupport.Store{DB: control}
+	defaults := store.SiteSizeLimits(context.Background())
+	if defaults.Registration != 1<<30 || defaults.TestDrive != 1<<30 {
+		t.Fatalf("unexpected defaults %+v", defaults)
+	}
+	if err := application.createManagedSite(context.Background(), "existing.example", "owner@example.com", "old", 9<<20); err != nil {
+		t.Fatal(err)
+	}
+	limits := hostingandsupport.SiteSizeLimits{Registration: 3 << 20, TestDrive: 2 << 20}
+	if err := store.SaveRegistrationSettingsWithLimits(context.Background(), true, true, limits); err != nil {
+		t.Fatal(err)
+	}
+	if err := (demo.Store{DB: control}).SaveSettingsWithLimit(context.Background(), "demo.example", "", false, true, 1<<20); err != nil {
+		t.Fatal(err)
+	}
+	if got := application.creationSizeLimits(context.Background()); got != limits {
+		t.Fatalf("limits changed %+v", got)
+	}
+	if got := (demo.Store{DB: control}).Settings(context.Background()).MaxSiteBytes; got != 1<<20 {
+		t.Fatalf("demo limit=%d", got)
+	}
+	ctx := contextWithDomain(context.Background(), "existing.example")
+	if got := application.storedDomainStorageUsage(ctx, "existing.example").LimitBytes; got != 9<<20 {
+		t.Fatalf("old quota changed to %d", got)
+	}
+	if got := application.registrationCreationQuota(context.Background()); got != limits.Registration {
+		t.Fatalf("registration limit=%d", got)
+	}
+	if got := hostingandsupport.CreationQuota(limits.TestDrive, 512<<10); got != 512<<10 {
+		t.Fatal("smaller tariff ignored")
+	}
+	if _, err := parseCreationSize("-1gb", 1<<30); err == nil {
+		t.Fatal("negative limit admitted")
+	}
+	invalid := limits
+	invalid.TestDrive = -1
+	if err := store.SaveRegistrationSettingsWithLimits(context.Background(), false, false, invalid); err == nil {
+		t.Fatal("invalid policy accepted")
+	}
+	if !store.AutomaticRegistrationAllowed(context.Background()) || store.SiteSizeLimits(context.Background()) != limits {
+		t.Fatal("invalid policy partially saved")
+	}
+	if err := application.createManagedSiteWithoutAdmin(context.Background(), "trial.example", limits.TestDrive); err != nil {
+		t.Fatal(err)
+	}
+	ctx = contextWithDomain(context.Background(), "trial.example")
+	filename := filepath.Join(application.domainFilesDirForDomain("trial.example"), "quota.bin")
+	if err := application.applyDomainStorageDelta(ctx, "trial.example", 0, 0, 0, limits.TestDrive, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.writeFileInsideStorage(filename, make([]byte, limits.TestDrive), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.applyDomainStorageDelta(ctx, "trial.example", 0, 0, 0, 1, 0); err == nil {
+		t.Fatal("write exceeded configured limit")
+	}
+}
+
+func TestRecreatedSiteKeepsCertificateAndRejectsExpiredCache(t *testing.T) {
+	application := newRouterTestApplication(t)
+	control := setupBillingOwnerForTest(t, application, "owner.example", "owner@example.com", true)
+	defer control.Close()
+	domain := "recreated.example.com"
+	if err := application.createManagedSite(context.Background(), domain, "old@example.com", "old", 1<<20); err != nil {
+		t.Fatal(err)
+	}
+	cacheDirectory := filepath.Join(application.storageRootDir(), "letsencrypt")
+	if err := application.mkdirAllInsideStorage(cacheDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	certificatePEM := cachedAutoCertPEMForTest(t, domain, now.Add(-time.Hour), now.Add(90*24*time.Hour))
+	filename := filepath.Join(cacheDirectory, domain)
+	if err := application.writeFileInsideStorage(filename, certificatePEM, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.deleteDemoManagedSiteWithoutBackup(context.Background(), domain); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.createManagedSite(context.Background(), domain, "new@example.com", "new", 2<<20); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := os.ReadFile(filename)
+	if err != nil || !bytes.Equal(stored, certificatePEM) {
+		t.Fatalf("certificate changed: %v", err)
+	}
+	cacheContext, cancelCache := context.WithCancel(context.Background())
+	defer cancelCache()
+	application.autoCertCertificateCache = startAutoCertCertificateMemoryCache(cacheContext, cacheDirectory)
+	result := application.prepareAutomaticSSLDomain(automaticSSLIssuerFunc(func(ctx context.Context, requestedDomain string) channelacme.IssueResult {
+		t.Error("valid certificate triggered issuance")
+		return channelacme.IssueResult{Err: errors.New("unexpected issuance")}
+	}), domain, nil)
+	if result.state != "ready" || result.certificate == nil {
+		t.Fatalf("cached certificate not reused: %+v", result)
+	}
+	expired := cachedAutoCertPEMForTest(t, domain, now.Add(-90*24*time.Hour), now.Add(-time.Hour))
+	if _, certificate, _, _ := automaticSSLCertificateCacheEntry(domain, expired, now); certificate != nil {
+		t.Fatal("expired certificate reused")
+	}
+}
+
+func TestProfilePaginatesAIAccessAndKeepsSessionIPOrder(t *testing.T) {
+	application, db := newTestApplication(t)
+	if _, err := db.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('localhost','owner@example.com','old',1)`); err != nil {
+		t.Fatal(err)
+	}
+	cookie := newAdminSessionCookie(t, application, "owner@example.com")
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/?profile", nil)
+	request.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if strings.Contains(response.Body.String(), "profile-ai-card") {
+		t.Fatal("empty AI card is visible")
+	}
+	application.aiCapabilities = aicapability.NewManager()
+	defer application.aiCapabilities.Close()
+	for index := 0; index < 7; index++ {
+		token, _, err := application.aiCapabilities.IssueFor("localhost", "owner@example.com", []string{aicapability.ScopeRead})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = application.aiCapabilities.Exchange(token, "localhost"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, page := range []int{1, 2, 999} {
+		request = httptest.NewRequest(http.MethodGet, fmt.Sprintf("http://localhost/?profile&ai_access_page=%d&ai_session_page=%d", page, page), nil)
+		request.AddCookie(cookie)
+		response = httptest.NewRecorder()
+		application.route(response, request)
+		body := response.Body.String()
+		expected := 5
+		if page > 1 {
+			expected = 2
+		}
+		if count := strings.Count(body, `name="ai_capability_id"`); count != expected {
+			t.Fatalf("AI links page %d count=%d want=%d body=%s", page, count, expected, body)
+		}
+		if count := strings.Count(body, `name="ai_session_id"`); count != expected*3 {
+			t.Fatalf("AI sessions page %d count=%d", page, count)
+		}
+		sessionAt, ipAt, aiAt := strings.Index(body, "profile-sessions-card"), strings.Index(body, "profile-admin-ip-card"), strings.Index(body, "profile-ai-card")
+		if !(sessionAt < ipAt && ipAt < aiAt) {
+			t.Fatal("sessions, IP and AI order changed")
+		}
+		document, parseErr := htmlparser.Parse(strings.NewReader(body))
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		grid := profileTestElementWithClass(document, "profile-account-grid")
+		aiCard := profileTestElementWithClass(document, "profile-ai-card")
+		if grid == nil || aiCard == nil || aiCard.Parent != grid {
+			t.Fatal("AI card must remain inside the account grid")
+		}
+	}
+}
+
+func profileTestElementWithClass(root *htmlparser.Node, className string) *htmlparser.Node {
+	for _, attribute := range root.Attr {
+		if attribute.Key == "class" {
+			for _, candidate := range strings.Fields(attribute.Val) {
+				if candidate == className {
+					return root
+				}
+			}
+		}
+	}
+	for child := root.FirstChild; child != nil; child = child.NextSibling {
+		if found := profileTestElementWithClass(child, className); found != nil {
+			return found
+		}
+	}
+	return nil
+}
+
+func TestProfileSecurityCardsShareGridAndPaginateThreeRecords(t *testing.T) {
+	application, database := newTestApplication(t)
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('localhost','owner@example.com','old',1)`); err != nil {
+		t.Fatal(err)
+	}
+	cookie := newAdminSessionCookie(t, application, "owner@example.com")
+	for index := 0; index < 6; index++ {
+		if _, err := database.Exec(`INSERT INTO sessions(token,user_email,created_at,last_used_at) VALUES(?,?,?,?)`, fmt.Sprintf("profile-session-%d", index), "localhost|owner@example.com", time.Now().Add(-time.Duration(index+1)*time.Minute).UTC().Format(time.RFC3339), time.Now().Unix()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for index := 0; index < 7; index++ {
+		if _, err := database.Exec(`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES(?,?,?,?)`, "localhost", "owner@example.com", fmt.Sprintf("198.51.100.%d", index+1), index); err != nil {
+			t.Fatal(err)
+		}
+	}
+	scenarios := []struct {
+		sessionPage, ipPage int
+		sessions, ips       int
+	}{
+		{1, 1, 3, 3},
+		{2, 1, 3, 3},
+		{1, 2, 3, 3},
+		{3, 2, 1, 3},
+		{2, 3, 3, 1},
+		{999, 999, 1, 1},
+	}
+	for _, scenario := range scenarios {
+		t.Run(fmt.Sprintf("sessions_%d_ips_%d", scenario.sessionPage, scenario.ipPage), func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, fmt.Sprintf("http://localhost/?profile&session_page=%d&ip_page=%d", scenario.sessionPage, scenario.ipPage), nil)
+			request.AddCookie(cookie)
+			response := httptest.NewRecorder()
+			application.route(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("profile status=%d", response.Code)
+			}
+			body := response.Body.String()
+			if count := strings.Count(body, `name="session_token"`); count != scenario.sessions {
+				t.Fatalf("sessions=%d want=%d", count, scenario.sessions)
+			}
+			if count := strings.Count(body, `name="profile_action" value="admin_ip_remove"`); count != scenario.ips {
+				t.Fatalf("IPs=%d want=%d", count, scenario.ips)
+			}
+			document, err := htmlparser.Parse(strings.NewReader(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			grid := profileTestElementWithClass(document, "profile-account-grid")
+			sessionsCard := profileTestElementWithClass(document, "profile-sessions-card")
+			ipCard := profileTestElementWithClass(document, "profile-admin-ip-card")
+			if grid == nil || sessionsCard == nil || ipCard == nil || sessionsCard.Parent != grid || ipCard.Parent != grid {
+				t.Fatal("sessions and IP cards must be direct children of the same grid")
+			}
+			nextCard := sessionsCard.NextSibling
+			for nextCard != nil && nextCard.Type != htmlparser.ElementNode {
+				nextCard = nextCard.NextSibling
+			}
+			if nextCard != ipCard {
+				t.Fatal("IP card must immediately follow the sessions card")
+			}
+			for _, card := range []*htmlparser.Node{sessionsCard, ipCard} {
+				pager := profileTestElementWithClass(card, "profile-pagination")
+				if pager == nil {
+					t.Fatal("each long security list needs its own pager")
+				}
+				for link := pager.FirstChild; link != nil; link = link.NextSibling {
+					for _, attribute := range link.Attr {
+						if attribute.Key != "href" {
+							continue
+						}
+						linkURL, parseErr := url.Parse(attribute.Val)
+						if parseErr != nil {
+							t.Fatal(parseErr)
+						}
+						preservedParameter, preservedPage := "ip_page", scenario.ipPage
+						if card == ipCard {
+							preservedParameter, preservedPage = "session_page", scenario.sessionPage
+						}
+						if linkURL.Query().Get(preservedParameter) != fmt.Sprint(preservedPage) {
+							t.Fatal("pagination must preserve the other list's page")
+						}
+					}
+				}
+			}
+		})
+	}
+	if _, err := database.Exec(`DELETE FROM sessions WHERE token IN ('profile-session-2','profile-session-3','profile-session-4','profile-session-5')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`DELETE FROM admin_allowed_ips WHERE added_at>=3`); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/?profile", nil)
+	request.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if strings.Contains(response.Body.String(), "profile-pagination") {
+		t.Fatal("three records must fit without pagination")
+	}
+}
+
+func TestProfileAdminIPUpdatesKeepSettingsAndShowValidation(t *testing.T) {
+	application, database := newTestApplication(t)
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('localhost','owner@example.com','old',1)`); err != nil {
+		t.Fatal(err)
+	}
+	cookie := newAdminSessionCookie(t, application, "owner@example.com")
+	target := "http://localhost/folder/page?profile&ip_page=2&session_page=2"
+	baseRequest := httptest.NewRequest(http.MethodGet, target, nil)
+	baseRequest.AddCookie(cookie)
+	scenarios := []struct {
+		address, errorKey string
+		statusCode        int
+	}{
+		{"999.1.2.3", "admin_ip_error_invalid", http.StatusBadRequest},
+		{"1.2.3.4", "", http.StatusSeeOther},
+		{"1.2.3.0/24", "", http.StatusSeeOther},
+		{"1.2.3.4", "", http.StatusSeeOther},
+		{"192.0.2.1", "", http.StatusSeeOther},
+		{"192.0.2.1", "", http.StatusSeeOther},
+	}
+	for _, scenario := range scenarios {
+		form := url.Values{"profile_action": {"admin_ip_add"}, "admin_ip": {scenario.address}, "account_csrf": {accountCSRF(baseRequest)}}
+		request := httptest.NewRequest(http.MethodPost, target, strings.NewReader(form.Encode()))
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		request.Header.Set("Accept-Language", "ru")
+		request.AddCookie(cookie)
+		response := httptest.NewRecorder()
+		application.route(response, request)
+		if response.Code != scenario.statusCode {
+			t.Fatalf("add %s status=%d body=%s", scenario.address, response.Code, response.Body.String())
+		}
+		if scenario.errorKey != "" {
+			if !strings.Contains(response.Header().Get("Content-Type"), "text/html") || strings.Contains(response.Body.String(), "account update unavailable") {
+				t.Fatal("validation must render the account form as HTML")
+			}
+			document, err := htmlparser.Parse(strings.NewReader(response.Body.String()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			ipCard := profileTestElementWithClass(document, "profile-admin-ip-card")
+			if ipCard == nil {
+				t.Fatal("validation lost the IP settings card")
+			}
+			var cardHTML strings.Builder
+			if err := htmlparser.Render(&cardHTML, ipCard); err != nil {
+				t.Fatal(err)
+			}
+			message := translationsForRequest(request)[scenario.errorKey]
+			if message == "" || !strings.Contains(cardHTML.String(), message) || !strings.Contains(cardHTML.String(), `value="`+scenario.address+`"`) {
+				t.Fatal("IP validation must explain the failure inside the card and retain input")
+			}
+			continue
+		}
+		location, err := url.Parse(response.Header().Get("Location"))
+		if err != nil || location.Path != "/folder/page" || !location.Query().Has("profile") || location.Fragment != "ProfileAdminIPs" || location.Query().Get("ip_page") != "2" || location.Query().Get("session_page") != "2" {
+			t.Fatalf("IP update lost settings location: %s err=%v", response.Header().Get("Location"), err)
+		}
+		followRequest := httptest.NewRequest(http.MethodGet, "http://localhost"+response.Header().Get("Location"), nil)
+		followRequest.AddCookie(cookie)
+		followResponse := httptest.NewRecorder()
+		application.route(followResponse, followRequest)
+		if followResponse.Code != http.StatusOK || !strings.Contains(followResponse.Body.String(), `id="ProfileAdminIPs"`) {
+			t.Fatal("IP update redirect must return to administrator IP settings")
+		}
+	}
+	var count int
+	if err := database.QueryRow(`SELECT COUNT(1) FROM admin_allowed_ips WHERE domain='localhost' AND email='owner@example.com' AND client_ip='192.0.2.1'`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("repeated current IP addition must be idempotent: count=%d err=%v", count, err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(1) FROM admin_allowed_ips WHERE domain='localhost' AND email='owner@example.com' AND client_ip IN ('1.2.3.4','1.2.3.0/24')`).Scan(&count); err != nil || count != 2 {
+		t.Fatalf("manual IP and subnet not stored: count=%d err=%v", count, err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/?profile", nil)
+	if target := profileFormAction(request); target != "/?profile" {
+		t.Fatalf("unpaginated profile action must contain an absolute local path: %s", target)
+	}
+}
+
+func TestLANPasswordLoginAcceptsFormWithStaleCookieAndOpaqueOrigin(t *testing.T) {
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
+	for _, cookieState := range []string{"revoked", "expired"} {
+		t.Run(cookieState, func(t *testing.T) {
+			application, database := newTestApplication(t)
+			captureImmediateProfileEmail(t, application)
+			const domain, email, clientIP = "192.168.1.227", "owner@example.com", "192.168.1.20"
+			if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, email, "correct-password"); err != nil {
+				t.Fatal(err)
+			}
+			staleCookie := &http.Cookie{Name: "sitebrush_session", Value: "stale-session"}
+			if cookieState == "expired" {
+				if _, err := database.Exec(`INSERT INTO sessions(token,user_email,created_at,client_ip,last_used_at) VALUES(?,?,?,?,?)`, staleCookie.Value, domain+"|"+email, time.Now().Add(-2*accountauth.SessionTTL).UTC().Format(time.RFC3339), clientIP, time.Now().Add(-2*accountauth.SessionTTL).Unix()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			handler := application.securityResponseHeadersMiddleware(http.HandlerFunc(application.route))
+			getRequest := httptest.NewRequest(http.MethodGet, "https://"+domain+"/?login&return_path=%2Fdocs%3Fprofile", nil)
+			getRequest.RemoteAddr = clientIP + ":1234"
+			getRequest.AddCookie(staleCookie)
+			getResponse := httptest.NewRecorder()
+			handler.ServeHTTP(getResponse, getRequest)
+			if getResponse.Code != http.StatusOK || getResponse.Header().Get("Referrer-Policy") != "no-referrer" {
+				t.Fatalf("login form status=%d body=%s", getResponse.Code, getResponse.Body.String())
+			}
+			browserCookie := staleCookie
+			for _, responseCookie := range getResponse.Result().Cookies() {
+				if responseCookie.Name == staleCookie.Name && responseCookie.MaxAge < 0 {
+					browserCookie = nil
+				}
+			}
+			document, err := htmlparser.Parse(strings.NewReader(getResponse.Body.String()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			loginForm := profileTestElementWithClass(document, "authentication-card")
+			if loginForm == nil || loginForm.Data != "form" {
+				t.Fatal("login form is missing")
+			}
+			form := url.Values{}
+			var collectInputs func(*htmlparser.Node)
+			collectInputs = func(element *htmlparser.Node) {
+				if element.Data == "input" {
+					inputName, inputValue := "", ""
+					for _, attribute := range element.Attr {
+						switch attribute.Key {
+						case "name":
+							inputName = attribute.Val
+						case "value":
+							inputValue = attribute.Val
+						}
+					}
+					if inputName != "" {
+						form.Set(inputName, inputValue)
+					}
+				}
+				for child := element.FirstChild; child != nil; child = child.NextSibling {
+					collectInputs(child)
+				}
+			}
+			collectInputs(loginForm)
+			form.Set("email", email)
+			form.Set("password", "correct-password")
+			postRequest := httptest.NewRequest(http.MethodPost, "https://"+domain+"/?login", strings.NewReader(form.Encode()))
+			postRequest.RemoteAddr = getRequest.RemoteAddr
+			postRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			postRequest.Header.Set("Origin", "null")
+			if browserCookie != nil {
+				postRequest.AddCookie(browserCookie)
+			}
+			postResponse := httptest.NewRecorder()
+			handler.ServeHTTP(postResponse, postRequest)
+			if postResponse.Code != http.StatusOK || !strings.Contains(postResponse.Body.String(), `name="login_challenge"`) {
+				t.Fatalf("LAN login status=%d location=%s body=%s", postResponse.Code, postResponse.Header().Get("Location"), postResponse.Body.String())
+			}
+			code := ""
+			select {
+			case delivery := <-application.emailDelivery:
+				for _, word := range strings.Fields(delivery.Message.Body) {
+					if isSixDigitCode(word) {
+						code = word
+						break
+					}
+				}
+			default:
+				t.Fatal("password login did not send the verification code")
+			}
+			if code == "" {
+				t.Fatal("verification email has no code")
+			}
+			codeDocument, err := htmlparser.Parse(strings.NewReader(postResponse.Body.String()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			codeForm := profileTestElementWithClass(codeDocument, "authentication-card")
+			if codeForm == nil || codeForm.Data != "form" {
+				t.Fatal("verification form is missing")
+			}
+			form = url.Values{}
+			collectInputs(codeForm)
+			form.Set("login_code", code)
+			verifyRequest := httptest.NewRequest(http.MethodPost, "https://"+domain+"/?login", strings.NewReader(form.Encode()))
+			verifyRequest.RemoteAddr = getRequest.RemoteAddr
+			verifyRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			verifyRequest.Header.Set("Origin", "null")
+			if browserCookie != nil {
+				verifyRequest.AddCookie(browserCookie)
+			}
+			postResponse = httptest.NewRecorder()
+			handler.ServeHTTP(postResponse, verifyRequest)
+			location, err := url.Parse(postResponse.Header().Get("Location"))
+			if postResponse.Code != http.StatusFound || err != nil || !location.Query().Has("profile") || location.Query().Get("return_path") != "/docs?profile" {
+				t.Fatalf("LAN verification status=%d location=%s body=%s", postResponse.Code, postResponse.Header().Get("Location"), postResponse.Body.String())
+			}
+			cookies := postResponse.Result().Cookies()
+			if len(cookies) != 1 || cookies[0].Name != "sitebrush_session" || cookies[0].Value == staleCookie.Value || !cookies[0].Secure || !cookies[0].HttpOnly {
+				t.Fatal("LAN login must replace the stale cookie with a secure authenticated session")
+			}
+			profileRequest := httptest.NewRequest(http.MethodGet, "https://"+domain+"/?profile", nil)
+			profileRequest.RemoteAddr = getRequest.RemoteAddr
+			profileRequest.AddCookie(cookies[0])
+			if !application.isAdminRequest(profileRequest) {
+				t.Fatal("LAN login session did not authenticate the administrator")
+			}
+			totpResponse := httptest.NewRecorder()
+			application.renderAccountTOTP(totpResponse, getRequest, "totp-challenge", "")
+			if !strings.Contains(totpResponse.Body.String(), `name="account_csrf" value="`+accountCSRF(getRequest)+`"`) {
+				t.Fatal("TOTP form must carry the cookie-bound CSRF token too")
+			}
+			for _, csrfToken := range []string{"", "wrong-token"} {
+				if browserCookie == nil {
+					break
+				}
+				form.Set("account_csrf", csrfToken)
+				rejectedRequest := httptest.NewRequest(http.MethodPost, "https://"+domain+"/?login", strings.NewReader(form.Encode()))
+				rejectedRequest.RemoteAddr = getRequest.RemoteAddr
+				rejectedRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+				rejectedRequest.Header.Set("Origin", "null")
+				rejectedRequest.AddCookie(browserCookie)
+				rejectedResponse := httptest.NewRecorder()
+				handler.ServeHTTP(rejectedResponse, rejectedRequest)
+				if rejectedResponse.Code != http.StatusForbidden {
+					t.Fatal("opaque-origin login with a stale cookie must require the form's CSRF token")
+				}
+			}
+		})
+	}
+}
+
+func TestPageSaveRollsBackPublicationWhenAnotherPageCannotBeWritten(t *testing.T) {
+	application, db := newTestApplication(t)
+	before := `<section class="SiteBrush-Template shared"><p>Old</p></section>`
+	after := strings.Replace(before, "Old", "New", 1)
+	for _, pagePath := range []string{"/", "/about"} {
+		if _, err := db.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES('localhost',?,?,?,1)`, pagePath, pagePath, before); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO published_pages(domain,path,title,html) VALUES('localhost',?,?,?)`, pagePath, pagePath, before); err != nil {
+			t.Fatal(err)
+		}
+	}
+	application.writePublishedStaticHTML("localhost", "/", before)
+	if err := application.mkdirAllInsideStorage(filepath.Join(application.domainStaticDir("localhost"), "about.html"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.persistFinalPageSave(context.Background(), "localhost", "/", "/", "/", after); err == nil {
+		t.Fatal("unwritable publication accepted")
+	}
+	root, err := application.readFileInsideStorage(filepath.Join(application.domainStaticDir("localhost"), "index.html"))
+	if err != nil || string(root) != before {
+		t.Fatalf("first publication was not restored: %q %v", root, err)
+	}
+	var html string
+	for _, table := range []string{"pages", "published_pages"} {
+		if err := db.QueryRow(`SELECT html FROM ` + table + ` WHERE domain='localhost' AND path='/'`).Scan(&html); err != nil || html != before {
+			t.Fatalf("%s did not roll back", table)
+		}
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM revisions`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("failed save created revisions: %d %v", count, err)
+	}
+}
+
+func TestDemoSnapshotRestoreHonorsNewQuotaBeforeReplacingContent(t *testing.T) {
+	application := newRouterTestApplication(t)
+	control := setupBillingOwnerForTest(t, application, "owner.example", "owner@example.com", true)
+	defer control.Close()
+	domain := "snapshot-limit.example"
+	settings := demo.Settings{Domain: domain, Enabled: true, MaxSiteBytes: 4 << 20}
+	if _, _, err := application.ensureDemoSiteReady(context.Background(), settings, true, ""); err != nil {
+		t.Fatal(err)
+	}
+	ctx := contextWithDomain(context.Background(), domain)
+	large := `<html><body>` + strings.Repeat("working page ", 30000) + `</body></html>`
+	if err := application.persistFinalPageSave(ctx, domain, "/", "/", "Home", large); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.createDemoSiteSnapshot(ctx, domain); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.initializeRegistrationQuota(ctx, domain, 32<<10); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.restoreDemoSiteFromSnapshot(ctx, domain); err == nil {
+		t.Fatal("oversized snapshot bypassed demo quota")
+	}
+	var retained string
+	if err := application.db.QueryRowContext(ctx, `SELECT html FROM pages WHERE domain=? AND path='/'`, domain).Scan(&retained); err != nil || retained != large {
+		t.Fatal("failed restore removed working content")
+	}
+}
+
+func TestConcurrentIdenticalPageSavesCreateOneRevision(t *testing.T) {
+	application := newRouterTestApplication(t)
+	domain := "save-concurrency.example"
+	if err := application.createManagedSite(context.Background(), domain, "owner@example.com", "old", 8<<20); err != nil {
+		t.Fatal(err)
+	}
+	ctx := contextWithDomain(context.Background(), domain)
+	if _, err := application.db.ExecContext(ctx, `INSERT INTO pages(domain,path,title,html,published) VALUES(?, '/', 'Home', '<p>Old</p>',1)`, domain); err != nil {
+		t.Fatal(err)
+	}
+	replies := make(chan error, 12)
+	for attempt := 0; attempt < 12; attempt++ {
+		go func() { replies <- application.persistFinalPageSave(ctx, domain, "/", "/", "Home", "<p>New</p>") }()
+	}
+	for attempt := 0; attempt < 12; attempt++ {
+		select {
+		case err := <-replies:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("save worker blocked")
+		}
+	}
+	var count int
+	if err := application.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM revisions WHERE domain=?`, domain).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("concurrent saves created %d revisions err=%v", count, err)
+	}
+}
+
+func TestPreparedImageDeduplicatesPreviewAndFullStorage(t *testing.T) {
+	application, db := newTestApplication(t)
+	file := imageprepare.File{Content: []byte("same immutable image"), MIME: "image/png", Extension: ".png", Width: 100, Height: 100}
+	request := httptest.NewRequest(http.MethodPost, "http://localhost/?files", nil)
+	result, err := application.storePreparedImageReplacement(request, "/", imageprepare.Result{Preview: file, Full: &file})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Full == nil || result.Preview.URL != result.Full.URL {
+		t.Fatal("identical image was stored twice")
+	}
+	var storedBytes int64
+	if err = db.QueryRow(`SELECT file_bytes FROM domain_storage_usage WHERE domain='localhost'`).Scan(&storedBytes); err != nil || storedBytes != int64(len(file.Content)) {
+		t.Fatalf("quota charged %d bytes err=%v", storedBytes, err)
+	}
+}
+
+func TestMissingRegisteredDatabaseDoesNotOfferNewOwnership(t *testing.T) {
+	application := newRouterTestApplication(t)
+	control := setupBillingOwnerForTest(t, application, "owner.example.com", "owner@example.com", true)
+	defer control.Close()
+	for _, domain := range []string{"owner.example.com", "paid.example.com"} {
+		if domain == "paid.example.com" {
+			store := hostingandsupport.Store{DB: control}
+			plan, _ := store.DefaultPlan(context.Background())
+			if err := store.AssignSite(context.Background(), domain, plan.ID, "paid"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, query := range []string{"", "?register"} {
+			request := httptest.NewRequest(http.MethodGet, "https://"+domain+"/"+query, nil)
+			response := httptest.NewRecorder()
+			application.route(response, request)
+			if response.Code != http.StatusServiceUnavailable || response.Header().Get("Location") != "" {
+				t.Fatalf("registered missing DB offered ownership: %d %s", response.Code, response.Body.String())
+			}
+		}
+	}
+}
+
+func TestClosedRegistrationRejectsPreviouslyIssuedConfirmation(t *testing.T) {
+	application := newRouterTestApplication(t)
+	confirmationContext, stopConfirmations := context.WithCancel(context.Background())
+	defer stopConfirmations()
+	application.registrationConfirmations = startEmailConfirmationMemoryWorker(confirmationContext)
+	control := setupBillingOwnerForTest(t, application, "owner.example", "owner@example.com", false)
+	defer control.Close()
+	domain := "pending.example.com"
+	confirmation := EmailConfirmation{Token: "pending-registration", Domain: domain, Email: "new@example.com", Action: "register", ExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339)}
+	if err := application.saveRegistrationConfirmation(context.Background(), confirmation); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "https://"+domain+"/?email_confirm="+confirmation.Token, strings.NewReader("password=secret&password_confirm=secret"))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `action="?site_request"`) {
+		t.Fatalf("closed registration did not offer request: %d %s", response.Code, response.Body.String())
+	}
+	filename := filepath.Join(siteDatabaseRootPath(application.serverControlDBPath()), domainStorageName(domain)+".db")
+	if _, err := os.Stat(filename); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("closed registration created site DB: %v", err)
+	}
+}
+
+func TestSavePageResolvesAllTemplateCopiesAndRejectsConflictsBeforeWriting(t *testing.T) {
+	for _, scenario := range []string{"first copy", "last copy", "same edits", "conflict"} {
+		t.Run(scenario, func(t *testing.T) {
+			application, rawDB := newTestApplication(t)
+			if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old"); err != nil {
+				t.Fatal(err)
+			}
+			before := `<section class="SiteBrush-Template shared"><p>Old</p></section>`
+			after := `<section class="SiteBrush-Template shared"><p>New</p></section>`
+			different := `<section class="SiteBrush-Template shared"><p>Different</p></section>`
+			storedHTML := `<html><head></head><body>` + before + before + `</body></html>`
+			for _, pagePath := range []string{"/", "/about"} {
+				if _, err := rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", pagePath, "Page", storedHTML); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := rawDB.Exec(`INSERT INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, "localhost", pagePath, "Page", storedHTML); err != nil {
+					t.Fatal(err)
+				}
+				application.writePublishedStaticHTML("localhost", pagePath, storedHTML)
+			}
+			savedCopies := after + before
+			switch scenario {
+			case "last copy":
+				savedCopies = before + after
+			case "same edits":
+				savedCopies = after + after
+			case "conflict":
+				savedCopies = after + different
+			}
+			form := url.Values{"path": {"/"}, "title": {"Page"}, "html": {`<html><head></head><body>` + savedCopies + `</body></html>`}}
+			request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?save", strings.NewReader(form.Encode()))
+			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+			response := httptest.NewRecorder()
+			application.route(response, request)
+			expectedStatus := http.StatusFound
+			if scenario == "conflict" {
+				expectedStatus = http.StatusConflict
+			}
+			if response.Code != expectedStatus {
+				t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+			}
+			expectedHTML := `<html><head></head><body>` + after + after + `</body></html>`
+			if scenario == "conflict" {
+				expectedHTML = storedHTML
+				if !strings.Contains(response.Body.String(), "shared") {
+					t.Fatal("conflict response omits template identifier")
+				}
+			}
+			for _, pagePath := range []string{"/", "/about"} {
+				for _, tableName := range []string{"pages", "published_pages"} {
+					var storedPageHTML string
+					if err := rawDB.QueryRow(`SELECT html FROM `+tableName+` WHERE domain=? AND path=?`, "localhost", pagePath).Scan(&storedPageHTML); err != nil {
+						t.Fatal(err)
+					}
+					if storedPageHTML != expectedHTML {
+						t.Fatalf("%s %s = %s, want %s", tableName, pagePath, storedPageHTML, expectedHTML)
+					}
+				}
+				staticHTML, err := os.ReadFile(filepath.Join(application.domainStaticDir("localhost"), staticRelativePathForPage(pagePath)))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(staticHTML) != expectedHTML {
+					t.Fatalf("published file %s = %s", pagePath, staticHTML)
+				}
+				var revisionCount int
+				if err := rawDB.QueryRow(`SELECT COUNT(*) FROM revisions WHERE domain=? AND page_path=?`, "localhost", pagePath).Scan(&revisionCount); err != nil {
+					t.Fatal(err)
+				}
+				expectedRevisions := 1
+				if scenario == "conflict" {
+					expectedRevisions = 0
+				}
+				if revisionCount != expectedRevisions {
+					t.Fatalf("%s revisions = %d, want %d", pagePath, revisionCount, expectedRevisions)
+				}
+			}
+		})
+	}
+}
+
+func TestImportedTemplatesRequireContentAndDistinctPages(t *testing.T) {
+	shared := `<section><img src="/logo.png"></section>`
+	empty := `<meta name="generator" content="Site Kit by Google 1.188.0"/><div class="column"><div></div></div><table><tr><td>&nbsp;</td></tr></table>`
+	importedPages := []wholeSiteImportedPage{
+		{LocalPath: "/one", HTML: `<html data-page="one"><body data-page="one">` + empty + shared + shared + `<p>One</p></body></html>`},
+		{LocalPath: "/two", HTML: `<html data-page="two"><body data-page="two">` + empty + shared + `<p>Two</p></body></html>`},
+	}
+	detectedPages, err := maybeDetectImportedPageTemplates(importedPages, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for pageIndex, detectedPage := range detectedPages {
+		expectedCount := 1
+		if pageIndex == 0 {
+			expectedCount = 2
+		}
+		if strings.Count(detectedPage.HTML, "SiteBrush-Template") != expectedCount {
+			t.Fatalf("wrong imported templates: %s", detectedPage.HTML)
+		}
+		if !strings.Contains(detectedPage.HTML, empty) {
+			t.Fatalf("empty markup was modified: %s", detectedPage.HTML)
+		}
+	}
+}
+
+func TestHTTPServerUsesAnotherPortWhenExistingProcessOwnsRequestedPort(t *testing.T) {
+	primaryListener, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer primaryListener.Close()
+	requestedPort := primaryListener.Addr().(*net.TCPAddr).Port
+	secondaryListener, actualPort, err := listenOnAvailablePort(requestedPort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secondaryListener.Close()
+	if actualPort == requestedPort {
+		t.Fatal("independent application processes must not share an HTTP listener")
+	}
+}
+
+// The browser uses production routes and storage. Only fixture resources and a
+// read-only database view are test adapters; upload and save are not mocked.
+func TestVisualEditorBrowserRegressions(t *testing.T) {
+	if os.Getenv("SITEBRUSH_EDITOR_BROWSER_TEST") != "1" {
+		t.Skip("set SITEBRUSH_EDITOR_BROWSER_TEST=1 after npm ci in scripts/editor and playwright install chromium")
+	}
+	application := newRouterTestApplication(t)
+	fixtureContext := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), "localhost"))
+	staticAssets, err := buildEmbeddedStaticAssetCache(testStaticFiles(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.embeddedStaticAssets = staticAssets
+	if _, err := application.db.ExecContext(fixtureContext, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "editor@example.com", "old"); err != nil {
+		t.Fatal(err)
+	}
+	fixtureHTML := `<!doctype html>
+<html lang="en" data-example="preserved"><head>
+<title>Editor fixture</title>
+<meta name="description" content="preserve > metadata">
+<link rel="stylesheet" href="/_editor-fixture.css">
+<base href="/">
+<style>.class-frame { width: 180px; height: 120px; } .responsive-frame { width: 100%; height: auto; } body { margin: 8px; } </style>
+<script>window.fixtureScriptMustNotRun = true; const boundaryExample = "<body>example</body>";</script>
+</head><body data-example="body-preserved">
+<img id="attribute-image" src="/_editor-wide.svg" width="180" height="120" alt="attributes" onload="window.fixtureHandlerMustNotRun = true">
+<img id="class-image" class="class-frame" src="/_editor-wide.svg" alt="class">
+<img id="responsive-image" class="responsive-frame" src="/_editor-wide.svg" alt="responsive">
+<img id="inline-image" src="/_editor-wide.svg" style="width: 180px; height: 120px; object-fit: contain;" alt="inline">
+<a id="gallery-link" href="/_editor-wide.svg" data-fancybox="gallery"><img id="gallery-image" src="/_editor-wide.svg" width="50" height="50" alt="gallery"></a>
+<p>Editable content</p>
+<script id="body-script">window.fixtureBodyScriptMustNotRun = true;</script>
+<iframe id="script-frame" title="Embedded script fixture" srcdoc="&lt;script&gt;window.fixtureNestedScriptMustNotRun = true;&lt;/script&gt;"></iframe>
+` + strings.Repeat("<p>Long document for caret and scroll regression</p>\n", 100) + `</body></html>`
+	for fixtureIndex := 0; fixtureIndex < 40; fixtureIndex++ {
+		pagePath := fmt.Sprintf("/editor-%d", fixtureIndex)
+		if _, err := application.db.ExecContext(fixtureContext, `INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", pagePath, "Editor fixture", fixtureHTML); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, viewportWidth := range []int{1280, 320} {
+		copiedMetadata := `<p><title>Editor fixture</title><meta name="description" content="preserve &gt; metadata"><link rel="stylesheet" href="/_editor-fixture.css"></p>`
+		corruptedHTML := strings.Replace(fixtureHTML, "<p>Editable content</p>", copiedMetadata+copiedMetadata+"<p>Editable content</p>", 1)
+		for fixtureName, documentHTML := range map[string]string{"repeat": fixtureHTML, "corrupted": corruptedHTML} {
+			pagePath := fmt.Sprintf("/editor-%s-%d", fixtureName, viewportWidth)
+			if _, err := application.db.ExecContext(fixtureContext, `INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", pagePath, "Editor fixture", documentHTML); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	adminCookie := newAdminSessionCookie(t, application, "editor@example.com")
+	fixtureServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if strings.HasPrefix(request.URL.Path, "/p/static/") {
+			application.serveEmbeddedStaticAsset(writer, request)
+			return
+		}
+		if strings.HasPrefix(request.URL.Path, "/p/") {
+			application.servePublicAsset(writer, request)
+			return
+		}
+		switch request.URL.Path {
+		case "/_editor-fixture.html":
+			if !application.isAdminRequest(request) {
+				http.Error(writer, "forbidden", http.StatusForbidden)
+				return
+			}
+			var storedHTML string
+			if err := application.db.QueryRowContext(request.Context(), `SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", request.URL.Query().Get("path")).Scan(&storedHTML); err != nil {
+				http.Error(writer, err.Error(), http.StatusNotFound)
+				return
+			}
+			writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			_, _ = writer.Write([]byte(storedHTML))
+		case "/_editor-fixture.css":
+			writer.Header().Set("Content-Type", "text/css")
+			_, _ = writer.Write([]byte("img { vertical-align: top; }"))
+		case "/_editor-wide.svg", "/_editor-tall.svg":
+			writer.Header().Set("Content-Type", "image/svg+xml")
+			imageWidth, imageHeight := 400, 100
+			if request.URL.Path == "/_editor-tall.svg" {
+				imageWidth, imageHeight = 100, 400
+			}
+			_, _ = fmt.Fprintf(writer, `<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d"><rect width="100%%" height="100%%" fill="orange"/><rect width="50%%" height="50%%" fill="blue"/><rect width="100%%" height="10%%" fill="red"/><rect y="90%%" width="100%%" height="10%%" fill="green"/></svg>`, imageWidth, imageHeight)
+		default:
+			application.route(writer, request)
+		}
+	}))
+	defer fixtureServer.Close()
+	fixtureURL := strings.Replace(fixtureServer.URL, "127.0.0.1", "localhost", 1)
+	browserCommand := exec.Command("node", "scripts/editor/browser_test.cjs")
+	browserCommand.Env = append(os.Environ(), "SITEBRUSH_EDITOR_URL="+fixtureURL, "SITEBRUSH_EDITOR_COOKIE="+adminCookie.Name+"="+adminCookie.Value)
+	browserOutput, err := browserCommand.CombinedOutput()
+	t.Log(string(browserOutput))
+	if err != nil {
+		t.Fatalf("editor browser regressions: %v", err)
+	}
+}
+
+// Server upgrades and centrally authorized release announcements.
+
+func newUpdateTestApplication(t *testing.T) (*App, *sql.DB) {
+	t.Helper()
+	// Update fixtures exercise durable migration and read-only WAL inspection
+	// using the production connection settings, including on Windows runners.
+	application, database := newTestApplicationWithDatabase(t, func(filename string) (*sql.DB, error) {
+		return openServerControlDatabaseHandle(filename, true)
+	})
+	application.dbPath = filepath.Join(application.storagePath, "sitebrush.db")
+	if err := hostingandsupport.Migrate(context.Background(), database); err != nil {
+		t.Fatal(err)
+	}
+	if err := (hostingandsupport.Store{DB: database}).SetOwner(context.Background(), "localhost", "owner@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	for _, email := range []string{"owner@example.com", "site-admin@example.com"} {
+		if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", email, "unused"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return application, database
+}
+
+func TestServerUpdateRequiresServerOwnerAndNeverMutatesOnGET(t *testing.T) {
+	application, _ := newUpdateTestApplication(t)
+	unauthenticated := httptest.NewRequest(http.MethodGet, "http://localhost/?server_update", nil)
+	unauthenticated = unauthenticated.WithContext(contextWithDomain(unauthenticated.Context(), "localhost"))
+	response := httptest.NewRecorder()
+	application.serverUpdatePage(response, unauthenticated)
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("unauthenticated status=%d", response.Code)
+	}
+	location, err := url.Parse(response.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if location.Query().Get("return_path") != "/?server_update" {
+		t.Fatal("login lost update destination")
+	}
+	for _, email := range []string{"owner@example.com", "site-admin@example.com"} {
+		t.Run(email, func(t *testing.T) {
+			cookie := newAdminSessionCookie(t, application, email)
+			request := httptest.NewRequest(http.MethodGet, "http://localhost/?server_update", nil)
+			request.AddCookie(cookie)
+			request = request.WithContext(contextWithDomain(request.Context(), "localhost"))
+			result := httptest.NewRecorder()
+			application.serverUpdatePage(result, request)
+			if email == "owner@example.com" {
+				if result.Code != http.StatusOK || !strings.Contains(result.Body.String(), "data-server-update") {
+					t.Fatalf("owner page=%d %s", result.Code, result.Body.String())
+				}
+			} else if result.Code != http.StatusForbidden {
+				t.Fatalf("site admin status=%d", result.Code)
+			}
+			if _, err := os.Stat(filepath.Join(application.storagePath, ".sitebrush-update")); !os.IsNotExist(err) {
+				t.Fatal("GET created update state")
+			}
+			request.Method = http.MethodPost
+			postResult := httptest.NewRecorder()
+			application.serverUpdatePage(postResult, request)
+			if postResult.Code != http.StatusMethodNotAllowed {
+				t.Fatalf("POST status=%d", postResult.Code)
+			}
+		})
+	}
+}
+
+func TestUpdateOwnerRevocationAndForeignDomain(t *testing.T) {
+	application, database := newUpdateTestApplication(t)
+	cookie := newAdminSessionCookie(t, application, "owner@example.com")
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/?server_update", nil)
+	request.AddCookie(cookie)
+	request = request.WithContext(contextWithDomain(request.Context(), "localhost"))
+	if !application.updateAuthorized(request) {
+		t.Fatal("owner rejected")
+	}
+	foreign := request.Clone(contextWithDomain(request.Context(), "foreign.example"))
+	foreign.Host = "foreign.example"
+	if application.updateAuthorized(foreign) {
+		t.Fatal("foreign site owner received server update rights")
+	}
+	if _, err := database.Exec(`DELETE FROM server_managers`); err != nil {
+		t.Fatal(err)
+	}
+	if application.updateAuthorized(request) {
+		t.Fatal("revoked owner retained update rights")
+	}
+}
+
+func TestUpdateSocketRejectsCrossOrigin(t *testing.T) {
+	application, _ := newUpdateTestApplication(t)
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/?server_update_ws", nil)
+	request.Header.Set("Origin", "https://evil.example")
+	response := httptest.NewRecorder()
+	application.serverUpdateSocket(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin status=%d", response.Code)
+	}
+}
+
+func TestUpdateSocketRequiresCSRFAndRechecksOwner(t *testing.T) {
+	application, database := newUpdateTestApplication(t)
+	cookie := newAdminSessionCookie(t, application, "owner@example.com")
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/?server_update_ws", nil)
+	request.AddCookie(cookie)
+	csrf := accountCSRF(request)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Host = "localhost"
+		r = r.WithContext(contextWithDomain(r.Context(), "localhost"))
+		application.serverUpdatePage(w, r)
+	}))
+	defer server.Close()
+	connect := func() *websocket.Conn {
+		t.Helper()
+		configuration, err := websocket.NewConfig("ws"+strings.TrimPrefix(server.URL, "http")+"/?server_update_ws", "http://localhost")
+		if err != nil {
+			t.Fatal(err)
+		}
+		configuration.Header.Set("Cookie", cookie.String())
+		connection, err := websocket.DialConfig(configuration)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { connection.Close() })
+		if err := connection.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		return connection
+	}
+	for _, token := range []string{"", "incorrect-token"} {
+		connection := connect()
+		if err := websocket.JSON.Send(connection, map[string]string{"action": "upgrade", "csrf": token}); err != nil {
+			t.Fatal(err)
+		}
+		var response map[string]any
+		if err := websocket.JSON.Receive(connection, &response); err == nil {
+			t.Fatal("mutation accepted without CSRF")
+		}
+	}
+	connection := connect()
+	if err := websocket.JSON.Send(connection, map[string]string{"action": "unknown", "csrf": csrf}); err != nil {
+		t.Fatal(err)
+	}
+	var response struct{ Error string }
+	if err := websocket.JSON.Receive(connection, &response); err != nil || response.Error != "Unknown update command" {
+		t.Fatalf("valid session failed: %+v %v", response, err)
+	}
+	if _, err := database.Exec(`DELETE FROM server_managers`); err != nil {
+		t.Fatal(err)
+	}
+	if err := websocket.JSON.Send(connection, map[string]string{"action": "upgrade", "csrf": csrf}); err != nil {
+		t.Fatal(err)
+	}
+	if err := websocket.JSON.Receive(connection, &response); err == nil {
+		t.Fatal("existing socket retained revoked server rights")
+	}
+	if _, err := os.Stat(filepath.Join(application.storagePath, ".sitebrush-update")); !os.IsNotExist(err) {
+		t.Fatal("rejected requests modified updater storage")
+	}
+}
+
+func TestUpdateEmailLinkAndBrandedNotice(t *testing.T) {
+	link, err := serverUpdateEmailURL("server.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if link != "https://server.example/?server_update" {
+		t.Fatal(link)
+	}
+	for _, domain := range []string{"localhost", "127.0.0.1", "http://evil.example", "evil.example/?token=secret", "user@evil.example"} {
+		if _, err := serverUpdateEmailURL(domain); err == nil {
+			t.Fatalf("accepted unsafe email destination %q", domain)
+		}
+	}
+	message, err := releaseAnnouncementMessage("ru", "security", "2", "1", "owner@example.com", []authmail.NoticeLink{{Label: "server.example — 1 → 2", URL: link}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message.From != "SiteBrush <sitebrush@sitebrush.com>" || !strings.Contains(message.HTMLBody, "Посмотреть и обновиться прямо сейчас") || !strings.Contains(message.HTMLBody, link) || !strings.Contains(message.HTMLBody, "#087f8c") {
+		t.Fatal("missing central branded mail and safe CTA")
+	}
+	for _, required := range []string{"%s", "permanent_admin_token"} {
+		if strings.Contains(message.Body, required) {
+			t.Fatal("unsafe email body")
+		}
+	}
+
+}
+
+func TestUpdateCampaignsRejectCustomerSendersAndAutomaticMail(t *testing.T) {
+	application, database := newUpdateTestApplication(t)
+	if _, err := application.centralAnnouncementIdentity(); err == nil {
+		t.Fatal("customer installation obtained central campaign authority")
+	}
+	for _, kind := range []string{"application_update:2", updateannounce.Kind + "2"} {
+		err := application.deliverMailRecord(nil, mailout.Record{Task: mailout.Task{Kind: kind, Route: mailout.RouteLocal, Message: mailout.Message{To: "owner@example.com"}}})
+		var permanent mailout.PermanentError
+		if !errors.As(err, &permanent) {
+			t.Fatalf("customer release mail must be permanently rejected: %v", err)
+		}
+		_, status := application.handleServiceMailRelayRequest(context.Background(), nil, serviceMailRequest{CodeKind: kind}, "127.0.0.1")
+		if status != http.StatusForbidden {
+			t.Fatal("generic relay accepted a release announcement", status)
+		}
+	}
+	var count int
+	if err := database.QueryRow(`SELECT COUNT(1) FROM mail_outbox`).Scan(&count); err != nil || count != 0 {
+		t.Fatal("rejected sender created mail", err)
+	}
+}
+
+func TestUpdateOwnerLanguageSurvivesLogoutAndAllMailLocalesRender(t *testing.T) {
+	application, database := newUpdateTestApplication(t)
+	cookie := newAdminSessionCookie(t, application, "owner@example.com")
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/", nil)
+	request.Header.Set("Accept-Language", "fr-CA,fr;q=0.9,en;q=0.5")
+	request.AddCookie(cookie)
+	application.storeProfileSessionDetails(request, cookie.Value)
+	if _, err := database.Exec(`DELETE FROM sessions`); err != nil {
+		t.Fatal(err)
+	}
+	var language string
+	if err := database.QueryRow(`SELECT language FROM owner_mail_preferences WHERE email='owner@example.com'`).Scan(&language); err != nil || language != "fr" {
+		t.Fatal("preferred mail language was lost with the session", language, err)
+	}
+	for languageCode := range translationCatalog {
+		message, err := releaseAnnouncementMessage(languageCode, "feature", "21", "1", "owner@example.com", []authmail.NoticeLink{{Label: "server.example", URL: "https://server.example/?server_update"}})
+		if err != nil || !strings.Contains(message.HTMLBody, `lang="`+languageCode+`"`) || strings.Contains(message.Body, "%!") {
+			t.Fatalf("bad localized notice %s: %v", languageCode, err)
+		}
+		if (languageCode == "he" || languageCode == "fa") && !strings.Contains(message.HTMLBody, `dir="rtl"`) {
+			t.Fatal("missing RTL mail layout", languageCode)
+		}
+	}
+}
+
+func TestUpdateLocalesAndEmailFormatting(t *testing.T) {
+	payload, err := os.ReadFile("web/translations.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var locales map[string]map[string]string
+	if err := json.Unmarshal(payload, &locales); err != nil {
+		t.Fatal(err)
+	}
+	for language, translations := range locales {
+		for key, reference := range locales["en"] {
+			if !strings.HasPrefix(key, "update_") && !strings.HasPrefix(key, "announcement_") {
+				continue
+			}
+			if strings.TrimSpace(translations[key]) == "" {
+				t.Errorf("%s missing %s", language, key)
+			}
+			if strings.Count(translations[key], "%s") != strings.Count(reference, "%s") {
+				t.Errorf("%s formatting mismatch %s", language, key)
+			}
+		}
+	}
+
+}
+
+func TestUpdatePreflightDoesNotCreateDatabase(t *testing.T) {
+	root := t.TempDir()
+	databasePath := filepath.Join(root, "missing.db")
+	if err := runUpdateDatabaseMaintenance(root, databasePath, false); err == nil {
+		t.Fatal("accepted missing control database")
+	}
+	if _, err := os.Stat(databasePath); !os.IsNotExist(err) {
+		t.Fatal("read-only preflight created database")
+	}
+}
+
+func TestUpdateManualCommandRefusesAnUnsupervisedInstallation(t *testing.T) {
+	root := t.TempDir()
+	databasePath := filepath.Join(root, "sitebrush.db")
+	if err := os.WriteFile(databasePath, []byte("existing legacy installation"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := runManualUpgrade(root, databasePath, "8080", false)
+	expectedError := "start the installed SiteBrush normally once"
+	if runningInContainer() {
+		expectedError = "container images must be updated"
+	}
+	if err == nil || !strings.Contains(err.Error(), expectedError) {
+		t.Fatalf("unsafe offline bootstrap error=%v", err)
+	}
+	contents, err := os.ReadFile(databasePath)
+	if err != nil || string(contents) != "existing legacy installation" {
+		t.Fatal("manual command modified legacy data")
+	}
+	if _, err := os.Stat(filepath.Join(root, ".sitebrush-update")); !os.IsNotExist(err) {
+		t.Fatal("manual command claimed an unsupervised installation")
+	}
+}
+
+func TestUpdatePreflightAllowsRequiredMigrationsButHealthRequiresCompletion(t *testing.T) {
+	application, database := newUpdateTestApplication(t)
+	if _, err := database.Exec(`DROP TABLE hosting_panel_snapshots`); err != nil {
+		t.Fatal(err)
+	}
+	if err := runUpdateDatabaseMaintenance(application.storagePath, application.dbPath, false); err != nil {
+		t.Fatalf("preflight must permit migrations: %v", err)
+	}
+	if err := inspectUpdateDatabases(application.storagePath, application.dbPath, false, true); err == nil {
+		t.Fatal("health accepted incomplete required migrations")
+	}
+	if err := runUpdateDatabaseMaintenance(application.storagePath, application.dbPath, true); err != nil {
+		t.Fatalf("offline migration: %v", err)
+	}
+	if err := inspectUpdateDatabases(application.storagePath, application.dbPath, false, true); err != nil {
+		t.Fatalf("health after migrations: %v", err)
+	}
+}
+
+func TestUpdateAcrossTwentyFiveReleasesPreservesHistoricalData(t *testing.T) {
+	root := t.TempDir()
+	for _, component := range []string{"site", "billing"} {
+		t.Run(component, func(t *testing.T) {
+			database, err := sql.Open("sqlite", filepath.Join(root, component+".db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close()
+			payload, err := os.ReadFile(filepath.Join("testdata", "migrations", component+"-9d4a3ab.sql"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := database.Exec(string(payload)); err != nil {
+				t.Fatal(err)
+			}
+			if component == "site" {
+				if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('legacy.example','owner@example.com','preserved-password',1); INSERT INTO pages(domain,path,title,html,published) VALUES('legacy.example','/kept','Kept','<p>preserved page</p>',1); INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES('legacy.example','/kept','<p>preserved revision</p>','2026-01-01',1)`); err != nil {
+					t.Fatal(err)
+				}
+				application := &App{db: database, storagePath: root, storageRealRoot: root}
+				for range 2 {
+					if err := application.migrate(context.Background()); err != nil {
+						t.Fatal(err)
+					}
+				}
+				var password, html, revision string
+				if err := database.QueryRow(`SELECT password FROM users WHERE email='owner@example.com'`).Scan(&password); err != nil || password != "preserved-password" {
+					t.Fatal("old account lost", password, err)
+				}
+				if err := database.QueryRow(`SELECT html FROM published_pages WHERE path='/kept'`).Scan(&html); err != nil || html != "<p>preserved page</p>" {
+					t.Fatal("old publication lost", html, err)
+				}
+				if err := database.QueryRow(`SELECT html FROM revisions WHERE page_path='/kept'`).Scan(&revision); err != nil || revision != "<p>preserved revision</p>" {
+					t.Fatal("old revision lost", revision, err)
+				}
+			} else {
+				if _, err := database.Exec(`INSERT INTO server_managers(domain,email,role,scope_domain) VALUES('legacy.example','owner@example.com','owner','*'); INSERT INTO billing_invoices(invoice_number,customer_email,domain,amount,currency,status) VALUES('HISTORICAL-1','owner@example.com','legacy.example','42.50','EUR','paid')`); err != nil {
+					t.Fatal(err)
+				}
+				for range 2 {
+					if err := hostingandsupport.Migrate(context.Background(), database); err != nil {
+						t.Fatal(err)
+					}
+				}
+				var amount, status string
+				if err := database.QueryRow(`SELECT amount,status FROM billing_invoices WHERE invoice_number='HISTORICAL-1'`).Scan(&amount, &status); err != nil || amount != "42.50" || status != "paid" {
+					t.Fatal("old invoice changed", amount, status, err)
+				}
+				if !(hostingandsupport.Store{DB: database}).IsOwner(context.Background(), "owner@example.com") {
+					t.Fatal("old server owner lost")
+				}
+			}
+			var steps int
+			if err := database.QueryRow(`SELECT COUNT(1) FROM application_migration_steps`).Scan(&steps); err != nil || steps < 20 {
+				t.Fatal("historical upgrade bypassed the migration chain", steps, err)
+			}
+		})
+	}
+}
+
+func TestUpdateRejectsNewerSchemaBeforeChangingData(t *testing.T) {
+	application, database := newUpdateTestApplication(t)
+	if _, err := database.Exec(`PRAGMA user_version=999`); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.migrate(context.Background()); err == nil {
+		t.Fatal("newer schema was modified")
+	}
+	if err := checkSiteMigrationSource(context.Background(), database); err == nil {
+		t.Fatal("preflight accepted a future site schema")
+	}
+	var version int
+	if err := database.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 999 {
+		t.Fatal("rejection changed the future schema", version, err)
+	}
+	if _, err := database.Exec(`UPDATE schema_migrations SET version=999 WHERE component='billing'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := runUpdateDatabaseMaintenance(application.storagePath, application.dbPath, false); err == nil {
+		t.Fatal("preflight accepted a future control schema")
+	}
+}
+
+func TestUpdateMaintenanceChecksEverySiteAndMigrationJournal(t *testing.T) {
+	application, _ := newUpdateTestApplication(t)
+	sitePath := filepath.Join(siteDatabaseRootPath(application.dbPath), "legacy.example.db")
+	if err := os.MkdirAll(filepath.Dir(sitePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	database, err := sql.Open("sqlite", sitePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture, err := os.ReadFile(filepath.Join("testdata", "migrations", "site-9d4a3ab.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(string(fixture)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('legacy.example','owner@example.com','preserved-password',1); INSERT INTO pages(domain,path,title,html,published) VALUES('legacy.example','/kept','Kept','<p>preserved</p>',1)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(sitePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runUpdateDatabaseMaintenance(application.storagePath, application.dbPath, false); err != nil {
+		t.Fatalf("historical site preflight: %v", err)
+	}
+	after, err := os.ReadFile(sitePath)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("preflight mutated the site database", err)
+	}
+	if err := inspectUpdateDatabases(application.storagePath, application.dbPath, false, true); err == nil {
+		t.Fatal("health accepted an unmigrated site")
+	}
+	if err := runUpdateDatabaseMaintenance(application.storagePath, application.dbPath, true); err != nil {
+		t.Fatalf("historical site migration: %v", err)
+	}
+	if err := inspectUpdateDatabases(application.storagePath, application.dbPath, false, true); err != nil {
+		t.Fatalf("migrated site health: %v", err)
+	}
+	database, err = sql.Open("sqlite", sitePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`DELETE FROM application_migration_steps WHERE component='owner-mail-preferences-v1'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := inspectUpdateDatabases(application.storagePath, application.dbPath, false, true); err == nil {
+		t.Fatal("health accepted physically present tables without completed migrations")
+	}
+	if err := runUpdateDatabaseMaintenance(application.storagePath, application.dbPath, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := inspectUpdateDatabases(application.storagePath, application.dbPath, false, true); err != nil {
+		t.Fatal(err)
+	}
+	database, err = sql.Open("sqlite", sitePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`PRAGMA user_version=999`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := runUpdateDatabaseMaintenance(application.storagePath, application.dbPath, false); err == nil {
+		t.Fatal("preflight accepted a future site database schema")
+	}
+}
+
+func TestUpdateReadOnlyDatabaseEscapesNativePaths(t *testing.T) {
+	filename := filepath.Join(t.TempDir(), "read only-#-%-данные.db")
+	database, err := sql.Open("sqlite", filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`CREATE TABLE preserved(content TEXT); INSERT INTO preserved(content) VALUES('working')`); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	readonly, err := openUpdateReadOnlyDatabase(filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readonly.Close()
+	var content string
+	if err := readonly.QueryRow(`SELECT content FROM preserved`).Scan(&content); err != nil || content != "working" {
+		t.Fatal("preflight opened the wrong database", content, err)
+	}
+	if _, err := readonly.Exec(`INSERT INTO preserved(content) VALUES('changed')`); err == nil {
+		t.Fatal("preflight can modify persistent data")
+	}
+}
+
+func TestBrowserAnalyticsShutdownPersistsFirstQueuedVisit(t *testing.T) {
+	application, _ := newTestApplication(t)
+	for index := 0; index < 24; index++ {
+		domain := fmt.Sprintf("shutdown-%02d.example", index)
+		application.browserAnalytics = make(chan browserAnalyticsEnvelope, 1)
+		application.browserAnalytics <- browserAnalyticsEnvelope{domain: domain, received: time.Now().UTC(), event: browserstats.Event{Version: 2, Visitor: "1111111111111111", View: "2222222222222222", Sequence: 1, Path: "/", Signals: []browserstats.Signal{{Kind: "page"}}}}
+		stop := make(chan struct{})
+		close(stop)
+		finished := make(chan struct{})
+		go func() { defer close(finished); application.runBrowserAnalytics(stop) }()
+		select {
+		case <-finished:
+		case <-time.After(3 * time.Second):
+			t.Fatal("queued visit was not drained before shutdown")
+		}
+		saved := application.analyticsStorage.Exchange(browserstats.StorageRequest{Operation: browserstats.ReadBrowserReport, Domain: domain})
+		if saved.Err != nil {
+			t.Fatalf("first queued visit for %s was lost: %v", domain, saved.Err)
+		}
+		var reports map[string]browserstats.Report
+		if err := json.Unmarshal([]byte(saved.Text), &reports); err != nil || reports["7"].Conversion.Visitors != 1 {
+			t.Fatal("shutdown lost or duplicated the queued visit", saved.Text, err)
+		}
 	}
 }

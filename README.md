@@ -621,3 +621,66 @@ require explicit confirmation. Email codes remain selectable text.
 account IP attribution. By default only loopback proxies are trusted. Forwarded
 addresses from other peers are ignored; an unavailable client IP is never stored
 as a trusted address. Configure this list to match the actual reverse proxies.
+
+# Built-in server updates
+
+Server owners can open **SiteBrush updates** in the server menu, check the installed and available versions, and confirm an update. The email button opens this page and requires ordinary administrator authentication; opening its URL never installs a release. Site administrators cannot change the server version.
+
+For a manual update over SSH or a local administrative terminal:
+
+```sh
+sitebrush -upgrade
+sitebrush -upgrade -path /var/lib/sitebrush
+```
+
+Run the command as the installation's process user, with access to its private update directory and binaries. The command is the confirmation; it prints progress and exits with status `0` when updated or already current. Failure returns a nonzero status, including when automatic recovery succeeds. Installed service settings are reused unless explicitly overridden. A stopped installation is returned to its stopped state after verification. Desktop and container installations use their existing distribution mechanism.
+
+The launcher remains at the installed executable path. Its supervisor runs the selected server binary from the private `.sitebrush-update` directory under `-path`. CLI and panel operations share one authenticated local NetChan owner. Downloads use the pinned official NetChan mirror at `sitebrush.com:9878`, with the official HTTPS download directories and `matveynator/sitebrush` GitHub assets as fallbacks. Every transport requires the same signed release metadata, exact platform, size and SHA-256 checked against the embedded Ed25519 public key. Existing `MD5SUMS` files are retained for download compatibility and are not used to authorize an update.
+
+Before migration, SiteBrush stops the server and background writers, closes all databases, and verifies a complete backup of installation data. Relative symbolic links that resolve inside the installation are preserved, including the publication directory’s `latest` link. Escaping, absolute, dangling or updater-private links and special files are rejected. The candidate starts with public requests paused and outbound background jobs held until database, migration, HTTP and process checks succeed for 60 seconds. An early failure restores the previous binary and backup. Once normal writes resume, **Return to the previous version** is enabled only when the previous release supports the current persistent formats; older backups are never automatically restored over new user writes.
+
+At least the previous working binary and recovery backup are retained. After the final journal is durably acknowledged, the operation worker prunes superseded snapshots, partial operations and unreferenced binaries. Cleanup also retries after restart. Current, previous, candidate, launcher and active recovery references are retained; a failed preparation preserves the last working snapshot. Version operations remain serialized throughout cleanup, and cleanup errors are reported separately without undoing a successful update. Do not delete `.sitebrush-update` while changing versions: it contains the selected version, recovery journal and private contact identity. The launcher protocol is versioned; an incompatible launcher requires a separate administrative installation. The first release containing this feature must likewise be installed and started normally, because older executables do not implement `-upgrade`. Offline updates require this established supervisor state; an unrelated downloaded executable cannot claim ownership of a legacy running installation.
+
+Publishing or discovering a release never sends update emails. Only the authenticated owner of the pinned central sitebrush.com installation can preview and start an important-release campaign: security fixes, significant features, or both. The central update page provides the announcement button, a localized branded preview, recipient estimate, delivery counts and cancellation. All such mail uses `SiteBrush <sitebrush@sitebrush.com>`; customer installations and the generic mail relay cannot create release announcements.
+
+Before each delivery attempt, the central server requests a fresh nonce-bound Ed25519 status over the installation's outgoing NetChan session. TLS pins the central signing identity and verifies the registered installation key. The central listener uses TCP port **9877**; installations need outbound access, including those behind NAT, and require no public update-status endpoint. Status includes the actual selected version, active update state, current owners and their saved mail languages. The link must match the registered installation domain. Only confirmed owner addresses are eligible. Already updated installations are excluded; busy, offline or unknown installations wait for up to seven days. No fresh proof means no email.
+
+Each owner receives at most one announcement per release; several qualifying installations are grouped into one message. Durable campaign history survives restarts and outbox cleanup. Saved languages come from successful account authentication and survive logout; the supported-language fallback is English. Ordinary version checks and manual updates remain available without a campaign.
+
+## Publishing signed updates
+
+The release signing key must match `pkg/appupdate/release-public-key.txt`. Provision its base64 Ed25519 private key as the protected GitHub Actions secret `SITEBRUSH_RELEASE_PRIVATE_KEY`; never commit the private key. Releases fail closed when this secret is missing or mismatched. The public key is an initial trust anchor: changing it without a compatible trust transition would prevent existing installations from accepting future releases.
+
+`pkg/appupdate/compatibility.json` declares the generation of every persistent format, the readable generation range, the oldest migratable generation (`migrates_from`), and whether predecessor writes remain compatible. Review this contract for SQL migrations and filesystem-format changes. Incompatible changes advance the generation and disable predecessor rollback after activation. Unknown contracts cannot be published or installed.
+
+The existing `stable release` commit trigger and manual workflow remain available. The workflow publishes numbered `release-<build>` assets, a signed `update.json`, and `SHA256SUMS`, then updates the persistent `stable-release` entry. Local and GitHub releases use `git rev-list --count HEAD` from the complete history as their numeric version; workflow run counters do not supersede source history. Build a new commit for a new release. For the primary local cross-compilation path, official `-sync` destinations automatically require and generate signed server metadata. Load the private key from `SITEBRUSH_RELEASE_PRIVATE_KEY`, `-release-key <private-file>`, or the default `os.UserConfigDir()/sitebrush/release-ed25519.key` (on macOS, `~/Library/Application Support/sitebrush/release-ed25519.key`). Nonofficial publication can opt in with `-sign-updates`. Signing requires the complete server matrix; the signing helper is also available as `go run ./scripts/releases -directory <server-artifacts> -version <build> -commit <full-sha>`.
+
+## Cumulative database migrations
+
+The latest binary carries the migration path; application release numbers are independent from database schema versions. A direct upgrade across twenty releases runs the missing SQL steps in order using `pkg/migrations`, without downloading intermediate executables. Each component has an append-only log with step ID, ordinal, revision and completion time. SQL changes and their completion marker commit in the same transaction. Legacy filesystem/data adapters are explicitly idempotent, run under the stopped database owner and record completion only after success.
+
+Preflight rejects future schemas and changed, missing or reordered migration history before maintenance changes begin. The complete backup covers the control database, all site databases and persistent files; health checks verify the resulting schemas before public writes resume. Tests include a chain of twenty dependent data changes with failure/resume and historical SiteBrush schemas from commit `9d4a3ab`.
+
+The legacy `site-schema-v12` and `billing-schema-v27` chains are frozen compatibility baselines. Append future steps to their component or add a new component; never edit completed SQL, insert a step into an existing prefix or remove historical transformations. Keep data transformations idempotent where they cannot use one SQL transaction. If increasing an explicit schema version prevents the old binary from opening it, advance the persistent-data generation and declare a migration range separately from the readable range; do not advertise safe predecessor rollback. New components must be included in source-path and final-health validation.
+
+## Releasing on GitHub
+
+1. Keep a private backup of the Ed25519 signing key. In repository **Settings → Secrets and variables → Actions**, create the repository secret `SITEBRUSH_RELEASE_PRIVATE_KEY` containing its base64 private key. The key must match the embedded public trust anchor; never paste it into an issue, PR, workflow output or this repository.
+2. Merge the reviewed PR. A commit message containing **`stable release`** on `main` triggers `release-request.yml`, which dispatches `release.yml`. Alternatively use **Actions → Stable Release → Run workflow → main**, or `gh workflow run release.yml --ref main`.
+3. Wait for server and desktop builds and signing to finish. The workflow publishes immutable numbered `release-<build>` assets and updates the stable link only afterwards. Check `update.json`, `SHA256SUMS` and the required native-platform assets. The primary local build path remains `scripts/crosscompile`.
+4. Install and start the first updater-enabled release normally. Later installations can use the protected update page or `sitebrush -upgrade`.
+5. For an exceptional security or feature announcement, open the **sitebrush.com server update panel**, choose its reason, preview the message, and explicitly press the notification button. Releasing frequently never performs this step automatically.
+
+## Local publication and NetChan downloads
+
+The existing publishing command remains valid, including Docker desktop builds:
+
+```sh
+go run scripts/crosscompile/crosscompile.go \
+  -sync "root@sitebrush.com=/var/lib/sitebrush/storage/chroot/sitebrush.com/download" \
+  -sync "root@sitebrush.ru=/var/lib/sitebrush/storage/chroot/sitebrush.ru/download"
+```
+
+The command builds and publishes artifacts; it does not replace the running executable. Signed `update.json` and `SHA256SUMS` accompany the complete server matrix before publication. Missing or mismatched signing keys fail before compilation. The private key stays on the build machine. Desktop binaries continue to use the existing Docker/native build and distribution paths.
+
+After the first updater-enabled installation has been started on sitebrush.com, its pinned central identity serves the published `storage/chroot/sitebrush.com/download` tree over TCP **9878**. Allow inbound access on that central server and outbound access from installations. Public release reads need no installation registration, email or administrative token. Channel/session delivery, bounded backpressure, verified resume and HTTPS fallback are documented in [pkg/appupdate/netchan.md](pkg/appupdate/netchan.md). Updating an installation still requires its protected confirmation page or `sitebrush -upgrade`.

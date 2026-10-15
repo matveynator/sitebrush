@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"crypto/md5"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,7 +14,10 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
+
+	"github.com/matveynator/sitebrush/v2/pkg/appupdate"
 )
 
 type buildMode string
@@ -85,7 +90,9 @@ func (flags *syncDestinationFlags) Set(value string) error {
 func main() {
 	var (
 		programName         = flag.String("program", "sitebrush", "program name used in binary names")
-		versionFlag         = flag.String("version", "", "version folder under binaries/; defaults to GITHUB_RUN_NUMBER, then git rev-list count, then git describe")
+		versionFlag         = flag.String("version", "", "version folder under binaries/; defaults to git rev-list count, then GITHUB_RUN_NUMBER, then git describe")
+		signUpdates         = flag.Bool("sign-updates", false, "sign the complete server matrix; automatic for official -sync destinations")
+		releaseKeyFile      = flag.String("release-key", "", "private signing key file; defaults to the SiteBrush user configuration directory")
 		outputRoot          = flag.String("output-dir", "binaries", "root output directory for generated artifacts")
 		modeFlag            = flag.String("mode", string(modeAll), "build scope: all, server-app, or desktop-app")
 		targetOS            = flag.String("os", "", "optional GOOS target filter, for example linux")
@@ -126,6 +133,26 @@ func main() {
 		fatalf("resolved empty version label")
 	}
 
+	// Official publication is validated before any expensive desktop/Docker work.
+	signServerUpdates := *signUpdates || (mode != modeDesktopApp && officialReleasePublication(syncTargets))
+	var signingKey ed25519.PrivateKey
+	if signServerUpdates {
+		if mode == modeDesktopApp || targetFilter.active() || *programName != "sitebrush" {
+			fatalf("signed updates require the complete SiteBrush server matrix")
+		}
+		trusted, err := appupdate.TrustedKey()
+		if err != nil {
+			fatalf("release trust anchor: %v", err)
+		}
+		signingKey, err = loadReleaseSigningKey(*releaseKeyFile, os.Getenv("SITEBRUSH_RELEASE_PRIVATE_KEY"), trusted)
+		if err != nil {
+			fatalf("release signing key: %v", err)
+		}
+		if number, err := strconv.ParseUint(version, 10, 64); err != nil || number == 0 {
+			fatalf("signed update version must be numeric")
+		}
+	}
+
 	outputDir := filepath.Join(repoRoot, *outputRoot, version)
 	if err := os.RemoveAll(outputDir); err != nil {
 		fatalf("clean output dir: %v", err)
@@ -154,6 +181,16 @@ func main() {
 			targetFilter:        targetFilter,
 		}); err != nil {
 			fatalf("desktop-app build: %v", err)
+		}
+	}
+
+	if signServerUpdates {
+		commit, err := runOutput(repoRoot, "git", "rev-parse", "HEAD")
+		if err != nil {
+			fatalf("resolve release commit: %v", err)
+		}
+		if err := appupdate.Publish(filepath.Join(outputDir, "server-app"), version, strings.TrimSpace(commit), signingKey); err != nil {
+			fatalf("sign update manifest: %v", err)
 		}
 	}
 
@@ -940,14 +977,14 @@ func rsyncRemoteDirectory(syncHost, remoteDirectory string) string {
 }
 
 func defaultVersionLabel(repoRoot string) string {
-	if version := strings.TrimSpace(os.Getenv("GITHUB_RUN_NUMBER")); version != "" {
-		return version
-	}
 	if version, err := runOutput(repoRoot, "git", "rev-list", "--count", "HEAD"); err == nil {
 		version = strings.TrimSpace(version)
 		if version != "" {
 			return version
 		}
+	}
+	if version := strings.TrimSpace(os.Getenv("GITHUB_RUN_NUMBER")); version != "" {
+		return version
 	}
 	if version, err := runOutput(repoRoot, "git", "describe", "--tags", "--always", "--dirty"); err == nil {
 		version = strings.TrimSpace(version)
@@ -1267,4 +1304,56 @@ func sanitizePathSegment(input string) string {
 func fatalf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, format+"\n", args...)
 	os.Exit(1)
+}
+
+// Local and GitHub publication use the same commit-count identity. A new
+// committed release advances the version regardless of the build machine.
+func officialReleasePublication(destinations []syncDestination) bool {
+	for _, destination := range destinations {
+		host := destination.host
+		if separator := strings.LastIndex(host, "@"); separator >= 0 {
+			host = host[separator+1:]
+		}
+		if host == "sitebrush.com" || host == "sitebrush.ru" {
+			return true
+		}
+	}
+	return false
+}
+
+func loadReleaseSigningKey(filename, encoded string, trusted ed25519.PublicKey) (ed25519.PrivateKey, error) {
+	if strings.TrimSpace(encoded) == "" {
+		if filename == "" {
+			configuration, err := os.UserConfigDir()
+			if err != nil {
+				return nil, err
+			}
+			filename = filepath.Join(configuration, "sitebrush", "release-ed25519.key")
+		}
+		file, err := os.Open(filename)
+		if err != nil {
+			return nil, fmt.Errorf("set SITEBRUSH_RELEASE_PRIVATE_KEY or provision %s: %w", filename, err)
+		}
+		payload, readErr := io.ReadAll(io.LimitReader(file, 4097))
+		closeErr := file.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+		if len(payload) > 4096 {
+			return nil, errors.New("release key file exceeds size limit")
+		}
+		encoded = string(payload)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(encoded))
+	if err != nil || len(decoded) != ed25519.PrivateKeySize {
+		return nil, errors.New("expected a base64 Ed25519 private signing key")
+	}
+	key := ed25519.PrivateKey(decoded)
+	if !key.Public().(ed25519.PublicKey).Equal(trusted) || !ed25519.NewKeyFromSeed(key.Seed()).Equal(key) {
+		return nil, errors.New("release key does not match the embedded public trust anchor")
+	}
+	return key, nil
 }

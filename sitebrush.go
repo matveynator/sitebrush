@@ -61,6 +61,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/aieditor"
 	"github.com/matveynator/sitebrush/v2/pkg/aiprovider"
 	browserstats "github.com/matveynator/sitebrush/v2/pkg/analytics"
+	"github.com/matveynator/sitebrush/v2/pkg/appupdate"
 	"github.com/matveynator/sitebrush/v2/pkg/authmail"
 	"github.com/matveynator/sitebrush/v2/pkg/channelacme"
 	appcli "github.com/matveynator/sitebrush/v2/pkg/cli"
@@ -77,6 +78,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/httpsecurity"
 	"github.com/matveynator/sitebrush/v2/pkg/imageprepare"
 	"github.com/matveynator/sitebrush/v2/pkg/mailout"
+	"github.com/matveynator/sitebrush/v2/pkg/migrations"
 	"github.com/matveynator/sitebrush/v2/pkg/outboundhttp"
 	"github.com/matveynator/sitebrush/v2/pkg/securitysync"
 	"github.com/matveynator/sitebrush/v2/pkg/serviceinstall"
@@ -84,6 +86,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/sitebrushtemplate"
 	"github.com/matveynator/sitebrush/v2/pkg/storagejail"
 	"github.com/matveynator/sitebrush/v2/pkg/systeminit"
+	"github.com/matveynator/sitebrush/v2/pkg/updateannounce"
 	"github.com/matveynator/sitebrush/v2/pkg/winservice"
 	"github.com/skip2/go-qrcode"
 	"golang.org/x/net/dns/dnsmessage"
@@ -168,6 +171,8 @@ var sitebrushRuServiceMailRelayPublicKey = ""
 
 // App keeps only explicit dependencies to stay readable and easy to swap.
 type App struct {
+	updateActivation               <-chan struct{}
+	announcementContacts           *updateannounce.Hub
 	imageJobs                      chan<- imageprepare.Job
 	analyticsStorage               browserstats.Repository
 	analyticsQuotaRequests         chan browserstats.DiskQuotaRequest
@@ -1943,6 +1948,10 @@ func (r *perSiteDBRouter) migrateStartupDatabase(ctx context.Context, databasePa
 		results <- siteDBMigrationEvent{kind: "failed", domain: databaseDomain, path: databasePath, step: "read schema version", err: versionErr}
 		return
 	}
+	if err := checkSiteMigrationSource(migrationCtx, database); err != nil {
+		results <- siteDBMigrationEvent{kind: "failed", domain: databaseDomain, path: databasePath, step: "validate migration path", err: err}
+		return
+	}
 	schemaComplete, schemaErr := siteDatabaseSchemaComplete(migrationCtx, database)
 	if schemaErr != nil {
 		results <- siteDBMigrationEvent{kind: "failed", domain: databaseDomain, path: databasePath, step: "verify schema", err: schemaErr}
@@ -2016,6 +2025,11 @@ func (r *perSiteDBRouter) databaseForDomain(siteDatabaseRootDir string, database
 		}
 		log.Printf("%sDB MIGRATION%s failed path=%s domain=%s step=%s err=%v", terminalRed(), terminalReset(), databasePath, databaseDomain, "read schema version", versionErr)
 		return nil, siteDatabaseDegradedError{domain: databaseDomain, err: versionErr}
+	}
+	if sourceErr := checkSiteMigrationSource(context.Background(), nextDatabase); sourceErr != nil {
+		nextDatabase.Close()
+		degradedDomains[databaseDomain] = sourceErr
+		return nil, siteDatabaseDegradedError{domain: databaseDomain, err: sourceErr}
 	}
 	schemaComplete, schemaErr := siteDatabaseSchemaComplete(context.Background(), nextDatabase)
 	if schemaErr != nil {
@@ -3570,7 +3584,7 @@ func analyticsFileContentType(contentType string) bool {
 
 func isSitebrushControllerQuery(query url.Values) bool {
 	for _, controllerFlag := range []string{
-		"save", "template_events", "grab_preview", "grab_events", "grab_ws", "revision_preview", "revision_restore", "revision_delete", "revision_toggle",
+		"server_update", "server_update_ws", "save", "template_events", "grab_preview", "grab_events", "grab_ws", "revision_preview", "revision_restore", "revision_delete", "revision_toggle",
 		"tree", "native_pick_files", "native_save_backup", "edit", "ai", "ai_capability_create", "ai_execute", "ai_execute_ws", "ai_background", "visual", "text", "editraw", "settings", "properties",
 		"backup_download", "hosting_and_support_backup_download", "billing_backup_download", "backup_import", "profile", "freeze", "publish", "publish_events", "publish_preview", "files",
 		"revisions", "login", "register", "email_confirm", "grab", "recover", "captcha", "analytics", "expenses", "hosting_and_support", "billing",
@@ -4360,6 +4374,42 @@ func (a *App) runBrowserAnalytics(stopRequested <-chan struct{}) {
 		}
 	}
 
+	// Draining shutdown uses the same admission path as normal consumption. A
+	// queued first visit must create its slot before it can be persisted.
+	admit := func(envelope browserAnalyticsEnvelope) bool {
+		envelope.domain = a.resolveAnalyticsDomain(envelope.domain, resolutions)
+		if envelope.domain == "" {
+			return false
+		}
+		slot := slots[envelope.domain]
+		if slot == nil {
+			if len(slots) >= 8 {
+				for domain, candidate := range slots {
+					if !candidate.busy && !candidate.saving && !candidate.dirty {
+						delete(slots, domain)
+						break
+					}
+				}
+				if len(slots) >= 8 {
+					a.markAnalyticsLoss(envelope.domain)
+					return false
+				}
+			}
+			slot = &browserAnalyticsSlot{lost: lostDomains[envelope.domain]}
+			delete(lostDomains, envelope.domain)
+			select {
+			case jobs <- browserAnalyticsStorageJob{domain: envelope.domain, load: true, limit: siteLimit}:
+				slot.busy = true
+				slots[envelope.domain] = slot
+			default:
+				a.markAnalyticsLoss(envelope.domain)
+				return false
+			}
+		}
+		record(slot, envelope)
+		return true
+	}
+
 	for {
 		select {
 		case <-stopRequested:
@@ -4367,12 +4417,7 @@ func (a *App) runBrowserAnalytics(stopRequested <-chan struct{}) {
 			defer deadline.Stop()
 			for len(a.browserAnalytics) > 0 {
 				envelope := <-a.browserAnalytics
-				if a.siteDatabaseRouter != nil {
-					envelope.domain = resolutions[envelope.domain].domain
-				}
-				if slot := slots[envelope.domain]; slot != nil {
-					record(slot, envelope)
-				}
+				admit(envelope)
 			}
 			for {
 				var outbound chan browserAnalyticsStorageJob
@@ -4418,36 +4463,9 @@ func (a *App) runBrowserAnalytics(stopRequested <-chan struct{}) {
 				lostDomains[domain] = true
 			}
 		case envelope := <-a.browserAnalytics:
-			envelope.domain = a.resolveAnalyticsDomain(envelope.domain, resolutions)
-			if envelope.domain == "" {
+			if !admit(envelope) {
 				continue
 			}
-			slot := slots[envelope.domain]
-			if slot == nil {
-				if len(slots) >= 8 {
-					for domain, candidate := range slots {
-						if !candidate.busy && !candidate.saving && !candidate.dirty {
-							delete(slots, domain)
-							break
-						}
-					}
-					if len(slots) >= 8 {
-						a.markAnalyticsLoss(envelope.domain)
-						continue
-					}
-				}
-				slot = &browserAnalyticsSlot{lost: lostDomains[envelope.domain]}
-				delete(lostDomains, envelope.domain)
-				select {
-				case jobs <- browserAnalyticsStorageJob{domain: envelope.domain, load: true, limit: siteLimit}:
-					slot.busy = true
-					slots[envelope.domain] = slot
-				default:
-					a.markAnalyticsLoss(envelope.domain)
-					continue
-				}
-			}
-			record(slot, envelope)
 			processed++
 			if processed%128 == 0 {
 				select {
@@ -8583,6 +8601,8 @@ type serverRunConfig struct {
 	PortWasProvided      bool
 	DesktopMode          bool
 	Debug                bool
+	UpdateProbation      bool
+	UpdateChild          bool
 }
 
 func printSitebrushUsage(output io.Writer, flagSet *flag.FlagSet) {
@@ -8660,8 +8680,14 @@ Common commands:
       Remove the installed SiteBrush service and delete its automatic startup
       registration for the current operating system.
 
+  %[1]s -upgrade
+      Install the latest signed stable server release. Reuse the installed
+      service configuration, or select the installation with -path.
+      Progress is printed in the terminal. A failed upgrade returns a nonzero
+      exit status even when the previous version was restored successfully.
+
   %[1]s -version
-      Print the compiled SiteBrush version and exit.
+      Print the installed SiteBrush version and exit.
 
 Data layout:
   -path is the only required storage root. SiteBrush keeps databases, imported
@@ -8726,7 +8752,7 @@ func helpWasRequested(args []string) bool {
 }
 
 func printVisibleFlagDefaults(output io.Writer, flagSet *flag.FlagSet) {
-	visibleFlagNames := []string{"cli", "debug", "desktop", "install", "path", "port", "uninstall", "version"}
+	visibleFlagNames := []string{"cli", "debug", "desktop", "install", "path", "port", "uninstall", "upgrade", "version"}
 	for _, flagName := range visibleFlagNames {
 		currentFlag := flagSet.Lookup(flagName)
 		if currentFlag == nil {
@@ -8764,13 +8790,20 @@ func versionOnlyRequested(args []string) bool {
 
 func main() {
 	if versionOnlyRequested(os.Args[1:]) {
-		fmt.Println(CompileVersion)
+		fmt.Println(installedSitebrushVersion(defaultAppStoragePath(), false))
 		return
 	}
 
 	port := flag.String("port", "80,443", "listen port or standard pair 80,443")
 	storagePath := flag.String("path", defaultAppStoragePath(), "path to the SiteBrush app data directory")
 	cliMode := flag.Bool("cli", false, "open interactive SiteBrush server console")
+	upgradeMode := flag.Bool("upgrade", false, "install the latest signed stable server release")
+	updateSupervisor := flag.Bool("update-supervisor", false, "internal offline maintenance supervisor")
+	serverChild := flag.Bool("server-child", false, "internal supervised server process")
+	updateProbation := flag.Bool("update-probation", false, "internal startup verification without public writes")
+	updatePreflight := flag.Bool("update-preflight", false, "internal read-only release preflight")
+	updateMigrate := flag.Bool("update-migrate", false, "internal offline release migrations")
+	updateTargetVersion := flag.String("update-target-version", "", "internal expected compiled release identity")
 	versionMode := flag.Bool("version", false, "print version and exit")
 	debugMode := flag.Bool("debug", false, "enable verbose HTTP and database diagnostic logs")
 	legacyStoragePath := flag.String("storage-path", "", "")
@@ -8802,8 +8835,14 @@ func main() {
 		return
 	}
 	flag.Parse()
+	if *updateTargetVersion != "" && *updateTargetVersion != CompileVersion {
+		log.Fatal("release binary does not match its signed version identity")
+	}
+	if *upgradeMode && (*versionMode || *legacyVersionMode || *cliMode || *legacyListSitesMode || strings.TrimSpace(*legacyQuotaSite) != "" || flagWasProvided("quota") || *resetAdminIP || *serverChild || *updateProbation || *updatePreflight || *updateMigrate || *updateSupervisor) {
+		log.Fatal("-upgrade cannot be combined with another command")
+	}
 	if *versionMode || *legacyVersionMode {
-		fmt.Println(CompileVersion)
+		fmt.Println(installedSitebrushVersion(*storagePath, flagWasProvided("path")))
 		return
 	}
 	desktopMode := false
@@ -8820,6 +8859,25 @@ func main() {
 	}
 	if installMode && uninstallMode {
 		log.Fatal("choose only one service action: -install or -uninstall")
+	}
+	if *upgradeMode && (installMode || uninstallMode || desktopMode) {
+		log.Fatal("-upgrade is a server maintenance command and cannot be combined with another mode")
+	}
+	if *updateProbation && !*serverChild {
+		log.Fatal("startup probation requires a supervised child")
+	}
+	if *upgradeMode {
+		if stored, found := serviceinstall.StoredOptions(); found && ((!flagWasProvided("path") && strings.TrimSpace(*legacyStoragePath) == "") || sameCleanPath(*storagePath, stored.StoragePath) || sameCleanPath(*legacyStoragePath, stored.StoragePath)) {
+			if !flagWasProvided("path") && strings.TrimSpace(*legacyStoragePath) == "" {
+				*storagePath = stored.StoragePath
+			}
+			if !flagWasProvided("port") {
+				*port = stored.Port
+			}
+			if strings.TrimSpace(*legacyDBPath) == "" {
+				*legacyDBPath = stored.DBPath
+			}
+		}
 	}
 	if strings.TrimSpace(*legacyDBType) != "" && strings.TrimSpace(*legacyDBType) != "sqlite" {
 		log.Fatalf("unsupported legacy -db-type %q, supported: sqlite", *legacyDBType)
@@ -8876,6 +8934,32 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	if *updatePreflight || *updateMigrate {
+		if *updatePreflight && *updateMigrate {
+			log.Fatal("choose one update maintenance mode")
+		}
+		go func() { _, _ = io.Copy(io.Discard, os.Stdin); os.Exit(1) }()
+		if *updateMigrate {
+			session, err := appupdate.ServerSession(effectiveStoragePath, nil, 0)
+			if err != nil {
+				log.Fatal(err)
+			}
+			defer session.Close()
+		}
+		if err := runUpdateDatabaseMaintenance(effectiveStoragePath, effectiveDBPath, *updateMigrate); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if *upgradeMode {
+		if !appcli.InstallFlagSupported() {
+			log.Fatal("updates are available only in server builds")
+		}
+		if err := runManualUpgrade(effectiveStoragePath, effectiveDBPath, parsedPorts.Raw, *debugMode); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	if installMode {
 		if err := runServiceInstaller(parsedPorts.Raw, effectiveStoragePath, effectiveDBPath); err != nil {
 			handleServiceControlError(err)
@@ -8892,9 +8976,24 @@ func main() {
 		ParsedPorts: parsedPorts, StoragePath: effectiveStoragePath, DBPath: effectiveDBPath,
 		AllowStorageFallback: !storagePathWasProvided && !dbPathWasProvided, PortWasProvided: flagWasProvided("port"),
 		DesktopMode: desktopMode, Debug: *debugMode,
+		UpdateProbation: *updateProbation, UpdateChild: *serverChild,
+	}
+	if *updateSupervisor {
+		if err := runStoppedUpdateSupervisor(serverConfig); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if *serverChild {
+		serverContext, stopSignals := signalAwareContext(context.Background())
+		defer stopSignals()
+		if err := runSitebrushServer(serverContext, serverConfig); err != nil {
+			log.Fatal(err)
+		}
+		return
 	}
 	if handled, err := winservice.RunIfNeeded("sitebrush", func(ctx context.Context) error {
-		return runSitebrushServer(ctx, serverConfig)
+		return runSupervisedSitebrush(ctx, serverConfig)
 	}); handled {
 		if err != nil {
 			log.Fatal(err)
@@ -8904,7 +9003,7 @@ func main() {
 	}
 	serverContext, stopSignals := signalAwareContext(context.Background())
 	defer stopSignals()
-	if err := runSitebrushServer(serverContext, serverConfig); err != nil {
+	if err := runSupervisedSitebrush(serverContext, serverConfig); err != nil {
 		log.Fatal(err)
 	}
 	logShutdownDone("program stopped")
@@ -8960,8 +9059,10 @@ func logShutdownDone(format string, args ...any) {
 
 func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 
-	if err := systeminit.Init(); err != nil {
-		log.Printf("system initialization failed: %v", err)
+	if !config.UpdateProbation {
+		if err := systeminit.Init(); err != nil {
+			log.Printf("system initialization failed: %v", err)
+		}
 	}
 
 	parsedPorts := config.ParsedPorts
@@ -8987,9 +9088,38 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 		return err
 	}
 
+	activation := make(chan struct{})
+	serving := make(chan struct{})
+	if !config.UpdateProbation {
+		close(activation)
+	}
+	childTasks := make(chan appupdate.ChildTask, 8)
+	var stopChild context.CancelFunc
+	if config.UpdateChild {
+		childContext, cancelChild := context.WithCancel(ctx)
+		ctx = childContext
+		stopChild = cancelChild
+		defer cancelChild()
+		go func() { _, _ = io.Copy(io.Discard, os.Stdin); cancelChild() }()
+		processSession, err := appupdate.ServerSession(effectiveStoragePath, ctx.Done(), 0)
+		if err != nil {
+			return err
+		}
+		defer processSession.Close()
+		contactFinished := make(chan struct{})
+		go func() {
+			defer close(contactFinished)
+			if err := appupdate.ChildContact(effectiveStoragePath, childTasks, ctx.Done()); err != nil {
+				log.Printf("update supervisor: %v", err)
+				cancelChild()
+			}
+		}()
+		defer func() { cancelChild(); <-contactFinished }()
+	}
 	var siteDatabaseRouter *perSiteDBRouter
 	aiCapabilityStatePath := filepath.Join(storageRealRoot, "security", "ai-capabilities.json")
 	application := &App{storagePath: effectiveStoragePath, storageRealRoot: storageRealRoot, dbPath: effectiveDBPath, debug: config.Debug, desktopMode: config.DesktopMode, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), grabCancels: newGrabCancelTracker(), trialPreviews: newPublicTrialPreviewStore(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 1024), analyticsLosses: make(chan string, 64), browserAnalyticsLosses: make(chan string, 64), browserAnalytics: make(chan browserAnalyticsEnvelope, 512), analyticsConnections: make(chan struct{}, 128), domainLogEvents: make(chan domainLogEvent, 1024), aiCapabilities: aicapability.NewPersistentManager(aiCapabilityStatePath)}
+	application.updateActivation = activation
 	defer application.aiCapabilities.Close()
 	application.aiExecutor = aieditor.NewExecutor(&appAIStore{application: application}, 32)
 	defer application.aiExecutor.Close()
@@ -9035,8 +9165,6 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application.authIPFailureCache = startAuthIPFailureCacheWorker(ctx)
 	application.registrationConfirmations = startEmailConfirmationMemoryWorker(ctx)
 	application.publicTrialAvailability = startPublicTrialAvailabilityWorker(ctx.Done())
-	application.mailRouting = application.startSystemMailRouteProcess(ctx.Done())
-	application.durableMailTasks = application.startDurableMailProcess(ctx.Done())
 	application.hostingSupportEvents = application.startHostingSupportEventWorker(ctx.Done())
 	application.geoIP = geoip.NewResolver(filepath.Join(application.storageRootDir(), "geoip"))
 	certificateCacheDir := filepath.Join(application.storageRootDir(), "letsencrypt")
@@ -9064,31 +9192,38 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application.db = siteDatabaseRouter
 	application.siteDatabaseRouter = siteDatabaseRouter
 	application.ensureAutoCertGuard()
-	application.imageJobs = imageprepare.Start(ctx.Done())
-	application.renderTemplates = startRenderTemplateProcess(ctx.Done())
-	application.demoSessionEvents = application.startDemoSessionEventProcess(ctx.Done())
-	application.demoSiteRuntime = application.startDemoSiteRuntimeProcess(ctx.Done())
-	application.hostingAndSupportPanel = application.startHostingAndSupportPanelProcess(ctx.Done())
-	application.billingInvoices = application.startBillingInvoiceProcess(ctx.Done())
-	application.startDomainLogWorker(ctx)
-	application.startAnalyticsWorkers(ctx)
 	defer func() {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil && application.analyticsFinished != nil {
 			select {
 			case <-application.analyticsFinished:
 			case <-time.After(10 * time.Second):
 			}
 		}
 	}()
-	application.startServerOwnerRecoveryWorker(ctx)
-	application.startDemoSiteCleanupWorker(ctx)
-	application.startServiceMailKeyPairWorker(ctx)
-	go application.runSecurityGlobalSync(ctx.Done())
-	application.hostingSnapshotDeliveries = startHostingSnapshotNetChanDeliveryWorker(ctx.Done())
-	application.hostingSnapshotReports = application.startHostingSnapshotReporter(ctx)
-	application.startHostingSnapshotMetricsMonitor(ctx)
-	application.startHostingSnapshotNetChanListener(ctx)
-	application.startHostingServerMonitor(ctx)
+	startBackground := func() {
+		application.startAnnouncementSubsystems(ctx.Done())
+		application.mailRouting = application.startSystemMailRouteProcess(ctx.Done())
+		application.durableMailTasks = application.startDurableMailProcess(ctx.Done())
+		application.imageJobs = imageprepare.Start(ctx.Done())
+		application.renderTemplates = startRenderTemplateProcess(ctx.Done())
+		application.demoSessionEvents = application.startDemoSessionEventProcess(ctx.Done())
+		application.demoSiteRuntime = application.startDemoSiteRuntimeProcess(ctx.Done())
+		application.hostingAndSupportPanel = application.startHostingAndSupportPanelProcess(ctx.Done())
+		application.billingInvoices = application.startBillingInvoiceProcess(ctx.Done())
+		application.startDomainLogWorker(ctx)
+		application.startAnalyticsWorkers(ctx)
+		application.startServerOwnerRecoveryWorker(ctx)
+		application.startDemoSiteCleanupWorker(ctx)
+		application.startServiceMailKeyPairWorker(ctx)
+		go application.runSecurityGlobalSync(ctx.Done())
+		application.hostingSnapshotDeliveries = startHostingSnapshotNetChanDeliveryWorker(ctx.Done())
+		application.hostingSnapshotReports = application.startHostingSnapshotReporter(ctx)
+		application.startHostingSnapshotMetricsMonitor(ctx)
+		application.startHostingSnapshotNetChanListener(ctx)
+		application.startHostingServerMonitor(ctx)
+
+		application.startStartupPreloadWorker(ctx, siteDatabaseRootDir)
+	}
 
 	router := http.NewServeMux()
 	staticFiles, err := fs.Sub(embeddedWebFiles, "web/static")
@@ -9100,7 +9235,6 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 		return err
 	}
 	application.embeddedStaticAssets = embeddedStaticAssets
-	application.startStartupPreloadWorker(ctx, siteDatabaseRootDir)
 	router.HandleFunc("/p/static/", application.serveEmbeddedStaticAsset)
 	router.HandleFunc("/p/", application.servePublicAsset)
 	router.HandleFunc("/", application.route)
@@ -9110,6 +9244,9 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 		return err
 	}
 	defer listener.Close()
+	if config.UpdateProbation && parsedPorts.HTTPPort != 0 && listenPort != parsedPorts.HTTPPort {
+		return errors.New("update candidate could not acquire the configured HTTP port")
+	}
 
 	address := "localhost:" + strconv.Itoa(listenPort)
 
@@ -9118,8 +9255,25 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 		nextRequest := r.WithContext(contextWithDomain(r.Context(), requestDomain))
 		router.ServeHTTP(w, nextRequest)
 	})
-	appHandler := application.securityResponseHeadersMiddleware(application.analyticsMiddleware(application.accessLogMiddleware(application.authAbuseMiddleware(domainContextMiddleware))))
-	httpHandler := appHandler
+	managedHandler := application.securityResponseHeadersMiddleware(application.analyticsMiddleware(application.accessLogMiddleware(application.authAbuseMiddleware(domainContextMiddleware))))
+	healthNonce, nonceErr := appupdate.Identifier()
+	if nonceErr != nil {
+		return nonceErr
+	}
+	appHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/_sitebrush/update-health" && r.Header.Get("X-SiteBrush-Update-Probe") == healthNonce && requestRemoteIsLoopback(r) {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		select {
+		case <-serving:
+			managedHandler.ServeHTTP(w, r)
+		default:
+			w.Header().Set("Retry-After", "5")
+			http.Error(w, "SiteBrush maintenance", http.StatusServiceUnavailable)
+		}
+	})
+	var httpHandler http.Handler = appHandler
 	if listenPort != 80 {
 		application.automaticSSLUnavailableHintKey = automaticSSLUnavailableHintKey(config.PortWasProvided)
 		if config.PortWasProvided {
@@ -9179,6 +9333,29 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 		}
 	}
 
+	if config.UpdateProbation && parsedPorts.TLSEnabled && listenPort == 80 && !application.automaticSSLAvailable {
+		return errors.New("update candidate could not initialize configured HTTPS")
+	}
+	backgroundStartupFinished := make(chan struct{})
+	if config.UpdateProbation {
+		go func() {
+			defer close(backgroundStartupFinished)
+			select {
+			case <-activation:
+				startBackground()
+				close(serving)
+			case <-ctx.Done():
+			}
+		}()
+	} else {
+		startBackground()
+		close(serving)
+		close(backgroundStartupFinished)
+	}
+	defer func() { <-backgroundStartupFinished }()
+	if config.UpdateChild {
+		go runUpdateChildLifecycle(ctx.Done(), childTasks, activation, serving, config.UpdateProbation, stopChild, application, net.JoinHostPort("127.0.0.1", strconv.Itoa(listenPort)), healthNonce)
+	}
 	server := newSitebrushHTTPServer(httpHandler)
 	server.ConnState = sitebrushConnStateLogger("HTTP", config.Debug)
 	serverErrors := make(chan error, 1)
@@ -9186,6 +9363,13 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 		serverErrors <- server.Serve(listener)
 	}()
 	log.Printf("Sitebrush started on http://%s", address)
+	if config.UpdateChild {
+		go func() {
+			if _, err := appupdate.Exchange(effectiveStoragePath, appupdate.Request{Action: "server_ready", Detail: net.JoinHostPort("127.0.0.1", strconv.Itoa(listenPort))}, ctx.Done()); err != nil {
+				log.Printf("update startup contact: %s", diagnosticlog.SafeLogValue(err.Error()))
+			}
+		}()
+	}
 	if application.selfSignedTLSPort > 0 {
 		log.Printf("Sitebrush secure registration is available on https://localhost:%d with a self-signed certificate", application.selfSignedTLSPort)
 	}
@@ -9993,67 +10177,64 @@ func (a *App) finishAutoCertIssuance(domain string) {
 }
 
 func (a *App) migrate(ctx context.Context) error {
-	a.removeLegacyAIProviderMasterKeyFile()
-	const legacyDomain = "localhost"
 	schemaVersion, versionErr := sqliteUserVersion(ctx, a.db)
 	if versionErr != nil {
 		return siteMigrationStepError{step: "read schema version", err: versionErr}
 	}
+	if schemaVersion > currentSiteDatabaseSchemaVersion {
+		return fmt.Errorf("site schema %d is newer than supported %d", schemaVersion, currentSiteDatabaseSchemaVersion)
+	}
+	if database, ok := a.db.(*sql.DB); ok {
+		if err := checkSiteMigrationSource(ctx, database); err != nil {
+			return err
+		}
+	}
+	a.removeLegacyAIProviderMasterKeyFile()
 	schemaComplete, schemaErr := siteDatabaseSchemaComplete(ctx, a.db)
 	if schemaErr != nil {
 		return siteMigrationStepError{step: "verify schema", err: schemaErr}
 	}
-	if schemaVersion >= currentSiteDatabaseSchemaVersion && schemaComplete {
-		if err := crawler.RecoverImportFrontiers(ctx, a.db); err != nil {
-			return siteMigrationStepError{step: "finish interrupted import cleanup", err: err}
-		}
-		a.migrateLoopbackDomainsToLocalhost(ctx)
-		if a.debug {
-			log.Printf("%sDB MIGRATION%s skipped domain=%s version=%d",
-				terminalCyan(), terminalReset(), diagnosticlog.SafeLogValue(domainFromContext(ctx)), schemaVersion)
-		}
-		return nil
+	steps := siteSchemaSteps(ctx, !schemaComplete || schemaVersion < currentSiteDatabaseSchemaVersion)
+	migrationDatabase, ownsDatabase := a.db.(*sql.DB)
+	if !ownsDatabase {
+		return errors.New("site migrations require the database owner's exclusive SQL handle")
 	}
-	queries := []string{
-		`CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,email TEXT,password TEXT,is_admin INTEGER,UNIQUE(domain,email));`,
-		`CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY,user_email TEXT,created_at TEXT,admin_ip_trust INTEGER NOT NULL DEFAULT 1);`,
-		`CREATE TABLE IF NOT EXISTS pages(domain TEXT,path TEXT,title TEXT,html TEXT,published INTEGER,PRIMARY KEY(domain,path));`,
-		`CREATE TABLE IF NOT EXISTS published_pages(domain TEXT,path TEXT,title TEXT,html TEXT,PRIMARY KEY(domain,path));`,
-		`CREATE TABLE IF NOT EXISTS page_redirects(domain TEXT,old_path TEXT,new_path TEXT,created_at TEXT,PRIMARY KEY(domain,old_path));`,
-		`CREATE TABLE IF NOT EXISTS domain_storage_usage(domain TEXT PRIMARY KEY,page_bytes INTEGER DEFAULT 0,published_page_bytes INTEGER DEFAULT 0,revision_bytes INTEGER DEFAULT 0,file_bytes INTEGER DEFAULT 0,published_static_bytes INTEGER DEFAULT 0,limit_bytes INTEGER DEFAULT 10737418240,updated_at TEXT);`,
-		`CREATE TABLE IF NOT EXISTS auth_ip_failures(domain TEXT,client_ip TEXT,failure_count INTEGER DEFAULT 0,blocked_until TEXT,hard_locked INTEGER DEFAULT 0,last_failed_at TEXT,last_attempt_at TEXT,PRIMARY KEY(domain,client_ip));`,
-		`CREATE TABLE IF NOT EXISTS revisions(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,page_path TEXT,html TEXT,created_at TEXT,is_active INTEGER DEFAULT 1);`,
-		`CREATE TABLE IF NOT EXISTS domain_aliases(primary_domain TEXT,alias_domain TEXT UNIQUE,verification_token TEXT,is_verified INTEGER DEFAULT 0,dns_a_ok INTEGER DEFAULT 0,is_selected INTEGER DEFAULT 0,last_checked_at TEXT);`,
-		`CREATE TABLE IF NOT EXISTS analytics_configuration(domain TEXT PRIMARY KEY,goals TEXT NOT NULL);`,
-		`CREATE TABLE IF NOT EXISTS domain_states(domain TEXT PRIMARY KEY,is_frozen INTEGER DEFAULT 0);`,
-		`CREATE TABLE IF NOT EXISTS domain_ssl_settings(domain TEXT PRIMARY KEY,auto_ssl_enabled INTEGER DEFAULT 0,manually_disabled INTEGER DEFAULT 0,last_checked_at TEXT,last_failed_at TEXT,last_failure_reason TEXT,retry_after TEXT,certificate_expires_at TEXT,last_acme_attempt_at TEXT,last_acme_success_at TEXT,certificate_last_validated_at TEXT);`,
-		`CREATE TABLE IF NOT EXISTS page_password_rules(domain TEXT,path TEXT,password_hash TEXT,created_at TEXT,updated_at TEXT,PRIMARY KEY(domain,path));`,
-		`CREATE TABLE IF NOT EXISTS page_password_sessions(token TEXT PRIMARY KEY,domain TEXT,path TEXT,created_at TEXT);`,
-		`CREATE TABLE IF NOT EXISTS domain_chroot_locations(domain TEXT,url_path TEXT,directory_path TEXT,updated_at TEXT,PRIMARY KEY(domain,url_path));`,
-		`CREATE TABLE IF NOT EXISTS domain_backup_tokens(domain TEXT PRIMARY KEY,token TEXT,updated_at TEXT);`,
-		`CREATE TABLE IF NOT EXISTS ai_provider_user_credentials(domain TEXT,email TEXT,provider TEXT,encrypted_api_key TEXT,model TEXT,updated_at TEXT,PRIMARY KEY(domain,email,provider));`,
-		`CREATE TABLE IF NOT EXISTS admin_stealth_modes(domain TEXT,email TEXT,enabled_at INTEGER NOT NULL,PRIMARY KEY(domain,email));`,
-		`CREATE TABLE IF NOT EXISTS file_access_rules(domain TEXT,file_name TEXT,access_mode TEXT,token TEXT,expires_at TEXT,single_use_left INTEGER DEFAULT 0,token_use_count INTEGER DEFAULT 0,PRIMARY KEY(domain,file_name));`,
-		`CREATE TABLE IF NOT EXISTS file_metadata(domain TEXT,file_name TEXT,page_path TEXT,size INTEGER,mime_type TEXT,created_at TEXT,updated_at TEXT,source TEXT,download_count INTEGER DEFAULT 0,PRIMARY KEY(domain,file_name));`,
-		`CREATE TABLE IF NOT EXISTS email_confirmations(token TEXT PRIMARY KEY,domain TEXT,action TEXT,email TEXT,password TEXT,verification_code TEXT,current_email TEXT,return_path TEXT,language_code TEXT,created_at TEXT,expires_at TEXT);`,
-		`CREATE TABLE IF NOT EXISTS analytics_events(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,path TEXT,query TEXT,method TEXT,status_code INTEGER,content_source TEXT,occurred_at TEXT,duration_ms INTEGER,client_ip TEXT,remote_addr TEXT,user_agent TEXT,referer TEXT,accept_language TEXT,geo_country_code TEXT,geo_city TEXT,geo_latitude REAL DEFAULT 0,geo_longitude REAL DEFAULT 0,geo_source TEXT,visitor_id TEXT,is_admin INTEGER DEFAULT 0,is_asset INTEGER DEFAULT 0,is_controller INTEGER DEFAULT 0);`,
-		`CREATE INDEX IF NOT EXISTS idx_analytics_events_domain_time ON analytics_events(domain,occurred_at);`,
-		`CREATE INDEX IF NOT EXISTS idx_analytics_events_visitor ON analytics_events(domain,visitor_id,occurred_at);`,
-		`CREATE TABLE IF NOT EXISTS analytics_reports(domain TEXT PRIMARY KEY,generated_at TEXT,period_start TEXT,period_end TEXT,event_count INTEGER,report_json TEXT);`,
-		`CREATE TABLE IF NOT EXISTS sitebrush_migrations(name TEXT PRIMARY KEY,applied_at INTEGER NOT NULL);`,
-	}
-	queries = append(queries, crawler.ImportFrontierSchema()...)
-	queries = append(queries, accountauth.Schema()...)
-	queries = append(queries, accountpasskey.Schema()...)
-	queries = append(queries, accounttotp.Schema()...)
-	for queryIndex, query := range queries {
-		if _, err := a.db.ExecContext(ctx, query); err != nil {
-			return siteMigrationStepError{step: "base schema statement " + strconv.Itoa(queryIndex+1), err: err}
-		}
-	}
-	if err := a.ensureSiteDatabaseSchemaColumns(ctx); err != nil {
+	if err := migrations.Run(migrationDatabase, "site-schema-v12", steps); err != nil {
 		return err
 	}
+	preferenceSteps := siteMailPreferenceSteps()
+	preferencesFound, err := siteDatabaseColumnExists(ctx, migrationDatabase, "owner_mail_preferences", "language")
+	if err != nil {
+		return err
+	}
+	preferenceSteps[0].Ensure = !preferencesFound
+	if err := migrations.Run(migrationDatabase, "owner-mail-preferences-v1", preferenceSteps); err != nil {
+		return err
+	}
+
+	needsDataMigration := schemaVersion < currentSiteDatabaseSchemaVersion || !schemaComplete
+	if err := migrations.Run(migrationDatabase, "site-data-v12", []migrations.Step{{ID: "legacy-data-through-12", Revision: "1", Ensure: needsDataMigration, Recoverable: func() error {
+		if !needsDataMigration {
+			return nil
+		}
+		return a.migrateLegacySiteData(ctx)
+	}}}); err != nil {
+		return err
+	}
+	if err := crawler.RecoverImportFrontiers(ctx, a.db); err != nil {
+		return err
+	}
+	if err := a.migrateLoopbackDomainsToLocalhost(ctx); err != nil {
+		return err
+	}
+	if err := setSQLiteUserVersion(ctx, a.db, currentSiteDatabaseSchemaVersion); err != nil {
+		return siteMigrationStepError{step: "write schema version", err: err}
+	}
+	return nil
+}
+
+func (a *App) migrateLegacySiteData(ctx context.Context) error {
+	const legacyDomain = "localhost"
 	if _, err := a.db.ExecContext(ctx, `DROP TABLE IF EXISTS ai_provider_credentials`); err != nil {
 		return siteMigrationStepError{step: "remove legacy AI provider credential storage", err: err}
 	}
@@ -10090,14 +10271,26 @@ func (a *App) migrate(ctx context.Context) error {
 	if _, err := a.db.ExecContext(ctx, `UPDATE sessions SET last_used_at=? WHERE last_used_at=0`, time.Now().Unix()); err != nil {
 		return err
 	}
-	_, _ = a.db.ExecContext(ctx, `UPDATE users SET domain=? WHERE domain IS NULL OR TRIM(domain)=''`, legacyDomain)
-	_, _ = a.db.ExecContext(ctx, `UPDATE pages SET domain=? WHERE domain IS NULL OR TRIM(domain)=''`, legacyDomain)
-	_, _ = a.db.ExecContext(ctx, `UPDATE revisions SET domain=? WHERE domain IS NULL OR TRIM(domain)=''`, legacyDomain)
-	a.migrateLoopbackDomainsToLocalhost(ctx)
-	_, _ = a.db.ExecContext(ctx, `UPDATE revisions SET is_active=1 WHERE is_active IS NULL`)
-	_, _ = a.db.ExecContext(ctx, `UPDATE domain_storage_usage SET limit_bytes=? WHERE limit_bytes IS NULL OR limit_bytes<=0`, defaultDomainStorageLimitBytes)
+	if _, err := a.db.ExecContext(ctx, `UPDATE users SET domain=? WHERE domain IS NULL OR TRIM(domain)=''`, legacyDomain); err != nil {
+		return err
+	}
+	if _, err := a.db.ExecContext(ctx, `UPDATE pages SET domain=? WHERE domain IS NULL OR TRIM(domain)=''`, legacyDomain); err != nil {
+		return err
+	}
+	if _, err := a.db.ExecContext(ctx, `UPDATE revisions SET domain=? WHERE domain IS NULL OR TRIM(domain)=''`, legacyDomain); err != nil {
+		return err
+	}
+	if err := a.migrateLoopbackDomainsToLocalhost(ctx); err != nil {
+		return err
+	}
+	if _, err := a.db.ExecContext(ctx, `UPDATE revisions SET is_active=1 WHERE is_active IS NULL`); err != nil {
+		return err
+	}
+	if _, err := a.db.ExecContext(ctx, `UPDATE domain_storage_usage SET limit_bytes=? WHERE limit_bytes IS NULL OR limit_bytes<=0`, defaultDomainStorageLimitBytes); err != nil {
+		return err
+	}
 	a.assignMissingDomainAliasTokens(ctx)
-	_, _ = a.db.ExecContext(ctx, `
+	if _, err := a.db.ExecContext(ctx, `
 		INSERT INTO published_pages(domain,path,title,html)
 		SELECT p.domain,p.path,p.title,p.html
 		FROM pages AS p
@@ -10105,13 +10298,64 @@ func (a *App) migrate(ctx context.Context) error {
 		AND NOT EXISTS (
 			SELECT 1 FROM published_pages AS pp WHERE pp.domain=p.domain AND pp.path=p.path
 		)
-	`)
+	`); err != nil {
+		return err
+	}
 	a.ensureAllDomainStorageUsageRows(ctx)
 	a.rebuildPagePasswordPrefixFiles(ctx)
-	if err := setSQLiteUserVersion(ctx, a.db, currentSiteDatabaseSchemaVersion); err != nil {
-		return siteMigrationStepError{step: "write schema version", err: err}
-	}
 	return nil
+}
+
+func siteSchemaSteps(ctx context.Context, repair bool) []migrations.Step {
+	queries := []string{
+		`CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,email TEXT,password TEXT,is_admin INTEGER,UNIQUE(domain,email));`,
+		`CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY,user_email TEXT,created_at TEXT,admin_ip_trust INTEGER NOT NULL DEFAULT 1);`,
+		`CREATE TABLE IF NOT EXISTS pages(domain TEXT,path TEXT,title TEXT,html TEXT,published INTEGER,PRIMARY KEY(domain,path));`,
+		`CREATE TABLE IF NOT EXISTS published_pages(domain TEXT,path TEXT,title TEXT,html TEXT,PRIMARY KEY(domain,path));`,
+		`CREATE TABLE IF NOT EXISTS page_redirects(domain TEXT,old_path TEXT,new_path TEXT,created_at TEXT,PRIMARY KEY(domain,old_path));`,
+		`CREATE TABLE IF NOT EXISTS domain_storage_usage(domain TEXT PRIMARY KEY,page_bytes INTEGER DEFAULT 0,published_page_bytes INTEGER DEFAULT 0,revision_bytes INTEGER DEFAULT 0,file_bytes INTEGER DEFAULT 0,published_static_bytes INTEGER DEFAULT 0,limit_bytes INTEGER DEFAULT 10737418240,updated_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS auth_ip_failures(domain TEXT,client_ip TEXT,failure_count INTEGER DEFAULT 0,blocked_until TEXT,hard_locked INTEGER DEFAULT 0,last_failed_at TEXT,last_attempt_at TEXT,PRIMARY KEY(domain,client_ip));`,
+		`CREATE TABLE IF NOT EXISTS revisions(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,page_path TEXT,html TEXT,created_at TEXT,is_active INTEGER DEFAULT 1);`,
+		`CREATE TABLE IF NOT EXISTS domain_aliases(primary_domain TEXT,alias_domain TEXT UNIQUE,verification_token TEXT,is_verified INTEGER DEFAULT 0,dns_a_ok INTEGER DEFAULT 0,is_selected INTEGER DEFAULT 0,last_checked_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS analytics_configuration(domain TEXT PRIMARY KEY,goals TEXT NOT NULL);`,
+		`CREATE TABLE IF NOT EXISTS domain_states(domain TEXT PRIMARY KEY,is_frozen INTEGER DEFAULT 0);`,
+		`CREATE TABLE IF NOT EXISTS domain_ssl_settings(domain TEXT PRIMARY KEY,auto_ssl_enabled INTEGER DEFAULT 0,manually_disabled INTEGER DEFAULT 0,last_checked_at TEXT,last_failed_at TEXT,last_failure_reason TEXT,retry_after TEXT,certificate_expires_at TEXT,last_acme_attempt_at TEXT,last_acme_success_at TEXT,certificate_last_validated_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS page_password_rules(domain TEXT,path TEXT,password_hash TEXT,created_at TEXT,updated_at TEXT,PRIMARY KEY(domain,path));`,
+		`CREATE TABLE IF NOT EXISTS page_password_sessions(token TEXT PRIMARY KEY,domain TEXT,path TEXT,created_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS domain_chroot_locations(domain TEXT,url_path TEXT,directory_path TEXT,updated_at TEXT,PRIMARY KEY(domain,url_path));`,
+		`CREATE TABLE IF NOT EXISTS domain_backup_tokens(domain TEXT PRIMARY KEY,token TEXT,updated_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS ai_provider_user_credentials(domain TEXT,email TEXT,provider TEXT,encrypted_api_key TEXT,model TEXT,updated_at TEXT,PRIMARY KEY(domain,email,provider));`,
+		`CREATE TABLE IF NOT EXISTS admin_stealth_modes(domain TEXT,email TEXT,enabled_at INTEGER NOT NULL,PRIMARY KEY(domain,email));`,
+		`CREATE TABLE IF NOT EXISTS file_access_rules(domain TEXT,file_name TEXT,access_mode TEXT,token TEXT,expires_at TEXT,single_use_left INTEGER DEFAULT 0,token_use_count INTEGER DEFAULT 0,PRIMARY KEY(domain,file_name));`,
+		`CREATE TABLE IF NOT EXISTS file_metadata(domain TEXT,file_name TEXT,page_path TEXT,size INTEGER,mime_type TEXT,created_at TEXT,updated_at TEXT,source TEXT,download_count INTEGER DEFAULT 0,PRIMARY KEY(domain,file_name));`,
+		`CREATE TABLE IF NOT EXISTS email_confirmations(token TEXT PRIMARY KEY,domain TEXT,action TEXT,email TEXT,password TEXT,verification_code TEXT,current_email TEXT,return_path TEXT,language_code TEXT,created_at TEXT,expires_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS analytics_events(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,path TEXT,query TEXT,method TEXT,status_code INTEGER,content_source TEXT,occurred_at TEXT,duration_ms INTEGER,client_ip TEXT,remote_addr TEXT,user_agent TEXT,referer TEXT,accept_language TEXT,geo_country_code TEXT,geo_city TEXT,geo_latitude REAL DEFAULT 0,geo_longitude REAL DEFAULT 0,geo_source TEXT,visitor_id TEXT,is_admin INTEGER DEFAULT 0,is_asset INTEGER DEFAULT 0,is_controller INTEGER DEFAULT 0);`,
+		`CREATE INDEX IF NOT EXISTS idx_analytics_events_domain_time ON analytics_events(domain,occurred_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_analytics_events_visitor ON analytics_events(domain,visitor_id,occurred_at);`,
+		`CREATE TABLE IF NOT EXISTS analytics_reports(domain TEXT PRIMARY KEY,generated_at TEXT,period_start TEXT,period_end TEXT,event_count INTEGER,report_json TEXT);`,
+		`CREATE TABLE IF NOT EXISTS sitebrush_migrations(name TEXT PRIMARY KEY,applied_at INTEGER NOT NULL);`,
+	}
+	queries = append(queries, crawler.ImportFrontierSchema()...)
+	queries = append(queries, accountauth.Schema()...)
+	queries = append(queries, accountpasskey.Schema()...)
+	queries = append(queries, accounttotp.Schema()...)
+	steps := make([]migrations.Step, 0, len(queries)+len(requiredSiteDatabaseColumns()))
+	for queryIndex, query := range queries {
+		step := migrations.SQL("schema-"+strconv.Itoa(queryIndex+1), query)
+		step.Ensure = repair
+		steps = append(steps, step)
+	}
+	for _, column := range requiredSiteDatabaseColumns() {
+		steps = append(steps, migrations.Step{ID: "column-" + column.tableName + "-" + column.columnName, Revision: column.definition, Ensure: repair, Apply: func(transaction *sql.Tx) error {
+			found, err := siteDatabaseColumnExists(ctx, transaction, column.tableName, column.columnName)
+			if err != nil || found {
+				return err
+			}
+			_, err = transaction.Exec(`ALTER TABLE ` + column.tableName + ` ADD COLUMN ` + column.columnName + ` ` + column.definition)
+			return err
+		}})
+	}
+	return steps
 }
 
 func (a *App) ensureSiteDatabaseSchemaColumns(ctx context.Context) error {
@@ -10232,7 +10476,7 @@ func siteDatabaseSchemaComplete(ctx context.Context, database sqlExecutor) (bool
 			return false, err
 		}
 	}
-	return true, nil
+	return siteDatabaseColumnExists(ctx, database, "owner_mail_preferences", "language")
 }
 
 func siteDatabaseColumnExists(ctx context.Context, database sqlExecutor, tableName, columnName string) (bool, error) {
@@ -10258,7 +10502,17 @@ func siteDatabaseColumnExists(ctx context.Context, database sqlExecutor, tableNa
 	return false, rows.Err()
 }
 
-func (a *App) migrateLoopbackDomainsToLocalhost(ctx context.Context) {
+func (a *App) migrateLoopbackDomainsToLocalhost(ctx context.Context) error {
+	database, owned := a.db.(*sql.DB)
+	if !owned {
+		return errors.New("loopback migration requires the database owner")
+	}
+	transaction, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer transaction.Rollback()
+
 	legacyLoopbackDomains := []string{"127.0.0.1", "::1", "[::1]"}
 	placeholders := "(" + strings.TrimSuffix(strings.Repeat("?,", len(legacyLoopbackDomains)), ",") + ")"
 	sqlArguments := make([]any, 0, len(legacyLoopbackDomains))
@@ -10267,62 +10521,125 @@ func (a *App) migrateLoopbackDomainsToLocalhost(ctx context.Context) {
 	}
 	usersMergeQuery := `INSERT OR IGNORE INTO users(domain,email,password,is_admin)
 SELECT 'localhost',email,password,is_admin FROM users WHERE domain IN ` + placeholders
-	_, _ = a.db.ExecContext(ctx, usersMergeQuery, sqlArguments...)
+	if _, err := transaction.ExecContext(ctx, usersMergeQuery, sqlArguments...); err != nil {
+		return err
+	}
 	pagesMergeQuery := `INSERT OR IGNORE INTO pages(domain,path,title,html,published)
 SELECT 'localhost',path,title,html,published FROM pages WHERE domain IN ` + placeholders
-	_, _ = a.db.ExecContext(ctx, pagesMergeQuery, sqlArguments...)
+	if _, err := transaction.ExecContext(ctx, pagesMergeQuery, sqlArguments...); err != nil {
+		return err
+	}
 	publishedPagesMergeQuery := `INSERT OR IGNORE INTO published_pages(domain,path,title,html)
 SELECT 'localhost',path,title,html FROM published_pages WHERE domain IN ` + placeholders
-	_, _ = a.db.ExecContext(ctx, publishedPagesMergeQuery, sqlArguments...)
+	if _, err := transaction.ExecContext(ctx, publishedPagesMergeQuery, sqlArguments...); err != nil {
+		return err
+	}
 	fileAccessRulesMergeQuery := `INSERT OR IGNORE INTO file_access_rules(domain,file_name,access_mode,token,expires_at,single_use_left,token_use_count)
 SELECT 'localhost',file_name,access_mode,token,expires_at,single_use_left,token_use_count FROM file_access_rules WHERE domain IN ` + placeholders
-	_, _ = a.db.ExecContext(ctx, fileAccessRulesMergeQuery, sqlArguments...)
+	if _, err := transaction.ExecContext(ctx, fileAccessRulesMergeQuery, sqlArguments...); err != nil {
+		return err
+	}
 	fileMetadataMergeQuery := `INSERT OR IGNORE INTO file_metadata(domain,file_name,page_path,size,mime_type,created_at,updated_at,source,download_count)
 SELECT 'localhost',file_name,page_path,size,mime_type,created_at,updated_at,source,download_count FROM file_metadata WHERE domain IN ` + placeholders
-	_, _ = a.db.ExecContext(ctx, fileMetadataMergeQuery, sqlArguments...)
+	if _, err := transaction.ExecContext(ctx, fileMetadataMergeQuery, sqlArguments...); err != nil {
+		return err
+	}
 	pageRedirectsMergeQuery := `INSERT OR IGNORE INTO page_redirects(domain,old_path,new_path,created_at)
 SELECT 'localhost',old_path,new_path,created_at FROM page_redirects WHERE domain IN ` + placeholders
-	_, _ = a.db.ExecContext(ctx, pageRedirectsMergeQuery, sqlArguments...)
+	if _, err := transaction.ExecContext(ctx, pageRedirectsMergeQuery, sqlArguments...); err != nil {
+		return err
+	}
 	storageUsageMergeQuery := `INSERT OR IGNORE INTO domain_storage_usage(domain,page_bytes,published_page_bytes,revision_bytes,file_bytes,published_static_bytes,import_queue_bytes,limit_bytes,updated_at)
 SELECT 'localhost',page_bytes,published_page_bytes,revision_bytes,file_bytes,published_static_bytes,import_queue_bytes,limit_bytes,updated_at FROM domain_storage_usage WHERE domain IN ` + placeholders
-	_, _ = a.db.ExecContext(ctx, storageUsageMergeQuery, sqlArguments...)
-	_, _ = a.db.ExecContext(ctx, `INSERT OR IGNORE INTO whole_site_imports(import_id,domain,page_path,source_url,auto_templates,state,created_at,updated_at)
-SELECT import_id,'localhost',page_path,source_url,auto_templates,state,created_at,updated_at FROM whole_site_imports WHERE domain IN `+placeholders, sqlArguments...)
-	_, _ = a.db.ExecContext(ctx, `INSERT OR IGNORE INTO whole_site_import_pages(import_id,domain,page_key,page_url,local_path,link_offset,storage_bytes,state,created_at)
-SELECT import_id,'localhost',page_key,page_url,local_path,link_offset,storage_bytes,state,created_at FROM whole_site_import_pages WHERE domain IN `+placeholders, sqlArguments...)
-	_, _ = a.db.ExecContext(ctx, `INSERT OR IGNORE INTO ai_provider_user_credentials(domain,email,provider,encrypted_api_key,model,updated_at)
-SELECT 'localhost',email,provider,encrypted_api_key,model,updated_at FROM ai_provider_user_credentials WHERE domain IN `+placeholders, sqlArguments...)
+	if _, err := transaction.ExecContext(ctx, storageUsageMergeQuery, sqlArguments...); err != nil {
+		return err
+	}
+	if _, err := transaction.ExecContext(ctx, `INSERT OR IGNORE INTO whole_site_imports(import_id,domain,page_path,source_url,auto_templates,state,created_at,updated_at)
+SELECT import_id,'localhost',page_path,source_url,auto_templates,state,created_at,updated_at FROM whole_site_imports WHERE domain IN `+placeholders, sqlArguments...); err != nil {
+		return err
+	}
+	if _, err := transaction.ExecContext(ctx, `INSERT OR IGNORE INTO whole_site_import_pages(import_id,domain,page_key,page_url,local_path,link_offset,storage_bytes,state,created_at)
+SELECT import_id,'localhost',page_key,page_url,local_path,link_offset,storage_bytes,state,created_at FROM whole_site_import_pages WHERE domain IN `+placeholders, sqlArguments...); err != nil {
+		return err
+	}
+	if _, err := transaction.ExecContext(ctx, `INSERT OR IGNORE INTO ai_provider_user_credentials(domain,email,provider,encrypted_api_key,model,updated_at)
+SELECT 'localhost',email,provider,encrypted_api_key,model,updated_at FROM ai_provider_user_credentials WHERE domain IN `+placeholders, sqlArguments...); err != nil {
+		return err
+	}
 	domainStatesMergeQuery := `INSERT OR IGNORE INTO domain_states(domain,is_frozen)
 SELECT 'localhost',is_frozen FROM domain_states WHERE domain IN ` + placeholders
-	_, _ = a.db.ExecContext(ctx, domainStatesMergeQuery, sqlArguments...)
+	if _, err := transaction.ExecContext(ctx, domainStatesMergeQuery, sqlArguments...); err != nil {
+		return err
+	}
 	domainSSLSettingsMergeQuery := `INSERT OR IGNORE INTO domain_ssl_settings(domain,auto_ssl_enabled,manually_disabled,last_checked_at,last_failed_at,last_failure_reason,retry_after)
 SELECT 'localhost',auto_ssl_enabled,manually_disabled,last_checked_at,last_failed_at,last_failure_reason,retry_after FROM domain_ssl_settings WHERE domain IN ` + placeholders
-	_, _ = a.db.ExecContext(ctx, domainSSLSettingsMergeQuery, sqlArguments...)
+	if _, err := transaction.ExecContext(ctx, domainSSLSettingsMergeQuery, sqlArguments...); err != nil {
+		return err
+	}
 	pagePasswordRulesMergeQuery := `INSERT OR IGNORE INTO page_password_rules(domain,path,password_hash,created_at,updated_at)
 SELECT 'localhost',path,password_hash,created_at,updated_at FROM page_password_rules WHERE domain IN ` + placeholders
-	_, _ = a.db.ExecContext(ctx, pagePasswordRulesMergeQuery, sqlArguments...)
+	if _, err := transaction.ExecContext(ctx, pagePasswordRulesMergeQuery, sqlArguments...); err != nil {
+		return err
+	}
 	pagePasswordSessionsMergeQuery := `INSERT OR IGNORE INTO page_password_sessions(token,domain,path,created_at)
 SELECT token,'localhost',path,created_at FROM page_password_sessions WHERE domain IN ` + placeholders
-	_, _ = a.db.ExecContext(ctx, pagePasswordSessionsMergeQuery, sqlArguments...)
+	if _, err := transaction.ExecContext(ctx, pagePasswordSessionsMergeQuery, sqlArguments...); err != nil {
+		return err
+	}
 
-	_, _ = a.db.ExecContext(ctx, `UPDATE revisions SET domain='localhost' WHERE domain IN `+placeholders, sqlArguments...)
-	_, _ = a.db.ExecContext(ctx, `UPDATE domain_aliases SET primary_domain='localhost' WHERE primary_domain IN `+placeholders, sqlArguments...)
-	_, _ = a.db.ExecContext(ctx, `DELETE FROM domain_aliases WHERE alias_domain IN `+placeholders, sqlArguments...)
+	if _, err := transaction.ExecContext(ctx, `UPDATE revisions SET domain='localhost' WHERE domain IN `+placeholders, sqlArguments...); err != nil {
+		return err
+	}
+	if _, err := transaction.ExecContext(ctx, `UPDATE domain_aliases SET primary_domain='localhost' WHERE primary_domain IN `+placeholders, sqlArguments...); err != nil {
+		return err
+	}
+	if _, err := transaction.ExecContext(ctx, `DELETE FROM domain_aliases WHERE alias_domain IN `+placeholders, sqlArguments...); err != nil {
+		return err
+	}
 
-	_, _ = a.db.ExecContext(ctx, `DELETE FROM users WHERE domain IN `+placeholders, sqlArguments...)
-	_, _ = a.db.ExecContext(ctx, `DELETE FROM pages WHERE domain IN `+placeholders, sqlArguments...)
-	_, _ = a.db.ExecContext(ctx, `DELETE FROM published_pages WHERE domain IN `+placeholders, sqlArguments...)
-	_, _ = a.db.ExecContext(ctx, `DELETE FROM page_redirects WHERE domain IN `+placeholders, sqlArguments...)
-	_, _ = a.db.ExecContext(ctx, `DELETE FROM file_access_rules WHERE domain IN `+placeholders, sqlArguments...)
-	_, _ = a.db.ExecContext(ctx, `DELETE FROM file_metadata WHERE domain IN `+placeholders, sqlArguments...)
-	_, _ = a.db.ExecContext(ctx, `DELETE FROM domain_storage_usage WHERE domain IN `+placeholders, sqlArguments...)
-	_, _ = a.db.ExecContext(ctx, `DELETE FROM ai_provider_user_credentials WHERE domain IN `+placeholders, sqlArguments...)
-	_, _ = a.db.ExecContext(ctx, `DELETE FROM whole_site_import_pages WHERE domain IN `+placeholders, sqlArguments...)
-	_, _ = a.db.ExecContext(ctx, `DELETE FROM whole_site_imports WHERE domain IN `+placeholders, sqlArguments...)
-	_, _ = a.db.ExecContext(ctx, `DELETE FROM domain_states WHERE domain IN `+placeholders, sqlArguments...)
-	_, _ = a.db.ExecContext(ctx, `DELETE FROM domain_ssl_settings WHERE domain IN `+placeholders, sqlArguments...)
-	_, _ = a.db.ExecContext(ctx, `DELETE FROM page_password_rules WHERE domain IN `+placeholders, sqlArguments...)
-	_, _ = a.db.ExecContext(ctx, `DELETE FROM page_password_sessions WHERE domain IN `+placeholders, sqlArguments...)
+	if _, err := transaction.ExecContext(ctx, `DELETE FROM users WHERE domain IN `+placeholders, sqlArguments...); err != nil {
+		return err
+	}
+	if _, err := transaction.ExecContext(ctx, `DELETE FROM pages WHERE domain IN `+placeholders, sqlArguments...); err != nil {
+		return err
+	}
+	if _, err := transaction.ExecContext(ctx, `DELETE FROM published_pages WHERE domain IN `+placeholders, sqlArguments...); err != nil {
+		return err
+	}
+	if _, err := transaction.ExecContext(ctx, `DELETE FROM page_redirects WHERE domain IN `+placeholders, sqlArguments...); err != nil {
+		return err
+	}
+	if _, err := transaction.ExecContext(ctx, `DELETE FROM file_access_rules WHERE domain IN `+placeholders, sqlArguments...); err != nil {
+		return err
+	}
+	if _, err := transaction.ExecContext(ctx, `DELETE FROM file_metadata WHERE domain IN `+placeholders, sqlArguments...); err != nil {
+		return err
+	}
+	if _, err := transaction.ExecContext(ctx, `DELETE FROM domain_storage_usage WHERE domain IN `+placeholders, sqlArguments...); err != nil {
+		return err
+	}
+	if _, err := transaction.ExecContext(ctx, `DELETE FROM ai_provider_user_credentials WHERE domain IN `+placeholders, sqlArguments...); err != nil {
+		return err
+	}
+	if _, err := transaction.ExecContext(ctx, `DELETE FROM whole_site_import_pages WHERE domain IN `+placeholders, sqlArguments...); err != nil {
+		return err
+	}
+	if _, err := transaction.ExecContext(ctx, `DELETE FROM whole_site_imports WHERE domain IN `+placeholders, sqlArguments...); err != nil {
+		return err
+	}
+	if _, err := transaction.ExecContext(ctx, `DELETE FROM domain_states WHERE domain IN `+placeholders, sqlArguments...); err != nil {
+		return err
+	}
+	if _, err := transaction.ExecContext(ctx, `DELETE FROM domain_ssl_settings WHERE domain IN `+placeholders, sqlArguments...); err != nil {
+		return err
+	}
+	if _, err := transaction.ExecContext(ctx, `DELETE FROM page_password_rules WHERE domain IN `+placeholders, sqlArguments...); err != nil {
+		return err
+	}
+	if _, err := transaction.ExecContext(ctx, `DELETE FROM page_password_sessions WHERE domain IN `+placeholders, sqlArguments...); err != nil {
+		return err
+	}
+	return transaction.Commit()
 }
 
 func (a *App) autoCertHostPolicy(ctx context.Context, host string) error {
@@ -10957,6 +11274,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	}
 	if hasQueryFlag(r, "billing_schedule") {
 		a.billingSchedulePage(w, r)
+		return
+	}
+	if hasQueryFlag(r, "server_update") || hasQueryFlag(r, "server_update_ws") {
+		a.serverUpdatePage(w, r)
 		return
 	}
 	if hasQueryFlag(r, "expenses") || hasQueryFlag(r, "hosting_and_support") || hasQueryFlag(r, "billing") {
@@ -14860,6 +15181,33 @@ func (a *App) storeProfileSessionDetails(r *http.Request, token string) {
 	if err != nil {
 		log.Printf("AUTH session details update failed: %v", err)
 	}
+	// The legacy account adapter serializes the initial insert with concurrent
+	// logins through the site's database owner, without database-specific upsert.
+	if saveErr := a.accountTransaction(r.Context(), func(transaction *sql.Tx) error {
+		var account string
+		if err := transaction.QueryRow(`SELECT user_email FROM sessions WHERE token=?`, token).Scan(&account); err != nil {
+			return err
+		}
+		domain, email, found := strings.Cut(account, "|")
+		if !found {
+			return errors.New("invalid account session identity")
+		}
+		var count int
+		if err := transaction.QueryRow(`SELECT COUNT(1) FROM owner_mail_preferences WHERE domain=? AND email=?`, domain, email).Scan(&count); err != nil {
+			return err
+		}
+		language := preferredLanguageCode(r.Header.Get("Accept-Language"))
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		if count > 0 {
+			_, err := transaction.Exec(`UPDATE owner_mail_preferences SET language=?,updated_at=? WHERE domain=? AND email=?`, language, now, domain, email)
+			return err
+		}
+		_, err := transaction.Exec(`INSERT INTO owner_mail_preferences(domain,email,language,updated_at) VALUES(?,?,?,?)`, domain, email, language, now)
+		return err
+	}); saveErr != nil {
+		log.Printf("AUTH mail language update failed: %v", saveErr)
+	}
+
 }
 
 func (a *App) rememberAuthenticatedAdminIP(r *http.Request, domain string, now time.Time) {
@@ -16476,7 +16824,7 @@ func requestWithSensitiveCookieRequiresHTTPS(r *http.Request) bool {
 	if hasSitebrushSessionCookie(r) {
 		return true
 	}
-	for _, queryFlag := range []string{"login", "logout", "register", "recover", "email_confirm", "captcha", "page_password", "page_password_unlock"} {
+	for _, queryFlag := range []string{"server_update", "server_update_ws", "login", "logout", "register", "recover", "email_confirm", "captcha", "page_password", "page_password_unlock"} {
 		if hasQueryFlag(r, queryFlag) {
 			return true
 		}
@@ -26735,6 +27083,13 @@ func (a *App) submitDurableMailTask(stop <-chan struct{}, task mailout.Task) err
 }
 
 func (a *App) deliverMailRecord(stop <-chan struct{}, record mailout.Record) error {
+	if strings.HasPrefix(record.Kind, "application_update:") {
+		return mailout.PermanentError{Err: errors.New("automatic release mail is disabled; only central manual campaigns are allowed")}
+	}
+	if strings.HasPrefix(record.Kind, updateannounce.Kind) {
+		return a.deliverReleaseAnnouncement(stop, record)
+	}
+
 	if !time.Now().UTC().Before(record.ExpiresAt) {
 		return mailout.PermanentError{Err: errors.New("mail delivery expired")}
 	}
@@ -29648,6 +30003,10 @@ func (a *App) notifyServiceMailRequestHostingSnapshotDiskThreshold(ctx context.C
 }
 
 func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request, request serviceMailRequest, sourceIP string) (string, int) {
+	if strings.HasPrefix(request.CodeKind, "application_update:") || strings.HasPrefix(request.CodeKind, updateannounce.Kind) {
+		return "release announcements require a central administrator campaign", http.StatusForbidden
+	}
+
 	recipientDomain := emailAddressDomain(request.Recipient)
 	event := hostingandsupport.ServiceMailEvent{
 		InstallationID:  request.InstallationID,
@@ -35303,6 +35662,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
 		hostingAndSupportEntry := ""
 		if isServerManager {
 			hostingAndSupportEntry = "<li class='SiteBrushContextMenu SiteBrushSeparatedMenuItem SiteBrushPrivilegedMenuItem'><a href='?expenses' class='SiteBrushContextMenuLink'><img src='/p/static/sitebrush-app-icon.png' class='SiteBrushMenuIcon' alt=''>" + hostingAndSupportLabel + "</a></li>"
+			hostingAndSupportEntry += "<li class='SiteBrushContextMenu SiteBrushPrivilegedMenuItem'><a href='/?server_update' class='SiteBrushContextMenuLink'>" + template.HTMLEscapeString(translationOrDefault(translations, "update_title", "SiteBrush updates")) + "</a></li>"
 		}
 		logoutEntry := ""
 		if showLogout {
@@ -40426,8 +40786,26 @@ func (a *App) startAutomaticSSLProcess(stop <-chan struct{}, certificateManager 
 		return nil, nil, fallbackResponse.err
 	}
 	requests := make(chan automaticSSLRequest, automaticSSLProcessQueueSize)
-	go a.runAutomaticSSLProcess(stop, certificateManager, requests)
-	go a.runAutomaticSSLRenewalAudits(stop, requests, time.Now, rand.Reader)
+	go func() {
+		if a.updateActivation != nil {
+			select {
+			case <-a.updateActivation:
+			case <-stop:
+				return
+			}
+		}
+		a.runAutomaticSSLProcess(stop, certificateManager, requests)
+	}()
+	go func() {
+		if a.updateActivation != nil {
+			select {
+			case <-a.updateActivation:
+			case <-stop:
+				return
+			}
+		}
+		a.runAutomaticSSLRenewalAudits(stop, requests, time.Now, rand.Reader)
+	}()
 	return requests, fallbackResponse.certificate, nil
 }
 
@@ -43295,4 +43673,919 @@ func defaultBaseAppDataPath() string {
 		return homeDir
 	}
 	return "."
+}
+
+// Server application updates keep their durable owner outside the replaceable
+// HTTP process. CLI and panel adapters transfer jobs to that same owner.
+func runSupervisedSitebrush(ctx context.Context, config serverRunConfig) error {
+	if config.DesktopMode || runningInContainer() {
+		return runSitebrushServer(ctx, config)
+	}
+	storagePath, _, err := prepareStoragePathWithFallback(config.StoragePath, userAppStoragePath(), config.AllowStorageFallback)
+	if err != nil {
+		return err
+	}
+	databasePath := config.DBPath
+	if sameCleanPath(databasePath, filepath.Join(config.StoragePath, defaultDBPath)) {
+		databasePath = filepath.Join(storagePath, defaultDBPath)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	publicKey, err := appupdate.TrustedKey()
+	if err != nil {
+		return err
+	}
+	arguments := []string{"-path", storagePath, "-db-path", databasePath, "-port", config.ParsedPorts.Raw}
+	if config.Debug {
+		arguments = append(arguments, "-debug")
+	}
+	catalog, err := serverReleaseCatalog(publicKey)
+	if err != nil {
+		return err
+	}
+	return appupdate.Run(appupdate.Options{Catalog: &catalog, StoragePath: storagePath, Executable: executable, Version: CompileVersion, Compatibility: appupdate.CurrentCompatibility(), Arguments: arguments, PublicKey: publicKey, Output: os.Stdout}, ctx.Done())
+}
+
+func runManualUpgrade(storagePath, databasePath, port string, debug bool) error {
+	if !appupdate.Supported(runtime.GOOS, runtime.GOARCH) {
+		return errors.New("this server platform does not support automatic updates")
+	}
+	if runningInContainer() {
+		return errors.New("container images must be updated by their container runtime")
+	}
+	storagePath = cleanStoragePath(storagePath)
+	if absolute, err := filepath.Abs(storagePath); err == nil {
+		storagePath = absolute
+	} else {
+		return err
+	}
+	if absolute, err := filepath.Abs(databasePath); err == nil {
+		databasePath = absolute
+	} else {
+		return err
+	}
+	stop := make(chan struct{})
+	defer close(stop)
+	_, contactErr := appupdate.Exchange(storagePath, appupdate.Request{Action: "status"}, stop)
+	if contactErr != nil {
+		recordedArguments, recordedDirectory, runtimeErr := appupdate.InstalledRuntime(storagePath)
+		if runtimeErr != nil {
+			return fmt.Errorf("start the installed SiteBrush normally once before using offline -upgrade; no established supervisor identity: %w", runtimeErr)
+		}
+		workingDirectory := recordedDirectory
+		if !flagWasProvided("port") {
+			if recorded := serverRuntimeArgument(recordedArguments, "-port"); recorded != "" {
+				port = recorded
+			}
+		}
+		if !flagWasProvided("db-path") {
+			if recorded := serverRuntimeArgument(recordedArguments, "-db-path"); recorded != "" {
+				databasePath = recorded
+			}
+		}
+		if !flagWasProvided("debug") {
+			debug = serverRuntimeArgument(recordedArguments, "-debug") == "true"
+		}
+		if workingDirectory == "" {
+			if stored, found := serviceinstall.StoredOptions(); found && sameCleanPath(storagePath, stored.StoragePath) {
+				workingDirectory = stored.WorkingDir
+			}
+		}
+		if _, err := os.Stat(databasePath); err != nil {
+			return fmt.Errorf("select an existing installation with -path: %w", err)
+		}
+		executable, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		arguments := []string{"-path", storagePath, "-db-path", databasePath, "-port", port}
+		if debug {
+			arguments = append(arguments, "-debug")
+		}
+		if err := appupdate.StartMaintenance(executable, storagePath, arguments, workingDirectory); err != nil {
+			return err
+		}
+		deadline := time.NewTimer(20 * time.Second)
+		defer deadline.Stop()
+		for {
+			if response, err := appupdate.Exchange(storagePath, appupdate.Request{Action: "status"}, stop); err == nil && !response.State.Busy {
+				break
+			}
+			select {
+			case <-deadline.C:
+				return errors.New("local maintenance supervisor is not ready; an operation or artifact cleanup may still be running")
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+	}
+	response, err := appupdate.Exchange(storagePath, appupdate.Request{Action: "status"}, stop)
+	if err != nil {
+		return err
+	}
+	if response.State.Busy {
+		return errors.New("a version operation is already running")
+	}
+	checkedAt := response.State.CheckedAt
+	if _, err := appupdate.Exchange(storagePath, appupdate.Request{Action: "check"}, stop); err != nil {
+		return err
+	}
+	deadline := time.NewTimer(6 * time.Minute)
+	defer deadline.Stop()
+	for {
+		response, err = appupdate.Exchange(storagePath, appupdate.Request{Action: "status"}, stop)
+		if err != nil {
+			return err
+		}
+		if response.State.CheckedAt != checkedAt {
+			break
+		}
+		select {
+		case <-deadline.C:
+			return errors.New("official release check timed out")
+		case <-time.After(time.Second):
+		}
+	}
+	if response.State.Error != "" {
+		return errors.New(response.State.Error)
+	}
+	if response.State.Available == nil {
+		return errors.New("no verified official release")
+	}
+	currentSequence, _ := strconv.ParseUint(response.State.Current.Version, 10, 64)
+	fmt.Fprintf(os.Stdout, "SiteBrush %s → %s\n", response.State.Current.Version, response.State.Available.Version)
+	if response.State.Available.Sequence <= currentSequence {
+		fmt.Fprintln(os.Stdout, "SiteBrush is up to date")
+		return nil
+	}
+	if _, err := appupdate.Exchange(storagePath, appupdate.Request{Action: "upgrade", ManifestHash: response.State.ManifestHash}, stop); err != nil {
+		return err
+	}
+	lastStage := ""
+	for {
+		response, err = appupdate.Exchange(storagePath, appupdate.Request{Action: "status"}, stop)
+		if err != nil {
+			return err
+		}
+		if response.State.Stage != lastStage {
+			lastStage = response.State.Stage
+			fmt.Fprintln(os.Stdout, lastStage)
+		}
+		if !response.State.Busy {
+			if response.State.CleanupError != "" {
+				fmt.Fprintf(os.Stdout, "Artifact cleanup: %s\n", response.State.CleanupError)
+			}
+			if response.State.OperationError != "" {
+				return errors.New(response.State.OperationError)
+			}
+			if response.State.Error != "" {
+				return errors.New(response.State.Error)
+			}
+			return nil
+		}
+		time.Sleep(time.Second)
+	}
+}
+
+func runningInContainer() bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	for _, name := range []string{"/.dockerenv", "/run/.containerenv"} {
+		if _, err := os.Stat(name); err == nil {
+			return true
+		}
+	}
+	return strings.TrimSpace(os.Getenv("container")) != ""
+}
+
+func requestRemoteIsLoopback(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	return err == nil && net.ParseIP(host) != nil && net.ParseIP(host).IsLoopback()
+}
+
+func runUpdateChildLifecycle(stop <-chan struct{}, tasks <-chan appupdate.ChildTask, activation chan struct{}, serving <-chan struct{}, probation bool, shutdown func(), application *App, address, nonce string) {
+	activated := !probation
+	migrationsChecked := false
+	for {
+		select {
+		case <-stop:
+			return
+		case task, open := <-tasks:
+			if !open {
+				return
+			}
+			result := appupdate.ChildResult{Address: address, Nonce: nonce}
+			switch task.Action {
+			case "address":
+			case "stop":
+				if task.Reply != nil {
+					_ = appupdate.ReplyChild(task, result, stop)
+				}
+				shutdown()
+				return
+			case "commit":
+				if !activated {
+					close(activation)
+					activated = true
+				}
+				select {
+				case <-serving:
+				case <-stop:
+					return
+				case <-time.After(30 * time.Second):
+					result.Error = "server activation timed out"
+				}
+			case "probe":
+				if !migrationsChecked {
+					if err := application.updateDatabaseHealth(); err != nil {
+						result.Error = err.Error()
+					} else {
+						migrationsChecked = true
+					}
+				} else {
+					if err := application.withServerControlDatabaseRead(context.Background(), "update-health-ping", func(database *sql.DB) error { return database.Ping() }); err != nil {
+						result.Error = err.Error()
+					}
+				}
+			default:
+				result.Error = "unknown child lifecycle command"
+			}
+			if task.Reply != nil {
+				if err := appupdate.ReplyChild(task, result, stop); err != nil {
+					return
+				}
+			}
+		}
+	}
+}
+
+func (a *App) updateDatabaseHealth() error {
+	if a.siteDatabaseRouter != nil {
+		status := a.siteDatabaseRouter.MigrationStatus(context.Background(), "localhost")
+		if !status.startupFinished {
+			return errors.New("site database migrations are still running")
+		}
+		if status.err != nil {
+			return status.err
+		}
+	}
+	return inspectUpdateDatabases(a.storagePath, a.dbPath, false, true)
+}
+
+// Legacy migration entrypoints retain their context signatures at this adapter.
+// The updater itself uses process sessions and channels for task lifetime.
+func runUpdateDatabaseMaintenance(storagePath, databasePath string, migrate bool) error {
+	return inspectUpdateDatabases(storagePath, databasePath, migrate, false)
+}
+
+func inspectUpdateDatabases(storagePath, databasePath string, migrate, requireMigrations bool) error {
+	realRoot, err := filepath.EvalSymlinks(storagePath)
+	if err != nil {
+		return err
+	}
+	if _, err := resolvePathInsideRootForWrite(realRoot, databasePath); err != nil {
+		return err
+	}
+	var control *sql.DB
+	if migrate {
+		control, err = openServerControlDatabaseHandle(databasePath, true)
+	} else {
+		control, err = openUpdateReadOnlyDatabase(databasePath)
+	}
+	if err != nil {
+		return err
+	}
+	if migrate {
+		err = hostingandsupport.Migrate(context.Background(), control)
+	} else {
+		if err := hostingandsupport.CheckMigrationSource(context.Background(), control); err != nil {
+			control.Close()
+			return err
+		}
+		var check string
+		err = control.QueryRow("PRAGMA quick_check").Scan(&check)
+		if err == nil && requireMigrations {
+			err = hostingandsupport.CheckMigrations(context.Background(), control)
+		}
+		if err == nil && check != "ok" {
+			err = errors.New("control database integrity check failed")
+		}
+	}
+	closeErr := control.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	root := siteDatabaseRootPath(databasePath)
+	entries, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !strings.HasSuffix(strings.ToLower(entry.Name()), ".db") {
+			continue
+		}
+		if entry.Type()&os.ModeSymlink != 0 || entry.IsDir() {
+			return errors.New("unsafe site database entry")
+		}
+		name := filepath.Join(root, entry.Name())
+		if _, err := resolvePathInsideRootForWrite(realRoot, name); err != nil {
+			return err
+		}
+		var database *sql.DB
+		if migrate {
+			database, err = openSiteDatabaseHandle(context.Background(), name)
+		} else {
+			database, err = openUpdateReadOnlyDatabase(name)
+		}
+		if err != nil {
+			return err
+		}
+		if migrate {
+			domain := normalizeDomainName(strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name())))
+			application := &App{db: database, storagePath: realRoot, storageRealRoot: realRoot, dbPath: databasePath}
+			err = application.migrate(contextWithDomain(context.Background(), domain))
+		} else {
+			if err := checkSiteMigrationSource(context.Background(), database); err != nil {
+				database.Close()
+				return err
+			}
+			var check string
+			err = database.QueryRow("PRAGMA quick_check").Scan(&check)
+			if err == nil && check != "ok" {
+				err = fmt.Errorf("site database integrity check failed: %s", entry.Name())
+			}
+			if err == nil && requireMigrations && siteDatabaseHasRegisteredAdmin(context.Background(), database) {
+				var complete bool
+				complete, err = siteDatabaseSchemaComplete(context.Background(), database)
+				if err == nil && !complete {
+					err = errors.New("required site migrations are incomplete")
+				}
+			}
+			if err == nil && requireMigrations {
+				err = checkSiteMigrationCompletion(database)
+			}
+		}
+		closeErr := database.Close()
+		if err != nil {
+			return err
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+	}
+	return nil
+}
+
+func checkSiteMigrationCompletion(database *sql.DB) error {
+	components := []struct {
+		name  string
+		steps []migrations.Step
+	}{
+		{"site-schema-v12", siteSchemaSteps(context.Background(), false)},
+		{"owner-mail-preferences-v1", siteMailPreferenceSteps()},
+		{"site-data-v12", []migrations.Step{{ID: "legacy-data-through-12", Revision: "1"}}},
+	}
+	for _, component := range components {
+		completed, err := migrations.Check(database, component.name, component.steps)
+		if err != nil {
+			return err
+		}
+		if completed != len(component.steps) {
+			return fmt.Errorf("required site migrations are incomplete: %s", component.name)
+		}
+	}
+	return nil
+}
+
+func openUpdateReadOnlyDatabase(databasePath string) (*sql.DB, error) {
+	if _, err := os.Stat(databasePath); err != nil {
+		return nil, err
+	}
+	absolute, err := filepath.Abs(databasePath)
+	if err != nil {
+		return nil, err
+	}
+	// SQLite URI paths use forward slashes and /C:/ for Windows drives.
+	// Escaping the native drive as a URI authority makes preflight fail.
+	uriPath := filepath.ToSlash(absolute)
+	if !strings.HasPrefix(uriPath, "/") {
+		uriPath = "/" + uriPath
+	}
+	address := url.URL{Scheme: "file", Path: uriPath}
+	query := url.Values{}
+	query.Set("mode", "ro")
+	address.RawQuery = query.Encode()
+	database, err := sql.Open("sqlite", address.String())
+	if err != nil {
+		return nil, err
+	}
+	database.SetMaxOpenConns(1)
+	if err := database.Ping(); err != nil {
+		database.Close()
+		return nil, err
+	}
+	return database, nil
+}
+
+func checkSiteMigrationSource(ctx context.Context, database *sql.DB) error {
+	version, err := sqliteUserVersion(ctx, database)
+	if err != nil {
+		return err
+	}
+	if version > currentSiteDatabaseSchemaVersion {
+		return fmt.Errorf("site schema %d is newer than this binary", version)
+	}
+	found, err := siteDatabaseColumnExists(ctx, database, "application_migration_steps", "step_id")
+	if err != nil || !found {
+		return err
+	}
+	if _, err = migrations.Check(database, "site-schema-v12", siteSchemaSteps(ctx, false)); err != nil {
+		return err
+	}
+	if _, err = migrations.Check(database, "owner-mail-preferences-v1", siteMailPreferenceSteps()); err != nil {
+		return err
+	}
+	_, err = migrations.Check(database, "site-data-v12", []migrations.Step{{ID: "legacy-data-through-12", Revision: "1"}})
+	return err
+}
+
+func siteMailPreferenceSteps() []migrations.Step {
+	return []migrations.Step{migrations.SQL("language", `CREATE TABLE IF NOT EXISTS owner_mail_preferences(domain TEXT NOT NULL,email TEXT NOT NULL,language TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(domain,email))`)}
+}
+
+func (a *App) updateAuthorized(r *http.Request) bool {
+	domain := domainFromRequest(r)
+	email, found := a.currentAdminEmailForDomain(r, domain)
+	if !found {
+		return false
+	}
+	allowed := false
+	if err := a.withServerControlDatabaseRead(r.Context(), "update-authorize", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		ownerDomain, found := store.OwnerDomain(r.Context())
+		allowed = found && store.IsOwner(r.Context(), email) && (sameHostingAndSupportDomain(ownerDomain, domain) || a.hostingAndSupportEffectiveLocalhost(r.Context(), ownerDomain, domain))
+		return nil
+	}); err != nil {
+		return false
+	}
+	return allowed
+}
+
+func (a *App) serverUpdatePage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !a.isAdminRequest(r) {
+		httpsecurity.RedirectLocal(w, r, "/?login&return_path="+url.QueryEscape("/?server_update"), http.StatusSeeOther)
+		return
+	}
+	if !a.updateAuthorized(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if hasQueryFlag(r, "server_update_ws") {
+		a.serverUpdateSocket(w, r)
+		return
+	}
+	_, centralErr := a.centralAnnouncementIdentity()
+	view := map[string]any{"T": translationsForRequest(r), "AccountCSRF": accountCSRF(r), "CentralAnnouncements": centralErr == nil}
+	a.render(w, r, "server_update.html", view)
+}
+
+func (a *App) serverUpdateSocket(w http.ResponseWriter, r *http.Request) {
+	origin, err := url.Parse(r.Header.Get("Origin"))
+	if err != nil || origin.Scheme != requestScheme(r) || origin.Host != r.Host || origin.User != nil || origin.Path != "" {
+		http.Error(w, "invalid origin", http.StatusForbidden)
+		return
+	}
+	websocket.Server{Handshake: func(*websocket.Config, *http.Request) error { return nil }, Handler: func(connection *websocket.Conn) {
+		defer connection.Close()
+		connection.MaxPayloadBytes = 2048
+		for {
+			_ = connection.SetReadDeadline(time.Now().Add(45 * time.Second))
+			var command struct {
+				Action       string `json:"action"`
+				CSRF         string `json:"csrf"`
+				ManifestHash string `json:"manifest_hash"`
+				Reason       string `json:"reason"`
+				Version      string `json:"version"`
+			}
+			if err := websocket.JSON.Receive(connection, &command); err != nil {
+				return
+			}
+			if !a.updateAuthorized(r) || command.CSRF == "" || subtle.ConstantTimeCompare([]byte(command.CSRF), []byte(accountCSRF(r))) != 1 {
+				return
+			}
+			response := serverUpdateResponse{}
+			switch command.Action {
+			case "status", "check", "upgrade", "rollback":
+				if a.desktopMode || runningInContainer() {
+					response.Error = "Updates are unavailable for desktop and container installations"
+				} else {
+					var exchangeErr error
+					response.Response, exchangeErr = appupdate.Exchange(a.storagePath, appupdate.Request{Action: command.Action, ManifestHash: command.ManifestHash}, r.Context().Done())
+					if exchangeErr != nil {
+						response.Error = exchangeErr.Error()
+					}
+				}
+			case "campaign_preview", "campaign_start", "campaign_cancel":
+				if _, err := a.centralAnnouncementIdentity(); err != nil {
+					response.Error = err.Error()
+					break
+				}
+				if command.Action == "campaign_cancel" {
+					err := a.withServerControlDatabaseWrite(r.Context(), "announcement-cancel", func(database *sql.DB) error { return updateannounce.Cancel(database, command.Version) })
+					if err != nil {
+						response.Error = err.Error()
+					}
+					break
+				}
+				preview, err := a.previewReleaseAnnouncement(command.Reason, preferredLanguageCode(r.Header.Get("Accept-Language")), r.Context().Done())
+				if err != nil {
+					response.Error = err.Error()
+					break
+				}
+				response.Preview = &preview
+				if command.Action == "campaign_start" {
+					if command.ManifestHash == "" || command.ManifestHash != preview.ManifestHash || command.Version != preview.Version {
+						response.Error = "The stable release changed; preview and confirm it again"
+						break
+					}
+					if err := a.withServerControlDatabaseWrite(r.Context(), "announcement-start", func(database *sql.DB) error {
+						return updateannounce.Start(database, preview.Version, command.Reason, time.Now().UTC())
+					}); err != nil {
+						response.Error = err.Error()
+					}
+				}
+			default:
+				response.Error = "Unknown update command"
+			}
+			if _, err := a.centralAnnouncementIdentity(); err == nil {
+				if err := a.withServerControlDatabaseRead(r.Context(), "announcement-campaign-status", func(database *sql.DB) error {
+					var err error
+					response.Campaigns, err = updateannounce.Campaigns(database)
+					return err
+				}); err != nil {
+					response.Error = err.Error()
+				}
+			}
+			_ = connection.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if err := websocket.JSON.Send(connection, response); err != nil {
+				return
+			}
+		}
+	}}.ServeHTTP(w, r)
+}
+
+func serverUpdateEmailURL(domain string) (string, error) {
+	if strings.ContainsAny(domain, "/:@?# \\ ") {
+		return "", errors.New("invalid administrator domain")
+	}
+	domain = normalizeHostingAndSupportMainDomain(domain)
+	if domain == "" || canonicalLocalDomain(domain) == "localhost" || net.ParseIP(domain) != nil || !strings.Contains(domain, ".") || strings.ContainsAny(domain, "/:@?# \\ ") {
+		return "", errors.New("a public HTTPS owner domain is required for update notification links")
+	}
+	return (&url.URL{Scheme: "https", Host: domain, Path: "/", RawQuery: "server_update"}).String(), nil
+}
+
+// Campaign authorization is tied to both the server owner and the pinned
+// central signing identity. Host headers cannot turn a customer into sitebrush.com.
+func (a *App) centralAnnouncementIdentity() (ed25519.PrivateKey, error) {
+	var domain string
+	if err := a.withServerControlDatabaseRead(context.Background(), "announcement-central-domain", func(database *sql.DB) error {
+		domain, _ = (hostingandsupport.Store{DB: database}).OwnerDomain(context.Background())
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	if domain != "sitebrush.com" {
+		return nil, errors.New("release announcements are available only on sitebrush.com")
+	}
+	_, publicKey, privateKey, err := a.serviceMailLocalKeyPair(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	if base64.StdEncoding.EncodeToString(publicKey) != sitebrushComServiceMailRelayPublicKey {
+		return nil, errors.New("central announcement identity mismatch")
+	}
+	return privateKey, nil
+}
+
+type releaseAnnouncementPreview struct {
+	Version      string
+	Reason       string
+	ManifestHash string
+	HTML         string
+	Recipients   int
+}
+type serverUpdateResponse struct {
+	appupdate.Response
+	Preview   *releaseAnnouncementPreview `json:",omitempty"`
+	Campaigns []updateannounce.Campaign   `json:",omitempty"`
+}
+
+func (a *App) previewReleaseAnnouncement(reason, language string, stop <-chan struct{}) (releaseAnnouncementPreview, error) {
+	if reason != "security" && reason != "feature" && reason != "both" {
+		return releaseAnnouncementPreview{}, errors.New("choose an important security fix or significant feature")
+	}
+	key, err := appupdate.TrustedKey()
+	if err != nil {
+		return releaseAnnouncementPreview{}, err
+	}
+	catalog, err := serverReleaseCatalog(key)
+	if err != nil {
+		return releaseAnnouncementPreview{}, err
+	}
+	checkStop := make(chan struct{})
+	finished := make(chan struct{})
+	defer close(finished)
+	go func() {
+		select {
+		case <-stop:
+		case <-time.After(30 * time.Second):
+		case <-finished:
+			return
+		}
+		close(checkStop)
+	}()
+	manifest, digest, err := catalog.Check(checkStop)
+	if err != nil {
+		return releaseAnnouncementPreview{}, err
+	}
+	message, err := releaseAnnouncementMessage(language, reason, manifest.Version, "…", "", []authmail.NoticeLink{{Label: "installation.example", URL: "https://installation.example/?server_update"}})
+	if err != nil {
+		return releaseAnnouncementPreview{}, err
+	}
+	preview := releaseAnnouncementPreview{Version: manifest.Version, Reason: reason, ManifestHash: digest, HTML: message.HTMLBody}
+	err = a.withServerControlDatabaseRead(context.Background(), "announcement-preview-count", func(database *sql.DB) error {
+		return database.QueryRow(`SELECT COUNT(DISTINCT roles.email) FROM registry_installation_roles roles JOIN client_hostings hostings ON hostings.installation_id=roles.installation_id JOIN service_mail_installations installations ON installations.installation_id=hostings.installation_id WHERE roles.role='superadmin' AND roles.scope='installation' AND hostings.installation_kind='server' AND installations.blocked=0`).Scan(&preview.Recipients)
+	})
+	return preview, err
+}
+
+func (a *App) announcementInstallationKey(id string) (ed25519.PublicKey, error) {
+	var encoded string
+	err := a.withServerControlDatabaseRead(context.Background(), "announcement-peer-key", func(database *sql.DB) error {
+		return database.QueryRow(`SELECT public_key FROM service_mail_installations WHERE installation_id=? AND blocked=0`, id).Scan(&encoded)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return updateannounce.DecodeKey(encoded)
+}
+
+func (a *App) startAnnouncementSubsystems(stop <-chan struct{}) {
+	if key, err := a.centralAnnouncementIdentity(); err == nil {
+		go func() {
+			releaseKey, err := appupdate.TrustedKey()
+			if err == nil {
+				err = appupdate.ServeReleaseMirror(appupdate.MirrorOptions{Address: ":9878", Directory: filepath.Join(a.domainChrootRootDir("sitebrush.com"), "download"), PrivateKey: key, ReleaseKey: releaseKey}, stop)
+			}
+			if err != nil {
+				log.Printf("UPDATE release mirror: %s", diagnosticlog.SafeLogValue(err.Error()))
+			}
+		}()
+		a.announcementContacts = updateannounce.NewHub(stop)
+		go func() {
+			if err := a.announcementContacts.Listen(":9877", key, a.announcementInstallationKey, stop); err != nil {
+				log.Printf("UPDATE central contacts: %v", err)
+			}
+		}()
+		go func() {
+			ticker := time.NewTicker(10 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stop:
+					return
+				case <-ticker.C:
+					if _, err := a.centralAnnouncementIdentity(); err != nil {
+						log.Printf("UPDATE campaigns suspended: %v", err)
+						continue
+					}
+					if err := a.withServerControlDatabaseWrite(context.Background(), "announcement-campaign-queue", func(database *sql.DB) error { return updateannounce.Queue(database, time.Now().UTC()) }); err != nil {
+						log.Printf("UPDATE campaign queue: %v", err)
+					}
+				}
+			}
+		}()
+	}
+	if a.desktopMode || runningInContainer() {
+		return
+	}
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			id, _, key, err := a.serviceMailLocalKeyPair(context.Background())
+			central, decodeErr := updateannounce.DecodeKey(sitebrushComServiceMailRelayPublicKey)
+			if err == nil && decodeErr == nil {
+				err = updateannounce.Agent(updateannounce.Address, id, key, central, a.announcementLiveStatus, stop)
+			}
+			if err != nil {
+				log.Printf("UPDATE announcement contact: %s", diagnosticlog.SafeLogValue(err.Error()))
+			}
+			select {
+			case <-stop:
+				return
+			case <-time.After(30 * time.Second):
+			}
+		}
+	}()
+}
+
+func (a *App) announcementLiveStatus() (updateannounce.Status, error) {
+	response, err := appupdate.Exchange(a.storagePath, appupdate.Request{Action: "status"}, nil)
+	if err != nil {
+		return updateannounce.Status{}, err
+	}
+	current := updateannounce.Status{Version: response.State.Current.Version, Busy: response.State.Busy, Enabled: !a.desktopMode && !runningInContainer()}
+	var domain string
+	var owners []string
+	if err := a.withServerControlDatabaseRead(context.Background(), "announcement-owner-contacts", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		domain, _ = store.OwnerDomain(context.Background())
+		owners = store.OwnerEmails(context.Background())
+		return nil
+	}); err != nil {
+		return current, err
+	}
+	current.PanelURL, err = serverUpdateEmailURL(domain)
+	if err != nil {
+		return current, err
+	}
+	for _, email := range owners {
+		language := "en"
+		languageTime := ""
+		accountContext := contextWithDomain(context.Background(), domain)
+		if err := a.db.QueryRowContext(accountContext, `SELECT language,updated_at FROM owner_mail_preferences WHERE domain=? AND email=?`, domain, email).Scan(&language, &languageTime); err != nil && err != sql.ErrNoRows {
+			return current, err
+		}
+		if _, known := translationCatalog[language]; !known {
+			language = "en"
+		}
+		languageAt, _ := time.Parse(time.RFC3339Nano, languageTime)
+		current.Owners = append(current.Owners, updateannounce.Owner{Email: strings.ToLower(strings.TrimSpace(email)), Language: language, LanguageAt: languageAt})
+	}
+	return current, nil
+}
+
+func (a *App) deliverReleaseAnnouncement(stop <-chan struct{}, record mailout.Record) error {
+	if _, err := a.centralAnnouncementIdentity(); err != nil {
+		return mailout.PermanentError{Err: err}
+	}
+	if record.Route != mailout.RouteLocal || record.InstallationID != "" {
+		return mailout.PermanentError{Err: errors.New("customer installations cannot send central announcements")}
+	}
+	version := strings.TrimPrefix(record.Kind, updateannounce.Kind)
+	var campaign updateannounce.Campaign
+	var installations []updateannounce.Installation
+	if err := a.withServerControlDatabaseRead(context.Background(), "announcement-delivery-read", func(database *sql.DB) error {
+		var err error
+		campaign, installations, err = updateannounce.Delivery(database, version, record.Message.To, time.Now().UTC())
+		return err
+	}); err != nil {
+		return err
+	}
+	selection, err := a.announcementContacts.Select(installations, version, record.Message.To, stop)
+	if err != nil {
+		return err
+	}
+	var links []authmail.NoticeLink
+	var installedVersions []string
+	for _, status := range selection.Servers {
+		parsed, _ := url.Parse(status.PanelURL)
+		links = append(links, authmail.NoticeLink{Label: parsed.Host + " — " + status.Version + " → " + version, URL: status.PanelURL})
+		installedVersions = append(installedVersions, status.Version)
+	}
+	if len(links) == 0 {
+		if selection.Waiting {
+			return errors.New("waiting for a fresh signed installation status")
+		}
+		if err := a.markAnnouncementDelivery(version, record.Message.To, "skipped"); err != nil {
+			return err
+		}
+		return mailout.PermanentError{Err: errors.New("all installations are current, unsupported, or no longer owned by this recipient")}
+	}
+	message, err := releaseAnnouncementMessage(selection.Language, campaign.Reason, version, strings.Join(installedVersions, ", "), record.Message.To, links)
+	if err != nil {
+		return err
+	}
+	message.MessageID = record.ID
+	// Re-read cancellation after probing peers, immediately before SMTP.
+	if err := a.withServerControlDatabaseRead(context.Background(), "announcement-delivery-confirm", func(database *sql.DB) error {
+		_, _, err := updateannounce.Delivery(database, version, record.Message.To, time.Now().UTC())
+		return err
+	}); err != nil {
+		return err
+	}
+	deliveryContext, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	finished := make(chan struct{})
+	defer close(finished)
+	go func() {
+		select {
+		case <-stop:
+			cancel()
+		case <-finished:
+		}
+	}()
+	if err := a.defaultEmailSender()(deliveryContext, message); err != nil {
+		return err
+	}
+	return a.markAnnouncementDelivery(version, record.Message.To, "sent")
+}
+
+func (a *App) markAnnouncementDelivery(version, email, status string) error {
+	return a.withServerControlDatabaseWrite(context.Background(), "announcement-delivery-result", func(database *sql.DB) error { return updateannounce.Mark(database, version, email, status) })
+}
+
+func releaseAnnouncementMessage(language, reason, version, current, recipient string, links []authmail.NoticeLink) (mailout.Message, error) {
+	if _, found := translationCatalog[language]; !found {
+		language = "en"
+	}
+	translations := translationsForLanguageCode(language)
+	introduction := fmt.Sprintf(translations["update_mail_body"], current, version)
+	notice := authmail.Notice{Language: language, Direction: "ltr", Title: translations["update_mail_subject"], Introduction: introduction, Reason: translations["announcement_reason_"+reason], Button: translations["announcement_mail_button"], Details: translations["announcement_release_details"], DetailsURL: "https://github.com/" + appupdate.Repository + "/releases/tag/release-" + version, Links: links}
+	if language == "he" || language == "fa" {
+		notice.Direction = "rtl"
+	}
+	body, markup, err := authmail.RenderNotice(notice)
+	return mailout.Message{Kind: updateannounce.Kind + version, From: "SiteBrush <sitebrush@sitebrush.com>", To: recipient, Subject: notice.Title, Body: body, HTMLBody: markup}, err
+}
+
+func runStoppedUpdateSupervisor(config serverRunConfig) error {
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	publicKey, err := appupdate.TrustedKey()
+	if err != nil {
+		return err
+	}
+	arguments := []string{"-path", config.StoragePath, "-db-path", config.DBPath, "-port", config.ParsedPorts.Raw}
+	if config.Debug {
+		arguments = append(arguments, "-debug")
+	}
+	serverContext, stopSignals := signalAwareContext(context.Background())
+	defer stopSignals()
+	catalog, err := serverReleaseCatalog(publicKey)
+	if err != nil {
+		return err
+	}
+	return appupdate.Run(appupdate.Options{Catalog: &catalog, StoragePath: config.StoragePath, Executable: executable, Version: CompileVersion, Compatibility: appupdate.CurrentCompatibility(), Arguments: arguments, PublicKey: publicKey, Output: os.Stdout, Stopped: true}, serverContext.Done())
+}
+
+func installedSitebrushVersion(storagePath string, explicitPath bool) string {
+	executable, err := os.Executable()
+	if err != nil {
+		return CompileVersion
+	}
+	if !explicitPath {
+		if stored, found := serviceinstall.StoredOptions(); found {
+			storagePath = stored.StoragePath
+		}
+	}
+	if installed := appupdate.InstalledVersion(storagePath, executable); installed != "" {
+		return installed
+	}
+	return CompileVersion
+}
+
+func serverRuntimeArgument(arguments []string, name string) string {
+	for index, argument := range arguments {
+		if argument != name {
+			continue
+		}
+		if name == "-debug" {
+			return "true"
+		}
+		if index+1 < len(arguments) {
+			return arguments[index+1]
+		}
+	}
+	return ""
+}
+
+func serverReleaseCatalog(releaseKey ed25519.PublicKey) (appupdate.Catalog, error) {
+	central, err := updateannounce.DecodeKey(sitebrushComServiceMailRelayPublicKey)
+	if err != nil {
+		return appupdate.Catalog{}, err
+	}
+	return appupdate.NewNetworkCatalog(releaseKey, central), nil
 }
