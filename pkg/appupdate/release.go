@@ -170,10 +170,13 @@ func (manifest Manifest) Artifact(goos, goarch string) (Artifact, error) {
 // GitHub is an external HTTPS adapter. Signed bytes, rather than API metadata or
 // the mutable stable tag, establish identity and select a specific artifact.
 type Catalog struct {
-	PublicKey    ed25519.PublicKey
-	client       *http.Client
-	manifestURL  string
-	artifactBase string
+	PublicKey     ed25519.PublicKey
+	client        *http.Client
+	manifestURL   string
+	artifactBase  string
+	mirror        *ReleaseClient
+	manifestURLs  []string
+	artifactBases []string
 }
 
 func NewCatalog(publicKey ed25519.PublicKey) Catalog {
@@ -192,6 +195,8 @@ func officialURL(address *url.URL) bool {
 	switch address.Hostname() {
 	case "github.com":
 		return strings.HasPrefix(address.Path, "/"+Repository+"/releases/download/")
+	case "sitebrush.com", "sitebrush.ru":
+		return strings.HasPrefix(address.Path, "/download/")
 	case "release-assets.githubusercontent.com", "objects.githubusercontent.com":
 		return true
 	}
@@ -202,31 +207,56 @@ func (catalog Catalog) Check(stop <-chan struct{}) (Manifest, string, error) {
 	if len(catalog.PublicKey) != ed25519.PublicKeySize {
 		return Manifest{}, "", errors.New("official release signing key is not configured")
 	}
-	response, err := catalog.get(catalog.manifestURL, stop)
-	if err != nil {
-		return Manifest{}, "", err
+	var failure error
+	if catalog.mirror != nil {
+		manifest, digest, err := catalog.mirror.check(catalog.PublicKey, stop)
+		if err == nil {
+			return manifest, digest, nil
+		}
+		failure = err
 	}
-	defer response.Body.Close()
-	payload, err := io.ReadAll(io.LimitReader(response.Body, manifestLimit+1))
-	if err != nil {
-		return Manifest{}, "", err
+	addresses := catalog.manifestURLs
+	if len(addresses) == 0 {
+		addresses = []string{catalog.manifestURL}
 	}
-	manifest, err := Verify(payload, catalog.PublicKey)
-	digest := sha256.Sum256(payload)
-	return manifest, hex.EncodeToString(digest[:]), err
+	for _, address := range addresses {
+		response, err := catalog.get(address, stop)
+		if err != nil {
+			failure = err
+			continue
+		}
+		payload, readErr := io.ReadAll(io.LimitReader(response.Body, manifestLimit+1))
+		closeErr := response.Body.Close()
+		if readErr != nil {
+			failure = readErr
+			continue
+		}
+		if closeErr != nil {
+			failure = closeErr
+			continue
+		}
+		manifest, err := Verify(payload, catalog.PublicKey)
+		if err != nil {
+			failure = err
+			continue
+		}
+		digest := sha256.Sum256(payload)
+		return manifest, hex.EncodeToString(digest[:]), nil
+	}
+	return Manifest{}, "", failure
 }
 
 func (catalog Catalog) Download(manifest Manifest, destination string, stop <-chan struct{}) error {
+	if err := manifest.Validate(); err != nil {
+		return err
+	}
 	artifact, err := manifest.Artifact(runtime.GOOS, runtime.GOARCH)
 	if err != nil {
 		return err
 	}
-	response, err := catalog.get(catalog.artifactBase+"release-"+manifest.Version+"/"+path.Base(artifact.Name), stop)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	file, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o700)
+	// The consumer owns an exclusive candidate file through every transport.
+	// A failed transfer never overwrites a working or pre-existing executable.
+	file, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0700)
 	if err != nil {
 		return err
 	}
@@ -237,22 +267,78 @@ func (catalog Catalog) Download(manifest Manifest, destination string, stop <-ch
 			os.Remove(destination)
 		}
 	}()
+	var failure error
+	if catalog.mirror != nil {
+		failure = catalog.mirror.download(manifest, catalog.PublicKey, file, stop)
+		if failure == nil {
+			failure = verifyReleaseFile(file, artifact, stop)
+		}
+		if failure == nil {
+			if err := file.Close(); err != nil {
+				return err
+			}
+			complete = true
+			return nil
+		}
+	}
+	addresses := make([]string, 0, len(catalog.artifactBases)+1)
+	for _, base := range catalog.artifactBases {
+		addresses = append(addresses, base+manifest.Version+"/server-app/"+path.Base(artifact.Name))
+	}
+	addresses = append(addresses, catalog.artifactBase+"release-"+manifest.Version+"/"+path.Base(artifact.Name))
+	for _, address := range addresses {
+		select {
+		case <-stop:
+			return errors.New("release download canceled")
+		default:
+		}
+		if err := file.Truncate(0); err != nil {
+			return err
+		}
+		if _, err := file.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		response, err := catalog.get(address, stop)
+		if err != nil {
+			failure = err
+			continue
+		}
+		_, copyErr := io.Copy(file, io.LimitReader(response.Body, artifact.Size+1))
+		closeErr := response.Body.Close()
+		if copyErr != nil {
+			failure = copyErr
+			continue
+		}
+		if closeErr != nil {
+			failure = closeErr
+			continue
+		}
+		if err := verifyReleaseFile(file, artifact, stop); err != nil {
+			failure = err
+			continue
+		}
+		if err := file.Close(); err != nil {
+			return err
+		}
+		complete = true
+		return nil
+	}
+	return failure
+}
+
+func verifyReleaseFile(file *os.File, artifact Artifact, stop <-chan struct{}) error {
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
 	digest := sha256.New()
-	written, err := io.Copy(io.MultiWriter(file, digest), io.LimitReader(response.Body, artifact.Size+1))
+	written, err := io.Copy(digest, sessionReader{reader: io.LimitReader(file, artifact.Size+1), stop: stop})
 	if err != nil {
 		return err
 	}
 	if written != artifact.Size || hex.EncodeToString(digest.Sum(nil)) != artifact.SHA256 {
 		return errors.New("release size or SHA-256 verification failed")
 	}
-	if err := file.Sync(); err != nil {
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	complete = true
-	return nil
+	return file.Sync()
 }
 
 func (catalog Catalog) get(address string, stop <-chan struct{}) (*http.Response, error) {

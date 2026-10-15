@@ -43697,7 +43697,11 @@ func runSupervisedSitebrush(ctx context.Context, config serverRunConfig) error {
 	if config.Debug {
 		arguments = append(arguments, "-debug")
 	}
-	return appupdate.Run(appupdate.Options{StoragePath: storagePath, Executable: executable, Version: CompileVersion, Compatibility: appupdate.CurrentCompatibility(), Arguments: arguments, PublicKey: publicKey, Output: os.Stdout}, ctx.Done())
+	catalog, err := serverReleaseCatalog(publicKey)
+	if err != nil {
+		return err
+	}
+	return appupdate.Run(appupdate.Options{Catalog: &catalog, StoragePath: storagePath, Executable: executable, Version: CompileVersion, Compatibility: appupdate.CurrentCompatibility(), Arguments: arguments, PublicKey: publicKey, Output: os.Stdout}, ctx.Done())
 }
 
 func runManualUpgrade(storagePath, databasePath, port string, debug bool) error {
@@ -44286,7 +44290,10 @@ func (a *App) previewReleaseAnnouncement(reason, language string, stop <-chan st
 	if err != nil {
 		return releaseAnnouncementPreview{}, err
 	}
-	catalog := appupdate.NewCatalog(key)
+	catalog, err := serverReleaseCatalog(key)
+	if err != nil {
+		return releaseAnnouncementPreview{}, err
+	}
 	checkStop := make(chan struct{})
 	finished := make(chan struct{})
 	defer close(finished)
@@ -44327,6 +44334,15 @@ func (a *App) announcementInstallationKey(id string) (ed25519.PublicKey, error) 
 
 func (a *App) startAnnouncementSubsystems(stop <-chan struct{}) {
 	if key, err := a.centralAnnouncementIdentity(); err == nil {
+		go func() {
+			releaseKey, err := appupdate.TrustedKey()
+			if err == nil {
+				err = appupdate.ServeReleaseMirror(appupdate.MirrorOptions{Address: ":9878", Directory: filepath.Join(a.domainChrootRootDir("sitebrush.com"), "download"), PrivateKey: key, ReleaseKey: releaseKey}, stop)
+			}
+			if err != nil {
+				log.Printf("UPDATE release mirror: %s", diagnosticlog.SafeLogValue(err.Error()))
+			}
+		}()
 		a.announcementContacts = updateannounce.NewHub(stop)
 		go func() {
 			if err := a.announcementContacts.Listen(":9877", key, a.announcementInstallationKey, stop); err != nil {
@@ -44514,7 +44530,11 @@ func runStoppedUpdateSupervisor(config serverRunConfig) error {
 	}
 	serverContext, stopSignals := signalAwareContext(context.Background())
 	defer stopSignals()
-	return appupdate.Run(appupdate.Options{StoragePath: config.StoragePath, Executable: executable, Version: CompileVersion, Compatibility: appupdate.CurrentCompatibility(), Arguments: arguments, PublicKey: publicKey, Output: os.Stdout, Stopped: true}, serverContext.Done())
+	catalog, err := serverReleaseCatalog(publicKey)
+	if err != nil {
+		return err
+	}
+	return appupdate.Run(appupdate.Options{Catalog: &catalog, StoragePath: config.StoragePath, Executable: executable, Version: CompileVersion, Compatibility: appupdate.CurrentCompatibility(), Arguments: arguments, PublicKey: publicKey, Output: os.Stdout, Stopped: true}, serverContext.Done())
 }
 
 func installedSitebrushVersion(storagePath string, explicitPath bool) string {
@@ -44546,4 +44566,12 @@ func serverRuntimeArgument(arguments []string, name string) string {
 		}
 	}
 	return ""
+}
+
+func serverReleaseCatalog(releaseKey ed25519.PublicKey) (appupdate.Catalog, error) {
+	central, err := updateannounce.DecodeKey(sitebrushComServiceMailRelayPublicKey)
+	if err != nil {
+		return appupdate.Catalog{}, err
+	}
+	return appupdate.NewNetworkCatalog(releaseKey, central), nil
 }

@@ -48,7 +48,7 @@ func TestServiceInstallFilesystemAndCommandHelpers(t *testing.T) {
 	if got := windowsCommandLine([]string{`C:\Program Files\sitebrush.exe`, `name "quoted"`}); got != `"C:\\Program Files\\sitebrush.exe" "name \"quoted\""` {
 		t.Fatalf("Windows command line = %q", got)
 	}
-	if got := expectedServicePath("systemd", "sitebrush"); got != "/etc/systemd/system/sitebrush.service" {
+	if got := expectedServicePath("systemd", "sitebrush"); got != filepath.Join("/etc/systemd/system", "sitebrush.service") {
 		t.Fatalf("systemd service path = %q", got)
 	}
 	if got := expectedServicePath("Windows Service", "sitebrush"); got != "Windows Service: sitebrush" {

@@ -1,6 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"flag"
 	"os"
 	"path/filepath"
@@ -651,7 +655,6 @@ func writeCommandStub(t *testing.T, directory, name, body string) {
 	}
 }
 
-
 func TestSecurityBoundaryReleaseSyncRejectsOptionAndPathInjection(t *testing.T) {
 	t.Parallel()
 
@@ -804,7 +807,6 @@ func TestDesktopBuildOrchestratorWithStubDocker(t *testing.T) {
 	}
 }
 
-
 func TestCrosscompileMainServerOnlyWithStubCompiler(t *testing.T) {
 	oldArgs := os.Args
 	oldFlags := flag.CommandLine
@@ -907,5 +909,61 @@ func TestCrosscompileVersionAndPlatformHelperFallbacks(t *testing.T) {
 	platform, err := dockerNativePlatform(t.TempDir())
 	if err != nil || platform != "linux/amd64" {
 		t.Fatalf("docker native platform=%q err=%v", platform, err)
+	}
+}
+
+func TestOfficialPublicationRequiresSignedServerMetadata(t *testing.T) {
+	for _, host := range []string{"root@sitebrush.com", "root@sitebrush.ru", "sitebrush.com"} {
+		if !officialReleasePublication([]syncDestination{{host: host, base: "/srv/download"}}) {
+			t.Fatal("official sync was not recognized", host)
+		}
+	}
+	for _, host := range []string{"root@sitebrush.com.evil.example", "root@other.example"} {
+		if officialReleasePublication([]syncDestination{{host: host, base: "/srv/download"}}) {
+			t.Fatal("unrelated destination treated as official", host)
+		}
+	}
+	public, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	filename := filepath.Join(t.TempDir(), "release.key")
+	encoded := base64.StdEncoding.EncodeToString(key)
+	if err := os.WriteFile(filename, []byte(encoded+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, scenario := range []struct{ filename, encoded string }{{filename, ""}, {"missing", encoded}} {
+		loaded, err := loadReleaseSigningKey(scenario.filename, scenario.encoded, public)
+		if err != nil || !loaded.Equal(key) {
+			t.Fatal("configured signing key rejected", err)
+		}
+	}
+	for _, encoded := range []string{"not base64", base64.StdEncoding.EncodeToString([]byte("short"))} {
+		if _, err := loadReleaseSigningKey("", encoded, public); err == nil {
+			t.Fatal("invalid signing input accepted")
+		}
+	}
+	wrong, _, _ := ed25519.GenerateKey(rand.Reader)
+	if _, err := loadReleaseSigningKey(filename, "", wrong); err == nil {
+		t.Fatal("wrong signing identity accepted")
+	}
+	if _, err := loadReleaseSigningKey(filepath.Join(t.TempDir(), "missing"), "", public); err == nil {
+		t.Fatal("missing signing key accepted")
+	}
+	if err := os.WriteFile(filename, bytes.Repeat([]byte("x"), 4097), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadReleaseSigningKey(filename, "", public); err == nil {
+		t.Fatal("oversized key file accepted")
+	}
+}
+
+func TestReleaseVersionUsesGitHistoryBeforeWorkflowCounter(t *testing.T) {
+	commandDirectory := t.TempDir()
+	writeCommandStub(t, commandDirectory, "git", `if [ "$1" = "rev-list" ]; then printf '321\n'; exit 0; fi; exit 1`)
+	t.Setenv("PATH", commandDirectory)
+	t.Setenv("GITHUB_RUN_NUMBER", "987")
+	if version := defaultVersionLabel(t.TempDir()); version != "321" {
+		t.Fatalf("local and GitHub builds must use the same source history version, got %q", version)
 	}
 }

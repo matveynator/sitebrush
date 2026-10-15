@@ -225,3 +225,80 @@ func TestInstalledVersionBelongsToTheActualLauncher(t *testing.T) {
 		t.Fatal("corrupt journal supplied version", got)
 	}
 }
+
+func TestSnapshotRestoresInternalReleasePublicationLinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks require Windows privileges")
+	}
+	root := t.TempDir()
+	directory := filepath.Join(root, "download", "42")
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "release"), []byte("verified release"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "download", "latest")
+	if err := os.Symlink("42", link); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	backup, err := snapshot(root, store, strings.Repeat("a", 32), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(link, []byte("wrong index"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := restore(root, store, backup); err != nil {
+		t.Fatal(err)
+	}
+	if target, err := os.Readlink(link); err != nil || target != "42" {
+		t.Fatal("release index link was not restored", target, err)
+	}
+	if contents, err := os.ReadFile(filepath.Join(link, "release")); err != nil || string(contents) != "verified release" {
+		t.Fatal("release link lost its target", err)
+	}
+	if err := restore(root, store, backup); err != nil {
+		t.Fatal("repeated link recovery failed", err)
+	}
+	backedUpLink := filepath.Join(backup, "files", "download", "latest")
+	if err := store.Remove(backedUpLink); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Symlink("../..", backedUpLink); err != nil {
+		t.Fatal(err)
+	}
+	if err := restore(root, store, backup); err == nil {
+		t.Fatal("modified backup link accepted")
+	}
+}
+
+func TestSnapshotRejectsEscapingPrivateAndDanglingLinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks require Windows privileges")
+	}
+	for _, target := range []string{"../outside", Directory + "/state.json", "missing"} {
+		t.Run(target, func(t *testing.T) {
+			root := t.TempDir()
+			store, err := openStore(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			if err := os.Symlink(target, filepath.Join(root, "link")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := snapshot(root, store, strings.Repeat("b", 32), nil); err == nil {
+				t.Fatal("unsafe link accepted", target)
+			}
+		})
+	}
+}

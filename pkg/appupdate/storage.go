@@ -352,6 +352,18 @@ type backupEntry struct {
 	Name   string
 	Mode   fs.FileMode
 	SHA256 string
+	Link   string `json:",omitempty"`
+}
+
+// Published release indexes use relative links such as download/latest -> 42.
+// Preserve those references without permitting access outside the snapshot or
+// into the private updater directory excluded from the installation backup.
+func safeBackupLink(name, target string) bool {
+	if !filepath.IsLocal(target) {
+		return false
+	}
+	resolved := filepath.Clean(filepath.Join(filepath.Dir(name), target))
+	return filepath.IsLocal(resolved) && resolved != Directory && !strings.HasPrefix(resolved, Directory+string(filepath.Separator))
 }
 
 func snapshot(storagePath string, store *os.Root, operation string, stop <-chan struct{}) (string, error) {
@@ -399,11 +411,28 @@ func snapshot(storagePath string, store *os.Root, operation string, stop <-chan 
 		if err != nil {
 			return err
 		}
-		if entry.Type()&os.ModeSymlink != 0 || (!info.IsDir() && !info.Mode().IsRegular()) {
+		if entry.Type()&os.ModeSymlink == 0 && !info.IsDir() && !info.Mode().IsRegular() {
 			return fmt.Errorf("backup refuses special file %q", name)
 		}
 		record := backupEntry{Name: name, Mode: info.Mode()}
-		if info.IsDir() {
+		if info.Mode()&os.ModeSymlink != 0 {
+			record.Link, err = source.Readlink(name)
+			if err != nil {
+				return err
+			}
+			if !safeBackupLink(name, record.Link) {
+				return fmt.Errorf("backup refuses unsafe link %q", name)
+			}
+			if _, err := source.Stat(name); err != nil {
+				return fmt.Errorf("backup link does not resolve inside installation: %w", err)
+			}
+			if err := destination.Symlink(record.Link, name); err != nil {
+				return err
+			}
+			if err := syncDirectory(destination, filepath.Dir(name)); err != nil {
+				return err
+			}
+		} else if info.IsDir() {
 			if err := destination.MkdirAll(name, info.Mode().Perm()); err != nil {
 				return err
 			}
@@ -462,6 +491,13 @@ func eachBackupEntry(store *os.Root, backup string, visit func(backupEntry) erro
 		if count >= 1000000 || !fs.ValidPath(entry.Name) || entry.Name == "." || entry.Name == Directory || strings.HasPrefix(entry.Name, Directory+"/") {
 			return errors.New("invalid backup inventory")
 		}
+		if entry.Mode&os.ModeSymlink != 0 {
+			if !safeBackupLink(entry.Name, entry.Link) {
+				return errors.New("invalid backup link")
+			}
+		} else if entry.Link != "" {
+			return errors.New("unexpected backup link target")
+		}
 		if err := visit(entry); err != nil {
 			return err
 		}
@@ -496,6 +532,18 @@ func verifySnapshot(store *os.Root, backup string) error {
 		}
 		if info.Mode().Type() != entry.Mode.Type() || info.Mode().Perm() != entry.Mode.Perm() {
 			return fmt.Errorf("backup mode mismatch: %s", entry.Name)
+		}
+		if entry.Mode&os.ModeSymlink != 0 {
+			target, err := files.Readlink(entry.Name)
+			if err != nil {
+				return err
+			}
+			if target != entry.Link {
+				return errors.New("backup link target mismatch")
+			}
+			if _, err := files.Stat(entry.Name); err != nil {
+				return err
+			}
 		}
 		if entry.Mode.IsRegular() {
 			digest, err := fileDigest(files, entry.Name)
@@ -532,6 +580,21 @@ func restore(storagePath string, store *os.Root, backup string) error {
 	err = eachBackupEntry(store, backup, func(entry backupEntry) error {
 		if entry.Mode.IsDir() {
 			if err := destination.MkdirAll(entry.Name, entry.Mode.Perm()); err != nil {
+				return err
+			}
+			return syncDirectory(destination, filepath.Dir(entry.Name))
+		}
+		if entry.Mode&os.ModeSymlink != 0 {
+			identifier, err := Identifier()
+			if err != nil {
+				return err
+			}
+			temporary := entry.Name + ".restore-" + identifier
+			if err := destination.Symlink(entry.Link, temporary); err != nil {
+				return err
+			}
+			if err := destination.Rename(temporary, entry.Name); err != nil {
+				destination.Remove(temporary)
 				return err
 			}
 			return syncDirectory(destination, filepath.Dir(entry.Name))
