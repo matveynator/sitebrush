@@ -102,7 +102,7 @@ jobs:
         run: |
           npm ci --ignore-scripts
           node document_test.cjs
-          node image_replacement_test.cjs
+          node ../../pkg/imageprepare/image_replacement_test.cjs
           node ../../pkg/analytics/browser_test.cjs
           node ../../pkg/accountpasskey/browser_test.cjs
           npx playwright install --with-deps chromium
