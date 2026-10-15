@@ -151,7 +151,7 @@ func TestSupervisorUpdatesAcrossAdditiveDomainSchemaChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := t.TempDir()
+	root := newFixtureInstallation(t)
 	startFixtureSupervisorWithPayload(t, root, "success", payload)
 	checked := checkedFixture(t, root)
 	fixtureExchange(t, root, "upgrade", checked.ManifestHash)
@@ -261,7 +261,7 @@ func TestLifecycleBridgesRevokeBrokenConsumers(t *testing.T) {
 func TestChildContactRejectsStartupFailureAndRevokedLifecycle(t *testing.T) {
 	for _, scenario := range []string{"rejected", "invalid result", "revoked lifecycle"} {
 		t.Run(scenario, func(t *testing.T) {
-			root := t.TempDir()
+			root := newFixtureInstallation(t)
 			store, err := openStore(root)
 			if err != nil {
 				t.Fatal(err)

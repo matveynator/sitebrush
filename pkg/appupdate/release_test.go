@@ -334,7 +334,7 @@ func TestBackupRejectsTruncatedInventory(t *testing.T) {
 }
 
 func TestServerSessionGuardsRecoveryUntilProcessReleasesDatabases(t *testing.T) {
-	root := t.TempDir()
+	root := newFixtureInstallation(t)
 	first, err := ServerSession(root, nil, 0)
 	if err != nil {
 		t.Fatal(err)

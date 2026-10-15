@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -143,6 +144,40 @@ func runUpdateFixture() int {
 		}
 	}
 	return 0
+}
+
+// Keep fixture contacts below the CI ephemeral client range. Otherwise a
+// preceding outgoing TLS connection can reserve a later fixture's hashed port.
+func newFixtureInstallation(t *testing.T) string {
+	t.Helper()
+	for attempt := 0; attempt < 100; attempt++ {
+		root := t.TempDir()
+		address := Address(root)
+		host, rawPort, err := net.SplitHostPort(address)
+		if err != nil {
+			t.Fatal(err)
+		}
+		port, err := strconv.Atoi(rawPort)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if port >= 30000 {
+			continue
+		}
+		contact, err := net.Listen("tcp", address)
+		if err != nil {
+			continue
+		}
+		session, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port+1)))
+		contact.Close()
+		if err != nil {
+			continue
+		}
+		session.Close()
+		return root
+	}
+	t.Fatal("cannot allocate an available fixture contact and process session")
+	return ""
 }
 
 func startFixtureSupervisor(t *testing.T, root string, scenario string) (Options, <-chan struct{}, chan struct{}) {
@@ -280,7 +315,7 @@ func awaitFixture(t *testing.T, root string) State {
 func TestSupervisorUpdateRollbackAndFailures(t *testing.T) {
 	for _, scenario := range []string{"success", "download-failure", "reject-preflight", "reject-migration", "reject-start", "reject-health", "incompatible"} {
 		t.Run(scenario, func(t *testing.T) {
-			root := t.TempDir()
+			root := newFixtureInstallation(t)
 			if err := os.WriteFile(filepath.Join(root, "user-content"), []byte("preserve me"), 0o640); err != nil {
 				t.Fatal(err)
 			}
@@ -342,7 +377,7 @@ func TestSupervisorUpdateRollbackAndFailures(t *testing.T) {
 }
 
 func TestRecoveryRestoresInterruptedMigration(t *testing.T) {
-	root := t.TempDir()
+	root := newFixtureInstallation(t)
 	if err := os.WriteFile(filepath.Join(root, "content"), []byte("before"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -384,7 +419,7 @@ func TestRecoveryRestoresInterruptedMigration(t *testing.T) {
 }
 
 func TestActivationFailureRollsBackWithoutDiscardingNewWrites(t *testing.T) {
-	root := t.TempDir()
+	root := newFixtureInstallation(t)
 	if err := os.WriteFile(filepath.Join(root, "reject-activation"), []byte("yes"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +437,7 @@ func TestActivationFailureRollsBackWithoutDiscardingNewWrites(t *testing.T) {
 }
 
 func TestIncompatibleActivationFailureNeverRestoresOverNewWrites(t *testing.T) {
-	root := t.TempDir()
+	root := newFixtureInstallation(t)
 	if err := os.WriteFile(filepath.Join(root, "reject-activation"), []byte("yes"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -423,7 +458,7 @@ func TestIncompatibleActivationFailureNeverRestoresOverNewWrites(t *testing.T) {
 }
 
 func TestSupervisorRejectsSecondOwnerAndAnonymousTLS(t *testing.T) {
-	root := t.TempDir()
+	root := newFixtureInstallation(t)
 	options, _, _ := startFixtureSupervisor(t, root, "success")
 	if err := Run(options, make(chan struct{})); err == nil {
 		t.Fatal("second supervisor acquired the installation")
@@ -478,7 +513,7 @@ func TestRuntimePreservesActualPortAndWorkingDirectory(t *testing.T) {
 			t.Fatalf("accepted invalid private contact %q", address)
 		}
 	}
-	root := t.TempDir()
+	root := newFixtureInstallation(t)
 	startFixtureSupervisor(t, root, "success")
 	if _, err := Exchange(root, Request{Action: "server_ready", Detail: "127.0.0.1:9123"}, nil); err != nil {
 		t.Fatal(err)
@@ -490,7 +525,7 @@ func TestRuntimePreservesActualPortAndWorkingDirectory(t *testing.T) {
 }
 
 func TestStoppedInstallationRemainsStoppedAfterUpgrade(t *testing.T) {
-	root := t.TempDir()
+	root := newFixtureInstallation(t)
 	startFixtureSupervisor(t, root, "stopped")
 	checked := checkedFixture(t, root)
 	fixtureExchange(t, root, "upgrade", checked.ManifestHash)
@@ -522,7 +557,7 @@ func serverPathArgument(arguments []string) string {
 }
 
 func TestSuccessiveUpdatesAndRollbackPruneSupersededArtifacts(t *testing.T) {
-	root := t.TempDir()
+	root := newFixtureInstallation(t)
 	_, done, stop := startFixtureSupervisor(t, root, "success")
 	original := fixtureExchange(t, root, "status", "").State.Current.Binary
 	checked := checkedFixture(t, root)
@@ -562,7 +597,7 @@ func TestSuccessiveUpdatesAndRollbackPruneSupersededArtifacts(t *testing.T) {
 }
 
 func TestFailedPreparationRetainsLastWorkingSnapshot(t *testing.T) {
-	root := t.TempDir()
+	root := newFixtureInstallation(t)
 	startFixtureSupervisor(t, root, "success")
 	checked := checkedFixture(t, root)
 	fixtureExchange(t, root, "upgrade", checked.ManifestHash)
@@ -590,7 +625,7 @@ func TestFailedPreparationRetainsLastWorkingSnapshot(t *testing.T) {
 }
 
 func TestStartupPrunesOrphanedArtifactsWithoutTouchingWorkingContent(t *testing.T) {
-	root := t.TempDir()
+	root := newFixtureInstallation(t)
 	orphan := strings.Repeat("a", 32)
 	for _, name := range []string{filepath.Join(root, Directory, orphan, "backup", "partial"), filepath.Join(root, Directory, "versions", orphan, "candidate"), filepath.Join(root, "user-content")} {
 		if err := os.MkdirAll(filepath.Dir(name), 0700); err != nil {
@@ -621,7 +656,7 @@ func TestStartupPrunesOrphanedArtifactsWithoutTouchingWorkingContent(t *testing.
 }
 
 func TestRestartFinishesInterruptedCleanupWithoutRestoringOldData(t *testing.T) {
-	root := t.TempDir()
+	root := newFixtureInstallation(t)
 	_, done, stop := startFixtureSupervisor(t, root, "success")
 	checked := checkedFixture(t, root)
 	fixtureExchange(t, root, "upgrade", checked.ManifestHash)

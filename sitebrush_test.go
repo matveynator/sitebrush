@@ -23153,7 +23153,7 @@ func TestUpdateDevelopmentStartupRespectsInstallationSession(t *testing.T) {
 	if CompileVersion != "dev" || runningInContainer() {
 		t.Skip("requires a native development server build")
 	}
-	root := t.TempDir()
+	root := newDevelopmentTestStorage(t)
 	session, err := appupdate.ServerSession(root, nil, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -23186,7 +23186,7 @@ func TestUpdateDevelopmentSourceStartupIgnoresCachedExecutable(t *testing.T) {
 		}
 		return
 	}
-	root := t.TempDir()
+	root := newDevelopmentTestStorage(t)
 	updateDirectory := filepath.Join(root, appupdate.Directory)
 	if err := os.Mkdir(updateDirectory, 0700); err != nil {
 		t.Fatal(err)
@@ -23270,4 +23270,38 @@ func TestUpdateDevelopmentSourceStartupIgnoresCachedExecutable(t *testing.T) {
 	if err != nil || !bytes.Equal(contents, journal) {
 		t.Fatal("source startup modified managed release journal")
 	}
+}
+
+// Development subprocesses use the same installation guard as real servers.
+// Reserve fixtures below CI's ephemeral range to avoid unrelated TLS clients.
+func newDevelopmentTestStorage(t *testing.T) string {
+	t.Helper()
+	for attempt := 0; attempt < 100; attempt++ {
+		root := t.TempDir()
+		address := appupdate.Address(root)
+		host, rawPort, err := net.SplitHostPort(address)
+		if err != nil {
+			t.Fatal(err)
+		}
+		port, err := strconv.Atoi(rawPort)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if port >= 30000 {
+			continue
+		}
+		contact, err := net.Listen("tcp", address)
+		if err != nil {
+			continue
+		}
+		session, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port+1)))
+		contact.Close()
+		if err != nil {
+			continue
+		}
+		session.Close()
+		return root
+	}
+	t.Fatal("cannot allocate a development installation contact and session")
+	return ""
 }
