@@ -254,7 +254,7 @@
       if (updateResponse.Preview) updateModel.preview = updateResponse.Preview;
       if (updateResponse.Campaigns) updateModel.campaigns = updateResponse.Campaigns;
       if (updateResponse.State && updateResponse.State.current && updateResponse.State.current.version) updateModel.state = updateResponse.State;
-      if (updateResponse.Error) updateModel.error = updateResponse.Error;
+      updateModel.error = updateResponse.Error || '';
       renderUpdate();
       if (updateModel.queuedCommand) {
         const queuedCommand = updateModel.queuedCommand;
