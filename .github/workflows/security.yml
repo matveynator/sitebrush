@@ -144,6 +144,10 @@ jobs:
         run: >-
           go test -count=1 .
           -run '^(TestAnalyticsServerRulesProduceBrowserConversion|TestFinalPageSaveCreatesOneRevisionPerChangedPage|TestDemoRefreshReplacesPageSetAndFirstImportCreatesDatabase|TestUnknownAndDeletedHostnamesOfferRegistrationOrRequest|TestPreparedImageUploadStoresActualCropAndSinglePageRevision|TestPreparedExternalImageUsesValidatedServerDownloadWithoutCORS|TestCreationLimitsAreIndependentAndPreserveExistingSites|TestRecreatedSiteKeepsCertificateAndRejectsExpiredCache|TestProfilePaginatesAIAccessAndKeepsSessionIPOrder|TestProfileSecurityCardsShareGridAndPaginateThreeRecords|TestProfileAdminIPUpdatesKeepSettingsAndShowValidation|TestLANPasswordLoginAcceptsFormWithStaleCookieAndOpaqueOrigin|TestPageSaveRollsBackPublicationWhenAnotherPageCannotBeWritten|TestDemoSnapshotRestoreHonorsNewQuotaBeforeReplacingContent|TestConcurrentIdenticalPageSavesCreateOneRevision|TestPreparedImageDeduplicatesPreviewAndFullStorage|TestMissingRegisteredDatabaseDoesNotOfferNewOwnership|TestClosedRegistrationRejectsPreviouslyIssuedConfirmation)$'
+      - name: Test site-wide AI capability boundaries
+        run: >-
+          go test -count=1 .
+          -run '^(TestAI(Site|CapabilityScopes|CapabilityRevocation|ConcurrentVersion|VersionGuard|Uploads|EditorInlineAttachments|PageSave|Rollback|Unscoped|FileEndpoint|PageScoped)|TestAppAIStore)'
       - name: Install editor browser test dependencies
         working-directory: scripts/editor
         run: |

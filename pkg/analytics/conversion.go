@@ -57,6 +57,8 @@ type ConversionVisitor struct {
 	Paths                       map[string]*ObservedPath
 	Behaviour                   map[string]*ElementObservation
 	Forms                       map[string]*FormObservation
+	Visits                      []*AudienceVisit
+	FirstVisit                  time.Time
 }
 type PathContact struct {
 	Session string
@@ -76,11 +78,12 @@ type ElementObservation struct {
 }
 type FormObservation struct {
 	StartedAt, SubmittedAt, CompletedAt, FailedAt time.Time
-	Date, Page, Form, Session, LastField          string
+	Date, Page, Form, Session, LastField, Device  string
 	Last                                          time.Time
 	Viewed, Started, Submitted, Completed, Failed bool
 }
 type ConversionState struct {
+	AudienceSince     time.Time
 	Replay            *ReplayState
 	Changes           []PageChange
 	Version           int
@@ -128,6 +131,16 @@ type ConversionPath struct {
 	Share, Conversion, ExitRate        string
 	Children                           []*ConversionPath
 }
+type PageAudience struct {
+	Page                 string `json:"page"`
+	Users                int    `json:"users"`
+	PageViews            int    `json:"page_views"`
+	ReturningOnOtherDays int    `json:"returning_on_other_days"`
+	Sessions             *int   `json:"sessions"`
+	ReturningUsers       *int   `json:"returning_users"`
+	ReturningSameDay     *int   `json:"returning_same_day"`
+}
+
 type BehaviourRow struct {
 	Element, Kind string
 	Users, Clicks int
@@ -143,6 +156,11 @@ type ConversionForm struct {
 	Page, Form                                               string
 	Viewed, Started, Submitted, Completed, Failed, Abandoned int
 	Fields                                                   []Row
+	Devices                                                  []ConversionFormDevice
+}
+type ConversionFormDevice struct {
+	Device                                                   string
+	Viewed, Started, Submitted, Completed, Failed, Abandoned int
 }
 type CohortWeek struct {
 	Eligible, Returned int
@@ -171,6 +189,8 @@ type ConversionDay struct {
 	Visitors int
 }
 type ConversionReport struct {
+	Audience            *AudienceMetrics
+	PageAudience        []PageAudience
 	Sessions            []ReplaySummary
 	Impacts             []PageImpact
 	Devices             []ConversionDevice
@@ -299,7 +319,7 @@ func (site *Site) recordConversion(event Event, now time.Time, limit int64) bool
 		site.Experience = Experience{}
 		site.Visitors = map[string]*Visitor{}
 		site.Days = map[string]*Day{}
-		site.Conversion = &ConversionState{Version: 2, Visitors: map[string]*ConversionVisitor{}, Configurations: map[string]Goal{}, Daily: map[string]ConversionDaily{}, HourlyConversions: map[string]int{}}
+		site.Conversion = &ConversionState{Version: 2, AudienceSince: now, Visitors: map[string]*ConversionVisitor{}, Configurations: map[string]Goal{}, Daily: map[string]ConversionDaily{}, HourlyConversions: map[string]int{}}
 	}
 	state := site.Conversion
 	if event.Limited {
@@ -350,6 +370,7 @@ func (site *Site) recordConversion(event Event, now time.Time, limit int64) bool
 	if visitorSequences(site, event, now) == false {
 		return false
 	}
+	site.recordAudience(visitor, event, now)
 	if event.Address != "" {
 		if event.Location.Address == event.Address {
 			visitor.Location = event.Location
@@ -564,7 +585,7 @@ func (site *Site) recordConversion(event Event, now time.Time, limit int64) bool
 					state.Incomplete = true
 					continue
 				}
-				observation = &FormObservation{Date: date, Page: event.Path, Form: signal.Form, Session: event.Session}
+				observation = &FormObservation{Date: date, Page: event.Path, Form: signal.Form, Session: event.Session, Device: event.Device}
 				visitor.Forms[key] = observation
 				state.Used += formBudget
 			}
@@ -673,6 +694,7 @@ func (site *Site) pruneConversion(now time.Time) {
 			continue
 		}
 		state.Used += 2048
+		pruneAudience(state, visitor, now)
 		for date := range visitor.Days {
 			if date < dayKey(now.AddDate(0, 0, -89)) {
 				delete(visitor.Days, date)
@@ -781,6 +803,10 @@ func (site *Site) conversionReport(now time.Time, days int) ConversionReport {
 	}
 	if primary == "" && len(goals) > 0 {
 		primary = goalVersion(goals[0])
+	}
+	result.PageAudience = []PageAudience{}
+	if !state.AudienceSince.IsZero() {
+		result.Audience = &AudienceMetrics{Since: state.AudienceSince, Incomplete: state.Incomplete || state.AudienceSince.After(start)}
 	}
 	result.Primary = primary
 	configurations := map[string]Goal{}
@@ -947,11 +973,13 @@ func (site *Site) conversionReport(now time.Time, days int) ConversionReport {
 		}
 		return result.Sources[i].Name < result.Sources[j].Name
 	})
+	pageAudience := map[string]*PageAudience{}
 	paths := map[string]*ConversionPath{}
 	behaviour := map[string]*BehaviourPage{}
 	elementRows := map[string]map[string]*BehaviourRow{}
 	forms := map[string]*ConversionForm{}
 	formFields := map[string]map[string]int{}
+	formDevices := map[string]map[string]*ConversionFormDevice{}
 	for _, visitor := range state.Visitors {
 		active := false
 		for date := range visitor.Days {
@@ -1027,6 +1055,7 @@ func (site *Site) conversionReport(now time.Time, days int) ConversionReport {
 		seenRows := map[string]bool{}
 		pageDepth := map[string]int{}
 		seenPages := map[string]bool{}
+		pageDates := map[string]map[string]bool{}
 		for _, observation := range visitor.Behaviour {
 			if observation.Date < dayKey(start) || observation.Date > dayKey(now) {
 				continue
@@ -1039,6 +1068,14 @@ func (site *Site) conversionReport(now time.Time, days int) ConversionReport {
 				elementRows[pageKey] = map[string]*BehaviourRow{}
 			}
 			if observation.Kind == "page" {
+				if pageAudience[observation.Page] == nil {
+					pageAudience[observation.Page] = &PageAudience{Page: observation.Page}
+				}
+				pageAudience[observation.Page].PageViews += observation.Count
+				if pageDates[observation.Page] == nil {
+					pageDates[observation.Page] = map[string]bool{}
+				}
+				pageDates[observation.Page][observation.Date] = true
 				if !seenPages[pageKey] {
 					page.Visitors++
 					seenPages[pageKey] = true
@@ -1061,6 +1098,13 @@ func (site *Site) conversionReport(now time.Time, days int) ConversionReport {
 				seenRows[pageKey+rowKey] = true
 			}
 		}
+		for page, dates := range pageDates {
+			pageAudience[page].Users++
+			if len(dates) > 1 {
+				pageAudience[page].ReturningOnOtherDays++
+			}
+		}
+		addAudience(&result, visitor, pageAudience, start, now)
 		for pageKey, depth := range pageDepth {
 			page := behaviour[pageKey]
 			if page.Scroll == nil {
@@ -1075,22 +1119,15 @@ func (site *Site) conversionReport(now time.Time, days int) ConversionReport {
 			}
 		}
 		seenForms := map[string]FormObservation{}
+		seenFormDevices := map[string]FormObservation{}
 		for _, observation := range visitor.Forms {
 			if observation.Date < dayKey(start) || observation.Date > dayKey(now) {
 				continue
 			}
 			formKey := observation.Page + "\x1f" + observation.Form
-			merged := seenForms[formKey]
-			merged.Viewed = merged.Viewed || observation.Viewed
-			merged.Started = merged.Started || observation.Started && !observation.StartedAt.After(now)
-			merged.Submitted = merged.Submitted || observation.Submitted && !observation.SubmittedAt.After(now)
-			merged.Completed = merged.Completed || observation.Completed && !observation.CompletedAt.After(now)
-			merged.Failed = merged.Failed || observation.Failed && !observation.FailedAt.After(now)
-			if observation.Last.After(merged.Last) {
-				merged.Last = observation.Last
-				merged.LastField = observation.LastField
-			}
-			seenForms[formKey] = merged
+			seenForms[formKey] = mergeFormObservation(seenForms[formKey], observation, now)
+			deviceKey := formKey + "\x1f" + observation.Device
+			seenFormDevices[deviceKey] = mergeFormObservation(seenFormDevices[deviceKey], observation, now)
 		}
 		for formKey, observation := range seenForms {
 			form := forms[formKey]
@@ -1121,6 +1158,18 @@ func (site *Site) conversionReport(now time.Time, days int) ConversionReport {
 					formFields[formKey][observation.LastField]++
 				}
 			}
+		}
+		for key, observation := range seenFormDevices {
+			formKey := strings.TrimSuffix(key, "\x1f"+observation.Device)
+			if formDevices[formKey] == nil {
+				formDevices[formKey] = map[string]*ConversionFormDevice{}
+			}
+			aggregate := formDevices[formKey][observation.Device]
+			if aggregate == nil {
+				aggregate = &ConversionFormDevice{Device: observation.Device}
+				formDevices[formKey][observation.Device] = aggregate
+			}
+			addFormDevice(aggregate, observation, now)
 		}
 
 	}
@@ -1169,6 +1218,10 @@ func (site *Site) conversionReport(now time.Time, days int) ConversionReport {
 	}
 	for key, form := range forms {
 		form.Fields = rows(formFields[key])
+		for _, aggregate := range formDevices[key] {
+			form.Devices = append(form.Devices, *aggregate)
+		}
+		sort.Slice(form.Devices, func(left, right int) bool { return form.Devices[left].Device < form.Devices[right].Device })
 		result.Forms = append(result.Forms, *form)
 	}
 	sort.Slice(result.Forms, func(i, j int) bool {
@@ -1210,6 +1263,15 @@ func (site *Site) conversionReport(now time.Time, days int) ConversionReport {
 	if !result.Incomplete {
 		result.Insights = conversionInsights(result)
 	}
+	for _, audience := range pageAudience {
+		result.PageAudience = append(result.PageAudience, *audience)
+	}
+	sort.Slice(result.PageAudience, func(left, right int) bool {
+		if result.PageAudience[left].Users != result.PageAudience[right].Users {
+			return result.PageAudience[left].Users > result.PageAudience[right].Users
+		}
+		return result.PageAudience[left].Page < result.PageAudience[right].Page
+	})
 	return result
 }
 func sortPaths(paths []*ConversionPath) {

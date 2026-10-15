@@ -83,3 +83,9 @@ func TestSecurityBoundarySafeQueryRedactsEveryCredentialLikeField(t *testing.T) 
 		t.Fatal("malformed query was not fully redacted")
 	}
 }
+
+func TestSafeQueryRedactsAIPairingApproval(t *testing.T) {
+	if query := SafeQuery("ai_authorize=browser-secret&ai=manifest"); strings.Contains(query, "browser-secret") || !strings.Contains(query, "ai=manifest") {
+		t.Fatalf("unsafe pairing query: %q", query)
+	}
+}

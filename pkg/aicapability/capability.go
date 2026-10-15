@@ -16,9 +16,10 @@ import (
 )
 
 const (
-	ScopeRead    = "read"
-	ScopeWrite   = "write"
-	ScopePublish = "publish"
+	ScopeRead      = "read"
+	ScopeWrite     = "write"
+	ScopePublish   = "publish"
+	ScopeAnalytics = "analytics"
 )
 
 type Manifest struct {
@@ -27,6 +28,7 @@ type Manifest struct {
 	Instructions     string           `json:"instructions"`
 	OpenAPIURL       string           `json:"openapi_url"`
 	DocumentationURL string           `json:"documentation_url"`
+	AuthorizationURL string           `json:"authorization_url,omitempty"`
 	APIBase          string           `json:"api_base"`
 	Domain           string           `json:"domain"`
 	PagePath         string           `json:"page_path,omitempty"`
@@ -48,13 +50,14 @@ type Capability struct {
 }
 
 type Session struct {
-	Token        string    `json:"token"`
-	CapabilityID string    `json:"capability_id"`
-	Domain       string    `json:"domain"`
-	Owner        string    `json:"owner,omitempty"`
-	Scopes       []string  `json:"scopes"`
-	Created      time.Time `json:"created"`
-	Expires      time.Time `json:"expires"`
+	Done         <-chan struct{} `json:"-"`
+	Token        string          `json:"token"`
+	CapabilityID string          `json:"capability_id"`
+	Domain       string          `json:"domain"`
+	Owner        string          `json:"owner,omitempty"`
+	Scopes       []string        `json:"scopes"`
+	Created      time.Time       `json:"created"`
+	Expires      time.Time       `json:"expires"`
 }
 
 type SessionInfo struct {
@@ -87,6 +90,7 @@ type managerRequest struct {
 
 type managerResponse struct {
 	total        int
+	pairing      Pairing
 	capability   Capability
 	capabilities []Capability
 	session      Session
@@ -118,12 +122,31 @@ func newManager(persistentPath string) *Manager {
 func (manager *Manager) run() {
 	capabilities := map[string]Capability{}
 	sessions := map[string]Session{}
+	sessionStops := map[string]chan struct{}{}
+	clock := time.NewTicker(time.Second)
+	defer clock.Stop()
+	defer func() {
+		for _, stop := range sessionStops {
+			close(stop)
+		}
+	}()
+	pairings := map[string]pairingState{}
 	manager.loadCapabilities(capabilities)
 	for {
 		select {
 		case <-manager.stop:
 			return
+		case now := <-clock.C:
+			pruneSessions(sessions, sessionStops, now)
+			prunePairings(pairings, now)
 		case request := <-manager.requests:
+			pruneSessions(sessions, sessionStops, time.Now())
+			// Temporary grants live only in this owner process and are never persisted.
+			prunePairings(pairings, time.Now())
+			if strings.HasPrefix(request.kind, "pairing-") {
+				request.reply <- manager.handlePairing(request, pairings, capabilities)
+				continue
+			}
 			switch request.kind {
 			case "close":
 				request.reply <- managerResponse{ok: true}
@@ -154,7 +177,9 @@ func (manager *Manager) run() {
 					request.reply <- managerResponse{err: err}
 					continue
 				}
-				session := Session{Token: sessionToken, CapabilityID: capability.ID, Domain: capability.Domain, Owner: capability.Owner, Scopes: append([]string(nil), capability.Scopes...), Created: time.Now().UTC(), Expires: time.Now().UTC().Add(15 * time.Minute)}
+				stop := make(chan struct{})
+				sessionStops[tokenHash(sessionToken)] = stop
+				session := Session{Done: stop, Token: sessionToken, CapabilityID: capability.ID, Domain: capability.Domain, Owner: capability.Owner, Scopes: append([]string(nil), capability.Scopes...), Created: time.Now().UTC(), Expires: time.Now().UTC().Add(15 * time.Minute)}
 				sessions[tokenHash(sessionToken)] = session
 				request.reply <- managerResponse{session: session}
 			case "lookup":
@@ -191,7 +216,7 @@ func (manager *Manager) run() {
 				for sessionKey, session := range sessions {
 					if session.Expires.Before(now) || session.Domain != request.domain || session.Owner != request.owner {
 						if session.Expires.Before(now) {
-							delete(sessions, sessionKey)
+							stopSession(sessions, sessionStops, sessionKey)
 						}
 						continue
 					}
@@ -231,7 +256,7 @@ func (manager *Manager) run() {
 				}
 				for sessionKey, activeSession := range sessions {
 					if activeSession.CapabilityID == capability.ID {
-						delete(sessions, sessionKey)
+						stopSession(sessions, sessionStops, sessionKey)
 					}
 				}
 				request.reply <- managerResponse{ok: true}
@@ -275,6 +300,12 @@ func (manager *Manager) run() {
 					if activeSession.CapabilityID != capability.ID {
 						continue
 					}
+					// Existing work loses its contact channel; subsequent requests see
+					// the narrower permissions through a fresh session lifetime.
+					close(sessionStops[activeSessionKey])
+					stop := make(chan struct{})
+					sessionStops[activeSessionKey] = stop
+					activeSession.Done = stop
 					activeSession.Scopes = intersectScopes(activeSession.Scopes, capability.Scopes)
 					sessions[activeSessionKey] = activeSession
 				}
@@ -303,7 +334,7 @@ func (manager *Manager) run() {
 				}
 				for sessionKey, session := range sessions {
 					if session.CapabilityID == capability.ID {
-						delete(sessions, sessionKey)
+						stopSession(sessions, sessionStops, sessionKey)
 					}
 				}
 				request.reply <- managerResponse{ok: true}
@@ -323,7 +354,7 @@ func (manager *Manager) run() {
 				}
 				for sessionKey, session := range sessions {
 					if session.CapabilityID == capability.ID {
-						delete(sessions, sessionKey)
+						stopSession(sessions, sessionStops, sessionKey)
 					}
 				}
 				request.reply <- managerResponse{ok: true}
@@ -577,4 +608,22 @@ func (manager *Manager) ListCapabilitiesPage(owner, domain string, offset, limit
 func (manager *Manager) ListSessionsPage(owner, domain string, offset, limit int) ([]SessionInfo, int, error) {
 	response := manager.request(managerRequest{kind: "list", owner: strings.ToLower(strings.TrimSpace(owner)), domain: normalizeDomain(domain), offset: offset, limit: limit, reply: make(chan managerResponse, 1)})
 	return response.sessions, response.total, response.err
+}
+
+// Only the manager owner closes session lifetimes. Consumers receive the
+// channel so revocation, expiry and shutdown also cancel work already in flight.
+func stopSession(sessions map[string]Session, stops map[string]chan struct{}, key string) {
+	if stop, found := stops[key]; found {
+		close(stop)
+		delete(stops, key)
+	}
+	delete(sessions, key)
+}
+
+func pruneSessions(sessions map[string]Session, stops map[string]chan struct{}, now time.Time) {
+	for key, session := range sessions {
+		if !now.Before(session.Expires) {
+			stopSession(sessions, stops, key)
+		}
+	}
 }
