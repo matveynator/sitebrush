@@ -343,12 +343,19 @@ func cachedAutoCertPEMForTest(t *testing.T, domain string, notBefore time.Time, 
 
 func newTestApplication(t *testing.T) (*App, *sql.DB) {
 	t.Helper()
+	return newTestApplicationWithDatabase(t, func(filename string) (*sql.DB, error) {
+		return sql.Open("sqlite", filename)
+	})
+}
+
+func newTestApplicationWithDatabase(t *testing.T, openDatabase func(string) (*sql.DB, error)) (*App, *sql.DB) {
+	t.Helper()
 	storagePath := t.TempDir()
 	storageRealRoot, err := prepareStorageJailRoot(storagePath)
 	if err != nil {
 		t.Fatalf("prepare storage root: %v", err)
 	}
-	rawDB, err := sql.Open("sqlite", filepath.Join(storagePath, "sitebrush.db"))
+	rawDB, err := openDatabase(filepath.Join(storagePath, "sitebrush.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -22540,7 +22547,11 @@ func TestVisualEditorBrowserRegressions(t *testing.T) {
 
 func newUpdateTestApplication(t *testing.T) (*App, *sql.DB) {
 	t.Helper()
-	application, database := newTestApplication(t)
+	// Update fixtures exercise durable migration and read-only WAL inspection
+	// using the production connection settings, including on Windows runners.
+	application, database := newTestApplicationWithDatabase(t, func(filename string) (*sql.DB, error) {
+		return openServerControlDatabaseHandle(filename, true)
+	})
 	application.dbPath = filepath.Join(application.storagePath, "sitebrush.db")
 	if err := hostingandsupport.Migrate(context.Background(), database); err != nil {
 		t.Fatal(err)
