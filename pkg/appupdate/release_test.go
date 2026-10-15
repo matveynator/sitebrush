@@ -63,7 +63,7 @@ func TestReleaseTrustAndPlatform(t *testing.T) {
 	if _, err := manifest.Artifact("plan9", "mips"); err == nil {
 		t.Fatal("accepted an unavailable target")
 	}
-	for _, change := range []func(*Manifest){func(m *Manifest) { m.Sequence = 1 }, func(m *Manifest) { m.Protocol++ }, func(m *Manifest) { m.Compatibility = Compatibility{} }, func(m *Manifest) { m.Artifacts[0].Name = "../server" }, func(m *Manifest) { m.Artifacts[0].SHA256 = "bad" }} {
+	for _, change := range []func(*Manifest){func(m *Manifest) { m.Sequence = 1 }, func(m *Manifest) { m.Protocol++ }, func(m *Manifest) { m.Protocol-- }, func(m *Manifest) { m.Compatibility = Compatibility{} }, func(m *Manifest) { m.Artifacts[0].Name = "../server" }, func(m *Manifest) { m.Artifacts[0].SHA256 = "bad" }} {
 		candidate := manifest
 		candidate.Artifacts = append([]Artifact(nil), manifest.Artifacts...)
 		change(&candidate)
@@ -334,7 +334,7 @@ func TestBackupRejectsTruncatedInventory(t *testing.T) {
 }
 
 func TestServerSessionGuardsRecoveryUntilProcessReleasesDatabases(t *testing.T) {
-	root := t.TempDir()
+	root := newFixtureInstallation(t)
 	first, err := ServerSession(root, nil, 0)
 	if err != nil {
 		t.Fatal(err)

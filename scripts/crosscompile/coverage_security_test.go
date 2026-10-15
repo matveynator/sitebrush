@@ -150,7 +150,7 @@ func TestCrossCompileDockerCommandFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", binDirectory)
-	if dockerImageExists(t.TempDir(), "missing") {
+	if exists, err := dockerImageExists(t.TempDir(), "missing"); exists || err != nil {
 		t.Fatal("failed Docker inspect reported an image")
 	}
 	if _, err := dockerNativePlatform(t.TempDir()); err == nil {

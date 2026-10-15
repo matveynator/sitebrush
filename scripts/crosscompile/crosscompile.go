@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/md5"
 	"encoding/base64"
@@ -16,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/matveynator/sitebrush/v2/pkg/appupdate"
 )
@@ -1035,14 +1037,26 @@ func runDockerShellScript(repoRoot, platform, image, shellScript string, extraEn
 
 func ensureDockerPlatformSupport(repoRoot, platform, builderImage string) error {
 	goarch := strings.TrimPrefix(platform, "linux/")
-	if dockerImageExists(repoRoot, builderImage) {
-		if dockerPlatformWorks(repoRoot, platform, builderImage) {
+	exists, err := dockerImageExists(repoRoot, builderImage)
+	if err != nil {
+		return err
+	}
+	if exists {
+		works, err := dockerPlatformWorks(repoRoot, platform, builderImage)
+		if err != nil {
+			return err
+		}
+		if works {
 			return nil
 		}
 		if err := installDockerPlatformEmulation(repoRoot, platform, goarch); err != nil {
 			return err
 		}
-		if !dockerPlatformWorks(repoRoot, platform, builderImage) {
+		works, err = dockerPlatformWorks(repoRoot, platform, builderImage)
+		if err != nil {
+			return err
+		}
+		if !works {
 			return fmt.Errorf("docker emulation registration completed, but cached builder %s still cannot run as %s", builderImage, platform)
 		}
 		return nil
@@ -1066,12 +1080,17 @@ func installDockerPlatformEmulation(repoRoot, platform, goarch string) error {
 	return nil
 }
 
-func dockerPlatformWorks(repoRoot, platform, builderImage string) bool {
+func dockerPlatformWorks(repoRoot, platform, builderImage string) (bool, error) {
+	fmt.Printf("check docker execution for %s using %s\n", platform, builderImage)
 	cmd := exec.Command("docker", dockerPlatformProbeArgs(platform, builderImage)...)
 	cmd.Dir = repoRoot
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
-	return cmd.Run() == nil
+	err := runDockerProbe(cmd, 30*time.Second)
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return false, err
+	}
+	return err == nil, nil
 }
 
 func dockerPlatformProbeArgs(platform, builderImage string) []string {
@@ -1079,7 +1098,14 @@ func dockerPlatformProbeArgs(platform, builderImage string) []string {
 }
 
 func dockerNativePlatform(repoRoot string) (string, error) {
-	architecture, err := runOutput(repoRoot, "docker", "info", "--format", "{{.Architecture}}")
+	fmt.Println("check Docker daemon architecture")
+	cmd := exec.Command("docker", "info", "--format", "{{.Architecture}}")
+	cmd.Dir = repoRoot
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = os.Stderr
+	err := runDockerProbe(cmd, 30*time.Second)
+	architecture := output.String()
 	if err != nil {
 		return "", fmt.Errorf("resolve Docker daemon architecture: %w", err)
 	}
@@ -1098,19 +1124,51 @@ func normalizeDockerArchitecture(architecture string) string {
 }
 
 func ensureDockerBuilderImage(repoRoot, platform, image, dockerfile string, rebuild bool) error {
-	if !rebuild && dockerImageExists(repoRoot, image) {
-		fmt.Printf("reuse docker builder image %s\n", image)
-		return nil
+	if !rebuild {
+		exists, err := dockerImageExists(repoRoot, image)
+		if err != nil {
+			return err
+		}
+		if exists {
+			fmt.Printf("reuse docker builder image %s\n", image)
+			return nil
+		}
 	}
 
 	fmt.Printf("build docker builder image %s\n", image)
 	return runDockerBuild(repoRoot, platform, image, dockerfile)
 }
 
-func dockerImageExists(repoRoot, image string) bool {
+func dockerImageExists(repoRoot, image string) (bool, error) {
+	fmt.Printf("check docker builder image %s\n", image)
 	cmd := exec.Command("docker", "image", "inspect", image)
 	cmd.Dir = repoRoot
-	return cmd.Run() == nil
+	err := runDockerProbe(cmd, 30*time.Second)
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return false, err
+	}
+	return err == nil, nil
+}
+
+// Readiness probes never pull or compile. A stalled daemon must fail before
+// emulation registration or publication; actual builds stream their progress.
+func runDockerProbe(cmd *exec.Cmd, timeout time.Duration) error {
+	cmd.WaitDelay = time.Second
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	finished := make(chan error, 1)
+	go func() { finished <- cmd.Wait() }()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case err := <-finished:
+		return err
+	case <-timer.C:
+		_ = cmd.Process.Kill()
+		<-finished
+		return fmt.Errorf("Docker check %q did not respond within %s; check Docker Desktop and docker info: %w", strings.Join(cmd.Args[1:], " "), timeout, os.ErrDeadlineExceeded)
+	}
 }
 
 func runDockerBuild(repoRoot, platform, image, dockerfile string) error {

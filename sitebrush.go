@@ -195,6 +195,7 @@ type App struct {
 	dbPath                         string
 	debug                          bool
 	desktopMode                    bool
+	developmentMode                bool
 	nativeFileDialog               bool
 	automaticSSLAvailable          bool
 	selfSignedTLSPort              int
@@ -8952,6 +8953,9 @@ func main() {
 		return
 	}
 	if *upgradeMode {
+		if CompileVersion == "dev" {
+			log.Fatal("in-place updates require a numbered server build; source builds run the current source")
+		}
 		if !appcli.InstallFlagSupported() {
 			log.Fatal("updates are available only in server builds")
 		}
@@ -9119,6 +9123,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	var siteDatabaseRouter *perSiteDBRouter
 	aiCapabilityStatePath := filepath.Join(storageRealRoot, "security", "ai-capabilities.json")
 	application := &App{storagePath: effectiveStoragePath, storageRealRoot: storageRealRoot, dbPath: effectiveDBPath, debug: config.Debug, desktopMode: config.DesktopMode, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), grabCancels: newGrabCancelTracker(), trialPreviews: newPublicTrialPreviewStore(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 1024), analyticsLosses: make(chan string, 64), browserAnalyticsLosses: make(chan string, 64), browserAnalytics: make(chan browserAnalyticsEnvelope, 512), analyticsConnections: make(chan struct{}, 128), domainLogEvents: make(chan domainLogEvent, 1024), aiCapabilities: aicapability.NewPersistentManager(aiCapabilityStatePath)}
+	application.developmentMode = CompileVersion == "dev" && !config.UpdateChild
 	application.updateActivation = activation
 	defer application.aiCapabilities.Close()
 	application.aiExecutor = aieditor.NewExecutor(&appAIStore{application: application}, 32)
@@ -43689,6 +43694,20 @@ func runSupervisedSitebrush(ctx context.Context, config serverRunConfig) error {
 	if sameCleanPath(databasePath, filepath.Join(config.StoragePath, defaultDBPath)) {
 		databasePath = filepath.Join(storagePath, defaultDBPath)
 	}
+	// Source builds run the executable just compiled, independently of any
+	// selected release or obsolete development copy in the updater journal.
+	// The process session still excludes concurrent maintenance and writers.
+	if CompileVersion == "dev" {
+		session, err := appupdate.ServerSession(storagePath, ctx.Done(), 0)
+		if err != nil {
+			return err
+		}
+		defer session.Close()
+		config.StoragePath = storagePath
+		config.DBPath = databasePath
+		config.AllowStorageFallback = false
+		return runSitebrushServer(ctx, config)
+	}
 	executable, err := os.Executable()
 	if err != nil {
 		return err
@@ -44191,7 +44210,11 @@ func (a *App) serverUpdateSocket(w http.ResponseWriter, r *http.Request) {
 			response := serverUpdateResponse{}
 			switch command.Action {
 			case "status", "check", "upgrade", "rollback":
-				if a.desktopMode || runningInContainer() {
+				if a.developmentMode {
+					response.State.Current.Version = CompileVersion
+					response.State.Stage = "unsupported"
+					response.Error = "Development builds run the current source; in-place updates require a numbered server build"
+				} else if a.desktopMode || runningInContainer() {
 					response.Error = "Updates are unavailable for desktop and container installations"
 				} else {
 					var exchangeErr error
@@ -44263,6 +44286,9 @@ func serverUpdateEmailURL(domain string) (string, error) {
 // Campaign authorization is tied to both the server owner and the pinned
 // central signing identity. Host headers cannot turn a customer into sitebrush.com.
 func (a *App) centralAnnouncementIdentity() (ed25519.PrivateKey, error) {
+	if a.developmentMode {
+		return nil, errors.New("release announcements are unavailable in development builds")
+	}
 	var domain string
 	if err := a.withServerControlDatabaseRead(context.Background(), "announcement-central-domain", func(database *sql.DB) error {
 		domain, _ = (hostingandsupport.Store{DB: database}).OwnerDomain(context.Background())
@@ -44347,6 +44373,9 @@ func (a *App) announcementInstallationKey(id string) (ed25519.PublicKey, error) 
 }
 
 func (a *App) startAnnouncementSubsystems(stop <-chan struct{}) {
+	if a.developmentMode {
+		return
+	}
 	if key, err := a.centralAnnouncementIdentity(); err == nil {
 		go func() {
 			releaseKey, err := appupdate.TrustedKey()
@@ -44410,6 +44439,9 @@ func (a *App) startAnnouncementSubsystems(stop <-chan struct{}) {
 }
 
 func (a *App) announcementLiveStatus() (updateannounce.Status, error) {
+	if a.developmentMode {
+		return updateannounce.Status{Version: CompileVersion, Enabled: false}, nil
+	}
 	response, err := appupdate.Exchange(a.storagePath, appupdate.Request{Action: "status"}, nil)
 	if err != nil {
 		return updateannounce.Status{}, err
