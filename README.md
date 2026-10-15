@@ -584,8 +584,78 @@ Account cards share one grid. Sessions and administrator IPs appear together;
 sessions and administrator IPs have independent pages of three records, while
 other long lists show five records per page. Administrators can add any valid IP
 or subnet without a prior session from that address. Explicit IP and subnet
-allowlist entries are permanently allowed until removed. AI access appears only
-when links or sessions exist.
+allowlist entries are permanently allowed until removed. AI connection instructions
+are always available in the account; access lists appear when grants or sessions exist.
+
+### AI access to a whole site
+
+Give an AI the site address. SiteBrush advertises `/?ai=manifest` through a public
+`Link` response header. Discovery, documentation (`/?ai=documentation`) and
+OpenAPI (`/?ai=openapi`) require no credentials. There is no provider-specific
+endpoint or mandatory well-known path. The AI needs tools that can inspect HTTP
+responses and perform the documented requests; this does not automatically add
+networking tools to every chatbot.
+
+The [AI working guide](pkg/aicapability/guide.md) is the source served verbatim
+at `/?ai=documentation` and included in OpenAPI. It explains the relationship
+between saved source, revisions and published static HTML, exact template
+identity and propagation rules, complete-document updates, image uploads,
+version conflicts, recovery and evidence-based analytics feedback.
+
+The AI calls `POST /?ai=pair`, shows the returned `verification_url`, and polls
+`POST /?ai=token` with its private `device_code`. The owner signs in and approves
+once. The ten-minute request is consumed once; the browser never receives the
+capability token. Approval defaults to **read, write, publish, analytics** for
+this site, with advanced opt-outs. Public credentials require HTTPS; direct
+loopback development uses the existing localhost exception.
+
+The AI exchanges its persistent capability at `/?ai=exchange` for a fifteen-minute
+session. Requests carry `X-SiteBrush-Capability` and `Authorization: Bearer` headers,
+with no secret in their URL. The ordinary menu's **AI · SiteBrush** entry opens the
+account card. Revocation prevents new exchanges and closes session channels,
+canceling queued and running work through the existing worker and SQL adapters.
+Restriction also cancels work admitted under broader permissions. Changes already
+committed remain revisions and can be restored normally. Existing current-page
+links remain supported.
+
+Content actions are `?ai=pages`, `page`, `files`, `file`, `revisions`, `publish`
+and `rollback`. Page reads include a version. Updates require `expected_version`;
+rollback takes both `revision_id` and `expected_version`, so a newer edit cannot
+be silently overwritten. A conflict returns HTTP 409. Site-wide saves use the
+same template normalization, propagation, quota, revision and publication path
+as the normal editor. Without `publish`, writes and rollbacks remain drafts.
+Page-limited grants cannot propagate template edits to neighbouring pages.
+
+Uploads are immutable, content-addressed files. Optional image dimensions use the
+normal editor image preparation pipeline. Change an image using **upload_file →
+update_page**, reusing the returned `/p/` URL; there is no replace-image action.
+**Edit as text** (`?text`) and **Edit with voice** (`?ai`) share the same page
+storage, templates and revisions; external agents use `read_page → update_page`.
+Site copying/import, password protection, revision deactivation and freezing
+remain ordinary menu actions, described as such in the AI documentation.
+
+`?ai=get_site_report&days=30` gives bounded, read-only aggregates from the existing
+Analytics snapshots. Focused actions cover summary, funnels, paths, page behaviour,
+forms, sources, page impacts and insights. Periods are 1, 7, 30 and 90 days;
+`limit` (at most 50) and `offset` paginate sections. Reports carry collection status,
+period boundaries and denominators. Audience aggregates count active sessions,
+returning visitors and page returns across distinct sessions, including returns
+on the same UTC day. Tabs sharing a browser session are joined; 30 minutes of
+inactivity starts another session. Form stages include per-device user counts,
+so mobile and desktop abandonment can be compared. These are observations, not
+proof of buying intent. `audience_since` and `audience_incomplete` identify the
+coverage of new measurements. Historical sessions are not reconstructed, and
+old form attempts retain an unknown device. Checkpoints preserve the new bounded
+observations in the existing Analytics worker, with the same 90-day retention.
+
+No visitor IPs, raw sessions, replay or form values are exported. DOM identifiers
+and campaigns are hashed; referrers contain origins only. Missing measurements
+are unavailable, not measured zero. Search-engine queries and internal-search
+terms are unavailable. Insights include supporting aggregates; publication
+comparisons include their windows, small-sample and overlapping-change flags.
+The protocol instructs agents to ground advice in facts and treat explanations
+of causes or unfulfilled demand as hypotheses. Final language is generated by
+the connected AI, not by an additional SiteBrush statistics engine.
 
 ### Account confirmation and secure registration
 

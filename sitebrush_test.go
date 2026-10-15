@@ -10,10 +10,12 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -2582,6 +2584,7 @@ func TestRenderTemplateProcessUsesPreparedTemplate(t *testing.T) {
 func TestMobileServicePageDesignCoversEverySharedTemplate(t *testing.T) {
 	expectedTemplates := []string{
 		"account-confirm.html", "account-https.html",
+		"ai_authorize.html",
 		"analytics.html",
 		"billing_invoice.html",
 		"billing_schedule.html",
@@ -11969,11 +11972,13 @@ func TestAIEditorAttachmentMetadataDescribesSiteFileURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(names) != 1 || names[0] != "photo.jpg" {
+	digest := sha256.Sum256([]byte("photo"))
+	expectedName := hex.EncodeToString(digest[:]) + ".jpg"
+	if len(names) != 1 || names[0] != expectedName {
 		t.Fatalf("names=%v", names)
 	}
 	description := aiEditorAttachmentDescriptions(aiEditorFileReferences(decodedFiles))
-	if !strings.Contains(description, "image/jpeg") || !strings.Contains(description, "/p/photo.jpg") {
+	if !strings.Contains(description, "image/jpeg") || !strings.Contains(description, "/p/"+expectedName) {
 		t.Fatalf("description=%q", description)
 	}
 }
@@ -11982,6 +11987,66 @@ func TestAIEditorModelsExcludeNonTextModels(t *testing.T) {
 	models := aiEditorModels(aiprovider.ProviderOpenAICompatible, []string{"text-embedding-3-large", "gpt-6-sol", "gpt-image-1", "whisper-1"})
 	if len(models) != 1 || models[0] != "gpt-6-sol" {
 		t.Fatalf("filtered models=%v", models)
+	}
+}
+
+type cancelingAIEditorStore struct {
+	started  chan struct{}
+	canceled chan struct{}
+}
+
+func (store *cancelingAIEditorStore) Execute(request aieditor.Request, done <-chan struct{}) aieditor.Result {
+	close(store.started)
+	select {
+	case <-done:
+		close(store.canceled)
+	case <-time.After(5 * time.Second):
+	}
+	return aieditor.Result{Operation: request.Operation, Err: aieditor.ErrTaskCanceled}
+}
+
+func TestAICapabilityRevocationCancelsAlreadyRunningWork(t *testing.T) {
+	application, _ := newTestApplication(t)
+	application.aiCapabilities = aicapability.NewManager()
+	t.Cleanup(application.aiCapabilities.Close)
+	store := &cancelingAIEditorStore{started: make(chan struct{}), canceled: make(chan struct{})}
+	application.aiExecutor = aieditor.NewExecutor(store, 4)
+	t.Cleanup(application.aiExecutor.Close)
+	token, capability, err := application.aiCapabilities.IssueFor("localhost", "owner@example.org", aicapability.StandardScopes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := application.aiCapabilities.Exchange(token, "localhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest("GET", "http://localhost/?ai=pages", nil)
+	request.RemoteAddr = "127.0.0.1:12345"
+	request.Header.Set("X-SiteBrush-Capability", token)
+	request.Header.Set("Authorization", "Bearer "+session.Token)
+	response := httptest.NewRecorder()
+	finished := make(chan struct{})
+	go func() { application.route(response, request); close(finished) }()
+	select {
+	case <-store.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("request did not reach worker")
+	}
+	if err := application.aiCapabilities.RevokeCapabilityID(capability.ID, "owner@example.org", "localhost"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-store.canceled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("revoked in-flight work was not canceled")
+	}
+	select {
+	case <-finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("HTTP adapter retained revoked work")
+	}
+	if response.Code == http.StatusOK {
+		t.Fatal("canceled operation reported success")
 	}
 }
 
@@ -19889,7 +19954,9 @@ func TestAIEditorAttachmentContextKeepsOriginalNameAndPermanentURL(t *testing.T)
 	}
 	references := aiEditorFileReferences(decoded)
 	contextText := aiEditorTaskWithAttachments("Используй приложенное фото", references)
-	if !strings.Contains(contextText, "IMG_5869.JPG") || !strings.Contains(contextText, "/p/stored.jpg") {
+	digest := sha256.Sum256([]byte("image"))
+	expectedURL := "/p/" + hex.EncodeToString(digest[:]) + ".jpg"
+	if !strings.Contains(contextText, "IMG_5869.JPG") || !strings.Contains(contextText, expectedURL) {
 		t.Fatalf("attachment context=%q", contextText)
 	}
 }
@@ -21774,6 +21841,9 @@ func TestProfilePaginatesAIAccessAndKeepsSessionIPOrder(t *testing.T) {
 	if strings.Contains(response.Body.String(), "profile-ai-card") {
 		t.Fatal("empty AI card is visible")
 	}
+	if !strings.Contains(response.Body.String(), `id="ai-access"`) {
+		t.Fatal("AI connection instructions are missing before the first grant")
+	}
 	application.aiCapabilities = aicapability.NewManager()
 	defer application.aiCapabilities.Close()
 	for index := 0; index < 7; index++ {
@@ -23304,4 +23374,370 @@ func newDevelopmentTestStorage(t *testing.T) string {
 	}
 	t.Fatal("cannot allocate a development installation contact and session")
 	return ""
+}
+
+// The public flow is exercised through the real query router and account session.
+func TestAISitePairingFlowUsesOwnerApprovalAndHeaderCredentials(t *testing.T) {
+	application, database := newTestApplication(t)
+	application.aiCapabilities = aicapability.NewManager()
+	t.Cleanup(application.aiCapabilities.Close)
+	application.aiExecutor = aieditor.NewExecutor(&appAIStore{application: application}, 4)
+	t.Cleanup(application.aiExecutor.Close)
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "owner@example.org", "password"); err != nil {
+		t.Fatal(err)
+	}
+	cookie := newAdminSessionCookie(t, application, "owner@example.org")
+	route := func(method, target, body, contentType, capabilityToken, sessionToken string, admin bool) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(method, "http://localhost"+target, strings.NewReader(body))
+		request.RemoteAddr = "127.0.0.1:12345"
+		request.Header.Set("Content-Type", contentType)
+		if admin {
+			request.AddCookie(cookie)
+		}
+		if capabilityToken != "" {
+			request.Header.Set("X-SiteBrush-Capability", capabilityToken)
+		}
+		if sessionToken != "" {
+			request.Header.Set("Authorization", "Bearer "+sessionToken)
+		}
+		response := httptest.NewRecorder()
+		application.route(response, request)
+		return response
+	}
+	manifestResponse := route("GET", "/?ai=manifest", "", "", "", "", false)
+	var manifest aicapability.Manifest
+	if json.Unmarshal(manifestResponse.Body.Bytes(), &manifest) != nil || manifest.Domain != "localhost" || manifest.AuthorizationURL != "http://localhost/?ai=pair" || len(manifest.Scopes) != 4 || !strings.Contains(manifestResponse.Header().Get("Link"), "/?ai=manifest") {
+		t.Fatalf("manifest: %d %s", manifestResponse.Code, manifestResponse.Body.String())
+	}
+	documentationResponse := route("GET", "/?ai=documentation", "", "", "", "", false)
+	if documentationResponse.Code != http.StatusOK || documentationResponse.Body.String() != aicapability.Documentation() || !strings.HasPrefix(documentationResponse.Header().Get("Content-Type"), "text/plain") {
+		t.Fatalf("public working guide: %d %s", documentationResponse.Code, documentationResponse.Body.String())
+	}
+	openAPIResponse := route("GET", "/?ai=openapi", "", "", "", "", false)
+	var openAPI struct{ Info struct{ Description string } }
+	if openAPIResponse.Code != http.StatusOK || json.Unmarshal(openAPIResponse.Body.Bytes(), &openAPI) != nil || openAPI.Info.Description != documentationResponse.Body.String() {
+		t.Fatal("OpenAPI does not carry the canonical working guide")
+	}
+	pairResponse := route("POST", "/?ai=pair", "", "", "", "", false)
+	var pairing struct {
+		VerificationURL string `json:"verification_url"`
+		DeviceCode      string `json:"device_code"`
+	}
+	if json.Unmarshal(pairResponse.Body.Bytes(), &pairing) != nil || pairing.DeviceCode == "" || pairing.VerificationURL == "" {
+		t.Fatalf("pair: %d %s", pairResponse.Code, pairResponse.Body.String())
+	}
+	verification, _ := url.Parse(pairing.VerificationURL)
+	verificationTarget := verification.RequestURI()
+	login := route("GET", verificationTarget, "", "", "", "", false)
+	if login.Code != http.StatusSeeOther || !strings.Contains(login.Header().Get("Location"), "login") {
+		t.Fatalf("login redirect: %d %s", login.Code, login.Body.String())
+	}
+	pending := route("POST", "/?ai=token", `{"device_code":"`+pairing.DeviceCode+`"}`, "application/json", "", "", false)
+	if pending.Code != http.StatusAccepted {
+		t.Fatalf("pending: %d %s", pending.Code, pending.Body.String())
+	}
+	approvalPage := route("GET", verificationTarget, "", "", "", "", true)
+	if approvalPage.Code != http.StatusOK || !strings.Contains(approvalPage.Body.String(), `name="scope_analytics" checked`) || strings.Contains(approvalPage.Body.String(), pairing.DeviceCode) {
+		t.Fatalf("approval: %d %s", approvalPage.Code, approvalPage.Body.String())
+	}
+	deniedCSRF := route("POST", verificationTarget, "decision=allow&scope_read=on", "application/x-www-form-urlencoded", "", "", true)
+	if deniedCSRF.Code != http.StatusForbidden {
+		t.Fatalf("CSRF: %d %s", deniedCSRF.Code, deniedCSRF.Body.String())
+	}
+	csrfRequest := httptest.NewRequest("GET", "http://localhost/", nil)
+	csrfRequest.AddCookie(cookie)
+	form := url.Values{"account_csrf": {accountCSRF(csrfRequest)}, "decision": {"allow"}, "scope_read": {"on"}, "scope_write": {"on"}, "scope_publish": {"on"}, "scope_analytics": {"on"}}
+	approval := route("POST", verificationTarget, form.Encode(), "application/x-www-form-urlencoded", "", "", true)
+	if approval.Code != http.StatusSeeOther || strings.Contains(approval.Body.String(), "capability") {
+		t.Fatalf("approve: %d %s", approval.Code, approval.Body.String())
+	}
+	claim := route("POST", "/?ai=token", `{"device_code":"`+pairing.DeviceCode+`"}`, "application/json", "", "", false)
+	var grant struct {
+		Capability string `json:"capability"`
+	}
+	if json.Unmarshal(claim.Body.Bytes(), &grant) != nil || grant.Capability == "" {
+		t.Fatalf("claim: %d %s", claim.Code, claim.Body.String())
+	}
+	exchange := route("POST", "/?ai=exchange", "", "", grant.Capability, "", false)
+	var session aicapability.Session
+	if json.Unmarshal(exchange.Body.Bytes(), &session) != nil || session.Token == "" || session.Owner != "owner@example.org" {
+		t.Fatalf("exchange: %d %s", exchange.Code, exchange.Body.String())
+	}
+	create := route("POST", "/?ai=page", `{"operation":"create_page","path":"/catalog","title":"Catalog","html":"<p>Shop</p>"}`, "application/json", grant.Capability, session.Token, false)
+	if create.Code != http.StatusOK {
+		t.Fatalf("create: %d %s", create.Code, create.Body.String())
+	}
+	read := route("GET", "/?ai=page&path=/catalog", "", "", grant.Capability, session.Token, false)
+	var readResult struct {
+		Payload aiPageView `json:"payload"`
+	}
+	if json.Unmarshal(read.Body.Bytes(), &readResult) != nil || readResult.Payload.Version == "" || readResult.Payload.HTML != "<p>Shop</p>" {
+		t.Fatalf("read: %d %s", read.Code, read.Body.String())
+	}
+	conflict := route("POST", "/?ai=page", `{"path":"/catalog","html":"stale","expected_version":"0"}`, "application/json", grant.Capability, session.Token, false)
+	if conflict.Code != http.StatusConflict {
+		t.Fatalf("conflict: %d %s", conflict.Code, conflict.Body.String())
+	}
+	report := route("GET", "/?ai=get_site_report&days=30", "", "", grant.Capability, session.Token, false)
+	if report.Code != http.StatusOK || !strings.Contains(report.Body.String(), `"available":false`) {
+		t.Fatalf("report: %d %s", report.Code, report.Body.String())
+	}
+	links, err := application.aiCapabilities.ListCapabilities("owner@example.org", "localhost")
+	if err != nil || len(links) != 1 {
+		t.Fatalf("manageable grants: %+v %v", links, err)
+	}
+	if err := application.aiCapabilities.RevokeCapabilityID(links[0].ID, "owner@example.org", "localhost"); err != nil {
+		t.Fatal(err)
+	}
+	revoked := route("GET", "/?ai=pages", "", "", grant.Capability, session.Token, false)
+	if revoked.Code != http.StatusUnauthorized {
+		t.Fatalf("revoked: %d %s", revoked.Code, revoked.Body.String())
+	}
+}
+
+func TestAICapabilityScopesGateReadAnalyticsAndPublication(t *testing.T) {
+	application, database := newTestApplication(t)
+	application.aiCapabilities = aicapability.NewManager()
+	t.Cleanup(application.aiCapabilities.Close)
+	application.aiExecutor = aieditor.NewExecutor(&appAIStore{application: application}, 4)
+	t.Cleanup(application.aiExecutor.Close)
+	if err := application.persistFinalPageSave(context.Background(), "localhost", "/one", "/one", "One", "old"); err != nil {
+		t.Fatal(err)
+	}
+	for _, scenario := range []struct {
+		scopes                  []string
+		operation, method, body string
+		expected                int
+	}{
+		{[]string{aicapability.ScopeAnalytics}, "pages", "GET", "", 403},
+		{[]string{aicapability.ScopeRead}, "get_site_report", "GET", "", 403},
+		{[]string{aicapability.ScopeAnalytics}, "get_site_report", "POST", "{}", 405},
+		{[]string{aicapability.ScopeWrite}, "publish", "POST", "{}", 403},
+		{[]string{aicapability.ScopeAnalytics}, "get_site_report&days=4", "GET", "", 400},
+		{[]string{aicapability.ScopeRead, aicapability.ScopeWrite}, "page", "POST", `{"path":"/one","html":"draft"}`, 400},
+	} {
+		token, _, err := application.aiCapabilities.IssueFor("localhost", "owner@example.org", scenario.scopes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		session, err := application.aiCapabilities.Exchange(token, "localhost")
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := httptest.NewRequest(scenario.method, "http://localhost/?ai="+scenario.operation, strings.NewReader(scenario.body))
+		request.RemoteAddr = "127.0.0.1:12345"
+		request.Header.Set("X-SiteBrush-Capability", token)
+		request.Header.Set("Authorization", "Bearer "+session.Token)
+		response := httptest.NewRecorder()
+		application.route(response, request)
+		if response.Code != scenario.expected {
+			t.Fatalf("%s scopes=%v: %d %s", scenario.operation, scenario.scopes, response.Code, response.Body.String())
+		}
+	}
+	page, err := application.readAIPage(context.Background(), "localhost", "/one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, _, err := application.aiCapabilities.IssueFor("localhost", "owner@example.org", []string{aicapability.ScopeRead, aicapability.ScopeWrite})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := application.aiCapabilities.Exchange(token, "localhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(aieditor.Request{Operation: aieditor.OperationUpdatePage, Path: "/one", HTML: "draft", ExpectedVersion: page.Version})
+	request := httptest.NewRequest("POST", "http://localhost/?ai=page", bytes.NewReader(body))
+	request.RemoteAddr = "127.0.0.1:12345"
+	request.Header.Set("X-SiteBrush-Capability", token)
+	request.Header.Set("Authorization", "Bearer "+session.Token)
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("write-only draft: %d %s", response.Code, response.Body.String())
+	}
+	var published string
+	if err := database.QueryRow(`SELECT html FROM published_pages WHERE domain=? AND path=?`, "localhost", "/one").Scan(&published); err != nil || published != "old" {
+		t.Fatalf("draft changed published page: %q %v", published, err)
+	}
+}
+
+func TestAISiteTemplateSaveAndPageOnlyGrantUseEditorPipeline(t *testing.T) {
+	for _, pageOnly := range []bool{false, true} {
+		t.Run(strconv.FormatBool(pageOnly), func(t *testing.T) {
+			application, database := newTestApplication(t)
+			before := `<section class="SiteBrush-Template shared"><p>Old</p></section>`
+			after := strings.Replace(before, "Old", "New", 1)
+			for _, pagePath := range []string{"/", "/about"} {
+				if _, err := database.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES('localhost',?,?,?,1)`, pagePath, pagePath, before); err != nil {
+					t.Fatal(err)
+				}
+			}
+			application.browserAnalytics = make(chan browserAnalyticsEnvelope, 8)
+			if _, err := application.saveAIPage(context.Background(), "localhost", aieditor.Request{Operation: aieditor.OperationUpdatePage, Path: "/", HTML: after, PageOnly: pageOnly}); err != nil {
+				t.Fatal(err)
+			}
+			var about string
+			if err := database.QueryRow(`SELECT html FROM pages WHERE domain='localhost' AND path='/about'`).Scan(&about); err != nil {
+				t.Fatal(err)
+			}
+			if pageOnly && about != before || !pageOnly && !strings.Contains(about, "New") {
+				t.Fatalf("template scope pageOnly=%v: %s", pageOnly, about)
+			}
+			var revisions int
+			if err := database.QueryRow(`SELECT COUNT(1) FROM revisions WHERE domain='localhost'`).Scan(&revisions); err != nil {
+				t.Fatal(err)
+			}
+			expected := 2
+			if pageOnly {
+				expected = 1
+			}
+			if revisions != expected {
+				t.Fatalf("got %d revisions, expected %d", revisions, expected)
+			}
+		})
+	}
+}
+
+func TestAIConcurrentVersionGuardsUseProductionDatabaseOwner(t *testing.T) {
+	application, database := newTestApplication(t)
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(application.storagePath, "sitebrush.db"), filepath.Join(application.storagePath, "localhost.db")); err != nil {
+		t.Fatal(err)
+	}
+	router := newPerSiteDBRouter(application.storagePath, "localhost", func(boundary context.Context, rawDatabase *sql.DB, domain string) error {
+		migrationApp := &App{db: rawDatabase, storagePath: application.storagePath}
+		return migrationApp.migrate(contextWithDomain(boundary, domain))
+	}, false)
+	t.Cleanup(func() {
+		if err := router.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	waitSiteDBRouterStartup(t, router)
+	application.db = router
+	if err := application.persistFinalPageSave(context.Background(), "localhost", "/one", "/one", "One", "old"); err != nil {
+		t.Fatal(err)
+	}
+	page, err := application.readAIPage(context.Background(), "localhost", "/one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	replies := make(chan error, 2)
+	for _, html := range []string{"first", "second"} {
+		go func(document string) {
+			<-start
+			_, saveErr := application.saveAIPage(context.Background(), "localhost", aieditor.Request{Operation: aieditor.OperationUpdatePage, Path: "/one", HTML: document, ExpectedVersion: page.Version})
+			replies <- saveErr
+		}(html)
+	}
+	close(start)
+	accepted, conflicts := 0, 0
+	for range 2 {
+		select {
+		case saveErr := <-replies:
+			if saveErr == nil {
+				accepted++
+			} else if errors.Is(saveErr, aieditor.ErrVersionConflict) {
+				conflicts++
+			} else {
+				t.Fatal(saveErr)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("database owner did not finish concurrent writes")
+		}
+	}
+	if accepted != 1 || conflicts != 1 {
+		t.Fatalf("accepted=%d conflicts=%d", accepted, conflicts)
+	}
+}
+
+func TestAIUploadsAreImmutableAndUseSharedImageStorage(t *testing.T) {
+	application, database := newTestApplication(t)
+	done := make(chan struct{})
+	defer close(done)
+	firstContent := []byte("old picture")
+	first, err := application.saveAIFile(context.Background(), "localhost", aieditor.Request{FileName: "photo.png", FileContent: firstContent, Path: "/one"}, done)
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicate, err := application.saveAIFile(context.Background(), "localhost", aieditor.Request{FileName: "photo.png", FileContent: firstContent, Path: "/one"}, done)
+	if err != nil || duplicate != first {
+		t.Fatalf("duplicate: %q %v", duplicate, err)
+	}
+	second, err := application.saveAIFile(context.Background(), "localhost", aieditor.Request{FileName: "photo.png", FileContent: []byte("new picture"), Path: "/one"}, done)
+	if err != nil || first == second || len(first) != 64+len(".png") {
+		t.Fatalf("content identity: %q %q %v", first, second, err)
+	}
+	stored, err := application.readFileInsideStorage(filepath.Join(application.domainFilesDirForDomain("localhost"), first))
+	if err != nil || string(stored) != string(firstContent) {
+		t.Fatalf("old file overwritten: %q %v", stored, err)
+	}
+	var fileBytes int64
+	if err := database.QueryRow(`SELECT file_bytes FROM domain_storage_usage WHERE domain='localhost'`).Scan(&fileBytes); err != nil || fileBytes != int64(len(firstContent)+len("new picture")) {
+		t.Fatalf("deduplicated quota=%d err=%v", fileBytes, err)
+	}
+	var source bytes.Buffer
+	if err := png.Encode(&source, image.NewRGBA(image.Rect(0, 0, 20, 20))); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := application.saveAIFile(context.Background(), "localhost", aieditor.Request{FileName: "small.png", FileContent: source.Bytes(), ImageWidth: 4, ImageHeight: 3, ImageFit: "cover"}, done)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparedBytes, err := application.readFileInsideStorage(filepath.Join(application.domainFilesDirForDomain("localhost"), prepared))
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuration, _, err := image.DecodeConfig(bytes.NewReader(preparedBytes))
+	if err != nil || configuration.Width != 8 || configuration.Height != 6 {
+		t.Fatalf("shared image pipeline dimensions=%+v err=%v", configuration, err)
+	}
+}
+
+func TestAIVersionGuardDetectsRevisionReactivationWithoutANewRevision(t *testing.T) {
+	application, database := newTestApplication(t)
+	for _, document := range []string{"old", "new"} {
+		if err := application.persistFinalPageSave(context.Background(), "localhost", "/one", "/one", "One", document); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page, err := application.readAIPage(context.Background(), "localhost", "/one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`UPDATE revisions SET is_active=0 WHERE id=(SELECT MAX(id) FROM revisions WHERE domain='localhost' AND page_path='/one')`); err != nil {
+		t.Fatal(err)
+	}
+	application.applyLatestActiveRevision(context.Background(), "localhost", "/one")
+	current, err := application.readAIPage(context.Background(), "localhost", "/one")
+	if err != nil || current.HTML != "old" || current.Version == page.Version {
+		t.Fatalf("reactivation version=%q old=%q html=%q err=%v", current.Version, page.Version, current.HTML, err)
+	}
+	_, err = application.saveAIPage(context.Background(), "localhost", aieditor.Request{Operation: aieditor.OperationUpdatePage, Path: "/one", HTML: "stale AI edit", ExpectedVersion: page.Version, StrictVersion: true})
+	if !errors.Is(err, aieditor.ErrVersionConflict) {
+		t.Fatalf("stale edit overwrote reactivated revision: %v", err)
+	}
+}
+
+func TestAIEditorInlineAttachmentsResolveToImmutableUploadedFiles(t *testing.T) {
+	application, _ := newTestApplication(t)
+	application.aiExecutor = aieditor.NewExecutor(&appAIStore{application: application}, 4)
+	t.Cleanup(application.aiExecutor.Close)
+	files, _, err := decodeAIEditorFiles([]aiEditorUploadedFile{{Name: "photo.jpg", Content: base64.StdEncoding.EncodeToString([]byte("photo"))}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest("POST", "http://localhost/?ai_apply", nil)
+	if err := application.storeAIEditorFiles(request, "/", files); err != nil {
+		t.Fatal(err)
+	}
+	references := aiEditorFileReferences(files)
+	stored, err := application.readFileInsideStorage(filepath.Join(application.domainFilesDirForDomain("localhost"), references[0].Name))
+	if err != nil || string(stored) != "photo" || references[0].URL != "/p/"+files[0].Name || references[0].OriginalName != "photo.jpg" {
+		t.Fatalf("attachment reference is not the uploaded file: %+v %q %v", references, stored, err)
+	}
 }

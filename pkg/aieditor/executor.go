@@ -20,12 +20,16 @@ const (
 )
 
 var (
+	ErrVersionConflict      = errors.New("revision conflict")
 	ErrInvalidRequest       = errors.New("AI editor request is invalid")
 	ErrUnsupportedOperation = errors.New("AI editor operation is not supported")
 	ErrTaskCanceled         = errors.New("AI editor task was canceled")
 )
 
 type Request struct {
+	DraftOnly       bool      `json:"-"`
+	PageOnly        bool      `json:"-"`
+	StrictVersion   bool      `json:"-"`
 	Domain          string    `json:"domain,omitempty"`
 	Operation       Operation `json:"operation"`
 	Path            string    `json:"path,omitempty"`
@@ -33,6 +37,10 @@ type Request struct {
 	HTML            string    `json:"html,omitempty"`
 	FileName        string    `json:"file_name,omitempty"`
 	FileContent     []byte    `json:"file_content,omitempty"`
+	RevisionID      string    `json:"revision_id,omitempty"`
+	ImageWidth      int       `json:"image_width,omitempty"`
+	ImageHeight     int       `json:"image_height,omitempty"`
+	ImageFit        string    `json:"image_fit,omitempty"`
 	ExpectedVersion string    `json:"expected_version,omitempty"`
 }
 

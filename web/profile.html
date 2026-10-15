@@ -351,11 +351,18 @@
     {{if .NextURL}}<a href="{{.NextURL}}">{{index $.T "account_next_page"}}</a>{{end}}
   </nav>{{end}}{{end}}
 </section>
+<section id="ai-access" class="authentication-card profile-form profile-account-card profile-ai-connect-card">
+  <div class="profile-account-card-header">
+    <h2>AI · SiteBrush</h2>
+    <p>{{if eq .LanguageCode "ru"}}Скажите AI: «Помоги мне с сайтом https://{{.Domain}}». Он сможет обнаружить SiteBrush и предложить ссылку для подтверждения доступа ко всему сайту и аналитике. API-ключи и настройка приложения не нужны.{{else}}Tell your AI: “Help me with https://{{.Domain}}”. It can discover SiteBrush and offer a link to approve site and analytics access. No API key or application setup is needed.{{end}}</p>
+  </div>
+</section>
 {{if .HasAIAccess}}
 <section class="authentication-card profile-form profile-account-card profile-ai-card">
   <div class="profile-account-card-header">
     <h2>{{index .T "profile_ai_access_title"}}</h2>
     <p>{{index .T "profile_ai_access_help"}}</p>
+
   </div>
   <div class="profile-account-list">
   <h3>Revocable links</h3>
