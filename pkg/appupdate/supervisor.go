@@ -61,7 +61,7 @@ func Run(options Options, stop <-chan struct{}) error {
 	if err != nil {
 		return err
 	}
-	listener, err := netchan.Listen[Request](Address(options.StoragePath), netchan.Config{Capacity: 8, TLS: configuration})
+	listener, err := netchan.Listen[wireRequest](Address(options.StoragePath), netchan.Config{Capacity: 8, TLS: configuration})
 	if err != nil {
 		return fmt.Errorf("another supervisor or conflicting listener owns this installation: %w", err)
 	}
@@ -338,7 +338,7 @@ func settleOperation(store *os.Root, state State, progress chan<- transition, st
 	return state
 }
 
-func acceptContacts(listener *netchan.Listener[Request], requests chan<- Request, sessions chan struct{}, stop <-chan struct{}) {
+func acceptContacts(listener *netchan.Listener[wireRequest], requests chan<- Request, sessions chan struct{}, stop <-chan struct{}) {
 	for {
 		select {
 		case <-stop:
@@ -354,6 +354,8 @@ func acceptContacts(listener *netchan.Listener[Request], requests chan<- Request
 				go func() {
 					defer func() { <-sessions }()
 					graceful := false
+					bridgeStop := make(chan struct{})
+					var bridgeDone chan struct{}
 					defer func() {
 						if graceful {
 							_ = connection.Close()
@@ -361,19 +363,39 @@ func acceptContacts(listener *netchan.Listener[Request], requests chan<- Request
 							_ = connection.Abort()
 						}
 					}()
+					defer func() {
+						close(bridgeStop)
+						if bridgeDone != nil {
+							<-bridgeDone
+						}
+					}()
 					for {
 						select {
 						case <-stop:
 							return
+						case <-bridgeDone:
+							return
 						case <-connection.Done:
 							return
-						case request, open := <-connection.Receive:
+						case message, open := <-connection.Receive:
 							if !open {
 								return
 							}
+							if message.Protocol != Protocol {
+								return
+							}
+							request := Request{Action: message.Action, ManifestHash: message.ManifestHash, Detail: message.Detail}
+							if message.Child != nil {
+								if request.Action != "attach" || bridgeDone != nil {
+									return
+								}
+								tasks := make(chan ChildTask, 8)
+								bridgeDone = make(chan struct{})
+								go sendChildWire(tasks, message.Child, bridgeStop, bridgeDone)
+								request.Child = tasks
+							}
 							reply := make(chan Response, 1)
 							request.Reply = reply
-							request.Result = nil
 							select {
 							case requests <- request:
 							case <-stop:
@@ -385,7 +407,11 @@ func acceptContacts(listener *netchan.Listener[Request], requests chan<- Request
 							}
 							select {
 							case response := <-reply:
-								if err := connection.Deliver(Request{Result: &response}); err != nil {
+								result, err := encodeContactResult(response)
+								if err != nil {
+									return
+								}
+								if err := connection.Deliver(result); err != nil {
 									return
 								}
 								if request.Action != "attach" {

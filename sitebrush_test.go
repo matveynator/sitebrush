@@ -50,6 +50,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/aieditor"
 	"github.com/matveynator/sitebrush/v2/pkg/aiprovider"
 	browserstats "github.com/matveynator/sitebrush/v2/pkg/analytics"
+	"github.com/matveynator/sitebrush/v2/pkg/appupdate"
 	"github.com/matveynator/sitebrush/v2/pkg/authmail"
 	"github.com/matveynator/sitebrush/v2/pkg/channelacme"
 	"github.com/matveynator/sitebrush/v2/pkg/crawler"
@@ -23069,5 +23070,175 @@ func TestBrowserAnalyticsShutdownPersistsFirstQueuedVisit(t *testing.T) {
 		if err := json.Unmarshal([]byte(saved.Text), &reports); err != nil || reports["7"].Conversion.Visitors != 1 {
 			t.Fatal("shutdown lost or duplicated the queued visit", saved.Text, err)
 		}
+	}
+}
+
+func TestUpdateDevelopmentBuildNeverContactsStaleSupervisor(t *testing.T) {
+	application, _ := newUpdateTestApplication(t)
+	application.developmentMode = true
+	cookie := newAdminSessionCookie(t, application, "owner@example.com")
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/?server_update_ws", nil)
+	request.AddCookie(cookie)
+	csrf := accountCSRF(request)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Host = "localhost"
+		r = r.WithContext(contextWithDomain(r.Context(), "localhost"))
+		application.serverUpdatePage(w, r)
+	}))
+	defer server.Close()
+	configuration, err := websocket.NewConfig("ws"+strings.TrimPrefix(server.URL, "http")+"/?server_update_ws", "http://localhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuration.Header.Set("Cookie", cookie.String())
+	connection, err := websocket.DialConfig(configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	if err := connection.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{"status", "check", "upgrade", "rollback"} {
+		if err := websocket.JSON.Send(connection, map[string]string{"action": action, "csrf": csrf}); err != nil {
+			t.Fatal(err)
+		}
+		var response serverUpdateResponse
+		if err := websocket.JSON.Receive(connection, &response); err != nil {
+			t.Fatal(err)
+		}
+		if response.State.Current.Version != CompileVersion || response.State.Stage != "unsupported" || !strings.Contains(response.Error, "numbered server build") {
+			t.Fatalf("development %s: %+v", action, response)
+		}
+	}
+	status, err := application.announcementLiveStatus()
+	if err != nil || status.Enabled || status.Version != CompileVersion {
+		t.Fatalf("development announcement status: %+v %v", status, err)
+	}
+	if _, err := os.Stat(filepath.Join(application.storagePath, appupdate.Directory)); !os.IsNotExist(err) {
+		t.Fatal("development request created updater state")
+	}
+}
+
+func TestUpdateDevelopmentStartupRespectsInstallationSession(t *testing.T) {
+	if CompileVersion != "dev" || runningInContainer() {
+		t.Skip("requires a native development server build")
+	}
+	root := t.TempDir()
+	session, err := appupdate.ServerSession(root, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	databasePath := filepath.Join(root, defaultDBPath)
+	err = runSupervisedSitebrush(context.Background(), serverRunConfig{StoragePath: root, DBPath: databasePath})
+	if err == nil || !strings.Contains(err.Error(), "another server process") {
+		t.Fatalf("development session exclusion: %v", err)
+	}
+	if _, err := os.Stat(databasePath); !os.IsNotExist(err) {
+		t.Fatal("competing development process opened a database")
+	}
+}
+
+func TestUpdateDevelopmentSourceStartupIgnoresCachedExecutable(t *testing.T) {
+	if CompileVersion != "dev" || runningInContainer() {
+		t.Skip("requires a native development server build")
+	}
+	if root := os.Getenv("SITEBRUSH_TEST_DEV_SOURCE_ROOT"); root != "" {
+		ports, err := parseListenPorts(os.Getenv("SITEBRUSH_TEST_DEV_SOURCE_PORT"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		boundary, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() { _, _ = io.Copy(io.Discard, os.Stdin); cancel() }()
+		if err := runSupervisedSitebrush(boundary, serverRunConfig{StoragePath: root, DBPath: filepath.Join(root, defaultDBPath), ParsedPorts: ports, PortWasProvided: true}); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	root := t.TempDir()
+	updateDirectory := filepath.Join(root, appupdate.Directory)
+	if err := os.Mkdir(updateDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	journal := []byte(`{"stage":"current","current":{"version":"dev","binary":"versions/stale-development/sitebrush","sha256":"old"},"launcher":"/missing/old/go-run/sitebrush"}`)
+	journalPath := filepath.Join(updateDirectory, "state.json")
+	if err := os.WriteFile(journalPath, journal, 0600); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+	listener.Close()
+	outputPath := filepath.Join(t.TempDir(), "startup.log")
+	output, err := os.Create(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer output.Close()
+	command := exec.Command(os.Args[0], "-test.run=^TestUpdateDevelopmentSourceStartupIgnoresCachedExecutable$")
+	command.Env = append(os.Environ(), "SITEBRUSH_TEST_DEV_SOURCE_ROOT="+root, "SITEBRUSH_TEST_DEV_SOURCE_PORT="+port, "SITEBRUSH_SERVICE_MAIL_MODE=local")
+	command.Stdout = output
+	command.Stderr = output
+	input, err := command.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Start(); err != nil {
+		input.Close()
+		t.Fatal(err)
+	}
+	finished := make(chan error, 1)
+	go func() { finished <- command.Wait() }()
+	defer func() {
+		input.Close()
+		select {
+		case err := <-finished:
+			if err != nil {
+				contents, _ := os.ReadFile(outputPath)
+				t.Errorf("development shutdown: %v\n%s", err, contents)
+			}
+		case <-time.After(15 * time.Second):
+			command.Process.Kill()
+			<-finished
+			t.Error("development shutdown timed out")
+		}
+	}()
+	client := &http.Client{Timeout: time.Second, Transport: &http.Transport{Proxy: nil}}
+	defer client.CloseIdleConnections()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		select {
+		case err := <-finished:
+			finished <- err
+			contents, _ := os.ReadFile(outputPath)
+			t.Fatalf("development startup exited: %v\n%s", err, contents)
+		default:
+		}
+		response, err := client.Get("http://localhost:" + port + "/")
+		if err == nil {
+			response.Body.Close()
+			if response.StatusCode == http.StatusOK {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			contents, _ := os.ReadFile(outputPath)
+			t.Fatalf("development source failed to start with obsolete journal:\n%s", contents)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	select {
+	case err := <-finished:
+		finished <- err
+		t.Fatalf("development server exited after startup: %v", err)
+	case <-time.After(250 * time.Millisecond):
+	}
+	contents, err := os.ReadFile(journalPath)
+	if err != nil || !bytes.Equal(contents, journal) {
+		t.Fatal("source startup modified managed release journal")
 	}
 }

@@ -21,7 +21,9 @@ import (
 	"time"
 )
 
-const Protocol = 1
+// Protocol 2 prevents prototype launchers from installing binaries whose frozen
+// local contact schema they cannot speak. The persistent-data contract is separate.
+const Protocol = 2
 const manifestLimit = 256 << 10
 const binaryLimit int64 = 256 << 20
 const Repository = "matveynator/sitebrush"

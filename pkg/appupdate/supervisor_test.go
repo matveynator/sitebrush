@@ -155,6 +155,15 @@ func startFixtureSupervisor(t *testing.T, root string, scenario string) (Options
 	if err != nil {
 		t.Fatal(err)
 	}
+	return startFixtureSupervisorWithPayload(t, root, scenario, payload)
+}
+
+func startFixtureSupervisorWithPayload(t *testing.T, root, scenario string, payload []byte) (Options, <-chan struct{}, chan struct{}) {
+	t.Helper()
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
 	manifest, publicKey, privateKey := testRelease(t, payload)
 	if scenario == "third-release" {
 		manifest.Version = "3"

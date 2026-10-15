@@ -27,7 +27,6 @@ type Request struct {
 	Reply        chan<- Response
 	Child        chan<- ChildTask
 	Detail       string
-	Result       *Response
 }
 
 type ChildTask struct {
@@ -85,30 +84,39 @@ func ChildContact(storagePath string, tasks chan ChildTask, stop <-chan struct{}
 	if err != nil {
 		return err
 	}
-	connection, err := netchan.Dial[Request](Address(storagePath), netchan.Config{Capacity: 4, TLS: configuration})
+	connection, err := netchan.Dial[wireRequest](Address(storagePath), netchan.Config{Capacity: 4, TLS: configuration})
 	if err != nil {
 		return err
 	}
 	defer connection.Abort()
-	if err := sendChannel(connection.Send, Request{Action: "attach", Child: tasks}, stop, 5*time.Second); err != nil {
+	session := make(chan wireChildTask, 8)
+	bridgeStop := make(chan struct{})
+	bridgeDone := make(chan struct{})
+	go receiveChildWire(session, tasks, bridgeStop, bridgeDone)
+	defer func() { close(bridgeStop); <-bridgeDone }()
+	if err := sendChannel(connection.Send, wireRequest{Protocol: Protocol, Action: "attach", Child: session}, stop, 5*time.Second); err != nil {
 		return err
 	}
 	select {
 	case response, open := <-connection.Receive:
-		if !open || response.Result == nil {
+		if !open {
 			return errors.New("supervisor reply contact terminated")
 		}
-		if response.Result.Error != "" {
-			return errors.New(response.Result.Error)
+		if _, err := decodeContactResult(response); err != nil {
+			return err
 		}
 	case <-stop:
 		return nil
+	case <-bridgeDone:
+		return errors.New("child lifecycle contact terminated")
 	case <-connection.Done:
 		return errors.New("supervisor contact lost")
 	}
 	select {
 	case <-stop:
 		return nil
+	case <-bridgeDone:
+		return errors.New("child lifecycle contact terminated")
 	case <-connection.Done:
 		return errors.New("supervisor contact lost")
 	}
@@ -211,7 +219,7 @@ func Exchange(storagePath string, request Request, stop <-chan struct{}) (Respon
 	if err != nil {
 		return Response{}, err
 	}
-	connection, err := netchan.Dial[Request](Address(storagePath), netchan.Config{Capacity: 4, TLS: configuration})
+	connection, err := netchan.Dial[wireRequest](Address(storagePath), netchan.Config{Capacity: 4, TLS: configuration})
 	if err != nil {
 		return Response{}, err
 	}
@@ -223,23 +231,18 @@ func Exchange(storagePath string, request Request, stop <-chan struct{}) (Respon
 			_ = connection.Abort()
 		}
 	}()
-	request.Reply = nil
-	request.Result = nil
 	timer := time.NewTimer(15 * time.Second)
 	defer timer.Stop()
-	if err := sendChannel(connection.Send, request, stop, 5*time.Second); err != nil {
+	if err := sendChannel(connection.Send, wireRequest{Protocol: Protocol, Action: request.Action, ManifestHash: request.ManifestHash, Detail: request.Detail}, stop, 5*time.Second); err != nil {
 		return Response{}, err
 	}
 	select {
 	case response, open := <-connection.Receive:
-		if !open || response.Result == nil {
+		if !open {
 			return Response{}, errors.New("supervisor reply contact terminated")
 		}
 		graceful = true
-		if response.Result.Error != "" {
-			return *response.Result, errors.New(response.Result.Error)
-		}
-		return *response.Result, nil
+		return decodeContactResult(response)
 	case <-stop:
 		return Response{}, errors.New("update request canceled")
 	case <-connection.Done:
