@@ -53,7 +53,7 @@ function installationPanel(central) {
     element('[data-announcement-cancel-label]').content = {textContent: 'Cancel'};
   }
   root.querySelector = selector => selector === '[data-announcements]' ? announcements : element(selector);
-  root.querySelectorAll = selector => selector === '[data-stage]' ? ['current', 'available', 'preparing', 'downloading', 'verifying', 'inspecting', 'backing_up', 'installing', 'restarting', 'checking', 'activating', 'completed', 'failed', 'rolling_back', 'rolled_back'].map(stage => ({dataset: {stage}, textContent: stage})) : Array.from(templateSource.matchAll(/data-label="([^"]+)">\{\{index \.T "([^"]+)"\}\}/g), match => ({dataset: {label: match[1]}, textContent: translations[match[2]]}));
+  root.querySelectorAll = selector => selector === '[data-stage]' ? ['current', 'available', 'preparing', 'downloading', 'verifying', 'inspecting', 'preparing_backup', 'backing_up', 'installing', 'restarting', 'checking', 'activating', 'completed', 'failed', 'rolling_back', 'rolled_back'].map(stage => ({dataset: {stage}, textContent: stage})) : Array.from(templateSource.matchAll(/data-label="([^"]+)">\{\{index \.T "([^"]+)"\}\}/g), match => ({dataset: {label: match[1]}, textContent: translations[match[2]]}));
   let now = Date.parse('2026-10-16T00:00:10Z');
   class TestDate extends Date { static now() { return now; } }
   let clipboardText = '';
@@ -73,7 +73,7 @@ function installationPanel(central) {
     constructor(address) { super(); this.address = address; this.readyState = 1; this.commands = []; sockets.push(this); }
     send(payload) { this.commands.push(JSON.parse(payload)); }
     close() { this.readyState = 3; this.dispatch('close'); }
-    reply(response) { for (const callback of this.listeners.get('message')) callback({data: JSON.stringify(response)}); }
+    reply(response) { if (response.State) response.State = {backup_options: true, ...response.State}; for (const callback of this.listeners.get('message')) callback({data: JSON.stringify(response)}); }
   }
   vm.runInNewContext(source, {document, window, WebSocket: Socket, URL, Blob, navigator, Date: TestDate, console});
   assert.equal(sockets.length, 1);
@@ -92,9 +92,10 @@ function installationPanel(central) {
 async function testUpdatePanel() {
 const ordinary = installationPanel(false);
 ordinary.element('[data-update-install]').dispatch('click');
-assert.equal(ordinary.socket.commands.at(-1).action, 'upgrade');
+assert.equal(ordinary.socket.commands.at(-1).action, 'upgrade_with_options');
 assert.equal(ordinary.socket.commands.at(-1).csrf, 'session-proof');
 assert.equal(ordinary.socket.commands.at(-1).manifest_hash, 'signed-release');
+assert.deepEqual(ordinary.socket.commands.at(-1).backup_policy, {databases: true, analytics: true, files: true, settings: true});
 assert.equal(ordinary.element('[data-update-install]').disabled, true);
 ordinary.poll();
 assert.equal(ordinary.socket.commands.length, 2, 'polling must not queue behind an outstanding operation');
@@ -103,11 +104,38 @@ assert.equal(ordinary.element('[data-update-error]').textContent, 'Checksum fail
 assert.equal(ordinary.element('[data-update-error]').hidden, false);
 assert.equal(ordinary.element('[data-update-rollback]').disabled, false);
 ordinary.element('[data-update-rollback]').dispatch('click');
-assert.equal(ordinary.socket.commands.at(-1).action, 'rollback');
+assert.equal(ordinary.socket.commands.at(-1).action, 'rollback_with_options');
 ordinary.socket.reply({State: {stage: 'rolled_back', current: {version: '1'}, cleanup_error: 'Old snapshot could not be removed', rollback_available: true}});
 assert.match(ordinary.element('[data-update-cleanup-error]').textContent, /Old snapshot could not be removed/);
 ordinary.windowEvents.get('pagehide')();
 assert.equal(ordinary.element('[data-update-rollback]').disabled, true);
+
+
+const optionsPanel = installationPanel(false);
+const fileCheckbox = optionsPanel.element('[data-backup-group="files"]');
+fileCheckbox.checked = false;
+fileCheckbox.dispatch('change');
+assert.equal(optionsPanel.element('[data-update-backup-warning]').hidden, false);
+optionsPanel.element('[data-update-install]').dispatch('click');
+assert.equal(optionsPanel.socket.commands.at(-1).backup_policy.files, false);
+assert.equal(optionsPanel.socket.commands.at(-1).backup_policy.databases, true);
+optionsPanel.socket.reply({State: {stage: 'available', current: {version: '1'}, available: {version: '21'}, backup_options: false}});
+assert.equal(optionsPanel.element('[data-update-install]').disabled, true, 'old supervisor cannot silently ignore options');
+assert.equal(optionsPanel.element('[data-update-launcher-warning]').hidden, false);
+optionsPanel.socket.reply({State: {stage: 'completed', current: {version: '21'}, notification_code: 'contact', notification_error: 'dial tcp 46.4.4.46:9877: connect: connection refused'}});
+assert.match(optionsPanel.element('[data-update-notification-error]').textContent, /notification service is unavailable/);
+assert.doesNotMatch(optionsPanel.element('[data-update-notification-error]').textContent, /public HTTPS/);
+optionsPanel.socket.reply({State: {stage: 'completed', current: {version: '21'}, notification_code: 'panel_url', notification_error: 'a public HTTPS owner domain is required'}});
+assert.match(optionsPanel.element('[data-update-notification-error]').textContent, /public HTTPS/);
+optionsPanel.socket.reply({State: {stage: 'completed', current: {version: '21'}}});
+assert.equal(optionsPanel.element('[data-update-notification-error]').hidden, true);
+
+const activePolicyPanel = installationPanel(false);
+activePolicyPanel.socket.reply({State: {current: {version: '1'}, busy: true, stage: 'preparing_backup', backup_policy: {databases: true, analytics: true, files: false, settings: true}, progress: {action: 'upgrade', stage: 'preparing_backup'}}});
+assert.equal(activePolicyPanel.element('[data-backup-group="files"]').checked, false, 'a reopened page must show the accepted operation policy');
+assert.equal(activePolicyPanel.element('[data-backup-group="files"]').disabled, true);
+activePolicyPanel.socket.reply({State: {current: {version: '21'}, busy: false, stage: 'completed', progress: {action: 'upgrade', stage: 'completed', finished_at: '2026-10-16T00:00:15Z'}}});
+assert.equal(activePolicyPanel.element('[data-backup-group="files"]').checked, true, 'each subsequent operation defaults to a full backup');
 
 const central = installationPanel(true);
 const previewButton = central.element('[data-announcement-preview]');
@@ -152,8 +180,8 @@ const progress = {
 };
 const downloading = {stage: 'downloading', current: {version: '919'}, busy: true, operation: 'operation-one', progress};
 progressPanel.socket.reply({ServerVersion: '919', State: downloading});
-assert.equal(progressPanel.element('[data-update-percent]').textContent, '16%');
-assert.equal(progressPanel.element('[data-update-progress]').attributes.get('aria-valuenow'), '16');
+assert.equal(progressPanel.element('[data-update-percent]').textContent, '15%');
+assert.equal(progressPanel.element('[data-update-progress]').attributes.get('aria-valuenow'), '15');
 assert.equal(progressPanel.element('[data-update-elapsed]').textContent, '00:00:10');
 assert.equal(progressPanel.element('[data-update-stage-elapsed]').textContent, '00:00:05');
 assert.equal(progressPanel.element('[data-update-remaining]').textContent, 'This step: about 00:00:05');
@@ -161,8 +189,8 @@ const logBefore = progressPanel.element('[data-update-log]').textContent;
 assert.match(logBefore, /<img src=x onerror=alert\(1\)>/);
 assert.equal(progressPanel.element('[data-update-log]').children.length, 0, 'diagnostics must be rendered as text');
 progressPanel.socket.close();
-assert.equal(progressPanel.element('[data-update-percent]').textContent, '16%', 'disconnect must preserve confirmed progress');
-assert.match(progressPanel.element('[data-update-connection]').textContent, /reconnecting automatically/);
+assert.equal(progressPanel.element('[data-update-percent]').textContent, '15%', 'disconnect must preserve confirmed progress');
+assert.match(progressPanel.element('[data-update-connection]').textContent, /reconnecting automatically/i);
 progressPanel.advance(5000);
 progressPanel.tick();
 assert.equal(progressPanel.element('[data-update-elapsed]').textContent, '00:00:15');
@@ -207,7 +235,7 @@ assert.equal(restoredPanel.element('[data-update-error]').hidden, true, 'notific
 const manualProgress = {...completed, action: 'rollback', from_version: '920', target_version: '919', stage: 'preparing', finished_at: '', work: {}, events: []};
 restoredPanel.socket.reply({ServerVersion: '920', State: {...downloading, progress: manualProgress}});
 assert.equal(restoredPanel.element('[data-update-percent]').textContent, '0%');
-assert.equal(restoredPanel.element('[data-update-steps]').children.length, 7, 'manual rollback must omit download and preflight stages');
+assert.equal(restoredPanel.element('[data-update-steps]').children.length, 8, 'manual rollback must omit download and preflight stages');
 assert.equal(restoredPanel.element('[data-update-log]').textContent.includes('<img'), false, 'new operation cannot retain the previous journal');
 const waitingPanel = installationPanel(false);
 waitingPanel.poll();
@@ -216,7 +244,7 @@ waitingPanel.element('[data-update-install]').dispatch('click');
 assert.equal(waitingPanel.socket.commands.at(-1).action, 'status', 'only one request may be in flight');
 assert.equal(waitingPanel.element('[data-update-install]').disabled, true);
 waitingPanel.socket.reply({State: {stage: 'available', current: {version: '1'}, available: {version: '22'}, manifest_hash: 'changed-release'}});
-assert.equal(waitingPanel.socket.commands.at(-1).action, 'upgrade');
+assert.equal(waitingPanel.socket.commands.at(-1).action, 'upgrade_with_options');
 assert.equal(waitingPanel.socket.commands.at(-1).manifest_hash, 'signed-release', 'queued confirmation must keep the release that was displayed at click time');
 const commandErrorPanel = installationPanel(false);
 commandErrorPanel.element('[data-update-install]').dispatch('click');

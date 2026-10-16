@@ -3,8 +3,7 @@
   const updateRoot = document.querySelector('[data-server-update]');
   if (!updateRoot) return;
   const announcementRoot = updateRoot.querySelector('[data-announcements]');
-  const notificationCaption = updateRoot.querySelector('[data-update-notification-error]').textContent;
-  const updateModel = { serverVersion: updateRoot.dataset.serverVersion || '', lastContact: 0, pendingAction: '', queuedCommand: null, logText: '', renderedLog: '', connected: false, state: null, error: '', pending: false, socket: null, stopped: false, preview: null, campaigns: [], reason: 'security' };
+  const updateModel = { serverVersion: updateRoot.dataset.serverVersion || '', lastContact: 0, pendingAction: '', queuedCommand: null, logText: '', renderedLog: '', connected: false, state: null, error: '', pending: false, socket: null, stopped: false, preview: null, campaigns: [], reason: 'security', backupPolicy: {databases: true, analytics: true, files: true, settings: true} };
   const stageLabels = Object.fromEntries(Array.from(updateRoot.querySelectorAll('[data-stage]'), function readStageLabel(stageElement) {
     return [stageElement.dataset.stage, stageElement.textContent];
   }));
@@ -12,11 +11,12 @@
   const interfaceLabels = Object.fromEntries(Array.from(updateRoot.querySelectorAll('[data-label]'), function readInterfaceLabel(labelElement) {
     return [labelElement.dataset.label, labelElement.textContent];
   }));
-  const upgradeStages = ['preparing', 'downloading', 'verifying', 'inspecting', 'backing_up', 'installing', 'restarting', 'checking', 'activating'];
-  const rollbackStages = ['preparing', 'inspecting', 'backing_up', 'installing', 'restarting', 'checking', 'activating'];
+  const upgradeStages = ['preparing', 'downloading', 'verifying', 'inspecting', 'preparing_backup', 'backing_up', 'installing', 'restarting', 'checking', 'activating'];
+  const rollbackStages = ['preparing', 'inspecting', 'preparing_backup', 'backing_up', 'installing', 'restarting', 'checking', 'activating'];
 
   function label(labelName) { return interfaceLabels[labelName] || labelName; }
   function stageLabel(stageName) { return stageLabels[stageName] || label(stageName); }
+  function transferAdvancing(progress) { return updateModel.connected && (!progress.advanced_at || Date.now() - timestamp(progress.advanced_at) < 10000); }
   function timestamp(timeText) { const milliseconds = Date.parse(timeText); return Number.isFinite(milliseconds) && milliseconds > 0 ? milliseconds : 0; }
   function duration(milliseconds) {
     const seconds = Math.max(0, Math.floor(milliseconds / 1000));
@@ -57,19 +57,33 @@
     cleanupElement.hidden = !cleanupElement.textContent;
     updateRoot.querySelector('[data-update-check]').disabled = !updateModel.connected || operationBusy;
     const newerRelease = updateState && updateState.available && /^\d+$/.test(updateState.current.version) && /^\d+$/.test(updateState.available.version) && BigInt(updateState.available.version) > BigInt(updateState.current.version);
-    updateRoot.querySelector('[data-update-install]').disabled = !updateModel.connected || operationBusy || !newerRelease;
-    updateRoot.querySelector('[data-update-rollback]').disabled = !updateModel.connected || operationBusy || !updateState || !updateState.rollback_available;
+    updateRoot.querySelector('[data-update-install]').disabled = !updateModel.connected || operationBusy || !newerRelease || !updateState.backup_options || Boolean(updateState.recovery_required);
+    updateRoot.querySelector('[data-update-rollback]').disabled = !updateModel.connected || operationBusy || !updateState || !updateState.rollback_available || !updateState.backup_options || Boolean(updateState.recovery_required);
     updateRoot.querySelector('[data-update-rollback-reason]').hidden = !updateState || !updateState.previous || updateState.rollback_available;
     const notificationElement = updateRoot.querySelector('[data-update-notification-error]');
     notificationElement.hidden = !updateState || !updateState.notification_error;
-    notificationElement.textContent = notificationCaption + (updateState && updateState.notification_error ? ' ' + updateState.notification_error : '');
+    notificationElement.textContent = updateState && updateState.notification_error ? label('notification_' + (updateState.notification_code || 'contact')) + ' ' + updateState.notification_error : '';
+    const displayedPolicy = updateState && updateState.busy && !updateState.checking && updateState.backup_policy ? updateState.backup_policy : updateModel.backupPolicy;
+    updateRoot.querySelector('[data-update-backup-warning]').hidden = Object.values(displayedPolicy).every(Boolean);
+    updateRoot.querySelector('[data-update-launcher-warning]').hidden = !updateState || updateState.backup_options === true;
+    updateRoot.querySelector('[data-update-backup-options]').disabled = operationBusy;
+    const backupGroups = updateState && updateState.backup_groups ? updateState.backup_groups : [];
+    putText('[data-update-backup-estimate]', backupGroups.filter(function selectedBackupGroup(group) { return updateState.backup_policy && updateState.backup_policy[group.name]; }).map(function backupGroupEstimate(group) { return label('backup_' + group.name) + ': ' + bytes(group.bytes) + ' (' + group.files + ')'; }).join(' · '));
+    const cancelButton = updateRoot.querySelector('[data-update-cancel]');
+    cancelButton.hidden = !updateState || !updateState.busy || !updateState.backup_options || ['completed', 'rolled_back', 'failed', 'interrupted'].includes(operationStage);
+    cancelButton.disabled = !updateModel.connected || updateModel.pending;
+    for (const groupName of ['databases', 'analytics', 'files', 'settings']) {
+      const checkbox = updateRoot.querySelector('[data-backup-group="' + groupName + '"]');
+      checkbox.checked = displayedPolicy[groupName];
+      checkbox.disabled = operationBusy;
+    }
     renderOperation(progress);
     renderConnection();
     renderAnnouncements();
   }
 
   function renderConnection() {
-    const connectionText = updateModel.connected ? label('connected') : (updateModel.lastContact ? label('reconnecting') : updateRoot.dataset.waiting);
+    const connectionText = updateModel.connected ? label('connected') : (updateModel.lastContact ? (updateModel.state && updateModel.state.busy && !updateModel.state.checking ? label('restarting_notice') : label('reconnecting')) : updateRoot.dataset.waiting);
     putText('[data-update-connection]', connectionText);
     putText('[data-update-last-contact]', updateModel.lastContact ? ' · ' + label('last_contact') + ' ' + new Date(updateModel.lastContact).toLocaleTimeString() : '');
   }
@@ -104,7 +118,7 @@
     const workParts = [];
     if (work.total_bytes > 0) workParts.push((effectiveStage === 'inspecting' ? '' : bytes(work.bytes || 0) + ' / ') + bytes(work.total_bytes));
     if (work.total_files > 0) workParts.push(label('files').replace('%s', (effectiveStage === 'inspecting' ? '' : String(work.files || 0) + ' / ') + String(work.total_files)));
-    if (work.speed > 0 && updateModel.connected && !finishedAt) workParts.push(label('speed').replace('%s', bytes(work.speed)));
+    if (work.speed > 0 && transferAdvancing(progress) && !finishedAt) workParts.push(label('speed').replace('%s', bytes(work.speed)));
     putText('[data-update-work]', workParts.join(' · '));
     renderTimes(progress);
     renderSteps(progress, stages, events);
@@ -119,9 +133,12 @@
     putText('[data-update-started]', startedAt ? new Date(startedAt).toLocaleString() : '—');
     putText('[data-update-elapsed]', startedAt ? duration(endingAt - startedAt) : '—');
     putText('[data-update-stage-elapsed]', stageAt ? duration(endingAt - stageAt) : '—');
+    const heartbeatElement = updateRoot.querySelector('[data-update-heartbeat]');
+    heartbeatElement.hidden = !progress || !progress.updated_at;
+    heartbeatElement.textContent = progress && progress.updated_at ? label('last_contact') + ' ' + new Date(progress.updated_at).toLocaleString() + (progress.advanced_at ? ' · ' + label('backup_progress') + ': ' + new Date(progress.advanced_at).toLocaleString() : '') : '';
     let remaining = progress && !finishedAt ? label('calculating') : '—';
     const work = progress && progress.work;
-    if (work && work.speed > 0 && work.total_bytes > work.bytes && updateModel.connected && !finishedAt && ['downloading', 'backing_up'].includes(progress.stage)) {
+    if (work && work.speed > 0 && work.total_bytes > work.bytes && transferAdvancing(progress) && !finishedAt && ['downloading', 'preparing_backup', 'backing_up'].includes(progress.stage)) {
       remaining = label('stage_remaining').replace('%s', duration(1000 * (work.total_bytes - work.bytes) / work.speed));
     }
     putText('[data-update-remaining]', remaining);
@@ -253,7 +270,10 @@
       if (!updateModel.serverVersion && updateResponse.State && updateResponse.State.current) updateModel.serverVersion = updateResponse.State.current.version;
       if (updateResponse.Preview) updateModel.preview = updateResponse.Preview;
       if (updateResponse.Campaigns) updateModel.campaigns = updateResponse.Campaigns;
-      if (updateResponse.State && updateResponse.State.current && updateResponse.State.current.version) updateModel.state = updateResponse.State;
+      if (updateResponse.State && updateResponse.State.current && updateResponse.State.current.version) {
+        if (updateResponse.State.progress && updateResponse.State.progress.finished_at && updateModel.state && updateModel.state.progress && !updateModel.state.progress.finished_at) updateModel.backupPolicy = {databases: true, analytics: true, files: true, settings: true};
+        updateModel.state = updateResponse.State;
+      }
       updateModel.error = updateResponse.Error || '';
       renderUpdate();
       if (updateModel.queuedCommand) {
@@ -286,9 +306,13 @@
       submitUpdateCommand('campaign_start', { reason: updateModel.reason, version: updateModel.preview.Version, manifest_hash: updateModel.preview.ManifestHash });
     });
   }
+  for (const groupName of ['databases', 'analytics', 'files', 'settings']) {
+    updateRoot.querySelector('[data-backup-group="' + groupName + '"]').addEventListener('change', function changeBackupGroup(changeEvent) { updateModel.backupPolicy[groupName] = changeEvent.target.checked; renderUpdate(); });
+  }
+  updateRoot.querySelector('[data-update-cancel]').addEventListener('click', function cancelUpdate() { submitUpdateCommand('cancel'); });
   updateRoot.querySelector('[data-update-check]').addEventListener('click', function checkRelease() { submitUpdateCommand('check'); });
-  updateRoot.querySelector('[data-update-install]').addEventListener('click', function installRelease() { submitUpdateCommand('upgrade'); });
-  updateRoot.querySelector('[data-update-rollback]').addEventListener('click', function restoreRelease() { submitUpdateCommand('rollback'); });
+  updateRoot.querySelector('[data-update-install]').addEventListener('click', function installRelease() { submitUpdateCommand('upgrade_with_options', {backup_policy: {...updateModel.backupPolicy}}); });
+  updateRoot.querySelector('[data-update-rollback]').addEventListener('click', function restoreRelease() { submitUpdateCommand('rollback_with_options', {backup_policy: {...updateModel.backupPolicy}}); });
   updateRoot.querySelector('[data-update-copy]').addEventListener('click', async function copyUpdateLog() {
     try {
       await navigator.clipboard.writeText(updateModel.logText);

@@ -81,6 +81,7 @@ import (
 	sitemcp "github.com/matveynator/sitebrush/v2/pkg/mcp"
 	"github.com/matveynator/sitebrush/v2/pkg/migrations"
 	"github.com/matveynator/sitebrush/v2/pkg/outboundhttp"
+	"github.com/matveynator/sitebrush/v2/pkg/pagearchive"
 	"github.com/matveynator/sitebrush/v2/pkg/securitysync"
 	"github.com/matveynator/sitebrush/v2/pkg/serviceinstall"
 	"github.com/matveynator/sitebrush/v2/pkg/shutdownsignals"
@@ -8805,6 +8806,7 @@ func main() {
 	storagePath := flag.String("path", defaultAppStoragePath(), "path to the SiteBrush app data directory")
 	cliMode := flag.Bool("cli", false, "open interactive SiteBrush server console")
 	upgradeMode := flag.Bool("upgrade", false, "install the latest signed stable server release")
+	upgradeBackup := flag.String("upgrade-backup", "all", "backup groups for -upgrade: all, none, or databases,analytics,files,settings")
 	updateSupervisor := flag.Bool("update-supervisor", false, "internal offline maintenance supervisor")
 	serverChild := flag.Bool("server-child", false, "internal supervised server process")
 	updateProbation := flag.Bool("update-probation", false, "internal startup verification without public writes")
@@ -8965,7 +8967,11 @@ func main() {
 		if !appcli.InstallFlagSupported() {
 			log.Fatal("updates are available only in server builds")
 		}
-		if err := runManualUpgrade(effectiveStoragePath, effectiveDBPath, parsedPorts.Raw, *debugMode); err != nil {
+		policy, policyErr := appupdate.ParseBackupPolicy(*upgradeBackup)
+		if policyErr != nil {
+			log.Fatal(policyErr)
+		}
+		if err := runManualUpgrade(effectiveStoragePath, effectiveDBPath, parsedPorts.Raw, *debugMode, policy); err != nil {
 			log.Fatal(err)
 		}
 		return
@@ -42909,29 +42915,30 @@ func (a *App) importBackup(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, backupImportUploadLimitBytes)
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "too large") {
-			http.Error(w, "backup zip is too large", http.StatusRequestEntityTooLarge)
+			http.Error(w, "page archive is too large", http.StatusRequestEntityTooLarge)
 			return
 		}
 		http.Error(w, "failed to parse upload", http.StatusBadRequest)
 		return
 	}
+	defer r.MultipartForm.RemoveAll()
 	if !adminMutationSourceAllowed(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 	backupFile, backupFileHeader, err := r.FormFile("backup_zip")
 	if err != nil {
-		http.Error(w, "backup zip is required", http.StatusBadRequest)
+		http.Error(w, "page archive is required", http.StatusBadRequest)
 		return
 	}
 	defer backupFile.Close()
 	if backupFileHeader == nil {
-		http.Error(w, "backup zip is empty", http.StatusBadRequest)
+		http.Error(w, "page archive is empty", http.StatusBadRequest)
 		return
 	}
 	tempFile, err := os.CreateTemp("", "sitebrush-backup-*.zip")
 	if err != nil {
-		http.Error(w, "failed to stage backup zip", http.StatusInternalServerError)
+		http.Error(w, "failed to stage page archive", http.StatusInternalServerError)
 		return
 	}
 	tempFilePath := tempFile.Name()
@@ -42942,35 +42949,210 @@ func (a *App) importBackup(w http.ResponseWriter, r *http.Request) {
 	}
 	if copyErr != nil {
 		if errors.Is(copyErr, errReadLimitExceeded) {
-			http.Error(w, "backup zip is too large", http.StatusRequestEntityTooLarge)
+			http.Error(w, "page archive is too large", http.StatusRequestEntityTooLarge)
 			return
 		}
-		http.Error(w, "failed to stage backup zip", http.StatusInternalServerError)
+		http.Error(w, "failed to stage page archive", http.StatusInternalServerError)
 		return
 	}
 	if writtenBytes <= 0 {
-		http.Error(w, "backup zip is empty", http.StatusBadRequest)
+		http.Error(w, "page archive is empty", http.StatusBadRequest)
 		return
 	}
 	readerAt, err := os.Open(tempFilePath)
 	if err != nil {
-		http.Error(w, "failed to open backup zip", http.StatusInternalServerError)
+		http.Error(w, "failed to open page archive", http.StatusInternalServerError)
 		return
 	}
 	defer readerAt.Close()
-	backupZIP, err := zip.NewReader(readerAt, writtenBytes)
-	if err != nil {
-		http.Error(w, "invalid backup zip", http.StatusBadRequest)
-		return
-	}
 	domain := a.siteDomain(r.Context(), r)
+	importContext := contextWithDomain(r.Context(), domain)
 	importBasePath := normalizeImportBasePath(r.FormValue("base_path"))
-	redirectPath, err := a.importDomainBackupZIP(r.Context(), domain, importBasePath, backupZIP)
+	backupZIP, zipErr := zip.NewReader(readerAt, writtenBytes)
+	sitebrushBackup := false
+	if zipErr == nil {
+		for _, entry := range backupZIP.File {
+			if entry.Name == "backup.json" {
+				sitebrushBackup = true
+				break
+			}
+		}
+	}
+	redirectPath := importBasePath
+	if sitebrushBackup {
+		redirectPath, err = a.importDomainBackupZIP(importContext, domain, importBasePath, backupZIP)
+	} else {
+		var savedPage *pagearchive.Archive
+		savedPage, err = pagearchive.Read(readerAt, writtenBytes, r.Context().Done())
+		if err == nil {
+			err = a.importSavedPage(importContext, domain, importBasePath, savedPage)
+		}
+	}
 	if err != nil {
 		http.Error(w, "failed to import backup: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	httpsecurity.RedirectLocal(w, r, redirectPath+"?visual", http.StatusFound)
+}
+
+// Saved browser resources get a private import prefix. Compensation may remove
+// only this operation's files, never an earlier upload or another page's assets.
+func (a *App) importSavedPage(ctx context.Context, domain, destination string, saved *pagearchive.Archive) error {
+	if saved == nil || saved.Main == nil {
+		return errors.New("saved page has no main HTML resource")
+	}
+	destination = normalizeImportBasePath(destination)
+	prefix := "saved-pages/" + randomAccessToken()
+	destinations := map[string]string{saved.Main.URL: destination}
+	resources := make([]*pagearchive.Resource, 0, len(saved.Resources))
+	for _, resource := range saved.Resources {
+		if _, exists := destinations[resource.URL]; exists {
+			continue
+		}
+		extension := crawler.DownloadedResourceExtension(resource.URL, resource.MIME)
+		if len(extension) < 2 || len(extension) > 12 || strings.ContainsAny(extension, "/\\:%?#") {
+			extension = ".bin"
+		}
+		digest := sha256.Sum256([]byte(resource.URL))
+		destinations[resource.URL] = "/p/" + prefix + "/" + hex.EncodeToString(digest[:16]) + extension
+		resources = append(resources, resource)
+	}
+	pageBytes, err := pagearchive.Rewrite(saved.Main, destinations)
+	if err != nil {
+		return err
+	}
+	pageHTML := rewriteImportedHTMLCharsetDeclaration(string(pageBytes))
+	type savedPageFile struct {
+		Name    string
+		MIME    string
+		Content []byte
+	}
+	files := make([]savedPageFile, 0, len(resources))
+	var fileBytes int64
+	for _, resource := range resources {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		rewritten, err := pagearchive.Rewrite(resource, destinations)
+		if err != nil {
+			return err
+		}
+		if int64(len(rewritten)) > pagearchive.FileLimit || fileBytes > pagearchive.TotalLimit-int64(len(rewritten)) {
+			return errors.New("rewritten saved page exceeds size limit")
+		}
+		fileBytes += int64(len(rewritten))
+		files = append(files, savedPageFile{Name: strings.TrimPrefix(destinations[resource.URL], "/p/"), MIME: resource.MIME, Content: rewritten})
+	}
+	importedPages := []wholeSiteImportedPage{{SourceURL: saved.Main.URL, LocalPath: destination, HTML: pageHTML}}
+	pageDelta, publishedDelta, revisionDelta, staticDelta := a.estimateImportedPagesStorageDelta(ctx, domain, importedPages)
+	if err := a.applyDomainStorageDelta(ctx, domain, pageDelta, publishedDelta, revisionDelta, fileBytes, staticDelta); err != nil {
+		return err
+	}
+	domainDirectory := a.domainFilesDirForDomain(domain)
+	created := []string{}
+	committed := false
+	defer func() {
+		if !committed {
+			for _, filename := range created {
+				_ = a.removeInsideStorage(filename)
+			}
+			a.rebuildDomainStorageUsage(ctx, domain)
+		}
+	}()
+	for _, file := range files {
+		filename := filepath.Join(domainDirectory, filepath.FromSlash(file.Name))
+		if err := a.mkdirAllInsideStorage(filepath.Dir(filename), 0755); err != nil {
+			return err
+		}
+		jail, relativeFilename, err := a.storageJailForPath(filename)
+		if err != nil {
+			return err
+		}
+		output, err := jail.CreateExclusive(relativeFilename)
+		if err != nil {
+			return err
+		}
+		created = append(created, filename)
+		_, writeErr := output.Write(file.Content)
+		closeErr := output.Close()
+		if writeErr != nil {
+			return writeErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+	}
+	frozen := a.isDomainFrozen(ctx, domain)
+	title := aiEditorHTMLTitle(pageHTML)
+	if title == "" {
+		title = destination
+	}
+	staticFilename := filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(destination))
+	var previousStatic []byte
+	previousStaticExists, staticTouched := false, false
+	var staticRecoveryError error
+	err = a.siteContentTransaction(ctx, func(transaction *sql.Tx) error {
+		var previousHTML string
+		if err := transaction.QueryRowContext(ctx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, destination).Scan(&previousHTML); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+
+		if _, err := transaction.ExecContext(ctx, `DELETE FROM page_redirects WHERE domain=? AND old_path=?`, domain, destination); err != nil {
+			return err
+		}
+		if err := updateOrInsertPage(ctx, transaction, domain, destination, title, pageHTML, true); err != nil {
+			return err
+		}
+		if !frozen {
+			if err := updateOrInsertPublishedPage(ctx, transaction, domain, destination, title, pageHTML); err != nil {
+				return err
+			}
+		}
+		if previousHTML != pageHTML {
+			if _, err := transaction.ExecContext(ctx, `UPDATE revisions SET is_active=0 WHERE domain=? AND page_path=?`, domain, destination); err != nil {
+				return err
+			}
+			if _, err := transaction.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, domain, destination, pageHTML, time.Now().UTC().Format(time.RFC3339)); err != nil {
+				return err
+			}
+		}
+		for _, file := range files {
+			if _, err := transaction.ExecContext(ctx, `INSERT INTO file_metadata(domain,file_name,page_path,size,mime_type,created_at,download_count) VALUES(?,?,?,?,?,?,0)`, domainStorageName(domain), file.Name, destination, len(file.Content), file.MIME, time.Now().UTC().Format(time.RFC3339)); err != nil {
+				return err
+			}
+		}
+		if !frozen {
+			var readErr error
+			previousStatic, readErr = a.readFileInsideStorage(staticFilename)
+			if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+				return readErr
+			}
+			previousStaticExists = readErr == nil
+			staticTouched = true
+			if err := a.writeAtomicStorageFile(staticFilename, []byte(pageHTML)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, func(transactionErr error) {
+		if transactionErr == nil || !staticTouched {
+			return
+		}
+		if previousStaticExists {
+			staticRecoveryError = a.writeAtomicStorageFile(staticFilename, previousStatic)
+		} else {
+			staticRecoveryError = a.removeInsideStorage(staticFilename)
+			if errors.Is(staticRecoveryError, os.ErrNotExist) {
+				staticRecoveryError = nil
+			}
+		}
+	})
+	if err != nil {
+		return errors.Join(err, staticRecoveryError)
+	}
+	committed = true
+	a.rebuildDomainStorageUsage(ctx, domain)
+	return nil
 }
 
 func (a *App) generateDomainPack(ctx context.Context, domain string) error {
@@ -44460,7 +44642,7 @@ func runSupervisedSitebrush(ctx context.Context, config serverRunConfig) error {
 	return appupdate.Run(appupdate.Options{Catalog: &catalog, StoragePath: storagePath, Executable: executable, Version: CompileVersion, Compatibility: appupdate.CurrentCompatibility(), Arguments: arguments, PublicKey: publicKey, Output: os.Stdout}, ctx.Done())
 }
 
-func runManualUpgrade(storagePath, databasePath, port string, debug bool) error {
+func runManualUpgrade(storagePath, databasePath, port string, debug bool, policies ...appupdate.BackupPolicy) error {
 	if !appupdate.Supported(runtime.GOOS, runtime.GOARCH) {
 		return errors.New("this server platform does not support automatic updates")
 	}
@@ -44571,7 +44753,18 @@ func runManualUpgrade(storagePath, databasePath, port string, debug bool) error 
 		fmt.Fprintln(os.Stdout, "SiteBrush is up to date")
 		return nil
 	}
-	if _, err := appupdate.Exchange(storagePath, appupdate.Request{Action: "upgrade", ManifestHash: response.State.ManifestHash}, stop); err != nil {
+	if !response.State.BackupOptions {
+		return errors.New("the running supervisor does not support backup options; install the new launcher binary and restart the service once")
+	}
+	policy := appupdate.FullBackupPolicy()
+	if len(policies) > 0 {
+		policy = policies[0]
+	}
+	policyJSON, err := json.Marshal(policy)
+	if err != nil {
+		return err
+	}
+	if _, err := appupdate.Exchange(storagePath, appupdate.Request{Action: "upgrade_with_options", ManifestHash: response.State.ManifestHash, Detail: string(policyJSON)}, stop); err != nil {
 		return err
 	}
 	lastStage := ""
@@ -44940,11 +45133,12 @@ func (a *App) serverUpdateSocket(w http.ResponseWriter, r *http.Request) {
 		for {
 			_ = connection.SetReadDeadline(time.Now().Add(45 * time.Second))
 			var command struct {
-				Action       string `json:"action"`
-				CSRF         string `json:"csrf"`
-				ManifestHash string `json:"manifest_hash"`
-				Reason       string `json:"reason"`
-				Version      string `json:"version"`
+				Action       string                  `json:"action"`
+				CSRF         string                  `json:"csrf"`
+				ManifestHash string                  `json:"manifest_hash"`
+				Reason       string                  `json:"reason"`
+				Version      string                  `json:"version"`
+				BackupPolicy *appupdate.BackupPolicy `json:"backup_policy"`
 			}
 			if err := websocket.JSON.Receive(connection, &command); err != nil {
 				return
@@ -44954,7 +45148,7 @@ func (a *App) serverUpdateSocket(w http.ResponseWriter, r *http.Request) {
 			}
 			response := serverUpdateResponse{ServerVersion: CompileVersion}
 			switch command.Action {
-			case "status", "check", "upgrade", "rollback":
+			case "status", "check", "upgrade", "rollback", "upgrade_with_options", "rollback_with_options", "cancel":
 				if a.developmentMode {
 					response.State.Current.Version = CompileVersion
 					response.State.Stage = "unsupported"
@@ -44963,7 +45157,20 @@ func (a *App) serverUpdateSocket(w http.ResponseWriter, r *http.Request) {
 					response.Error = "Updates are unavailable for desktop and container installations"
 				} else {
 					var exchangeErr error
-					response.Response, exchangeErr = appupdate.Exchange(a.storagePath, appupdate.Request{Action: command.Action, ManifestHash: command.ManifestHash}, r.Context().Done())
+					detail := ""
+					if strings.HasSuffix(command.Action, "_with_options") {
+						if command.BackupPolicy == nil {
+							response.Error = "an explicit backup policy is required"
+							break
+						}
+						policyJSON, marshalErr := json.Marshal(command.BackupPolicy)
+						if marshalErr != nil {
+							response.Error = marshalErr.Error()
+							break
+						}
+						detail = string(policyJSON)
+					}
+					response.Response, exchangeErr = appupdate.Exchange(a.storagePath, appupdate.Request{Action: command.Action, ManifestHash: command.ManifestHash, Detail: detail}, r.Context().Done())
 					if exchangeErr != nil {
 						response.Error = exchangeErr.Error()
 					}
@@ -45171,7 +45378,13 @@ func (a *App) startAnnouncementSubsystems(stop <-chan struct{}) {
 			}
 			id, _, key, err := a.serviceMailLocalKeyPair(context.Background())
 			central, decodeErr := updateannounce.DecodeKey(sitebrushComServiceMailRelayPublicKey)
-			if err == nil && decodeErr == nil {
+			if err == nil && decodeErr != nil {
+				err = decodeErr
+			}
+			if err == nil {
+				_, err = a.announcementLiveStatus()
+			}
+			if err == nil {
 				err = updateannounce.AgentWithStatus(updateannounce.Address, id, key, central, a.announcementLiveStatus, notificationStatuses, stop)
 			}
 			if err != nil {
@@ -45203,7 +45416,29 @@ func (a *App) runUpdateNotificationStatus(statuses <-chan string, stop <-chan st
 			if len(status) > 512 {
 				status = strings.ToValidUTF8(status[:512], "?")
 			}
-			if _, err := appupdate.Exchange(a.storagePath, appupdate.Request{Action: "notification_status", Detail: status}, stop); err != nil {
+			code := ""
+			if status != "" {
+				code = "contact"
+				lowered := strings.ToLower(status)
+				if strings.Contains(lowered, "public https") || strings.Contains(lowered, "administrator domain") {
+					code = "panel_url"
+				}
+				if strings.Contains(lowered, "tls") || strings.Contains(lowered, "certificate") || strings.Contains(lowered, "authentication") {
+					code = "authentication"
+				}
+			}
+			notice, marshalErr := json.Marshal(struct {
+				Code   string `json:"code"`
+				Detail string `json:"detail"`
+			}{Code: code, Detail: status})
+			if marshalErr != nil {
+				continue
+			}
+			_, exchangeErr := appupdate.Exchange(a.storagePath, appupdate.Request{Action: "notification_status_v2", Detail: string(notice)}, stop)
+			if exchangeErr != nil && exchangeErr.Error() == "unknown update command" {
+				_, exchangeErr = appupdate.Exchange(a.storagePath, appupdate.Request{Action: "notification_status", Detail: status}, stop)
+			}
+			if err := exchangeErr; err != nil {
 				select {
 				case <-stop:
 					return

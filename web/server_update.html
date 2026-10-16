@@ -25,6 +25,7 @@
     </div>
     <div class="update-progress" role="progressbar" aria-label="{{index .T "update_progress"}}" aria-valuemin="0" aria-valuemax="100" data-update-progress><div data-update-progress-fill></div></div>
     <div class="update-progress-caption"><span>{{index .T "update_progress_by_steps"}}</span><span data-update-work></span></div>
+    <p class="update-connection" data-update-heartbeat hidden></p>
     <p class="update-connection"><span role="status" aria-live="polite" data-update-connection></span><span aria-live="off" data-update-last-contact></span></p>
     <dl class="update-metrics">
       <div><dt>{{index .T "update_started"}}</dt><dd data-update-started>—</dd></div>
@@ -34,11 +35,23 @@
     </dl>
     <p class="update-error" role="alert" data-update-error hidden></p>
     <p class="update-warning" data-update-cleanup-error hidden></p>
-    <p class="update-warning" data-update-notification-error hidden>{{index .T "update_notification_unavailable"}}</p>
+    <p class="update-warning" data-update-notification-error hidden></p>
+    <fieldset class="update-backup-options" data-update-backup-options>
+      <legend>{{index .T "update_backup_title"}}</legend>
+      <p>{{index .T "update_backup_hint"}}</p>
+      <label><input type="checkbox" data-backup-group="databases" checked> {{index .T "update_backup_databases"}}</label>
+      <label><input type="checkbox" data-backup-group="analytics" checked> {{index .T "update_backup_analytics"}}</label>
+      <label><input type="checkbox" data-backup-group="files" checked> {{index .T "update_backup_files"}}</label>
+      <label><input type="checkbox" data-backup-group="settings" checked> {{index .T "update_backup_settings"}}</label>
+      <p class="update-warning" data-update-backup-warning hidden>{{index .T "update_backup_warning"}}</p>
+      <p class="update-warning" data-update-launcher-warning hidden>{{index .T "update_launcher_required"}}</p>
+      <p data-update-backup-estimate></p>
+    </fieldset>
     <div class="update-actions">
       <button type="button" class="btn btn-primary" data-update-install disabled>{{index .T "update_install"}}</button>
       <button type="button" class="btn btn-outline-secondary" data-update-check disabled>{{index .T "update_check"}}</button>
       <button type="button" class="btn btn-outline-secondary" data-update-rollback disabled>{{index .T "update_rollback"}}</button>
+      <button type="button" class="btn btn-outline-secondary" data-update-cancel hidden>{{index .T "edit_cancel"}}</button>
     </div>
   </section>
   <section class="update-card update-steps-card" aria-labelledby="update-steps-heading" data-update-steps-card hidden>
@@ -68,6 +81,15 @@
   </section>
   {{end}}
   <div hidden data-update-labels>
+    <span data-label="notification_panel_url">{{index .T "update_notification_unavailable"}}</span>
+    <span data-label="notification_contact">{{index .T "update_notification_contact"}}</span>
+    <span data-label="notification_authentication">{{index .T "update_notification_authentication"}}</span>
+    <span data-label="backup_databases">{{index .T "update_backup_databases"}}</span>
+    <span data-label="backup_analytics">{{index .T "update_backup_analytics"}}</span>
+    <span data-label="backup_files">{{index .T "update_backup_files"}}</span>
+    <span data-label="backup_settings">{{index .T "update_backup_settings"}}</span>
+    <span data-label="backup_progress">{{index .T "update_backup_progress"}}</span>
+    <span data-label="restarting_notice">{{index .T "update_restarting_notice"}}</span>
     <span data-label="log_truncated">{{index .T "update_log_truncated"}}</span>
     <span data-label="upgrade">{{index .T "update_ui_upgrade"}}</span>
     <span data-label="rollback">{{index .T "update_ui_rollback"}}</span>
@@ -109,6 +131,8 @@
     <span data-stage="verifying">{{index .T "update_stage_verifying"}}</span>
     <span data-stage="inspecting">{{index .T "update_stage_inspecting"}}</span>
     <span data-stage="backing_up">{{index .T "update_stage_backing_up"}}</span>
+    <span data-stage="preparing_backup">{{index .T "update_stage_preparing_backup"}}</span>
+    <span data-stage="interrupted">{{index .T "update_ui_interrupted"}}</span>
     <span data-stage="installing">{{index .T "update_stage_installing"}}</span>
     <span data-stage="restarting">{{index .T "update_stage_restarting"}}</span>
     <span data-stage="checking">{{index .T "update_stage_checking"}}</span>

@@ -132,6 +132,8 @@ jobs:
           use_oidc: true
       - name: Enforce lock-free architecture
         run: go test -count=1 ./scripts/architecture
+      - name: Test saved browser page imports
+        run: go test -count=1 -timeout=180s -run '^TestSavedPage' .
       - name: Test analytics sessions and graceful shutdown
         run: >-
           go test -count=1 .
