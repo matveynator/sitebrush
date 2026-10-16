@@ -24238,3 +24238,23 @@ func TestSavedPageUploadPreservesBackupImportAndSecurity(t *testing.T) {
 		})
 	}
 }
+
+func TestSavedPageRepeatedImportKeepsRevisionAndQuotaAccounting(t *testing.T) {
+	application := newRouterTestApplication(t)
+	ctx := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), "localhost"))
+	saved := &pagearchive.Archive{Main: &pagearchive.Resource{URL: "https://example.org/page", MIME: "text/html", Content: []byte(`<h1>Saved page without external files</h1>`)}}
+	if err := application.importSavedPage(ctx, "localhost", "/about", saved); err != nil {
+		t.Fatal(err)
+	}
+	originalUsage := application.domainStorageUsage(ctx, "localhost").totalBytes()
+	if err := application.importSavedPage(ctx, "localhost", "/about", saved); err != nil {
+		t.Fatal(err)
+	}
+	var revisions int
+	if err := application.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM revisions WHERE domain=? AND page_path=?`, "localhost", "/about").Scan(&revisions); err != nil || revisions != 1 {
+		t.Fatal("unchanged import created a duplicate revision", revisions, err)
+	}
+	if nextUsage := application.domainStorageUsage(ctx, "localhost").totalBytes(); nextUsage != originalUsage {
+		t.Fatal("unchanged import inflated storage usage", originalUsage, nextUsage)
+	}
+}

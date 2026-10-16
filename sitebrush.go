@@ -43092,6 +43092,11 @@ func (a *App) importSavedPage(ctx context.Context, domain, destination string, s
 	previousStaticExists, staticTouched := false, false
 	var staticRecoveryError error
 	err = a.siteContentTransaction(ctx, func(transaction *sql.Tx) error {
+		var previousHTML string
+		if err := transaction.QueryRowContext(ctx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, destination).Scan(&previousHTML); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+
 		if _, err := transaction.ExecContext(ctx, `DELETE FROM page_redirects WHERE domain=? AND old_path=?`, domain, destination); err != nil {
 			return err
 		}
@@ -43103,11 +43108,13 @@ func (a *App) importSavedPage(ctx context.Context, domain, destination string, s
 				return err
 			}
 		}
-		if _, err := transaction.ExecContext(ctx, `UPDATE revisions SET is_active=0 WHERE domain=? AND page_path=?`, domain, destination); err != nil {
-			return err
-		}
-		if _, err := transaction.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, domain, destination, pageHTML, time.Now().UTC().Format(time.RFC3339)); err != nil {
-			return err
+		if previousHTML != pageHTML {
+			if _, err := transaction.ExecContext(ctx, `UPDATE revisions SET is_active=0 WHERE domain=? AND page_path=?`, domain, destination); err != nil {
+				return err
+			}
+			if _, err := transaction.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, domain, destination, pageHTML, time.Now().UTC().Format(time.RFC3339)); err != nil {
+				return err
+			}
 		}
 		for _, file := range files {
 			if _, err := transaction.ExecContext(ctx, `INSERT INTO file_metadata(domain,file_name,page_path,size,mime_type,created_at,download_count) VALUES(?,?,?,?,?,?,0)`, domainStorageName(domain), file.Name, destination, len(file.Content), file.MIME, time.Now().UTC().Format(time.RFC3339)); err != nil {
