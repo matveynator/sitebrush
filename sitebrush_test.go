@@ -24078,9 +24078,9 @@ func TestMCPRemoteOAuthAndExistingSiteOperations(t *testing.T) {
 func TestSavedPageImportUsesRoutedTransactionAndRequestedAddress(t *testing.T) {
 	application := newRouterTestApplication(t)
 	ctx := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), "localhost"))
-	saved := &pagearchive.Archive{Main: &pagearchive.Resource{URL: "https://source.example/page.html", MIME: "text/html", Content: []byte(`<html><head><title>Saved page</title><link rel="stylesheet" href="files/style.css"></head><body><img src="files/photo.png"></body></html>`)}, Resources: []*pagearchive.Resource{
+	saved := &pagearchive.Archive{Main: &pagearchive.Resource{URL: "https://source.example/page.html", MIME: "text/html", Content: []byte(`<html><head><title>Saved page</title><link rel="stylesheet" href="files/style.php?theme=dark"></head><body><img src="files/photo.png"></body></html>`)}, Resources: []*pagearchive.Resource{
 		{URL: "https://source.example/files/photo.png", MIME: "image/png", Content: []byte("saved image")},
-		{URL: "https://source.example/files/style.css", MIME: "text/css", Content: []byte(`body{background:url(photo.png)}`)},
+		{URL: "https://source.example/files/style.php?theme=dark", MIME: "text/css", Content: []byte(`body{background:url(photo.png)}`)},
 	}}
 	if err := application.importSavedPage(ctx, "localhost", "/about", saved); err != nil {
 		t.Fatal(err)
@@ -24115,14 +24115,27 @@ func TestSavedPageImportUsesRoutedTransactionAndRequestedAddress(t *testing.T) {
 	if len(names) != 2 {
 		t.Fatal(names)
 	}
+	foundCSS := false
 	for _, name := range names {
 		contents, err := application.readFileInsideStorage(filepath.Join(application.domainFilesDirForDomain("localhost"), name))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.HasSuffix(name, ".css") && !strings.Contains(string(contents), "/p/saved-pages/") {
-			t.Fatal(string(contents))
+		if strings.HasSuffix(name, ".css") {
+			foundCSS = true
+			if !strings.Contains(string(contents), "/p/saved-pages/") {
+				t.Fatal(string(contents))
+			}
+			response := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodGet, "http://localhost/p/"+name, nil)
+			application.serveAssetFile(response, request.WithContext(ctx), "localhost", name)
+			if response.Code != http.StatusOK || !strings.HasPrefix(response.Header().Get("Content-Type"), "text/css") {
+				t.Fatal("saved PHP stylesheet lost its MIME type", response.Code, response.Header())
+			}
 		}
+	}
+	if !foundCSS {
+		t.Fatal("stylesheet was saved with its PHP extension instead of CSS")
 	}
 	if err := application.importSavedPage(ctx, "localhost", "/other", saved); err != nil {
 		t.Fatal(err)

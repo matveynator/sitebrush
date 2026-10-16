@@ -43009,16 +43009,9 @@ func (a *App) importSavedPage(ctx context.Context, domain, destination string, s
 		if _, exists := destinations[resource.URL]; exists {
 			continue
 		}
-		address, err := url.Parse(resource.URL)
-		if err != nil {
-			return err
-		}
-		extension := strings.ToLower(path.Ext(address.Path))
+		extension := crawler.DownloadedResourceExtension(resource.URL, resource.MIME)
 		if len(extension) < 2 || len(extension) > 12 || strings.ContainsAny(extension, "/\\:%?#") {
 			extension = ".bin"
-			if extensions, err := mime.ExtensionsByType(resource.MIME); err == nil && len(extensions) > 0 {
-				extension = extensions[0]
-			}
 		}
 		digest := sha256.Sum256([]byte(resource.URL))
 		destinations[resource.URL] = "/p/" + prefix + "/" + hex.EncodeToString(digest[:16]) + extension
