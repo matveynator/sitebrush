@@ -236,3 +236,47 @@ func TestDatabaseSnapshotRejectsOutOfScopeInventoryAndSupportsLegacyRecovery(t *
 		t.Fatal("legacy snapshot did not recover its recorded content", err)
 	}
 }
+
+func TestDatabaseBackupFollowsStableSiteSubsystemBoundaries(t *testing.T) {
+	root := t.TempDir()
+	identifier := strings.Repeat("a", 32)
+	content := "storage/db/sites/" + identifier + "/content.db"
+	control := "storage/db/sites/" + identifier + "/control.db"
+	analytics := "storage/db/sites/" + identifier + "/analytics/analytics.db"
+	archive := "storage/db/sites/" + identifier + "/analytics/archives/2026-10-16.json.gz"
+	for _, name := range []string{"storage/db/sitebrush.db", content, control, analytics, archive} {
+		writeBackupFixtureFile(t, root, name, []byte("owned state"))
+	}
+	directory, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	for _, test := range []struct {
+		policy   BackupPolicy
+		expected []string
+	}{
+		{BackupPolicy{Databases: true}, []string{"storage/db/sitebrush.db", content, control}},
+		{BackupPolicy{Analytics: true}, []string{analytics, archive}},
+	} {
+		selected := map[string]bool{}
+		scope := backupScope{Policy: test.policy, Control: defaultDatabaseBackupScope()}
+		err := walkSelectedFiles(directory, scope, nil, func(name string, info os.FileInfo) error {
+			if info.Mode().IsRegular() {
+				selected[name] = true
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(selected) != len(test.expected) {
+			t.Fatalf("incorrect backup group: %v", selected)
+		}
+		for _, name := range test.expected {
+			if !selected[name] {
+				t.Fatalf("missing subsystem backup: %s", name)
+			}
+		}
+	}
+}

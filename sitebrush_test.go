@@ -36,6 +36,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"slices"
@@ -50,6 +51,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/accountauth"
 	"github.com/matveynator/sitebrush/v2/pkg/aicapability"
 	"github.com/matveynator/sitebrush/v2/pkg/aieditor"
+	"github.com/matveynator/sitebrush/v2/pkg/aiingress"
 	"github.com/matveynator/sitebrush/v2/pkg/aiprovider"
 	browserstats "github.com/matveynator/sitebrush/v2/pkg/analytics"
 	"github.com/matveynator/sitebrush/v2/pkg/appupdate"
@@ -12039,6 +12041,7 @@ func (store *cancelingAIEditorStore) Execute(request aieditor.Request, done <-ch
 
 func TestAICapabilityRevocationCancelsAlreadyRunningWork(t *testing.T) {
 	application, _ := newTestApplication(t)
+	enableAIIngressForTest(t, application)
 	application.aiCapabilities = aicapability.NewManager()
 	t.Cleanup(application.aiCapabilities.Close)
 	store := &cancelingAIEditorStore{started: make(chan struct{}), canceled: make(chan struct{})}
@@ -17435,30 +17438,31 @@ func TestCoverageProfileCodeConfirmationTransaction(t *testing.T) {
 // BEGIN account mutation attack tests.
 
 func TestAuthAttackConcurrentEmailChangeConfirmationAppliesOnce(t *testing.T) {
-	application, database := newTestApplication(t)
+	application := newPartitionedTestApplication(t)
+	boundary := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), "localhost"))
 	now := time.Now().UTC()
 	const currentEmail = "owner@example.com"
 	confirmation := EmailConfirmation{
 		Token: "email-change-once", Domain: "localhost", Action: "profile",
 		Email: "owner-new@example.com", CurrentEmail: currentEmail,
 	}
-	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, confirmation.Domain, currentEmail, "password"); err != nil {
+	if _, err := application.db.ExecContext(boundary, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, confirmation.Domain, currentEmail, "password"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.Exec(`INSERT INTO email_confirmations(token,domain,action,email,current_email,created_at,expires_at) VALUES(?,?,?,?,?,?,?)`,
+	if _, err := application.db.ExecContext(boundary, `INSERT INTO email_confirmations(token,domain,action,email,current_email,created_at,expires_at) VALUES(?,?,?,?,?,?,?)`,
 		confirmation.Token, confirmation.Domain, confirmation.Action, confirmation.Email, confirmation.CurrentEmail,
 		now.Format(time.RFC3339), now.Add(time.Hour).Format(time.RFC3339)); err != nil {
 		t.Fatal(err)
 	}
 
 	successfulClaims := concurrentConfirmationClaims(t, func() error {
-		return application.applyProfileEmailConfirmation(context.Background(), confirmation)
+		return application.applyProfileEmailConfirmation(boundary, confirmation)
 	})
 	if successfulClaims != 1 {
 		t.Fatalf("SECURITY: concurrent email-change confirmations succeeded %d times, want one", successfulClaims)
 	}
 	var updatedEmail string
-	if err := database.QueryRow(`SELECT email FROM users WHERE domain=?`, confirmation.Domain).Scan(&updatedEmail); err != nil {
+	if err := application.db.QueryRowContext(boundary, `SELECT email FROM users WHERE domain=?`, confirmation.Domain).Scan(&updatedEmail); err != nil {
 		t.Fatal(err)
 	}
 	if updatedEmail != confirmation.Email {
@@ -23412,6 +23416,20 @@ func newDevelopmentTestStorage(t *testing.T) string {
 }
 
 // The public flow is exercised through the real query router and account session.
+func enableAIIngressForTest(t *testing.T, application *App) {
+	t.Helper()
+	fixtureContext := contextWithDomain(context.Background(), "localhost")
+	if _, err := application.db.ExecContext(fixtureContext, `CREATE TABLE IF NOT EXISTS ai_provider_policy(id INTEGER PRIMARY KEY,policy TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.db.ExecContext(fixtureContext, `INSERT INTO ai_provider_policy(id,policy) VALUES(1,'{"external":true,"custom_cidrs":["127.0.0.1/32"]}')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.db.ExecContext(fixtureContext, `INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) SELECT domain,email,'127.0.0.1',0 FROM users WHERE is_admin=1`); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAISitePairingFlowUsesOwnerApprovalAndHeaderCredentials(t *testing.T) {
 	application, database := newTestApplication(t)
 	application.aiCapabilities = aicapability.NewManager()
@@ -23421,6 +23439,7 @@ func TestAISitePairingFlowUsesOwnerApprovalAndHeaderCredentials(t *testing.T) {
 	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "owner@example.org", "password"); err != nil {
 		t.Fatal(err)
 	}
+	enableAIIngressForTest(t, application)
 	cookie := newAdminSessionCookie(t, application, "owner@example.org")
 	route := func(method, target, body, contentType, capabilityToken, sessionToken string, admin bool) *httptest.ResponseRecorder {
 		request := httptest.NewRequest(method, "http://localhost"+target, strings.NewReader(body))
@@ -23441,7 +23460,7 @@ func TestAISitePairingFlowUsesOwnerApprovalAndHeaderCredentials(t *testing.T) {
 	}
 	manifestResponse := route("GET", "/?ai=manifest", "", "", "", "", false)
 	var manifest aicapability.Manifest
-	if json.Unmarshal(manifestResponse.Body.Bytes(), &manifest) != nil || manifest.Domain != "localhost" || manifest.AuthorizationURL != "http://localhost/?ai=pair" || len(manifest.Scopes) != 4 || !strings.Contains(manifestResponse.Header().Get("Link"), "/?ai=manifest") {
+	if json.Unmarshal(manifestResponse.Body.Bytes(), &manifest) != nil || manifest.Domain != "localhost" || manifest.AuthorizationURL != "http://localhost/?ai=pair" || len(manifest.Scopes) != 4 || manifestResponse.Header().Get("Link") != "" {
 		t.Fatalf("manifest: %d %s", manifestResponse.Code, manifestResponse.Body.String())
 	}
 	documentationResponse := route("GET", "/?ai=documentation", "", "", "", "", false)
@@ -23532,6 +23551,7 @@ func TestAISitePairingFlowUsesOwnerApprovalAndHeaderCredentials(t *testing.T) {
 
 func TestAICapabilityScopesGateReadAnalyticsAndPublication(t *testing.T) {
 	application, database := newTestApplication(t)
+	enableAIIngressForTest(t, application)
 	application.aiCapabilities = aicapability.NewManager()
 	t.Cleanup(application.aiCapabilities.Close)
 	application.aiExecutor = aieditor.NewExecutor(&appAIStore{application: application}, 4)
@@ -23859,6 +23879,7 @@ func TestMCPApprovalBrowserRedirect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	enableAIIngressForTest(t, application)
 	cookie := newAdminSessionCookie(t, application, "browser-owner@example.org")
 	command := exec.Command("node", "pkg/mcp/approval_test.cjs")
 	command.Env = append(os.Environ(), "SITEBRUSH_MCP_APPROVAL_URL="+origin+"/?ai_authorize="+pairing.VerificationCode, "SITEBRUSH_MCP_CALLBACK_URL="+redirectURI, "SITEBRUSH_MCP_COOKIE="+cookie.Name+"="+cookie.Value)
@@ -23879,16 +23900,13 @@ func TestMCPApprovalBrowserRedirect(t *testing.T) {
 }
 
 func TestMCPRemoteOAuthAndExistingSiteOperations(t *testing.T) {
-	application := newRouterTestApplication(t)
-	analyticsStore := browserstats.OpenStore(filepath.Join(application.storageRootDir(), "analytics"))
-	application.analyticsStorage = analyticsStore
-	t.Cleanup(analyticsStore.Close)
+	application := newPartitionedTestApplication(t)
+	application.analyticsStorage = siteAnalyticsRepository{application: application}
 	fixtureContext := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), "localhost"))
 	if _, err := application.db.ExecContext(fixtureContext, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "mcp-owner@example.org", "test"); err != nil {
 		t.Fatal(err)
 	}
-	application.aiCapabilities = aicapability.NewPersistentManager(filepath.Join(application.storagePath, "security", "ai-capabilities.json"))
-	t.Cleanup(application.aiCapabilities.Close)
+
 	application.aiExecutor = aieditor.NewExecutor(&appAIStore{application: application}, 8)
 	t.Cleanup(application.aiExecutor.Close)
 	server := httptest.NewServer(http.HandlerFunc(application.route))
@@ -23896,6 +23914,7 @@ func TestMCPRemoteOAuthAndExistingSiteOperations(t *testing.T) {
 	origin := strings.Replace(server.URL, "127.0.0.1", "localhost", 1)
 	resource := origin + sitemcp.Path
 	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }, Timeout: 15 * time.Second}
+	enableAIIngressForTest(t, application)
 	cookie := newAdminSessionCookie(t, application, "mcp-owner@example.org")
 	send := func(method, address, body, contentType string, admin bool) (int, http.Header, []byte) {
 		t.Helper()
@@ -23946,7 +23965,7 @@ func TestMCPRemoteOAuthAndExistingSiteOperations(t *testing.T) {
 	verifier := strings.Repeat("v", 43)
 	digest := sha256.Sum256([]byte(verifier))
 	authorize := url.Values{"client_id": {registration.ClientID}, "redirect_uri": {"https://client.example/callback"}, "response_type": {"code"}, "resource": {resource}, "scope": {"read write publish analytics"}, "state": {"client-state"}, "code_challenge_method": {"S256"}, "code_challenge": {base64.RawURLEncoding.EncodeToString(digest[:])}}
-	status, headers, _ = send("GET", origin+sitemcp.OAuthPath+"authorize?"+authorize.Encode(), "", "", false)
+	status, headers, _ = send("GET", origin+sitemcp.OAuthPath+"authorize&"+authorize.Encode(), "", "", true)
 	if status != 303 || !strings.HasPrefix(headers.Get("Location"), "/?ai_authorize=") {
 		t.Fatal("OAuth did not reuse SiteBrush approval", status)
 	}
@@ -23989,6 +24008,17 @@ func TestMCPRemoteOAuthAndExistingSiteOperations(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer connection.Close()
+	for _, pathname := range []string{"/index.html", "/nested/address", "/p/static/analytics.js"} {
+		alternative, err := sdkClient.Connect(boundary, &mcpsdk.StreamableClientTransport{Endpoint: origin + pathname + "?mcp", HTTPClient: sdkHTTP}, nil)
+		if err != nil {
+			t.Fatalf("query MCP on %s: %v", pathname, err)
+		}
+		tools, listErr := alternative.ListTools(boundary, &mcpsdk.ListToolsParams{})
+		alternative.Close()
+		if listErr != nil || len(tools.Tools) == 0 {
+			t.Fatalf("MCP tools on %s: %v", pathname, listErr)
+		}
+	}
 	call := func(operation string, arguments map[string]any) map[string]any {
 		t.Helper()
 		result, err := connection.CallTool(boundary, &mcpsdk.CallToolParams{Name: "sitebrush_" + operation, Arguments: arguments})
@@ -24589,5 +24619,706 @@ func TestSixDigitRegistrationProgressUsesRenderedConfirmationURL(t *testing.T) {
 	application.route(status, poll)
 	if status.Code != http.StatusOK || !strings.Contains(status.Header().Get("Content-Type"), "application/json") || !strings.Contains(status.Body.String(), `"state":"requesting"`) {
 		t.Fatalf("code flow cannot poll confirmation: %d %s", status.Code, status.Body.String())
+	}
+}
+
+func newPartitionedTestApplication(t *testing.T) *App {
+	t.Helper()
+	root := t.TempDir()
+	globalPath := filepath.Join(root, "storage", "db", "sitebrush.db")
+	if err := ensureParentDir(globalPath); err != nil {
+		t.Fatal(err)
+	}
+	global, err := startServerControlDatabaseDispatcher(globalPath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := newSiteDatabaseRouter(siteDatabaseRootPath(globalPath), "localhost", func(boundary context.Context, database *sql.DB, domain string) error {
+		application := &App{db: database, storagePath: root, dbPath: globalPath}
+		return application.migrate(contextWithDomain(boundary, domain))
+	}, false, global)
+	t.Cleanup(func() { router.Close(); global.Close() })
+	waitSiteDBRouterStartup(t, router)
+	application := &App{db: router, siteDatabaseRouter: router, controlDatabase: global, storagePath: root, dbPath: globalPath}
+	application.connectAIControlFacade()
+	return application
+}
+
+func TestSiteSubsystemIsolationAndUnknownHost(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	for _, domain := range []string{"one.example", "two.example"} {
+		boundary := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), domain))
+		if _, err := application.db.ExecContext(boundary, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, "owner@example.org", "test"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := application.db.ExecContext(boundary, `INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,0)`, domain, "/", "test", "hello"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := application.db.ExecContext(boundary, `INSERT INTO analytics_reports(domain,report_json) VALUES(?,?)`, domain, `{}`); err != nil {
+			t.Fatal(err)
+		}
+		database, err := application.siteDatabaseRouter.databaseForContext(boundary)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if database.control == nil || database.analytics == nil || database.control == database || database.analytics == database.control {
+			t.Fatal("missing distinct subsystem participants")
+		}
+		for _, check := range []struct {
+			worker *siteFileDatabase
+			table  string
+			count  int
+		}{{database, "users", 0}, {database, "pages", 1}, {database.control, "users", 1}, {database.analytics, "analytics_reports", 1}} {
+			row, err := check.worker.QueryRowContext(boundary, `SELECT COUNT(*) FROM `+check.table)
+			var count int
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := row.Scan(&count); err != nil || count != check.count {
+				t.Fatalf("%s count=%d error=%v", check.table, count, err)
+			}
+		}
+	}
+	token, _, err := application.aiCapabilities.Issue("one.example", []string{aicapability.ScopeRead})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.aiCapabilities.Exchange(token, "two.example"); err == nil {
+		t.Fatal("cross-site capability accepted")
+	}
+	before, err := os.ReadDir(siteDatabaseRootPath(application.dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 32; index++ {
+		domain := fmt.Sprintf("unknown-%d.example", index)
+		if _, err := application.siteDatabaseRouter.databaseForContext(contextWithDomain(context.Background(), domain)); !errors.Is(err, errSiteDatabaseMissing) {
+			t.Fatalf("unknown Host: %v", err)
+		}
+	}
+	after, err := os.ReadDir(siteDatabaseRootPath(application.dbPath))
+	if err != nil || len(before) != len(after) {
+		t.Fatal("unknown Host created storage")
+	}
+}
+
+func TestAIIngressStealthQueriesMatchPublicRouting(t *testing.T) {
+	application, _ := newTestApplication(t)
+	for _, pathname := range []string{"/", "/about", "/index.html", "/random/path"} {
+		for _, method := range []string{"GET", "HEAD", "POST", "OPTIONS"} {
+			baseline := httptest.NewRecorder()
+			request := httptest.NewRequest(method, "https://localhost"+pathname, nil)
+			request.RemoteAddr = "203.0.113.7:1234"
+			application.route(baseline, request)
+			for _, selector := range []string{"mcp", "oauth=server", "oauth=token", "oauth=authorize", "ai=manifest", "ai=documentation", "ai=openapi", "ai=pair", "ai=token", "ai=exchange", "ai_authorize=private"} {
+				response := httptest.NewRecorder()
+				probe := httptest.NewRequest(method, "https://localhost"+pathname+"?"+selector, nil)
+				probe.RemoteAddr = request.RemoteAddr
+				application.route(response, probe)
+				if response.Code != baseline.Code || response.Body.String() != baseline.Body.String() {
+					t.Fatalf("fingerprint %s %s?%s: status %d vs %d", method, pathname, selector, response.Code, baseline.Code)
+				}
+				for _, header := range []string{"WWW-Authenticate", "Link", "Access-Control-Allow-Origin", "Access-Control-Allow-Methods"} {
+					if response.Header().Get(header) != baseline.Header().Get(header) {
+						t.Fatalf("fingerprint header %s", header)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestAIProviderGateBeforeQueryRoutingAndProxyTrust(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	domain := "ingress.example"
+	boundary := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), domain))
+	if _, err := application.db.ExecContext(boundary, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, "owner@example.org", "test"); err != nil {
+		t.Fatal(err)
+	}
+	policy := `{"external":true,"openai":true,"anthropic":true,"xai":true}`
+	if _, err := application.db.ExecContext(boundary, `INSERT INTO ai_provider_policy(id,policy) VALUES(1,?)`, policy); err != nil {
+		t.Fatal(err)
+	}
+	ranges, err := aiingress.ParseOpenAI(aiingress.OfficialSnapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	validIP := ranges.OpenAI[0].Addr().String()
+	t.Setenv("SITEBRUSH_TRUSTED_PROXIES", "127.0.0.1/32")
+	requestFor := func(target, peer, forwarded string) *http.Request {
+		request := httptest.NewRequest("GET", "https://"+domain+target, nil)
+		request.RemoteAddr = net.JoinHostPort(peer, "1234")
+		request.Header.Set("Forwarded", forwarded)
+		return request.WithContext(contextWithDomain(request.Context(), domain))
+	}
+	for _, pathname := range []string{"/", "/a", "/random/path", "/index.html"} {
+		response := httptest.NewRecorder()
+		application.route(response, requestFor(pathname+"?mcp", validIP, ""))
+		if response.Code != http.StatusUnauthorized || !strings.Contains(response.Header().Get("WWW-Authenticate"), "https://"+domain+"/?oauth=resource") {
+			t.Fatalf("trusted query %s: %d %s", pathname, response.Code, response.Body.String())
+		}
+		metadata := httptest.NewRecorder()
+		application.route(metadata, requestFor(pathname+"?oauth=server", "160.79.104.1", ""))
+		if metadata.Code != 200 || !strings.Contains(metadata.Body.String(), "/?oauth=token") {
+			t.Fatal("OAuth selector depends on pathname")
+		}
+	}
+	for _, test := range []struct {
+		peer, forwarded string
+		allowed         bool
+	}{
+		{"203.0.113.5", "for=" + validIP, false},
+		{"127.0.0.1", "for=" + validIP, true},
+		{"127.0.0.1", "for=unknown", false},
+		{"160.79.104.1", "", true},
+		{"104.16.2.1", "", false},
+	} {
+		machine, _ := application.aiIngressAdmission(requestFor("/?mcp", test.peer, test.forwarded))
+		if machine != test.allowed {
+			t.Fatalf("peer=%s forwarded=%s allowed=%t", test.peer, test.forwarded, machine)
+		}
+	}
+	for _, oldPath := range []string{"/_sitebrush/mcp", "/_sitebrush/oauth/token", "/.well-known/oauth-protected-resource"} {
+		request := requestFor(oldPath, validIP, "")
+		response := httptest.NewRecorder()
+		if application.siteMCPRoute(response, request) {
+			t.Fatalf("old path remains active: %s", oldPath)
+		}
+	}
+	if _, err := application.db.ExecContext(boundary, `INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES(?,?,1)`, domain, "owner@example.org"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.db.ExecContext(boundary, `INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES(?,?,?,1)`, domain, "owner@example.org", "198.51.100.0/24"); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		ip      string
+		allowed bool
+	}{{"198.51.100.8", true}, {"203.0.113.8", false}} {
+		machine, owner := application.aiIngressAdmission(requestFor("/?oauth=authorize", test.ip, ""))
+		if machine || owner != test.allowed {
+			t.Fatalf("owner admission %s: %t %t", test.ip, machine, owner)
+		}
+	}
+}
+
+func restartPartitionedApplication(t *testing.T, application *App) {
+	t.Helper()
+	if err := application.siteDatabaseRouter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	router := newSiteDatabaseRouter(siteDatabaseRootPath(application.dbPath), "localhost", func(boundary context.Context, database *sql.DB, domain string) error {
+		bootstrap := &App{db: database, storagePath: application.storagePath, dbPath: application.dbPath}
+		return bootstrap.migrate(contextWithDomain(boundary, domain))
+	}, false, application.controlDatabase)
+	t.Cleanup(func() { router.Close() })
+	waitSiteDBRouterStartup(t, router)
+	application.db = router
+	application.siteDatabaseRouter = router
+	application.connectAIControlFacade()
+}
+
+func TestSiteControlRestartAndCorruptionFailClosed(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	domain := "restart.example"
+	boundary := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), domain))
+	if _, err := application.db.ExecContext(boundary, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, "owner@example.org", "test"); err != nil {
+		t.Fatal(err)
+	}
+	token, _, err := application.aiCapabilities.Issue(domain, []string{aicapability.ScopeRead})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := application.aiCapabilities.Exchange(token, domain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := application.siteDatabaseRouter.databaseForContext(boundary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controlPath := database.control.path
+	restartPartitionedApplication(t, application)
+	select {
+	case <-session.Done:
+	default:
+		t.Fatal("shutdown left active work alive")
+	}
+	if _, err := application.aiCapabilities.Lookup(session.Token, domain); err == nil {
+		t.Fatal("restart revived short lived session")
+	}
+	if _, err := application.aiCapabilities.ValidateCapability(token, domain); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.aiCapabilities.Revoke(token); err != nil {
+		t.Fatal(err)
+	}
+	restartPartitionedApplication(t, application)
+	if _, err := application.aiCapabilities.Exchange(token, domain); err == nil {
+		t.Fatal("restart lost revocation")
+	}
+	if err := application.siteDatabaseRouter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(controlPath, []byte("corrupt security database"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	restartPartitionedApplication(t, application)
+	if _, err := application.aiCapabilities.Exchange(token, domain); err == nil {
+		t.Fatal("corrupt control database accepted credentials")
+	}
+}
+
+func TestLegacyAIMigrationRetriesCommittedSitesWithoutRestoringRevokedGrants(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	firstToken := "legacy-first-secret"
+	secondToken := "legacy-second-secret"
+	grants := map[string]aicapability.Capability{}
+	for index, domain := range []string{"one.example", "two.example"} {
+		boundary := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), domain))
+		if _, err := application.db.ExecContext(boundary, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, "owner@example.org", "test"); err != nil {
+			t.Fatal(err)
+		}
+		token := firstToken
+		if index == 1 {
+			token = secondToken
+		}
+		digest := sha256.Sum256([]byte(token))
+		identifier := base64.RawURLEncoding.EncodeToString(digest[:])
+		grants[identifier] = aicapability.Capability{ID: identifier, Domain: domain, Owner: "owner@example.org", Scopes: []string{aicapability.ScopeRead}, Created: time.Now()}
+	}
+	filename := filepath.Join(application.storagePath, "security", "ai-capabilities.json")
+	if err := os.MkdirAll(filepath.Dir(filename), 0700); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(grants)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filename, encoded, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filename+".oauth", []byte(`{"clients":{},"refresh":{}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	second, err := application.siteDatabaseRouter.databaseForContext(contextWithDomain(context.Background(), "two.example"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocker, err := sql.Open("sqlite", second.control.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Close()
+	if _, err := blocker.Exec(`BEGIN IMMEDIATE`); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.migrateLegacyAIState(filename); err == nil {
+		t.Fatal("migration ignored busy control DB")
+	} else {
+		t.Logf("interrupted migration: %v", err)
+	}
+	if _, err := os.Stat(filename); err != nil {
+		t.Fatal("legacy source removed before every site committed")
+	}
+	if _, err := blocker.Exec(`ROLLBACK`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.aiCapabilities.ValidateCapability(firstToken, "one.example"); err != nil {
+		t.Fatalf("first import was not committed: %v", err)
+	}
+	if err := application.aiCapabilities.Revoke(firstToken); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.migrateLegacyAIState(filename); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.aiCapabilities.Exchange(firstToken, "one.example"); err == nil {
+		t.Fatal("retry restored a revoked grant")
+	}
+	if _, err := application.aiCapabilities.Exchange(secondToken, "two.example"); err != nil {
+		t.Fatal(err)
+	}
+	for _, source := range []string{filename, filename + ".oauth"} {
+		if _, err := os.Stat(source); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("committed legacy source still exists")
+		}
+	}
+	if err := application.migrateLegacyAIState(filename); err != nil {
+		t.Fatal("completed migration is not idempotent", err)
+	}
+	for _, domain := range []string{"one.example", "two.example"} {
+		database, err := application.siteDatabaseRouter.databaseForContext(contextWithDomain(context.Background(), domain))
+		if err != nil {
+			t.Fatal(err)
+		}
+		capabilities, oauth, err := (siteAIStorage{worker: database.control}).Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, secret := range []string{firstToken, secondToken} {
+			if bytes.Contains(capabilities, []byte(secret)) || bytes.Contains(oauth, []byte(secret)) {
+				t.Fatal("raw credentials entered control DB")
+			}
+		}
+	}
+}
+
+func TestSiteControlSnapshotRestoresPolicyAndRevocationsWithoutAccessSessions(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	domain := "restore.example"
+	boundary := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), domain))
+	if _, err := application.db.ExecContext(boundary, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, "owner@example.org", "test"); err != nil {
+		t.Fatal(err)
+	}
+	active, _, err := application.aiCapabilities.Issue(domain, []string{aicapability.ScopeRead})
+	if err != nil {
+		t.Fatal(err)
+	}
+	revoked, _, err := application.aiCapabilities.Issue(domain, []string{aicapability.ScopeRead})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := application.aiCapabilities.Revoke(revoked); err != nil {
+		t.Fatal(err)
+	}
+	session, err := application.aiCapabilities.Exchange(active, domain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.db.ExecContext(boundary, `INSERT INTO ai_provider_policy(id,policy) VALUES(1,?)`, `{"external":true,"anthropic":true}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.db.ExecContext(boundary, `INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES(?,?,?,1)`, domain, "owner@example.org", "198.51.100.0/24"); err != nil {
+		t.Fatal(err)
+	}
+	database, err := application.siteDatabaseRouter.databaseForContext(boundary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotRoot := t.TempDir()
+	paths := [][2]string{}
+	for index, participant := range []*siteFileDatabase{database, database.control, database.analytics} {
+		snapshot := filepath.Join(snapshotRoot, strconv.Itoa(index)+".db")
+		if err := participant.Migrate(context.Background(), domain, func(_ context.Context, raw *sql.DB, _ string) error {
+			_, err := raw.Exec(`VACUUM INTO ?`, snapshot)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, [2]string{participant.path, snapshot})
+	}
+	if err := application.updateDatabaseHealth(); err != nil {
+		t.Fatal("partition health", err)
+	}
+	if err := application.siteDatabaseRouter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, pathsForOwner := range paths {
+		encoded, err := os.ReadFile(pathsForOwner[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(pathsForOwner[0], encoded, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	restartPartitionedApplication(t, application)
+	if _, err := application.aiCapabilities.ValidateCapability(active, domain); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.aiCapabilities.ValidateCapability(revoked, domain); err == nil {
+		t.Fatal("restore lost revocation state")
+	}
+	if _, err := application.aiCapabilities.Lookup(session.Token, domain); err == nil {
+		t.Fatal("restore revived an access session")
+	}
+	var policy string
+	if err := application.db.QueryRowContext(contextWithDomain(context.Background(), domain), `SELECT policy FROM ai_provider_policy WHERE id=1`).Scan(&policy); err != nil || !strings.Contains(policy, "anthropic") {
+		t.Fatal("provider policy was not restored", err)
+	}
+	var allowed int
+	if err := application.db.QueryRowContext(contextWithDomain(context.Background(), domain), `SELECT COUNT(*) FROM admin_allowed_ips WHERE domain=?`, domain).Scan(&allowed); err != nil || allowed != 1 {
+		t.Fatal("admin IP policy was not restored", err)
+	}
+}
+
+func TestConcurrentSiteControlRequestsSerializeAndRevokeTheirSessions(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	domain := "parallel.example"
+	boundary := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), domain))
+	if _, err := application.db.ExecContext(boundary, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, "owner@example.org", "test"); err != nil {
+		t.Fatal(err)
+	}
+	results := make(chan error, 24)
+	for index := 0; index < 24; index++ {
+		go func() {
+			token, _, err := application.aiCapabilities.Issue(domain, []string{aicapability.ScopeRead})
+			if err != nil {
+				results <- err
+				return
+			}
+			session, err := application.aiCapabilities.Exchange(token, domain)
+			if err != nil {
+				results <- err
+				return
+			}
+			if err = application.aiCapabilities.Revoke(token); err != nil {
+				results <- err
+				return
+			}
+			select {
+			case <-session.Done:
+				results <- nil
+			default:
+				results <- errors.New("revoked concurrent session remained alive")
+			}
+		}()
+	}
+	for index := 0; index < 24; index++ {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestSiteDatabaseBackupArchivesAllOwnerSnapshots(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	domain := "backup.example"
+	boundary := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), domain))
+	if _, err := application.db.ExecContext(boundary, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, "owner@example.org", "test"); err != nil {
+		t.Fatal(err)
+	}
+	token, _, err := application.aiCapabilities.Issue(domain, []string{aicapability.ScopeRead})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(application.backupRootDir(), 0700); err != nil {
+		t.Fatal(err)
+	}
+	var contents bytes.Buffer
+	writer := zip.NewWriter(&contents)
+	owned, err := application.addSiteDatabaseSnapshots(boundary, domain, "database/content.db", writer)
+	if err != nil || !owned {
+		t.Fatal("owner snapshot", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	archive, err := zip.NewReader(bytes.NewReader(contents.Bytes()), int64(contents.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(archive.File) != 3 {
+		t.Fatal("backup omitted an owner")
+	}
+	found := map[string]bool{}
+	for _, entry := range archive.File {
+		found[entry.Name] = true
+		reader, err := entry.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoded, err := io.ReadAll(reader)
+		reader.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(encoded, []byte(token)) {
+			t.Fatal("backup contains raw credential")
+		}
+	}
+	for _, name := range []string{"database/content.db", "database/control.db", "database/analytics.db"} {
+		if !found[name] {
+			t.Fatal("missing snapshot", name)
+		}
+	}
+}
+
+func TestHiddenAISelectorsMatchPublicMiddlewareResponses(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	domain := "middleware.example"
+	boundary := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), domain))
+	if _, err := application.db.ExecContext(boundary, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, "owner@example.org", "test"); err != nil {
+		t.Fatal(err)
+	}
+	application.securityAnalytics = make(chan siteAnalyticsEvent, 64)
+	handler := application.aiIngressMiddleware(application.analyticsMiddleware(application.authAbuseMiddleware(http.HandlerFunc(application.route))))
+	for _, selector := range []string{"mcp", "oauth=server", "oauth=authorize", "ai=manifest", "ai_authorize=private"} {
+		baseline := httptest.NewRecorder()
+		request := httptest.NewRequest("GET", "https://"+domain+"/missing", nil)
+		request.RemoteAddr = "203.0.113.7:1234"
+		request.Header.Set("Referer", "https://search.example/search?q=website")
+		handler.ServeHTTP(baseline, request)
+		response := httptest.NewRecorder()
+		probe := request.Clone(request.Context())
+		probe.URL.RawQuery = selector
+		probe.RequestURI = probe.URL.RequestURI()
+		handler.ServeHTTP(response, probe)
+		if response.Code != baseline.Code || response.Body.String() != baseline.Body.String() || !reflect.DeepEqual(response.Header(), baseline.Header()) {
+			t.Fatalf("middleware exposes hidden selector %s: baseline=%v response=%v", selector, baseline.Header(), response.Header())
+		}
+	}
+}
+
+func TestPartitionedSiteManagementAndAdministratorRecovery(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	domain := "managed.example"
+	const owner = "owner@example.org"
+	if err := application.createManagedSite(context.Background(), domain, owner, "test", 123456789); err != nil {
+		t.Fatal(err)
+	}
+	if !application.rawManagedSiteHasAdmin(context.Background(), domain) {
+		t.Fatal("managed site administrator disappeared after partitioning")
+	}
+	rows, err := application.listSiteQuotaRows(context.Background())
+	if err != nil || len(rows) != 1 || rows[0].Domain != domain || rows[0].LimitBytes != 123456789 || !reflect.DeepEqual(rows[0].AdminEmails, []string{owner}) {
+		t.Fatalf("managed site quota listing: %+v %v", rows, err)
+	}
+	updated, err := application.updateSiteQuotaLimit(context.Background(), domain, 234567890)
+	if err != nil || updated.LimitBytes != 234567890 {
+		t.Fatalf("managed site quota update: %+v %v", updated, err)
+	}
+	adminDomain, adminEmail, found := firstAdminInDatabase(context.Background(), rows[0].DatabasePath, domain)
+	if !found || adminDomain != domain || adminEmail != owner {
+		t.Fatal("server owner discovery did not read the control database")
+	}
+	if err := application.siteDatabaseRouter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var output strings.Builder
+	if err := runAdminIPResetCommand(context.Background(), &output, application.storagePath, application.dbPath, domain, owner, "192.0.2.17/24"); err != nil {
+		t.Fatal(err)
+	}
+	restartPartitionedApplication(t, application)
+	boundary := contextWithDomain(context.Background(), domain)
+	var rule string
+	if err := application.db.QueryRowContext(boundary, `SELECT client_ip FROM admin_allowed_ips WHERE domain=? AND email=?`, domain, owner).Scan(&rule); err != nil || rule != "192.0.2.0/24" {
+		t.Fatalf("recovery did not update control owner: %q %v", rule, err)
+	}
+	database, err := application.siteDatabaseRouter.databaseForContext(boundary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, err := database.QueryRowContext(boundary, `SELECT COUNT(*) FROM users`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var users int
+	if err := row.Scan(&users); err != nil || users != 0 {
+		t.Fatal("recovery wrote accounts into content database", err)
+	}
+	if err := application.createManagedSiteWithoutAdmin(context.Background(), "trial.example", 345678901); err != nil {
+		t.Fatal(err)
+	}
+	restartPartitionedApplication(t, application)
+	var limit int64
+	if err := application.db.QueryRowContext(contextWithDomain(context.Background(), "trial.example"), `SELECT limit_bytes FROM domain_storage_usage WHERE domain=?`, "trial.example").Scan(&limit); err != nil || limit != 345678901 {
+		t.Fatalf("registered trial lost after restart: limit=%d error=%v", limit, err)
+	}
+}
+
+func TestLegacySitePartitionPreservesExistingRecords(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	if err := application.siteDatabaseRouter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	domain := "legacy.example"
+	const legacyPassword = "legacy-security-password-never-include-in-content-snapshot"
+	legacyPath := filepath.Join(siteDatabaseRootPath(application.dbPath), domain+".db")
+	if err := ensureParentDir(legacyPath); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := openSiteDatabaseHandle(context.Background(), legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootstrap := &App{db: raw, storagePath: application.storagePath, dbPath: application.dbPath}
+	if err := bootstrap.migrate(contextWithDomain(context.Background(), domain)); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	statements := []struct {
+		query string
+		args  []any
+	}{
+		{`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, []any{domain, "owner@example.org", legacyPassword}},
+		{`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,0)`, []any{domain, "/", "Home", "preserved content"}},
+		{`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES(?,?,?,?)`, []any{domain, "owner@example.org", "192.0.2.0/24", time.Now().Unix()}},
+		{`INSERT INTO analytics_reports(domain,report_json) VALUES(?,?)`, []any{domain, `{"events":42}`}},
+	}
+	for _, statement := range statements {
+		if _, err := raw.Exec(statement.query, statement.args...); err != nil {
+			raw.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restartPartitionedApplication(t, application)
+	boundary := contextWithDomain(context.Background(), domain)
+	for _, check := range []struct{ query, expected string }{
+		{`SELECT html FROM pages WHERE path='/'`, "preserved content"},
+		{`SELECT client_ip FROM admin_allowed_ips`, "192.0.2.0/24"},
+		{`SELECT report_json FROM analytics_reports`, `{"events":42}`},
+	} {
+		var actual string
+		if err := application.db.QueryRowContext(boundary, check.query).Scan(&actual); err != nil || actual != check.expected {
+			t.Fatalf("legacy migration lost record: %s actual=%q error=%v", check.query, actual, err)
+		}
+	}
+	if _, err := os.Stat(legacyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("legacy combined database remains an active source", err)
+	}
+	contentBytes, err := os.ReadFile(siteDatabaseFile(siteDatabaseRootPath(application.dbPath), domain))
+	if err != nil || bytes.Contains(contentBytes, []byte(legacyPassword)) {
+		t.Fatal("content file retains migrated security records", err)
+	}
+	restartPartitionedApplication(t, application)
+	var rule string
+	if err := application.db.QueryRowContext(boundary, `SELECT client_ip FROM admin_allowed_ips`).Scan(&rule); err != nil || rule != "192.0.2.0/24" {
+		t.Fatal("restart lost migrated security state", err)
+	}
+}
+
+func TestLegacyAnalyticsFilesMigrateIntoSiteOwner(t *testing.T) {
+	for _, legacyName := range []string{"analytics.db", "analytics.example.analytics.db"} {
+		t.Run(legacyName, func(t *testing.T) {
+			application := newPartitionedTestApplication(t)
+			domain := "analytics.example"
+			if err := application.createManagedSiteWithoutAdmin(context.Background(), domain, 123456789); err != nil {
+				t.Fatal(err)
+			}
+			legacyDirectory := filepath.Join(application.storageRootDir(), "analytics", "site-"+domain)
+			if err := os.MkdirAll(legacyDirectory, 0700); err != nil {
+				t.Fatal(err)
+			}
+			legacyPath := filepath.Join(legacyDirectory, legacyName)
+			legacy, err := sql.Open("sqlite", legacyPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := legacy.Exec(`CREATE TABLE checkpoints(kind TEXT PRIMARY KEY,body TEXT NOT NULL); INSERT INTO checkpoints(kind,body) VALUES('technical-report','{"requests":42}')`); err != nil {
+				legacy.Close()
+				t.Fatal(err)
+			}
+			if err := legacy.Close(); err != nil {
+				t.Fatal(err)
+			}
+			repository := siteAnalyticsRepository{application: application}
+			loaded := repository.Exchange(browserstats.StorageRequest{Operation: browserstats.ReadTechnicalReport, Domain: domain})
+			if loaded.Err != nil || loaded.Text != `{"requests":42}` {
+				t.Fatalf("legacy analytics missing: %+v", loaded)
+			}
+			if _, err := os.Stat(legacyPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("legacy analytics still acts as a second source", err)
+			}
+			restartPartitionedApplication(t, application)
+			loaded = repository.Exchange(browserstats.StorageRequest{Operation: browserstats.ReadTechnicalReport, Domain: domain})
+			if loaded.Err != nil || loaded.Text != `{"requests":42}` {
+				t.Fatalf("analytics lost after restart: %+v", loaded)
+			}
+		})
 	}
 }

@@ -3,13 +3,9 @@ package aicapability
 import (
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"net"
 	"net/url"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 )
@@ -162,72 +158,10 @@ func validOAuthRedirect(address string) bool {
 }
 
 func (manager *Manager) loadOAuth() *oauthState {
-	state := &oauthState{Clients: make(map[string]OAuthClient), Refresh: make(map[string]oauthRefresh), Approvals: make(map[string]oauthApproval), Codes: make(map[string]oauthCode)}
-	if manager.persistentPath == "" {
-		return state
-	}
-	encoded, err := os.ReadFile(manager.persistentPath + ".oauth")
-	if errors.Is(err, os.ErrNotExist) {
-		return state
-	}
-	if err != nil {
-		state.loadError = errors.New("OAuth storage unavailable")
-		return state
-	}
-	if json.Unmarshal(encoded, state) != nil || state.Clients == nil || state.Refresh == nil {
-		state.loadError = errors.New("OAuth storage is invalid")
-	}
-	state.prune(time.Now())
-	return state
+	return &oauthState{Clients: make(map[string]OAuthClient), Refresh: make(map[string]oauthRefresh), Approvals: make(map[string]oauthApproval), Codes: make(map[string]oauthCode)}
 }
 
-func (manager *Manager) saveOAuth(state *oauthState) error {
-	if manager.persistentPath == "" {
-		return nil
-	}
-	encoded, err := json.Marshal(state)
-	if err != nil {
-		return err
-	}
-	// Capability issuance creates the private parent directory before grants are
-	// committed. Registration may precede the first capability.
-	if err := os.MkdirAll(filepath.Dir(manager.persistentPath), 0700); err != nil {
-		return err
-	}
-	filename := manager.persistentPath + ".oauth"
-	file, err := os.OpenFile(filename+".tmp", os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
-	if err != nil {
-		return errors.New("cannot persist OAuth binding")
-	}
-	if _, err = file.Write(encoded); err == nil {
-		err = file.Sync()
-	}
-	closeErr := file.Close()
-	if err == nil {
-		err = closeErr
-	}
-	if err == nil {
-		err = os.Rename(filename+".tmp", filename)
-	}
-	// Refresh rotation must survive a crash after the response. Windows does
-	// not support syncing directory handles through os.File.
-	if err == nil && runtime.GOOS != "windows" {
-		directory, openErr := os.Open(filepath.Dir(filename))
-		err = openErr
-		if err == nil {
-			err = directory.Sync()
-			closeErr = directory.Close()
-			if err == nil {
-				err = closeErr
-			}
-		}
-	}
-	if err != nil {
-		_ = os.Remove(filename + ".tmp")
-		return errors.New("cannot persist OAuth binding")
-	}
-	return nil
-}
+func (manager *Manager) saveOAuth(state *oauthState) error { return manager.persist() }
 
 func (state *oauthState) prune(now time.Time) {
 	for key, client := range state.Clients {
@@ -319,7 +253,7 @@ func (manager *Manager) handleOAuth(request oauthRequest, state *oauthState, cap
 		}
 		challenge, err := base64.RawURLEncoding.DecodeString(authorization.Challenge)
 		resource, resourceErr := url.Parse(authorization.Resource)
-		if !redirectAllowed || err != nil || len(challenge) != 32 || resourceErr != nil || resource.Host == "" || resource.User != nil || resource.RawQuery != "" || resource.Fragment != "" || len(authorization.State) > 4096 {
+		if !redirectAllowed || err != nil || len(challenge) != 32 || resourceErr != nil || resource.Host == "" || resource.User != nil || (resource.RawQuery != "" && resource.RawQuery != "mcp") || resource.Fragment != "" || len(authorization.State) > 4096 {
 			return oauthFailure("invalid_request")
 		}
 		if len(authorization.Scopes) == 0 {

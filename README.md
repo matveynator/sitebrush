@@ -589,22 +589,26 @@ are always available in the account; access lists appear when grants or sessions
 
 ### AI access to a whole site
 
-Give an AI the site address. SiteBrush advertises `/?ai=manifest` through a public
-`Link` response header. Discovery, documentation (`/?ai=documentation`) and
-OpenAPI (`/?ai=openapi`) require no credentials. This provider-neutral discovery
-does not require a well-known path. The AI needs tools that can inspect HTTP
-responses and perform the documented requests; this does not automatically add
-networking tools to every chatbot. The manifest also advertises `mcp_url` for
-clients with native Remote MCP support.
+External AI access is hidden by default. Enable the required
+provider in the authenticated profile before connecting it. Provider network
+admission precedes discovery, OAuth and capability checks; ordinary visitors
+receive the same public response with or without AI selectors. Discovery uses
+`/?ai=manifest`, `/?ai=documentation` and `/?ai=openapi` only after admission.
+The manifest advertises `mcp_url` for clients with native Remote MCP support.
 
 #### ChatGPT and Remote MCP
 
 The same SiteBrush instance serves Streamable HTTP at
-`https://example.com/_sitebrush/mcp`. There is no separate daemon. The adapter
+`https://example.com/?mcp`. There is no separate daemon. The adapter
 exports the existing content and Analytics operations, plus `sitebrush_get_access`
 with the connected site, actual permissions, expiry and suggested next actions.
-OAuth discovery uses protected-resource and authorization-server metadata at the
-standard `/.well-known/` paths. Public endpoints require HTTPS.
+OAuth endpoints use `/?oauth=resource`, `/?oauth=server`, `/?oauth=authorize`,
+`/?oauth=token`, `/?oauth=register` and `/?oauth=revoke`, independently of the
+request pathname. The sole standard-path compatibility adapter is
+`/.well-known/oauth-authorization-server`, behind the same provider gate.
+The MCP challenge names the exact query URL for protected-resource metadata.
+External endpoints require HTTPS. See [AI control plane](doc/ai-control-plane.md)
+for ingress policies, database ownership, migration and backup boundaries.
 
 Connect the site's MCP endpoint once in ChatGPT's **Plugins → Add custom MCP
 server**, select OAuth authentication and install the resulting connection.

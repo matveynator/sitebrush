@@ -28,7 +28,7 @@ func beginOAuthFixture(t *testing.T, manager *Manager, domain string, scopes []s
 	}
 	verifier := strings.Repeat("v", 43)
 	digest := sha256.Sum256([]byte(verifier))
-	authorization := OAuthAuthorization{ClientID: client.ID, RedirectURI: client.RedirectURIs[0], Resource: "https://" + domain + "/_sitebrush/mcp", State: "client-state", Challenge: base64.RawURLEncoding.EncodeToString(digest[:]), Scopes: scopes}
+	authorization := OAuthAuthorization{ClientID: client.ID, RedirectURI: client.RedirectURIs[0], Resource: "https://" + domain + "/?mcp", State: "client-state", Challenge: base64.RawURLEncoding.EncodeToString(digest[:]), Scopes: scopes}
 	pairing, err := manager.BeginOAuth(domain, authorization)
 	if err != nil {
 		t.Fatal(err)
@@ -78,7 +78,7 @@ func TestOAuthBindsPKCEClientSiteResourceAndOneTimeCode(t *testing.T) {
 	for _, changes := range []struct{ domain, client, resource, redirect, verifier string }{
 		{"two.example", fixture.client.ID, fixture.authorization.Resource, fixture.authorization.RedirectURI, strings.Repeat("v", 43)},
 		{"one.example", "other-client", fixture.authorization.Resource, fixture.authorization.RedirectURI, strings.Repeat("v", 43)},
-		{"one.example", fixture.client.ID, "https://two.example/_sitebrush/mcp", fixture.authorization.RedirectURI, strings.Repeat("v", 43)},
+		{"one.example", fixture.client.ID, "https://two.example/?mcp", fixture.authorization.RedirectURI, strings.Repeat("v", 43)},
 		{"one.example", fixture.client.ID, fixture.authorization.Resource, "https://evil.example/callback", strings.Repeat("v", 43)},
 		{"one.example", fixture.client.ID, fixture.authorization.Resource, fixture.authorization.RedirectURI, strings.Repeat("x", 43)},
 	} {
@@ -164,7 +164,7 @@ func TestOAuthRefreshPersistsHashesAndDetectsReplayAfterRestart(t *testing.T) {
 	fixture := approveOAuthFixture(t, manager, "one.example", beginOAuthFixture(t, manager, "one.example", StandardScopes()), StandardScopes())
 	tokens := exchangeOAuthFixture(t, manager, "one.example", fixture)
 	manager.Close()
-	for _, name := range []string{filename, filename + ".oauth"} {
+	for _, name := range []string{filename + ".db"} {
 		encoded, err := os.ReadFile(name)
 		if err != nil {
 			t.Fatal(err)

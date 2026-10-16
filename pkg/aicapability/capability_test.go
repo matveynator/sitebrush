@@ -2,6 +2,7 @@ package aicapability
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -117,7 +118,7 @@ func TestPersistentManagerKeepsRevocableCapabilityHash(t *testing.T) {
 	if _, err := secondManager.Exchange(token, "example.org"); err != nil {
 		t.Fatalf("persisted capability was not restored: %v", err)
 	}
-	data, err := os.ReadFile(statePath)
+	data, err := os.ReadFile(statePath + ".db")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +194,6 @@ func TestCapabilityKeepsPageAndTaskContextOutOfTheURL(t *testing.T) {
 	}
 }
 
-
 func TestCapabilityManagerRejectsInvalidSessionAdministration(t *testing.T) {
 	manager := NewManager()
 	defer manager.Close()
@@ -249,34 +249,38 @@ func TestCapabilityPersistenceFailsClosed(t *testing.T) {
 	}
 }
 
-func TestCapabilityRevokeRestoresStateWhenPersistenceFails(t *testing.T) {
-	root := t.TempDir()
-	statePath := filepath.Join(root, "state", "capabilities.json")
-	manager := NewPersistentManager(statePath)
-	defer manager.Close()
+type failingSaveStorage struct{ fail <-chan struct{} }
 
+func (storage failingSaveStorage) Load() ([]byte, []byte, error) { return nil, nil, nil }
+func (storage failingSaveStorage) Save([]byte, []byte) error {
+	select {
+	case <-storage.fail:
+		return errors.New("control database unavailable")
+	default:
+		return nil
+	}
+}
+
+func TestCapabilityRevokeRestoresStateWhenPersistenceFails(t *testing.T) {
+	failure := make(chan struct{})
+	manager := NewStoredManager(failingSaveStorage{fail: failure})
+	defer manager.Close()
 	token, capability, err := manager.IssueFor("example.org", "owner@example.org", []string{ScopeRead})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Rename(filepath.Dir(statePath), filepath.Join(root, "state-old")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Dir(statePath), []byte("block directory recreation"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
+	close(failure)
 	if err := manager.Revoke(token); err == nil {
-		t.Fatal("revoke succeeded even though capability state could not be persisted")
+		t.Fatal("revoke ignored failed transaction")
 	}
 	if _, err := manager.ValidateCapability(token, "example.org"); err != nil {
-		t.Fatalf("failed revoke did not restore in-memory capability: %v", err)
+		t.Fatal(err)
 	}
 	if err := manager.RevokeCapabilityID(capability.ID, "owner@example.org", "example.org"); err == nil {
-		t.Fatal("capability-id revoke succeeded even though state could not be persisted")
+		t.Fatal("ID revoke ignored failed transaction")
 	}
 	if _, err := manager.ValidateCapability(token, "example.org"); err != nil {
-		t.Fatalf("failed capability-id revoke did not restore state: %v", err)
+		t.Fatal(err)
 	}
 }
 
@@ -329,5 +333,31 @@ func TestPersistentManagerSkipsRevokedCapabilities(t *testing.T) {
 	defer manager.Close()
 	if _, err := manager.Exchange(token, "example.org"); err == nil {
 		t.Fatal("revoked persisted capability was restored")
+	}
+}
+
+func TestFailedRepeatedRevocationCannotReactivateGrant(t *testing.T) {
+	failure := make(chan struct{})
+	manager := NewStoredManager(failingSaveStorage{fail: failure})
+	defer manager.Close()
+	token, capability, err := manager.IssueFor("example.org", "owner@example.org", []string{ScopeRead})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Revoke(token); err != nil {
+		t.Fatal(err)
+	}
+	close(failure)
+	if err := manager.Revoke(token); err == nil {
+		t.Fatal("failed commit reported success")
+	}
+	if _, err := manager.Exchange(token, "example.org"); err == nil {
+		t.Fatal("failed repeated revoke reactivated grant")
+	}
+	if err := manager.RevokeCapabilityID(capability.ID, "owner@example.org", "example.org"); err == nil {
+		t.Fatal("failed commit reported success")
+	}
+	if _, err := manager.ValidateCapability(token, "example.org"); err == nil {
+		t.Fatal("failed repeated ID revoke reactivated grant")
 	}
 }

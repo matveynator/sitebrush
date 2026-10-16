@@ -85,7 +85,7 @@ func TestSecurityBoundarySafeQueryRedactsEveryCredentialLikeField(t *testing.T) 
 }
 
 func TestSafeQueryRedactsAIPairingApproval(t *testing.T) {
-	if query := SafeQuery("ai_authorize=browser-secret&ai=manifest"); strings.Contains(query, "browser-secret") || !strings.Contains(query, "ai=manifest") {
+	if query := SafeQuery("ai_authorize=browser-secret&ai=manifest"); strings.Contains(query, "browser-secret") || strings.Contains(query, "manifest") {
 		t.Fatalf("unsafe pairing query: %q", query)
 	}
 }

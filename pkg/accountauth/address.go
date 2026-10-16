@@ -77,7 +77,7 @@ func SafeQuery(raw string) string {
 	}
 	for key := range query {
 		lower := strings.ToLower(key)
-		if strings.Contains(lower, "token") || strings.Contains(lower, "code") || strings.Contains(lower, "password") || strings.Contains(lower, "secret") || strings.Contains(lower, "challenge") || strings.Contains(lower, "resume") || lower == "state" || lower == "download_url" || lower == "ai_authorize" || lower == "email_confirm" || lower == "return_path" {
+		if strings.Contains(lower, "token") || strings.Contains(lower, "code") || strings.Contains(lower, "password") || strings.Contains(lower, "secret") || strings.Contains(lower, "challenge") || strings.Contains(lower, "resume") || lower == "state" || lower == "mcp" || lower == "oauth" || lower == "ai" || lower == "scope" || lower == "resource" || lower == "redirect_uri" || lower == "client_id" || lower == "response_type" || lower == "grant_type" || lower == "download_url" || lower == "ai_authorize" || lower == "email_confirm" || lower == "return_path" {
 			query.Set(key, "[redacted]")
 		}
 	}

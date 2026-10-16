@@ -1,1 +1,1 @@
-{"generation":1,"reads_from":1,"reads_through":1,"writes_compatible":true,"migrates_from":1}
+{"generation":2,"reads_from":2,"reads_through":2,"writes_compatible":false,"migrates_from":1}

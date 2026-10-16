@@ -59,6 +59,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/accounttotp"
 	"github.com/matveynator/sitebrush/v2/pkg/aicapability"
 	"github.com/matveynator/sitebrush/v2/pkg/aieditor"
+	"github.com/matveynator/sitebrush/v2/pkg/aiingress"
 	"github.com/matveynator/sitebrush/v2/pkg/aiprovider"
 	browserstats "github.com/matveynator/sitebrush/v2/pkg/analytics"
 	"github.com/matveynator/sitebrush/v2/pkg/appupdate"
@@ -917,6 +918,7 @@ const (
 )
 
 type siteDBOperation struct {
+	stop     <-chan struct{}
 	ctx      context.Context
 	query    string
 	args     []any
@@ -1014,7 +1016,7 @@ func openServerControlDatabaseHandle(databasePath string, writer bool) (*sql.DB,
 	pragmas := []string{
 		"PRAGMA busy_timeout=5000",
 		"PRAGMA foreign_keys=ON",
-		"PRAGMA synchronous=NORMAL",
+		"PRAGMA synchronous=FULL",
 	}
 	if writer {
 		pragmas = append([]string{"PRAGMA journal_mode=WAL"}, pragmas...)
@@ -1169,17 +1171,20 @@ func (dispatcher *serverControlDatabaseDispatcher) runCloser() {
 // enter through channel queues: writes stay ordered while WAL readers proceed
 // independently without sharing the writer connection.
 type siteFileDatabase struct {
-	path          string
-	rawDatabase   *sql.DB
-	readDatabases []*sql.DB
-	debug         bool
-	generalQueue  chan siteDBOperation
-	readQueue     chan siteDBOperation
-	writeQueue    chan siteDBOperation
-	closeRequests chan chan error
-	readStop      chan struct{}
-	readersDone   chan struct{}
-	stopped       chan struct{}
+	analyticsArchiveHours map[string]string
+	control, analytics    *siteFileDatabase
+	ai                    *aicapability.Manager
+	path                  string
+	rawDatabase           *sql.DB
+	readDatabases         []*sql.DB
+	debug                 bool
+	generalQueue          chan siteDBOperation
+	readQueue             chan siteDBOperation
+	writeQueue            chan siteDBOperation
+	closeRequests         chan chan error
+	readStop              chan struct{}
+	readersDone           chan struct{}
+	stopped               chan struct{}
 }
 
 const slowHTTPRequestLogAfter = 2 * time.Second
@@ -1302,7 +1307,11 @@ func newSiteFileDatabase(databasePath string, rawDatabase *sql.DB, debug bool) (
 }
 
 func openSiteDatabaseReadHandle(databasePath string) (*sql.DB, error) {
-	database, err := sql.Open("sqlite", "file:"+databasePath)
+	address, err := siteDatabaseURL(databasePath, "ro")
+	if err != nil {
+		return nil, err
+	}
+	database, err := sql.Open("sqlite", address)
 	if err != nil {
 		return nil, err
 	}
@@ -1316,6 +1325,18 @@ func openSiteDatabaseReadHandle(databasePath string) (*sql.DB, error) {
 		}
 	}
 	return database, nil
+}
+
+func siteDatabaseURL(databasePath, mode string) (string, error) {
+	absolutePath, err := filepath.Abs(databasePath)
+	if err != nil {
+		return "", err
+	}
+	uriPath := filepath.ToSlash(absolutePath)
+	if !strings.HasPrefix(uriPath, "/") {
+		uriPath = "/" + uriPath
+	}
+	return (&url.URL{Scheme: "file", Path: uriPath, RawQuery: url.Values{"mode": {mode}}.Encode()}).String(), nil
 }
 
 func (db *siteFileDatabase) run() {
@@ -1380,6 +1401,12 @@ func (db *siteFileDatabase) completeOperation(operation siteDBOperation) {
 
 func (db *siteFileDatabase) completeOperationWithDatabase(operation siteDBOperation, database *sql.DB) {
 	select {
+	case <-operation.stop:
+		operation.response <- siteDBOperationResponse{err: errors.New("site database subscriber disconnected")}
+		return
+	default:
+	}
+	select {
 	case <-operation.ctx.Done():
 		if db.debug {
 			db.logDatabaseOperationCanceled(operation)
@@ -1414,6 +1441,15 @@ func (db *siteFileDatabase) finishQueuedOperations() int {
 }
 
 func (db *siteFileDatabase) close(finishedOperations int) error {
+	if db.ai != nil {
+		db.ai.Close()
+	}
+	for _, participant := range []*siteFileDatabase{db.control, db.analytics} {
+		if participant != nil {
+			_ = participant.Close()
+		}
+	}
+
 	log.Printf("%sDB WORKER%s closing path=%s queued_operations_finished=%d", terminalYellow(), terminalReset(), db.path, finishedOperations)
 	err := db.rawDatabase.Close()
 	if err != nil {
@@ -1517,6 +1553,28 @@ func (db *siteFileDatabase) QueryRowContext(ctx context.Context, query string, a
 	}
 	response := db.runOperation(ctx, operation)
 	return response.row, response.err
+}
+
+func (db *siteFileDatabase) Session(stop <-chan struct{}, run func(*sql.DB) error) error {
+	reply := make(chan siteDBOperationResponse, 1)
+	operation := siteDBOperation{ctx: context.Background(), stop: stop, response: reply, kind: siteDBWorkloadGeneral, run: func(_ context.Context, raw *sql.DB) siteDBOperationResponse {
+		return siteDBOperationResponse{err: run(raw)}
+	}}
+	select {
+	case <-stop:
+		return errors.New("site database subscriber disconnected")
+	case <-db.stopped:
+		return errors.New("site database worker stopped")
+	case db.generalQueue <- operation:
+	}
+	select {
+	case <-stop:
+		return errors.New("site database subscriber disconnected")
+	case <-db.stopped:
+		return errors.New("site database worker stopped")
+	case response := <-reply:
+		return response.err
+	}
 }
 
 func (db *siteFileDatabase) Migrate(ctx context.Context, domain string, migrate siteDBMigrator) error {
@@ -1686,9 +1744,651 @@ func (db *siteFileDatabase) logDatabaseOperationCanceled(operation siteDBOperati
 		siteDBWorkloadName(operation.kind), status)
 }
 
+// Site subsystem ownership follows the global registry. Legacy files remain
+// migration sources only until their durable destination has been verified.
+type siteAnalyticsRepository struct{ application *App }
+
+func (repository siteAnalyticsRepository) Exchange(request browserstats.StorageRequest) browserstats.StorageResult {
+	application := repository.application
+	database, err := application.siteDatabaseRouter.databaseForContext(contextWithDomain(context.Background(), request.Domain))
+	if err != nil {
+		return browserstats.StorageResult{Err: err}
+	}
+	if database.analytics == nil {
+		return browserstats.StorageResult{Err: errors.New("site analytics participant unavailable")}
+	}
+	var result browserstats.StorageResult
+	err = database.analytics.Session(request.Stop, func(raw *sql.DB) error {
+		domain := request.Domain
+		select {
+		case <-request.Stop:
+			return errors.New("analytics subscriber disconnected")
+		default:
+		}
+		if err := application.migrateLegacyAnalytics(raw, domain, filepath.Dir(database.analytics.path)); err != nil {
+			return err
+		}
+		if database.analytics.analyticsArchiveHours == nil {
+			database.analytics.analyticsArchiveHours = map[string]string{}
+		}
+		result = browserstats.ExecuteOwned(filepath.Dir(database.analytics.path), request, raw, database.analytics.analyticsArchiveHours)
+		return result.Err
+	})
+	if err != nil {
+		result.Err = err
+	}
+	return result
+}
+
+func (a *App) migrateLegacyAnalytics(database *sql.DB, domain, directory string) error {
+	legacyDirectory := filepath.Join(a.storageRootDir(), "analytics", "site-"+url.PathEscape(domain))
+	legacyPath := filepath.Join(legacyDirectory, browserstats.DatabaseName(domain))
+	if _, err := os.Lstat(legacyPath); errors.Is(err, os.ErrNotExist) {
+		legacyPath = filepath.Join(legacyDirectory, "analytics.db")
+		if _, legacyErr := os.Lstat(legacyPath); errors.Is(legacyErr, os.ErrNotExist) {
+			return nil
+		}
+	}
+	if info, err := os.Lstat(legacyDirectory); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("unsafe legacy analytics directory")
+	}
+	if info, err := os.Lstat(legacyPath); err != nil || !info.Mode().IsRegular() {
+		return errors.New("unsafe legacy analytics database")
+	}
+	if _, err := database.Exec(`CREATE TABLE IF NOT EXISTS analytics_legacy_import(domain TEXT PRIMARY KEY)`); err != nil {
+		return err
+	}
+	var imported int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM analytics_legacy_import WHERE domain=?`, domain).Scan(&imported); err != nil {
+		return err
+	}
+	if imported == 0 {
+		if _, err := database.Exec(`ATTACH DATABASE ? AS legacy_observations`, legacyPath); err != nil {
+			return err
+		}
+		defer database.Exec(`DETACH DATABASE legacy_observations`)
+		var integrity string
+		if err := database.QueryRow(`PRAGMA legacy_observations.quick_check`).Scan(&integrity); err != nil || integrity != "ok" {
+			return errors.New("invalid legacy analytics database")
+		}
+		transaction, err := database.Begin()
+		if err != nil {
+			return err
+		}
+		defer transaction.Rollback()
+		if _, err = transaction.Exec(`CREATE TABLE IF NOT EXISTS checkpoints(kind TEXT PRIMARY KEY,body TEXT NOT NULL)`); err != nil {
+			return err
+		}
+		if _, err = transaction.Exec(`INSERT INTO checkpoints(kind,body) SELECT legacy.kind,legacy.body FROM legacy_observations.checkpoints legacy WHERE NOT EXISTS(SELECT 1 FROM main.checkpoints current WHERE current.kind=legacy.kind)`); err != nil {
+			return err
+		}
+		if _, err = transaction.Exec(`INSERT INTO analytics_legacy_import(domain) VALUES(?)`, domain); err != nil {
+			return err
+		}
+		if err = transaction.Commit(); err != nil {
+			return err
+		}
+	}
+	sourceArchives := filepath.Join(legacyDirectory, "archives")
+	if info, err := os.Lstat(sourceArchives); err == nil {
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return errors.New("unsafe legacy analytics archives")
+		}
+		destination := filepath.Join(directory, "archives")
+		if _, err := os.Lstat(destination); errors.Is(err, os.ErrNotExist) {
+			if err := os.Rename(sourceArchives, destination); err != nil {
+				return err
+			}
+		} else {
+			return errors.New("analytics archive migration destination already exists")
+		}
+	}
+	// The committed import marker prevents stale observations from replacing
+	// current state if interruption occurs during source cleanup.
+	if _, err := database.Exec(`DETACH DATABASE legacy_observations`); err != nil && imported == 0 {
+		return err
+	}
+	return os.Remove(legacyPath)
+}
+
+type siteAIStorage struct{ worker *siteFileDatabase }
+
+func (storage siteAIStorage) Load() ([]byte, []byte, error) {
+	var capabilities, oauth []byte
+	err := storage.worker.Migrate(context.Background(), "", func(_ context.Context, database *sql.DB, _ string) error {
+		var loadErr error
+		capabilities, oauth, loadErr = aicapability.LoadSQL(database)
+		return loadErr
+	})
+	return capabilities, oauth, err
+}
+func (storage siteAIStorage) Save(capabilities, oauth []byte) error {
+	return storage.worker.Migrate(context.Background(), "", func(_ context.Context, database *sql.DB, _ string) error {
+		return aicapability.SaveSQL(database, capabilities, oauth)
+	})
+}
+
+func stableSiteID(domain string) string {
+	digest := sha256.Sum256([]byte("sitebrush/site/" + normalizeDomainName(domain)))
+	return hex.EncodeToString(digest[:16])
+}
+
+func registeredSiteDatabaseCandidates(root string) ([]siteQuotaDatabaseCandidate, error) {
+	entries, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	candidates := []siteQuotaDatabaseCandidate{}
+	for _, entry := range entries {
+		if entry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		if !entry.IsDir() {
+			if strings.EqualFold(filepath.Ext(entry.Name()), ".db") {
+				candidates = append(candidates, siteQuotaDatabaseCandidate{path: filepath.Join(root, entry.Name()), fallbackDomain: strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))})
+			}
+			continue
+		}
+		identifier := entry.Name()
+		if len(identifier) != 32 || strings.Trim(identifier, "0123456789abcdef") != "" {
+			continue
+		}
+		contentPath := filepath.Join(root, identifier, "content.db")
+		if _, err := os.Stat(contentPath); errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		control, err := openSiteDatabaseReadHandle(filepath.Join(root, identifier, "control.db"))
+		if err != nil {
+			return nil, err
+		}
+		var domain string
+		err = control.QueryRow(`SELECT domain FROM users WHERE is_admin=1 LIMIT 1`).Scan(&domain)
+		control.Close()
+		if errors.Is(err, sql.ErrNoRows) {
+			content, openErr := openSiteDatabaseReadHandle(contentPath)
+			if openErr != nil {
+				return nil, openErr
+			}
+			err = content.QueryRow(`SELECT domain FROM domain_storage_usage LIMIT 1`).Scan(&domain)
+			content.Close()
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
+		if stableSiteID(domain) != identifier {
+			return nil, errors.New("invalid stable site identity")
+		}
+		candidates = append(candidates, siteQuotaDatabaseCandidate{path: contentPath, fallbackDomain: domain})
+	}
+	return candidates, nil
+}
+
+func siteDatabaseFile(root, domain string) string {
+	current := filepath.Join(root, stableSiteID(domain), "content.db")
+	if _, err := os.Stat(current); err == nil {
+		return current
+	}
+	return filepath.Join(root, domainStorageName(domain)+".db")
+}
+
+func siteControlDatabasePath(database *sql.DB) string {
+	identifier := partitionedSiteID(database)
+	if identifier == "" {
+		return ""
+	}
+	rows, err := database.Query(`PRAGMA database_list`)
+	if err != nil {
+		return ""
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sequence int
+		var name, filename string
+		if rows.Scan(&sequence, &name, &filename) == nil && name == "main" {
+			directory := filepath.Dir(filename)
+			if filepath.Base(filename) != "content.db" {
+				directory = filepath.Join(directory, identifier)
+			}
+			return filepath.Join(directory, "control.db")
+		}
+	}
+	return ""
+}
+
+func readSiteControlDatabase(database *sql.DB) (*sql.DB, func(), error) {
+	if database == nil {
+		return nil, func() {}, errors.New("site database unavailable")
+	}
+	filename := siteControlDatabasePath(database)
+	if filename == "" {
+		return database, func() {}, nil
+	}
+	control, err := openSiteDatabaseReadHandle(filename)
+	if err != nil {
+		return nil, func() {}, err
+	}
+	return control, func() { control.Close() }, nil
+}
+
+func (router *perSiteDBRouter) relocateSiteContent(root, domain string, database *siteFileDatabase) (*siteFileDatabase, error) {
+	destination := filepath.Join(root, stableSiteID(domain), "content.db")
+	if database.path == destination {
+		return database, nil
+	}
+	original := database.path
+	if err := database.Close(); err != nil {
+		return nil, err
+	}
+	if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
+		return nil, errors.New("site content destination already exists")
+	}
+	if err := os.Rename(original, destination); err != nil {
+		return nil, err
+	}
+	raw, err := openSiteDatabaseHandle(context.Background(), destination)
+	if err != nil {
+		return nil, err
+	}
+	participant, err := newSiteFileDatabase(destination, raw, router.debug)
+	if err != nil {
+		raw.Close()
+		return nil, err
+	}
+	if err := router.startSiteSubsystems(root, domain, participant); err != nil {
+		participant.Close()
+		return nil, err
+	}
+	return participant, nil
+}
+
+func siteTableSubsystem(table string) string {
+	switch table {
+	case "pages", "published_pages", "page_redirects", "domain_storage_usage", "revisions", "file_metadata":
+		return "content"
+	case "analytics_events", "analytics_reports", "analytics_configuration":
+		return "analytics"
+	}
+	if strings.HasPrefix(table, "crawler_") || strings.HasPrefix(table, "whole_site_import") || strings.HasPrefix(table, "import_") || table == "sitebrush_migrations" || table == "application_migration_steps" || table == "site_partition_layout" || table == "site_partition_ready" {
+		return "content"
+	}
+	return "control"
+}
+
+func siteQuerySubsystem(query string) string {
+	words := strings.FieldsFunc(strings.ToLower(query), func(character rune) bool {
+		return !(character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '_')
+	})
+	subsystem := ""
+	for _, word := range words {
+		owner := ""
+		switch word {
+		case "pages", "published_pages", "page_redirects", "domain_storage_usage", "revisions", "file_metadata":
+			owner = "content"
+		case "analytics_events", "analytics_reports", "analytics_configuration", "checkpoints":
+			owner = "analytics"
+		case "users", "sessions", "auth_ip_failures", "domain_aliases", "domain_states", "domain_ssl_settings", "page_password_rules", "page_password_sessions", "domain_chroot_locations", "domain_backup_tokens", "ai_provider_user_credentials", "admin_stealth_modes", "file_access_rules", "email_confirmations", "owner_mail_preferences", "ai_security_state", "ai_provider_policy":
+			owner = "control"
+		}
+		if strings.HasPrefix(word, "account_") || word == "admin_allowed_ips" || word == "admin_ip_policies" {
+			owner = "control"
+		}
+		if strings.HasPrefix(word, "whole_site_import") {
+			owner = "content"
+		}
+		if owner == "" {
+			continue
+		}
+		if subsystem != "" && subsystem != owner {
+			return "mixed"
+		}
+		subsystem = owner
+	}
+	if subsystem == "" {
+		return "content"
+	}
+	return subsystem
+}
+
+func siteQueryParticipant(database *siteFileDatabase, query string) (*siteFileDatabase, error) {
+	subsystem := siteQuerySubsystem(query)
+	if database.control != nil && subsystem == "mixed" {
+		return nil, errors.New("query crosses site subsystem ownership")
+	}
+	return database.subsystem(subsystem), nil
+}
+
+func (database *siteFileDatabase) subsystem(name string) *siteFileDatabase {
+	if name == "control" && database.control != nil {
+		return database.control
+	}
+	if name == "analytics" && database.analytics != nil {
+		return database.analytics
+	}
+	return database
+}
+
+func partitionedSiteID(database *sql.DB) string {
+	var identifier string
+	_ = database.QueryRow(`SELECT site_id FROM site_partition_layout WHERE version=1`).Scan(&identifier)
+	if len(identifier) != 32 {
+		return ""
+	}
+	for _, character := range identifier {
+		if !strings.ContainsRune("0123456789abcdef", character) {
+			return ""
+		}
+	}
+	return identifier
+}
+
+func (router *perSiteDBRouter) registerSite(domain string) (string, error) {
+	var identifier string
+	err := router.global.execute(context.Background(), serverControlDatabaseWrite, "resolve stable site ID", func(database *sql.DB) error {
+		if _, err := database.Exec(`CREATE TABLE IF NOT EXISTS site_registry(domain TEXT PRIMARY KEY,site_id TEXT NOT NULL UNIQUE)`); err != nil {
+			return err
+		}
+		err := database.QueryRow(`SELECT site_id FROM site_registry WHERE domain=?`, domain).Scan(&identifier)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		identifier = stableSiteID(domain)
+		_, err = database.Exec(`INSERT INTO site_registry(domain,site_id) VALUES(?,?)`, domain, identifier)
+		return err
+	})
+	if err == nil && identifier != stableSiteID(domain) {
+		return "", errors.New("invalid stable site registry binding")
+	}
+	return identifier, err
+}
+
+func (router *perSiteDBRouter) startSiteSubsystems(root, domain string, content *siteFileDatabase) error {
+	identifier, err := router.registerSite(domain)
+	if err != nil {
+		return err
+	}
+	directory := filepath.Join(root, identifier)
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		return err
+	}
+	if info, err := os.Lstat(directory); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("unsafe site subsystem directory")
+	}
+	for _, name := range []string{"control", "analytics"} {
+		filename := filepath.Join(directory, name+".db")
+		if name == "analytics" {
+			analyticsDirectory := filepath.Join(directory, "analytics")
+			if err := os.MkdirAll(analyticsDirectory, 0700); err != nil {
+				return err
+			}
+			if info, err := os.Lstat(analyticsDirectory); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+				return errors.New("unsafe analytics directory")
+			}
+			filename = filepath.Join(analyticsDirectory, "analytics.db")
+		}
+		if info, err := os.Lstat(filename); err == nil && !info.Mode().IsRegular() {
+			return errors.New("unsafe site subsystem database")
+		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		var ready int
+		checkErr := content.Migrate(context.Background(), domain, func(_ context.Context, raw *sql.DB, _ string) error {
+			var present int
+			if err := raw.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='site_partition_ready'`).Scan(&present); err != nil {
+				return err
+			}
+			if present == 0 {
+				return nil
+			}
+			return raw.QueryRow(`SELECT COUNT(*) FROM site_partition_ready WHERE name=?`, name).Scan(&ready)
+		})
+		if checkErr != nil {
+			return checkErr
+		}
+		if ready != 0 {
+			if _, err := os.Stat(filename); err != nil {
+				return errors.New("site subsystem database is missing")
+			}
+		}
+		err = content.Migrate(context.Background(), domain, func(_ context.Context, database *sql.DB, _ string) error {
+			return migrateSitePartition(database, filename, identifier, name)
+		})
+		if err != nil {
+			return err
+		}
+		raw, openErr := openSiteDatabaseHandle(context.Background(), filename)
+		if openErr != nil {
+			return openErr
+		}
+		worker, workerErr := newSiteFileDatabase(filename, raw, router.debug)
+		if workerErr != nil {
+			raw.Close()
+			return workerErr
+		}
+		if err := os.Chmod(filename, 0600); err != nil {
+			worker.Close()
+			return err
+		}
+		if name == "control" {
+			if err := worker.Migrate(context.Background(), domain, func(_ context.Context, raw *sql.DB, _ string) error {
+				_, err := raw.Exec(`PRAGMA synchronous=FULL`)
+				return err
+			}); err != nil {
+				worker.Close()
+				return err
+			}
+		}
+		if name == "control" {
+			content.control = worker
+		} else {
+			content.analytics = worker
+		}
+	}
+	if err := content.control.Migrate(context.Background(), domain, func(_ context.Context, database *sql.DB, _ string) error {
+		if err := aicapability.InitSQL(database); err != nil {
+			return err
+		}
+		if _, err := database.Exec(`CREATE TABLE IF NOT EXISTS ai_provider_policy(id INTEGER PRIMARY KEY,policy TEXT NOT NULL)`); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	content.ai = aicapability.NewStoredManager(siteAIStorage{worker: content.control})
+	return nil
+}
+
+func migrateSitePartition(database *sql.DB, filename, identifier, subsystem string) error {
+	if _, err := database.Exec(`ATTACH DATABASE ? AS destination`, filename); err != nil {
+		return err
+	}
+	defer database.Exec(`DETACH DATABASE destination`)
+	if _, err := database.Exec(`PRAGMA destination.synchronous=FULL`); err != nil {
+		return err
+	}
+	var integrity string
+	if err := database.QueryRow(`PRAGMA destination.quick_check`).Scan(&integrity); err != nil || integrity != "ok" {
+		return errors.New("invalid site control or analytics database")
+	}
+	rows, err := database.Query(`SELECT name,sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`)
+	if err != nil {
+		return err
+	}
+	type tableSchema struct{ name, query string }
+	tables := []tableSchema{}
+	for rows.Next() {
+		var table tableSchema
+		if err = rows.Scan(&table.name, &table.query); err != nil {
+			rows.Close()
+			return err
+		}
+		if siteTableSubsystem(table.name) == subsystem {
+			tables = append(tables, table)
+		}
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	if _, err = database.Exec(`CREATE TABLE IF NOT EXISTS destination.site_partition_import(name TEXT PRIMARY KEY)`); err != nil {
+		return err
+	}
+	var imported int
+	err = database.QueryRow(`SELECT COUNT(1) FROM destination.site_partition_import WHERE name=?`, subsystem).Scan(&imported)
+	if err != nil {
+		return err
+	}
+	if imported == 0 {
+		transaction, beginErr := database.Begin()
+		if beginErr != nil {
+			return beginErr
+		}
+		defer transaction.Rollback()
+		for _, table := range tables {
+			opening := strings.Index(table.query, "(")
+			if opening < 0 {
+				return errors.New("unsupported legacy table schema")
+			}
+			if _, err = transaction.Exec(`CREATE TABLE destination."` + table.name + `" ` + table.query[opening:]); err != nil {
+				return err
+			}
+			if _, err = transaction.Exec(`INSERT INTO destination."` + table.name + `" SELECT * FROM main."` + table.name + `"`); err != nil {
+				return err
+			}
+			var originalCount, copiedCount int64
+			if err = transaction.QueryRow(`SELECT COUNT(*) FROM main."` + table.name + `"`).Scan(&originalCount); err != nil {
+				return err
+			}
+			if err = transaction.QueryRow(`SELECT COUNT(*) FROM destination."` + table.name + `"`).Scan(&copiedCount); err != nil {
+				return err
+			}
+			if copiedCount != originalCount {
+				return errors.New("site partition verification failed")
+			}
+		}
+		indexRows, indexErr := transaction.Query(`SELECT name,tbl_name,sql FROM sqlite_master WHERE type='index' AND sql IS NOT NULL`)
+		if indexErr != nil {
+			return indexErr
+		}
+		type indexSchema struct{ name, table, query string }
+		indexes := []indexSchema{}
+		for indexRows.Next() {
+			var index indexSchema
+			if err := indexRows.Scan(&index.name, &index.table, &index.query); err != nil {
+				indexRows.Close()
+				return err
+			}
+			if siteTableSubsystem(index.table) == subsystem {
+				indexes = append(indexes, index)
+			}
+		}
+		indexErr = indexRows.Err()
+		indexRows.Close()
+		if indexErr != nil {
+			return indexErr
+		}
+		for _, index := range indexes {
+			opening := strings.Index(index.query, "(")
+			if opening < 0 {
+				return errors.New("invalid legacy index schema")
+			}
+			uniqueness := ""
+			if strings.HasPrefix(strings.ToUpper(index.query), "CREATE UNIQUE INDEX") {
+				uniqueness = "UNIQUE "
+			}
+			query := `CREATE ` + uniqueness + `INDEX destination."` + strings.ReplaceAll(index.name, `"`, `""`) + `" ON "` + strings.ReplaceAll(index.table, `"`, `""`) + `" ` + index.query[opening:]
+			if _, err := transaction.Exec(query); err != nil {
+				return err
+			}
+		}
+		if _, err = transaction.Exec(`INSERT INTO destination.site_partition_import(name) VALUES(?)`, subsystem); err != nil {
+			return err
+		}
+		if err = transaction.Commit(); err != nil {
+			return err
+		}
+	}
+	if imported != 0 {
+		var readyTable, ready int
+		if err := database.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='site_partition_ready'`).Scan(&readyTable); err != nil {
+			return err
+		}
+		if readyTable != 0 {
+			if err := database.QueryRow(`SELECT COUNT(*) FROM site_partition_ready WHERE name=?`, subsystem).Scan(&ready); err != nil {
+				return err
+			}
+		}
+		if ready == 0 {
+			for _, table := range tables {
+				var sourceCount, destinationCount, differences int64
+				if err := database.QueryRow(`SELECT COUNT(*) FROM main."` + table.name + `"`).Scan(&sourceCount); err != nil {
+					return err
+				}
+				if err := database.QueryRow(`SELECT COUNT(*) FROM destination."` + table.name + `"`).Scan(&destinationCount); err != nil {
+					return err
+				}
+				if err := database.QueryRow(`SELECT COUNT(*) FROM (SELECT * FROM main."` + table.name + `" EXCEPT SELECT * FROM destination."` + table.name + `")`).Scan(&differences); err != nil {
+					return err
+				}
+				if sourceCount != destinationCount || differences != 0 {
+					return errors.New("site partition source differs from committed import; restore a consistent database backup")
+				}
+			}
+		}
+	}
+	// The destination marker commits first. An interruption before this cleanup
+	// reuses that verified destination and never imports stale grants over it.
+	// Source content backups must not retain removed security records in free pages.
+	if _, err := database.Exec(`PRAGMA secure_delete=ON`); err != nil {
+		return err
+	}
+	transaction, err := database.Begin()
+	if err != nil {
+		return err
+	}
+	defer transaction.Rollback()
+	for _, table := range tables {
+		if _, err = transaction.Exec(`DELETE FROM main."` + table.name + `"`); err != nil {
+			return err
+		}
+	}
+	if _, err = transaction.Exec(`CREATE TABLE IF NOT EXISTS site_partition_layout(site_id TEXT PRIMARY KEY,version INTEGER NOT NULL)`); err != nil {
+		return err
+	}
+	if _, err = transaction.Exec(`DELETE FROM site_partition_layout`); err != nil {
+		return err
+	}
+	if _, err = transaction.Exec(`INSERT INTO site_partition_layout(site_id,version) VALUES(?,1)`, identifier); err != nil {
+		return err
+	}
+	if _, err = transaction.Exec(`CREATE TABLE IF NOT EXISTS site_partition_ready(name TEXT PRIMARY KEY)`); err != nil {
+		return err
+	}
+	if _, err = transaction.Exec(`DELETE FROM site_partition_ready WHERE name=?`, subsystem); err != nil {
+		return err
+	}
+	if _, err = transaction.Exec(`INSERT INTO site_partition_ready(name) VALUES(?)`, subsystem); err != nil {
+		return err
+	}
+	return transaction.Commit()
+}
+
 // perSiteDBRouter resolves a separate sqlite file per domain and keeps the map
 // ownership in a single goroutine so we do not coordinate it with mutexes.
 type perSiteDBRouter struct {
+	done                    chan struct{}
+	global                  *serverControlDatabaseDispatcher
+	partitioned             bool
 	fallbackDomain          string
 	debug                   bool
 	requests                chan siteDBRequest
@@ -1702,7 +2402,13 @@ type perSiteDBRouter struct {
 }
 
 func newPerSiteDBRouter(siteDatabaseRootDir string, fallbackDomain string, migrate siteDBMigrator, debug bool) *perSiteDBRouter {
+	return newSiteDatabaseRouter(siteDatabaseRootDir, fallbackDomain, migrate, debug, nil)
+}
+
+func newSiteDatabaseRouter(siteDatabaseRootDir string, fallbackDomain string, migrate siteDBMigrator, debug bool, global *serverControlDatabaseDispatcher) *perSiteDBRouter {
 	router := &perSiteDBRouter{
+		done:   make(chan struct{}),
+		global: global, partitioned: global != nil,
 		fallbackDomain:          fallbackDomain,
 		debug:                   debug,
 		requests:                make(chan siteDBRequest),
@@ -1719,6 +2425,7 @@ func newPerSiteDBRouter(siteDatabaseRootDir string, fallbackDomain string, migra
 }
 
 func (r *perSiteDBRouter) run(siteDatabaseRootDir string, migrate siteDBMigrator) {
+	defer close(r.done)
 	databasesByDomain := make(map[string]*siteFileDatabase)
 	primaryDomainsByAlias := make(map[string]string)
 	startupMigrationFinished := false
@@ -1808,7 +2515,7 @@ func (r *perSiteDBRouter) run(siteDatabaseRootDir string, migrate siteDBMigrator
 				continue
 			}
 			if err := degradedDomains[domain]; err != nil {
-				if _, statErr := os.Stat(filepath.Join(siteDatabaseRootDir, domainStorageName(domain)+".db")); errors.Is(statErr, os.ErrNotExist) {
+				if _, statErr := os.Stat(siteDatabaseFile(siteDatabaseRootDir, domain)); errors.Is(statErr, os.ErrNotExist) {
 					if database := databasesByDomain[domain]; database != nil {
 						_ = database.Close()
 					}
@@ -1911,6 +2618,26 @@ func (r *perSiteDBRouter) scanStartupMigrations(ctx context.Context, siteDatabas
 		}
 		databaseFiles = append(databaseFiles, databaseEntry.Name())
 	}
+	if r.partitioned {
+		_ = r.global.execute(ctx, serverControlDatabaseRead, "list registered site databases", func(database *sql.DB) error {
+			rows, err := database.Query(`SELECT domain,site_id FROM site_registry`)
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var domain, identifier string
+				if rows.Scan(&domain, &identifier) != nil || identifier != stableSiteID(domain) {
+					return errors.New("invalid site registry binding")
+				}
+				current := filepath.Join(identifier, "content.db")
+				if _, err := os.Stat(filepath.Join(siteDatabaseRootDir, current)); err == nil {
+					databaseFiles = append(databaseFiles, current)
+				}
+			}
+			return rows.Err()
+		})
+	}
 	if len(databaseFiles) == 0 {
 		r.migrationEvents <- siteDBMigrationEvent{kind: "summary"}
 		return
@@ -1920,6 +2647,16 @@ func (r *perSiteDBRouter) scanStartupMigrations(ctx context.Context, siteDatabas
 	for _, databaseFile := range databaseFiles {
 		databasePath := filepath.Join(siteDatabaseRootDir, databaseFile)
 		databaseDomain := normalizeDomainName(strings.TrimSuffix(databaseFile, filepath.Ext(databaseFile)))
+		if filepath.Base(databaseFile) == "content.db" && r.partitioned {
+			identifier := filepath.Base(filepath.Dir(databaseFile))
+			lookupErr := r.global.execute(ctx, serverControlDatabaseRead, "resolve registered site migration", func(database *sql.DB) error {
+				return database.QueryRow(`SELECT domain FROM site_registry WHERE site_id=?`, identifier).Scan(&databaseDomain)
+			})
+			if lookupErr != nil {
+				results <- siteDBMigrationEvent{kind: "failed", path: databasePath, err: lookupErr}
+				continue
+			}
+		}
 		if databaseDomain == "" {
 			databaseDomain = r.fallbackDomain
 		}
@@ -1957,7 +2694,7 @@ func (r *perSiteDBRouter) migrateStartupDatabase(ctx context.Context, databasePa
 	database.SetMaxOpenConns(1)
 	database.SetMaxIdleConns(1)
 
-	if !siteDatabaseHasRegisteredAdmin(migrationCtx, database) {
+	if !(r.partitioned && filepath.Base(databasePath) == "content.db") && !siteDatabaseHasRegisteredAdmin(migrationCtx, database) {
 		results <- siteDBMigrationEvent{kind: "ignored", domain: databaseDomain, path: databasePath}
 		return
 	}
@@ -2008,7 +2745,7 @@ func (r *perSiteDBRouter) databaseForDomain(siteDatabaseRootDir string, database
 	if err := degradedDomains[databaseDomain]; err != nil {
 		return nil, siteDatabaseDegradedError{domain: databaseDomain, err: err}
 	}
-	databasePath := filepath.Join(siteDatabaseRootDir, domainStorageName(databaseDomain)+".db")
+	databasePath := siteDatabaseFile(siteDatabaseRootDir, databaseDomain)
 	database := databasesByDomain[databaseDomain]
 	if database != nil {
 		if _, err := os.Stat(databasePath); err == nil {
@@ -2020,6 +2757,12 @@ func (r *perSiteDBRouter) databaseForDomain(siteDatabaseRootDir string, database
 		_ = database.Close()
 		delete(databasesByDomain, databaseDomain)
 		delete(migratedDomains, databaseDomain)
+	}
+	if r.partitioned && len(databasesByDomain) >= 256 {
+		return nil, errors.New("active site capacity reached")
+	}
+	if r.partitioned && !createIfMissing && !migratedDomains[databaseDomain] {
+		return nil, errSiteDatabaseMissing
 	}
 	if err := ensureParentDir(databasePath); err != nil {
 		return nil, err
@@ -2085,6 +2828,17 @@ func (r *perSiteDBRouter) databaseForDomain(siteDatabaseRootDir string, database
 	} else if r.debug {
 		log.Printf("%sDB MIGRATION%s skipped path=%s domain=%s reason=startup-ready", terminalCyan(), terminalReset(), databasePath, databaseDomain)
 	}
+	if r.partitioned {
+		if err := r.startSiteSubsystems(siteDatabaseRootDir, databaseDomain, siteDatabase); err != nil {
+			siteDatabase.Close()
+			return nil, err
+		}
+		relocated, err := r.relocateSiteContent(siteDatabaseRootDir, databaseDomain, siteDatabase)
+		if err != nil {
+			return nil, err
+		}
+		siteDatabase = relocated
+	}
 	databasesByDomain[databaseDomain] = siteDatabase
 	return siteDatabase, nil
 }
@@ -2099,15 +2853,12 @@ func findActivePrimaryDomainForAlias(siteDatabaseRootDir string, databasesByDoma
 			return primaryDomain
 		}
 	}
-	databaseEntries, err := os.ReadDir(siteDatabaseRootDir)
+	candidates, err := registeredSiteDatabaseCandidates(siteDatabaseRootDir)
 	if err != nil {
 		return ""
 	}
-	for _, databaseEntry := range databaseEntries {
-		if databaseEntry.IsDir() || !strings.HasSuffix(databaseEntry.Name(), ".db") {
-			continue
-		}
-		databasePath := filepath.Join(siteDatabaseRootDir, databaseEntry.Name())
+	for _, candidate := range candidates {
+		databasePath := candidate.path
 		if siteDatabasePathAlreadyOpen(databasesByDomain, databasePath) {
 			continue
 		}
@@ -2139,7 +2890,7 @@ func activePrimaryDomainForAlias(database *siteFileDatabase, aliasDomain string)
 	if database == nil {
 		return ""
 	}
-	row, err := database.QueryRowContext(context.Background(), `SELECT primary_domain FROM domain_aliases WHERE alias_domain=? AND is_verified=1 AND dns_a_ok=1 LIMIT 1`, aliasDomain)
+	row, err := database.subsystem("control").QueryRowContext(context.Background(), `SELECT primary_domain FROM domain_aliases WHERE alias_domain=? AND is_verified=1 AND dns_a_ok=1 LIMIT 1`, aliasDomain)
 	if err != nil {
 		return ""
 	}
@@ -2147,6 +2898,13 @@ func activePrimaryDomainForAlias(database *siteFileDatabase, aliasDomain string)
 }
 
 func activePrimaryDomainForAliasRaw(database *sql.DB, aliasDomain string) string {
+	control, finish, controlErr := readSiteControlDatabase(database)
+	if controlErr != nil {
+		return ""
+	}
+	defer finish()
+	database = control
+
 	if database == nil {
 		return ""
 	}
@@ -2172,14 +2930,30 @@ func siteDatabaseHasRegisteredAdmin(ctx context.Context, database *sql.DB) bool 
 		return false
 	}
 	var adminCount int
-	err := database.QueryRowContext(ctx, `SELECT COUNT(1) FROM users WHERE is_admin=1`).Scan(&adminCount)
+	control, finish, err := readSiteControlDatabase(database)
+	if err != nil {
+		return false
+	}
+	defer finish()
+	database = control
+	err = database.QueryRowContext(ctx, `SELECT COUNT(1) FROM users WHERE is_admin=1`).Scan(&adminCount)
 	return err == nil && adminCount > 0
 }
 
 func (r *perSiteDBRouter) Close() error {
-	closeResponse := make(chan error, 1)
-	r.closeRequests <- closeResponse
-	return <-closeResponse
+	reply := make(chan error, 1)
+	select {
+	case <-r.done:
+		return nil
+	case r.closeRequests <- reply:
+	}
+	select {
+	case err := <-reply:
+		<-r.done
+		return err
+	case <-r.done:
+		return nil
+	}
 }
 
 func (r *perSiteDBRouter) MigrationStatus(ctx context.Context, domain string) siteDBMigrationStatus {
@@ -2262,7 +3036,11 @@ func (r *perSiteDBRouter) ExecContext(ctx context.Context, query string, args ..
 	if err != nil {
 		return nil, err
 	}
-	return database.ExecContext(ctx, query, args...)
+	participant, err := siteQueryParticipant(database, query)
+	if err != nil {
+		return nil, err
+	}
+	return participant.ExecContext(ctx, query, args...)
 }
 
 func (r *perSiteDBRouter) WriteTransaction(ctx context.Context, write func(*sql.Tx) error) error {
@@ -2270,7 +3048,7 @@ func (r *perSiteDBRouter) WriteTransaction(ctx context.Context, write func(*sql.
 	if err != nil {
 		return err
 	}
-	return database.WriteTransaction(ctx, write)
+	return database.subsystem("control").WriteTransaction(ctx, write)
 }
 
 func (r *perSiteDBRouter) WriteTransactionWithFinish(ctx context.Context, write func(*sql.Tx) error, finish func(error)) error {
@@ -2286,7 +3064,11 @@ func (r *perSiteDBRouter) QueryContext(ctx context.Context, query string, args .
 	if err != nil {
 		return nil, err
 	}
-	return database.QueryContext(ctx, query, args...)
+	participant, err := siteQueryParticipant(database, query)
+	if err != nil {
+		return nil, err
+	}
+	return participant.QueryContext(ctx, query, args...)
 }
 
 func (r *perSiteDBRouter) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
@@ -2298,7 +3080,11 @@ func (r *perSiteDBRouter) QueryRowContext(ctx context.Context, query string, arg
 		}
 		return r.noopDatabase.QueryRowContext(ctx, `SELECT 1 WHERE 0`)
 	}
-	row, err := database.QueryRowContext(ctx, query, args...)
+	participant, err := siteQueryParticipant(database, query)
+	if err != nil {
+		return r.noopDatabase.QueryRowContext(ctx, `SELECT 1 WHERE 0`)
+	}
+	row, err := participant.QueryRowContext(ctx, query, args...)
 	if err != nil {
 		if r.debug {
 			log.Printf("%sDB ROUTER%s query-row fallback domain=%s path=%s err=%s",
@@ -2323,6 +3109,8 @@ func (r *perSiteDBRouter) databaseForContext(ctx context.Context) (*siteFileData
 	if !r.debug {
 		select {
 		case r.requests <- request:
+		case <-r.done:
+			return nil, errors.New("site database router stopped")
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
@@ -3699,8 +4487,15 @@ func (a *App) startAnalyticsWorkers(ctx context.Context) {
 	if a.analyticsEvents == nil {
 		return
 	}
-	store := browserstats.OpenStore(filepath.Join(a.storageRootDir(), "analytics"))
-	a.analyticsStorage = store
+	var closeStore func()
+	if a.siteDatabaseRouter != nil && a.siteDatabaseRouter.partitioned {
+		a.analyticsStorage = siteAnalyticsRepository{application: a}
+		closeStore = func() {}
+	} else {
+		store := browserstats.OpenStore(filepath.Join(a.storageRootDir(), "analytics"))
+		a.analyticsStorage = store
+		closeStore = store.Close
+	}
 	a.analyticsQuotaRequests = make(chan browserstats.DiskQuotaRequest, 16)
 	quotaDone := make(chan struct{})
 	go a.runAnalyticsDiskQuota(a.analyticsQuotaRequests, ctx.Done(), quotaDone)
@@ -3710,7 +4505,7 @@ func (a *App) startAnalyticsWorkers(ctx context.Context) {
 	a.analyticsFinished = make(chan struct{})
 	go func() {
 		defer close(a.analyticsFinished)
-		defer store.Close()
+		defer closeStore()
 		securityFinished := make(chan struct{})
 		go func() { defer close(securityFinished); a.runSecurityAnalytics(ctx.Done()) }()
 		browserFinished := make(chan struct{})
@@ -4274,7 +5069,7 @@ func (a *App) analyticsSiteAvailable(domain string) bool {
 	if a.siteDatabaseRouter == nil {
 		return true
 	}
-	databasePath := filepath.Join(siteDatabaseRootPath(a.serverControlDBPath()), domainStorageName(domain)+".db")
+	databasePath := siteDatabaseFile(siteDatabaseRootPath(a.serverControlDBPath()), domain)
 	databaseInfo, databaseErr := os.Stat(databasePath)
 	if databaseErr == nil && databaseInfo.Mode().IsRegular() {
 		return true
@@ -6470,19 +7265,18 @@ func (a *App) rebuildAnalyticsReports(ctx context.Context) {
 }
 
 func (a *App) analyticsDomains(ctx context.Context) []string {
-	rows, err := a.db.QueryContext(ctx, `SELECT domain FROM analytics_events GROUP BY domain UNION SELECT domain FROM users GROUP BY domain UNION SELECT domain FROM pages GROUP BY domain UNION SELECT domain FROM published_pages GROUP BY domain ORDER BY domain`)
+	if a.siteDatabaseRouter != nil {
+		return a.siteDatabaseRouter.Domains(ctx)
+	}
+	rows, err := a.db.QueryContext(ctx, `SELECT DISTINCT domain FROM analytics_events ORDER BY domain`)
 	if err != nil {
-		return []string{}
+		return nil
 	}
 	defer rows.Close()
-	domains := make([]string, 0, 8)
+	domains := []string{}
 	for rows.Next() {
 		var domain string
-		if scanErr := rows.Scan(&domain); scanErr != nil {
-			continue
-		}
-		domain = strings.TrimSpace(domain)
-		if domain != "" {
+		if rows.Scan(&domain) == nil && domain != "" {
 			domains = append(domains, domain)
 		}
 	}
@@ -9150,10 +9944,10 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	}
 	var siteDatabaseRouter *perSiteDBRouter
 	aiCapabilityStatePath := filepath.Join(storageRealRoot, "security", "ai-capabilities.json")
-	application := &App{storagePath: effectiveStoragePath, storageRealRoot: storageRealRoot, dbPath: effectiveDBPath, debug: config.Debug, desktopMode: config.DesktopMode, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), grabCancels: newGrabCancelTracker(), trialPreviews: newPublicTrialPreviewStore(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 1024), analyticsLosses: make(chan string, 64), browserAnalyticsLosses: make(chan string, 64), browserAnalytics: make(chan browserAnalyticsEnvelope, 512), analyticsConnections: make(chan struct{}, 128), domainLogEvents: make(chan domainLogEvent, 1024), aiCapabilities: aicapability.NewPersistentManager(aiCapabilityStatePath)}
+	application := &App{storagePath: effectiveStoragePath, storageRealRoot: storageRealRoot, dbPath: effectiveDBPath, debug: config.Debug, desktopMode: config.DesktopMode, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), grabCancels: newGrabCancelTracker(), trialPreviews: newPublicTrialPreviewStore(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 1024), analyticsLosses: make(chan string, 64), browserAnalyticsLosses: make(chan string, 64), browserAnalytics: make(chan browserAnalyticsEnvelope, 512), analyticsConnections: make(chan struct{}, 128), domainLogEvents: make(chan domainLogEvent, 1024), aiCapabilities: nil}
 	application.developmentMode = CompileVersion == "dev" && !config.UpdateChild
 	application.updateActivation = activation
-	defer application.aiCapabilities.Close()
+
 	application.aiExecutor = aieditor.NewExecutor(&appAIStore{application: application}, 32)
 	defer application.aiExecutor.Close()
 	application.analyticsMemoryLimit = analyticsConfiguredMemoryLimit()
@@ -9210,10 +10004,10 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 		application.autoCertCertificateCache = startAutoCertCertificateMemoryCache(ctx, certificateCacheDir)
 	}
 	siteDatabaseRootDir := siteDatabaseRootPath(effectiveDBPath)
-	siteDatabaseRouter = newPerSiteDBRouter(siteDatabaseRootDir, "localhost", func(migrationCtx context.Context, rawDatabase *sql.DB, domain string) error {
+	siteDatabaseRouter = newSiteDatabaseRouter(siteDatabaseRootDir, "localhost", func(migrationCtx context.Context, rawDatabase *sql.DB, domain string) error {
 		bootstrapApplication := &App{db: rawDatabase, storagePath: effectiveStoragePath, storageRealRoot: storageRealRoot, dbPath: effectiveDBPath, debug: config.Debug}
 		return bootstrapApplication.migrate(contextWithDomain(migrationCtx, domain))
-	}, config.Debug)
+	}, config.Debug, controlDatabaseDispatcher)
 	defer func() {
 		logShutdownStep("closing site database workers")
 		if closeErr := siteDatabaseRouter.Close(); closeErr != nil {
@@ -9224,6 +10018,11 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	}()
 	application.db = siteDatabaseRouter
 	application.siteDatabaseRouter = siteDatabaseRouter
+	application.connectAIControlFacade()
+	if err := application.migrateLegacyAIState(aiCapabilityStatePath); err != nil {
+		return fmt.Errorf("migrate AI security state: %w", err)
+	}
+	go application.refreshAIProviderRanges(ctx.Done())
 	application.ensureAutoCertGuard()
 	defer func() {
 		if ctx.Err() != nil && application.analyticsFinished != nil {
@@ -9286,9 +10085,15 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	domainContextMiddleware := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestDomain := domainFromRequest(r)
 		nextRequest := r.WithContext(contextWithDomain(r.Context(), requestDomain))
+		// Query endpoints also work on paths otherwise claimed by embedded assets.
+		query := nextRequest.URL.Query()
+		if query.Has("mcp") || query.Has("oauth") || query.Has("ai") || query.Has("ai_token") || query.Has("ai_session") || query.Has("ai_authorize") {
+			application.route(w, nextRequest)
+			return
+		}
 		router.ServeHTTP(w, nextRequest)
 	})
-	managedHandler := application.securityResponseHeadersMiddleware(application.analyticsMiddleware(application.accessLogMiddleware(application.authAbuseMiddleware(domainContextMiddleware))))
+	managedHandler := application.securityResponseHeadersMiddleware(application.aiIngressMiddleware(application.analyticsMiddleware(application.accessLogMiddleware(application.authAbuseMiddleware(domainContextMiddleware)))))
 	healthNonce, nonceErr := appupdate.Identifier()
 	if nonceErr != nil {
 		return nonceErr
@@ -9980,7 +10785,7 @@ func (a *App) serveTLSWithAutoCert(ctx context.Context, tlsListener net.Listener
 }
 
 func (a *App) autoCertTLSConfig(fallbackCertificate *tls.Certificate) *tls.Config {
-	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, ClientAuth: tls.RequestClientCert}
 	tlsConfig.GetCertificate = func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 		certificateDomain := normalizeDomainName(clientHello.ServerName)
 		now := time.Now()
@@ -11035,17 +11840,336 @@ func (a *App) assignMissingDomainAliasTokens(ctx context.Context) {
 	}
 }
 
+func (a *App) connectAIControlFacade() {
+	a.aiCapabilities = aicapability.NewRoutedManager(func(domain string) (*aicapability.Manager, error) {
+		database, err := a.siteDatabaseRouter.databaseForContext(contextWithDomain(context.Background(), domain))
+		if err != nil {
+			return nil, err
+		}
+		if database.ai == nil {
+			return nil, errors.New("site control participant is unavailable")
+		}
+		return database.ai, nil
+	}, func() []string { return a.siteDatabaseRouter.Domains(context.Background()) })
+}
+
+// Admission is evaluated before inspecting any AI selector or writing a
+// protocol-specific header. Credentials cannot substitute for network trust.
+func (a *App) aiIngressMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		machine, owner := a.aiIngressAdmission(r)
+		// Public logging, abuse detection and referrer cookies must observe the
+		// same request as the public router, without hidden control selectors.
+		next.ServeHTTP(w, aiRequestAfterAdmission(r, machine, owner))
+	})
+}
+
+func (a *App) aiIngressAdmission(r *http.Request) (machine, owner bool) {
+	if a.db == nil || a.aiCapabilities == nil {
+		return false, false
+	}
+	domain := a.siteDomain(r.Context(), r)
+	clientIP := accountClientIP(r)
+	if clientIP == "" {
+		return false, false
+	}
+	if !a.adminIPLoginBlocked(r.Context(), domain, clientIP, "") {
+		rows, err := a.db.QueryContext(r.Context(), `SELECT allowed.client_ip FROM admin_allowed_ips allowed JOIN users administrator ON administrator.domain=allowed.domain AND administrator.email=allowed.email WHERE allowed.domain=? AND administrator.is_admin=1`, domain)
+		if err == nil {
+			for rows.Next() {
+				var rule string
+				if rows.Scan(&rule) == nil && adminIPRuleContains(rule, clientIP) {
+					owner = true
+				}
+			}
+			if rows.Err() != nil {
+				owner = false
+			}
+			rows.Close()
+		}
+		if !owner {
+			if cookie, err := r.Cookie("sitebrush_session"); err == nil {
+				var sessionIP string
+				var lastUsed int64
+				err := a.db.QueryRowContext(r.Context(), `SELECT s.client_ip,s.last_used_at FROM sessions s JOIN users u ON (u.domain||'|'||u.email)=s.user_email WHERE s.token=? AND u.domain=? AND u.is_admin=1`, cookie.Value, domain).Scan(&sessionIP, &lastUsed)
+				owner = err == nil && sessionIP == clientIP && accountauth.SessionActive(lastUsed, time.Now())
+			}
+		}
+	}
+	var encodedPolicy string
+	if err := a.db.QueryRowContext(r.Context(), `SELECT policy FROM ai_provider_policy WHERE id=1`).Scan(&encodedPolicy); err != nil {
+		return false, owner
+	}
+	var policy aiingress.Policy
+	if json.Unmarshal([]byte(encodedPolicy), &policy) != nil || !policy.External {
+		return false, owner
+	}
+	snapshot := aiingress.OfficialSnapshot()
+	if a.controlDatabase != nil {
+		_ = a.controlDatabase.execute(r.Context(), serverControlDatabaseRead, "AI ingress range snapshot", func(database *sql.DB) error {
+			var cached []byte
+			if err := database.QueryRow(`SELECT document FROM ai_provider_ranges WHERE provider='openai'`).Scan(&cached); err != nil {
+				return err
+			}
+			if _, err := aiingress.ParseOpenAI(cached); err == nil {
+				snapshot = cached
+			}
+			return nil
+		})
+	}
+	ranges, err := aiingress.ParseOpenAI(snapshot)
+	return err == nil && ranges.Allows(policy, clientIP, r.TLS), owner
+}
+
+func aiRequestAfterAdmission(r *http.Request, machine, owner bool) *http.Request {
+	if machine && owner {
+		return r
+	}
+	query := r.URL.Query()
+	changed := false
+	for selector := range query {
+		hidden := !machine && (selector == "mcp" || selector == "ai" && (!owner || query.Get("ai") != "") || selector == "ai_token" || selector == "ai_session")
+		if selector == "oauth" {
+			hidden = !machine && (!owner || query.Get(selector) != "authorize")
+		}
+		if selector == "ai_authorize" {
+			hidden = !owner
+		}
+		if hidden {
+			query.Del(selector)
+			changed = true
+		}
+	}
+	if !changed {
+		return r
+	}
+	request := r.Clone(r.Context())
+	requestURL := *r.URL
+	requestURL.RawQuery = query.Encode()
+	request.URL = &requestURL
+	request.RequestURI = requestURL.RequestURI()
+	return request
+}
+
+func (a *App) migrateLegacyAIState(filename string) error {
+	var completed int
+	err := a.controlDatabase.execute(context.Background(), serverControlDatabaseWrite, "AI legacy migration journal", func(database *sql.DB) error {
+		if _, err := database.Exec(`CREATE TABLE IF NOT EXISTS ai_legacy_migrations(source TEXT PRIMARY KEY,digest TEXT NOT NULL)`); err != nil {
+			return err
+		}
+		return database.QueryRow(`SELECT COUNT(*) FROM ai_legacy_migrations WHERE source=?`, filename).Scan(&completed)
+	})
+	if err != nil {
+		return err
+	}
+	cleanup := func() error {
+		for _, source := range []string{filename, filename + ".oauth"} {
+			if err := os.Remove(source); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
+		return nil
+	}
+	if completed != 0 {
+		return cleanup()
+	}
+	read := func(path string) ([]byte, error) {
+		file, err := os.Open(path)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		defer file.Close()
+		encoded, err := io.ReadAll(io.LimitReader(file, (32<<20)+1))
+		if len(encoded) > 32<<20 {
+			return nil, errors.New("legacy AI state exceeds migration limit")
+		}
+		return encoded, err
+	}
+	capabilities, err := read(filename)
+	if err != nil {
+		return err
+	}
+	oauth, err := read(filename + ".oauth")
+	if err != nil {
+		return err
+	}
+	if len(capabilities) == 0 && len(oauth) == 0 {
+		return nil
+	}
+	sites, err := aicapability.SplitLegacy(capabilities, oauth)
+	if err != nil {
+		return err
+	}
+	digest := sha256.Sum256(append(append(append([]byte{}, capabilities...), 0), oauth...))
+	digestText := hex.EncodeToString(digest[:])
+	deadline := time.NewTimer(siteDatabaseStartupMigrationTimeout)
+	defer deadline.Stop()
+	for !a.siteDatabaseRouter.MigrationStatus(context.Background(), "localhost").startupFinished {
+		select {
+		case <-deadline.C:
+			return errSiteMigrationsStarting
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	domains := make([]string, 0, len(sites))
+	for domain := range sites {
+		domains = append(domains, domain)
+	}
+	sort.Strings(domains)
+	for _, domain := range domains {
+		documents := sites[domain]
+		database, err := a.siteDatabaseRouter.databaseForContext(contextWithDomain(context.Background(), domain))
+		if err != nil {
+			return err
+		}
+		if database.control == nil {
+			return errors.New("legacy AI site has no control worker")
+		}
+		err = database.control.Migrate(context.Background(), domain, func(_ context.Context, raw *sql.DB, _ string) error {
+			if _, err := raw.Exec(`CREATE TABLE IF NOT EXISTS ai_legacy_import(digest TEXT PRIMARY KEY)`); err != nil {
+				return err
+			}
+			var imported int
+			if err := raw.QueryRow(`SELECT COUNT(*) FROM ai_legacy_import WHERE digest=?`, digestText).Scan(&imported); err != nil {
+				return err
+			}
+			if imported != 0 {
+				return nil
+			}
+			stored, _, err := aicapability.LoadSQL(raw)
+			if err != nil {
+				return err
+			}
+			if len(stored) > 0 {
+				return errors.New("legacy import conflicts with existing AI security state")
+			}
+			transaction, err := raw.Begin()
+			if err != nil {
+				return err
+			}
+			defer transaction.Rollback()
+			if _, err = transaction.Exec(`INSERT INTO ai_security_state(id,capabilities,oauth) VALUES(1,?,?)`, string(documents[0]), string(documents[1])); err != nil {
+				return err
+			}
+			var verifyCapabilities, verifyOAuth []byte
+			if err = transaction.QueryRow(`SELECT capabilities,oauth FROM ai_security_state WHERE id=1`).Scan(&verifyCapabilities, &verifyOAuth); err != nil {
+				return err
+			}
+			if !bytes.Equal(verifyCapabilities, documents[0]) || !bytes.Equal(verifyOAuth, documents[1]) {
+				return errors.New("legacy AI import verification failed")
+			}
+			if _, err = transaction.Exec(`INSERT INTO ai_legacy_import(digest) VALUES(?)`, digestText); err != nil {
+				return err
+			}
+			return transaction.Commit()
+		})
+		if err != nil {
+			return err
+		}
+		// The manager may have loaded its initial empty snapshot during construction.
+		if err := database.ai.Reload(); err != nil {
+			return err
+		}
+	}
+	err = a.controlDatabase.execute(context.Background(), serverControlDatabaseWrite, "commit AI legacy migration journal", func(database *sql.DB) error {
+		_, err := database.Exec(`INSERT INTO ai_legacy_migrations(source,digest) VALUES(?,?)`, filename, digestText)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	return cleanup()
+}
+
+func (a *App) refreshAIProviderRanges(stop <-chan struct{}) {
+	refresh := func() {
+		boundary, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		finished := make(chan struct{})
+		go func() {
+			select {
+			case <-stop:
+				cancel()
+			case <-finished:
+			}
+		}()
+		defer close(finished)
+		defer cancel()
+		request, err := http.NewRequestWithContext(boundary, http.MethodGet, "https://openai.com/chatgpt-connectors.json", nil)
+		if err != nil {
+			return
+		}
+		client := &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+		response, err := client.Do(request)
+		if err != nil {
+			return
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			return
+		}
+		encoded, err := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
+		if err != nil {
+			return
+		}
+		if _, err := aiingress.ParseOpenAI(encoded); err != nil {
+			return
+		}
+		_ = a.controlDatabase.execute(boundary, serverControlDatabaseWrite, "refresh official AI provider ranges", func(database *sql.DB) error {
+			if _, err := database.Exec(`CREATE TABLE IF NOT EXISTS ai_provider_ranges(provider TEXT PRIMARY KEY,document TEXT NOT NULL)`); err != nil {
+				return err
+			}
+			var previous []byte
+			if err := database.QueryRow(`SELECT document FROM ai_provider_ranges WHERE provider='openai'`).Scan(&previous); err == nil {
+				current, currentErr := aiingress.ParseOpenAI(previous)
+				next, nextErr := aiingress.ParseOpenAI(encoded)
+				if currentErr == nil && nextErr == nil && next.Created.Before(current.Created) {
+					return errors.New("official AI range snapshot would move backwards")
+				}
+			}
+
+			transaction, err := database.Begin()
+			if err != nil {
+				return err
+			}
+			defer transaction.Rollback()
+			if _, err := transaction.Exec(`DELETE FROM ai_provider_ranges WHERE provider='openai'`); err != nil {
+				return err
+			}
+			if _, err := transaction.Exec(`INSERT INTO ai_provider_ranges(provider,document) VALUES('openai',?)`, string(encoded)); err != nil {
+				return err
+			}
+			return transaction.Commit()
+		})
+	}
+	refresh()
+	clock := time.NewTicker(24 * time.Hour)
+	defer clock.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-clock.C:
+			refresh()
+		}
+	}
+}
+
 func (a *App) route(w http.ResponseWriter, r *http.Request) {
+	machine, owner := a.aiIngressAdmission(r)
+	r = aiRequestAfterAdmission(r, machine, owner)
+
 	if a.siteMCPRoute(w, r) {
 		return
 	}
-	w.Header().Add("Link", `</?ai=manifest>; rel="service-desc"; type="application/json"; title="SiteBrush AI"`)
 	pagePath := cleanPath(r.URL.Path)
 	guestStaticRequest := isGuestStaticRequest(r)
 	requestDomain := domainFromRequest(r)
 	localGuestStaticRequest := guestStaticRequest && canonicalLocalDomain(requestDomain) == "localhost"
 	if localGuestStaticRequest && pagePath == "/" && localAccountRequest(r) && a.siteDatabaseRouter != nil {
-		databasePath := filepath.Join(siteDatabaseRootPath(a.serverControlDBPath()), "localhost.db")
+		databasePath := siteDatabaseFile(siteDatabaseRootPath(a.serverControlDBPath()), "localhost")
 		if _, err := os.Stat(databasePath); errors.Is(err, os.ErrNotExist) {
 			httpsecurity.RedirectLocal(w, r, "/?register", http.StatusSeeOther)
 			return
@@ -13445,8 +14569,22 @@ func (a *App) executeAIEditorSiteRequest(w http.ResponseWriter, r *http.Request,
 // Remote MCP is a boundary adapter. Site content and permissions remain owned
 // by the existing AI capability and editor processes.
 func (a *App) siteMCPRoute(w http.ResponseWriter, r *http.Request) bool {
-	endpoint := r.URL.Path
-	if endpoint != sitemcp.Path && endpoint != sitemcp.ResourceMetadataPath && endpoint != "/.well-known/oauth-protected-resource" && endpoint != "/.well-known/oauth-authorization-server" && !strings.HasPrefix(endpoint, sitemcp.OAuthPath) {
+	machine, owner := a.aiIngressAdmission(r)
+	if !machine && !owner {
+		return false
+	}
+	endpoint := ""
+	query := r.URL.Query()
+	if machine && query.Has("mcp") {
+		endpoint = sitemcp.Path
+	}
+	if operation := query.Get("oauth"); operation != "" && (machine && operation != "authorize" || owner && operation == "authorize") {
+		endpoint = sitemcp.OAuthPath + operation
+	}
+	if machine && r.URL.Path == "/.well-known/oauth-authorization-server" {
+		endpoint = sitemcp.OAuthPath + "server"
+	}
+	if endpoint == "" {
 		return false
 	}
 	w.Header().Set("Cache-Control", "no-store")
@@ -13474,7 +14612,7 @@ func (a *App) siteMCPRoute(w http.ResponseWriter, r *http.Request) bool {
 			oauthError(503, "temporarily_unavailable")
 		}
 	}
-	if endpoint == sitemcp.ResourceMetadataPath || endpoint == "/.well-known/oauth-protected-resource" || endpoint == "/.well-known/oauth-authorization-server" {
+	if endpoint == sitemcp.OAuthPath+"resource" || endpoint == sitemcp.OAuthPath+"server" {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -13484,7 +14622,7 @@ func (a *App) siteMCPRoute(w http.ResponseWriter, r *http.Request) bool {
 			http.Error(w, "method not allowed", 405)
 			return true
 		}
-		if endpoint == "/.well-known/oauth-authorization-server" {
+		if endpoint == sitemcp.OAuthPath+"server" {
 			writeJSON(200, map[string]any{"issuer": origin, "authorization_endpoint": origin + sitemcp.OAuthPath + "authorize", "token_endpoint": origin + sitemcp.OAuthPath + "token", "registration_endpoint": origin + sitemcp.OAuthPath + "register", "revocation_endpoint": origin + sitemcp.OAuthPath + "revoke", "response_types_supported": []string{"code"}, "grant_types_supported": []string{"authorization_code", "refresh_token"}, "code_challenge_methods_supported": []string{"S256"}, "token_endpoint_auth_methods_supported": []string{"none"}, "scopes_supported": aicapability.StandardScopes(), "client_id_metadata_document_supported": true, "authorization_response_iss_parameter_supported": true})
 		} else {
 			writeJSON(200, map[string]any{"resource": resource, "authorization_servers": []string{origin}, "scopes_supported": aicapability.StandardScopes(), "bearer_methods_supported": []string{"header"}})
@@ -13496,10 +14634,6 @@ func (a *App) siteMCPRoute(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 	if endpoint == sitemcp.Path {
-		if r.URL.RawQuery != "" {
-			oauthError(400, "query_parameters_not_supported")
-			return true
-		}
 		if browserOrigin := r.Header.Get("Origin"); browserOrigin != "" && browserOrigin != origin {
 			http.Error(w, "invalid origin", 403)
 			return true
@@ -13525,6 +14659,10 @@ func (a *App) siteMCPRoute(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 	if endpoint == sitemcp.OAuthPath+"authorize" {
+		if !a.isAdminRequest(r) {
+			httpsecurity.RedirectLocal(w, r, loginURLForRequest(r), http.StatusSeeOther)
+			return true
+		}
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", 405)
 			return true
@@ -13762,7 +14900,7 @@ func (a *App) invokeMCPAIContent(r *http.Request, domain string, invocation site
 	return sitemcp.DecodeResult(response.status, response.body.Bytes()), nil
 }
 
-// Public discovery and device approval extend the existing capability owner.
+// Admitted discovery and owner approval extend the existing capability owner.
 func (a *App) aiProtocolEndpoint(w http.ResponseWriter, r *http.Request, domain string) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
@@ -16438,7 +17576,7 @@ func (a *App) ensureDemoSiteReady(ctx context.Context, settings demo.Settings, r
 	}
 	adminEmail, hasAdmin := a.firstAdminEmailForDomain(ctx, domain)
 	if !hasAdmin {
-		databasePath := filepath.Join(siteDatabaseRootPath(a.serverControlDBPath()), domainStorageName(domain)+".db")
+		databasePath := siteDatabaseFile(siteDatabaseRootPath(a.serverControlDBPath()), domain)
 		realDatabasePath, pathErr := a.writablePathInsideStorage(databasePath)
 		if pathErr != nil {
 			return "", 0, pathErr
@@ -17803,6 +18941,22 @@ func (a *App) persistFinalPageSave(ctx context.Context, domain, previousPath, pa
 }
 
 func (a *App) persistPageSave(ctx context.Context, domain, previousPath, pagePath, title, savedHTML string, options pageSaveOptions) error {
+	frozenState := 0
+	frozenRows, freezeErr := a.db.QueryContext(ctx, `SELECT is_frozen FROM domain_states WHERE domain=?`, domain)
+	if freezeErr != nil {
+		return freezeErr
+	}
+	if frozenRows.Next() {
+		freezeErr = frozenRows.Scan(&frozenState)
+	}
+	if freezeErr == nil {
+		freezeErr = frozenRows.Err()
+	}
+	frozenRows.Close()
+	if freezeErr != nil {
+		return freezeErr
+	}
+
 	a.ensureDomainStorageUsageRow(ctx, domain)
 	a.rebuildDomainStorageUsage(ctx, domain)
 	type savedPage struct {
@@ -17889,10 +19043,7 @@ func (a *App) persistPageSave(ctx context.Context, domain, previousPath, pagePat
 				}
 			}
 		}
-		frozen := 0
-		if err = transaction.QueryRowContext(ctx, `SELECT is_frozen FROM domain_states WHERE domain=?`, domain).Scan(&frozen); err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
+		frozen := frozenState
 		if options.draftOnly {
 			frozen = 1
 		}
@@ -19139,7 +20290,7 @@ func (a *App) cleanupExpiredPublicTrialSite(ctx context.Context, trialSite hosti
 		return
 	}
 	if !found {
-		databasePath := filepath.Join(siteDatabaseRootPath(a.serverControlDBPath()), domainStorageName(domain)+".db")
+		databasePath := siteDatabaseFile(siteDatabaseRootPath(a.serverControlDBPath()), domain)
 		if _, pathErr := a.writablePathInsideStorage(databasePath); pathErr != nil {
 			return
 		}
@@ -19223,7 +20374,13 @@ func (a *App) rawManagedSiteHasAdmin(ctx context.Context, domain string) bool {
 	if domain == "" {
 		return false
 	}
-	siteDatabasePath := filepath.Join(siteDatabaseRootPath(a.serverControlDBPath()), domainStorageName(domain)+".db")
+	if a.siteDatabaseRouter != nil {
+		var adminCount int
+		err := a.db.QueryRowContext(contextWithDomain(ctx, domain), `SELECT COUNT(1) FROM users WHERE domain=? AND is_admin=1`, domain).Scan(&adminCount)
+		// Cleanup cannot treat an unreadable registered site as an empty trial.
+		return adminCount > 0 || err != nil && !errors.Is(err, errSiteDatabaseMissing)
+	}
+	siteDatabasePath := siteDatabaseFile(siteDatabaseRootPath(a.serverControlDBPath()), domain)
 	realSiteDatabasePath, pathErr := a.existingPathInsideStorage(siteDatabasePath)
 	if pathErr != nil {
 		return false
@@ -19233,9 +20390,14 @@ func (a *App) rawManagedSiteHasAdmin(ctx context.Context, domain string) bool {
 		return false
 	}
 	defer rawDatabase.Close()
+	control, finish, err := readSiteControlDatabase(rawDatabase)
+	if err != nil {
+		return true
+	}
+	defer finish()
 	var adminCount int
-	_ = rawDatabase.QueryRowContext(ctx, `SELECT COUNT(1) FROM users WHERE domain=? AND is_admin=1`, domain).Scan(&adminCount)
-	return adminCount > 0
+	err = control.QueryRowContext(ctx, `SELECT COUNT(1) FROM users WHERE domain=? AND is_admin=1`, domain).Scan(&adminCount)
+	return err != nil || adminCount > 0
 }
 
 func (a *App) resolvePublicTrialSource(ctx context.Context, rawSourceURL, progressToken string, sourceOptions grabSourceOptions) (string, *url.URL, []byte, error) {
@@ -19655,7 +20817,7 @@ func (a *App) publicTrialDomainAvailable(ctx context.Context, domain string) boo
 			return false
 		}
 	}
-	databasePath := filepath.Join(siteDatabaseRootPath(a.serverControlDBPath()), domainStorageName(domain)+".db")
+	databasePath := siteDatabaseFile(siteDatabaseRootPath(a.serverControlDBPath()), domain)
 	realDatabasePath, pathErr := a.writablePathInsideStorage(databasePath)
 	if pathErr != nil {
 		return false
@@ -19669,7 +20831,7 @@ func (a *App) publicTrialDomainAvailable(ctx context.Context, domain string) boo
 }
 
 func (a *App) createManagedSiteWithoutAdmin(ctx context.Context, domain string, quotaBytes int64) error {
-	siteDatabasePath := filepath.Join(siteDatabaseRootPath(a.serverControlDBPath()), domainStorageName(domain)+".db")
+	siteDatabasePath := siteDatabaseFile(siteDatabaseRootPath(a.serverControlDBPath()), domain)
 	realSiteDatabasePath, pathErr := a.writablePathInsideStorage(siteDatabasePath)
 	if pathErr != nil {
 		return pathErr
@@ -23883,6 +25045,13 @@ func siteAdminEmails(ctx context.Context, databasePath, domain string) []string 
 }
 
 func siteAdminEmailsFromDatabase(ctx context.Context, database *sql.DB, domain string) []string {
+	control, finish, controlErr := readSiteControlDatabase(database)
+	if controlErr != nil {
+		return nil
+	}
+	defer finish()
+	database = control
+
 	rows, err := database.QueryContext(ctx, `SELECT email FROM users WHERE domain=? AND is_admin=1 ORDER BY email`, domain)
 	if err != nil {
 		return nil
@@ -24206,7 +25375,7 @@ func (a *App) createManagedSiteFromForm(r *http.Request) string {
 }
 
 func (a *App) createManagedSite(ctx context.Context, domain, email, password string, quotaBytes int64) error {
-	siteDatabasePath := filepath.Join(siteDatabaseRootPath(a.serverControlDBPath()), domainStorageName(domain)+".db")
+	siteDatabasePath := siteDatabaseFile(siteDatabaseRootPath(a.serverControlDBPath()), domain)
 	realSiteDatabasePath, pathErr := a.writablePathInsideStorage(siteDatabasePath)
 	if pathErr != nil {
 		return pathErr
@@ -24216,6 +25385,28 @@ func (a *App) createManagedSite(ctx context.Context, domain, email, password str
 		return fmt.Errorf("site database for %s already exists", domain)
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return statErr
+	}
+	if a.siteDatabaseRouter != nil {
+		siteContext := contextWithSiteDatabaseCreation(contextWithDomain(ctx, domain))
+		if err := a.initializeRegistrationQuota(siteContext, domain, quotaBytes); err != nil {
+			return err
+		}
+		if err := a.accountTransaction(siteContext, func(transaction *sql.Tx) error {
+			var administrators int
+			if err := transaction.QueryRow(`SELECT COUNT(*) FROM users WHERE domain=? AND is_admin=1`, domain).Scan(&administrators); err != nil {
+				return err
+			}
+			if administrators != 0 {
+				return fmt.Errorf("site %s already has an administrator", domain)
+			}
+			_, err := transaction.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, email, password)
+			return err
+		}); err != nil {
+			return err
+		}
+		a.logHostingSupportEvent(ctx, "site_created", "success", email, domain, "managed site created")
+		a.reportHostingSnapshotAsync(ctx)
+		return nil
 	}
 	if err := ensureParentDir(realSiteDatabasePath); err != nil {
 		return err
@@ -24703,6 +25894,12 @@ func (a *App) deleteManagedSiteControlRows(ctx context.Context, controlDatabase 
 	}
 	(hostingandsupport.Store{DB: controlDatabase}).RemoveSiteAssignment(ctx, domain)
 	_, _ = controlDatabase.ExecContext(ctx, `DELETE FROM server_managers WHERE domain=? AND role<>'owner'`, domain)
+	if a.siteDatabaseRouter != nil && a.siteDatabaseRouter.partitioned {
+		if _, err := controlDatabase.ExecContext(ctx, `DELETE FROM site_registry WHERE domain=?`, domain); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -24723,6 +25920,12 @@ func (a *App) deleteManagedSiteFiles(ctx context.Context, row siteQuotaRow) erro
 			}
 		}
 	}
+	if filepath.Base(row.DatabasePath) == "content.db" && filepath.Base(filepath.Dir(row.DatabasePath)) == stableSiteID(domain) {
+		if err := a.removeAllInsideStorage(filepath.Dir(row.DatabasePath)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+
 	for _, directoryPath := range []string{
 		a.domainFilesDirForDomain(domain),
 		a.domainStaticDir(domain),
@@ -24769,6 +25972,10 @@ func (a *App) managedSiteQuotaRow(ctx context.Context, domain string) (siteQuota
 
 func (a *App) managedSiteDeletionSizeBytes(row siteQuotaRow) int64 {
 	totalBytes := a.fileSizeInsideStorage(row.DatabasePath)
+	if filepath.Base(row.DatabasePath) == "content.db" {
+		totalBytes += a.fileSizeInsideStorage(filepath.Join(filepath.Dir(row.DatabasePath), "control.db"))
+	}
+
 	for _, directoryPath := range []string{
 		a.domainFilesDirForDomain(row.Domain),
 		a.domainStaticDir(row.Domain),
@@ -24990,6 +26197,51 @@ func (a *App) createManagedSiteDeletionBackup(ctx context.Context, r *http.Reque
 	}, nil
 }
 
+func (a *App) addSiteDatabaseSnapshots(ctx context.Context, domain, contentArchive string, zipWriter *zip.Writer) (bool, error) {
+	if a.siteDatabaseRouter == nil || !a.siteDatabaseRouter.partitioned {
+		return false, nil
+	}
+	database, err := a.siteDatabaseRouter.databaseForContext(contextWithDomain(ctx, domain))
+	if err != nil {
+		return true, err
+	}
+	owners := []struct {
+		participant *siteFileDatabase
+		archive     string
+	}{{database, contentArchive}, {database.control, "database/control.db"}, {database.analytics, "database/analytics.db"}}
+	for _, owner := range owners {
+		if owner.participant == nil {
+			return true, errors.New("site backup participant unavailable")
+		}
+		temporary := filepath.Join(a.backupRootDir(), ".database-snapshot-"+randomAccessToken()+".db")
+		realTemporary, err := a.writablePathInsideStorageSubtree(a.backupRootDir(), temporary)
+		if err != nil {
+			return true, err
+		}
+		placeholder, createErr := os.OpenFile(realTemporary, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if createErr != nil {
+			return true, createErr
+		}
+		if err := placeholder.Close(); err != nil {
+			os.Remove(realTemporary)
+			return true, err
+		}
+
+		err = owner.participant.Migrate(ctx, domain, func(boundary context.Context, raw *sql.DB, _ string) error {
+			_, err := raw.ExecContext(boundary, `VACUUM INTO ?`, realTemporary)
+			return err
+		})
+		if err == nil {
+			err = addFileToZip(zipWriter, realTemporary, owner.archive)
+		}
+		_ = os.Remove(realTemporary)
+		if err != nil {
+			return true, err
+		}
+	}
+	return true, nil
+}
+
 func (a *App) writeManagedSiteDeletionBackupArchive(ctx context.Context, domain, databasePath, archivePath string, metadata hostingandsupport.DeletionBackupMetadata) error {
 	realDatabasePath, err := a.existingPathInsideStorage(databasePath)
 	if err != nil {
@@ -24999,13 +26251,21 @@ func (a *App) writeManagedSiteDeletionBackupArchive(ctx context.Context, domain,
 	if err != nil {
 		return err
 	}
-	siteDatabase, err := sql.Open("sqlite", "file:"+realDatabasePath)
-	if err != nil {
-		return err
+	ctx = contextWithDomain(ctx, domain)
+	var backupDatabase sqlExecutor
+	if a.siteDatabaseRouter != nil && a.siteDatabaseRouter.partitioned {
+		backupDatabase = a.db
+	} else {
+		raw, err := sql.Open("sqlite", "file:"+realDatabasePath)
+		if err != nil {
+			return err
+		}
+		defer raw.Close()
+		backupDatabase = raw
 	}
-	defer siteDatabase.Close()
-	siteApplication := &App{db: siteDatabase, storagePath: a.storagePath, storageRealRoot: a.storageRealRoot, dbPath: a.serverControlDBPath(), debug: a.debug}
-	archiveFile, err := os.Create(realArchivePath)
+	siteApplication := &App{db: backupDatabase, storagePath: a.storagePath, storageRealRoot: a.storageRealRoot, dbPath: a.serverControlDBPath(), debug: a.debug}
+
+	archiveFile, err := os.OpenFile(realArchivePath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
 	}
@@ -25028,9 +26288,16 @@ func (a *App) writeManagedSiteDeletionBackupArchive(ctx context.Context, domain,
 		_ = zipWriter.Close()
 		return err
 	}
-	if err := addFileToZip(zipWriter, realDatabasePath, metadata.DatabaseFile); err != nil {
-		_ = zipWriter.Close()
-		return err
+	ownedSnapshot, snapshotErr := a.addSiteDatabaseSnapshots(ctx, domain, metadata.DatabaseFile, zipWriter)
+	if snapshotErr != nil {
+		zipWriter.Close()
+		return snapshotErr
+	}
+	if !ownedSnapshot {
+		if err := addFileToZip(zipWriter, realDatabasePath, metadata.DatabaseFile); err != nil {
+			zipWriter.Close()
+			return err
+		}
 	}
 	metadataJSON, err := json.MarshalIndent(metadata, "", "  ")
 	if err != nil {
@@ -25691,6 +26958,74 @@ func (a *App) finishAccountPasskeyRegistration(w http.ResponseWriter, r *http.Re
 	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 
+func (a *App) aiProviderPolicy(r *http.Request) aiingress.Policy {
+	var encoded string
+	if a.db.QueryRowContext(r.Context(), `SELECT policy FROM ai_provider_policy WHERE id=1`).Scan(&encoded) != nil {
+		return aiingress.Policy{}
+	}
+	var policy aiingress.Policy
+	if json.Unmarshal([]byte(encoded), &policy) != nil {
+		return aiingress.Policy{}
+	}
+	return policy
+}
+
+func (a *App) saveAIIngressPolicy(w http.ResponseWriter, r *http.Request) {
+	_, owner := a.aiIngressAdmission(r)
+	if !owner || !sessionCSRFMutationAllowed(r) || !adminMutationSourceAllowed(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	policy := aiingress.Policy{External: r.FormValue("ai_external") == "on", OpenAI: r.FormValue("ai_openai") == "on", Anthropic: r.FormValue("ai_anthropic") == "on", XAI: r.FormValue("ai_xai") == "on", RequireOpenAIMTLS: r.FormValue("ai_openai_mtls") == "on"}
+	parseCIDRs := func(configured string) ([]string, error) {
+		prefixes := []string{}
+		for _, text := range strings.Fields(strings.ReplaceAll(configured, ",", " ")) {
+			_, network, err := net.ParseCIDR(text)
+			if err != nil {
+				return nil, errors.New("invalid provider CIDR")
+			}
+			bits, _ := network.Mask.Size()
+			if bits == 0 || len(prefixes) >= 32 {
+				return nil, errors.New("provider CIDR is too broad or limit exceeded")
+			}
+			prefixes = append(prefixes, network.String())
+		}
+		return prefixes, nil
+	}
+	var parseErr error
+	policy.CustomCIDRs, parseErr = parseCIDRs(r.FormValue("ai_custom_cidrs"))
+	if parseErr == nil {
+		policy.XAICIDRs, parseErr = parseCIDRs(r.FormValue("ai_xai_cidrs"))
+	}
+	if parseErr != nil {
+		http.Error(w, parseErr.Error(), http.StatusBadRequest)
+		return
+	}
+	if policy.XAI && len(policy.XAICIDRs) == 0 {
+		http.Error(w, "xAI requires explicitly configured outbound CIDRs", http.StatusBadRequest)
+		return
+	}
+
+	encoded, err := json.Marshal(policy)
+	if err == nil {
+		err = a.accountTransaction(r.Context(), func(transaction *sql.Tx) error {
+			if _, err := transaction.Exec(`CREATE TABLE IF NOT EXISTS ai_provider_policy(id INTEGER PRIMARY KEY,policy TEXT NOT NULL)`); err != nil {
+				return err
+			}
+			if _, err := transaction.Exec(`DELETE FROM ai_provider_policy WHERE id=1`); err != nil {
+				return err
+			}
+			_, err := transaction.Exec(`INSERT INTO ai_provider_policy(id,policy) VALUES(1,?)`, string(encoded))
+			return err
+		})
+	}
+	if err != nil {
+		http.Error(w, "AI access settings unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	httpsecurity.RedirectLocal(w, r, profileFormAction(r), http.StatusSeeOther)
+}
+
 func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
@@ -25712,6 +27047,11 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	domain := a.siteDomain(r.Context(), r)
+	if r.Method == http.MethodPost && r.FormValue("profile_action") == "ai_ingress_save" {
+		a.saveAIIngressPolicy(w, r)
+		return
+	}
+
 	if hasQueryFlag(r, "passkey_begin") {
 		a.beginAccountPasskeyRegistration(w, r, domain, currentEmail)
 		return
@@ -26374,6 +27714,7 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 		"AIAccessPagination":         aiAccessPagination,
 		"AISessionPagination":        aiSessionPagination,
 		"HasAIAccess":                aiAccessPagination.Count+aiSessionPagination.Count > 0,
+		"AIIngressPolicy":            a.aiProviderPolicy(r),
 		"PasskeyOffer":               passkeyOffer,
 		"PasskeyContinuePath":        passkeyContinuePath,
 		"TOTPEnabled":                totpEnabled,
@@ -26753,7 +28094,14 @@ func (a *App) reserveAccountMail(r *http.Request, domain, email string) error {
 		return err
 	}
 	var err error
-	if a.controlDatabase != nil {
+	registeredSite := false
+	if a.siteDatabaseRouter != nil {
+		_, lookupErr := a.siteDatabaseRouter.databaseForContext(contextWithDomain(r.Context(), domain))
+		registeredSite = lookupErr == nil
+	}
+	if registeredSite {
+		err = a.accountTransaction(r.Context(), write)
+	} else if a.controlDatabase != nil {
 		err = a.withServerControlDatabaseWrite(r.Context(), "reserve-account-mail", func(database *sql.DB) error {
 			transaction, beginErr := database.BeginTx(r.Context(), nil)
 			if beginErr != nil {
@@ -27246,6 +28594,18 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 			registrationLimit = existingLimit
 		}
 		registerContext := contextWithSiteDatabaseCreation(confirmationContext)
+		quotaErr := a.siteContentTransaction(registerContext, func(transaction *sql.Tx) error {
+			if _, err := transaction.ExecContext(registerContext, `INSERT INTO domain_storage_usage(domain,limit_bytes,updated_at) SELECT ?,?,? WHERE NOT EXISTS(SELECT 1 FROM domain_storage_usage WHERE domain=?)`, confirmation.Domain, registrationLimit, time.Now().UTC().Format(time.RFC3339), confirmation.Domain); err != nil {
+				return err
+			}
+			_, err := transaction.ExecContext(registerContext, `UPDATE domain_storage_usage SET limit_bytes=? WHERE domain=?`, registrationLimit, confirmation.Domain)
+			return err
+		}, func(error) {})
+		if quotaErr != nil {
+			a.renderEmailConfirmationStatus(w, r, http.StatusServiceUnavailable, "site content settings unavailable")
+			return
+		}
+
 		err := a.accountTransaction(registerContext, func(transaction *sql.Tx) error {
 			result, insertErr := transaction.ExecContext(registerContext, `INSERT INTO users(domain,email,password,is_admin) SELECT ?,?,?,1 WHERE NOT EXISTS(SELECT 1 FROM users WHERE domain=? AND is_admin=1)`, confirmation.Domain, confirmation.Email, confirmation.Password, confirmation.Domain)
 			if insertErr != nil {
@@ -27258,11 +28618,7 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 			if inserted != 1 {
 				return errors.New("administrator already exists")
 			}
-			if _, insertErr = transaction.ExecContext(registerContext, `INSERT INTO domain_storage_usage(domain,limit_bytes,updated_at) SELECT ?,?,? WHERE NOT EXISTS(SELECT 1 FROM domain_storage_usage WHERE domain=?)`, confirmation.Domain, registrationLimit, time.Now().UTC().Format(time.RFC3339), confirmation.Domain); insertErr != nil {
-				return insertErr
-			}
-			_, insertErr = transaction.ExecContext(registerContext, `UPDATE domain_storage_usage SET limit_bytes=? WHERE domain=?`, registrationLimit, confirmation.Domain)
-			return insertErr
+			return nil
 		})
 		if err != nil {
 			a.renderEmailConfirmationStatus(w, r, http.StatusBadRequest, err.Error())
@@ -33549,7 +34905,15 @@ func (a *App) listSiteQuotaRowsWithControlDatabase(ctx context.Context, controlD
 				})
 			}
 		} else {
-			candidateRows, err = siteQuotaRowsFromDatabase(ctx, a.storagePath, candidate)
+			if a.siteDatabaseRouter != nil && a.siteDatabaseRouter.partitioned {
+				var row siteQuotaRow
+				row, err = a.siteQuotaRowFromOwners(ctx, candidate)
+				if err == nil && len(row.AdminEmails) > 0 {
+					candidateRows = []siteQuotaRow{row}
+				}
+			} else {
+				candidateRows, err = siteQuotaRowsFromDatabase(ctx, a.storagePath, candidate)
+			}
 		}
 		if err != nil {
 			return nil, err
@@ -33564,6 +34928,40 @@ func (a *App) listSiteQuotaRowsWithControlDatabase(ctx context.Context, controlD
 		return rows[left].Domain < rows[right].Domain
 	})
 	return rows, nil
+}
+
+func (a *App) siteQuotaRowFromOwners(ctx context.Context, candidate siteQuotaDatabaseCandidate) (siteQuotaRow, error) {
+	domain := normalizeDomainName(candidate.fallbackDomain)
+	siteContext := contextWithDomain(ctx, domain)
+	emailRows, err := a.db.QueryContext(siteContext, `SELECT email FROM users WHERE domain=? AND is_admin=1 AND TRIM(COALESCE(email,''))<>'' AND TRIM(COALESCE(password,''))<>'' ORDER BY email`, domain)
+	if err != nil {
+		return siteQuotaRow{}, fmt.Errorf("load site administrators for %s: %w", domain, err)
+	}
+	emails := []string{}
+	for emailRows.Next() {
+		var email string
+		if err := emailRows.Scan(&email); err != nil {
+			emailRows.Close()
+			return siteQuotaRow{}, err
+		}
+		emails = append(emails, email)
+	}
+	err = emailRows.Err()
+	emailRows.Close()
+	if err != nil || len(emails) == 0 {
+		return siteQuotaRow{}, err
+	}
+	configuredAliases, err := a.listDomainAliases(siteContext, domain)
+	if err != nil {
+		return siteQuotaRow{}, err
+	}
+	aliases := []string{}
+	for _, alias := range configuredAliases {
+		aliases = append(aliases, alias.Domain)
+	}
+	a.ensureDomainStorageUsageRow(siteContext, domain)
+	usage := a.storedDomainStorageUsage(siteContext, domain)
+	return siteQuotaRow{Domain: domain, Aliases: aliases, UsedBytes: usage.totalBytes(), AnalyticsBytes: usage.AnalyticsBytes, LimitBytes: usage.LimitBytes, AdminEmails: emails, FilesPath: a.domainFilesDirForDomain(domain), DatabasePath: candidate.path}, nil
 }
 
 func (a *App) siteQuotaDatabaseCandidatesInsideStorage() ([]siteQuotaDatabaseCandidate, error) {
@@ -33599,20 +34997,14 @@ func (a *App) siteQuotaDatabaseCandidatesInsideStorage() ([]siteQuotaDatabaseCan
 		}
 		return nil, pathErr
 	}
-	databaseFiles, err := os.ReadDir(realSiteDatabaseDir)
+	siteCandidates, err := registeredSiteDatabaseCandidates(realSiteDatabaseDir)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return candidates, nil
-		}
 		return nil, err
 	}
-	for _, databaseFile := range databaseFiles {
-		if databaseFile.IsDir() || databaseFile.Type()&os.ModeSymlink != 0 || strings.ToLower(filepath.Ext(databaseFile.Name())) != ".db" {
-			continue
-		}
-		fallbackDomain := strings.TrimSuffix(databaseFile.Name(), filepath.Ext(databaseFile.Name()))
-		addCandidate(filepath.Join(realSiteDatabaseDir, databaseFile.Name()), fallbackDomain)
+	for _, candidate := range siteCandidates {
+		addCandidate(candidate.path, candidate.fallbackDomain)
 	}
+
 	return candidates, nil
 }
 
@@ -33637,20 +35029,14 @@ func siteQuotaDatabaseCandidates(dbPath string) ([]siteQuotaDatabaseCandidate, e
 
 	addCandidate(dbPath, "")
 	siteDatabaseDir := siteDatabaseRootPath(dbPath)
-	databaseFiles, err := os.ReadDir(siteDatabaseDir)
+	siteCandidates, err := registeredSiteDatabaseCandidates(siteDatabaseDir)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return candidates, nil
-		}
 		return nil, err
 	}
-	for _, databaseFile := range databaseFiles {
-		if databaseFile.IsDir() || strings.ToLower(filepath.Ext(databaseFile.Name())) != ".db" {
-			continue
-		}
-		fallbackDomain := strings.TrimSuffix(databaseFile.Name(), filepath.Ext(databaseFile.Name()))
-		addCandidate(filepath.Join(siteDatabaseDir, databaseFile.Name()), fallbackDomain)
+	for _, candidate := range siteCandidates {
+		addCandidate(candidate.path, candidate.fallbackDomain)
 	}
+
 	return candidates, nil
 }
 
@@ -33660,6 +35046,14 @@ func siteQuotaRowsFromDatabase(ctx context.Context, storagePath string, candidat
 		return nil, err
 	}
 	defer rawDatabase.Close()
+	// The offline console historically initializes missing quota rows. Active
+	// partitioned sites perform this operation through their content owner.
+	if partitionedSiteID(rawDatabase) == "" {
+		application := &App{db: rawDatabase, storagePath: storagePath, dbPath: candidate.path}
+		for _, domain := range siteDomainsInDatabase(ctx, rawDatabase) {
+			application.ensureDomainStorageUsageRow(contextWithDomain(ctx, domain), domain)
+		}
+	}
 	return siteQuotaRowsFromOpenDatabase(ctx, storagePath, candidate, rawDatabase)
 }
 
@@ -33673,7 +35067,6 @@ func siteQuotaRowsFromOpenDatabase(ctx context.Context, storagePath string, cand
 	rows := make([]siteQuotaRow, 0, len(domains))
 	for _, domain := range domains {
 		domainContext := contextWithDomain(ctx, domain)
-		application.ensureDomainStorageUsageRow(domainContext, domain)
 		usage := application.storedDomainStorageUsage(domainContext, domain)
 		rows = append(rows, siteQuotaRow{
 			Domain:         domain,
@@ -33773,7 +35166,7 @@ func siteQuotaRowPriority(row siteQuotaRow, primaryDomain, dbPath string) int {
 	if row.Domain == primaryDomain {
 		priority += 4
 	}
-	expectedSiteDatabasePath := filepath.Join(siteDatabaseRootPath(dbPath), domainStorageName(primaryDomain)+".db")
+	expectedSiteDatabasePath := siteDatabaseFile(siteDatabaseRootPath(dbPath), primaryDomain)
 	if sameSiteQuotaPath(row.DatabasePath, expectedSiteDatabasePath) {
 		priority += 8
 	}
@@ -33789,12 +35182,25 @@ func sameSiteQuotaPath(leftPath, rightPath string) bool {
 	leftAbsolutePath, leftErr := filepath.Abs(leftCleanPath)
 	rightAbsolutePath, rightErr := filepath.Abs(rightCleanPath)
 	if leftErr == nil && rightErr == nil {
+		if resolved, err := filepath.EvalSymlinks(leftAbsolutePath); err == nil {
+			leftAbsolutePath = resolved
+		}
+		if resolved, err := filepath.EvalSymlinks(rightAbsolutePath); err == nil {
+			rightAbsolutePath = resolved
+		}
 		return leftAbsolutePath == rightAbsolutePath
 	}
 	return leftCleanPath == rightCleanPath
 }
 
 func siteDomainsInDatabase(ctx context.Context, database *sql.DB) []string {
+	control, finish, controlErr := readSiteControlDatabase(database)
+	if controlErr != nil {
+		return nil
+	}
+	defer finish()
+	database = control
+
 	domainSet := make(map[string]struct{})
 	rows, err := database.QueryContext(ctx, `SELECT DISTINCT domain FROM users WHERE is_admin=1 AND TRIM(COALESCE(email,''))<>'' AND TRIM(COALESCE(password,''))<>''`)
 	if err == nil {
@@ -33819,6 +35225,13 @@ func siteDomainsInDatabase(ctx context.Context, database *sql.DB) []string {
 }
 
 func siteAliasesInDatabase(ctx context.Context, database *sql.DB, domain string) []string {
+	control, finish, controlErr := readSiteControlDatabase(database)
+	if controlErr != nil {
+		return nil
+	}
+	defer finish()
+	database = control
+
 	rows, err := database.QueryContext(ctx, `SELECT alias_domain FROM domain_aliases WHERE primary_domain=? ORDER BY alias_domain`, domain)
 	if err != nil {
 		return nil
@@ -33881,6 +35294,13 @@ func (a *App) updateSiteQuotaLimit(ctx context.Context, rawDomain string, limitB
 	candidate, err := a.siteQuotaDatabaseCandidateForDomainInsideStorage(ctx, domain)
 	if err != nil {
 		return siteQuotaRow{}, err
+	}
+	if a.siteDatabaseRouter != nil && a.siteDatabaseRouter.partitioned && !sameSiteQuotaPath(candidate.path, a.serverControlDBPath()) {
+		siteContext := contextWithDomain(ctx, domain)
+		if err := a.initializeRegistrationQuota(siteContext, domain, limitBytes); err != nil {
+			return siteQuotaRow{}, err
+		}
+		return a.siteQuotaRowFromOwners(siteContext, candidate)
 	}
 
 	if sameSiteQuotaPath(candidate.path, a.serverControlDBPath()) {
@@ -33998,7 +35418,22 @@ func runAdminIPResetCommand(ctx context.Context, output io.Writer, storagePath, 
 	if err != nil {
 		return err
 	}
-	database, err := sql.Open("sqlite", "file:"+candidate.path)
+	source, err := openSiteDatabaseReadHandle(candidate.path)
+	if err != nil {
+		return fmt.Errorf("open site database: %w", err)
+	}
+	controlPath := siteControlDatabasePath(source)
+	source.Close()
+	if controlPath == "" {
+		controlPath = candidate.path
+	}
+	// Recovery must open the existing security database, never create a second
+	// account source if one member of the site's database set is missing.
+	address, err := siteDatabaseURL(controlPath, "rw")
+	if err != nil {
+		return err
+	}
+	database, err := sql.Open("sqlite", address)
 	if err != nil {
 		return fmt.Errorf("open site database: %w", err)
 	}
@@ -34074,7 +35509,7 @@ func resetAdministratorIPAccess(ctx context.Context, transaction *sql.Tx, domain
 }
 
 func siteQuotaDatabaseCandidateForDomain(ctx context.Context, storagePath, dbPath, domain string) (siteQuotaDatabaseCandidate, error) {
-	siteDatabasePath := filepath.Join(siteDatabaseRootPath(dbPath), domainStorageName(domain)+".db")
+	siteDatabasePath := siteDatabaseFile(siteDatabaseRootPath(dbPath), domain)
 	if _, err := os.Stat(siteDatabasePath); err == nil {
 		return siteQuotaDatabaseCandidate{path: siteDatabasePath, fallbackDomain: domain}, nil
 	}
@@ -34097,7 +35532,7 @@ func siteQuotaDatabaseCandidateForDomain(ctx context.Context, storagePath, dbPat
 }
 
 func (a *App) siteQuotaDatabaseCandidateForDomainInsideStorage(ctx context.Context, domain string) (siteQuotaDatabaseCandidate, error) {
-	siteDatabasePath := filepath.Join(siteDatabaseRootPath(a.serverControlDBPath()), domainStorageName(domain)+".db")
+	siteDatabasePath := siteDatabaseFile(siteDatabaseRootPath(a.serverControlDBPath()), domain)
 	realSiteDatabasePath, pathErr := a.existingPathInsideStorage(siteDatabasePath)
 	if pathErr == nil {
 		if fileInfo, statErr := a.statInsideStorage(siteDatabasePath); statErr == nil && !fileInfo.IsDir() {
@@ -34794,9 +36229,14 @@ func firstAdminInDatabase(ctx context.Context, databasePath, fallbackDomain stri
 }
 
 func firstAdminFromOpenDatabase(ctx context.Context, rawDatabase *sql.DB, fallbackDomain string) (string, string, bool) {
+	control, finish, err := readSiteControlDatabase(rawDatabase)
+	if err != nil {
+		return "", "", false
+	}
+	defer finish()
 	var domain string
 	var email string
-	err := rawDatabase.QueryRowContext(ctx, `SELECT domain,email FROM users WHERE is_admin=1 ORDER BY id ASC LIMIT 1`).Scan(&domain, &email)
+	err = control.QueryRowContext(ctx, `SELECT domain,email FROM users WHERE is_admin=1 ORDER BY id ASC LIMIT 1`).Scan(&domain, &email)
 	domain = normalizeQuotaDomainName(domain)
 	if domain == "" {
 		domain = normalizeQuotaDomainName(fallbackDomain)
@@ -45169,13 +46609,16 @@ func inspectUpdateDatabases(storagePath, databasePath string, migrate, requireMi
 		return err
 	}
 	for _, entry := range entries {
-		if !strings.HasSuffix(strings.ToLower(entry.Name()), ".db") {
-			continue
-		}
-		if entry.Type()&os.ModeSymlink != 0 || entry.IsDir() {
+		if strings.HasSuffix(strings.ToLower(entry.Name()), ".db") && (entry.Type()&os.ModeSymlink != 0 || entry.IsDir()) {
 			return errors.New("unsafe site database entry")
 		}
-		name := filepath.Join(root, entry.Name())
+	}
+	candidates, err := registeredSiteDatabaseCandidates(root)
+	if err != nil {
+		return err
+	}
+	for _, candidate := range candidates {
+		name := candidate.path
 		if _, err := resolvePathInsideRootForWrite(realRoot, name); err != nil {
 			return err
 		}
@@ -45189,7 +46632,7 @@ func inspectUpdateDatabases(storagePath, databasePath string, migrate, requireMi
 			return err
 		}
 		if migrate {
-			domain := normalizeDomainName(strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name())))
+			domain := candidate.fallbackDomain
 			application := &App{db: database, storagePath: realRoot, storageRealRoot: realRoot, dbPath: databasePath}
 			err = application.migrate(contextWithDomain(context.Background(), domain))
 		} else {
@@ -45200,7 +46643,7 @@ func inspectUpdateDatabases(storagePath, databasePath string, migrate, requireMi
 			var check string
 			err = database.QueryRow("PRAGMA quick_check").Scan(&check)
 			if err == nil && check != "ok" {
-				err = fmt.Errorf("site database integrity check failed: %s", entry.Name())
+				err = fmt.Errorf("site database integrity check failed: %s", filepath.Base(name))
 			}
 			if err == nil && requireMigrations && siteDatabaseHasRegisteredAdmin(context.Background(), database) {
 				var complete bool
@@ -45219,6 +46662,24 @@ func inspectUpdateDatabases(storagePath, databasePath string, migrate, requireMi
 		}
 		if closeErr != nil {
 			return closeErr
+		}
+		if filepath.Base(name) == "content.db" {
+			for _, relative := range []string{"control.db", filepath.Join("analytics", "analytics.db")} {
+				subsystemPath := filepath.Join(filepath.Dir(name), relative)
+				subsystem, err := openUpdateReadOnlyDatabase(subsystemPath)
+				if err != nil {
+					return err
+				}
+				var integrity string
+				checkErr := subsystem.QueryRow(`PRAGMA quick_check`).Scan(&integrity)
+				subsystem.Close()
+				if checkErr != nil {
+					return checkErr
+				}
+				if integrity != "ok" {
+					return errors.New("site subsystem integrity check failed")
+				}
+			}
 		}
 	}
 	return nil

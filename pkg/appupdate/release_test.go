@@ -356,3 +356,14 @@ func TestServerSessionGuardsRecoveryUntilProcessReleasesDatabases(t *testing.T) 
 	}
 	recovered.Close()
 }
+
+func TestPartitionedStorageContractRejectsPredecessorWrites(t *testing.T) {
+	predecessor := Version{Compatibility: Compatibility{Generation: 1, ReadsFrom: 1, ReadsThrough: 1, WritesCompatible: true}}
+	successor := Version{Compatibility: CurrentCompatibility()}
+	if successor.Compatibility.MigrationMinimum() > predecessor.Compatibility.Generation {
+		t.Fatal("legacy sites cannot migrate")
+	}
+	if canRollback(predecessor, successor) {
+		t.Fatal("predecessor could reopen partitioned security storage after activation")
+	}
+}

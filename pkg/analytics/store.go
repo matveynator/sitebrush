@@ -246,9 +246,28 @@ func storeDirectory(root, domain string) (string, error) {
 	return directory, nil
 }
 
+// ExecuteOwned runs inside the site's analytics participant. The SQL handle and
+// archive-hour map never leave that participant's turn.
+func ExecuteOwned(directory string, request StorageRequest, database *sql.DB, archivedHour map[string]string) StorageResult {
+	return (&Store{}).executeWithDatabase("", request, archivedHour, database, directory)
+}
+
 func (store *Store) execute(root string, request StorageRequest, archivedHour map[string]string) StorageResult {
+	return store.executeWithDatabase(root, request, archivedHour, nil, "")
+}
+
+func (store *Store) executeWithDatabase(root string, request StorageRequest, archivedHour map[string]string, owned *sql.DB, ownedDirectory string) StorageResult {
+	directoryForRequest := func(create bool) (string, error) {
+		if ownedDirectory != "" {
+			return ownedDirectory, nil
+		}
+		if create {
+			return storeDirectory(root, request.Domain)
+		}
+		return storeDirectoryPath(root, request.Domain)
+	}
 	if request.Operation == ReadUsage {
-		directory, err := storeDirectoryPath(root, request.Domain)
+		directory, err := directoryForRequest(false)
 		if err != nil {
 			return StorageResult{Err: err}
 		}
@@ -262,13 +281,16 @@ func (store *Store) execute(root string, request StorageRequest, archivedHour ma
 		usage, err := directoryBytes(directory)
 		return StorageResult{Bytes: usage, Err: err}
 	}
-	directory, err := storeDirectory(root, request.Domain)
+	directory, err := directoryForRequest(true)
 	if err != nil {
 		return StorageResult{Err: err}
 	}
 	databasePath := filepath.Join(directory, DatabaseName(request.Domain))
+	if owned != nil {
+		databasePath = filepath.Join(directory, "analytics.db")
+	}
 	legacyPath := filepath.Join(directory, "analytics.db")
-	if _, pathErr := os.Lstat(databasePath); os.IsNotExist(pathErr) {
+	if _, pathErr := os.Lstat(databasePath); owned == nil && os.IsNotExist(pathErr) {
 		if legacy, legacyErr := os.Lstat(legacyPath); legacyErr == nil && legacy.Mode().IsRegular() {
 			if renameErr := os.Rename(legacyPath, databasePath); renameErr != nil {
 				return StorageResult{Err: renameErr}
@@ -318,12 +340,15 @@ func (store *Store) execute(root string, request StorageRequest, archivedHour ma
 			return StorageResult{Err: quotaErr}
 		}
 	}
-	database, err := sql.Open("sqlite", databasePath)
-	if err != nil {
-		return StorageResult{Err: err}
+	database := owned
+	if database == nil {
+		database, err = sql.Open("sqlite", databasePath)
+		if err != nil {
+			return StorageResult{Err: err}
+		}
+		defer database.Close()
+		database.SetMaxOpenConns(1)
 	}
-	defer database.Close()
-	database.SetMaxOpenConns(1)
 	boundary, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	finished := make(chan struct{})
 	defer close(finished)
@@ -341,6 +366,9 @@ func (store *Store) execute(root string, request StorageRequest, archivedHour ma
 	}()
 	// SQLite-specific resource limits are confined to this storage boundary.
 	for _, statement := range []string{`PRAGMA page_size=4096`, `PRAGMA auto_vacuum=INCREMENTAL`, `PRAGMA journal_mode=DELETE`, `PRAGMA busy_timeout=100`, `PRAGMA max_page_count=4096`, `CREATE TABLE IF NOT EXISTS checkpoints(kind TEXT PRIMARY KEY,body TEXT NOT NULL)`} {
+		if owned != nil && strings.HasPrefix(statement, "PRAGMA") {
+			continue
+		}
 		if _, err := database.ExecContext(boundary, statement); err != nil {
 			return StorageResult{Err: err}
 		}

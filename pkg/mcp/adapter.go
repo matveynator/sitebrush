@@ -13,9 +13,9 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-const Path = "/_sitebrush/mcp"
-const OAuthPath = "/_sitebrush/oauth/"
-const ResourceMetadataPath = "/.well-known/oauth-protected-resource/_sitebrush/mcp"
+const Path = "/?mcp"
+const OAuthPath = "/?oauth="
+const ResourceMetadataPath = "/?oauth=resource"
 
 // FileInput is a client-provided attachment, not a server filesystem path.
 type FileInput struct {

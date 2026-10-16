@@ -354,7 +354,19 @@
 <section id="ai-access" class="authentication-card profile-form profile-account-card profile-ai-connect-card">
   <div class="profile-account-card-header">
     <h2>AI · SiteBrush</h2>
-    <p>{{if eq .LanguageCode "ru"}}Скажите AI: «Помоги мне с сайтом https://{{.Domain}}». Он сможет обнаружить SiteBrush и предложить ссылку для подтверждения доступа ко всему сайту и аналитике. API-ключи и настройка приложения не нужны.{{else}}Tell your AI: “Help me with https://{{.Domain}}”. It can discover SiteBrush and offer a link to approve site and analytics access. No API key or application setup is needed.{{end}}</p>
+    <p>{{if eq .LanguageCode "ru"}}Внешний AI-доступ по умолчанию скрыт. Разрешите нужного провайдера и подключите адрес <code>https://{{.Domain}}/?mcp</code>. Каждое подключение требует вашего подтверждения.{{else}}External AI access is hidden by default. Enable a provider and connect <code>https://{{.Domain}}/?mcp</code>. Each connection requires your approval.{{end}}</p>
+    <form method="post" action="{{.ProfileFormAction}}">
+      <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
+      <input type="hidden" name="profile_action" value="ai_ingress_save">
+      <label><input type="checkbox" name="ai_external"{{if .AIIngressPolicy.External}} checked{{end}}> {{if eq .LanguageCode "ru"}}Разрешить внешние AI-подключения{{else}}Allow external AI connections{{end}}</label>
+      <label><input type="checkbox" name="ai_openai"{{if .AIIngressPolicy.OpenAI}} checked{{end}}> OpenAI / ChatGPT</label>
+      <label><input type="checkbox" name="ai_anthropic"{{if .AIIngressPolicy.Anthropic}} checked{{end}}> Anthropic / Claude</label>
+      <label><input type="checkbox" name="ai_xai"{{if .AIIngressPolicy.XAI}} checked{{end}}> xAI / Grok ({{if eq .LanguageCode "ru"}}требуются свои CIDR{{else}}requires custom CIDRs{{end}})</label>
+      <label>xAI CIDRs<input name="ai_xai_cidrs" value="{{range $index, $cidr := .AIIngressPolicy.XAICIDRs}}{{if $index}}, {{end}}{{$cidr}}{{end}}" maxlength="2048"></label>
+      <label><input type="checkbox" name="ai_openai_mtls"{{if .AIIngressPolicy.RequireOpenAIMTLS}} checked{{end}}> {{if eq .LanguageCode "ru"}}Требовать сертификат OpenAI mTLS{{else}}Require OpenAI mTLS certificate{{end}}</label>
+      <label>{{if eq .LanguageCode "ru"}}Дополнительные CIDR провайдеров (через запятую){{else}}Custom provider CIDRs (comma separated){{end}}<input name="ai_custom_cidrs" value="{{range $index, $cidr := .AIIngressPolicy.CustomCIDRs}}{{if $index}}, {{end}}{{$cidr}}{{end}}" maxlength="2048"></label>
+      <button type="submit">{{.SaveLabel}}</button>
+    </form>
   </div>
 </section>
 {{if .HasAIAccess}}
