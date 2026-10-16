@@ -54,10 +54,12 @@ func ServeReleaseMirror(options MirrorOptions, stop <-chan struct{}) error {
 	}
 	slots := make(chan struct{}, 8)
 	defer func() {
-		listener.Close()
+		// Workers must send logical channel closures before the transport closes;
+		// a disconnected transport otherwise leaves remote sessions resumable.
 		for count := 0; count < cap(slots); count++ {
 			slots <- struct{}{}
 		}
+		listener.Close()
 	}()
 	for {
 		select {
