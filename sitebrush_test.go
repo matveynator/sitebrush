@@ -64,10 +64,12 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/httpsecurity"
 	"github.com/matveynator/sitebrush/v2/pkg/imageprepare"
 	"github.com/matveynator/sitebrush/v2/pkg/mailout"
+	sitemcp "github.com/matveynator/sitebrush/v2/pkg/mcp"
 	"github.com/matveynator/sitebrush/v2/pkg/outboundhttp"
 	"github.com/matveynator/sitebrush/v2/pkg/securitysync"
 	"github.com/matveynator/sitebrush/v2/pkg/sitebrushtemplate"
 	"github.com/matveynator/sitebrush/v2/pkg/updateannounce"
+	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/net/dns/dnsmessage"
 	htmlparser "golang.org/x/net/html"
 	"golang.org/x/net/websocket"
@@ -23771,5 +23773,303 @@ func TestAIEditorInlineAttachmentsResolveToImmutableUploadedFiles(t *testing.T) 
 	stored, err := application.readFileInsideStorage(filepath.Join(application.domainFilesDirForDomain("localhost"), references[0].Name))
 	if err != nil || string(stored) != "photo" || references[0].URL != "/p/"+files[0].Name || references[0].OriginalName != "photo.jpg" {
 		t.Fatalf("attachment reference is not the uploaded file: %+v %q %v", references, stored, err)
+	}
+}
+
+// The native SDK drives the public MCP transport; all writes use the production
+// database owner and editor pipeline used by the existing capability protocol.
+type mcpTestAuthorizationTransport struct {
+	bearer    string
+	transport http.RoundTripper
+}
+
+func (transport mcpTestAuthorizationTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	cloned := request.Clone(request.Context())
+	cloned.Header = request.Header.Clone()
+	cloned.Header.Set("Authorization", "Bearer "+transport.bearer)
+	return transport.transport.RoundTrip(cloned)
+}
+
+func TestMCPPublicTransportSecurityAndCredentialRedaction(t *testing.T) {
+	application, _ := newTestApplication(t)
+	guard, err := httpsecurity.NewAttackGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(guard.Close)
+	application.attackGuard = guard
+	application.securityAnalytics = make(chan siteAnalyticsEvent, 16)
+	handler := application.analyticsMiddleware(application.authAbuseMiddleware(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.WriteHeader(http.StatusNoContent)
+	})))
+	for _, pathname := range []string{sitemcp.Path, sitemcp.OAuthPath + "authorize", sitemcp.OAuthPath + "register", sitemcp.OAuthPath + "token", sitemcp.OAuthPath + "revoke"} {
+		request := httptest.NewRequest(http.MethodPost, "https://mcp.example"+pathname+"?code=private-code&state=private-state&code_challenge=private-challenge", nil)
+		request.RemoteAddr = "198.51.100.80:1234"
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("external MCP request was treated as a probe: %s returned %d", pathname, response.Code)
+		}
+		observation := <-application.securityAnalytics
+		if strings.Contains(observation.Query, "private-") {
+			t.Fatal("OAuth credentials entered Analytics")
+		}
+	}
+	for _, address := range []string{"file:///etc/passwd", "http://files.example/image", "https://localhost/image", "https://127.0.0.1/image", "https://[::1]/image", "https://169.254.169.254/metadata", "https://user:secret@files.example/image", "https://files.example/image#private"} {
+		if _, err := downloadAIMCPFile(context.Background(), address, 1024); err == nil {
+			t.Fatalf("unsafe attachment URL accepted: %s", address)
+		}
+	}
+}
+
+func TestMCPApprovalBrowserRedirect(t *testing.T) {
+	if os.Getenv("SITEBRUSH_MCP_BROWSER_TEST") != "1" {
+		t.Skip("set SITEBRUSH_MCP_BROWSER_TEST=1 after installing scripts/editor browser dependencies")
+	}
+	application := newRouterTestApplication(t)
+	fixtureContext := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), "localhost"))
+	if _, err := application.db.ExecContext(fixtureContext, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "browser-owner@example.org", "test"); err != nil {
+		t.Fatal(err)
+	}
+	application.aiCapabilities = aicapability.NewManager()
+	t.Cleanup(application.aiCapabilities.Close)
+	responses := make(chan url.Values, 1)
+	callback := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/callback" {
+			http.NotFound(response, request)
+			return
+		}
+		responses <- request.URL.Query()
+		_, _ = io.WriteString(response, "OAuth complete")
+	}))
+	defer callback.Close()
+	server := httptest.NewServer(http.HandlerFunc(application.route))
+	defer server.Close()
+	origin := strings.Replace(server.URL, "127.0.0.1", "localhost", 1)
+	redirectURI := callback.URL + "/callback"
+	client, err := application.aiCapabilities.RegisterOAuthClient("localhost", aicapability.OAuthClient{Name: "Browser AI", RedirectURIs: []string{redirectURI}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier := strings.Repeat("v", 43)
+	digest := sha256.Sum256([]byte(verifier))
+	resource := origin + sitemcp.Path
+	pairing, err := application.aiCapabilities.BeginOAuth("localhost", aicapability.OAuthAuthorization{ClientID: client.ID, RedirectURI: redirectURI, Resource: resource, State: "browser-state", Challenge: base64.RawURLEncoding.EncodeToString(digest[:])})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookie := newAdminSessionCookie(t, application, "browser-owner@example.org")
+	command := exec.Command("node", "pkg/mcp/approval_test.cjs")
+	command.Env = append(os.Environ(), "SITEBRUSH_MCP_APPROVAL_URL="+origin+"/?ai_authorize="+pairing.VerificationCode, "SITEBRUSH_MCP_CALLBACK_URL="+redirectURI, "SITEBRUSH_MCP_COOKIE="+cookie.Name+"="+cookie.Value)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("MCP browser approval failed: %v\n%s", err, output)
+	}
+	select {
+	case response := <-responses:
+		if response.Get("state") != "browser-state" || response.Get("iss") != origin {
+			t.Fatal("browser callback lost authorization binding")
+		}
+		if _, err := application.aiCapabilities.ExchangeOAuthCode("localhost", client.ID, resource, redirectURI, response.Get("code"), verifier); err != nil {
+			t.Fatal("browser approval could not establish access", err)
+		}
+	default:
+		t.Fatal("browser never reached the external OAuth callback")
+	}
+}
+
+func TestMCPRemoteOAuthAndExistingSiteOperations(t *testing.T) {
+	application := newRouterTestApplication(t)
+	analyticsStore := browserstats.OpenStore(filepath.Join(application.storageRootDir(), "analytics"))
+	application.analyticsStorage = analyticsStore
+	t.Cleanup(analyticsStore.Close)
+	fixtureContext := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), "localhost"))
+	if _, err := application.db.ExecContext(fixtureContext, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "mcp-owner@example.org", "test"); err != nil {
+		t.Fatal(err)
+	}
+	application.aiCapabilities = aicapability.NewPersistentManager(filepath.Join(application.storagePath, "security", "ai-capabilities.json"))
+	t.Cleanup(application.aiCapabilities.Close)
+	application.aiExecutor = aieditor.NewExecutor(&appAIStore{application: application}, 8)
+	t.Cleanup(application.aiExecutor.Close)
+	server := httptest.NewServer(http.HandlerFunc(application.route))
+	defer server.Close()
+	origin := strings.Replace(server.URL, "127.0.0.1", "localhost", 1)
+	resource := origin + sitemcp.Path
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }, Timeout: 15 * time.Second}
+	cookie := newAdminSessionCookie(t, application, "mcp-owner@example.org")
+	send := func(method, address, body, contentType string, admin bool) (int, http.Header, []byte) {
+		t.Helper()
+		request, err := http.NewRequest(method, address, strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Content-Type", contentType)
+		if admin {
+			request.AddCookie(cookie)
+			request.Header.Set("Origin", origin)
+		}
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		encoded, err := io.ReadAll(response.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return response.StatusCode, response.Header, encoded
+	}
+	status, _, manifestBody := send("GET", origin+"/?ai=manifest", "", "", false)
+	var manifest aicapability.Manifest
+	if status != 200 || json.Unmarshal(manifestBody, &manifest) != nil || manifest.MCPURL != resource {
+		t.Fatal("manifest did not advertise site's MCP endpoint")
+	}
+	status, headers, _ := send("POST", resource, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`, "application/json", false)
+	if status != 401 || !strings.Contains(headers.Get("WWW-Authenticate"), origin+sitemcp.ResourceMetadataPath) {
+		t.Fatal("MCP authentication discovery missing", status)
+	}
+	status, _, metadataBody := send("GET", origin+sitemcp.ResourceMetadataPath, "", "", false)
+	if status != 200 || !strings.Contains(string(metadataBody), resource) {
+		t.Fatal("protected resource metadata missing")
+	}
+	status, _, issuerBody := send("GET", origin+"/.well-known/oauth-authorization-server", "", "", false)
+	if status != 200 || !strings.Contains(string(issuerBody), `"S256"`) {
+		t.Fatal("OAuth metadata missing PKCE")
+	}
+	status, _, clientBody := send("POST", origin+sitemcp.OAuthPath+"register", `{"client_name":"MCP external client","redirect_uris":["https://client.example/callback"],"token_endpoint_auth_method":"none","grant_types":["authorization_code","refresh_token"],"response_types":["code"]}`, "application/json", false)
+	var registration struct {
+		ClientID string `json:"client_id"`
+	}
+	if status != 201 || json.Unmarshal(clientBody, &registration) != nil || registration.ClientID == "" {
+		t.Fatal("automatic registration failed", status, string(clientBody))
+	}
+	verifier := strings.Repeat("v", 43)
+	digest := sha256.Sum256([]byte(verifier))
+	authorize := url.Values{"client_id": {registration.ClientID}, "redirect_uri": {"https://client.example/callback"}, "response_type": {"code"}, "resource": {resource}, "scope": {"read write publish analytics"}, "state": {"client-state"}, "code_challenge_method": {"S256"}, "code_challenge": {base64.RawURLEncoding.EncodeToString(digest[:])}}
+	status, headers, _ = send("GET", origin+sitemcp.OAuthPath+"authorize?"+authorize.Encode(), "", "", false)
+	if status != 303 || !strings.HasPrefix(headers.Get("Location"), "/?ai_authorize=") {
+		t.Fatal("OAuth did not reuse SiteBrush approval", status)
+	}
+	approvalAddress := origin + headers.Get("Location")
+	status, headers, _ = send("GET", approvalAddress, "", "", false)
+	if status != 303 || !strings.Contains(headers.Get("Location"), "login") {
+		t.Fatal("approval bypassed login", status)
+	}
+	status, approvalHeaders, approvalBody := send("GET", approvalAddress, "", "", true)
+	if status != 200 || !strings.Contains(string(approvalBody), "MCP external client") || !strings.Contains(string(approvalBody), `name="scope_analytics" checked`) || strings.Contains(string(approvalBody), "device_code") {
+		t.Fatal("invalid native approval screen", status)
+	}
+	if approvalHeaders.Get("Content-Security-Policy") != "frame-ancestors 'none'; form-action 'self' https://client.example" {
+		t.Fatal("approval form cannot redirect to the registered OAuth client")
+	}
+	csrfRequest := httptest.NewRequest("GET", origin, nil)
+	csrfRequest.AddCookie(cookie)
+	approval := url.Values{"account_csrf": {accountCSRF(csrfRequest)}, "decision": {"allow"}, "scope_read": {"on"}, "scope_write": {"on"}, "scope_publish": {"on"}, "scope_analytics": {"on"}}
+	status, headers, _ = send("POST", approvalAddress, approval.Encode(), "application/x-www-form-urlencoded", true)
+	callback, err := url.Parse(headers.Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := callback.Query().Get("code")
+	if status != 303 || code == "" || callback.Host != "client.example" || callback.Query().Get("iss") != origin || callback.Query().Get("state") != "client-state" {
+		t.Fatal("OAuth callback failed", status)
+	}
+	exchange := url.Values{"client_id": {registration.ClientID}, "redirect_uri": {"https://client.example/callback"}, "grant_type": {"authorization_code"}, "resource": {resource}, "code": {code}, "code_verifier": {verifier}}
+	status, _, tokenBody := send("POST", origin+sitemcp.OAuthPath+"token", exchange.Encode(), "application/x-www-form-urlencoded", false)
+	var tokens aicapability.OAuthTokens
+	if status != 200 || json.Unmarshal(tokenBody, &tokens) != nil || tokens.AccessToken == "" || tokens.RefreshToken == "" {
+		t.Fatal("automatic token exchange failed", status)
+	}
+	boundary, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	sdkClient := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "External MCP SDK", Version: "test"}, nil)
+	sdkHTTP := &http.Client{Transport: mcpTestAuthorizationTransport{bearer: tokens.AccessToken, transport: http.DefaultTransport}, Timeout: 15 * time.Second}
+	connection, err := sdkClient.Connect(boundary, &mcpsdk.StreamableClientTransport{Endpoint: resource, HTTPClient: sdkHTTP}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	call := func(operation string, arguments map[string]any) map[string]any {
+		t.Helper()
+		result, err := connection.CallTool(boundary, &mcpsdk.CallToolParams{Name: "sitebrush_" + operation, Arguments: arguments})
+		if err != nil {
+			t.Fatal(operation, err)
+		}
+		if result.IsError {
+			encoded, _ := json.Marshal(result)
+			t.Fatal(operation, string(encoded))
+		}
+		encoded, err := json.Marshal(result.StructuredContent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(encoded), tokens.AccessToken) || strings.Contains(string(encoded), tokens.RefreshToken) {
+			t.Fatal("credentials exposed to model")
+		}
+		var decoded map[string]any
+		if json.Unmarshal(encoded, &decoded) != nil {
+			t.Fatal("invalid tool result")
+		}
+		return decoded
+	}
+	access := call("get_access", map[string]any{})
+	if access["domain"] != "localhost" || access["publication"] != "draft_then_publish" {
+		t.Fatal("access bootstrap missing site identity")
+	}
+	call("list_pages", map[string]any{})
+	call("create_page", map[string]any{"path": "/mcp-test", "title": "MCP test", "html": "<html><body>Original version</body></html>"})
+	var publishedCount int
+	if err := application.db.QueryRowContext(fixtureContext, `SELECT COUNT(1) FROM published_pages WHERE domain=? AND path=?`, "localhost", "/mcp-test").Scan(&publishedCount); err != nil || publishedCount != 0 {
+		t.Fatal("create_page published without publish operation", err)
+	}
+	call("publish", map[string]any{})
+	first := call("read_page", map[string]any{"path": "/mcp-test"})["result"].(map[string]any)["payload"].(map[string]any)
+	revisions := call("list_revisions", map[string]any{"path": "/mcp-test"})["result"].(map[string]any)["revisions"].([]any)
+	revision := revisions[0].(map[string]any)["id"].(float64)
+	imageBytes, _ := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=")
+	uploaded := call("upload_file", map[string]any{"path": "/mcp-test", "file_name": "photo.png", "file_content": base64.StdEncoding.EncodeToString(imageBytes)})["result"].(map[string]any)["payload"].(map[string]any)
+	fileURL := uploaded["url"].(string)
+	updatedHTML := `<html><body>Improved version<img src="` + fileURL + `"></body></html>`
+	call("update_page", map[string]any{"path": "/mcp-test", "title": "MCP test", "html": updatedHTML, "expected_version": first["version"]})
+	beforeStatus, beforeHeaders, publicBeforePublish := send("GET", origin+"/mcp-test/", "", "", false)
+	if !strings.Contains(string(publicBeforePublish), "Original version") || strings.Contains(string(publicBeforePublish), "Improved version") {
+		t.Fatalf("draft public response: %d location=%s body=%s", beforeStatus, beforeHeaders.Get("Location"), publicBeforePublish)
+	}
+	conflict, err := connection.CallTool(boundary, &mcpsdk.CallToolParams{Name: "sitebrush_update_page", Arguments: map[string]any{"path": "/mcp-test", "title": "stale", "html": "stale", "expected_version": first["version"]}})
+	if err != nil || !conflict.IsError {
+		t.Fatal("stale revision bypassed editor guard", err)
+	}
+	call("get_site_report", map[string]any{"days": 30})
+	call("publish", map[string]any{})
+	status, _, publicAfterPublish := send("GET", origin+"/mcp-test/", "", "", false)
+	if status != 200 || !strings.Contains(string(publicAfterPublish), "Improved version") || !strings.Contains(string(publicAfterPublish), fileURL) {
+		t.Fatal("publication was not visible on public page", status)
+	}
+	current := call("read_page", map[string]any{"path": "/mcp-test"})["result"].(map[string]any)["payload"].(map[string]any)
+	call("rollback", map[string]any{"path": "/mcp-test", "revision_id": strconv.Itoa(int(revision)), "expected_version": current["version"]})
+	_, _, publicBeforeRollbackPublish := send("GET", origin+"/mcp-test/", "", "", false)
+	if !strings.Contains(string(publicBeforeRollbackPublish), "Improved version") {
+		t.Fatal("rollback published without an explicit publish")
+	}
+	call("publish", map[string]any{})
+	_, _, rolledBack := send("GET", origin+"/mcp-test/", "", "", false)
+	if !strings.Contains(string(rolledBack), "Original version") || strings.Contains(string(rolledBack), "Improved version") {
+		t.Fatal("rollback did not restore public content")
+	}
+	_, capability, err := application.aiCapabilities.ValidateOAuth("localhost", resource, tokens.AccessToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := application.aiCapabilities.RevokeCapabilityID(capability.ID, "mcp-owner@example.org", "localhost"); err != nil {
+		t.Fatal(err)
+	}
+	request, _ := http.NewRequest("POST", resource, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	request.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+	revoked, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revoked.Body.Close()
+	if revoked.StatusCode != 401 {
+		t.Fatal("revoked credentials accepted by MCP transport", revoked.StatusCode)
 	}
 }

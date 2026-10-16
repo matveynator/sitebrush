@@ -119,6 +119,34 @@ func TestScanDirectoryAcceptsOnlyExactValidatedBaselineFingerprint(t *testing.T)
 	}
 }
 
+func TestValidatedMCPDownloadBoundaryMatchesOnlyReviewedCall(t *testing.T) {
+	t.Chdir(repositoryRoot(t))
+	source, err := os.ReadFile("sitebrush.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(source), "\n")
+	for index, line := range lines {
+		if !strings.HasPrefix(line, "func downloadAIMCPFile(") {
+			continue
+		}
+		callLine := index + 1 + 16
+		if strings.TrimSpace(lines[callLine-1]) != "response, err := client.Do(request)" {
+			t.Fatal("reviewed downloader boundary changed; inspect its CodeQL data flow again")
+		}
+		if _, accepted := baselineJustification("go/request-forgery", "sitebrush.go", "", callLine); !accepted {
+			t.Fatal("reviewed public-only transport boundary was not recognized")
+		}
+		for _, candidate := range []int{callLine - 1, callLine + 1} {
+			if _, accepted := baselineJustification("go/request-forgery", "sitebrush.go", "", candidate); accepted {
+				t.Fatal("a neighbouring network call bypassed the CodeQL gate")
+			}
+		}
+		return
+	}
+	t.Fatal("MCP downloader boundary is missing")
+}
+
 func TestValidatedRedirectBaselineSurvivesLineMovement(t *testing.T) {
 	root := repositoryRoot(t)
 	previousDirectory, err := os.Getwd()

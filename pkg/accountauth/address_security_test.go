@@ -89,3 +89,15 @@ func TestSafeQueryRedactsAIPairingApproval(t *testing.T) {
 		t.Fatalf("unsafe pairing query: %q", query)
 	}
 }
+
+func TestSafeQueryRedactsOAuthAndAttachmentCredentials(t *testing.T) {
+	query := SafeQuery("code=private-code&state=private-state&code_challenge=private-challenge&download_url=private-attachment&resource=https%3A%2F%2Fexample.org%2F_sitebrush%2Fmcp")
+	for _, secret := range []string{"private-code", "private-state", "private-challenge", "private-attachment"} {
+		if strings.Contains(query, secret) {
+			t.Fatalf("OAuth transport credential leaked: %s", query)
+		}
+	}
+	if !strings.Contains(query, "resource=") {
+		t.Fatal("safe discovery information was removed")
+	}
+}

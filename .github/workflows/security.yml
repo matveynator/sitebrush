@@ -152,6 +152,8 @@ jobs:
         run: >-
           go test -count=1 .
           -run '^(TestAI(Site|CapabilityScopes|CapabilityRevocation|ConcurrentVersion|VersionGuard|Uploads|EditorInlineAttachments|PageSave|Rollback|Unscoped|FileEndpoint|PageScoped)|TestAppAIStore)'
+      - name: Test Remote MCP authorization and site lifecycle
+        run: go test -count=1 -timeout=180s . -run '^TestMCP'
       - name: Install editor browser test dependencies
         working-directory: scripts/editor
         run: |
@@ -166,6 +168,10 @@ jobs:
         env:
           SITEBRUSH_ANALYTICS_BROWSER_TEST: "1"
         run: go test -count=1 . -run '^TestConversionBrowserRegressions$'
+      - name: Test MCP owner approval in Chromium
+        env:
+          SITEBRUSH_MCP_BROWSER_TEST: "1"
+        run: go test -count=1 -timeout=90s . -run '^TestMCPApprovalBrowserRedirect$'
       - name: Test visual editor on desktop and narrow mobile
         env:
           SITEBRUSH_EDITOR_BROWSER_TEST: "1"
@@ -247,6 +253,13 @@ jobs:
           upload: never
       - name: Require clean CodeQL result
         run: go run ./scripts/codeqlguard
+      - name: Preserve failed CodeQL diagnostics for review
+        if: failure()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: codeql-${{ matrix.language }}-diagnostics
+          path: codeql-results
+          retention-days: 3
       - name: Upload reviewed CodeQL result
         uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
         with:

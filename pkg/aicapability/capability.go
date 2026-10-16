@@ -29,6 +29,7 @@ type Manifest struct {
 	OpenAPIURL       string           `json:"openapi_url"`
 	DocumentationURL string           `json:"documentation_url"`
 	AuthorizationURL string           `json:"authorization_url,omitempty"`
+	MCPURL           string           `json:"mcp_url,omitempty"`
 	APIBase          string           `json:"api_base"`
 	Domain           string           `json:"domain"`
 	PagePath         string           `json:"page_path,omitempty"`
@@ -58,6 +59,9 @@ type Session struct {
 	Scopes       []string        `json:"scopes"`
 	Created      time.Time       `json:"created"`
 	Expires      time.Time       `json:"expires"`
+	Resource     string          `json:"-"`
+	ClientID     string          `json:"-"`
+	OAuthFamily  string          `json:"-"`
 }
 
 type SessionInfo struct {
@@ -86,6 +90,7 @@ type managerRequest struct {
 	task          string
 	sessions      []SessionInfo
 	reply         chan managerResponse
+	oauth         *oauthRequest
 }
 
 type managerResponse struct {
@@ -97,6 +102,7 @@ type managerResponse struct {
 	sessions     []SessionInfo
 	ok           bool
 	err          error
+	oauth        OAuthResult
 }
 
 type Manager struct {
@@ -132,6 +138,7 @@ func (manager *Manager) run() {
 	}()
 	pairings := map[string]pairingState{}
 	manager.loadCapabilities(capabilities)
+	oauth := manager.loadOAuth()
 	for {
 		select {
 		case <-manager.stop:
@@ -139,10 +146,15 @@ func (manager *Manager) run() {
 		case now := <-clock.C:
 			pruneSessions(sessions, sessionStops, now)
 			prunePairings(pairings, now)
+			oauth.prune(now)
 		case request := <-manager.requests:
 			pruneSessions(sessions, sessionStops, time.Now())
 			// Temporary grants live only in this owner process and are never persisted.
 			prunePairings(pairings, time.Now())
+			if request.oauth != nil {
+				request.reply <- manager.handleOAuth(*request.oauth, oauth, capabilities, sessions, sessionStops, pairings)
+				continue
+			}
 			if strings.HasPrefix(request.kind, "pairing-") {
 				request.reply <- manager.handlePairing(request, pairings, capabilities)
 				continue

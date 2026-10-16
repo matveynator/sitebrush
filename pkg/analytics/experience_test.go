@@ -315,6 +315,14 @@ func TestSecuritySignalsRedactionAndBounds(t *testing.T) {
 	if ProbeCategory("/_sitebrush/analytics", "") != "" || ProbeCategory("/articles/sitebrush", "") != "" {
 		t.Fatal("normal SiteBrush route was marked as an attack")
 	}
+	for _, pathname := range []string{"/_sitebrush/mcp", "/_sitebrush/oauth/authorize", "/_sitebrush/oauth/register", "/_sitebrush/oauth/token", "/_sitebrush/oauth/revoke"} {
+		if ProbeCategory(pathname, "") != "" || ProbeCategory(pathname, "q=union+select") != "injection" {
+			t.Fatalf("public transport classification lost path/query boundaries: %s", pathname)
+		}
+		if ProbeCategory(pathname+"/storage", "") != "sitebrush-exploit" {
+			t.Fatalf("public transport exception covered a neighbouring path: %s", pathname)
+		}
+	}
 	encoded, _ := json.Marshal(state)
 	if strings.Contains(string(encoded), "token=secret") {
 		t.Fatal("raw query retained")
