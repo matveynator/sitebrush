@@ -22,17 +22,7 @@ jobs:
           from pathlib import Path
 
           text = Path("sitebrush.go").read_text()
-          names = [
-              "collectAutomaticSSLDomainCandidates",
-              "domainIsAutomaticSSLCandidate",
-              "aiIngressMiddleware",
-              "aiIngressAdmission",
-              "aiRequestAfterAdmission",
-              "route",
-              "siteMCPRoute",
-              "migrateLegacyAnalytics",
-              "stableSiteID",
-          ]
+          names = ["collectAutomaticSSLDomainCandidates"]
 
           def function(name):
               markers = [f"func {name}(", f"func (a *App) {name}("]
@@ -41,7 +31,10 @@ jobs:
               if not starts:
                   return f"NOT FOUND: {name}"
               start = min(starts)
-              opening = text.find("{", start)
+              opening = text.find(" {\n", start)
+              if opening < 0:
+                  return f"NO BODY: {name}"
+              opening += 1
               depth = 0
               quote = None
               escaped = False
