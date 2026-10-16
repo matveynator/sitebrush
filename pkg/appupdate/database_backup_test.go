@@ -145,6 +145,46 @@ func TestDatabaseBackupUsesConfiguredControlPath(t *testing.T) {
 	}
 }
 
+func TestDatabaseBackupRestoresControlPathsWithJournalSuffixes(t *testing.T) {
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		t.Run(suffix, func(t *testing.T) {
+			root := t.TempDir()
+			controlName := "custom/control" + suffix
+			scope, err := updateDatabaseBackupScope(root, root, []string{"-db-path", controlName})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, companion := range []string{"", "-wal", "-shm", "-journal"} {
+				writeBackupFixtureFile(t, root, controlName+companion, []byte("original database"))
+			}
+			store, err := openStore(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			backup, err := snapshotProgress(root, store, "journal-suffix", nil, nil, WorkProgress{}, scope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := verifySnapshot(store, backup); err != nil {
+				t.Fatal("configured control database was rejected", err)
+			}
+			for _, companion := range []string{"", "-wal", "-shm", "-journal"} {
+				writeBackupFixtureFile(t, root, controlName+companion, []byte("migrated database"))
+			}
+			if err := restore(root, store, backup); err != nil {
+				t.Fatal(err)
+			}
+			for _, companion := range []string{"", "-wal", "-shm", "-journal"} {
+				contents, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(controlName+companion)))
+				if err != nil || string(contents) != "original database" {
+					t.Fatal("configured database or journal was not restored", companion, err)
+				}
+			}
+		})
+	}
+}
+
 func TestDatabaseSnapshotRejectsOutOfScopeInventoryAndSupportsLegacyRecovery(t *testing.T) {
 	root := t.TempDir()
 	writeBackupFixtureFile(t, root, "storage/db/sitebrush.db", []byte("database"))

@@ -74,7 +74,7 @@ func databaseName(name string) bool {
 }
 
 func (scope databaseBackupScope) contains(name string) bool {
-	if databaseBaseName(name) == scope.Control {
+	if name == scope.Control || databaseBaseName(name) == scope.Control {
 		return true
 	}
 	sites := path.Join(path.Dir(scope.Control), "sites")
