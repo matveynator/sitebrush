@@ -183,6 +183,10 @@ func TestSelectedBackupPreservesDirectoryModesAndSafeLinks(t *testing.T) {
 	if err := os.Chmod(directory, 0750); err != nil {
 		t.Fatal(err)
 	}
+	originalDirectory, err := os.Stat(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Symlink("1", filepath.Join(directory, "latest")); err != nil {
 		t.Skip(err)
 	}
@@ -216,7 +220,7 @@ func TestSelectedBackupPreservesDirectoryModesAndSafeLinks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0750 {
+	if info.Mode().Perm() != originalDirectory.Mode().Perm() {
 		t.Fatal(info.Mode())
 	}
 	if target, err := os.Readlink(filepath.Join(directory, "latest")); err != nil || target != "1" {

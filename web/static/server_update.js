@@ -63,7 +63,8 @@
     const notificationElement = updateRoot.querySelector('[data-update-notification-error]');
     notificationElement.hidden = !updateState || !updateState.notification_error;
     notificationElement.textContent = updateState && updateState.notification_error ? label('notification_' + (updateState.notification_code || 'contact')) + ' ' + updateState.notification_error : '';
-    updateRoot.querySelector('[data-update-backup-warning]').hidden = Object.values(updateModel.backupPolicy).every(Boolean);
+    const displayedPolicy = updateState && updateState.busy && !updateState.checking && updateState.backup_policy ? updateState.backup_policy : updateModel.backupPolicy;
+    updateRoot.querySelector('[data-update-backup-warning]').hidden = Object.values(displayedPolicy).every(Boolean);
     updateRoot.querySelector('[data-update-launcher-warning]').hidden = !updateState || updateState.backup_options === true;
     updateRoot.querySelector('[data-update-backup-options]').disabled = operationBusy;
     const backupGroups = updateState && updateState.backup_groups ? updateState.backup_groups : [];
@@ -73,7 +74,7 @@
     cancelButton.disabled = !updateModel.connected || updateModel.pending;
     for (const groupName of ['databases', 'analytics', 'files', 'settings']) {
       const checkbox = updateRoot.querySelector('[data-backup-group="' + groupName + '"]');
-      checkbox.checked = updateModel.backupPolicy[groupName];
+      checkbox.checked = displayedPolicy[groupName];
       checkbox.disabled = operationBusy;
     }
     renderOperation(progress);
@@ -269,7 +270,10 @@
       if (!updateModel.serverVersion && updateResponse.State && updateResponse.State.current) updateModel.serverVersion = updateResponse.State.current.version;
       if (updateResponse.Preview) updateModel.preview = updateResponse.Preview;
       if (updateResponse.Campaigns) updateModel.campaigns = updateResponse.Campaigns;
-      if (updateResponse.State && updateResponse.State.current && updateResponse.State.current.version) updateModel.state = updateResponse.State;
+      if (updateResponse.State && updateResponse.State.current && updateResponse.State.current.version) {
+        if (updateResponse.State.progress && updateResponse.State.progress.finished_at && updateModel.state && updateModel.state.progress && !updateModel.state.progress.finished_at) updateModel.backupPolicy = {databases: true, analytics: true, files: true, settings: true};
+        updateModel.state = updateResponse.State;
+      }
       updateModel.error = updateResponse.Error || '';
       renderUpdate();
       if (updateModel.queuedCommand) {

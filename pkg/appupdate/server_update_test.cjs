@@ -130,6 +130,13 @@ assert.match(optionsPanel.element('[data-update-notification-error]').textConten
 optionsPanel.socket.reply({State: {stage: 'completed', current: {version: '21'}}});
 assert.equal(optionsPanel.element('[data-update-notification-error]').hidden, true);
 
+const activePolicyPanel = installationPanel(false);
+activePolicyPanel.socket.reply({State: {current: {version: '1'}, busy: true, stage: 'preparing_backup', backup_policy: {databases: true, analytics: true, files: false, settings: true}, progress: {action: 'upgrade', stage: 'preparing_backup'}}});
+assert.equal(activePolicyPanel.element('[data-backup-group="files"]').checked, false, 'a reopened page must show the accepted operation policy');
+assert.equal(activePolicyPanel.element('[data-backup-group="files"]').disabled, true);
+activePolicyPanel.socket.reply({State: {current: {version: '21'}, busy: false, stage: 'completed', progress: {action: 'upgrade', stage: 'completed', finished_at: '2026-10-16T00:00:15Z'}}});
+assert.equal(activePolicyPanel.element('[data-backup-group="files"]').checked, true, 'each subsequent operation defaults to a full backup');
+
 const central = installationPanel(true);
 const previewButton = central.element('[data-announcement-preview]');
 const sendButton = central.element('[data-announcement-send]');
