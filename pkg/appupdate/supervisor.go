@@ -90,6 +90,12 @@ func Run(options Options, stop <-chan struct{}) error {
 			}
 			state.Stage = "failed"
 			state.Error = "Interrupted version operation recovered before startup"
+			if state.Progress.Action != "" {
+				state.Progress.FailedStage = state.Progress.Stage
+				state.Progress.Stage = "failed"
+				state.Progress.FinishedAt = time.Now().UTC()
+				state.Progress.event("failed", "interrupted", state.Error)
+			}
 		}
 		state.Busy = false
 		if err := atomicJSON(store, "state.json", state); err != nil {
@@ -151,6 +157,11 @@ func Run(options Options, stop <-chan struct{}) error {
 	idle := time.NewTicker(time.Minute)
 	defer idle.Stop()
 	lastContact := time.Now()
+	var loggedSequence uint64
+	logOperation := func() {
+		sequence, _ := WriteOperationEvents(options.Output, state.Progress, loggedSequence)
+		loggedSequence = sequence
+	}
 	for {
 		select {
 		case err := <-worker.failures:
@@ -207,17 +218,21 @@ func Run(options Options, stop <-chan struct{}) error {
 				return err
 			}
 		case step := <-progress:
+			step.state.NotificationError = state.NotificationError
 			if err := atomicJSON(store, "state.json", step.state); err != nil {
 				step.reply <- err
 			} else {
 				state = step.state
+				logOperation()
 				step.reply <- nil
 			}
 		case completed := <-finished:
+			completed.NotificationError = state.NotificationError
 			state = completed
 			if err := atomicJSON(store, "state.json", state); err != nil {
 				return err
 			}
+			logOperation()
 			if !options.Stopped {
 				if err := worker.exchange("alive", Version{}, false); err != nil {
 					return fmt.Errorf("version operation ended without a running server: %w", err)
@@ -226,6 +241,8 @@ func Run(options Options, stop <-chan struct{}) error {
 		case request := <-requests:
 			lastContact = time.Now()
 			response := Response{State: state}
+			response.State.Busy = state.Busy || checking
+			response.State.Checking = checking
 			switch request.Action {
 			case "status":
 			case "server_ready":
@@ -246,7 +263,7 @@ func Run(options Options, stop <-chan struct{}) error {
 					response.State = state
 				}
 			case "notification_status":
-				if !state.Busy && len(request.Detail) <= 512 {
+				if len(request.Detail) <= 512 && state.NotificationError != request.Detail {
 					state.NotificationError = request.Detail
 					if err := atomicJSON(store, "state.json", state); err != nil {
 						response.Error = err.Error()
@@ -273,6 +290,7 @@ func Run(options Options, stop <-chan struct{}) error {
 				} else {
 					startCheck()
 					response.State.Busy = true
+					response.State.Checking = true
 				}
 			case "upgrade", "rollback":
 				if state.Busy || checking {
@@ -297,6 +315,13 @@ func Run(options Options, stop <-chan struct{}) error {
 				state.Error = ""
 				state.OperationError = ""
 				state.Stage = "preparing"
+				target := state.Previous
+				if request.Action == "upgrade" {
+					target = &Version{Version: state.Available.Version}
+				}
+				state.Progress = OperationProgress{Action: request.Action, Stage: "preparing", FromVersion: state.Current.Version, TargetVersion: target.Version, StartedAt: time.Now().UTC(), StageAt: time.Now().UTC()}
+				state.Progress.event("preparing", "stage_started", "")
+				loggedSequence = 0
 				if state.Backup != "" {
 					state.RetainedBackup = state.Backup
 				}
@@ -307,6 +332,7 @@ func Run(options Options, stop <-chan struct{}) error {
 					return err
 				}
 				response.State = state
+				logOperation()
 				go func(initial State, action string) {
 					result := perform(options, store, catalog, worker, initial, action, progress, stop)
 					finished <- settleOperation(store, result, progress, stop)
@@ -327,6 +353,13 @@ func settleOperation(store *os.Root, state State, progress chan<- transition, st
 	}
 	state.Busy = true
 	state.CleanupError = ""
+	if state.Progress.Action != "" && state.Progress.FinishedAt.IsZero() {
+		if state.Stage == "completed" || state.Stage == "rolled_back" {
+			state.Progress.finishStage()
+		}
+		state.Progress.Stage = state.Stage
+		state.Progress.event(state.Stage, "cleanup_started", "")
+	}
 	reply := make(chan error, 1)
 	progress <- transition{state: state, reply: reply}
 	if err := <-reply; err != nil {
@@ -335,6 +368,14 @@ func settleOperation(store *os.Root, state State, progress chan<- transition, st
 		state.CleanupError = err.Error()
 	}
 	state.Busy = false
+	if state.Progress.Action != "" && state.Progress.FinishedAt.IsZero() {
+		state.Progress.Stage = state.Stage
+		state.Progress.FinishedAt = time.Now().UTC()
+		if state.CleanupError != "" {
+			state.Progress.event(state.Stage, "cleanup_warning", state.CleanupError)
+		}
+		state.Progress.event(state.Stage, "finished", state.Error)
+	}
 	return state
 }
 
@@ -471,15 +512,37 @@ func perform(options Options, store *os.Root, catalog Catalog, worker process, s
 	previousBefore := state.Previous
 	stopped := false
 	changed := false
-	emit := func(stage string) error {
-		state.Stage = stage
+	persist := func() error {
 		reply := make(chan error, 1)
 		progress <- transition{state: state, reply: reply}
 		return <-reply
 	}
+	emit := func(stage string) error {
+		if state.Progress.Stage != stage {
+			if state.Progress.Stage != state.Progress.FailedStage {
+				state.Progress.finishStage()
+			}
+			state.Progress.Stage = stage
+			state.Progress.StageAt = time.Now().UTC()
+			state.Progress.Work = WorkProgress{}
+			state.Progress.event(stage, "stage_started", "")
+		}
+		state.Stage = stage
+		return persist()
+	}
+	report := func(work WorkProgress) error {
+		if work.Code != "" {
+			state.Progress.event(state.Stage, work.Code, work.Detail)
+		} else {
+			state.Progress.Work = work
+		}
+		return persist()
+	}
 	fail := func(cause error) State {
 		state.Error = cause.Error()
 		state.OperationError = cause.Error()
+		state.Progress.FailedStage = state.Stage
+		state.Progress.event(state.Stage, "stage_failed", cause.Error())
 		// Activation can already have admitted writes. Only the compatibility
 		// contract permits returning to the predecessor at this boundary; its
 		// older snapshot must never overwrite those newly accepted writes.
@@ -605,6 +668,7 @@ func perform(options Options, store *os.Root, catalog Catalog, worker process, s
 		if digest != state.ManifestHash || verified.Version != manifest.Version {
 			return fail(errors.New("the official release changed; check and confirm it again"))
 		}
+		state.Progress.event("preparing", "manifest_verified", verified.Version)
 		manifest = verified
 		installed, err := strconv.ParseUint(old.Version, 10, 64)
 		if err != nil {
@@ -625,9 +689,12 @@ func perform(options Options, store *os.Root, catalog Catalog, worker process, s
 		if err := store.MkdirAll(filepath.Dir(binary), 0o700); err != nil {
 			return fail(err)
 		}
-		if err := catalog.Download(manifest, filepath.Join(options.StoragePath, Directory, binary), stop); err != nil {
+		if _, err := runMeasured(stop, func(updates chan<- WorkProgress, session <-chan struct{}) (struct{}, error) {
+			return struct{}{}, catalog.downloadProgress(manifest, filepath.Join(options.StoragePath, Directory, binary), session, updates)
+		}, report); err != nil {
 			return fail(err)
 		}
+		state.Progress.event("downloading", "download_verified", "")
 		if err := syncAncestors(store, filepath.Dir(binary)); err != nil {
 			return fail(err)
 		}
@@ -650,7 +717,13 @@ func perform(options Options, store *os.Root, catalog Catalog, worker process, s
 		}
 	}
 	state.Candidate = &candidate
-	if err := checkBackupSpace(options.StoragePath); err != nil {
+	if err := emit("inspecting"); err != nil {
+		return fail(err)
+	}
+	totals, err := runMeasured(stop, func(updates chan<- WorkProgress, session <-chan struct{}) (WorkProgress, error) {
+		return inspectBackupSpace(options.StoragePath, updates, session)
+	}, report)
+	if err != nil {
 		return fail(err)
 	}
 	if err := emit("backing_up"); err != nil {
@@ -660,7 +733,9 @@ func perform(options Options, store *os.Root, catalog Catalog, worker process, s
 		return fail(err)
 	}
 	stopped = true
-	backup, err := snapshot(options.StoragePath, store, state.Operation, stop)
+	backup, err := runMeasured(stop, func(updates chan<- WorkProgress, session <-chan struct{}) (string, error) {
+		return snapshotProgress(options.StoragePath, store, state.Operation, session, updates, totals)
+	}, report)
 	if err != nil {
 		return fail(err)
 	}
@@ -815,9 +890,16 @@ func health(worker process, options Options, stop <-chan struct{}) error {
 }
 
 func checkBackupSpace(storagePath string) error {
+	_, err := inspectBackupSpace(storagePath, nil, nil)
+	return err
+}
+
+func inspectBackupSpace(storagePath string, updates chan<- WorkProgress, stop <-chan struct{}) (WorkProgress, error) {
+	work := WorkProgress{}
+	last := time.Now()
 	root, err := os.OpenRoot(storagePath)
 	if err != nil {
-		return err
+		return work, err
 	}
 	defer root.Close()
 	var required uint64 = 32 << 20
@@ -828,7 +910,23 @@ func checkBackupSpace(storagePath string) error {
 		if name == Directory {
 			return fs.SkipDir
 		}
-		if !entry.IsDir() {
+		select {
+		case <-stop:
+			return errors.New("backup inspection canceled")
+		default:
+		}
+		if name == "." {
+			return nil
+		}
+		work.TotalFiles++
+		if work.TotalFiles > 1000000 {
+			return errors.New("backup entry limit exceeded")
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			if _, err := backupLink(root, name); err != nil {
+				return err
+			}
+		} else if !entry.IsDir() {
 			info, err := entry.Info()
 			if err != nil {
 				return err
@@ -840,18 +938,23 @@ func checkBackupSpace(storagePath string) error {
 				return errors.New("backup size overflow")
 			}
 			required += uint64(info.Size()) * 2
+			work.TotalBytes += info.Size()
+		}
+		if time.Since(last) >= time.Second {
+			last = time.Now()
+			return sendWork(updates, work, stop)
 		}
 		return nil
 	})
 	if err != nil {
-		return err
+		return work, err
 	}
 	available, err := availableSpace(storagePath)
 	if err != nil {
-		return err
+		return work, err
 	}
 	if available < required {
-		return fmt.Errorf("backup and recovery require %d free bytes, have %d", required, available)
+		return work, fmt.Errorf("backup and recovery require %d free bytes, have %d", required, available)
 	}
-	return nil
+	return work, sendWork(updates, work, stop)
 }

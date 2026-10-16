@@ -251,6 +251,12 @@ func verifiedCentralTLS(id string, key ed25519.PrivateKey, central ed25519.Publi
 }
 
 func Agent(address, id string, key ed25519.PrivateKey, central ed25519.PublicKey, status func() (Status, error), stop <-chan struct{}) error {
+	return AgentWithStatus(address, id, key, central, status, nil, stop)
+}
+
+// Connection status has its own consumer; announcement availability never owns
+// or authorizes an installation's release operation.
+func AgentWithStatus(address, id string, key ed25519.PrivateKey, central ed25519.PublicKey, status func() (Status, error), updates chan<- string, stop <-chan struct{}) error {
 	if status == nil {
 		return errors.New("missing installation status source")
 	}
@@ -273,6 +279,11 @@ func Agent(address, id string, key ed25519.PrivateKey, central ed25519.PublicKey
 	hello.Signature = ed25519.Sign(key, contactPayload(hello))
 	if err := send(connection.Send, hello, stop); err != nil {
 		return err
+	}
+	if updates != nil {
+		if err := send(updates, "", stop); err != nil {
+			return err
+		}
 	}
 	for {
 		select {

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const Directory = ".sitebrush-update"
@@ -24,28 +25,30 @@ type Version struct {
 }
 
 type State struct {
-	Launcher          string    `json:"launcher"`
-	Arguments         []string  `json:"arguments"`
-	WorkingDirectory  string    `json:"working_directory"`
-	Stage             string    `json:"stage"`
-	Error             string    `json:"error,omitempty"`
-	Current           Version   `json:"current"`
-	Previous          *Version  `json:"previous,omitempty"`
-	Available         *Manifest `json:"available,omitempty"`
-	ManifestHash      string    `json:"manifest_hash,omitempty"`
-	HighestSequence   uint64    `json:"highest_sequence"`
-	Operation         string    `json:"operation,omitempty"`
-	Backup            string    `json:"backup,omitempty"`
-	RetainedBackup    string    `json:"retained_backup,omitempty"`
-	Candidate         *Version  `json:"candidate,omitempty"`
-	WritesOpened      bool      `json:"writes_opened"`
-	RollbackAvailable bool      `json:"rollback_available"`
-	RollbackReason    string    `json:"rollback_reason,omitempty"`
-	CheckedAt         string    `json:"checked_at,omitempty"`
-	Busy              bool      `json:"busy"`
-	OperationError    string    `json:"operation_error,omitempty"`
-	NotificationError string    `json:"notification_error,omitempty"`
-	CleanupError      string    `json:"cleanup_error,omitempty"`
+	Launcher          string            `json:"launcher"`
+	Arguments         []string          `json:"arguments"`
+	WorkingDirectory  string            `json:"working_directory"`
+	Stage             string            `json:"stage"`
+	Error             string            `json:"error,omitempty"`
+	Current           Version           `json:"current"`
+	Previous          *Version          `json:"previous,omitempty"`
+	Available         *Manifest         `json:"available,omitempty"`
+	ManifestHash      string            `json:"manifest_hash,omitempty"`
+	HighestSequence   uint64            `json:"highest_sequence"`
+	Operation         string            `json:"operation,omitempty"`
+	Backup            string            `json:"backup,omitempty"`
+	RetainedBackup    string            `json:"retained_backup,omitempty"`
+	Candidate         *Version          `json:"candidate,omitempty"`
+	WritesOpened      bool              `json:"writes_opened"`
+	RollbackAvailable bool              `json:"rollback_available"`
+	RollbackReason    string            `json:"rollback_reason,omitempty"`
+	CheckedAt         string            `json:"checked_at,omitempty"`
+	Busy              bool              `json:"busy"`
+	Checking          bool              `json:"checking,omitempty"`
+	OperationError    string            `json:"operation_error,omitempty"`
+	NotificationError string            `json:"notification_error,omitempty"`
+	CleanupError      string            `json:"cleanup_error,omitempty"`
+	Progress          OperationProgress `json:"progress"`
 }
 
 // Pruning uses only references from a durably acknowledged journal. It runs
@@ -313,6 +316,10 @@ func (reader sessionReader) Read(buffer []byte) (int, error) {
 }
 
 func copyFileSession(source *os.Root, sourceName string, destination *os.Root, destinationName string, mode fs.FileMode, stop <-chan struct{}) (string, error) {
+	return copyFileProgress(source, sourceName, destination, destinationName, mode, stop, nil)
+}
+
+func copyFileProgress(source *os.Root, sourceName string, destination *os.Root, destinationName string, mode fs.FileMode, stop <-chan struct{}, counter *progressWriter) (string, error) {
 	input, err := source.Open(sourceName)
 	if err != nil {
 		return "", err
@@ -330,7 +337,12 @@ func copyFileSession(source *os.Root, sourceName string, destination *os.Root, d
 		return "", err
 	}
 	digest := sha256.New()
-	_, copyErr := io.Copy(io.MultiWriter(output, digest), sessionReader{reader: input, stop: stop})
+	var target io.Writer = io.MultiWriter(output, digest)
+	if counter != nil {
+		counter.output = target
+		target = counter
+	}
+	_, copyErr := io.Copy(target, sessionReader{reader: input, stop: stop})
 	if copyErr != nil {
 		output.Close()
 		return "", copyErr
@@ -366,7 +378,30 @@ func safeBackupLink(name, target string) bool {
 	return filepath.IsLocal(resolved) && resolved != Directory && !strings.HasPrefix(resolved, Directory+string(filepath.Separator))
 }
 
+// Inspection and copying must apply the same policy before the server stops.
+func backupLink(source *os.Root, name string) (string, error) {
+	target, err := source.Readlink(name)
+	if err != nil {
+		return "", err
+	}
+	if !safeBackupLink(name, target) {
+		return "", fmt.Errorf("backup refuses unsafe link %q", name)
+	}
+	if _, err := source.Stat(name); err != nil {
+		return "", fmt.Errorf("backup link %q does not resolve inside installation: %w", name, err)
+	}
+	return target, nil
+}
+
 func snapshot(storagePath string, store *os.Root, operation string, stop <-chan struct{}) (string, error) {
+	return snapshotProgress(storagePath, store, operation, stop, nil, WorkProgress{})
+}
+
+func snapshotProgress(storagePath string, store *os.Root, operation string, stop <-chan struct{}, updates chan<- WorkProgress, totals WorkProgress) (string, error) {
+	counter := &progressWriter{updates: updates, stop: stop, work: totals}
+	if err := counter.report(); err != nil {
+		return "", err
+	}
 	backup := filepath.Join(operation, "backup")
 	if err := store.MkdirAll(filepath.Join(backup, "files"), 0o700); err != nil {
 		return "", err
@@ -416,15 +451,9 @@ func snapshot(storagePath string, store *os.Root, operation string, stop <-chan 
 		}
 		record := backupEntry{Name: name, Mode: info.Mode()}
 		if info.Mode()&os.ModeSymlink != 0 {
-			record.Link, err = source.Readlink(name)
+			record.Link, err = backupLink(source, name)
 			if err != nil {
 				return err
-			}
-			if !safeBackupLink(name, record.Link) {
-				return fmt.Errorf("backup refuses unsafe link %q", name)
-			}
-			if _, err := source.Stat(name); err != nil {
-				return fmt.Errorf("backup link does not resolve inside installation: %w", err)
 			}
 			if err := destination.Symlink(record.Link, name); err != nil {
 				return err
@@ -440,8 +469,14 @@ func snapshot(storagePath string, store *os.Root, operation string, stop <-chan 
 				return err
 			}
 		} else {
-			record.SHA256, err = copyFileSession(source, name, destination, name, info.Mode(), stop)
+			record.SHA256, err = copyFileProgress(source, name, destination, name, info.Mode(), stop, counter)
 			if err != nil {
+				return err
+			}
+		}
+		counter.work.Files++
+		if time.Since(counter.last) >= time.Second {
+			if err := counter.report(); err != nil {
 				return err
 			}
 		}
@@ -467,6 +502,9 @@ func snapshot(storagePath string, store *os.Root, operation string, stop <-chan 
 		return "", err
 	}
 	if err := syncAncestors(store, filepath.Join(backup, "files")); err != nil {
+		return "", err
+	}
+	if err := counter.report(); err != nil {
 		return "", err
 	}
 	return backup, nil
