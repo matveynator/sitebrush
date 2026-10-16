@@ -708,6 +708,18 @@ func restore(storagePath string, store *os.Root, backup string) error {
 			return err
 		}
 		for index := len(extraDirectories) - 1; index >= 0; index-- {
+			directory, err := destination.Open(extraDirectories[index])
+			if err != nil {
+				return err
+			}
+			entries, readErr := directory.ReadDir(1)
+			directory.Close()
+			if readErr != nil && readErr != io.EOF {
+				return readErr
+			}
+			if len(entries) > 0 {
+				continue
+			}
 			if err := destination.Remove(extraDirectories[index]); err != nil {
 				return err
 			}

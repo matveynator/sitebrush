@@ -68,6 +68,7 @@ func decodeBackupPolicy(detail string) (BackupPolicy, error) {
 type backupScope struct {
 	Policy  BackupPolicy        `json:"policy"`
 	Control databaseBackupScope `json:"database"`
+	live    bool
 }
 
 func (scope backupScope) trees() []string {
@@ -77,6 +78,9 @@ func (scope backupScope) trees() []string {
 	}
 	if scope.Policy.Settings {
 		trees = append(trees, "storage/keys", "storage/letsencrypt", "storage/security", "security", "secrets", "config")
+	}
+	if scope.Policy.Analytics {
+		trees = append(trees, "storage/analytics")
 	}
 	return trees
 }
@@ -106,13 +110,13 @@ func walkSelectedFiles(root *os.Root, scope backupScope, stop <-chan struct{}, v
 	if err := scope.Control.validate(); err != nil {
 		return err
 	}
-	if scope.Policy.Databases || scope.Policy.Analytics {
+	if !scope.live && (scope.Policy.Databases || scope.Policy.Analytics) {
 		if err := walkDatabaseFiles(root, scope.Control, stop, func(name string, info fs.FileInfo) error {
 			if scope.contains(name) && visit != nil {
 				return visit(name, info)
 			}
 			return nil
-		}, scope.contains); err != nil {
+		}, scope.Policy); err != nil {
 			return err
 		}
 	}
@@ -149,6 +153,9 @@ func walkSelectedFiles(root *os.Root, scope backupScope, stop <-chan struct{}, v
 				if entry.IsDir() {
 					return fs.SkipDir
 				}
+				return nil
+			}
+			if tree == "storage/analytics" && !info.IsDir() && (path.Base(path.Dir(fullName)) != "archives" || !strings.HasSuffix(fullName, ".json.gz")) {
 				return nil
 			}
 			if info.Mode()&os.ModeSymlink != 0 {

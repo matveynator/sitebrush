@@ -107,7 +107,7 @@ func databaseDirectory(root *os.Root, name string) (*os.Root, error) {
 	return root.OpenRoot(name)
 }
 
-func walkDatabaseFiles(root *os.Root, scope databaseBackupScope, stop <-chan struct{}, visit func(string, fs.FileInfo) error, selections ...func(string) bool) error {
+func walkDatabaseFiles(root *os.Root, scope databaseBackupScope, stop <-chan struct{}, visit func(string, fs.FileInfo) error, selections ...BackupPolicy) error {
 	select {
 	case <-stop:
 		return errors.New("database backup session stopped")
@@ -118,8 +118,14 @@ func walkDatabaseFiles(root *os.Root, scope databaseBackupScope, stop <-chan str
 	}
 	seen := make(map[string]bool)
 	inspect := func(name string) error {
-		if len(selections) > 0 && !selections[0](name) {
-			return nil
+		if len(selections) > 0 {
+			selected := selections[0].Databases
+			if !scope.coreContains(name) {
+				selected = selections[0].Analytics
+			}
+			if !selected {
+				return nil
+			}
 		}
 		select {
 		case <-stop:
@@ -150,7 +156,7 @@ func walkDatabaseFiles(root *os.Root, scope databaseBackupScope, stop <-chan str
 	}
 	var controlDirectory *os.Root
 	var err error
-	if len(selections) == 0 || selections[0](scope.Control) {
+	if len(selections) == 0 || selections[0].Databases {
 		controlDirectory, err = databaseDirectory(root, path.Dir(scope.Control))
 	} else {
 		err = os.ErrNotExist
@@ -166,8 +172,14 @@ func walkDatabaseFiles(root *os.Root, scope databaseBackupScope, stop <-chan str
 		return err
 	}
 	for _, directoryName := range []string{path.Join(path.Dir(scope.Control), "sites"), "storage/analytics"} {
-		if len(selections) > 0 && !selections[0](path.Join(directoryName, "selected.db")) {
-			continue
+		if len(selections) > 0 {
+			selected := selections[0].Databases
+			if directoryName == "storage/analytics" {
+				selected = selections[0].Analytics
+			}
+			if !selected {
+				continue
+			}
 		}
 		directory, err := databaseDirectory(root, directoryName)
 		if errors.Is(err, os.ErrNotExist) {

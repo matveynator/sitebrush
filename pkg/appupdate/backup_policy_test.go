@@ -15,11 +15,12 @@ func TestSelectedBackupAllGroupCombinations(t *testing.T) {
 		t.Run(fmt.Sprint(mask), func(t *testing.T) {
 			root := t.TempDir()
 			policy := BackupPolicy{Databases: mask&1 != 0, Analytics: mask&2 != 0, Files: mask&4 != 0, Settings: mask&8 != 0}
-			names := []string{"storage/db/sitebrush.db", "storage/db/sites/example.db", "storage/analytics/example/report.db", "storage/files/example/photo.png", "storage/static/example/index.html", "storage/chroot/example/index.html", "storage/keys/tls/key.pem", "security/ai-capabilities.json"}
+			names := []string{"storage/db/sitebrush.db", "storage/db/sites/example.db", "storage/analytics/example/report.db", "storage/analytics/example/archives/2026-10-01.json.gz", "storage/files/example/photo.png", "storage/static/example/index.html", "storage/chroot/example/index.html", "storage/keys/tls/key.pem", "security/ai-capabilities.json"}
 			for _, name := range names {
 				writeBackupFixtureFile(t, root, name, []byte("original"))
 			}
 			writeBackupFixtureFile(t, root, "backup/old.zip", []byte("never recurse"))
+			writeBackupFixtureFile(t, root, "storage/analytics/example/archives/.summary-live", []byte("temporary"))
 			store, err := openStore(root)
 			if err != nil {
 				t.Fatal(err)
@@ -47,6 +48,9 @@ func TestSelectedBackupAllGroupCombinations(t *testing.T) {
 			if err := verifySnapshot(store, backup); err != nil {
 				t.Fatal(err)
 			}
+			if _, err := store.Stat(filepath.Join(backup, "files/storage/analytics/example/archives/.summary-live")); !os.IsNotExist(err) {
+				t.Fatal("transient analytics file was backed up", err)
+			}
 			if err := eachBackupEntry(store, backup, func(entry backupEntry) error {
 				if !scope.contains(entry.Name) {
 					t.Fatalf("unselected entry %s", entry.Name)
@@ -63,6 +67,9 @@ func TestSelectedBackupAllGroupCombinations(t *testing.T) {
 			}
 			if err := restore(root, store, backup); err != nil {
 				t.Fatal(err)
+			}
+			if contents, err := os.ReadFile(filepath.Join(root, "storage/analytics/example/archives/.summary-live")); err != nil || string(contents) != "temporary" {
+				t.Fatal("transient file changed during recovery", err)
 			}
 			for _, name := range names {
 				contents, err := os.ReadFile(filepath.Join(root, name))
@@ -348,5 +355,60 @@ func TestUnbackedIncompatibleMigrationRequiresManualRecovery(t *testing.T) {
 	}
 	if _, err := Exchange(root, Request{Action: "upgrade", ManifestHash: checked.ManifestHash}, nil); err == nil {
 		t.Fatal("accepted operation before manual recovery")
+	}
+}
+
+func TestAnalyticsGroupIncludesLiveArchivesAndPreservesTransientFiles(t *testing.T) {
+	root := t.TempDir()
+	archive := "storage/analytics/example/archives/2026-10-01.json.gz"
+	database := "storage/analytics/example/analytics.db"
+	writeBackupFixtureFile(t, root, archive, []byte("archive"))
+	writeBackupFixtureFile(t, root, database, []byte("database"))
+	writeBackupFixtureFile(t, root, "storage/analytics/example/archives/.summary-live", []byte("temporary"))
+	scope := backupScope{Policy: BackupPolicy{Analytics: true}, Control: defaultDatabaseBackupScope()}
+	inspection, err := inspectSelectedSpace(root, scope, 0, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inspection.Work.TotalFiles != 2 || inspection.Groups[1].Bytes != int64(len("archive")+len("database")) {
+		t.Fatal(inspection)
+	}
+	store, err := openStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	staged, err := prepareSelectedBackup(root, store, "analytics", scope, inspection.Work, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := staged.Entries[archive]; !exists {
+		t.Fatal("archive was not staged while the site was running")
+	}
+	if _, exists := staged.Entries[database]; exists {
+		t.Fatal("live analytics database was staged")
+	}
+	writeBackupFixtureFile(t, root, archive, []byte("final archive"))
+	backup, err := staged.finish(root, store, inspection.Work, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifySnapshot(store, backup); err != nil {
+		t.Fatal(err)
+	}
+	writeBackupFixtureFile(t, root, archive, []byte("migration changed the archive"))
+	writeBackupFixtureFile(t, root, "storage/analytics/example/archives/2026-10-02.json.gz", []byte("new archive"))
+	writeBackupFixtureFile(t, root, "storage/analytics/new/archives/.summary-live", []byte("new temporary"))
+	if err := restore(root, store, backup); err != nil {
+		t.Fatal(err)
+	}
+	if contents, err := os.ReadFile(filepath.Join(root, archive)); err != nil || string(contents) != "final archive" {
+		t.Fatal(string(contents), err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "storage/analytics/example/archives/2026-10-02.json.gz")); !os.IsNotExist(err) {
+		t.Fatal("new archive survived recovery", err)
+	}
+	if contents, err := os.ReadFile(filepath.Join(root, "storage/analytics/new/archives/.summary-live")); err != nil || string(contents) != "new temporary" {
+		t.Fatal("unselected transient file was lost", string(contents), err)
 	}
 }

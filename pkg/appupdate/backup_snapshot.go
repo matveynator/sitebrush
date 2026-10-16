@@ -46,6 +46,8 @@ func inspectSelectedSpace(storagePath string, scope backupScope, stagedBytes int
 			if !scope.Control.coreContains(name) {
 				group = 1
 			}
+		} else if strings.HasPrefix(name, "storage/analytics/") {
+			group = 1
 		} else if (backupScope{Policy: BackupPolicy{Files: true}, Control: scope.Control}).contains(name) {
 			group = 2
 		}
@@ -109,7 +111,7 @@ func prepareSelectedBackup(storagePath string, store *os.Root, operation string,
 	// finish checkpointing and close before the final copy can become valid.
 	liveScope := scope
 	liveScope.Policy.Databases = false
-	liveScope.Policy.Analytics = false
+	liveScope.live = true
 	if err := staged.copySelected(storagePath, store, liveScope, false, totals, updates, stop); err != nil {
 		return nil, err
 	}
