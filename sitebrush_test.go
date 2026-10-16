@@ -66,6 +66,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/mailout"
 	sitemcp "github.com/matveynator/sitebrush/v2/pkg/mcp"
 	"github.com/matveynator/sitebrush/v2/pkg/outboundhttp"
+	"github.com/matveynator/sitebrush/v2/pkg/pagearchive"
 	"github.com/matveynator/sitebrush/v2/pkg/securitysync"
 	"github.com/matveynator/sitebrush/v2/pkg/sitebrushtemplate"
 	"github.com/matveynator/sitebrush/v2/pkg/updateannounce"
@@ -24071,5 +24072,156 @@ func TestMCPRemoteOAuthAndExistingSiteOperations(t *testing.T) {
 	revoked.Body.Close()
 	if revoked.StatusCode != 401 {
 		t.Fatal("revoked credentials accepted by MCP transport", revoked.StatusCode)
+	}
+}
+
+func TestSavedPageImportUsesRoutedTransactionAndRequestedAddress(t *testing.T) {
+	application := newRouterTestApplication(t)
+	ctx := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), "localhost"))
+	saved := &pagearchive.Archive{Main: &pagearchive.Resource{URL: "https://source.example/page.html", MIME: "text/html", Content: []byte(`<html><head><title>Saved page</title><link rel="stylesheet" href="files/style.css"></head><body><img src="files/photo.png"></body></html>`)}, Resources: []*pagearchive.Resource{
+		{URL: "https://source.example/files/photo.png", MIME: "image/png", Content: []byte("saved image")},
+		{URL: "https://source.example/files/style.css", MIME: "text/css", Content: []byte(`body{background:url(photo.png)}`)},
+	}}
+	if err := application.importSavedPage(ctx, "localhost", "/about", saved); err != nil {
+		t.Fatal(err)
+	}
+	var pageHTML, publishedHTML, title string
+	if err := application.db.QueryRowContext(ctx, `SELECT title,html FROM pages WHERE domain=? AND path=?`, "localhost", "/about").Scan(&title, &pageHTML); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.db.QueryRowContext(ctx, `SELECT html FROM published_pages WHERE domain=? AND path=?`, "localhost", "/about").Scan(&publishedHTML); err != nil {
+		t.Fatal(err)
+	}
+	if title != "Saved page" || pageHTML != publishedHTML || strings.Contains(pageHTML, "https://source.example/files") || !strings.Contains(pageHTML, "/p/saved-pages/") {
+		t.Fatal(title, pageHTML, publishedHTML)
+	}
+	var revisions int
+	if err := application.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM revisions WHERE domain=? AND page_path=? AND is_active=1`, "localhost", "/about").Scan(&revisions); err != nil || revisions != 1 {
+		t.Fatal(revisions, err)
+	}
+	rows, err := application.db.QueryContext(ctx, `SELECT file_name FROM file_metadata WHERE domain=? AND page_path=?`, "localhost", "/about")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, name)
+	}
+	rows.Close()
+	if len(names) != 2 {
+		t.Fatal(names)
+	}
+	for _, name := range names {
+		contents, err := application.readFileInsideStorage(filepath.Join(application.domainFilesDirForDomain("localhost"), name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.HasSuffix(name, ".css") && !strings.Contains(string(contents), "/p/saved-pages/") {
+			t.Fatal(string(contents))
+		}
+	}
+	if err := application.importSavedPage(ctx, "localhost", "/other", saved); err != nil {
+		t.Fatal(err)
+	}
+	var otherHTML string
+	if err := application.db.QueryRowContext(ctx, `SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", "/other").Scan(&otherHTML); err != nil {
+		t.Fatal(err)
+	}
+	if pageHTML == otherHTML {
+		t.Fatal("two imports share their mutable asset namespace")
+	}
+}
+
+func TestSavedPageImportQuotaAndTransactionFailureLeaveNoPartialPage(t *testing.T) {
+	for _, scenario := range []string{"quota", "transaction", "publication"} {
+		t.Run(scenario, func(t *testing.T) {
+			application := newRouterTestApplication(t)
+			ctx := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), "localhost"))
+			application.ensureDomainStorageUsageRow(ctx, "localhost")
+			if scenario == "quota" {
+				if _, err := application.db.ExecContext(ctx, `UPDATE domain_storage_usage SET limit_bytes=1 WHERE domain=?`, "localhost"); err != nil {
+					t.Fatal(err)
+				}
+			} else if scenario == "publication" {
+				filename := filepath.Join(application.domainStaticDir("localhost"), staticRelativePathForPage("/failed"))
+				if err := application.mkdirAllInsideStorage(filename, 0755); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if _, err := application.db.ExecContext(ctx, `CREATE TRIGGER reject_saved_revision BEFORE INSERT ON revisions BEGIN SELECT RAISE(FAIL,'fixture revision failure'); END`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			saved := &pagearchive.Archive{Main: &pagearchive.Resource{URL: "https://example.org/page", MIME: "text/html", Content: []byte(`<h1>Saved</h1><img src="/image.png">`)}, Resources: []*pagearchive.Resource{{URL: "https://example.org/image.png", MIME: "image/png", Content: []byte("image")}}}
+			if err := application.importSavedPage(ctx, "localhost", "/failed", saved); err == nil {
+				t.Fatal("import reported success")
+			}
+			var count int
+			if err := application.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pages WHERE domain=? AND path=?`, "localhost", "/failed").Scan(&count); err != nil || count != 0 {
+				t.Fatal(count, err)
+			}
+			_ = filepath.WalkDir(application.domainFilesDirForDomain("localhost"), func(filename string, entry fs.DirEntry, walkErr error) error {
+				if walkErr == nil && !entry.IsDir() {
+					t.Errorf("partial file survived: %s", filename)
+				}
+				return nil
+			})
+		})
+	}
+}
+
+func TestSavedPageUploadPreservesBackupImportAndSecurity(t *testing.T) {
+	application := newRouterTestApplication(t)
+	ctx := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), "localhost"))
+	if _, err := application.db.ExecContext(ctx, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "password"); err != nil {
+		t.Fatal(err)
+	}
+	cookie := newAdminSessionCookie(t, application, "admin@example.com")
+	for _, format := range []string{"firefox", "sitebrush"} {
+		t.Run(format, func(t *testing.T) {
+			var archive bytes.Buffer
+			writer := zip.NewWriter(&archive)
+			if format == "firefox" {
+				entry, _ := writer.Create("page.html")
+				_, _ = io.WriteString(entry, "<h1>Firefox upload</h1>")
+			} else {
+				entry, _ := writer.Create("backup.json")
+				_ = json.NewEncoder(entry).Encode(domainBackup{Version: 1, Pages: []backupPage{{Path: "/", HTML: "<h1>SiteBrush backup</h1>"}}})
+			}
+			if err := writer.Close(); err != nil {
+				t.Fatal(err)
+			}
+			for _, origin := range []string{"https://evil.example", "http://localhost"} {
+				var body bytes.Buffer
+				multipartWriter := multipart.NewWriter(&body)
+				entry, err := multipartWriter.CreateFormFile("backup_zip", "page.zip")
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, _ = entry.Write(archive.Bytes())
+				_ = multipartWriter.WriteField("base_path", "/"+format)
+				_ = multipartWriter.Close()
+				request := httptest.NewRequest(http.MethodPost, "http://localhost/"+format+"?backup_import", &body)
+				request.Header.Set("Content-Type", multipartWriter.FormDataContentType())
+				request.Header.Set("Origin", origin)
+				request.AddCookie(cookie)
+				request = request.WithContext(ctx)
+				response := httptest.NewRecorder()
+				application.importBackup(response, request)
+				if origin == "https://evil.example" {
+					if response.Code != http.StatusForbidden {
+						t.Fatal(response.Code, response.Body.String())
+					}
+					continue
+				}
+				if response.Code != http.StatusFound || response.Header().Get("Location") != "/"+format+"?visual" {
+					t.Fatal(response.Code, response.Header(), response.Body.String())
+				}
+			}
+		})
 	}
 }

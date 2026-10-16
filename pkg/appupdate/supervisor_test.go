@@ -65,6 +65,13 @@ func runUpdateFixture() int {
 		if exists("reject-migration") {
 			return 4
 		}
+		if exists("wait-migration") {
+			if err := os.WriteFile(filepath.Join(root, "migration-entered"), []byte("yes"), 0600); err != nil {
+				return 15
+			}
+			_, _ = io.Copy(io.Discard, os.Stdin)
+			return 4
+		}
 		return 0
 	}
 	if !contains("-server-child") {

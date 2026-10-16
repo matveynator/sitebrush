@@ -26,6 +26,8 @@ type OperationProgress struct {
 	Events        []OperationEvent `json:"events,omitempty"`
 	Sequence      uint64           `json:"sequence"`
 	Truncated     bool             `json:"truncated,omitempty"`
+	UpdatedAt     time.Time        `json:"updated_at,omitempty"`
+	AdvancedAt    time.Time        `json:"advanced_at,omitempty"`
 }
 
 type OperationEvent struct {
@@ -135,13 +137,26 @@ func runMeasured[T any](stop <-chan struct{}, task func(chan<- WorkProgress, <-c
 		output, err := task(updates, session)
 		finished <- result{output: output, err: err}
 	}()
+	heartbeat := time.NewTicker(time.Second)
+	defer heartbeat.Stop()
+	var latest WorkProgress
 	for {
 		select {
 		case update := <-updates:
+			if update.Code == "" {
+				latest = update
+			}
 			if err := publish(update); err != nil {
 				close(session)
 				completed := <-finished
 				// The session is already closed on this exit path.
+				session = nil
+				return completed.output, err
+			}
+		case <-heartbeat.C:
+			if err := publish(latest); err != nil {
+				close(session)
+				completed := <-finished
 				session = nil
 				return completed.output, err
 			}

@@ -94,8 +94,9 @@
       <label class="form-label" for="backup_zip">{{index .T "missing_restore_zip_label"}}</label>
     </div>
     <div class="missing-page-file-field">
-      <input id="backup_zip" name="backup_zip" type="file" accept=".zip,application/zip" class="form-control" required>
+      <input id="backup_zip" name="backup_zip" aria-describedby="page_archive_hint" type="file" accept=".zip,.webarchive,application/zip,application/x-webarchive,application/octet-stream" class="form-control" required>
     </div>
+    <p id="page_archive_hint" class="form-text">{{index .T "missing_saved_page_hint"}}</p>
     <div class="missing-page-secondary-field missing-page-base-path-field">
       <label class="form-label" for="base_path">{{index .T "missing_base_path_label"}}</label>
       <input id="base_path" name="base_path" type="text" class="form-control" placeholder="/uri" value="{{.Path}}">

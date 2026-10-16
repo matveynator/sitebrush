@@ -2,6 +2,7 @@ package appupdate
 
 import (
 	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -31,7 +32,8 @@ type Options struct {
 	HealthWindow     time.Duration
 	HealthTimeout    time.Duration
 	// Catalog is only injectable by Go callers; remote requests cannot select it.
-	Catalog *Catalog
+	Catalog  *Catalog
+	shutdown <-chan struct{}
 }
 
 type transition struct {
@@ -45,6 +47,7 @@ type catalogResult struct {
 }
 
 func Run(options Options, stop <-chan struct{}) error {
+	options.shutdown = stop
 	if options.WorkingDirectory == "" {
 		directory, err := os.Getwd()
 		if err != nil {
@@ -78,11 +81,17 @@ func Run(options Options, stop <-chan struct{}) error {
 		maintenanceSession.Close()
 		return err
 	}
-	if state.Busy {
+	if state.Busy || state.RecoveryRequired {
 		// Terminal stages are written before pruning. An interrupted cleanup
 		// must not turn a committed update into a failed version operation.
 		if state.Stage != "completed" && state.Stage != "rolled_back" {
-			if !state.WritesOpened && state.Backup != "" {
+			if state.RecoveryRequired && !state.WritesOpened {
+				if err := recoverOperationData(options, store, &state, stop); err != nil {
+					maintenanceSession.Close()
+					return fmt.Errorf("manual recovery required: %w", err)
+				}
+			}
+			if !state.WritesOpened && state.Backup != "" && state.BackupPolicy == nil {
 				if err := restore(options.StoragePath, store, state.Backup); err != nil {
 					maintenanceSession.Close()
 					return fmt.Errorf("interrupted update recovery: %w", err)
@@ -103,6 +112,7 @@ func Run(options Options, stop <-chan struct{}) error {
 			return err
 		}
 	}
+	state.BackupOptions = true
 	if options.Stopped && state.WorkingDirectory != "" {
 		options.WorkingDirectory = state.WorkingDirectory
 	}
@@ -158,6 +168,7 @@ func Run(options Options, stop <-chan struct{}) error {
 	defer idle.Stop()
 	lastContact := time.Now()
 	var loggedSequence uint64
+	var operationCancel chan struct{}
 	logOperation := func() {
 		sequence, _ := WriteOperationEvents(options.Output, state.Progress, loggedSequence)
 		loggedSequence = sequence
@@ -219,6 +230,7 @@ func Run(options Options, stop <-chan struct{}) error {
 			}
 		case step := <-progress:
 			step.state.NotificationError = state.NotificationError
+			step.state.NotificationCode = state.NotificationCode
 			if err := atomicJSON(store, "state.json", step.state); err != nil {
 				step.reply <- err
 			} else {
@@ -227,13 +239,15 @@ func Run(options Options, stop <-chan struct{}) error {
 				step.reply <- nil
 			}
 		case completed := <-finished:
+			operationCancel = nil
+			completed.NotificationCode = state.NotificationCode
 			completed.NotificationError = state.NotificationError
 			state = completed
 			if err := atomicJSON(store, "state.json", state); err != nil {
 				return err
 			}
 			logOperation()
-			if !options.Stopped {
+			if !options.Stopped && !state.RecoveryRequired {
 				if err := worker.exchange("alive", Version{}, false); err != nil {
 					return fmt.Errorf("version operation ended without a running server: %w", err)
 				}
@@ -270,6 +284,20 @@ func Run(options Options, stop <-chan struct{}) error {
 					}
 					response.State = state
 				}
+			case "notification_status_v2":
+				var notice struct {
+					Code   string `json:"code"`
+					Detail string `json:"detail"`
+				}
+				if len(request.Detail) > 1024 || json.Unmarshal([]byte(request.Detail), &notice) != nil {
+					response.Error = "invalid notification status"
+					break
+				}
+				state.NotificationCode, state.NotificationError = notice.Code, notice.Detail
+				if err := atomicJSON(store, "state.json", state); err != nil {
+					response.Error = err.Error()
+				}
+				response.State = state
 			case "attach":
 				if request.Child == nil {
 					response.Error = "missing child session"
@@ -292,16 +320,38 @@ func Run(options Options, stop <-chan struct{}) error {
 					response.State.Busy = true
 					response.State.Checking = true
 				}
-			case "upgrade", "rollback":
+			case "cancel":
+				if operationCancel != nil {
+					close(operationCancel)
+					operationCancel = nil
+				} else {
+					response.Error = "no cancellable version operation"
+				}
+			case "upgrade", "upgrade_with_options", "rollback", "rollback_with_options":
+				policy := FullBackupPolicy()
+				action := request.Action
+				if strings.HasSuffix(action, "_with_options") {
+					var err error
+					policy, err = decodeBackupPolicy(request.Detail)
+					if err != nil {
+						response.Error = err.Error()
+						break
+					}
+					action = strings.TrimSuffix(action, "_with_options")
+				}
+				if state.RecoveryRequired {
+					response.Error = "manual recovery is required before another operation"
+					break
+				}
 				if state.Busy || checking {
 					response.Error = "version operation is already running"
 					break
 				}
-				if request.Action == "upgrade" && (state.Available == nil || request.ManifestHash == "" || request.ManifestHash != state.ManifestHash) {
+				if action == "upgrade" && (state.Available == nil || request.ManifestHash == "" || request.ManifestHash != state.ManifestHash) {
 					response.Error = "check and confirm the displayed official release first"
 					break
 				}
-				if request.Action == "rollback" && (!state.RollbackAvailable || state.Previous == nil) {
+				if action == "rollback" && (!state.RollbackAvailable || state.Previous == nil) {
 					response.Error = "safe rollback is not available"
 					break
 				}
@@ -315,11 +365,16 @@ func Run(options Options, stop <-chan struct{}) error {
 				state.Error = ""
 				state.OperationError = ""
 				state.Stage = "preparing"
+				state.BackupPolicy = &policy
+				state.BackupGroups = nil
+				state.DataChanged = false
+				recoveryVersion := state.Current
+				state.RecoveryVersion = &recoveryVersion
 				target := state.Previous
-				if request.Action == "upgrade" {
+				if action == "upgrade" {
 					target = &Version{Version: state.Available.Version}
 				}
-				state.Progress = OperationProgress{Action: request.Action, Stage: "preparing", FromVersion: state.Current.Version, TargetVersion: target.Version, StartedAt: time.Now().UTC(), StageAt: time.Now().UTC()}
+				state.Progress = OperationProgress{Action: action, Stage: "preparing", FromVersion: state.Current.Version, TargetVersion: target.Version, StartedAt: time.Now().UTC(), StageAt: time.Now().UTC()}
 				state.Progress.event("preparing", "stage_started", "")
 				loggedSequence = 0
 				if state.Backup != "" {
@@ -333,10 +388,22 @@ func Run(options Options, stop <-chan struct{}) error {
 				}
 				response.State = state
 				logOperation()
+				operationCancel = make(chan struct{})
+				operationStop := make(chan struct{})
+				operationDone := make(chan struct{})
+				go func(cancel <-chan struct{}) {
+					select {
+					case <-stop:
+					case <-cancel:
+					case <-operationDone:
+					}
+					close(operationStop)
+				}(operationCancel)
 				go func(initial State, action string) {
-					result := perform(options, store, catalog, worker, initial, action, progress, stop)
+					defer close(operationDone)
+					result := perform(options, store, catalog, worker, initial, action, progress, operationStop)
 					finished <- settleOperation(store, result, progress, stop)
-				}(state, request.Action)
+				}(state, action)
 			default:
 				response.Error = "unknown update command"
 			}
@@ -364,8 +431,10 @@ func settleOperation(store *os.Root, state State, progress chan<- transition, st
 	progress <- transition{state: state, reply: reply}
 	if err := <-reply; err != nil {
 		state.CleanupError = "cleanup journal: " + err.Error()
-	} else if err := pruneArtifacts(store, state, stop); err != nil {
-		state.CleanupError = err.Error()
+	} else if !sessionStopped(stop) {
+		if err := pruneArtifacts(store, state, stop); err != nil {
+			state.CleanupError = err.Error()
+		}
 	}
 	state.Busy = false
 	if state.Progress.Action != "" && state.Progress.FinishedAt.IsZero() {
@@ -510,6 +579,13 @@ func verifiedStart(store *os.Root, worker process, version Version, probation bo
 func perform(options Options, store *os.Root, catalog Catalog, worker process, state State, action string, progress chan<- transition, stop <-chan struct{}) State {
 	old := state.Current
 	previousBefore := state.Previous
+	recoveryVersion := old
+	state.RecoveryVersion = &recoveryVersion
+	state.BackupOptions = true
+	if state.BackupPolicy == nil {
+		policy := FullBackupPolicy()
+		state.BackupPolicy = &policy
+	}
 	stopped := false
 	changed := false
 	persist := func() error {
@@ -530,7 +606,16 @@ func perform(options Options, store *os.Root, catalog Catalog, worker process, s
 		state.Stage = stage
 		return persist()
 	}
+	lastProgressEvent := time.Now()
 	report := func(work WorkProgress) error {
+		state.Progress.UpdatedAt = time.Now().UTC()
+		if work.Bytes != state.Progress.Work.Bytes || work.Files != state.Progress.Work.Files {
+			state.Progress.AdvancedAt = state.Progress.UpdatedAt
+		}
+		if time.Since(lastProgressEvent) >= 10*time.Second {
+			state.Progress.event(state.Stage, "backup_progress", fmt.Sprintf("bytes=%d/%d files=%d/%d speed=%.0f B/s", work.Bytes, work.TotalBytes, work.Files, work.TotalFiles, work.Speed))
+			lastProgressEvent = time.Now()
+		}
 		if work.Code != "" {
 			state.Progress.event(state.Stage, work.Code, work.Detail)
 		} else {
@@ -543,6 +628,12 @@ func perform(options Options, store *os.Root, catalog Catalog, worker process, s
 		state.OperationError = cause.Error()
 		state.Progress.FailedStage = state.Stage
 		state.Progress.event(state.Stage, "stage_failed", cause.Error())
+		if sessionStopped(options.shutdown) {
+			state.RecoveryRequired = stopped && !state.WritesOpened
+			state.Stage = "interrupted"
+			state.Busy = false
+			return state
+		}
 		// Activation can already have admitted writes. Only the compatibility
 		// contract permits returning to the predecessor at this boundary; its
 		// older snapshot must never overwrite those newly accepted writes.
@@ -560,7 +651,7 @@ func perform(options Options, store *os.Root, catalog Catalog, worker process, s
 				state.Busy = false
 				return state
 			}
-			if err := health(worker, options, stop); err != nil {
+			if err := health(worker, options, options.shutdown); err != nil {
 				state.Error += "; compatible previous health: " + err.Error()
 				state.Stage = "failed"
 				state.Busy = false
@@ -593,13 +684,13 @@ func perform(options Options, store *os.Root, catalog Catalog, worker process, s
 				return state
 			}
 			_ = worker.exchange("stop", Version{}, false)
-			if changed {
-				if err := restore(options.StoragePath, store, state.Backup); err != nil {
-					state.Error += "; backup restore: " + err.Error()
-					state.Stage = "failed"
-					state.Busy = false
-					return state
-				}
+			state.RecoveryRequired = true
+			state.DataChanged = changed
+			if err := recoverOperationData(options, store, &state, options.shutdown); err != nil {
+				state.Error += "; manual recovery required: " + err.Error()
+				state.Stage = "failed"
+				state.Busy = false
+				return state
 			}
 			state.Current = old
 			state.Candidate = nil
@@ -610,7 +701,7 @@ func perform(options Options, store *os.Root, catalog Catalog, worker process, s
 					state.Busy = false
 					return state
 				}
-				if err := health(worker, options, stop); err != nil {
+				if err := health(worker, options, options.shutdown); err != nil {
 					state.Error += "; previous health: " + err.Error()
 					state.Stage = "failed"
 					state.Busy = false
@@ -724,8 +815,19 @@ func perform(options Options, store *os.Root, catalog Catalog, worker process, s
 	if err := emit("inspecting"); err != nil {
 		return fail(err)
 	}
-	totals, err := runMeasured(stop, func(updates chan<- WorkProgress, session <-chan struct{}) (WorkProgress, error) {
-		return inspectBackupSpace(options.StoragePath, updates, session, scope)
+	selected := backupScope{Policy: *state.BackupPolicy, Control: scope}
+	inspection, err := runMeasured(stop, func(updates chan<- WorkProgress, session <-chan struct{}) (backupInspection, error) {
+		return inspectSelectedSpace(options.StoragePath, selected, 0, updates, session)
+	}, report)
+	if err != nil {
+		return fail(err)
+	}
+	state.BackupGroups = inspection.Groups
+	if err := emit("preparing_backup"); err != nil {
+		return fail(err)
+	}
+	staged, err := runMeasured(stop, func(updates chan<- WorkProgress, session <-chan struct{}) (*stagedBackup, error) {
+		return prepareSelectedBackup(options.StoragePath, store, state.Operation, selected, inspection.Work, updates, session)
 	}, report)
 	if err != nil {
 		return fail(err)
@@ -737,25 +839,31 @@ func perform(options Options, store *os.Root, catalog Catalog, worker process, s
 		return fail(err)
 	}
 	stopped = true
-	// Closing SQLite owners can checkpoint or remove their WAL companions.
-	// Recount the quiescent files before reserving and copying the snapshot.
-	totals, err = runMeasured(stop, func(updates chan<- WorkProgress, session <-chan struct{}) (WorkProgress, error) {
-		return inspectBackupSpace(options.StoragePath, updates, session, scope)
+	state.RecoveryRequired = true
+	if err := persist(); err != nil {
+		return fail(err)
+	}
+	inspection, err = runMeasured(stop, func(updates chan<- WorkProgress, session <-chan struct{}) (backupInspection, error) {
+		return inspectSelectedSpace(options.StoragePath, selected, staged.Bytes, updates, session)
 	}, report)
 	if err != nil {
 		return fail(err)
 	}
+	state.BackupGroups = inspection.Groups
 	backup, err := runMeasured(stop, func(updates chan<- WorkProgress, session <-chan struct{}) (string, error) {
-		return snapshotProgress(options.StoragePath, store, state.Operation, session, updates, totals, scope)
+		return staged.finish(options.StoragePath, store, inspection.Work, updates, session)
 	}, report)
 	if err != nil {
 		return fail(err)
 	}
 	state.Backup = backup
+	changed = true
+	state.DataChanged = true
 	if err := emit("installing"); err != nil {
+		changed = false
+		state.DataChanged = false
 		return fail(err)
 	}
-	changed = true
 	arguments := append(append([]string{}, options.Arguments...), "-update-migrate", "-update-target-version", candidate.Version)
 	if err := runCandidate(filepath.Join(options.StoragePath, Directory, candidate.Binary), arguments, options.WorkingDirectory, options.Output, 30*time.Minute, stop); err != nil {
 		return fail(fmt.Errorf("candidate migrations: %w", err))
@@ -780,8 +888,10 @@ func perform(options Options, store *os.Root, catalog Catalog, worker process, s
 		state.RollbackReason = "Persistent data is incompatible with the previous version after writes resume"
 	}
 	state.WritesOpened = true
+	state.RecoveryRequired = false
 	if err := emit("activating"); err != nil {
 		state.WritesOpened = false
+		state.RecoveryRequired = true
 		return fail(err)
 	}
 	if options.Stopped {
@@ -794,6 +904,8 @@ func perform(options Options, store *os.Root, catalog Catalog, worker process, s
 		}
 	}
 	state.Candidate = nil
+	state.DataChanged = false
+	state.RecoveryRequired = false
 	state.Busy = false
 	state.Stage = "completed"
 	if action == "rollback" {

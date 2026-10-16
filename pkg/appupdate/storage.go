@@ -49,6 +49,13 @@ type State struct {
 	NotificationError string            `json:"notification_error,omitempty"`
 	CleanupError      string            `json:"cleanup_error,omitempty"`
 	Progress          OperationProgress `json:"progress"`
+	BackupPolicy      *BackupPolicy     `json:"backup_policy,omitempty"`
+	BackupGroups      []BackupGroup     `json:"backup_groups,omitempty"`
+	BackupOptions     bool              `json:"backup_options,omitempty"`
+	DataChanged       bool              `json:"data_changed,omitempty"`
+	RecoveryVersion   *Version          `json:"recovery_version,omitempty"`
+	RecoveryRequired  bool              `json:"recovery_required,omitempty"`
+	NotificationCode  string            `json:"notification_code,omitempty"`
 }
 
 // Pruning uses only references from a durably acknowledged journal. It runs
@@ -488,9 +495,11 @@ func eachBackupEntry(store *os.Root, backup string, visit func(backupEntry) erro
 // marker. Older supervisors must fail verification rather than delete static
 // files absent from a database-only inventory during their full-tree restore.
 type snapshotMarker struct {
-	SHA256         string `json:",omitempty"`
-	DatabaseSHA256 string `json:",omitempty"`
-	DatabasePath   string `json:",omitempty"`
+	SHA256         string       `json:",omitempty"`
+	DatabaseSHA256 string       `json:",omitempty"`
+	DatabasePath   string       `json:",omitempty"`
+	SelectedSHA256 string       `json:",omitempty"`
+	SelectedScope  *backupScope `json:",omitempty"`
 }
 
 func verifySnapshot(store *os.Root, backup string) error {
@@ -522,6 +531,15 @@ func checkedSnapshot(store *os.Root, backup string) (snapshotMarker, error) {
 		}
 		expected = marker.DatabaseSHA256
 	}
+	if marker.SelectedSHA256 != "" || marker.SelectedScope != nil {
+		if marker.SelectedSHA256 == "" || marker.SelectedScope == nil || marker.SHA256 != "" || marker.DatabaseSHA256 != "" {
+			return marker, errors.New("ambiguous selected backup marker")
+		}
+		if err := marker.SelectedScope.Control.validate(); err != nil {
+			return marker, err
+		}
+		expected = marker.SelectedSHA256
+	}
 	if indexDigest != expected {
 		return marker, errors.New("backup inventory checksum mismatch")
 	}
@@ -531,6 +549,12 @@ func checkedSnapshot(store *os.Root, backup string) (snapshotMarker, error) {
 	}
 	defer files.Close()
 	err = eachBackupEntry(store, backup, func(entry backupEntry) error {
+		if marker.SelectedScope != nil && !marker.SelectedScope.contains(entry.Name) {
+			return errors.New("entry outside selected backup groups")
+		}
+		if marker.SelectedScope != nil && entry.Link != "" && !marker.SelectedScope.contains(filepath.ToSlash(filepath.Clean(filepath.Join(filepath.Dir(entry.Name), entry.Link)))) {
+			return errors.New("link outside selected backup groups")
+		}
 		if marker.DatabaseSHA256 != "" && (!entry.Mode.IsRegular() || entry.Link != "" || !scope.contains(entry.Name)) {
 			return errors.New("non-database entry in database backup")
 		}
@@ -593,10 +617,27 @@ func restore(storagePath string, store *os.Root, backup string) error {
 			return err
 		}
 	}
+	if marker.SelectedScope != nil {
+		if err := walkSelectedFiles(destination, *marker.SelectedScope, nil, nil); err != nil {
+			return err
+		}
+	}
 	err = eachBackupEntry(store, backup, func(entry backupEntry) error {
+		if marker.SelectedScope != nil {
+			if existing, err := destination.Lstat(entry.Name); err == nil && existing.Mode().Type() != entry.Mode.Type() {
+				if err := destination.RemoveAll(entry.Name); err != nil {
+					return err
+				}
+			}
+		}
 		if entry.Mode.IsDir() {
 			if err := destination.MkdirAll(entry.Name, entry.Mode.Perm()); err != nil {
 				return err
+			}
+			if marker.SelectedScope != nil {
+				if err := destination.Chmod(entry.Name, entry.Mode.Perm()); err != nil {
+					return err
+				}
 			}
 			return syncDirectory(destination, filepath.Dir(entry.Name))
 		}
@@ -646,6 +687,32 @@ func restore(storagePath string, store *os.Root, backup string) error {
 				return err
 			}
 		})
+	}
+	if marker.SelectedScope != nil {
+		var extraDirectories []string
+		err := walkSelectedFiles(destination, *marker.SelectedScope, nil, func(name string, info fs.FileInfo) error {
+			if _, err := source.Lstat(name); errors.Is(err, os.ErrNotExist) {
+				if info.IsDir() {
+					extraDirectories = append(extraDirectories, name)
+					return nil
+				}
+				if err := destination.Remove(name); err != nil {
+					return err
+				}
+				return syncDirectory(destination, filepath.Dir(name))
+			} else {
+				return err
+			}
+		})
+		if err != nil {
+			return err
+		}
+		for index := len(extraDirectories) - 1; index >= 0; index-- {
+			if err := destination.Remove(extraDirectories[index]); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	return fs.WalkDir(destination.FS(), ".", func(name string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {

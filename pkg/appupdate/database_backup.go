@@ -73,7 +73,7 @@ func databaseName(name string) bool {
 	return strings.HasSuffix(base, ".db") || strings.HasSuffix(base, ".sqlite") || strings.HasSuffix(base, ".sqlite3")
 }
 
-func (scope databaseBackupScope) contains(name string) bool {
+func (scope databaseBackupScope) coreContains(name string) bool {
 	if name == scope.Control || databaseBaseName(name) == scope.Control {
 		return true
 	}
@@ -81,7 +81,11 @@ func (scope databaseBackupScope) contains(name string) bool {
 	if path.Dir(name) == sites && databaseName(path.Base(name)) {
 		return true
 	}
-	return strings.HasPrefix(name, "storage/analytics/") && databaseName(path.Base(name))
+	return false
+}
+
+func (scope databaseBackupScope) contains(name string) bool {
+	return scope.coreContains(name) || strings.HasPrefix(name, "storage/analytics/") && databaseName(path.Base(name))
 }
 
 // Directory capabilities may not traverse links, even links that currently
@@ -103,7 +107,7 @@ func databaseDirectory(root *os.Root, name string) (*os.Root, error) {
 	return root.OpenRoot(name)
 }
 
-func walkDatabaseFiles(root *os.Root, scope databaseBackupScope, stop <-chan struct{}, visit func(string, fs.FileInfo) error) error {
+func walkDatabaseFiles(root *os.Root, scope databaseBackupScope, stop <-chan struct{}, visit func(string, fs.FileInfo) error, selections ...func(string) bool) error {
 	select {
 	case <-stop:
 		return errors.New("database backup session stopped")
@@ -114,6 +118,9 @@ func walkDatabaseFiles(root *os.Root, scope databaseBackupScope, stop <-chan str
 	}
 	seen := make(map[string]bool)
 	inspect := func(name string) error {
+		if len(selections) > 0 && !selections[0](name) {
+			return nil
+		}
 		select {
 		case <-stop:
 			return errors.New("database backup session stopped")
@@ -141,7 +148,13 @@ func walkDatabaseFiles(root *os.Root, scope databaseBackupScope, stop <-chan str
 		}
 		return nil
 	}
-	controlDirectory, err := databaseDirectory(root, path.Dir(scope.Control))
+	var controlDirectory *os.Root
+	var err error
+	if len(selections) == 0 || selections[0](scope.Control) {
+		controlDirectory, err = databaseDirectory(root, path.Dir(scope.Control))
+	} else {
+		err = os.ErrNotExist
+	}
 	if err == nil {
 		controlDirectory.Close()
 		for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
@@ -153,6 +166,9 @@ func walkDatabaseFiles(root *os.Root, scope databaseBackupScope, stop <-chan str
 		return err
 	}
 	for _, directoryName := range []string{path.Join(path.Dir(scope.Control), "sites"), "storage/analytics"} {
+		if len(selections) > 0 && !selections[0](path.Join(directoryName, "selected.db")) {
+			continue
+		}
 		directory, err := databaseDirectory(root, directoryName)
 		if errors.Is(err, os.ErrNotExist) {
 			continue

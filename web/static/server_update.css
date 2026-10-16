@@ -54,3 +54,6 @@
   .update-steps { grid-template-columns: 1fr; }
 }
 @media (prefers-reduced-motion: reduce) { .update-progress > div { transition: none; } }
+.update-backup-options { border: 0; padding: 0; margin: 1rem 0; }
+.update-backup-options legend { font-weight: 600; }
+.update-backup-options label { display: block; margin: .5rem 0; }

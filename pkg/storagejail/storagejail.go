@@ -82,6 +82,20 @@ func (root Root) Create(relativePath string) (*os.File, error) {
 	return file, err
 }
 
+// Imported files must not truncate an existing upload, even if a generated
+// name collides or an administrator replaces its path during staging.
+func (root Root) CreateExclusive(relativePath string) (*os.File, error) {
+	openRoot, err := os.OpenRoot(root.path)
+	if err != nil {
+		return nil, err
+	}
+	defer openRoot.Close()
+	if err := openRoot.MkdirAll(filepath.Dir(relativePath), 0755); err != nil {
+		return nil, err
+	}
+	return openRoot.OpenFile(relativePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+}
+
 func (root Root) ReadFile(relativePath string) ([]byte, error) {
 	var payload []byte
 	err := root.withOpenRoot(func(openRoot *os.Root) error {
