@@ -24446,3 +24446,148 @@ func TestCertificateSchedulerReportsLiveJobAndDoesNotDuplicatePolls(t *testing.T
 		t.Fatal("status shares scheduler-owned memory")
 	}
 }
+
+func newDurableClaimTestApplication(t *testing.T) (*App, context.Context) {
+	t.Helper()
+	application := newRouterTestApplication(t)
+	db := setupBillingOwnerForTest(t, application, "sitebrush.ru", "admin@sitebrush.ru", true)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher, err := startServerControlDatabaseDispatcher(application.serverControlDBPath(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.controlDatabase = dispatcher
+	t.Cleanup(func() { dispatcher.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	application.registrationConfirmations = startEmailConfirmationMemoryWorker(ctx)
+	application.automaticSSL = make(chan automaticSSLRequest, 32)
+	return application, ctx
+}
+
+func TestExpiredUnfinishedRegistrationOffersNewConfirmation(t *testing.T) {
+	application, ctx := newDurableClaimTestApplication(t)
+	domain := "ero.sitebrush.ru"
+	original := EmailConfirmation{Token: "expired-owner-token", FormToken: "expired-form", Domain: domain, Action: "register", Email: "owner@example.org", Code: "123456", ExpiresAt: time.Now().Add(time.Minute).UTC().Format(time.RFC3339)}
+	if err := application.saveRegistrationConfirmation(ctx, original); err != nil {
+		t.Fatal(err)
+	}
+	confirm := func(token string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodGet, "http://"+domain+"/?email_confirm="+token, nil).WithContext(contextWithDomain(ctx, domain))
+		response := httptest.NewRecorder()
+		application.confirmEmailToken(response, request)
+		return response
+	}
+	if response := confirm(original.Token); response.Code != http.StatusOK {
+		t.Fatalf("initial confirmation: %d %s", response.Code, response.Body.String())
+	}
+	// Advance durable timestamps past the shared expiry and discard cached mail
+	// state, as after returning to the server the next day or a process restart.
+	if err := application.withServerControlDatabaseWrite(ctx, "expire-unfinished-registration-test", func(db *sql.DB) error {
+		if _, err := db.ExecContext(ctx, `UPDATE domain_registration_claims SET confirmed_at=? WHERE domain=?`, time.Now().UTC().Add(-25*time.Hour).Format(time.RFC3339), domain); err != nil {
+			return err
+		}
+		_, err := db.ExecContext(ctx, `UPDATE registration_confirmations SET expires_at=? WHERE token=?`, time.Now().UTC().Add(-time.Hour).Format(time.RFC3339), original.Token)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	application.registrationConfirmations = startEmailConfirmationMemoryWorker(ctx)
+	if application.registrationDomainClaimed(ctx, domain) {
+		t.Fatal("expired unfinished claim still blocks signup")
+	}
+	if response := confirm(original.Token); response.Code == http.StatusOK {
+		t.Fatal("expired confirmation still authorizes completion")
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://"+domain+"/?register", nil).WithContext(contextWithDomain(ctx, domain))
+	response := httptest.NewRecorder()
+	application.registerPage(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `name="email"`) {
+		t.Fatalf("owner cannot request fresh confirmation: %d %s", response.Code, response.Body.String())
+	}
+	rows, err := application.hostingAndSupportSiteRows(ctx, nil, nil, nil, nil, "sitebrush.ru", "", "sitebrush.ru")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.Domain == domain && strings.Contains(row.AdminEmails, original.Email) {
+			t.Fatal("expired uncompleted owner still presented as registered")
+		}
+	}
+	renewed := original
+	renewed.Token = "renewed-owner-token"
+	renewed.FormToken = "renewed-form"
+	renewed.ExpiresAt = time.Now().Add(time.Minute).UTC().Format(time.RFC3339)
+	if err := application.saveRegistrationConfirmation(ctx, renewed); err != nil {
+		t.Fatal(err)
+	}
+	if response := confirm(renewed.Token); response.Code != http.StatusOK {
+		t.Fatalf("owner cannot resume using fresh confirmation: %d %s", response.Code, response.Body.String())
+	}
+	if !application.registrationDomainClaimed(ctx, domain) {
+		t.Fatal("renewed owner lost reservation")
+	}
+	if err := application.claimTrialDomain(ctx, domain, "competing-trial"); err == nil {
+		t.Fatal("fresh registration can be overwritten by trial")
+	}
+}
+
+func TestSixDigitRegistrationProgressUsesRenderedConfirmationURL(t *testing.T) {
+	application, ctx := newDurableClaimTestApplication(t)
+	domain := "ero.sitebrush.ru"
+	confirmation := EmailConfirmation{Token: "code-confirmed-token", FormToken: "code-form", Domain: domain, Action: "register", Email: "owner@example.org", Code: "123456", ExpiresAt: time.Now().Add(time.Minute).UTC().Format(time.RFC3339)}
+	if err := application.saveRegistrationConfirmation(ctx, confirmation); err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{"registration_form_token": {confirmation.FormToken}, "registration_code": {confirmation.Code}}
+	originalURL := "http://" + domain + "/welcome?register&return_path=%2Fnext"
+	request := httptest.NewRequest(http.MethodPost, originalURL, strings.NewReader(form.Encode())).WithContext(contextWithDomain(ctx, domain))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	application.registerPage(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("code confirmation failed: %d %s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `data-key="auth_https_expired"`) {
+		t.Fatal("expiry recovery action has no translated explanation")
+	}
+	attribute := regexp.MustCompile(`data-refresh-url="([^"]+)"`).FindStringSubmatch(response.Body.String())
+	if len(attribute) != 2 {
+		t.Fatalf("confirmation URL not rendered: %s", response.Body.String())
+	}
+	pollURL, err := url.Parse(stdhtml.UnescapeString(attribute[1]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pollURL.Query().Get("email_confirm") != confirmation.Token || pollURL.Query().Has("register") {
+		t.Fatalf("poll lost the verified token: %s", pollURL)
+	}
+	if request.URL.Query().Get("email_confirm") != "" || !request.URL.Query().Has("register") {
+		t.Fatal("test no longer represents an unchanged browser register URL")
+	}
+	queries := pollURL.Query()
+	queries.Set("https_status", "1")
+	pollURL.RawQuery = queries.Encode()
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case job := <-application.automaticSSL:
+				if job.progressResponse != nil {
+					job.progressResponse <- automaticSSLProgress{State: "requesting", StartedAt: time.Now()}
+					return
+				}
+			}
+		}
+	}()
+	poll := httptest.NewRequest(http.MethodGet, "http://"+domain+pollURL.String(), nil).WithContext(contextWithDomain(ctx, domain))
+	status := httptest.NewRecorder()
+	application.route(status, poll)
+	if status.Code != http.StatusOK || !strings.Contains(status.Header().Get("Content-Type"), "application/json") || !strings.Contains(status.Body.String(), `"state":"requesting"`) {
+		t.Fatalf("code flow cannot poll confirmation: %d %s", status.Code, status.Body.String())
+	}
+}

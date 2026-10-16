@@ -1477,7 +1477,8 @@
     "auth_https_timeout": "This is taking longer than expected. Your domain remains reserved. The error and next retry are shown below; you can reopen this email link later.",
     "auth_https_next_retry": "Next automatic attempt in:",
     "auth_https_status_error": "Could not refresh the status. Reconnecting automatically.",
-    "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site."
+    "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site.",
+    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email."
   },
   "fr": {
     "edit_saving": "Enregistrement de la page…",
@@ -2805,7 +2806,8 @@
     "auth_https_timeout": "This is taking longer than expected. Your domain remains reserved. The error and next retry are shown below; you can reopen this email link later.",
     "auth_https_next_retry": "Next automatic attempt in:",
     "auth_https_status_error": "Could not refresh the status. Reconnecting automatically.",
-    "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site."
+    "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site.",
+    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email."
   },
   "ru": {
     "edit_saving": "Сохранение страницы…",
@@ -4285,7 +4287,8 @@
     "auth_https_timeout": "Это занимает больше времени, чем ожидалось. Домен остаётся за вами. Ниже указаны ошибка и следующая попытка; ссылку из письма можно открыть позже.",
     "auth_https_next_retry": "Следующая автоматическая попытка через:",
     "auth_https_status_error": "Не удалось обновить статус. Переподключаемся автоматически.",
-    "auth_domain_reserved": "Домен уже забронирован. Продолжите по ссылке из письма владельцу; для нового сайта выберите другое имя."
+    "auth_domain_reserved": "Домен уже забронирован. Продолжите по ссылке из письма владельцу; для нового сайта выберите другое имя.",
+    "auth_https_expired": "Срок действия ссылки истёк. Начните регистрацию заново, чтобы получить новое письмо."
   },
   "ja": {
     "edit_saving": "ページを保存中…",
@@ -5609,7 +5612,8 @@
     "auth_https_timeout": "This is taking longer than expected. Your domain remains reserved. The error and next retry are shown below; you can reopen this email link later.",
     "auth_https_next_retry": "Next automatic attempt in:",
     "auth_https_status_error": "Could not refresh the status. Reconnecting automatically.",
-    "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site."
+    "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site.",
+    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email."
   },
   "it": {
     "edit_saving": "Salvataggio della pagina…",
@@ -6933,7 +6937,8 @@
     "auth_https_timeout": "This is taking longer than expected. Your domain remains reserved. The error and next retry are shown below; you can reopen this email link later.",
     "auth_https_next_retry": "Next automatic attempt in:",
     "auth_https_status_error": "Could not refresh the status. Reconnecting automatically.",
-    "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site."
+    "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site.",
+    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email."
   },
   "sv": {
     "edit_saving": "Sparar sidan…",
@@ -8257,7 +8262,8 @@
     "auth_https_timeout": "This is taking longer than expected. Your domain remains reserved. The error and next retry are shown below; you can reopen this email link later.",
     "auth_https_next_retry": "Next automatic attempt in:",
     "auth_https_status_error": "Could not refresh the status. Reconnecting automatically.",
-    "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site."
+    "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site.",
+    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email."
   },
   "fi": {
     "edit_saving": "Tallennetaan sivua…",
@@ -9581,7 +9587,8 @@
     "auth_https_timeout": "This is taking longer than expected. Your domain remains reserved. The error and next retry are shown below; you can reopen this email link later.",
     "auth_https_next_retry": "Next automatic attempt in:",
     "auth_https_status_error": "Could not refresh the status. Reconnecting automatically.",
-    "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site."
+    "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site.",
+    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email."
   },
   "mn": {
     "edit_saving": "Хуудсыг хадгалж байна…",
@@ -10905,7 +10912,8 @@
     "auth_https_timeout": "This is taking longer than expected. Your domain remains reserved. The error and next retry are shown below; you can reopen this email link later.",
     "auth_https_next_retry": "Next automatic attempt in:",
     "auth_https_status_error": "Could not refresh the status. Reconnecting automatically.",
-    "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site."
+    "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site.",
+    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email."
   },
   "zh": {
     "edit_saving": "正在保存页面…",
@@ -12229,7 +12237,8 @@
     "auth_https_timeout": "This is taking longer than expected. Your domain remains reserved. The error and next retry are shown below; you can reopen this email link later.",
     "auth_https_next_retry": "Next automatic attempt in:",
     "auth_https_status_error": "Could not refresh the status. Reconnecting automatically.",
-    "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site."
+    "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site.",
+    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email."
   },
   "he": {
     "edit_saving": "שמירת הדף…",
@@ -13553,7 +13562,8 @@
     "auth_https_timeout": "This is taking longer than expected. Your domain remains reserved. The error and next retry are shown below; you can reopen this email link later.",
     "auth_https_next_retry": "Next automatic attempt in:",
     "auth_https_status_error": "Could not refresh the status. Reconnecting automatically.",
-    "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site."
+    "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site.",
+    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email."
   },
   "fa": {
     "edit_saving": "در حال ذخیره صفحه…",
@@ -14877,7 +14887,8 @@
     "auth_https_timeout": "This is taking longer than expected. Your domain remains reserved. The error and next retry are shown below; you can reopen this email link later.",
     "auth_https_next_retry": "Next automatic attempt in:",
     "auth_https_status_error": "Could not refresh the status. Reconnecting automatically.",
-    "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site."
+    "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site.",
+    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email."
   },
   "de": {
     "edit_saving": "Seite wird gespeichert…",
@@ -16201,7 +16212,8 @@
     "auth_https_timeout": "This is taking longer than expected. Your domain remains reserved. The error and next retry are shown below; you can reopen this email link later.",
     "auth_https_next_retry": "Next automatic attempt in:",
     "auth_https_status_error": "Could not refresh the status. Reconnecting automatically.",
-    "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site."
+    "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site.",
+    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email."
   },
   "tr": {
     "edit_saving": "Sayfa kaydediliyor…",
@@ -17525,7 +17537,8 @@
     "auth_https_timeout": "This is taking longer than expected. Your domain remains reserved. The error and next retry are shown below; you can reopen this email link later.",
     "auth_https_next_retry": "Next automatic attempt in:",
     "auth_https_status_error": "Could not refresh the status. Reconnecting automatically.",
-    "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site."
+    "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site.",
+    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email."
   },
   "kk": {
     "edit_saving": "Бет сақталуда…",
@@ -18849,7 +18862,8 @@
     "auth_https_timeout": "This is taking longer than expected. Your domain remains reserved. The error and next retry are shown below; you can reopen this email link later.",
     "auth_https_next_retry": "Next automatic attempt in:",
     "auth_https_status_error": "Could not refresh the status. Reconnecting automatically.",
-    "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site."
+    "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site.",
+    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email."
   },
   "es": {
     "edit_saving": "Guardando la página…",
@@ -20173,7 +20187,8 @@
     "auth_https_timeout": "This is taking longer than expected. Your domain remains reserved. The error and next retry are shown below; you can reopen this email link later.",
     "auth_https_next_retry": "Next automatic attempt in:",
     "auth_https_status_error": "Could not refresh the status. Reconnecting automatically.",
-    "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site."
+    "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site.",
+    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email."
   },
   "pt": {
     "edit_saving": "A guardar a página…",
@@ -21497,6 +21512,7 @@
     "auth_https_timeout": "This is taking longer than expected. Your domain remains reserved. The error and next retry are shown below; you can reopen this email link later.",
     "auth_https_next_retry": "Next automatic attempt in:",
     "auth_https_status_error": "Could not refresh the status. Reconnecting automatically.",
-    "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site."
+    "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site.",
+    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email."
   }
 }

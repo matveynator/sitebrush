@@ -26,7 +26,7 @@
 <p>{{index .T "auth_https_unavailable_help"}}</p>
 <a class="btn btn-outline-secondary" href="{{.ReturnURL}}">{{index .T "back_to_uri"}}</a>
 {{else}}
-<div id="https-progress" data-state="{{.HTTPSProgress.State}}">
+<div id="https-progress" data-refresh-url="{{.RefreshURL}}" data-state="{{.HTTPSProgress.State}}">
 <p role="status" id="https-stage">{{.HTTPSStageText}}</p>
 <progress id="https-bar" max="100" value="0" aria-label="HTTPS"></progress>
 <p>{{index .T "auth_https_estimate"}} <strong id="https-countdown">10:00</strong></p>

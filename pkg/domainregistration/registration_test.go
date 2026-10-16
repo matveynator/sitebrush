@@ -140,3 +140,80 @@ func TestDamagedControlSchemaNeverMakesDomainAvailable(t *testing.T) {
 		}
 	})
 }
+
+func TestExpiredUnfinishedClaimCanBeRegisteredAgain(t *testing.T) {
+	db := testDatabase(t)
+	ctx := context.Background()
+	domain := "expired.example.org"
+	if _, err := Claim(ctx, db, domain, "old-token", "owner@example.org", "registration"); err != nil {
+		t.Fatal(err)
+	}
+	expired := time.Now().UTC().Add(-UnfinishedTTL - time.Second).Format(time.RFC3339)
+	if _, err := db.Exec(`UPDATE domain_registration_claims SET confirmed_at=? WHERE domain=?`, expired, domain); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM domain_registration_claims WHERE domain=? AND `+ActiveClaimSQL, domain, time.Now().UTC().Add(-UnfinishedTTL).Format(time.RFC3339)).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("expired owner still blocks signup: %d %v", count, err)
+	}
+	if created, err := Claim(ctx, db, domain, "new-token", "owner@example.org", "registration"); err != nil || !created {
+		t.Fatalf("owner cannot resume: created=%v err=%v", created, err)
+	}
+	var token string
+	if err := db.QueryRow(`SELECT token FROM domain_registration_claims WHERE domain=?`, domain).Scan(&token); err != nil || token != "new-token" {
+		t.Fatalf("stale claim not replaced: %s %v", token, err)
+	}
+	if _, err := Claim(ctx, db, domain, "competing-token", "other@example.org", "registration"); !errors.Is(err, ErrTaken) {
+		t.Fatalf("resumed owner overwritten: %v", err)
+	}
+}
+
+func TestCompletedClaimsAndTrialsNeverExpireAsUnfinished(t *testing.T) {
+	for _, kind := range []string{"registration", "trial"} {
+		t.Run(kind, func(t *testing.T) {
+			db := testDatabase(t)
+			ctx := context.Background()
+			domain := "owned.example.org"
+			if _, err := Claim(ctx, db, domain, "token", "owner@example.org", kind); err != nil {
+				t.Fatal(err)
+			}
+			if kind == "registration" {
+				if _, err := db.Exec(`UPDATE domain_registration_claims SET token=''`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := db.Exec(`UPDATE domain_registration_claims SET confirmed_at=?`, time.Now().UTC().Add(-2*UnfinishedTTL).Format(time.RFC3339)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Claim(ctx, db, domain, "other-token", "other@example.org", "trial"); !errors.Is(err, ErrTaken) {
+				t.Fatalf("completed ownership/trial expired: %v", err)
+			}
+		})
+	}
+}
+
+func TestTrialAdoptionWriteFailureRetainsPreviousClaim(t *testing.T) {
+	for _, operation := range []string{"DELETE", "INSERT"} {
+		t.Run(operation, func(t *testing.T) {
+			db := testDatabase(t)
+			ctx := context.Background()
+			domain := "trial.example.org"
+			if _, err := Claim(ctx, db, domain, "trial-token", "", "trial"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`INSERT INTO public_trial_sites VALUES(?, 'active', ?)`, domain, time.Now().Add(time.Hour).UTC().Format(time.RFC3339)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`CREATE TRIGGER reject_claim_write BEFORE ` + operation + ` ON domain_registration_claims BEGIN SELECT RAISE(ABORT,'write unavailable'); END`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Claim(ctx, db, domain, "new-token", "owner@example.org", "registration"); err == nil {
+				t.Fatal("unavailable write accepted adoption")
+			}
+			var token string
+			if err := db.QueryRow(`SELECT token FROM domain_registration_claims WHERE domain=?`, domain).Scan(&token); err != nil || token != "trial-token" {
+				t.Fatalf("failed adoption lost original claim: %s %v", token, err)
+			}
+		})
+	}
+}

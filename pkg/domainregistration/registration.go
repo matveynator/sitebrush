@@ -10,6 +10,14 @@ import (
 
 const Schema = `CREATE TABLE IF NOT EXISTS domain_registration_claims(domain TEXT PRIMARY KEY,token TEXT NOT NULL,email TEXT NOT NULL DEFAULT '',kind TEXT NOT NULL,confirmed_at TEXT NOT NULL)`
 
+// UnfinishedTTL matches the confirmation extension. A completed registration
+// clears its token and therefore never expires with an unfinished claim.
+const UnfinishedTTL = 24 * time.Hour
+
+// ActiveClaimSQL takes a UTC cutoff (now minus UnfinishedTTL). All registry
+// readers use the same boundary, including registration, trials and the panel.
+const ActiveClaimSQL = `(kind<>'registration' OR token='' OR confirmed_at>?)`
+
 var ErrTaken = errors.New("domain is already reserved; choose another name or continue using your confirmation link")
 
 // Claim runs in the server control database's single writer. The unique key is
@@ -20,6 +28,12 @@ func Claim(ctx context.Context, db *sql.DB, domain, token, email, kind string) (
 		return false, err
 	}
 	defer tx.Rollback()
+	now := time.Now().UTC()
+	// Delete only stale unfinished reservations, in the same transaction that
+	// arbitrates their next owner. Completed owners and trials remain intact.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM domain_registration_claims WHERE domain=? AND NOT `+ActiveClaimSQL, domain, now.Add(-UnfinishedTTL).Format(time.RFC3339)); err != nil {
+		return false, err
+	}
 	var oldToken, oldKind string
 	err = tx.QueryRowContext(ctx, `SELECT token,kind FROM domain_registration_claims WHERE domain=?`, domain).Scan(&oldToken, &oldKind)
 	if err == nil {
@@ -28,7 +42,7 @@ func Claim(ctx context.Context, db *sql.DB, domain, token, email, kind string) (
 		}
 		var activeTrial int
 		if oldKind == "trial" && kind == "registration" {
-			if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM public_trial_sites WHERE domain=? AND status='active' AND delete_after>?`, domain, time.Now().UTC().Format(time.RFC3339)).Scan(&activeTrial); err != nil {
+			if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM public_trial_sites WHERE domain=? AND status='active' AND delete_after>?`, domain, now.Format(time.RFC3339)).Scan(&activeTrial); err != nil {
 				return false, err
 			}
 		}
@@ -43,19 +57,19 @@ func Claim(ctx context.Context, db *sql.DB, domain, token, email, kind string) (
 	}
 	if kind == "trial" {
 		var count int
-		if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM registration_confirmations WHERE domain=? AND expires_at>?`, domain, time.Now().UTC().Format(time.RFC3339)).Scan(&count); err != nil {
+		if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM registration_confirmations WHERE domain=? AND expires_at>?`, domain, now.Format(time.RFC3339)).Scan(&count); err != nil {
 			return false, err
 		}
 		if count > 0 {
 			return false, ErrTaken
 		}
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO domain_registration_claims(domain,token,email,kind,confirmed_at) VALUES(?,?,?,?,?)`, domain, token, email, kind, time.Now().UTC().Format(time.RFC3339))
+	_, err = tx.ExecContext(ctx, `INSERT INTO domain_registration_claims(domain,token,email,kind,confirmed_at) VALUES(?,?,?,?,?)`, domain, token, email, kind, now.Format(time.RFC3339))
 	if err != nil {
 		return false, err
 	}
 	if kind == "registration" {
-		if _, err = tx.ExecContext(ctx, `UPDATE registration_confirmations SET expires_at=? WHERE token=? AND domain=?`, time.Now().Add(24*time.Hour).UTC().Format(time.RFC3339), token, domain); err != nil {
+		if _, err = tx.ExecContext(ctx, `UPDATE registration_confirmations SET expires_at=? WHERE token=? AND domain=?`, now.Add(UnfinishedTTL).Format(time.RFC3339), token, domain); err != nil {
 			return false, err
 		}
 	}

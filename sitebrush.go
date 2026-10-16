@@ -19649,7 +19649,7 @@ func (a *App) publicTrialDomainAvailable(ctx context.Context, domain string) boo
 	if a.controlDatabase != nil {
 		var count int
 		err := a.withServerControlDatabaseRead(ctx, "available-trial-domain", func(db *sql.DB) error {
-			return db.QueryRowContext(ctx, `SELECT COUNT(*) FROM domain_registration_claims WHERE domain=?`, domain).Scan(&count)
+			return db.QueryRowContext(ctx, `SELECT COUNT(*) FROM domain_registration_claims WHERE domain=? AND `+domainregistration.ActiveClaimSQL, domain, time.Now().UTC().Add(-domainregistration.UnfinishedTTL).Format(time.RFC3339)).Scan(&count)
 		})
 		if err != nil || count > 0 {
 			return false
@@ -23661,7 +23661,7 @@ func (a *App) hostingAndSupportSiteRows(ctx context.Context, controlDatabase *sq
 		})
 	}
 	claimErr := a.withServerControlDatabaseRead(ctx, "reserved-domain-panel-rows", func(database *sql.DB) error {
-		claimRows, claimErr := database.QueryContext(ctx, `SELECT domain,email FROM domain_registration_claims WHERE kind='registration'`)
+		claimRows, claimErr := database.QueryContext(ctx, `SELECT domain,email FROM domain_registration_claims WHERE kind='registration' AND `+domainregistration.ActiveClaimSQL, time.Now().UTC().Add(-domainregistration.UnfinishedTTL).Format(time.RFC3339))
 		if claimErr != nil {
 			return claimErr
 		}
@@ -42250,7 +42250,7 @@ func (a *App) listAutomaticSSLDomainCandidates(ctx context.Context) []string {
 	seenDomains := make(map[string]struct{})
 	if a.controlDatabase != nil {
 		_ = a.withServerControlDatabaseRead(ctx, "reserved-certificate-domains", func(db *sql.DB) error {
-			rows, err := db.QueryContext(ctx, `SELECT domain FROM domain_registration_claims WHERE kind='registration'`)
+			rows, err := db.QueryContext(ctx, `SELECT domain FROM domain_registration_claims WHERE kind='registration' AND `+domainregistration.ActiveClaimSQL, time.Now().UTC().Add(-domainregistration.UnfinishedTTL).Format(time.RFC3339))
 			if err != nil {
 				return err
 			}
@@ -42316,7 +42316,7 @@ func (a *App) pendingRegistrationDomain(ctx context.Context, domain string) bool
 	if a.controlDatabase != nil {
 		var count int
 		err := a.withServerControlDatabaseRead(ctx, "confirmed-ssl-domain", func(db *sql.DB) error {
-			return db.QueryRowContext(ctx, `SELECT COUNT(*) FROM domain_registration_claims WHERE domain=? AND kind='registration'`, domain).Scan(&count)
+			return db.QueryRowContext(ctx, `SELECT COUNT(*) FROM domain_registration_claims WHERE domain=? AND kind='registration' AND `+domainregistration.ActiveClaimSQL, domain, time.Now().UTC().Add(-domainregistration.UnfinishedTTL).Format(time.RFC3339)).Scan(&count)
 		})
 		if err == nil && count > 0 {
 			return true
@@ -45889,7 +45889,7 @@ func (a *App) registrationDomainClaimed(ctx context.Context, domain string) bool
 	}
 	var count int
 	err := a.withServerControlDatabaseRead(ctx, "domain-reservation", func(db *sql.DB) error {
-		return db.QueryRowContext(ctx, `SELECT COUNT(*) FROM domain_registration_claims WHERE domain=? AND kind='registration'`, domain).Scan(&count)
+		return db.QueryRowContext(ctx, `SELECT COUNT(*) FROM domain_registration_claims WHERE domain=? AND kind='registration' AND `+domainregistration.ActiveClaimSQL, domain, time.Now().UTC().Add(-domainregistration.UnfinishedTTL).Format(time.RFC3339)).Scan(&count)
 	})
 	return err != nil || count > 0
 }
@@ -45948,7 +45948,7 @@ func (a *App) accountHTTPSProgress(ctx context.Context, domain string, snapshot 
 func accountHTTPSStageTexts(translations map[string]string) map[string]string {
 	texts := make(map[string]string)
 	for key, value := range translations {
-		if strings.HasPrefix(key, "auth_https_") {
+		if strings.HasPrefix(key, "auth_https_") || key == "setup_create_admin" {
 			texts[key] = value
 		}
 	}
