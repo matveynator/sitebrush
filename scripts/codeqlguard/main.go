@@ -56,6 +56,7 @@ var validatedBaseline = []validatedFinding{
 	{RuleID: "go/path-injection", URI: "sitebrush.go", LineHash: "e74d682a7512547d:1", Justification: "The chroot target is canonicalized and checked against the domain root before file metadata access."},
 	{RuleID: "go/path-injection", URI: "sitebrush.go", LineHash: "f8e148382f7697c3:1", Justification: "Callers pass only directory paths returned by the validated chroot resolver."},
 	{RuleID: "go/request-forgery", URI: "pkg/crawler/download.go", LineHash: "1b25405598db72a4:1", Justification: "RequirePublicURL rejects unsafe targets and the outbound transport re-resolves and pins every dial to public IP addresses."},
+	{RuleID: "go/request-forgery", URI: "sitebrush.go", FunctionDeclaration: "func downloadAIMCPFile(boundary context.Context, address string, maximum int64) ([]byte, error) {", RelativeLine: 16, Justification: "This reviewed MCP/CIMD HTTP boundary requires HTTPS and RequirePublicURL, uses the existing transport that rejects and pins private DNS results, disables redirects and forwards no SiteBrush credentials. Public client metadata URLs are required by CIMD; private-address and revocation regressions cover admission."},
 }
 
 func scanDirectory(directory string) (findingSummary, error) {

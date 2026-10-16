@@ -13,8 +13,8 @@ async function checkApprovalRedirect() {
   const browser = await chromium.launch(launchOptions);
   try {
     const browserContext = await browser.newContext();
-    const separator = cookieText.indexOf('=');
-    await browserContext.addCookies([{ name: cookieText.slice(0, separator), value: cookieText.slice(separator + 1), url: approvalURL }]);
+    const cookieSeparator = cookieText.indexOf('=');
+    await browserContext.addCookies([{ name: cookieText.slice(0, cookieSeparator), value: cookieText.slice(cookieSeparator + 1), url: approvalURL }]);
     const page = await browserContext.newPage();
     page.setDefaultTimeout(15000);
     await page.goto(approvalURL);
