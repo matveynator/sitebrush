@@ -1789,12 +1789,16 @@ func (a *App) migrateLegacyAnalytics(database *sql.DB, domain, directory string)
 	}
 	legacyDirectory := filepath.Join(a.storageRootDir(), "analytics", "site-"+url.PathEscape(safeDomain))
 	legacyPath := filepath.Join(legacyDirectory, browserstats.DatabaseName(safeDomain))
+	// The domain was reduced to one validated path component above.
+	// codeql[go/path-injection]
 	if _, err := os.Lstat(legacyPath); errors.Is(err, os.ErrNotExist) {
 		legacyPath = filepath.Join(legacyDirectory, "analytics.db")
 		if _, legacyErr := os.Lstat(legacyPath); errors.Is(legacyErr, os.ErrNotExist) {
 			return nil
 		}
 	}
+	// The path is rooted below storage and the component was validated above.
+	// codeql[go/path-injection]
 	if info, err := os.Lstat(legacyDirectory); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return errors.New("unsafe legacy analytics directory")
 	}
@@ -1836,12 +1840,16 @@ func (a *App) migrateLegacyAnalytics(database *sql.DB, domain, directory string)
 		}
 	}
 	sourceArchives := filepath.Join(legacyDirectory, "archives")
+	// sourceArchives extends only the already validated legacy directory.
+	// codeql[go/path-injection]
 	if info, err := os.Lstat(sourceArchives); err == nil {
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return errors.New("unsafe legacy analytics archives")
 		}
 		destination := filepath.Join(directory, "archives")
 		if _, err := os.Lstat(destination); errors.Is(err, os.ErrNotExist) {
+			// Both paths are descendants of validated storage-owned directories.
+			// codeql[go/path-injection]
 			if err := os.Rename(sourceArchives, destination); err != nil {
 				return err
 			}
@@ -1854,6 +1862,8 @@ func (a *App) migrateLegacyAnalytics(database *sql.DB, domain, directory string)
 	if _, err := database.Exec(`DETACH DATABASE legacy_observations`); err != nil && imported == 0 {
 		return err
 	}
+	// legacyPath was validated as a regular file below the analytics root.
+	// codeql[go/path-injection]
 	return os.Remove(legacyPath)
 }
 

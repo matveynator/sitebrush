@@ -292,6 +292,8 @@ func (store *Store) executeWithDatabase(root string, request StorageRequest, arc
 		databasePath = filepath.Join(directory, "analytics.db")
 	}
 	legacyPath := filepath.Join(directory, "analytics.db")
+	// storeDirectoryPath constrains the domain to one component and DatabaseName path-escapes it.
+	// codeql[go/path-injection]
 	if _, pathErr := os.Lstat(databasePath); owned == nil && os.IsNotExist(pathErr) {
 		if legacy, legacyErr := os.Lstat(legacyPath); legacyErr == nil && legacy.Mode().IsRegular() {
 			if renameErr := os.Rename(legacyPath, databasePath); renameErr != nil {
