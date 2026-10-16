@@ -141,10 +141,10 @@ func TestOfficialReleaseURLAllowlist(t *testing.T) {
 
 func TestBackupRecoveryAndCorruption(t *testing.T) {
 	directory := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(directory, "sites"), 0o750); err != nil {
+	if err := os.MkdirAll(filepath.Join(directory, "storage", "db", "sites"), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(directory, "sites", "site.db"), []byte("database with committed WAL content"), 0o640); err != nil {
+	if err := os.WriteFile(filepath.Join(directory, "storage", "db", "sites", "site.db"), []byte("database with committed WAL content"), 0o640); err != nil {
 		t.Fatal(err)
 	}
 	store, err := openStore(directory)
@@ -156,7 +156,7 @@ func TestBackupRecoveryAndCorruption(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(directory, "sites", "site.db"), []byte("migrated"), 0o640); err != nil {
+	if err := os.WriteFile(filepath.Join(directory, "storage", "db", "sites", "site.db"), []byte("migrated"), 0o640); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(directory, "new-format"), []byte("new"), 0o600); err != nil {
@@ -168,20 +168,20 @@ func TestBackupRecoveryAndCorruption(t *testing.T) {
 	if err := restore(directory, store, backup); err != nil {
 		t.Fatalf("repeated recovery: %v", err)
 	}
-	contents, _ := os.ReadFile(filepath.Join(directory, "sites", "site.db"))
+	contents, _ := os.ReadFile(filepath.Join(directory, "storage", "db", "sites", "site.db"))
 	if string(contents) != "database with committed WAL content" {
 		t.Fatal("database was not restored")
 	}
-	if _, err := os.Stat(filepath.Join(directory, "new-format")); !os.IsNotExist(err) {
-		t.Fatal("new format survived recovery")
+	if contents, err := os.ReadFile(filepath.Join(directory, "new-format")); err != nil || string(contents) != "new" {
+		t.Fatal("database recovery changed a non-database file", err)
 	}
-	if err := store.WriteFile(filepath.Join(backup, "files", "sites", "site.db"), []byte("corrupted"), 0o640); err != nil {
+	if err := store.WriteFile(filepath.Join(backup, "files", "storage", "db", "sites", "site.db"), []byte("corrupted"), 0o640); err != nil {
 		t.Fatal(err)
 	}
 	if err := restore(directory, store, backup); err == nil {
 		t.Fatal("accepted corrupt recovery snapshot")
 	}
-	contents, _ = os.ReadFile(filepath.Join(directory, "sites", "site.db"))
+	contents, _ = os.ReadFile(filepath.Join(directory, "storage", "db", "sites", "site.db"))
 	if string(contents) != "database with committed WAL content" {
 		t.Fatal("corrupt backup changed working data")
 	}
@@ -196,7 +196,10 @@ func TestBackupRefusesSymlinksAndCancellation(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(outside, "secret"), []byte("secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(outside, filepath.Join(root, "escape")); err != nil {
+	if err := os.Mkdir(filepath.Join(root, "storage"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "storage", "db")); err != nil {
 		t.Fatal(err)
 	}
 	store, err := openStore(root)
@@ -207,7 +210,7 @@ func TestBackupRefusesSymlinksAndCancellation(t *testing.T) {
 	if _, err := snapshot(root, store, "symlink", make(chan struct{})); err == nil {
 		t.Fatal("backup followed a symbolic link")
 	}
-	if err := os.Remove(filepath.Join(root, "escape")); err != nil {
+	if err := os.Remove(filepath.Join(root, "storage", "db")); err != nil {
 		t.Fatal(err)
 	}
 	canceled := make(chan struct{})
@@ -313,9 +316,7 @@ func TestPublishRequiresCompleteSignedServerMatrix(t *testing.T) {
 
 func TestBackupRejectsTruncatedInventory(t *testing.T) {
 	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "important"), []byte("content"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeBackupFixtureFile(t, root, "storage/db/sitebrush.db", []byte("content"))
 	store, err := openStore(root)
 	if err != nil {
 		t.Fatal(err)

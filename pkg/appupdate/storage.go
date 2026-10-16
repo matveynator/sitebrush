@@ -354,7 +354,7 @@ func copyFileProgress(source *os.Root, sourceName string, destination *os.Root, 
 	if err := output.Close(); err != nil {
 		return "", err
 	}
-	if err := syncDirectory(destination, filepath.Dir(destinationName)); err != nil {
+	if err := syncAncestors(destination, filepath.Dir(destinationName)); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(digest.Sum(nil)), nil
@@ -367,9 +367,8 @@ type backupEntry struct {
 	Link   string `json:",omitempty"`
 }
 
-// Published release indexes use relative links such as download/latest -> 42.
-// Preserve those references without permitting access outside the snapshot or
-// into the private updater directory excluded from the installation backup.
+// Legacy full-tree recovery may contain publication links such as latest -> 42.
+// Their validation remains bounded by the old snapshot and private-store policy.
 func safeBackupLink(name, target string) bool {
 	if !filepath.IsLocal(target) {
 		return false
@@ -378,26 +377,15 @@ func safeBackupLink(name, target string) bool {
 	return filepath.IsLocal(resolved) && resolved != Directory && !strings.HasPrefix(resolved, Directory+string(filepath.Separator))
 }
 
-// Inspection and copying must apply the same policy before the server stops.
-func backupLink(source *os.Root, name string) (string, error) {
-	target, err := source.Readlink(name)
-	if err != nil {
-		return "", err
-	}
-	if !safeBackupLink(name, target) {
-		return "", fmt.Errorf("backup refuses unsafe link %q", name)
-	}
-	if _, err := source.Stat(name); err != nil {
-		return "", fmt.Errorf("backup link %q does not resolve inside installation: %w", name, err)
-	}
-	return target, nil
-}
-
 func snapshot(storagePath string, store *os.Root, operation string, stop <-chan struct{}) (string, error) {
 	return snapshotProgress(storagePath, store, operation, stop, nil, WorkProgress{})
 }
 
-func snapshotProgress(storagePath string, store *os.Root, operation string, stop <-chan struct{}, updates chan<- WorkProgress, totals WorkProgress) (string, error) {
+func snapshotProgress(storagePath string, store *os.Root, operation string, stop <-chan struct{}, updates chan<- WorkProgress, totals WorkProgress, scopes ...databaseBackupScope) (string, error) {
+	scope := defaultDatabaseBackupScope()
+	if len(scopes) > 0 {
+		scope = scopes[0]
+	}
 	counter := &progressWriter{updates: updates, stop: stop, work: totals}
 	if err := counter.report(); err != nil {
 		return "", err
@@ -422,57 +410,11 @@ func snapshotProgress(storagePath string, store *os.Root, operation string, stop
 	}
 	defer index.Close()
 	encoder := json.NewEncoder(index)
-	entries := 0
-	err = fs.WalkDir(source.FS(), ".", func(name string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		select {
-		case <-stop:
-			return errors.New("backup canceled")
-		default:
-		}
-		if name == Directory {
-			return fs.SkipDir
-		}
-		if name == "." {
-			return nil
-		}
-		entries++
-		if entries > 1000000 {
-			return errors.New("backup entry limit exceeded")
-		}
-		info, err := entry.Info()
+	err = walkDatabaseFiles(source, scope, stop, func(name string, info fs.FileInfo) error {
+		record := backupEntry{Name: name, Mode: info.Mode()}
+		record.SHA256, err = copyFileProgress(source, name, destination, name, info.Mode(), stop, counter)
 		if err != nil {
 			return err
-		}
-		if entry.Type()&os.ModeSymlink == 0 && !info.IsDir() && !info.Mode().IsRegular() {
-			return fmt.Errorf("backup refuses special file %q", name)
-		}
-		record := backupEntry{Name: name, Mode: info.Mode()}
-		if info.Mode()&os.ModeSymlink != 0 {
-			record.Link, err = backupLink(source, name)
-			if err != nil {
-				return err
-			}
-			if err := destination.Symlink(record.Link, name); err != nil {
-				return err
-			}
-			if err := syncDirectory(destination, filepath.Dir(name)); err != nil {
-				return err
-			}
-		} else if info.IsDir() {
-			if err := destination.MkdirAll(name, info.Mode().Perm()); err != nil {
-				return err
-			}
-			if err := syncDirectory(destination, filepath.Dir(name)); err != nil {
-				return err
-			}
-		} else {
-			record.SHA256, err = copyFileProgress(source, name, destination, name, info.Mode(), stop, counter)
-			if err != nil {
-				return err
-			}
 		}
 		counter.work.Files++
 		if time.Since(counter.last) >= time.Second {
@@ -495,7 +437,7 @@ func snapshotProgress(storagePath string, store *os.Root, operation string, stop
 	if err != nil {
 		return "", err
 	}
-	if err := atomicJSON(store, filepath.Join(backup, "complete.json"), struct{ SHA256 string }{indexDigest}); err != nil {
+	if err := atomicJSON(store, filepath.Join(backup, "complete.json"), snapshotMarker{DatabaseSHA256: indexDigest, DatabasePath: scope.Control}); err != nil {
 		return "", err
 	}
 	if err := verifySnapshot(store, backup); err != nil {
@@ -542,28 +484,56 @@ func eachBackupEntry(store *os.Root, backup string, visit func(backupEntry) erro
 	}
 }
 
+// DatabaseSHA256 intentionally has a different name from the legacy full-tree
+// marker. Older supervisors must fail verification rather than delete static
+// files absent from a database-only inventory during their full-tree restore.
+type snapshotMarker struct {
+	SHA256         string `json:",omitempty"`
+	DatabaseSHA256 string `json:",omitempty"`
+	DatabasePath   string `json:",omitempty"`
+}
+
 func verifySnapshot(store *os.Root, backup string) error {
+	_, err := checkedSnapshot(store, backup)
+	return err
+}
+
+func checkedSnapshot(store *os.Root, backup string) (snapshotMarker, error) {
+	marker := snapshotMarker{}
 	completion, err := store.ReadFile(filepath.Join(backup, "complete.json"))
 	if err != nil {
-		return err
+		return marker, err
 	}
-	var marker struct{ SHA256 string }
 	if err := json.Unmarshal(completion, &marker); err != nil {
-		return err
+		return marker, err
 	}
 	indexDigest, err := fileDigest(store, filepath.Join(backup, "index.jsonl"))
 	if err != nil {
-		return err
+		return marker, err
 	}
-	if indexDigest != marker.SHA256 {
-		return errors.New("backup inventory checksum mismatch")
+	expected := marker.SHA256
+	scope := databaseBackupScope{Control: marker.DatabasePath}
+	if marker.DatabaseSHA256 != "" {
+		if marker.SHA256 != "" {
+			return marker, errors.New("ambiguous backup inventory marker")
+		}
+		if err := scope.validate(); err != nil {
+			return marker, err
+		}
+		expected = marker.DatabaseSHA256
+	}
+	if indexDigest != expected {
+		return marker, errors.New("backup inventory checksum mismatch")
 	}
 	files, err := store.OpenRoot(filepath.Join(backup, "files"))
 	if err != nil {
-		return err
+		return marker, err
 	}
 	defer files.Close()
-	return eachBackupEntry(store, backup, func(entry backupEntry) error {
+	err = eachBackupEntry(store, backup, func(entry backupEntry) error {
+		if marker.DatabaseSHA256 != "" && (!entry.Mode.IsRegular() || entry.Link != "" || !scope.contains(entry.Name)) {
+			return errors.New("non-database entry in database backup")
+		}
 		info, err := files.Lstat(entry.Name)
 		if err != nil {
 			return err
@@ -594,15 +564,18 @@ func verifySnapshot(store *os.Root, backup string) error {
 		}
 		return nil
 	})
+	return marker, err
 }
 
 // Restoration is repeatable after a crash. The verified backup remains intact
-// until all files have been replaced and all post-snapshot additions removed.
+// until the selected database files have been replaced. Legacy full-tree
+// snapshots retain their original recovery contract for interrupted upgrades.
 func restore(storagePath string, store *os.Root, backup string) error {
 	if backup == "" {
 		return errors.New("no verified recovery backup")
 	}
-	if err := verifySnapshot(store, backup); err != nil {
+	marker, err := checkedSnapshot(store, backup)
+	if err != nil {
 		return err
 	}
 	source, err := store.OpenRoot(filepath.Join(backup, "files"))
@@ -615,6 +588,11 @@ func restore(storagePath string, store *os.Root, backup string) error {
 		return err
 	}
 	defer destination.Close()
+	if marker.DatabaseSHA256 != "" {
+		if err := walkDatabaseFiles(destination, databaseBackupScope{Control: marker.DatabasePath}, nil, nil); err != nil {
+			return err
+		}
+	}
 	err = eachBackupEntry(store, backup, func(entry backupEntry) error {
 		if entry.Mode.IsDir() {
 			if err := destination.MkdirAll(entry.Name, entry.Mode.Perm()); err != nil {
@@ -656,6 +634,18 @@ func restore(storagePath string, store *os.Root, backup string) error {
 	})
 	if err != nil {
 		return err
+	}
+	if marker.DatabaseSHA256 != "" {
+		return walkDatabaseFiles(destination, databaseBackupScope{Control: marker.DatabasePath}, nil, func(name string, info fs.FileInfo) error {
+			if _, err := source.Lstat(name); errors.Is(err, os.ErrNotExist) {
+				if err := destination.Remove(name); err != nil {
+					return err
+				}
+				return syncDirectory(destination, filepath.Dir(name))
+			} else {
+				return err
+			}
+		})
 	}
 	return fs.WalkDir(destination.FS(), ".", func(name string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {

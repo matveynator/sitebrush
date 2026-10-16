@@ -655,6 +655,10 @@ func perform(options Options, store *os.Root, catalog Catalog, worker process, s
 		options.Arguments = arguments
 		state.Arguments = append([]string(nil), arguments...)
 	}
+	scope, err := updateDatabaseBackupScope(options.StoragePath, options.WorkingDirectory, options.Arguments)
+	if err != nil {
+		return fail(err)
+	}
 	var candidate Version
 	if action == "upgrade" {
 		if state.Available == nil {
@@ -721,7 +725,7 @@ func perform(options Options, store *os.Root, catalog Catalog, worker process, s
 		return fail(err)
 	}
 	totals, err := runMeasured(stop, func(updates chan<- WorkProgress, session <-chan struct{}) (WorkProgress, error) {
-		return inspectBackupSpace(options.StoragePath, updates, session)
+		return inspectBackupSpace(options.StoragePath, updates, session, scope)
 	}, report)
 	if err != nil {
 		return fail(err)
@@ -733,8 +737,16 @@ func perform(options Options, store *os.Root, catalog Catalog, worker process, s
 		return fail(err)
 	}
 	stopped = true
+	// Closing SQLite owners can checkpoint or remove their WAL companions.
+	// Recount the quiescent files before reserving and copying the snapshot.
+	totals, err = runMeasured(stop, func(updates chan<- WorkProgress, session <-chan struct{}) (WorkProgress, error) {
+		return inspectBackupSpace(options.StoragePath, updates, session, scope)
+	}, report)
+	if err != nil {
+		return fail(err)
+	}
 	backup, err := runMeasured(stop, func(updates chan<- WorkProgress, session <-chan struct{}) (string, error) {
-		return snapshotProgress(options.StoragePath, store, state.Operation, session, updates, totals)
+		return snapshotProgress(options.StoragePath, store, state.Operation, session, updates, totals, scope)
 	}, report)
 	if err != nil {
 		return fail(err)
@@ -894,8 +906,12 @@ func checkBackupSpace(storagePath string) error {
 	return err
 }
 
-func inspectBackupSpace(storagePath string, updates chan<- WorkProgress, stop <-chan struct{}) (WorkProgress, error) {
+func inspectBackupSpace(storagePath string, updates chan<- WorkProgress, stop <-chan struct{}, scopes ...databaseBackupScope) (WorkProgress, error) {
 	work := WorkProgress{}
+	scope := defaultDatabaseBackupScope()
+	if len(scopes) > 0 {
+		scope = scopes[0]
+	}
 	last := time.Now()
 	root, err := os.OpenRoot(storagePath)
 	if err != nil {
@@ -903,43 +919,13 @@ func inspectBackupSpace(storagePath string, updates chan<- WorkProgress, stop <-
 	}
 	defer root.Close()
 	var required uint64 = 32 << 20
-	err = fs.WalkDir(root.FS(), ".", func(name string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
+	err = walkDatabaseFiles(root, scope, stop, func(name string, info fs.FileInfo) error {
+		if info.Size() < 0 || uint64(info.Size()) > (^uint64(0)-required)/2 {
+			return errors.New("database backup size overflow")
 		}
-		if name == Directory {
-			return fs.SkipDir
-		}
-		select {
-		case <-stop:
-			return errors.New("backup inspection canceled")
-		default:
-		}
-		if name == "." {
-			return nil
-		}
+		required += uint64(info.Size()) * 2
+		work.TotalBytes += info.Size()
 		work.TotalFiles++
-		if work.TotalFiles > 1000000 {
-			return errors.New("backup entry limit exceeded")
-		}
-		if entry.Type()&os.ModeSymlink != 0 {
-			if _, err := backupLink(root, name); err != nil {
-				return err
-			}
-		} else if !entry.IsDir() {
-			info, err := entry.Info()
-			if err != nil {
-				return err
-			}
-			if !info.Mode().IsRegular() {
-				return fmt.Errorf("unsafe backup entry %s", name)
-			}
-			if info.Size() < 0 || uint64(info.Size()) > (^uint64(0)-required)/2 {
-				return errors.New("backup size overflow")
-			}
-			required += uint64(info.Size()) * 2
-			work.TotalBytes += info.Size()
-		}
 		if time.Since(last) >= time.Second {
 			last = time.Now()
 			return sendWork(updates, work, stop)
@@ -949,12 +935,15 @@ func inspectBackupSpace(storagePath string, updates chan<- WorkProgress, stop <-
 	if err != nil {
 		return work, err
 	}
+	if err := sendWork(updates, work, stop); err != nil {
+		return work, err
+	}
 	available, err := availableSpace(storagePath)
 	if err != nil {
 		return work, err
 	}
 	if available < required {
-		return work, fmt.Errorf("backup and recovery require %d free bytes, have %d", required, available)
+		return work, fmt.Errorf("database backup and recovery require %d free bytes for %d database files (%d bytes), have %d", required, work.TotalFiles, work.TotalBytes, available)
 	}
-	return work, sendWork(updates, work, stop)
+	return work, nil
 }

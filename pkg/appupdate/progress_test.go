@@ -66,11 +66,11 @@ func TestMeasuredTaskCancellationJoinsProducer(t *testing.T) {
 
 func TestSnapshotCountersDescribeActualCopiedContent(t *testing.T) {
 	root := t.TempDir()
-	if err := os.Mkdir(filepath.Join(root, "site"), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, "storage", "db", "sites"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	content := bytes.Repeat([]byte("content"), 10000)
-	if err := os.WriteFile(filepath.Join(root, "site", "page"), content, 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "storage", "db", "sites", "site.db"), content, 0600); err != nil {
 		t.Fatal(err)
 	}
 	store, err := openStore(root)
@@ -89,7 +89,7 @@ func TestSnapshotCountersDescribeActualCopiedContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if latest.Bytes != int64(len(content)) || latest.TotalBytes != latest.Bytes || latest.Files != 2 || latest.TotalFiles != 2 {
+	if latest.Bytes != int64(len(content)) || latest.TotalBytes != latest.Bytes || latest.Files != 1 || latest.TotalFiles != 1 {
 		t.Fatalf("incorrect snapshot totals: %+v", latest)
 	}
 	if err := verifySnapshot(store, backup); err != nil {

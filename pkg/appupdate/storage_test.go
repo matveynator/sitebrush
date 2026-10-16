@@ -226,16 +226,13 @@ func TestInstalledVersionBelongsToTheActualLauncher(t *testing.T) {
 	}
 }
 
-func TestSnapshotRestoresInternalReleasePublicationLinks(t *testing.T) {
+func TestDatabaseSnapshotIgnoresPublicationLinks(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlinks require Windows privileges")
 	}
 	root := t.TempDir()
-	directory := filepath.Join(root, "download", "42")
-	if err := os.MkdirAll(directory, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(directory, "release"), []byte("verified release"), 0600); err != nil {
+	writeBackupFixtureFile(t, root, "storage/db/sitebrush.db", []byte("database"))
+	if err := os.MkdirAll(filepath.Join(root, "download", "42"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	link := filepath.Join(root, "download", "latest")
@@ -243,7 +240,7 @@ func TestSnapshotRestoresInternalReleasePublicationLinks(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := checkBackupSpace(root); err != nil {
-		t.Fatal("preflight rejected a publication link accepted by snapshots", err)
+		t.Fatal(err)
 	}
 	store, err := openStore(root)
 	if err != nil {
@@ -254,56 +251,46 @@ func TestSnapshotRestoresInternalReleasePublicationLinks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.Lstat(filepath.Join(backup, "files", "download")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("release directory was backed up", err)
+	}
 	if err := os.Remove(link); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(link, []byte("wrong index"), 0600); err != nil {
+	if err := os.WriteFile(link, []byte("new publication"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := restore(root, store, backup); err != nil {
 		t.Fatal(err)
 	}
-	if target, err := os.Readlink(link); err != nil || target != "42" {
-		t.Fatal("release index link was not restored", target, err)
-	}
-	if contents, err := os.ReadFile(filepath.Join(link, "release")); err != nil || string(contents) != "verified release" {
-		t.Fatal("release link lost its target", err)
-	}
-	if err := restore(root, store, backup); err != nil {
-		t.Fatal("repeated link recovery failed", err)
-	}
-	backedUpLink := filepath.Join(backup, "files", "download", "latest")
-	if err := store.Remove(backedUpLink); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Symlink("../..", backedUpLink); err != nil {
-		t.Fatal(err)
-	}
-	if err := restore(root, store, backup); err == nil {
-		t.Fatal("modified backup link accepted")
+	if contents, err := os.ReadFile(link); err != nil || string(contents) != "new publication" {
+		t.Fatal("recovery modified a publication file", err)
 	}
 }
 
-func TestSnapshotRejectsEscapingPrivateAndDanglingLinks(t *testing.T) {
+func TestSnapshotRejectsDatabaseLinks(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlinks require Windows privileges")
 	}
-	for _, target := range []string{"../outside", Directory + "/state.json", "missing"} {
+	for _, target := range []string{"../../../outside", "../../" + Directory + "/state.json", "missing"} {
 		t.Run(target, func(t *testing.T) {
 			root := t.TempDir()
+			writeBackupFixtureFile(t, root, "storage/db/sitebrush.db", []byte("database"))
+			if err := os.Symlink(target, filepath.Join(root, "storage", "db", "linked.db")); err != nil {
+				t.Fatal(err)
+			}
+			// Use the configured control path so its link cannot be ignored as an unrelated file.
+			scope := databaseBackupScope{Control: "storage/db/linked.db"}
 			store, err := openStore(root)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer store.Close()
-			if err := os.Symlink(target, filepath.Join(root, "link")); err != nil {
-				t.Fatal(err)
+			if _, err := inspectBackupSpace(root, nil, nil, scope); err == nil {
+				t.Fatal("database link passed preflight")
 			}
-			if err := checkBackupSpace(root); err == nil {
-				t.Fatal("unsafe link passed backup preflight", target)
-			}
-			if _, err := snapshot(root, store, strings.Repeat("b", 32), nil); err == nil {
-				t.Fatal("unsafe link accepted", target)
+			if _, err := snapshotProgress(root, store, strings.Repeat("b", 32), nil, nil, WorkProgress{}, scope); err == nil {
+				t.Fatal("database link was copied")
 			}
 		})
 	}

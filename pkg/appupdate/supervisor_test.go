@@ -59,7 +59,7 @@ func runUpdateFixture() int {
 		return 0
 	}
 	if contains("-update-migrate") {
-		if err := os.WriteFile(filepath.Join(root, "migration-result"), []byte("new schema"), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(root, "storage", "db", "sites", "migration-result.db"), []byte("new schema"), 0o600); err != nil {
 			return 3
 		}
 		if exists("reject-migration") {
@@ -174,6 +174,10 @@ func newFixtureInstallation(t *testing.T) string {
 			continue
 		}
 		session.Close()
+		writeBackupFixtureFile(t, root, "storage/db/sitebrush.db", []byte("original database"))
+		if err := os.MkdirAll(filepath.Join(root, "storage", "db", "sites"), 0700); err != nil {
+			t.Fatal(err)
+		}
 		return root
 	}
 	t.Fatal("cannot allocate an available fixture contact and process session")
@@ -376,7 +380,7 @@ func TestSupervisorUpdateRollbackAndFailures(t *testing.T) {
 					if state.Stage != "rolled_back" {
 						t.Fatalf("automatic rollback: %+v", state)
 					}
-					if _, err := os.Stat(filepath.Join(root, "migration-result")); !os.IsNotExist(err) {
+					if _, err := os.Stat(filepath.Join(root, "storage", "db", "sites", "migration-result.db")); !os.IsNotExist(err) {
 						t.Fatal("failed migration data survived backup recovery")
 					}
 				}
@@ -391,7 +395,7 @@ func TestSupervisorUpdateRollbackAndFailures(t *testing.T) {
 
 func TestRecoveryRestoresInterruptedMigration(t *testing.T) {
 	root := newFixtureInstallation(t)
-	if err := os.WriteFile(filepath.Join(root, "content"), []byte("before"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "storage", "db", "sitebrush.db"), []byte("before"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	store, err := openStore(root)
@@ -419,11 +423,11 @@ func TestRecoveryRestoresInterruptedMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.Close()
-	if err := os.WriteFile(filepath.Join(root, "content"), []byte("half-migrated"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "storage", "db", "sitebrush.db"), []byte("half-migrated"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	startFixtureSupervisor(t, root, "success")
-	contents, err := os.ReadFile(filepath.Join(root, "content"))
+	contents, err := os.ReadFile(filepath.Join(root, "storage", "db", "sitebrush.db"))
 	if err != nil || string(contents) != "before" {
 		t.Fatalf("interrupted data recovery: %q %v", contents, err)
 	}
