@@ -152,6 +152,8 @@ jobs:
         run: >-
           go test -count=1 .
           -run '^(TestAI(Site|CapabilityScopes|CapabilityRevocation|ConcurrentVersion|VersionGuard|Uploads|EditorInlineAttachments|PageSave|Rollback|Unscoped|FileEndpoint|PageScoped)|TestAppAIStore)'
+      - name: Test Remote MCP authorization and site lifecycle
+        run: go test -count=1 -timeout=180s . -run '^TestMCP'
       - name: Install editor browser test dependencies
         working-directory: scripts/editor
         run: |

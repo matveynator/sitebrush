@@ -591,10 +591,62 @@ are always available in the account; access lists appear when grants or sessions
 
 Give an AI the site address. SiteBrush advertises `/?ai=manifest` through a public
 `Link` response header. Discovery, documentation (`/?ai=documentation`) and
-OpenAPI (`/?ai=openapi`) require no credentials. There is no provider-specific
-endpoint or mandatory well-known path. The AI needs tools that can inspect HTTP
+OpenAPI (`/?ai=openapi`) require no credentials. This provider-neutral discovery
+does not require a well-known path. The AI needs tools that can inspect HTTP
 responses and perform the documented requests; this does not automatically add
-networking tools to every chatbot.
+networking tools to every chatbot. The manifest also advertises `mcp_url` for
+clients with native Remote MCP support.
+
+#### ChatGPT and Remote MCP
+
+The same SiteBrush instance serves Streamable HTTP at
+`https://example.com/_sitebrush/mcp`. There is no separate daemon. The adapter
+exports the existing content and Analytics operations, plus `sitebrush_get_access`
+with the connected site, actual permissions, expiry and suggested next actions.
+OAuth discovery uses protected-resource and authorization-server metadata at the
+standard `/.well-known/` paths. Public endpoints require HTTPS.
+
+Connect the site's MCP endpoint once in ChatGPT's **Plugins → Add custom MCP
+server**, select OAuth authentication and install the resulting connection.
+Then select it in the conversation and ask, for example, “Посмотри мой сайт
+https://example.com и помоги мне его улучшить”. ChatGPT opens the normal SiteBrush
+login/approval screen. After **Allow**, the client handles the credential exchange
+and refresh automatically. The owner never copies tokens or runs API commands.
+Workspace policies and client support can affect connection availability. See
+the [official connection instructions](https://developers.openai.com/plugins/deploy/connect-chatgpt).
+
+The distributable [SiteBrush skill package](integrations/chatgpt/plugin.json)
+contains the [working skill](integrations/chatgpt/skills/sitebrush/SKILL.md) and its
+tool reference. Import `integrations/chatgpt` as a portable plugin using a
+supported personal or workspace plugin installation. For a local desktop
+installation, the repository marketplace exposes this package as `sitebrush`.
+Follow the [official package installation instructions](https://developers.openai.com/plugins/build/plugins).
+The skill works with the per-site connection; it cannot silently install a new
+MCP server merely because a URL appeared in chat. No site credentials belong in
+the package, skill or conversation.
+
+MCP creates, updates and rollbacks always save drafts, even with `publish` access.
+`sitebrush_publish` publishes **all pending changes**, including drafts made by
+other editors. Updates and rollback require the last read `expected_version`;
+conflicts require a fresh read. Attachments use ChatGPT's native file input or
+base64 bytes and the existing immutable uploader, followed by a page update.
+Analytics remain bounded aggregates with explicit coverage/no-data information.
+
+Authorization uses existing pairing, capabilities and owner controls. Public
+clients use exact registered redirect URLs and PKCE S256. Access sessions last
+15 minutes; rotated refresh tokens expire after 30 days without use. Only token
+hashes and capability references are persisted in the capability owner's private
+OAuth binding file. Unused client registrations expire after 24 hours. Restrict
+or revoke access in the normal SiteBrush account card; the same session channels
+cancel active work. This does not change the legacy capability API below.
+
+Before declaring a deployment ready, test it in an actual external ChatGPT
+conversation: connect/Allow, read pages and Analytics, edit a draft, publish,
+verify the public page, restore a revision, publish and verify again, then revoke
+access. Automated SDK tests cover this path locally; they do not establish that
+a particular ChatGPT account or deployed server has passed it.
+
+#### Provider-neutral capability API
 
 The [AI working guide](pkg/aicapability/guide.md) is the source served verbatim
 at `/?ai=documentation` and included in OpenAPI. It explains the relationship

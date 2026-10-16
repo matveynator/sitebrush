@@ -24,6 +24,8 @@ type Pairing struct {
 	Status           string    `json:"status"`
 	Expires          time.Time `json:"expires"`
 	Interval         int       `json:"interval"`
+	ClientName       string    `json:"client_name,omitempty"`
+	RequestedScopes  []string  `json:"requested_scopes,omitempty"`
 }
 
 type pairingState struct {
@@ -118,6 +120,7 @@ func (manager *Manager) handlePairing(request managerRequest, pairings map[strin
 			continue
 		}
 		if request.kind == "pairing-view" {
+			pairing.RequestedScopes = append([]string(nil), pairing.RequestedScopes...)
 			return managerResponse{pairing: pairing.Pairing}
 		}
 		if pairing.Status != "pending" || request.owner == "" {
@@ -130,6 +133,12 @@ func (manager *Manager) handlePairing(request managerRequest, pairings map[strin
 		}
 		if request.kind != "pairing-allow" || len(request.scopes) == 0 || !scopesAreSubset(request.scopes, StandardScopes()) {
 			return managerResponse{err: errors.New("invalid permissions")}
+		}
+		if len(pairing.RequestedScopes) > 0 {
+			request.scopes = intersectScopes(request.scopes, pairing.RequestedScopes)
+			if len(request.scopes) == 0 {
+				return managerResponse{err: errors.New("invalid permissions")}
+			}
 		}
 		token, err := randomToken()
 		if err != nil {

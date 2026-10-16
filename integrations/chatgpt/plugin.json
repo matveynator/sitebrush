@@ -1,0 +1,20 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "sitebrush",
+  "version": "0.1.0",
+  "description": "Inspect, understand and improve an authorized SiteBrush website using its own MCP connection.",
+  "homepage": "https://sitebrush.com",
+  "repository": "https://github.com/matveynator/sitebrush",
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "SiteBrush",
+        "shortDescription": "Understand and improve your SiteBrush website",
+        "defaultPrompt": [
+          "Look at my SiteBrush website, explain what visitors do and suggest useful improvements.",
+          "Apply the changes we agreed on, publish them and verify the result."
+        ]
+      }
+    }
+  }
+}

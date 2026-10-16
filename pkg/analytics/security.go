@@ -187,7 +187,7 @@ func ProbeCategory(pathname, query string) string {
 	if strings.Contains(decoded, "../") || strings.Contains(decoded, "..\\") {
 		return "traversal"
 	}
-	if strings.HasPrefix(decoded, "/_sitebrush/") && decoded != "/_sitebrush/analytics" || strings.Contains(decoded, "sitebrush.db") || strings.HasPrefix(decoded, "/.sitebrush/") {
+	if strings.HasPrefix(decoded, "/_sitebrush/") && !sitebrushPublicTransportPath(decoded) || strings.Contains(decoded, "sitebrush.db") || strings.HasPrefix(decoded, "/.sitebrush/") {
 		return "sitebrush-exploit"
 	}
 	for _, token := range []string{"/.git", "/.svn", "/.hg"} {
@@ -219,6 +219,16 @@ func ProbeCategory(pathname, query string) string {
 		return "admin-discovery"
 	}
 	return ""
+}
+
+// Only published external transport routes are public; neighbouring internal
+// paths must continue to be treated as probes by the security subsystem.
+func sitebrushPublicTransportPath(pathname string) bool {
+	switch pathname {
+	case "/_sitebrush/analytics", "/_sitebrush/mcp", "/_sitebrush/oauth/authorize", "/_sitebrush/oauth/register", "/_sitebrush/oauth/token", "/_sitebrush/oauth/revoke":
+		return true
+	}
+	return false
 }
 func (state *SecurityState) Record(request RequestObservation) string {
 	now := request.Time

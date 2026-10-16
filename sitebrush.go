@@ -78,6 +78,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/httpsecurity"
 	"github.com/matveynator/sitebrush/v2/pkg/imageprepare"
 	"github.com/matveynator/sitebrush/v2/pkg/mailout"
+	sitemcp "github.com/matveynator/sitebrush/v2/pkg/mcp"
 	"github.com/matveynator/sitebrush/v2/pkg/migrations"
 	"github.com/matveynator/sitebrush/v2/pkg/outboundhttp"
 	"github.com/matveynator/sitebrush/v2/pkg/securitysync"
@@ -3550,7 +3551,7 @@ func (a *App) analyticsMiddleware(next http.Handler) http.Handler {
 			}
 		}
 		if a.securityAnalytics != nil && r.URL.Path != "/_sitebrush/analytics" && len(a.securityAnalytics) < cap(a.securityAnalytics) {
-			securityEvent := siteAnalyticsEvent{Bytes: writer.bytesWritten, Domain: a.analyticsEventDomain(r, ""), Path: analyticsBoundedString(r.URL.EscapedPath(), 512), Query: analyticsBoundedString(r.URL.RawQuery, 2048), Method: r.Method, StatusCode: writer.statusCode, OccurredAt: startedAt.UTC(), RemoteAddress: analyticsBoundedString(r.RemoteAddr, 64), Forwarded: analyticsBoundedString(r.Header.Get("Forwarded"), 256), ForwardedFor: analyticsBoundedString(r.Header.Get("X-Forwarded-For"), 256), UserAgent: analyticsBoundedString(r.UserAgent(), 256), AcceptLanguage: analyticsBoundedString(r.Header.Get("Accept-Language"), 64), TrustedPeer: sitebrushPeerRequestTrusted(r, startedAt.UTC()), IndexingCrawler: httpsecurity.IsIndexingCrawlerRequest(r), SecurityBlocked: writer.Header().Get("X-Sitebrush-Security-Incident") != "" || writer.statusCode == http.StatusTooManyRequests || writer.statusCode == http.StatusForbidden}
+			securityEvent := siteAnalyticsEvent{Bytes: writer.bytesWritten, Domain: a.analyticsEventDomain(r, ""), Path: analyticsBoundedString(r.URL.EscapedPath(), 512), Query: analyticsBoundedString(accountauth.SafeQuery(r.URL.RawQuery), 2048), Method: r.Method, StatusCode: writer.statusCode, OccurredAt: startedAt.UTC(), RemoteAddress: analyticsBoundedString(r.RemoteAddr, 64), Forwarded: analyticsBoundedString(r.Header.Get("Forwarded"), 256), ForwardedFor: analyticsBoundedString(r.Header.Get("X-Forwarded-For"), 256), UserAgent: analyticsBoundedString(r.UserAgent(), 256), AcceptLanguage: analyticsBoundedString(r.Header.Get("Accept-Language"), 64), TrustedPeer: sitebrushPeerRequestTrusted(r, startedAt.UTC()), IndexingCrawler: httpsecurity.IsIndexingCrawlerRequest(r), SecurityBlocked: writer.Header().Get("X-Sitebrush-Security-Incident") != "" || writer.statusCode == http.StatusTooManyRequests || writer.statusCode == http.StatusForbidden}
 			securityEvent.SecurityAlreadyBlocked = writer.Header().Get("X-Sitebrush-Security-Already-Blocked") == "1"
 			select {
 			case a.securityAnalytics <- securityEvent:
@@ -11013,6 +11014,9 @@ func (a *App) assignMissingDomainAliasTokens(ctx context.Context) {
 }
 
 func (a *App) route(w http.ResponseWriter, r *http.Request) {
+	if a.siteMCPRoute(w, r) {
+		return
+	}
 	w.Header().Add("Link", `</?ai=manifest>; rel="service-desc"; type="application/json"; title="SiteBrush AI"`)
 	pagePath := cleanPath(r.URL.Path)
 	guestStaticRequest := isGuestStaticRequest(r)
@@ -13416,6 +13420,326 @@ func (a *App) executeAIEditorSiteRequest(w http.ResponseWriter, r *http.Request,
 	})
 }
 
+// Remote MCP is a boundary adapter. Site content and permissions remain owned
+// by the existing AI capability and editor processes.
+func (a *App) siteMCPRoute(w http.ResponseWriter, r *http.Request) bool {
+	endpoint := r.URL.Path
+	if endpoint != sitemcp.Path && endpoint != sitemcp.ResourceMetadataPath && endpoint != "/.well-known/oauth-protected-resource" && endpoint != "/.well-known/oauth-authorization-server" && !strings.HasPrefix(endpoint, sitemcp.OAuthPath) {
+		return false
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if requestScheme(r) != "https" && !localAccountRequest(r) {
+		http.Error(w, "HTTPS is required", http.StatusForbidden)
+		return true
+	}
+	origin := requestScheme(r) + "://" + r.Host
+	resource := origin + sitemcp.Path
+	domain := a.siteDomain(r.Context(), r)
+	writeJSON := func(status int, result any) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(result)
+	}
+	oauthError := func(status int, code string) { writeJSON(status, map[string]string{"error": code}) }
+	oauthFailure := func(err error) {
+		code := err.Error()
+		switch code {
+		case "invalid_request", "invalid_client", "invalid_client_metadata", "invalid_redirect_uri", "invalid_scope", "invalid_grant":
+			oauthError(400, code)
+		default:
+			oauthError(503, "temporarily_unavailable")
+		}
+	}
+	if endpoint == sitemcp.ResourceMetadataPath || endpoint == "/.well-known/oauth-protected-resource" || endpoint == "/.well-known/oauth-authorization-server" {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return true
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", 405)
+			return true
+		}
+		if endpoint == "/.well-known/oauth-authorization-server" {
+			writeJSON(200, map[string]any{"issuer": origin, "authorization_endpoint": origin + sitemcp.OAuthPath + "authorize", "token_endpoint": origin + sitemcp.OAuthPath + "token", "registration_endpoint": origin + sitemcp.OAuthPath + "register", "revocation_endpoint": origin + sitemcp.OAuthPath + "revoke", "response_types_supported": []string{"code"}, "grant_types_supported": []string{"authorization_code", "refresh_token"}, "code_challenge_methods_supported": []string{"S256"}, "token_endpoint_auth_methods_supported": []string{"none"}, "scopes_supported": aicapability.StandardScopes(), "client_id_metadata_document_supported": true, "authorization_response_iss_parameter_supported": true})
+		} else {
+			writeJSON(200, map[string]any{"resource": resource, "authorization_servers": []string{origin}, "scopes_supported": aicapability.StandardScopes(), "bearer_methods_supported": []string{"header"}})
+		}
+		return true
+	}
+	if a.aiCapabilities == nil {
+		oauthError(503, "temporarily_unavailable")
+		return true
+	}
+	if endpoint == sitemcp.Path {
+		if r.URL.RawQuery != "" {
+			oauthError(400, "query_parameters_not_supported")
+			return true
+		}
+		if browserOrigin := r.Header.Get("Origin"); browserOrigin != "" && browserOrigin != origin {
+			http.Error(w, "invalid origin", 403)
+			return true
+		}
+		if r.Method == http.MethodOptions {
+			w.Header().Set("Access-Control-Allow-Methods", "POST, GET, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, MCP-Protocol-Version, Mcp-Method, Mcp-Name")
+			w.WriteHeader(204)
+			return true
+		}
+		bearer := ""
+		authorizationFields := strings.Fields(r.Header.Get("Authorization"))
+		if len(authorizationFields) == 2 && strings.EqualFold(authorizationFields[0], "Bearer") {
+			bearer = authorizationFields[1]
+		}
+		if _, _, err := a.aiCapabilities.ValidateOAuth(domain, resource, bearer); err != nil {
+			sitemcp.Challenge(w, origin, 401, aicapability.StandardScopes())
+			return true
+		}
+		sitemcp.NewHandler(sitemcp.Options{Domain: domain, Resource: resource, Version: CompileVersion, Bearer: bearer, Manager: a.aiCapabilities, Download: downloadAIMCPFile, Invoke: func(boundary context.Context, invocation sitemcp.Invocation) (sitemcp.Result, error) {
+			return a.invokeMCPAIContent(r.WithContext(boundary), domain, invocation)
+		}}).ServeHTTP(w, r)
+		return true
+	}
+	if endpoint == sitemcp.OAuthPath+"authorize" {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", 405)
+			return true
+		}
+		query := r.URL.Query()
+		if query.Get("response_type") != "code" || query.Get("code_challenge_method") != "S256" || query.Get("resource") != resource {
+			oauthError(400, "invalid_request")
+			return true
+		}
+		clientID := query.Get("client_id")
+		if _, err := a.aiCapabilities.OAuthClient(domain, clientID); err != nil {
+			if err := a.registerMCPOAuthMetadataClient(r, domain, clientID); err != nil {
+				oauthError(400, "invalid_client")
+				return true
+			}
+		}
+		pairing, err := a.aiCapabilities.BeginOAuth(domain, aicapability.OAuthAuthorization{ClientID: clientID, RedirectURI: query.Get("redirect_uri"), Resource: resource, State: query.Get("state"), Challenge: query.Get("code_challenge"), Scopes: strings.Fields(query.Get("scope"))})
+		if err != nil {
+			oauthFailure(err)
+			return true
+		}
+		httpsecurity.RedirectLocal(w, r, "/?ai_authorize="+url.QueryEscape(pairing.VerificationCode), http.StatusSeeOther)
+		return true
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", 405)
+		return true
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 16384)
+	if endpoint == sitemcp.OAuthPath+"register" {
+		var registration struct {
+			Name          string   `json:"client_name"`
+			RedirectURIs  []string `json:"redirect_uris"`
+			AuthMethod    string   `json:"token_endpoint_auth_method"`
+			GrantTypes    []string `json:"grant_types"`
+			ResponseTypes []string `json:"response_types"`
+		}
+		if json.NewDecoder(r.Body).Decode(&registration) != nil || registration.AuthMethod != "" && registration.AuthMethod != "none" {
+			oauthError(400, "invalid_client_metadata")
+			return true
+		}
+		for _, grantType := range registration.GrantTypes {
+			if grantType != "authorization_code" && grantType != "refresh_token" {
+				oauthError(400, "invalid_client_metadata")
+				return true
+			}
+		}
+		for _, responseType := range registration.ResponseTypes {
+			if responseType != "code" {
+				oauthError(400, "invalid_client_metadata")
+				return true
+			}
+		}
+		client, err := a.aiCapabilities.RegisterOAuthClient(domain, aicapability.OAuthClient{Name: registration.Name, RedirectURIs: registration.RedirectURIs})
+		if err != nil {
+			oauthFailure(err)
+			return true
+		}
+		writeJSON(201, map[string]any{"client_id": client.ID, "client_name": client.Name, "redirect_uris": client.RedirectURIs, "token_endpoint_auth_method": "none", "grant_types": []string{"authorization_code", "refresh_token"}, "response_types": []string{"code"}})
+		return true
+	}
+	if r.ParseForm() != nil {
+		oauthError(400, "invalid_request")
+		return true
+	}
+	if endpoint == sitemcp.OAuthPath+"revoke" {
+		if err := a.aiCapabilities.RevokeOAuth(domain, r.PostForm.Get("client_id"), r.PostForm.Get("token")); err != nil {
+			oauthError(503, "temporarily_unavailable")
+			return true
+		}
+		w.WriteHeader(200)
+		return true
+	}
+	if endpoint != sitemcp.OAuthPath+"token" {
+		http.NotFound(w, r)
+		return true
+	}
+	if r.PostForm.Get("resource") != resource {
+		oauthError(400, "invalid_target")
+		return true
+	}
+	var tokens aicapability.OAuthTokens
+	var err error
+	switch r.PostForm.Get("grant_type") {
+	case "authorization_code":
+		tokens, err = a.aiCapabilities.ExchangeOAuthCode(domain, r.PostForm.Get("client_id"), resource, r.PostForm.Get("redirect_uri"), r.PostForm.Get("code"), r.PostForm.Get("code_verifier"))
+	case "refresh_token":
+		tokens, err = a.aiCapabilities.RefreshOAuth(domain, r.PostForm.Get("client_id"), resource, r.PostForm.Get("refresh_token"))
+	default:
+		oauthError(400, "unsupported_grant_type")
+		return true
+	}
+	if err != nil {
+		oauthFailure(err)
+		return true
+	}
+	writeJSON(200, tokens)
+	return true
+}
+
+func (a *App) registerMCPOAuthMetadataClient(r *http.Request, domain, clientID string) error {
+	parsed, err := url.Parse(clientID)
+	if err != nil || parsed.Scheme != "https" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("invalid client metadata URI")
+	}
+	encoded, err := downloadAIMCPFile(r.Context(), clientID, 65536)
+	if err != nil {
+		return errors.New("client metadata unavailable")
+	}
+	var metadata struct {
+		ID           string   `json:"client_id"`
+		Name         string   `json:"client_name"`
+		RedirectURIs []string `json:"redirect_uris"`
+		AuthMethod   string   `json:"token_endpoint_auth_method"`
+		AuthMethods  []string `json:"token_endpoint_auth_methods_supported"`
+	}
+	if json.Unmarshal(encoded, &metadata) != nil || metadata.ID != clientID {
+		return errors.New("invalid client metadata")
+	}
+	allowsPublic := metadata.AuthMethod == "none" || metadata.AuthMethod == "" && len(metadata.AuthMethods) == 0
+	for _, method := range metadata.AuthMethods {
+		if method == "none" {
+			allowsPublic = true
+		}
+	}
+	if !allowsPublic {
+		return errors.New("unsupported client authentication")
+	}
+	_, err = a.aiCapabilities.RegisterOAuthClient(domain, aicapability.OAuthClient{ID: clientID, Name: metadata.Name, RedirectURIs: metadata.RedirectURIs})
+	return err
+}
+
+func downloadAIMCPFile(boundary context.Context, address string, maximum int64) ([]byte, error) {
+	target, err := url.Parse(address)
+	if err != nil || target.Scheme != "https" || target.Fragment != "" || requirePublicOutboundURL(target) != nil {
+		return nil, errors.New("invalid remote attachment")
+	}
+	client := newPublicGrabHTTPClient("", "")
+	defer client.CloseIdleConnections()
+	// Signed attachment URLs and client metadata stay on their original HTTPS
+	// origin. Neither the capability nor the MCP bearer is forwarded to them.
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	// #nosec G704 -- HTTPS admission rejects private literals and credentials; the existing public-only transport pins validated DNS results.
+	request, err := http.NewRequestWithContext(boundary, http.MethodGet, address, nil)
+	if err != nil {
+		return nil, errors.New("invalid attachment request")
+	}
+	// #nosec G704 -- the public-only transport rejects private DNS results; redirects are disabled and no SiteBrush credentials are forwarded.
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, errors.New("remote attachment unavailable")
+	}
+	defer response.Body.Close()
+	if response.StatusCode != 200 || response.ContentLength > maximum {
+		return nil, errors.New("remote attachment rejected")
+	}
+	encoded, err := io.ReadAll(io.LimitReader(response.Body, maximum+1))
+	if err != nil || int64(len(encoded)) > maximum {
+		return nil, errors.New("remote attachment exceeds limits")
+	}
+	return encoded, nil
+}
+
+// This response adapter calls the shared in-process handler directly: no
+// loopback HTTP, duplicate CMS logic, or credentials in synthetic URLs.
+type aiOperationResponse struct {
+	headers http.Header
+	status  int
+	body    bytes.Buffer
+}
+
+func (response *aiOperationResponse) Header() http.Header { return response.headers }
+func (response *aiOperationResponse) WriteHeader(status int) {
+	if response.status == 0 {
+		response.status = status
+	}
+}
+func (response *aiOperationResponse) Write(encoded []byte) (int, error) {
+	if response.status == 0 {
+		response.status = 200
+	}
+	return response.body.Write(encoded)
+}
+
+func (a *App) invokeMCPAIContent(r *http.Request, domain string, invocation sitemcp.Invocation) (sitemcp.Result, error) {
+	operation := invocation.Operation
+	method := http.MethodGet
+	action := operation
+	switch operation {
+	case "list_pages":
+		action = "pages"
+	case "read_page":
+		action = "page"
+	case "list_files":
+		action = "files"
+	case "list_revisions":
+		action = "revisions"
+	case "create_page", "update_page":
+		action = "page"
+		method = http.MethodPost
+	case "upload_file":
+		action = "file"
+		method = http.MethodPost
+	case "publish", "rollback":
+		method = http.MethodPost
+	}
+	request := r.Clone(r.Context())
+	request.Method = method
+	requestURL := *request.URL
+	query := url.Values{"ai": []string{action}}
+	arguments := invocation.Arguments
+	if arguments.Path != "" {
+		query.Set("path", arguments.Path)
+	}
+	for _, parameter := range []struct {
+		name   string
+		number int
+	}{{"days", arguments.Days}, {"limit", arguments.Limit}, {"offset", arguments.Offset}} {
+		if parameter.number != 0 {
+			query.Set(parameter.name, strconv.Itoa(parameter.number))
+		}
+	}
+	requestURL.RawQuery = query.Encode()
+	request.URL = &requestURL
+	editorRequest := arguments.EditorRequest()
+	editorRequest.Operation = aieditor.Operation(operation)
+	encoded, err := json.Marshal(editorRequest)
+	if err != nil {
+		return sitemcp.Result{}, err
+	}
+	request.Body = io.NopCloser(bytes.NewReader(encoded))
+	request.ContentLength = int64(len(encoded))
+	response := &aiOperationResponse{headers: make(http.Header)}
+	a.serveAuthorizedAIContent(response, request, domain, invocation.Capability, invocation.Session, action, true)
+	return sitemcp.DecodeResult(response.status, response.body.Bytes()), nil
+}
+
 // Public discovery and device approval extend the existing capability owner.
 func (a *App) aiProtocolEndpoint(w http.ResponseWriter, r *http.Request, domain string) {
 	w.Header().Set("Cache-Control", "no-store")
@@ -13440,7 +13764,7 @@ func (a *App) aiProtocolEndpoint(w http.ResponseWriter, r *http.Request, domain 
 			return
 		}
 		aicapability.ManifestResponse(w, r, aicapability.Manifest{
-			Name: "SiteBrush", Protocol: aicapability.Protocol, Domain: domain,
+			Name: "SiteBrush", Protocol: aicapability.Protocol, Domain: domain, MCPURL: origin + sitemcp.Path,
 			APIBase: origin + "/", AuthorizationURL: origin + "/?ai=pair",
 			DocumentationURL: origin + "/?ai=documentation", OpenAPIURL: origin + "/?ai=openapi",
 			Scopes: aicapability.StandardScopes(), Operations: aicapability.Operations(),
@@ -13575,10 +13899,23 @@ func (a *App) aiPairingApproval(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "cannot approve AI connection request", http.StatusBadRequest)
 			return
 		}
+		callback, callbackErr := a.aiCapabilities.OAuthApprovalRedirect(domain, verificationCode)
+		if callbackErr != nil {
+			http.Error(w, "AI authorization expired or is invalid", http.StatusBadRequest)
+			return
+		}
+		if callback != "" {
+			http.Redirect(w, r, callback, http.StatusSeeOther)
+			return
+		}
 		httpsecurity.RedirectLocal(w, r, "/?ai_authorize="+url.QueryEscape(verificationCode), http.StatusSeeOther)
 		return
 	}
-	a.render(w, r, "ai_authorize.html", map[string]any{"Domain": domain, "Pairing": pairing, "AccountCSRF": accountCSRF(r)})
+	requestedScopes := pairing.RequestedScopes
+	if len(requestedScopes) == 0 {
+		requestedScopes = aicapability.StandardScopes()
+	}
+	a.render(w, r, "ai_authorize.html", map[string]any{"Domain": domain, "Pairing": pairing, "AccountCSRF": accountCSRF(r), "RequestedRead": containsAIScope(requestedScopes, aicapability.ScopeRead), "RequestedWrite": containsAIScope(requestedScopes, aicapability.ScopeWrite), "RequestedPublish": containsAIScope(requestedScopes, aicapability.ScopePublish), "RequestedAnalytics": containsAIScope(requestedScopes, aicapability.ScopeAnalytics)})
 }
 
 func (a *App) aiCapabilityQueryEndpoint(w http.ResponseWriter, r *http.Request, domain string) {
@@ -13953,6 +14290,12 @@ func (a *App) aiContentEndpoint(w http.ResponseWriter, r *http.Request, domain, 
 		http.Error(w, "editor session is invalid", http.StatusUnauthorized)
 		return
 	}
+	a.serveAuthorizedAIContent(w, r, domain, capability, session, operation, false)
+}
+
+// Both transports enter the same authorization and content pipeline. Transport
+// adapters may narrow publication to drafts, but cannot widen the grant.
+func (a *App) serveAuthorizedAIContent(w http.ResponseWriter, r *http.Request, domain string, capability aicapability.Capability, session aicapability.Session, operation string, draftOnly bool) {
 	r, finishSession := aiSessionRequest(r, session)
 	defer finishSession()
 	scopedPagePath := ""
@@ -14116,7 +14459,7 @@ func (a *App) aiContentEndpoint(w http.ResponseWriter, r *http.Request, domain, 
 			http.Error(w, "expected_version is required for update_page", http.StatusBadRequest)
 			return
 		}
-		request.DraftOnly = !containsAIScope(session.Scopes, aicapability.ScopePublish)
+		request.DraftOnly = draftOnly || !containsAIScope(session.Scopes, aicapability.ScopePublish)
 		request.PageOnly = scopedPagePath != ""
 		request.StrictVersion = r.URL.Query().Get("ai") != ""
 		result, resultErr := a.executeAITask(request, r)
@@ -14154,7 +14497,7 @@ func (a *App) aiContentEndpoint(w http.ResponseWriter, r *http.Request, domain, 
 		http.Error(w, "revision_id and expected_version are required for rollback", http.StatusBadRequest)
 		return
 	}
-	request.DraftOnly = !containsAIScope(session.Scopes, aicapability.ScopePublish)
+	request.DraftOnly = draftOnly || !containsAIScope(session.Scopes, aicapability.ScopePublish)
 	request.PageOnly = scopedPagePath != ""
 	request.StrictVersion = r.URL.Query().Get("ai") != ""
 	result, resultErr := a.executeAITask(request, r)
