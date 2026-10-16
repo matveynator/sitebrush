@@ -13878,6 +13878,11 @@ func (a *App) aiPairingApproval(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "AI connection request expired or is invalid", http.StatusBadRequest)
 		return
 	}
+	if pairing.OAuthRedirectOrigin != "" {
+		// Browsers apply form-action to the complete redirect chain. Only the
+		// registered callback origin may receive the PKCE authorization response.
+		w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'; form-action 'self' "+pairing.OAuthRedirectOrigin)
+	}
 	if r.Method == http.MethodPost {
 		r.Body = http.MaxBytesReader(w, r.Body, 8192)
 		if !sessionCSRFMutationAllowed(r) || !adminMutationSourceAllowed(r) {

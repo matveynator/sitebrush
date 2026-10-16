@@ -18,14 +18,15 @@ var ErrPairingBusy = errors.New("too_many_pairing_requests")
 // DeviceCode is delivered only to the initiating agent; VerificationCode only
 // identifies the browser approval. Neither alone can approve or use a grant.
 type Pairing struct {
-	DeviceCode       string    `json:"device_code,omitempty"`
-	VerificationCode string    `json:"-"`
-	Domain           string    `json:"domain"`
-	Status           string    `json:"status"`
-	Expires          time.Time `json:"expires"`
-	Interval         int       `json:"interval"`
-	ClientName       string    `json:"client_name,omitempty"`
-	RequestedScopes  []string  `json:"requested_scopes,omitempty"`
+	DeviceCode          string    `json:"device_code,omitempty"`
+	VerificationCode    string    `json:"-"`
+	Domain              string    `json:"domain"`
+	Status              string    `json:"status"`
+	Expires             time.Time `json:"expires"`
+	Interval            int       `json:"interval"`
+	ClientName          string    `json:"client_name,omitempty"`
+	RequestedScopes     []string  `json:"requested_scopes,omitempty"`
+	OAuthRedirectOrigin string    `json:"-"`
 }
 
 type pairingState struct {

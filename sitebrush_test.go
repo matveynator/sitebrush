@@ -23822,6 +23822,61 @@ func TestMCPPublicTransportSecurityAndCredentialRedaction(t *testing.T) {
 	}
 }
 
+func TestMCPApprovalBrowserRedirect(t *testing.T) {
+	if os.Getenv("SITEBRUSH_MCP_BROWSER_TEST") != "1" {
+		t.Skip("set SITEBRUSH_MCP_BROWSER_TEST=1 after installing scripts/editor browser dependencies")
+	}
+	application := newRouterTestApplication(t)
+	fixtureContext := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), "localhost"))
+	if _, err := application.db.ExecContext(fixtureContext, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "browser-owner@example.org", "test"); err != nil {
+		t.Fatal(err)
+	}
+	application.aiCapabilities = aicapability.NewManager()
+	t.Cleanup(application.aiCapabilities.Close)
+	responses := make(chan url.Values, 1)
+	callback := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/callback" {
+			http.NotFound(response, request)
+			return
+		}
+		responses <- request.URL.Query()
+		_, _ = io.WriteString(response, "OAuth complete")
+	}))
+	defer callback.Close()
+	server := httptest.NewServer(http.HandlerFunc(application.route))
+	defer server.Close()
+	origin := strings.Replace(server.URL, "127.0.0.1", "localhost", 1)
+	redirectURI := callback.URL + "/callback"
+	client, err := application.aiCapabilities.RegisterOAuthClient("localhost", aicapability.OAuthClient{Name: "Browser AI", RedirectURIs: []string{redirectURI}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier := strings.Repeat("v", 43)
+	digest := sha256.Sum256([]byte(verifier))
+	resource := origin + sitemcp.Path
+	pairing, err := application.aiCapabilities.BeginOAuth("localhost", aicapability.OAuthAuthorization{ClientID: client.ID, RedirectURI: redirectURI, Resource: resource, State: "browser-state", Challenge: base64.RawURLEncoding.EncodeToString(digest[:])})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookie := newAdminSessionCookie(t, application, "browser-owner@example.org")
+	command := exec.Command("node", "pkg/mcp/approval_test.cjs")
+	command.Env = append(os.Environ(), "SITEBRUSH_MCP_APPROVAL_URL="+origin+"/?ai_authorize="+pairing.VerificationCode, "SITEBRUSH_MCP_CALLBACK_URL="+redirectURI, "SITEBRUSH_MCP_COOKIE="+cookie.Name+"="+cookie.Value)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("MCP browser approval failed: %v\n%s", err, output)
+	}
+	select {
+	case response := <-responses:
+		if response.Get("state") != "browser-state" || response.Get("iss") != origin {
+			t.Fatal("browser callback lost authorization binding")
+		}
+		if _, err := application.aiCapabilities.ExchangeOAuthCode("localhost", client.ID, resource, redirectURI, response.Get("code"), verifier); err != nil {
+			t.Fatal("browser approval could not establish access", err)
+		}
+	default:
+		t.Fatal("browser never reached the external OAuth callback")
+	}
+}
+
 func TestMCPRemoteOAuthAndExistingSiteOperations(t *testing.T) {
 	application := newRouterTestApplication(t)
 	analyticsStore := browserstats.OpenStore(filepath.Join(application.storageRootDir(), "analytics"))
@@ -23899,9 +23954,12 @@ func TestMCPRemoteOAuthAndExistingSiteOperations(t *testing.T) {
 	if status != 303 || !strings.Contains(headers.Get("Location"), "login") {
 		t.Fatal("approval bypassed login", status)
 	}
-	status, _, approvalBody := send("GET", approvalAddress, "", "", true)
+	status, approvalHeaders, approvalBody := send("GET", approvalAddress, "", "", true)
 	if status != 200 || !strings.Contains(string(approvalBody), "MCP external client") || !strings.Contains(string(approvalBody), `name="scope_analytics" checked`) || strings.Contains(string(approvalBody), "device_code") {
 		t.Fatal("invalid native approval screen", status)
+	}
+	if approvalHeaders.Get("Content-Security-Policy") != "frame-ancestors 'none'; form-action 'self' https://client.example" {
+		t.Fatal("approval form cannot redirect to the registered OAuth client")
 	}
 	csrfRequest := httptest.NewRequest("GET", origin, nil)
 	csrfRequest.AddCookie(cookie)

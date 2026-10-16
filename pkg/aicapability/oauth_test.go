@@ -232,7 +232,7 @@ func TestOAuthApprovalCannotEscalateRequestedScopesAndDenialIsTerminal(t *testin
 func TestOAuthRejectsInvalidRedirectsScopesAndStorage(t *testing.T) {
 	manager := NewManager()
 	defer manager.Close()
-	for _, address := range []string{"javascript:alert(1)", "http://external.example/callback", "https://user:secret@example.org/callback", "https://example.org/callback#fragment"} {
+	for _, address := range []string{"javascript:alert(1)", "http://external.example/callback", "https://user:secret@example.org/callback", "https://example.org/callback#fragment", "https://example.org;form-action=*/callback"} {
 		if _, err := manager.RegisterOAuthClient("one.example", OAuthClient{RedirectURIs: []string{address}}); err == nil {
 			t.Fatal("unsafe redirect registered", address)
 		}

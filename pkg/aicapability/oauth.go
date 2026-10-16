@@ -147,6 +147,14 @@ func validOAuthRedirect(address string) bool {
 	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" || len(address) > 2048 {
 		return false
 	}
+	// Callback origins also enter the browser's form-action policy. Accept DNS
+	// ASCII (including punycode) and IP authority characters, never CSP syntax.
+	for _, character := range parsed.Host {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || strings.ContainsRune(".-:[]", character) {
+			continue
+		}
+		return false
+	}
 	if parsed.Scheme == "https" {
 		return true
 	}
@@ -331,6 +339,8 @@ func (manager *Manager) handleOAuth(request oauthRequest, state *oauthState, cap
 		state.Clients[clientKey(client.ID)] = client
 		pairing := response.pairing
 		pairing.ClientName = client.Name
+		redirect, _ := url.Parse(authorization.RedirectURI)
+		pairing.OAuthRedirectOrigin = redirect.Scheme + "://" + redirect.Host
 		pairing.RequestedScopes = append([]string(nil), authorization.Scopes...)
 		storedPairing := pairings[tokenHash(pairing.DeviceCode)]
 		storedPairing.Pairing = pairing
