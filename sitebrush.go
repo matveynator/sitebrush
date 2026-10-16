@@ -9,6 +9,7 @@ import (
 	"crypto/cipher"
 	"crypto/ecdh"
 	"crypto/ed25519"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha1"
@@ -1781,8 +1782,13 @@ func (repository siteAnalyticsRepository) Exchange(request browserstats.StorageR
 }
 
 func (a *App) migrateLegacyAnalytics(database *sql.DB, domain, directory string) error {
-	legacyDirectory := filepath.Join(a.storageRootDir(), "analytics", "site-"+url.PathEscape(domain))
-	legacyPath := filepath.Join(legacyDirectory, browserstats.DatabaseName(domain))
+	domain = strings.TrimSpace(domain)
+	safeDomain := filepath.Base(domain)
+	if domain == "" || strings.ContainsAny(domain, "\x00\r\n/\\") || safeDomain != domain || safeDomain == "." || safeDomain == ".." {
+		return errors.New("unsafe legacy analytics domain")
+	}
+	legacyDirectory := filepath.Join(a.storageRootDir(), "analytics", "site-"+url.PathEscape(safeDomain))
+	legacyPath := filepath.Join(legacyDirectory, browserstats.DatabaseName(safeDomain))
 	if _, err := os.Lstat(legacyPath); errors.Is(err, os.ErrNotExist) {
 		legacyPath = filepath.Join(legacyDirectory, "analytics.db")
 		if _, legacyErr := os.Lstat(legacyPath); errors.Is(legacyErr, os.ErrNotExist) {
@@ -1869,8 +1875,10 @@ func (storage siteAIStorage) Save(capabilities, oauth []byte) error {
 }
 
 func stableSiteID(domain string) string {
-	digest := sha256.Sum256([]byte("sitebrush/site/" + normalizeDomainName(domain)))
-	return hex.EncodeToString(digest[:16])
+	digest := hmac.New(sha256.New, []byte("sitebrush/site-id/v1"))
+	_, _ = digest.Write([]byte(normalizeDomainName(domain)))
+	sum := digest.Sum(nil)
+	return hex.EncodeToString(sum[:16])
 }
 
 func registeredSiteDatabaseCandidates(root string) ([]siteQuotaDatabaseCandidate, error) {
@@ -11855,12 +11863,32 @@ func (a *App) connectAIControlFacade() {
 
 // Admission is evaluated before inspecting any AI selector or writing a
 // protocol-specific header. Credentials cannot substitute for network trust.
+type aiIngressDecision struct {
+	machine bool
+	owner   bool
+}
+
+type aiIngressDecisionContextKey struct{}
+
+func requestWithAIIngressDecision(r *http.Request, machine, owner bool) *http.Request {
+	decision := aiIngressDecision{machine: machine, owner: owner}
+	return r.WithContext(context.WithValue(r.Context(), aiIngressDecisionContextKey{}, decision))
+}
+
+func (a *App) aiIngressDecisionForRequest(r *http.Request) (machine, owner bool) {
+	if decision, ok := r.Context().Value(aiIngressDecisionContextKey{}).(aiIngressDecision); ok {
+		return decision.machine, decision.owner
+	}
+	return a.aiIngressAdmission(r)
+}
+
 func (a *App) aiIngressMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		machine, owner := a.aiIngressAdmission(r)
 		// Public logging, abuse detection and referrer cookies must observe the
 		// same request as the public router, without hidden control selectors.
-		next.ServeHTTP(w, aiRequestAfterAdmission(r, machine, owner))
+		admitted := aiRequestAfterAdmission(r, machine, owner)
+		next.ServeHTTP(w, requestWithAIIngressDecision(admitted, machine, owner))
 	})
 }
 
@@ -12158,8 +12186,8 @@ func (a *App) refreshAIProviderRanges(stop <-chan struct{}) {
 }
 
 func (a *App) route(w http.ResponseWriter, r *http.Request) {
-	machine, owner := a.aiIngressAdmission(r)
-	r = aiRequestAfterAdmission(r, machine, owner)
+	machine, owner := a.aiIngressDecisionForRequest(r)
+	r = requestWithAIIngressDecision(aiRequestAfterAdmission(r, machine, owner), machine, owner)
 
 	if a.siteMCPRoute(w, r) {
 		return
@@ -14569,7 +14597,7 @@ func (a *App) executeAIEditorSiteRequest(w http.ResponseWriter, r *http.Request,
 // Remote MCP is a boundary adapter. Site content and permissions remain owned
 // by the existing AI capability and editor processes.
 func (a *App) siteMCPRoute(w http.ResponseWriter, r *http.Request) bool {
-	machine, owner := a.aiIngressAdmission(r)
+	machine, owner := a.aiIngressDecisionForRequest(r)
 	if !machine && !owner {
 		return false
 	}
@@ -43723,32 +43751,33 @@ func (a *App) listAutomaticSSLDomainCandidates(ctx context.Context) []string {
 }
 
 func (a *App) collectAutomaticSSLDomainCandidates(ctx context.Context, seenDomains map[string]struct{}) {
-	query := `
-SELECT domain FROM pages
-UNION SELECT domain FROM users
+	collect := func(query string) {
+		rows, err := a.db.QueryContext(ctx, query)
+		if err != nil {
+			return
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var rawDomain sql.NullString
+			if scanErr := rows.Scan(&rawDomain); scanErr != nil {
+				continue
+			}
+			domain := normalizeDomainName(rawDomain.String)
+			if domain == "" {
+				continue
+			}
+			if _, seen := seenDomains[domain]; seen {
+				continue
+			}
+			seenDomains[domain] = struct{}{}
+		}
+	}
+	collect(`SELECT domain FROM pages`)
+	collect(`SELECT domain FROM users
 UNION SELECT domain FROM domain_states
 UNION SELECT primary_domain FROM domain_aliases
 UNION SELECT alias_domain FROM domain_aliases
-UNION SELECT domain FROM domain_ssl_settings`
-	rows, err := a.db.QueryContext(ctx, query)
-	if err != nil {
-		return
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var rawDomain sql.NullString
-		if scanErr := rows.Scan(&rawDomain); scanErr != nil {
-			continue
-		}
-		domain := normalizeDomainName(rawDomain.String)
-		if domain == "" {
-			continue
-		}
-		if _, seen := seenDomains[domain]; seen {
-			continue
-		}
-		seenDomains[domain] = struct{}{}
-	}
+UNION SELECT domain FROM domain_ssl_settings`)
 }
 
 // Pending mail registrations can request a certificate before a site database exists.
@@ -43799,17 +43828,19 @@ func (a *App) domainIsAutomaticSSLCandidate(ctx context.Context, domain string) 
 	if a.pendingRegistrationDomain(ctx, certificateDomain) {
 		return true
 	}
+	var domainCount int
+	if err := a.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM pages WHERE domain=?`, certificateDomain).Scan(&domainCount); err == nil && domainCount > 0 {
+		return true
+	}
 	query := `
 SELECT COUNT(1) FROM (
-SELECT domain FROM pages WHERE domain=?
-UNION SELECT domain FROM users WHERE domain=?
+SELECT domain FROM users WHERE domain=?
 UNION SELECT domain FROM domain_states WHERE domain=?
 UNION SELECT primary_domain FROM domain_aliases WHERE primary_domain=?
 UNION SELECT alias_domain FROM domain_aliases WHERE alias_domain=?
 UNION SELECT domain FROM domain_ssl_settings WHERE domain=?
 )`
-	var domainCount int
-	err := a.db.QueryRowContext(ctx, query, certificateDomain, certificateDomain, certificateDomain, certificateDomain, certificateDomain, certificateDomain).Scan(&domainCount)
+	err := a.db.QueryRowContext(ctx, query, certificateDomain, certificateDomain, certificateDomain, certificateDomain, certificateDomain).Scan(&domainCount)
 	return err == nil && domainCount > 0
 }
 

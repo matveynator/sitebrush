@@ -220,10 +220,12 @@ func (store *Store) run(root string, requests <-chan StorageRequest, done chan<-
 }
 
 func storeDirectoryPath(root, domain string) (string, error) {
-	if domain == "" || len(domain) > 253 || strings.ContainsAny(domain, "\x00\r\n/\\") {
+	domain = strings.TrimSpace(domain)
+	safeDomain := filepath.Base(domain)
+	if domain == "" || len(domain) > 253 || strings.ContainsAny(domain, "\x00\r\n/\\") || safeDomain != domain || safeDomain == "." || safeDomain == ".." {
 		return "", errors.New("invalid analytics domain")
 	}
-	directory := filepath.Join(root, "site-"+url.PathEscape(domain))
+	directory := filepath.Join(root, "site-"+url.PathEscape(safeDomain))
 	relative, err := filepath.Rel(root, directory)
 	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
 		return "", errors.New("unsafe analytics directory")
@@ -629,7 +631,9 @@ func DecodeArchive(reader io.Reader) (Report, error) {
 	return report, nil
 }
 
-func DatabaseName(domain string) string { return url.PathEscape(domain) + ".analytics.db" }
+func DatabaseName(domain string) string {
+	return url.PathEscape(filepath.Base(strings.TrimSpace(domain))) + ".analytics.db"
+}
 func directoryBytes(directory string) (int64, error) {
 	entries, err := os.ReadDir(directory)
 	if os.IsNotExist(err) {
