@@ -1,0 +1,73 @@
+name: PR193 inspect
+
+on:
+  push:
+    branches:
+      - codex/hidden-ai-site-databases
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  inspect:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Print targeted functions
+        shell: python
+        run: |
+          from pathlib import Path
+
+          text = Path("sitebrush.go").read_text()
+          names = [
+              "collectAutomaticSSLDomainCandidates",
+              "domainIsAutomaticSSLCandidate",
+              "aiIngressMiddleware",
+              "aiIngressAdmission",
+              "aiRequestAfterAdmission",
+              "route",
+              "siteMCPRoute",
+              "migrateLegacyAnalytics",
+              "stableSiteID",
+          ]
+
+          def function(name):
+              markers = [f"func {name}(", f"func (a *App) {name}("]
+              starts = [text.find(marker) for marker in markers]
+              starts = [start for start in starts if start >= 0]
+              if not starts:
+                  return f"NOT FOUND: {name}"
+              start = min(starts)
+              opening = text.find("{", start)
+              depth = 0
+              quote = None
+              escaped = False
+              for index in range(opening, len(text)):
+                  ch = text[index]
+                  if quote:
+                      if quote != "`" and escaped:
+                          escaped = False
+                          continue
+                      if quote != "`" and ch == "\\":
+                          escaped = True
+                          continue
+                      if ch == quote:
+                          quote = None
+                      continue
+                  if ch in ('"', "'", "`"):
+                      quote = ch
+                      continue
+                  if ch == "{":
+                      depth += 1
+                  elif ch == "}":
+                      depth -= 1
+                      if depth == 0:
+                          return text[start:index + 1]
+              return f"UNTERMINATED: {name}"
+
+          for name in names:
+              print(f"===== {name} =====")
+              print(function(name))
