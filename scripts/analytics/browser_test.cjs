@@ -17,9 +17,9 @@ assert.ok(['chromium','webkit'].includes(browserEngine),'Unsupported browser eng
     assert.equal(tileRequest.request().headers().referer,new URL(process.env.SITEBRUSH_ANALYTICS_URL).origin+'/','OSM must receive only the site origin');
     await tileRequest.fulfill({contentType:'image/png',body:Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=','base64')});
    });
-   const page=await context.newPage();const errors=[];const networkFailures=[];page.on('pageerror',error=>errors.push(error.message));
+   const page=await context.newPage();const errors=[];const networkFailures=[];const websocketFailures=[];let analyticsSessionClosed=Promise.resolve();page.on('pageerror',error=>errors.push(error.message));
    page.on('console',message=>{if(message.type()==='error')networkFailures.push(message.text());});
-   page.on('websocket',connection=>{connection.on('socketerror',failure=>networkFailures.push(String(failure)));});
+   page.on('websocket',connection=>{analyticsSessionClosed=new Promise(resolve=>connection.on('close',resolve));connection.on('socketerror',failure=>{networkFailures.push(String(failure));websocketFailures.push(String(failure));});});
    await page.goto(process.env.SITEBRUSH_ANALYTICS_URL+'/?analytics&days=7');
    await page.locator('#conversion-funnels').getByText('Download · 100.0% · 1 / 1').waitFor();
    assert.equal(await page.locator('#technical-analytics').count(),0);
@@ -84,6 +84,9 @@ assert.ok(['chromium','webkit'].includes(browserEngine),'Unsupported browser eng
    } catch (saveError) {
     throw new Error(saveError.message+'\nConfiguration status: '+await page.locator('#conversion-save-status').textContent()+'\nNetwork failures: '+networkFailures.join(' | '));
    }
+   await analyticsSessionClosed;
+   assert.equal(await page.locator('#conversion-save-status').textContent(),'Saved. Reports refresh within one minute.','socket shutdown replaced a successful save');
+   assert.deepEqual(websocketFailures,[],'analytics session must send one valid close handshake');
    await page.screenshot({path:path.join(os.tmpdir(),'sitebrush-analytics-'+viewport.width+'.png'),fullPage:true});
    assert.deepEqual(errors,[]);
    console.log('Analytics browser '+viewport.width+': funnels, tree, sandbox heatmap, privacy, constructor and WebSocket save passed');

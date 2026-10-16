@@ -3979,14 +3979,19 @@ func (a *App) browserAnalyticsSocket(w http.ResponseWriter, r *http.Request) {
 	defer func() { <-a.analyticsConnections }()
 	domain := a.analyticsEventDomain(r, "")
 	websocket.Server{Handshake: func(*websocket.Config, *http.Request) error { return nil }, Handler: func(connection *websocket.Conn) {
-		defer connection.Close()
 		connection.MaxPayloadBytes = 16384
 		// One writer serializes configuration and worker replies for this session.
 		outbound := make(chan string, 8)
 		receipts := make(chan browserAnalyticsReceipt, 4)
 		sessionStop := make(chan struct{})
-		defer close(sessionStop)
-		go writeBrowserAnalyticsSession(connection, outbound, receipts, sessionStop)
+		sessionFinished := make(chan struct{})
+		// The writer owns the close frame. Join it before returning the transport
+		// to HTTP so concurrent closes cannot invalidate an acknowledged command.
+		defer func() { close(sessionStop); <-sessionFinished }()
+		go func() {
+			defer close(sessionFinished)
+			writeBrowserAnalyticsSession(connection, outbound, receipts, sessionStop)
+		}()
 		messageWindowStarted := time.Now()
 		messageWindowCount := 0
 		rulesSent := false
