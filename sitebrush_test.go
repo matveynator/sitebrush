@@ -24258,3 +24258,336 @@ func TestSavedPageRepeatedImportKeepsRevisionAndQuotaAccounting(t *testing.T) {
 		t.Fatal("unchanged import inflated storage usage", originalUsage, nextUsage)
 	}
 }
+
+// A confirmed mailbox reserves identity before TLS, without creating a usable account.
+func TestConfirmedDomainReservationSurvivesTLSWaitAndRestart(t *testing.T) {
+	application := newRouterTestApplication(t)
+	db := setupBillingOwnerForTest(t, application, "sitebrush.ru", "admin@sitebrush.ru", true)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher, err := startServerControlDatabaseDispatcher(application.serverControlDBPath(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.controlDatabase = dispatcher
+	t.Cleanup(func() { dispatcher.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	application.registrationConfirmations = startEmailConfirmationMemoryWorker(ctx)
+	application.automaticSSL = make(chan automaticSSLRequest, 16)
+	domain := "ero.sitebrush.ru"
+	confirmation := EmailConfirmation{Token: "confirmed-owner-token", FormToken: "owner-form", Domain: domain, Action: "register", Email: "owner@example.org", Code: "123456", ExpiresAt: time.Now().Add(time.Minute).UTC().Format(time.RFC3339)}
+	if err := application.saveRegistrationConfirmation(ctx, confirmation); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://"+domain+"/?email_confirm="+confirmation.Token, nil)
+	request = request.WithContext(contextWithDomain(request.Context(), domain))
+	response := httptest.NewRecorder()
+	application.confirmEmailToken(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `id="https-progress"`) || strings.Contains(response.Body.String(), `type="password"`) {
+		t.Fatalf("unsafe or missing wait UI: %d %s", response.Code, response.Body.String())
+	}
+	if !application.registrationDomainClaimed(ctx, domain) || application.hasAdmin(contextWithDomain(ctx, domain), domain) {
+		t.Fatal("reservation either absent or created login credentials")
+	}
+	observed := <-application.automaticSSL
+	if observed.action != "registration_confirmed" {
+		t.Fatalf("certificate not explicitly queued: %+v", observed)
+	}
+	next, err := application.availablePublicTrialDomain(ctx, "https://ero.com", "sitebrush.ru")
+	if err != nil || next == domain {
+		t.Fatalf("trial reused reserved domain: %s %v", next, err)
+	}
+	if err := application.claimTrialDomain(ctx, domain, "competing-trial"); err == nil {
+		t.Fatal("trial acquired confirmed domain")
+	}
+	// The unowned-site form must no longer accept a different email.
+	register := httptest.NewRequest(http.MethodGet, "http://"+domain+"/?register", nil).WithContext(contextWithDomain(ctx, domain))
+	reserved := httptest.NewRecorder()
+	application.registerPage(reserved, register)
+	if reserved.Code != http.StatusConflict || strings.Contains(reserved.Body.String(), `name="email"`) {
+		t.Fatalf("reserved site offers signup: %d %s", reserved.Code, reserved.Body.String())
+	}
+	// A restarted confirmation worker reloads the durable token, extended for slow TLS issuance.
+	application.registrationConfirmations = startEmailConfirmationMemoryWorker(ctx)
+	restored, found := application.registrationConfirmationByToken(ctx, confirmation.Token)
+	expiry, _ := time.Parse(time.RFC3339, restored.ExpiresAt)
+	if !found || time.Until(expiry) < 23*time.Hour {
+		t.Fatalf("confirmed link not durable: %+v %t", restored, found)
+	}
+	candidates := application.listAutomaticSSLDomainCandidates(ctx)
+	if !slices.Contains(candidates, domain) {
+		t.Fatalf("restart loses certificate job: %v", candidates)
+	}
+	rows, err := application.hostingAndSupportSiteRows(ctx, nil, nil, nil, nil, "sitebrush.ru", "", "sitebrush.ru")
+	if err != nil {
+		t.Fatal(err)
+	}
+	visible := false
+	for _, row := range rows {
+		if row.Domain == domain && strings.Contains(row.AdminEmails, confirmation.Email) {
+			visible = true
+		}
+	}
+	if !visible {
+		t.Fatalf("confirmed mailbox/site hidden from panel: %+v", rows)
+	}
+	// Status polling reuses the job and does not emit registration_confirmed again.
+	go func() {
+		for request := range application.automaticSSL {
+			if request.progressResponse != nil {
+				request.progressResponse <- automaticSSLProgress{State: "requesting", StartedAt: time.Now().Add(-time.Minute), Events: []automaticSSLProgressEvent{{State: "queued", At: time.Now().Add(-time.Minute)}}}
+				return
+			}
+		}
+	}()
+	statusRequest := httptest.NewRequest(http.MethodGet, "http://"+domain+"/?email_confirm="+confirmation.Token+"&https_status=1", nil).WithContext(contextWithDomain(ctx, domain))
+	statusResponse := httptest.NewRecorder()
+	application.confirmEmailToken(statusResponse, statusRequest)
+	if statusResponse.Code != 200 || !strings.Contains(statusResponse.Header().Get("Content-Type"), "application/json") || !strings.Contains(statusResponse.Body.String(), `"state":"requesting"`) {
+		t.Fatalf("status is not live JSON: %d %s", statusResponse.Code, statusResponse.Body.String())
+	}
+}
+
+func TestCertificateProgressAndTransientRetry(t *testing.T) {
+	application, database := newTestApplication(t)
+	application.automaticSSLAvailable = true
+	domain := "example.org"
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, "owner@example.org", "password"); err != nil {
+		t.Fatal(err)
+	}
+	previous := lookupIPRecords
+	lookupIPRecords = func(string) ([]net.IP, error) { return []net.IP{net.ParseIP("8.8.8.8")}, nil }
+	defer func() { lookupIPRecords = previous }()
+	var states []string
+	issuer := automaticSSLIssuerFunc(func(context.Context, string) channelacme.IssueResult {
+		return channelacme.IssueResult{Err: errors.New("temporary network failure")}
+	})
+	result := application.prepareAutomaticSSLDomainWithProgress(issuer, domain, []net.IP{net.ParseIP("8.8.8.8")}, false, func(state string) { states = append(states, state) })
+	if result.state != "certificate_error" || time.Until(result.retryAfter) > 3*time.Minute {
+		t.Fatalf("temporary failure has excessive backoff: %+v", result)
+	}
+	if !slices.Equal(states, []string{"checking_dns", "requesting"}) {
+		t.Fatalf("stages = %v", states)
+	}
+	// A status refresh must respect persisted backoff, not issue a second order.
+	second := application.prepareAutomaticSSLDomainWithProgress(nil, domain, []net.IP{net.ParseIP("8.8.8.8")}, false, func(string) { t.Fatal("backoff bypassed") })
+	if second.state != "delayed" {
+		t.Fatalf("lost retry deadline: %+v", second)
+	}
+}
+
+func TestCertificateSchedulerReportsLiveJobAndDoesNotDuplicatePolls(t *testing.T) {
+	application, database := newTestApplication(t)
+	application.automaticSSLAvailable = true
+	domain := "example.org"
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, "owner@example.org", "password"); err != nil {
+		t.Fatal(err)
+	}
+	previous := lookupIPRecords
+	lookupIPRecords = func(string) ([]net.IP, error) { return []net.IP{net.ParseIP("8.8.8.8")}, nil }
+	defer func() { lookupIPRecords = previous }()
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	defer func() { close(stop); <-done }()
+	application.automaticSSL = make(chan automaticSSLRequest, 16)
+	release := make(chan struct{})
+	calls := make(chan string, 8)
+	issuer := automaticSSLIssuerFunc(func(ctx context.Context, domain string) channelacme.IssueResult {
+		calls <- domain
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return channelacme.IssueResult{Err: errors.New("temporary network failure")}
+	})
+	go func() {
+		defer close(done)
+		application.runAutomaticSSLProcessWithIPDetection(stop, issuer, application.automaticSSL, func() ([]net.IP, error) { return []net.IP{net.ParseIP("8.8.8.8")}, nil })
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	application.automaticSSL <- automaticSSLRequest{action: "registration_confirmed", domain: domain}
+	select {
+	case <-calls:
+	case <-ctx.Done():
+		t.Fatal("confirmed job never started")
+	}
+	for i := 0; i < 10; i++ {
+		snapshot := application.accountHTTPSProgress(ctx, domain, true)
+		if snapshot.State != "requesting" && snapshot.State != "checking_dns" {
+			t.Fatalf("no live job state: %+v", snapshot)
+		}
+	}
+	close(release)
+	var snapshot automaticSSLProgress
+	for ctx.Err() == nil {
+		snapshot = application.accountHTTPSProgress(ctx, domain, true)
+		if snapshot.State == "certificate_error" {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if snapshot.State != "certificate_error" || snapshot.Error == "" || !snapshot.RetryAt.After(time.Now()) {
+		t.Fatalf("failure/retry is invisible: %+v", snapshot)
+	}
+	if len(snapshot.Events) < 3 {
+		t.Fatalf("job history missing: %+v", snapshot)
+	}
+	select {
+	case domain := <-calls:
+		t.Fatalf("polling duplicated ACME order for %s", domain)
+	default:
+	}
+	// Each caller gets a copy: browser consumption cannot mutate scheduler history.
+	snapshot.Events[0].State = "corrupted"
+	if next := application.accountHTTPSProgress(ctx, domain, true); next.Events[0].State == "corrupted" {
+		t.Fatal("status shares scheduler-owned memory")
+	}
+}
+
+func newDurableClaimTestApplication(t *testing.T) (*App, context.Context) {
+	t.Helper()
+	application := newRouterTestApplication(t)
+	db := setupBillingOwnerForTest(t, application, "sitebrush.ru", "admin@sitebrush.ru", true)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher, err := startServerControlDatabaseDispatcher(application.serverControlDBPath(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.controlDatabase = dispatcher
+	t.Cleanup(func() { dispatcher.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	application.registrationConfirmations = startEmailConfirmationMemoryWorker(ctx)
+	application.automaticSSL = make(chan automaticSSLRequest, 32)
+	return application, ctx
+}
+
+func TestExpiredUnfinishedRegistrationOffersNewConfirmation(t *testing.T) {
+	application, ctx := newDurableClaimTestApplication(t)
+	domain := "ero.sitebrush.ru"
+	original := EmailConfirmation{Token: "expired-owner-token", FormToken: "expired-form", Domain: domain, Action: "register", Email: "owner@example.org", Code: "123456", ExpiresAt: time.Now().Add(time.Minute).UTC().Format(time.RFC3339)}
+	if err := application.saveRegistrationConfirmation(ctx, original); err != nil {
+		t.Fatal(err)
+	}
+	confirm := func(token string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodGet, "http://"+domain+"/?email_confirm="+token, nil).WithContext(contextWithDomain(ctx, domain))
+		response := httptest.NewRecorder()
+		application.confirmEmailToken(response, request)
+		return response
+	}
+	if response := confirm(original.Token); response.Code != http.StatusOK {
+		t.Fatalf("initial confirmation: %d %s", response.Code, response.Body.String())
+	}
+	// Advance durable timestamps past the shared expiry and discard cached mail
+	// state, as after returning to the server the next day or a process restart.
+	if err := application.withServerControlDatabaseWrite(ctx, "expire-unfinished-registration-test", func(db *sql.DB) error {
+		if _, err := db.ExecContext(ctx, `UPDATE domain_registration_claims SET confirmed_at=? WHERE domain=?`, time.Now().UTC().Add(-25*time.Hour).Format(time.RFC3339), domain); err != nil {
+			return err
+		}
+		_, err := db.ExecContext(ctx, `UPDATE registration_confirmations SET expires_at=? WHERE token=?`, time.Now().UTC().Add(-time.Hour).Format(time.RFC3339), original.Token)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	application.registrationConfirmations = startEmailConfirmationMemoryWorker(ctx)
+	if application.registrationDomainClaimed(ctx, domain) {
+		t.Fatal("expired unfinished claim still blocks signup")
+	}
+	if response := confirm(original.Token); response.Code == http.StatusOK {
+		t.Fatal("expired confirmation still authorizes completion")
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://"+domain+"/?register", nil).WithContext(contextWithDomain(ctx, domain))
+	response := httptest.NewRecorder()
+	application.registerPage(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `name="email"`) {
+		t.Fatalf("owner cannot request fresh confirmation: %d %s", response.Code, response.Body.String())
+	}
+	rows, err := application.hostingAndSupportSiteRows(ctx, nil, nil, nil, nil, "sitebrush.ru", "", "sitebrush.ru")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.Domain == domain && strings.Contains(row.AdminEmails, original.Email) {
+			t.Fatal("expired uncompleted owner still presented as registered")
+		}
+	}
+	renewed := original
+	renewed.Token = "renewed-owner-token"
+	renewed.FormToken = "renewed-form"
+	renewed.ExpiresAt = time.Now().Add(time.Minute).UTC().Format(time.RFC3339)
+	if err := application.saveRegistrationConfirmation(ctx, renewed); err != nil {
+		t.Fatal(err)
+	}
+	if response := confirm(renewed.Token); response.Code != http.StatusOK {
+		t.Fatalf("owner cannot resume using fresh confirmation: %d %s", response.Code, response.Body.String())
+	}
+	if !application.registrationDomainClaimed(ctx, domain) {
+		t.Fatal("renewed owner lost reservation")
+	}
+	if err := application.claimTrialDomain(ctx, domain, "competing-trial"); err == nil {
+		t.Fatal("fresh registration can be overwritten by trial")
+	}
+}
+
+func TestSixDigitRegistrationProgressUsesRenderedConfirmationURL(t *testing.T) {
+	application, ctx := newDurableClaimTestApplication(t)
+	domain := "ero.sitebrush.ru"
+	confirmation := EmailConfirmation{Token: "code-confirmed-token", FormToken: "code-form", Domain: domain, Action: "register", Email: "owner@example.org", Code: "123456", ExpiresAt: time.Now().Add(time.Minute).UTC().Format(time.RFC3339)}
+	if err := application.saveRegistrationConfirmation(ctx, confirmation); err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{"registration_form_token": {confirmation.FormToken}, "registration_code": {confirmation.Code}}
+	originalURL := "http://" + domain + "/welcome?register&return_path=%2Fnext"
+	request := httptest.NewRequest(http.MethodPost, originalURL, strings.NewReader(form.Encode())).WithContext(contextWithDomain(ctx, domain))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	application.registerPage(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("code confirmation failed: %d %s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `data-key="auth_https_expired"`) {
+		t.Fatal("expiry recovery action has no translated explanation")
+	}
+	attribute := regexp.MustCompile(`data-refresh-url="([^"]+)"`).FindStringSubmatch(response.Body.String())
+	if len(attribute) != 2 {
+		t.Fatalf("confirmation URL not rendered: %s", response.Body.String())
+	}
+	pollURL, err := url.Parse(stdhtml.UnescapeString(attribute[1]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pollURL.Query().Get("email_confirm") != confirmation.Token || pollURL.Query().Has("register") {
+		t.Fatalf("poll lost the verified token: %s", pollURL)
+	}
+	if request.URL.Query().Get("email_confirm") != "" || !request.URL.Query().Has("register") {
+		t.Fatal("test no longer represents an unchanged browser register URL")
+	}
+	queries := pollURL.Query()
+	queries.Set("https_status", "1")
+	pollURL.RawQuery = queries.Encode()
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case job := <-application.automaticSSL:
+				if job.progressResponse != nil {
+					job.progressResponse <- automaticSSLProgress{State: "requesting", StartedAt: time.Now()}
+					return
+				}
+			}
+		}
+	}()
+	poll := httptest.NewRequest(http.MethodGet, "http://"+domain+pollURL.String(), nil).WithContext(contextWithDomain(ctx, domain))
+	status := httptest.NewRecorder()
+	application.route(status, poll)
+	if status.Code != http.StatusOK || !strings.Contains(status.Header().Get("Content-Type"), "application/json") || !strings.Contains(status.Body.String(), `"state":"requesting"`) {
+		t.Fatalf("code flow cannot poll confirmation: %d %s", status.Code, status.Body.String())
+	}
+}

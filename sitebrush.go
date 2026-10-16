@@ -72,6 +72,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/diagnosticlog"
 	"github.com/matveynator/sitebrush/v2/pkg/dirprotect"
 	"github.com/matveynator/sitebrush/v2/pkg/diskusage"
+	"github.com/matveynator/sitebrush/v2/pkg/domainregistration"
 	"github.com/matveynator/sitebrush/v2/pkg/expenses"
 	"github.com/matveynator/sitebrush/v2/pkg/geoip"
 	"github.com/matveynator/sitebrush/v2/pkg/hostingandsupport"
@@ -685,10 +686,11 @@ func automaticSSLCertificateCacheEntry(name string, certificateBytes []byte, now
 }
 
 type automaticSSLRequest struct {
-	action     string
-	domain     string
-	response   chan automaticSSLDomainResult
-	ipResponse chan automaticSSLIPResult
+	action           string
+	domain           string
+	response         chan automaticSSLDomainResult
+	ipResponse       chan automaticSSLIPResult
+	progressResponse chan automaticSSLProgress
 }
 
 type automaticSSLIssuer interface {
@@ -709,6 +711,20 @@ type automaticSSLDomainResult struct {
 	err         error
 	forced      bool
 }
+
+// Snapshots and their event slices are copied by the scheduler owner before publication.
+type automaticSSLProgress struct {
+	State     string                      `json:"state"`
+	StartedAt time.Time                   `json:"started_at"`
+	RetryAt   time.Time                   `json:"retry_at"`
+	Error     string                      `json:"error,omitempty"`
+	Events    []automaticSSLProgressEvent `json:"events"`
+}
+type automaticSSLProgressEvent struct {
+	State string    `json:"state"`
+	At    time.Time `json:"at"`
+}
+type automaticSSLProgressUpdate struct{ domain, state string }
 
 type automaticSSLIPResult struct {
 	serverIPs []net.IP
@@ -15197,6 +15213,10 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	domain := a.siteDomain(r.Context(), r)
+	if a.registrationDomainClaimed(r.Context(), domain) && !a.hasAdmin(r.Context(), domain) {
+		a.renderEmailConfirmationStatus(w, r, http.StatusConflict, translationOrDefault(translationsForRequest(r), "auth_domain_reserved", "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site."))
+		return
+	}
 	translations := translationsForRequest(r)
 	if a.hasAdmin(r.Context(), domain) {
 		httpsecurity.RedirectLocal(w, r, "/", http.StatusFound)
@@ -15424,14 +15444,19 @@ func (a *App) awaitAccountHTTPS(w http.ResponseWriter, r *http.Request) {
 		if host, port, err := net.SplitHostPort(r.Host); err == nil && port == "80" {
 			secureURL.Host = host
 		}
+		if hasQueryFlag(r, "https_status") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"ready": true, "secure_url": secureURL.String()})
+			return
+		}
 		a.render(w, r, "account-https.html", map[string]any{"Domain": domain, "HTTPSReady": true, "SecureURL": secureURL.String()})
 		return
 	}
-	if a.automaticSSL != nil {
-		select {
-		case a.automaticSSL <- automaticSSLRequest{action: "observe", domain: domain}:
-		default:
-		}
+	progress := a.accountHTTPSProgress(r.Context(), domain, hasQueryFlag(r, "https_status"))
+	if hasQueryFlag(r, "https_status") {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ready": false, "progress": progress, "server_now": time.Now().UTC()})
+		return
 	}
 	query := r.URL.Query()
 	query.Del("register")
@@ -15439,7 +15464,7 @@ func (a *App) awaitAccountHTTPS(w http.ResponseWriter, r *http.Request) {
 		query.Set("login", "")
 	}
 	refreshURL := r.URL.Path + "?" + query.Encode()
-	a.render(w, r, "account-https.html", map[string]any{"Domain": domain, "RefreshURL": refreshURL})
+	a.render(w, r, "account-https.html", map[string]any{"Domain": domain, "RefreshURL": refreshURL, "HTTPSProgress": progress, "HTTPSStageTexts": accountHTTPSStageTexts(translationsForRequest(r)), "HTTPSStageText": translationsForRequest(r)["auth_https_"+progress.State]})
 }
 
 func (a *App) registerPage(w http.ResponseWriter, r *http.Request) {
@@ -15456,6 +15481,10 @@ func (a *App) registerPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	domain := a.siteDomain(r.Context(), r)
+	if a.registrationDomainClaimed(r.Context(), domain) && !a.hasAdmin(r.Context(), domain) {
+		a.renderEmailConfirmationStatus(w, r, http.StatusConflict, translationOrDefault(translationsForRequest(r), "auth_domain_reserved", "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site."))
+		return
+	}
 	if a.hasAdmin(r.Context(), domain) {
 		if a.isAdminRequest(r) {
 			httpsecurity.RedirectLocal(w, r, requestedReturnTarget(r), http.StatusFound)
@@ -18722,6 +18751,17 @@ func (a *App) publicTrialSiteCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	quotaBytes := hostingandsupport.CreationQuota(a.creationSizeLimits(r.Context()).TestDrive, preview.Plan.QuotaBytes)
+	claimToken := randomAccessToken()
+	if err := a.claimTrialDomain(r.Context(), trialDomain, claimToken); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	trialCreated := false
+	defer func() {
+		if !trialCreated {
+			a.releaseTrialDomain(context.WithoutCancel(r.Context()), trialDomain, claimToken)
+		}
+	}()
 	if err := a.createManagedSiteWithoutAdmin(r.Context(), trialDomain, quotaBytes); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -18748,6 +18788,7 @@ func (a *App) publicTrialSiteCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	trialCreated = true
 	a.refreshHostingAndSupportPanel()
 	a.activePublicTrialPreviewStore().Delete(progressToken)
 	w.Header().Set("Content-Type", "application/json")
@@ -19086,7 +19127,7 @@ func (a *App) cleanupExpiredPublicTrialSite(ctx context.Context, trialSite hosti
 	if strings.ToLower(strings.TrimSpace(trialSite.Status)) != "active" || parseErr != nil || now.Before(deleteAfter) {
 		return
 	}
-	if a.rawManagedSiteHasAdmin(ctx, domain) {
+	if a.rawManagedSiteHasAdmin(ctx, domain) || a.registrationDomainClaimed(ctx, domain) {
 		_ = a.withServerControlDatabaseWrite(ctx, "trial-cleanup-registered", func(database *sql.DB) error {
 			(hostingandsupport.Store{DB: database}).RemoveActivePublicTrialSites(ctx, domain)
 			return nil
@@ -19125,6 +19166,9 @@ func (a *App) cleanupExpiredPublicTrialSite(ctx context.Context, trialSite hosti
 		}
 		if _, deleteErr := database.ExecContext(ctx, `DELETE FROM server_managers WHERE domain=? AND role<>'owner'`, domain); deleteErr != nil {
 			return deleteErr
+		}
+		if _, err := database.ExecContext(ctx, `DELETE FROM domain_registration_claims WHERE domain=? AND kind='trial'`, domain); err != nil {
+			return err
 		}
 		return store.ArchivePublicTrialSite(ctx, trialSite.ID, now)
 	}); err != nil {
@@ -19599,17 +19643,29 @@ func (a *App) publicTrialDomainAvailable(ctx context.Context, domain string) boo
 	if domain == "" {
 		return false
 	}
+	if a.pendingRegistrationDomain(ctx, domain) {
+		return false
+	}
+	if a.controlDatabase != nil {
+		var count int
+		err := a.withServerControlDatabaseRead(ctx, "available-trial-domain", func(db *sql.DB) error {
+			return db.QueryRowContext(ctx, `SELECT COUNT(*) FROM domain_registration_claims WHERE domain=? AND `+domainregistration.ActiveClaimSQL, domain, time.Now().UTC().Add(-domainregistration.UnfinishedTTL).Format(time.RFC3339)).Scan(&count)
+		})
+		if err != nil || count > 0 {
+			return false
+		}
+	}
 	databasePath := filepath.Join(siteDatabaseRootPath(a.serverControlDBPath()), domainStorageName(domain)+".db")
 	realDatabasePath, pathErr := a.writablePathInsideStorage(databasePath)
 	if pathErr != nil {
 		return false
 	}
-	if _, err := os.Stat(realDatabasePath); err == nil {
+	if _, err := os.Stat(realDatabasePath); err == nil || !errors.Is(err, os.ErrNotExist) {
 		return false
 	}
 	var userCount int
-	_ = a.db.QueryRowContext(contextWithDomain(ctx, domain), `SELECT COUNT(1) FROM users WHERE domain=?`, domain).Scan(&userCount)
-	return userCount == 0
+	err := a.db.QueryRowContext(contextWithDomain(ctx, domain), `SELECT COUNT(1) FROM users WHERE domain=?`, domain).Scan(&userCount)
+	return (err == nil || errors.Is(err, errSiteDatabaseMissing) || errors.Is(err, sql.ErrNoRows)) && userCount == 0
 }
 
 func (a *App) createManagedSiteWithoutAdmin(ctx context.Context, domain string, quotaBytes int64) error {
@@ -19622,6 +19678,9 @@ func (a *App) createManagedSiteWithoutAdmin(ctx context.Context, domain string, 
 		return fmt.Errorf("site database for %s already exists", domain)
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return statErr
+	}
+	if a.siteDatabaseRouter != nil {
+		return a.initializeRegistrationQuota(contextWithSiteDatabaseCreation(contextWithDomain(ctx, domain)), domain, quotaBytes)
 	}
 	if err := ensureParentDir(realSiteDatabasePath); err != nil {
 		return err
@@ -23601,6 +23660,41 @@ func (a *App) hostingAndSupportSiteRows(ctx context.Context, controlDatabase *sq
 			DatabasePath:   row.DatabasePath,
 		})
 	}
+	claimErr := a.withServerControlDatabaseRead(ctx, "reserved-domain-panel-rows", func(database *sql.DB) error {
+		claimRows, claimErr := database.QueryContext(ctx, `SELECT domain,email FROM domain_registration_claims WHERE kind='registration' AND `+domainregistration.ActiveClaimSQL, time.Now().UTC().Add(-domainregistration.UnfinishedTTL).Format(time.RFC3339))
+		if claimErr != nil {
+			return claimErr
+		}
+		for claimRows.Next() {
+			var domain, email string
+			if err := claimRows.Scan(&domain, &email); err != nil {
+				claimRows.Close()
+				return err
+			}
+			found := false
+			for index := range usages {
+				if usages[index].Domain == domain {
+					if len(usages[index].AdminEmails) == 0 {
+						usages[index].AdminEmails = []string{email}
+					}
+					found = true
+					break
+				}
+			}
+			if !found {
+				usages = append(usages, hostingandsupport.SiteUsage{Domain: domain, AdminEmails: []string{email}})
+			}
+		}
+		claimErr = claimRows.Err()
+		claimRows.Close()
+		if claimErr != nil {
+			return claimErr
+		}
+		return nil
+	})
+	if claimErr != nil {
+		return nil, claimErr
+	}
 	siteRows := hostingandsupport.BuildSitesWithDemoAndMainDomain(usages, plans, assignments, currentDomain, demoDomain, mainDomain)
 	rowByDomain := make(map[string]siteQuotaRow, len(rows))
 	for _, row := range rows {
@@ -24506,6 +24600,9 @@ func (a *App) deleteDemoManagedSiteWithoutBackup(ctx context.Context, domain str
 		return err
 	}
 	return a.withServerControlDatabaseWrite(ctx, "demo-delete-finish", func(database *sql.DB) error {
+		if _, err := database.ExecContext(ctx, `DELETE FROM domain_registration_claims WHERE domain=?`, domain); err != nil {
+			return err
+		}
 		(hostingandsupport.Store{DB: database}).RemoveSiteAssignment(ctx, domain)
 		_, deleteErr := database.ExecContext(ctx, `DELETE FROM server_managers WHERE domain=? AND role<>'owner'`, domain)
 		return deleteErr
@@ -24600,6 +24697,9 @@ func (a *App) deleteManagedSiteControlRows(ctx context.Context, controlDatabase 
 	domain := normalizeQuotaDomainName(row.Domain)
 	if domain == "" {
 		return fmt.Errorf("site domain is required")
+	}
+	if _, err := controlDatabase.ExecContext(ctx, `DELETE FROM domain_registration_claims WHERE domain=?`, domain); err != nil {
+		return err
 	}
 	(hostingandsupport.Store{DB: controlDatabase}).RemoveSiteAssignment(ctx, domain)
 	_, _ = controlDatabase.ExecContext(ctx, `DELETE FROM server_managers WHERE domain=? AND role<>'owner'`, domain)
@@ -27095,6 +27195,12 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 		a.renderEmailConfirmationStatus(w, r, http.StatusNotFound, translationOrDefault(translations, "email_confirmation_status_invalid", "Invalid link"))
 		return
 	}
+	if confirmation.Action == "register" {
+		if err := a.confirmRegistrationDomain(r, confirmation); err != nil {
+			a.renderEmailConfirmationStatus(w, r, http.StatusConflict, err.Error())
+			return
+		}
+	}
 	if !httpsecurity.UsesHTTPS(r) && !httpsecurity.IsLocalRequest(r) {
 		a.awaitAccountHTTPS(w, r)
 		return
@@ -27102,9 +27208,6 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		if confirmation.Action == "register" {
-			a.observeAutomaticSSLRegistration(r, confirmation.Domain)
-		}
 		a.render(w, r, "account-confirm.html", map[string]any{"Domain": confirmation.Domain, "Email": confirmation.Email, "CurrentEmail": confirmation.CurrentEmail, "Token": token, "AcceptEmail": confirmation.Action == "profile", "SetPassword": confirmation.Action == "register" && confirmation.Password == ""})
 		return
 	}
@@ -27167,6 +27270,12 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 		}
 		a.activatePublicTrialAfterAdminRegistration(registerContext, confirmation.Domain)
 		a.deleteRegistrationConfirmation(registerContext, token)
+		if a.controlDatabase != nil {
+			_ = a.withServerControlDatabaseWrite(registerContext, "complete-domain-reservation", func(db *sql.DB) error {
+				_, err := db.ExecContext(registerContext, `UPDATE domain_registration_claims SET token='' WHERE domain=? AND token=?`, confirmation.Domain, token)
+				return err
+			})
+		}
 		a.promoteFirstServerOwner(registerContext, confirmation.Domain, confirmation.Email)
 		a.markServiceMailRecipientVerified(registerContext, confirmation.Domain, confirmation.Email, confirmation.LanguageCode)
 		a.logHostingSupportEvent(registerContext, "client_registered", "success", confirmation.Email, confirmation.Domain, "email confirmed")
@@ -27199,9 +27308,11 @@ func (a *App) observeAutomaticSSLRegistration(r *http.Request, domain string) {
 	if a.automaticSSL == nil || autoCertDomainEligibilityError(domain) != nil {
 		return
 	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
 	select {
 	case a.automaticSSL <- automaticSSLRequest{action: "registration_confirmed", domain: domain}:
-	case <-r.Context().Done():
+	case <-ctx.Done():
 	}
 }
 
@@ -39925,12 +40036,12 @@ var exchangeDNSMessage = exchangeDNSMessageWithServer
 
 const automaticSSLRefreshInterval = time.Hour
 const automaticSSLIPFreshForIssuance = 15 * time.Minute
-const automaticSSLSchedulerInterval = 15 * time.Minute
+const automaticSSLSchedulerInterval = 5 * time.Second
 const automaticSSLCertificateRenewBefore = 30 * 24 * time.Hour
 const automaticSSLRetryDelayEligibility = 24 * time.Hour
-const automaticSSLRetryDelayDNS = 6 * time.Hour
+const automaticSSLRetryDelayDNS = time.Minute
 const automaticSSLRetryDelayChallenge = time.Hour
-const automaticSSLRetryDelayACME = 12 * time.Hour
+const automaticSSLRetryDelayACME = 2 * time.Minute
 const automaticSSLObservedDomainTTL = 24 * time.Hour
 const automaticSSLMaximumObservedDomains = 4096
 const automaticSSLProcessQueueSize = 1024
@@ -41623,8 +41734,32 @@ func nextAutomaticSSLRenewalAuditTime(now time.Time, random io.Reader) (time.Tim
 }
 
 func (a *App) runAutomaticSSLProcess(stop <-chan struct{}, certificateManager automaticSSLIssuer, requests chan automaticSSLRequest) {
+	a.runAutomaticSSLProcessWithIPDetection(stop, certificateManager, requests, detectPublicAutomaticSSLServerIPs)
+}
+func (a *App) runAutomaticSSLProcessWithIPDetection(stop <-chan struct{}, certificateManager automaticSSLIssuer, requests chan automaticSSLRequest, detectIPs func() ([]net.IP, error)) {
 	// This goroutine exclusively owns scheduling state; workers return immutable results through channels.
 	observedAt := make(map[string]time.Time)
+	progressByDomain := make(map[string]automaticSSLProgress)
+	updates := make(chan automaticSSLProgressUpdate, 32)
+	setProgress := func(domain, state string, retryAt time.Time, err error) {
+		snapshot := progressByDomain[domain]
+		if snapshot.StartedAt.IsZero() {
+			snapshot.StartedAt = time.Now().UTC()
+		}
+		if snapshot.State != state {
+			snapshot.Events = append(snapshot.Events, automaticSSLProgressEvent{state, time.Now().UTC()})
+			if len(snapshot.Events) > 20 {
+				snapshot.Events = snapshot.Events[len(snapshot.Events)-20:]
+			}
+			a.logDomainEvent(domain, "AUTOCERT stage=%s", state)
+		}
+		snapshot.State, snapshot.RetryAt, snapshot.Error = state, retryAt, ""
+		if err != nil {
+			snapshot.Error = err.Error()
+		}
+		progressByDomain[domain] = snapshot
+	}
+
 	nextAttemptAt := make(map[string]time.Time)
 	inFlight := make(map[string]bool)
 	forceResponses := make(map[string][]chan automaticSSLDomainResult)
@@ -41636,16 +41771,17 @@ func (a *App) runAutomaticSSLProcess(stop <-chan struct{}, certificateManager au
 	domainResults := make(chan automaticSSLDomainResult, automaticSSLPreparationConcurrency)
 	preparationSlots := make(chan struct{}, automaticSSLPreparationConcurrency)
 	ipInFlight := false
+	ipRetryAt := time.Time{}
 	pendingIPResponses := make([]chan automaticSSLIPResult, 0)
 
 	// External IP detection never blocks TLS or the scheduling loop.
 	startIPDetection := func() {
-		if ipInFlight {
+		if ipInFlight || time.Now().Before(ipRetryAt) {
 			return
 		}
 		ipInFlight = true
 		go func() {
-			ipList, err := detectPublicAutomaticSSLServerIPs()
+			ipList, err := detectIPs()
 			select {
 			case ipResult <- automaticSSLIPResult{serverIPs: ipList, err: err}:
 			case <-stop:
@@ -41667,11 +41803,17 @@ func (a *App) runAutomaticSSLProcess(stop <-chan struct{}, certificateManager au
 			return
 		}
 		inFlight[domain] = true
+		setProgress(domain, "checking_dns", time.Time{}, nil)
 		forceRenewal := forcePending[domain]
 		delete(forcePending, domain)
 		currentServerIPs := append([]net.IP(nil), serverIPs...)
 		go func() {
-			result := a.prepareAutomaticSSLDomainWithPolicy(certificateManager, domain, currentServerIPs, forceRenewal)
+			result := a.prepareAutomaticSSLDomainWithProgress(certificateManager, domain, currentServerIPs, forceRenewal, func(state string) {
+				select {
+				case updates <- automaticSSLProgressUpdate{domain, state}:
+				case <-stop:
+				}
+			})
 			<-preparationSlots
 			select {
 			case domainResults <- result:
@@ -41700,6 +41842,18 @@ func (a *App) runAutomaticSSLProcess(stop <-chan struct{}, certificateManager au
 			domain := normalizeDomainName(request.domain)
 			if domain != "" {
 				now := time.Now()
+				if !automaticSSLObservationAdmitted(request.action, !observedAt[domain].IsZero(), len(observedAt), automaticSSLMaximumObservedDomains) {
+					if request.progressResponse != nil {
+						select {
+						case request.progressResponse <- automaticSSLProgress{State: "queue_busy"}:
+						default:
+						}
+					}
+					continue
+				}
+				if progressByDomain[domain].StartedAt.IsZero() {
+					setProgress(domain, "queued", time.Time{}, nil)
+				}
 				if request.action == "registration_confirmed" {
 					delete(nextAttemptAt, domain)
 					if inFlight[domain] {
@@ -41716,12 +41870,22 @@ func (a *App) runAutomaticSSLProcess(stop <-chan struct{}, certificateManager au
 				if automaticSSLObservationAdmitted(request.action, !observedAt[domain].IsZero(), len(observedAt), automaticSSLMaximumObservedDomains) {
 					observedAt[domain] = now
 				}
+				if request.progressResponse != nil {
+					snapshot := progressByDomain[domain]
+					snapshot.Events = append([]automaticSSLProgressEvent(nil), snapshot.Events...)
+					select {
+					case request.progressResponse <- snapshot:
+					default:
+					}
+				}
 				if serverIPsCheckedAt.IsZero() || now.Sub(serverIPsCheckedAt) >= automaticSSLIPFreshForIssuance {
 					startIPDetection()
 				} else {
 					startDomainPreparation(domain, now)
 				}
 			}
+		case update := <-updates:
+			setProgress(update.domain, update.state, time.Time{}, nil)
 		case result := <-ipResult:
 			ipInFlight = false
 			serverIPsCheckedAt = time.Now()
@@ -41732,6 +41896,11 @@ func (a *App) runAutomaticSSLProcess(stop <-chan struct{}, certificateManager au
 				}
 			} else {
 				serverIPs = serverIPs[:0]
+				ipRetryAt = time.Now().Add(30 * time.Second)
+				serverIPsCheckedAt = time.Time{}
+				for domain := range observedAt {
+					setProgress(domain, "waiting_ip", ipRetryAt, result.err)
+				}
 				a.logProblemEvent("AUTOCERT background IP detection failed: %v", result.err)
 			}
 			for _, response := range pendingIPResponses {
@@ -41739,6 +41908,13 @@ func (a *App) runAutomaticSSLProcess(stop <-chan struct{}, certificateManager au
 			}
 			pendingIPResponses = pendingIPResponses[:0]
 		case result := <-domainResults:
+			for len(updates) > 0 {
+				update := <-updates
+				setProgress(update.domain, update.state, time.Time{}, nil)
+			}
+			if result.certificate == nil {
+				setProgress(result.domain, result.state, result.retryAfter, result.err)
+			}
 			delete(inFlight, result.domain)
 			nextAttemptAt[result.domain] = result.retryAfter
 			if retryPending[result.domain] {
@@ -41746,7 +41922,19 @@ func (a *App) runAutomaticSSLProcess(stop <-chan struct{}, certificateManager au
 				delete(nextAttemptAt, result.domain)
 			}
 			if result.certificate != nil && !result.expiresAt.IsZero() {
-				a.rememberAutoCertCachedCertificate(result.domain, result.certificate, result.expiresAt)
+				setProgress(result.domain, "applying", time.Time{}, nil)
+				cacheContext, cancelCache := context.WithTimeout(context.Background(), 2*time.Second)
+				cacheErr := error(nil)
+				if a.autoCertCertificateCache != nil {
+					cacheErr = a.storeAutoCertCachedCertificate(cacheContext, result.domain, result.certificate, result.expiresAt)
+				}
+				cancelCache()
+				if err := cacheErr; err != nil {
+					setProgress(result.domain, "storage_error", time.Now().Add(time.Minute), err)
+					nextAttemptAt[result.domain] = time.Now().Add(time.Minute)
+				} else {
+					setProgress(result.domain, "ready", time.Time{}, nil)
+				}
 			}
 			if result.state == "certificate_error" && result.err != nil {
 				a.logDomainEvent(result.domain, "AUTOCERT background certificate request failed: %v", result.err)
@@ -41767,6 +41955,7 @@ func (a *App) runAutomaticSSLProcess(stop <-chan struct{}, certificateManager au
 		case now := <-ticker.C:
 			for domain, lastObservedAt := range observedAt {
 				if now.Sub(lastObservedAt) > automaticSSLObservedDomainTTL {
+					delete(progressByDomain, domain)
 					delete(observedAt, domain)
 					delete(nextAttemptAt, domain)
 				}
@@ -41925,6 +42114,9 @@ func (a *App) prepareAutomaticSSLDomain(certificateManager automaticSSLIssuer, d
 }
 
 func (a *App) prepareAutomaticSSLDomainWithPolicy(certificateManager automaticSSLIssuer, domain string, serverIPs []net.IP, forceRenewal bool) automaticSSLDomainResult {
+	return a.prepareAutomaticSSLDomainWithProgress(certificateManager, domain, serverIPs, forceRenewal, func(string) {})
+}
+func (a *App) prepareAutomaticSSLDomainWithProgress(certificateManager automaticSSLIssuer, domain string, serverIPs []net.IP, forceRenewal bool, progress func(string)) automaticSSLDomainResult {
 	certificateDomain := normalizeDomainName(domain)
 	result := automaticSSLDomainResult{domain: certificateDomain, retryAfter: time.Now().Add(automaticSSLRefreshInterval), forced: forceRenewal}
 	if certificateDomain == "" || autoCertDomainEligibilityError(certificateDomain) != nil {
@@ -41955,9 +42147,13 @@ func (a *App) prepareAutomaticSSLDomainWithPolicy(certificateManager automaticSS
 	}
 	if retryAfter, delayed := automaticSSLRetryAfter(setting, now); delayed {
 		result.state = "delayed"
+		if setting.LastFailureReason != "" {
+			result.err = errors.New(setting.LastFailureReason)
+		}
 		result.retryAfter = retryAfter
 		return result
 	}
+	progress("checking_dns")
 	setting, err := a.precheckDomainAutomaticSSL(domainContext, certificateDomain, serverIPs)
 	if err != nil || !setting.Enabled {
 		result.state = "waiting_dns"
@@ -41966,21 +42162,20 @@ func (a *App) prepareAutomaticSSLDomainWithPolicy(certificateManager automaticSS
 		result.retryAfter = time.Now().Add(retryDelay)
 		return result
 	}
-	if lastAttemptAt, parseErr := time.Parse(time.RFC3339, setting.LastACMEAttemptAt); parseErr == nil && time.Since(lastAttemptAt) < time.Hour {
-		result.state = "delayed"
-		result.retryAfter = lastAttemptAt.Add(time.Hour)
-		return result
-	}
 	a.clearDomainAutomaticSSLFailure(domainContext, certificateDomain)
 	attemptedAt := time.Now().UTC()
-	_, _ = a.db.ExecContext(domainContext, `UPDATE domain_ssl_settings SET last_acme_attempt_at=?,retry_after=? WHERE domain=?`, attemptedAt.Format(time.RFC3339), attemptedAt.Add(time.Hour).Format(time.RFC3339), certificateDomain)
+	if _, err := a.db.ExecContext(domainContext, `UPDATE domain_ssl_settings SET last_acme_attempt_at=?,retry_after=? WHERE domain=?`, attemptedAt.Format(time.RFC3339), attemptedAt.Add(5*time.Minute).Format(time.RFC3339), certificateDomain); err != nil {
+		result.state, result.err, result.retryAfter = "storage_error", err, time.Now().Add(time.Minute)
+		return result
+	}
+	progress("requesting")
 	issueContext, cancelIssue := context.WithTimeout(context.Background(), 5*time.Minute)
 	issueResult := certificateManager.Issue(issueContext, certificateDomain)
 	cancelIssue()
 	if issueResult.Err != nil {
 		err := issueResult.Err
 		retryDelay := automaticSSLRetryDelayForCertificateError(err)
-		retryDelay = max(time.Hour, min(retryDelay, automaticSSLNextCheckDelay(currentExpiresAt, time.Now())))
+		retryDelay = min(retryDelay, automaticSSLNextCheckDelay(currentExpiresAt, time.Now()))
 		if retryAfter, found := channelacme.RetryAfter(err); found && retryAfter.After(time.Now()) {
 			retryDelay = time.Until(retryAfter)
 		}
@@ -41990,6 +42185,7 @@ func (a *App) prepareAutomaticSSLDomainWithPolicy(certificateManager automaticSS
 		result.retryAfter = time.Now().Add(retryDelay)
 		return result
 	}
+	progress("received")
 	a.clearDomainAutomaticSSLFailure(domainContext, certificateDomain)
 	_, _ = a.db.ExecContext(domainContext, `UPDATE domain_ssl_settings SET certificate_expires_at=?,last_acme_success_at=?,certificate_last_validated_at=? WHERE domain=?`, issueResult.ExpiresAt.UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339), certificateDomain)
 	result.state = "ready"
@@ -42052,6 +42248,24 @@ func (a *App) listAutomaticSSLDomainCandidates(ctx context.Context) []string {
 		}
 	}
 	seenDomains := make(map[string]struct{})
+	if a.controlDatabase != nil {
+		_ = a.withServerControlDatabaseRead(ctx, "reserved-certificate-domains", func(db *sql.DB) error {
+			rows, err := db.QueryContext(ctx, `SELECT domain FROM domain_registration_claims WHERE kind='registration' AND `+domainregistration.ActiveClaimSQL, time.Now().UTC().Add(-domainregistration.UnfinishedTTL).Format(time.RFC3339))
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var domain string
+				if err := rows.Scan(&domain); err != nil {
+					return err
+				}
+				seenDomains[domain] = struct{}{}
+			}
+			return rows.Err()
+		})
+	}
+
 	for _, databaseDomain := range databaseDomains {
 		a.collectAutomaticSSLDomainCandidates(contextWithDomain(ctx, databaseDomain), seenDomains)
 	}
@@ -42099,6 +42313,15 @@ UNION SELECT domain FROM domain_ssl_settings`
 
 // Pending mail registrations can request a certificate before a site database exists.
 func (a *App) pendingRegistrationDomain(ctx context.Context, domain string) bool {
+	if a.controlDatabase != nil {
+		var count int
+		err := a.withServerControlDatabaseRead(ctx, "confirmed-ssl-domain", func(db *sql.DB) error {
+			return db.QueryRowContext(ctx, `SELECT COUNT(*) FROM domain_registration_claims WHERE domain=? AND kind='registration' AND `+domainregistration.ActiveClaimSQL, domain, time.Now().UTC().Add(-domainregistration.UnfinishedTTL).Format(time.RFC3339)).Scan(&count)
+		})
+		if err == nil && count > 0 {
+			return true
+		}
+	}
 	if a.registrationConfirmations != nil {
 		reply := make(chan emailConfirmationMemoryResponse, 1)
 		select {
@@ -45616,4 +45839,118 @@ func serverReleaseCatalog(releaseKey ed25519.PublicKey) (appupdate.Catalog, erro
 		return appupdate.Catalog{}, err
 	}
 	return appupdate.NewNetworkCatalog(releaseKey, central), nil
+}
+
+// Confirmation reserves identity without accepting credentials over HTTP.
+func (a *App) confirmRegistrationDomain(r *http.Request, confirmation EmailConfirmation) error {
+	if a.controlDatabase == nil {
+		if r.Method == http.MethodGet {
+			a.observeAutomaticSSLRegistration(r, confirmation.Domain)
+		}
+		return nil
+	}
+	ctx := r.Context()
+	if a.hasAdmin(contextWithDomain(ctx, confirmation.Domain), confirmation.Domain) {
+		return nil
+	}
+	if !localAccountRequest(r) && a.serverOwnerExists(ctx) && !a.serverAutomaticRegistrationAllowed(ctx) {
+		return errors.New("registration requires administrator approval")
+	}
+	var created bool
+	err := a.withServerControlDatabaseWrite(ctx, "confirm-domain-reservation", func(db *sql.DB) error {
+		var err error
+		created, err = domainregistration.Claim(ctx, db, confirmation.Domain, confirmation.Token, confirmation.Email, "registration")
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	domainContext := contextWithSiteDatabaseCreation(contextWithDomain(ctx, confirmation.Domain))
+	// Bootstrap through the same router/writer used by HTTP and ACME workers.
+	var existingLimit int64
+	if err := a.db.QueryRowContext(domainContext, `SELECT limit_bytes FROM domain_storage_usage WHERE domain=?`, confirmation.Domain).Scan(&existingLimit); err != nil {
+		if !errors.Is(err, sql.ErrNoRows) && !errors.Is(err, errSiteDatabaseMissing) {
+			return err
+		}
+		if err := a.initializeRegistrationQuota(domainContext, confirmation.Domain, a.registrationCreationQuota(ctx)); err != nil {
+			return err
+		}
+	}
+	if created {
+		a.observeAutomaticSSLRegistration(r, confirmation.Domain)
+		a.refreshHostingAndSupportPanel()
+	}
+	return nil
+}
+
+func (a *App) registrationDomainClaimed(ctx context.Context, domain string) bool {
+	if a.controlDatabase == nil {
+		return false
+	}
+	var count int
+	err := a.withServerControlDatabaseRead(ctx, "domain-reservation", func(db *sql.DB) error {
+		return db.QueryRowContext(ctx, `SELECT COUNT(*) FROM domain_registration_claims WHERE domain=? AND kind='registration' AND `+domainregistration.ActiveClaimSQL, domain, time.Now().UTC().Add(-domainregistration.UnfinishedTTL).Format(time.RFC3339)).Scan(&count)
+	})
+	return err != nil || count > 0
+}
+
+func (a *App) claimTrialDomain(ctx context.Context, domain, token string) error {
+	if a.controlDatabase == nil {
+		return nil
+	}
+	return a.withServerControlDatabaseWrite(ctx, "claim-trial-domain", func(db *sql.DB) error {
+		_, err := domainregistration.Claim(ctx, db, domain, token, "", "trial")
+		return err
+	})
+}
+
+func (a *App) releaseTrialDomain(ctx context.Context, domain, token string) {
+	if a.controlDatabase == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_ = a.withServerControlDatabaseWrite(ctx, "release-trial-domain", func(db *sql.DB) error {
+		_, err := db.ExecContext(ctx, `DELETE FROM domain_registration_claims WHERE domain=? AND token=? AND kind='trial'`, domain, token)
+		return err
+	})
+}
+
+// Queue admission is acknowledged before reporting a job to the browser. Polls
+// never clear retry deadlines or create duplicate ACME orders.
+func (a *App) accountHTTPSProgress(ctx context.Context, domain string, snapshot bool) automaticSSLProgress {
+	if a.automaticSSL == nil {
+		return automaticSSLProgress{State: "unavailable"}
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	reply := make(chan automaticSSLProgress, 1)
+	request := automaticSSLRequest{action: "observe", domain: domain}
+	if snapshot {
+		request.progressResponse = reply
+	}
+	select {
+	case a.automaticSSL <- request:
+	case <-ctx.Done():
+		return automaticSSLProgress{State: "queue_busy", Error: ctx.Err().Error()}
+	}
+	if !snapshot {
+		return automaticSSLProgress{State: "queued"}
+	}
+	select {
+	case progress := <-reply:
+		return progress
+	case <-ctx.Done():
+		return automaticSSLProgress{State: "queue_busy", Error: ctx.Err().Error()}
+	}
+}
+
+func accountHTTPSStageTexts(translations map[string]string) map[string]string {
+	texts := make(map[string]string)
+	for key, value := range translations {
+		if strings.HasPrefix(key, "auth_https_") || key == "setup_create_admin" {
+			texts[key] = value
+		}
+	}
+	return texts
 }

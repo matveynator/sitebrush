@@ -2,7 +2,7 @@
 <html lang="{{.LanguageCode}}" dir="{{.TextDirection}}">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-{{if and (not .HTTPSReady) (not .SelfSigned) (not .HTTPSUnavailable)}}<meta http-equiv="refresh" content="10;url={{.RefreshURL}}">{{end}}
+{{if and (not .HTTPSReady) (not .SelfSigned) (not .HTTPSUnavailable)}}<noscript><meta http-equiv="refresh" content="10;url={{.RefreshURL}}"></noscript>{{end}}
 <title>HTTPS · {{.Domain}}</title>
 <link rel="stylesheet" href="/p/static/technical_pages.css">
 </head>
@@ -26,7 +26,19 @@
 <p>{{index .T "auth_https_unavailable_help"}}</p>
 <a class="btn btn-outline-secondary" href="{{.ReturnURL}}">{{index .T "back_to_uri"}}</a>
 {{else}}
-<p role="status">{{index .T "auth_https_wait"}}</p>
+<div id="https-progress" data-refresh-url="{{.RefreshURL}}" data-state="{{.HTTPSProgress.State}}">
+<p role="status" id="https-stage">{{.HTTPSStageText}}</p>
+<progress id="https-bar" max="100" value="0" aria-label="HTTPS"></progress>
+<p>{{index .T "auth_https_estimate"}} <strong id="https-countdown">10:00</strong></p>
+<p id="https-timeout" hidden>{{index .T "auth_https_timeout"}}</p>
+<p id="https-error" role="alert"></p>
+<p id="https-next-retry"></p>
+<ol id="https-events" aria-live="polite"></ol>
+<div id="https-texts" hidden>
+{{range $key, $value := .HTTPSStageTexts}}<span data-key="{{$key}}">{{$value}}</span>{{end}}
+</div>
+</div>
+<script defer src="/p/static/account_https.js"></script>
 <a class="btn btn-outline-secondary" href="{{.RefreshURL}}">{{index .T "auth_https_retry"}}</a>
 {{end}}
 </section>
