@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -205,7 +204,11 @@ func TestDatabaseSnapshotRejectsOutOfScopeInventoryAndSupportsLegacyRecovery(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	entry, err := json.Marshal(backupEntry{Name: "legacy.html", Mode: fs.FileMode(0600), SHA256: assetDigest})
+	assetInfo, err := store.Lstat(assetName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := json.Marshal(backupEntry{Name: "legacy.html", Mode: assetInfo.Mode(), SHA256: assetDigest})
 	if err != nil {
 		t.Fatal(err)
 	}
