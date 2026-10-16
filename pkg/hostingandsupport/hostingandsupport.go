@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/url"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/matveynator/sitebrush/v2/pkg/demo"
+	"github.com/matveynator/sitebrush/v2/pkg/domainregistration"
 	"github.com/matveynator/sitebrush/v2/pkg/expenses"
 	"github.com/matveynator/sitebrush/v2/pkg/mailout"
 	"github.com/matveynator/sitebrush/v2/pkg/migrations"
@@ -667,6 +669,13 @@ func CheckMigrations(ctx context.Context, database *sql.DB) error {
 	if completed != len(hostingSchemaSteps(ctx, false)) {
 		return fmt.Errorf("required billing migration steps are incomplete")
 	}
+	completed, err = migrations.Check(database, "domain-registration-v1", domainRegistrationSteps(false))
+	if err != nil {
+		return err
+	}
+	if completed != len(domainRegistrationSteps(false)) {
+		return errors.New("required domain registration migrations are incomplete")
+	}
 	completed, err = migrations.Check(database, "release-campaigns-v1", announcementSchemaSteps())
 	if err != nil {
 		return err
@@ -707,6 +716,9 @@ func CheckMigrationSource(ctx context.Context, database *sql.DB) error {
 	if _, err = migrations.Check(database, "billing-schema-v27", hostingSchemaSteps(ctx, false)); err != nil {
 		return err
 	}
+	if _, err = migrations.Check(database, "domain-registration-v1", domainRegistrationSteps(false)); err != nil {
+		return err
+	}
 	if _, err = migrations.Check(database, "release-campaigns-v1", announcementSchemaSteps()); err != nil {
 		return err
 	}
@@ -740,6 +752,9 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 	}
 	steps := hostingSchemaSteps(ctx, !schemaComplete || schemaVersion < currentBillingSchemaVersion)
 	if err := migrations.Run(database, "billing-schema-v27", steps); err != nil {
+		return err
+	}
+	if err := migrations.Run(database, "domain-registration-v1", domainRegistrationSteps(!schemaComplete)); err != nil {
 		return err
 	}
 	announcementSteps := announcementSchemaSteps()
@@ -956,7 +971,7 @@ func setSchemaMigrationVersion(ctx context.Context, database *sql.DB, component 
 }
 
 func hostingAndSupportSchemaComplete(ctx context.Context, database *sql.DB) (bool, error) {
-	tableNames := []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments", "public_trial_sites", "payment_providers", "billing_invoices", "billing_customers", "billing_customer_emails", "billing_customer_profiles", "billing_customer_tokens", "billing_invoice_lines", "billing_invoice_cycles", "billing_payments", "billing_invoice_deliveries", "hosting_server_cost_policies", "server_expense_policies", "site_registration_requests", "site_deletion_backups", "service_mail_installations", "service_mail_events", "support_events", "service_mail_blocks", "service_mail_recipients", "mail_outbox", "client_hostings", "client_hosting_sites", "client_hosting_domain_checks", "server_resource_checks", "server_network_checks", "site_tls_checks", "registry_accounts", "registry_installation_roles", "registry_installation_plans", "registry_events", "registry_sync_events", "sitebrush_com_keys", "hosting_panel_snapshots", "registration_confirmations"}
+	tableNames := []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments", "public_trial_sites", "payment_providers", "billing_invoices", "billing_customers", "billing_customer_emails", "billing_customer_profiles", "billing_customer_tokens", "billing_invoice_lines", "billing_invoice_cycles", "billing_payments", "billing_invoice_deliveries", "hosting_server_cost_policies", "server_expense_policies", "site_registration_requests", "site_deletion_backups", "service_mail_installations", "service_mail_events", "support_events", "service_mail_blocks", "service_mail_recipients", "mail_outbox", "client_hostings", "client_hosting_sites", "client_hosting_domain_checks", "server_resource_checks", "server_network_checks", "site_tls_checks", "registry_accounts", "registry_installation_roles", "registry_installation_plans", "registry_events", "registry_sync_events", "sitebrush_com_keys", "hosting_panel_snapshots", "registration_confirmations", "domain_registration_claims"}
 	tableNames = append(tableNames, demo.TableNames()...)
 	for _, tableName := range tableNames {
 		found, err := tableExists(ctx, database, tableName)
@@ -4057,4 +4072,10 @@ func FormatFileSize(size int64) string {
 		return fmt.Sprintf("%.1f MB", float64(size)/(1024*1024))
 	}
 	return fmt.Sprintf("%.1f GB", float64(size)/(1024*1024*1024))
+}
+
+func domainRegistrationSteps(repair bool) []migrations.Step {
+	step := migrations.SQL("claims", domainregistration.Schema)
+	step.Ensure = repair
+	return []migrations.Step{step}
 }
