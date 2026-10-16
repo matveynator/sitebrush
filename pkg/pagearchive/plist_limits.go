@@ -58,6 +58,11 @@ func checkPlistLimits(content []byte, stop <-chan struct{}) error {
 		return errors.New("invalid binary plist object table")
 	}
 	state := make([]uint8, count)
+	type expansion struct {
+		nodes, bytes uint64
+		height       int
+	}
+	expanded := make([]expansion, count)
 	var edges uint64
 	var visit func(uint64, int) error
 	visit = func(identifier uint64, depth int) error {
@@ -68,6 +73,9 @@ func checkPlistLimits(content []byte, stop <-chan struct{}) error {
 			return errors.New("cyclic or excessive plist nesting")
 		}
 		if state[identifier] == 2 {
+			if depth+expanded[identifier].height > 128 {
+				return errors.New("excessive expanded plist nesting")
+			}
 			return nil
 		}
 		offset, ok := readInteger(table+identifier*offsetWidth, offsetWidth)
@@ -75,6 +83,7 @@ func checkPlistLimits(content []byte, stop <-chan struct{}) error {
 			return errors.New("invalid binary plist object offset")
 		}
 		state[identifier] = 1
+		cost := expansion{nodes: 1}
 		tag := content[offset]
 		kind, length, start := tag>>4, uint64(tag&15), offset+1
 		if kind >= 4 && kind != 8 && length == 15 {
@@ -100,6 +109,7 @@ func checkPlistLimits(content []byte, stop <-chan struct{}) error {
 			if length > (table-start)/width {
 				return errors.New("binary plist string or data exceeds payload")
 			}
+			cost.bytes = length * width
 		case 10, 12, 13:
 			if kind == 13 {
 				if length > 1000000/2 {
@@ -119,9 +129,21 @@ func checkPlistLimits(content []byte, stop <-chan struct{}) error {
 				if err := visit(reference, depth+1); err != nil {
 					return err
 				}
+				child := expanded[reference]
+				// A small DAG can expand exponentially when unmarshaled into
+				// Go structs. Charge each reference, including cached objects.
+				if child.nodes > 1000000-cost.nodes || child.bytes > uint64(TotalLimit)-cost.bytes {
+					return errors.New("expanded plist exceeds limits")
+				}
+				cost.nodes += child.nodes
+				cost.bytes += child.bytes
+				if child.height+1 > cost.height {
+					cost.height = child.height + 1
+				}
 			}
 		}
 		state[identifier] = 2
+		expanded[identifier] = cost
 		return nil
 	}
 	return visit(top, 0)

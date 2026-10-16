@@ -142,11 +142,40 @@ func TestPlistBoundsBeforeDecoderAllocation(t *testing.T) {
 	if err := checkPlistLimits([]byte(strings.Repeat("<array>", 129)+strings.Repeat("</array>", 129)), nil); err == nil {
 		t.Fatal("accepted excessive XML nesting")
 	}
+	// Two references per level encode millions of expanded entries in a
+	// document shorter than 200 bytes. The generic decoder must not see it.
+	aliased := []byte("bplist00")
+	var offsets []byte
+	offsets = append(offsets, byte(len(aliased)))
+	aliased = append(aliased, 0x51, 'x')
+	for index := 1; index <= 24; index++ {
+		offsets = append(offsets, byte(len(aliased)))
+		aliased = append(aliased, 0xa2, byte(index-1), byte(index-1))
+	}
+	table := len(aliased)
+	aliased = append(aliased, offsets...)
+	trailer := make([]byte, 32)
+	trailer[6], trailer[7] = 1, 1
+	binary.BigEndian.PutUint64(trailer[8:], uint64(len(offsets)))
+	binary.BigEndian.PutUint64(trailer[16:], 24)
+	binary.BigEndian.PutUint64(trailer[24:], uint64(table))
+	aliased = append(aliased, trailer...)
+	if err := checkPlistLimits(aliased, nil); err == nil {
+		t.Fatal("accepted exponentially expanding plist references")
+	}
 }
 
 func FuzzArchiveReader(f *testing.F) {
 	f.Add([]byte("bplist00"))
 	f.Add([]byte("<?xml version=\"1.0\"?><plist><dict/></plist>"))
+	fixture := safariArchive{Main: safariResource{URL: "https://example.org/page", MIME: "text/html", Content: []byte("<h1>Saved</h1>")}}
+	for _, format := range []int{plist.BinaryFormat, plist.XMLFormat} {
+		payload, err := plist.Marshal(fixture, format)
+		if err != nil {
+			f.Fatal(err)
+		}
+		f.Add(payload)
+	}
 	f.Fuzz(func(t *testing.T, payload []byte) {
 		if len(payload) <= 1<<20 {
 			_, _ = Read(bytes.NewReader(payload), int64(len(payload)), nil)
