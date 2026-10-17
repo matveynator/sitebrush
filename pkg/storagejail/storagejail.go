@@ -116,6 +116,16 @@ func (root Root) Stat(relativePath string) (fs.FileInfo, error) {
 	return fileInfo, err
 }
 
+func (root Root) Lstat(relativePath string) (fs.FileInfo, error) {
+	var fileInfo fs.FileInfo
+	err := root.withOpenRoot(func(openRoot *os.Root) error {
+		var statErr error
+		fileInfo, statErr = openRoot.Lstat(relativePath)
+		return statErr
+	})
+	return fileInfo, err
+}
+
 func (root Root) FileSize(relativePath string) (int64, error) {
 	fileInfo, err := root.Stat(relativePath)
 	if err != nil || fileInfo.IsDir() {

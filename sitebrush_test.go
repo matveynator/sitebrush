@@ -25323,7 +25323,7 @@ func TestLegacyAnalyticsFilesMigrateIntoSiteOwner(t *testing.T) {
 	}
 }
 
-func TestPR193PartitionedAutomaticSSLCandidatesQueryOwnersSeparately(t *testing.T) {
+func TestSiteSubsystemAutomaticSSLCandidatesUseSeparateOwners(t *testing.T) {
 	application := newPartitionedTestApplication(t)
 
 	contentDomain := "ssl-content.example"
@@ -25353,14 +25353,66 @@ func TestPR193PartitionedAutomaticSSLCandidatesQueryOwnersSeparately(t *testing.
 	if !application.domainIsAutomaticSSLCandidate(controlBoundary, controlDomain) {
 		t.Fatal("automatic SSL admission rejected a control-owned domain")
 	}
+	alias := "ssl-alias.example"
+	if _, err := application.db.ExecContext(controlBoundary, `INSERT INTO domain_aliases(primary_domain,alias_domain,is_verified,dns_a_ok) VALUES(?,?,1,1)`, controlDomain, alias); err != nil {
+		t.Fatal(err)
+	}
+	aliasBoundary := contextWithDomain(context.Background(), alias)
+	if !application.domainIsAutomaticSSLCandidate(aliasBoundary, alias) {
+		t.Fatal("automatic SSL rejected a verified alias added after registration")
+	}
+	if application.domainIsAutomaticSSLCandidate(controlBoundary, "unmanaged.example") {
+		t.Fatal("automatic SSL admitted an unrelated domain")
+	}
 }
 
-func TestPR193AIIngressDecisionUsesRequestContext(t *testing.T) {
+func TestAIIngressDecisionIsRetainedAcrossHTTPAdapters(t *testing.T) {
 	application := &App{}
 	request := httptest.NewRequest(http.MethodGet, "https://example.test/?mcp", nil)
 	request = requestWithAIIngressDecision(request, true, false)
 	machine, owner := application.aiIngressDecisionForRequest(request)
 	if !machine || owner {
 		t.Fatalf("cached ingress decision = machine %t owner %t, want true false", machine, owner)
+	}
+}
+
+func TestLegacyAnalyticsMigrationRejectsEscapingSymlinkParents(t *testing.T) {
+	for _, linkComponent := range []string{"analytics", "site-escape.example"} {
+		t.Run(linkComponent, func(t *testing.T) {
+			application := newPartitionedTestApplication(t)
+			domain := "escape.example"
+			if err := application.createManagedSiteWithoutAdmin(context.Background(), domain, 123456789); err != nil {
+				t.Fatal(err)
+			}
+			outside := t.TempDir()
+			legacyDirectory := outside
+			linkPath := filepath.Join(application.storageRootDir(), "analytics", "site-"+domain)
+			if linkComponent == "analytics" {
+				legacyDirectory = filepath.Join(outside, "site-"+domain)
+				linkPath = filepath.Join(application.storageRootDir(), "analytics")
+			}
+			if err := os.MkdirAll(legacyDirectory, 0700); err != nil {
+				t.Fatal(err)
+			}
+			legacyPath := filepath.Join(legacyDirectory, browserstats.DatabaseName(domain))
+			if err := os.WriteFile(legacyPath, []byte("outside storage must not be opened or removed"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Dir(linkPath), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(outside, linkPath); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			repository := siteAnalyticsRepository{application: application}
+			result := repository.Exchange(browserstats.StorageRequest{Operation: browserstats.ReadTechnicalReport, Domain: domain})
+			if result.Err == nil {
+				t.Fatal("analytics migration followed an escaping parent")
+			}
+			payload, err := os.ReadFile(legacyPath)
+			if err != nil || string(payload) != "outside storage must not be opened or removed" {
+				t.Fatal("migration changed outside state", err)
+			}
+		})
 	}
 }

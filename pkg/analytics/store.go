@@ -287,17 +287,15 @@ func (store *Store) executeWithDatabase(root string, request StorageRequest, arc
 	if err != nil {
 		return StorageResult{Err: err}
 	}
-	databasePath := filepath.Join(directory, DatabaseName(request.Domain))
-	if owned != nil {
-		databasePath = filepath.Join(directory, "analytics.db")
-	}
-	legacyPath := filepath.Join(directory, "analytics.db")
-	// storeDirectoryPath constrains the domain to one component and DatabaseName path-escapes it.
-	// codeql[go/path-injection]
-	if _, pathErr := os.Lstat(databasePath); owned == nil && os.IsNotExist(pathErr) {
-		if legacy, legacyErr := os.Lstat(legacyPath); legacyErr == nil && legacy.Mode().IsRegular() {
-			if renameErr := os.Rename(legacyPath, databasePath); renameErr != nil {
-				return StorageResult{Err: renameErr}
+	databasePath := filepath.Join(directory, "analytics.db")
+	if owned == nil {
+		legacyPath := databasePath
+		databasePath = filepath.Join(directory, DatabaseName(request.Domain))
+		if _, pathErr := os.Lstat(databasePath); os.IsNotExist(pathErr) {
+			if legacy, legacyErr := os.Lstat(legacyPath); legacyErr == nil && legacy.Mode().IsRegular() {
+				if renameErr := os.Rename(legacyPath, databasePath); renameErr != nil {
+					return StorageResult{Err: renameErr}
+				}
 			}
 		}
 	}

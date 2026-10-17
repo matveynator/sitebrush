@@ -1789,20 +1789,18 @@ func (a *App) migrateLegacyAnalytics(database *sql.DB, domain, directory string)
 	}
 	legacyDirectory := filepath.Join(a.storageRootDir(), "analytics", "site-"+url.PathEscape(safeDomain))
 	legacyPath := filepath.Join(legacyDirectory, browserstats.DatabaseName(safeDomain))
-	// The domain was reduced to one validated path component above.
-	// codeql[go/path-injection]
-	if _, err := os.Lstat(legacyPath); errors.Is(err, os.ErrNotExist) {
+	// Filesystem operations stay inside the storage capability, including when
+	// a parent component is replaced with a symlink during migration.
+	if _, err := a.lstatInsideStorage(legacyPath); errors.Is(err, os.ErrNotExist) {
 		legacyPath = filepath.Join(legacyDirectory, "analytics.db")
-		if _, legacyErr := os.Lstat(legacyPath); errors.Is(legacyErr, os.ErrNotExist) {
+		if _, legacyErr := a.lstatInsideStorage(legacyPath); errors.Is(legacyErr, os.ErrNotExist) {
 			return nil
 		}
 	}
-	// The path is rooted below storage and the component was validated above.
-	// codeql[go/path-injection]
-	if info, err := os.Lstat(legacyDirectory); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+	if info, err := a.lstatInsideStorage(legacyDirectory); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return errors.New("unsafe legacy analytics directory")
 	}
-	if info, err := os.Lstat(legacyPath); err != nil || !info.Mode().IsRegular() {
+	if info, err := a.lstatInsideStorage(legacyPath); err != nil || !info.Mode().IsRegular() {
 		return errors.New("unsafe legacy analytics database")
 	}
 	if _, err := database.Exec(`CREATE TABLE IF NOT EXISTS analytics_legacy_import(domain TEXT PRIMARY KEY)`); err != nil {
@@ -1840,31 +1838,27 @@ func (a *App) migrateLegacyAnalytics(database *sql.DB, domain, directory string)
 		}
 	}
 	sourceArchives := filepath.Join(legacyDirectory, "archives")
-	// sourceArchives extends only the already validated legacy directory.
-	// codeql[go/path-injection]
-	if info, err := os.Lstat(sourceArchives); err == nil {
+	if info, err := a.lstatInsideStorage(sourceArchives); err == nil {
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return errors.New("unsafe legacy analytics archives")
 		}
 		destination := filepath.Join(directory, "archives")
-		if _, err := os.Lstat(destination); errors.Is(err, os.ErrNotExist) {
-			// Both paths are descendants of validated storage-owned directories.
-			// codeql[go/path-injection]
-			if err := os.Rename(sourceArchives, destination); err != nil {
+		if _, err := a.lstatInsideStorage(destination); errors.Is(err, os.ErrNotExist) {
+			if err := a.renameInsideStorage(sourceArchives, destination); err != nil {
 				return err
 			}
 		} else {
 			return errors.New("analytics archive migration destination already exists")
 		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
 	// The committed import marker prevents stale observations from replacing
 	// current state if interruption occurs during source cleanup.
 	if _, err := database.Exec(`DETACH DATABASE legacy_observations`); err != nil && imported == 0 {
 		return err
 	}
-	// legacyPath was validated as a regular file below the analytics root.
-	// codeql[go/path-injection]
-	return os.Remove(legacyPath)
+	return a.removeInsideStorage(legacyPath)
 }
 
 type siteAIStorage struct{ worker *siteFileDatabase }
@@ -42435,6 +42429,14 @@ func (a *App) statInsideStorage(filePath string) (os.FileInfo, error) {
 		return nil, err
 	}
 	return jail.Stat(relativeFilePath)
+}
+
+func (a *App) lstatInsideStorage(filePath string) (os.FileInfo, error) {
+	jail, relativeFilePath, err := a.storageJailForPath(filePath)
+	if err != nil {
+		return nil, err
+	}
+	return jail.Lstat(relativeFilePath)
 }
 
 func (a *App) fileSizeInsideStorage(filePath string) int64 {
