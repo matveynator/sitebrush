@@ -3,9 +3,95 @@ package aicapability
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"testing"
 )
+
+func TestRoutedFacadeRejectsUnknownSitesAndRevokesTheOwningSession(t *testing.T) {
+	first := NewManager()
+	second := NewManager()
+	defer first.Close()
+	defer second.Close()
+	resolve := func(domain string) (*Manager, error) {
+		switch domain {
+		case "one.example":
+			return first, nil
+		case "two.example":
+			return second, nil
+		default:
+			return nil, errors.New("unregistered site")
+		}
+	}
+	facade := NewRoutedManager(resolve, func() []string { return []string{"one.example", "two.example"} })
+	if _, _, err := facade.Issue("unknown.example", []string{ScopeRead}); err == nil {
+		t.Fatal("facade admitted an unregistered site")
+	}
+	firstToken, _, err := facade.Issue("one.example", []string{ScopeRead})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondToken, _, err := facade.Issue("two.example", []string{ScopeRead})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstSession, err := facade.Exchange(firstToken, "one.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondSession, err := facade.Exchange(secondToken, "two.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := facade.Exchange(firstToken, "two.example"); err == nil {
+		t.Fatal("facade crossed the site boundary")
+	}
+	if err := facade.Revoke(secondToken); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-secondSession.Done:
+	default:
+		t.Fatal("routed token-only revoke left active work alive")
+	}
+	if _, err := facade.Lookup(firstSession.Token, "one.example"); err != nil {
+		t.Fatal("another site's revoke interrupted this site", err)
+	}
+	if err := facade.Revoke("missing-token"); err == nil {
+		t.Fatal("facade accepted an unknown token")
+	}
+	facade.Close()
+	if _, err := first.Exchange(firstToken, "one.example"); err != nil {
+		t.Fatal("facade close terminated its independently owned participant", err)
+	}
+}
+
+func TestSQLSecurityReplacementRollsBackBothDocumentsAfterInsertFailure(t *testing.T) {
+	database, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	database.SetMaxOpenConns(1)
+	if err := InitSQL(database); err != nil {
+		t.Fatal(err)
+	}
+	previousCapabilities := []byte(`{"grant":"revoked"}`)
+	previousOAuth := []byte(`{"refresh":"used"}`)
+	if err := SaveSQL(database, previousCapabilities, previousOAuth); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`CREATE TRIGGER reject_security_replacement BEFORE INSERT ON ai_security_state BEGIN SELECT RAISE(ABORT,'simulated commit failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveSQL(database, []byte(`{}`), []byte(`{}`)); err == nil {
+		t.Fatal("failed replacement reported success")
+	}
+	capabilities, oauth, err := LoadSQL(database)
+	if err != nil || string(capabilities) != string(previousCapabilities) || string(oauth) != string(previousOAuth) {
+		t.Fatal("partial replacement lost revocation or refresh replay state", err)
+	}
+}
 
 func TestCorruptReloadStopsActiveWorkAndRecoveryDoesNotReviveSessions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "control")

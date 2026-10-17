@@ -7448,7 +7448,7 @@ func analyticsSlowPageRows(totalDuration map[string]int64, counts map[string]int
 }
 
 func mergeAnalyticsCountRows(current, addition []analyticsCountRow, limit, total int) []analyticsCountRow {
-	counts := make(map[string]int, len(current)+len(addition))
+	counts := make(map[string]int)
 	for _, row := range current {
 		counts[row.Label] += row.Count
 	}
@@ -7463,7 +7463,7 @@ func mergeAnalyticsMapPoints(current, addition []analyticsMapPoint) []analyticsM
 		Latitude, Longitude float64
 		Label               string
 	}
-	points := make(map[mapPointKey]analyticsMapPoint, len(current)+len(addition))
+	points := make(map[mapPointKey]analyticsMapPoint)
 	for _, collection := range [][]analyticsMapPoint{current, addition} {
 		for _, point := range collection {
 			key := mapPointKey{Latitude: point.Latitude, Longitude: point.Longitude, Label: point.Label}
