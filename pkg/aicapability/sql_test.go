@@ -151,3 +151,35 @@ func TestLegacySQLMigrationRejectsCorruptSourcesAndConflictingDestinations(t *te
 		})
 	}
 }
+
+func TestSecuritySQLFailureCannotEraseThePreviousSnapshotOrLegacySources(t *testing.T) {
+	database, source, capabilities, oauth := legacySQLFixture(t)
+	if err := SaveSQL(database, capabilities, oauth); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`CREATE TRIGGER deny_security_delete BEFORE DELETE ON ai_security_state BEGIN SELECT RAISE(ABORT,'control database unavailable'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveSQL(database, []byte(`{}`), []byte(`{}`)); err == nil {
+		t.Fatal("failed security deletion reported success")
+	}
+	storedCapabilities, storedOAuth, err := LoadSQL(database)
+	if err != nil || string(storedCapabilities) != string(capabilities) || string(storedOAuth) != string(oauth) {
+		t.Fatal("failed deletion lost the previous security snapshot", err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveSQL(database, []byte(`{}`), []byte(`{}`)); err == nil {
+		t.Fatal("closed database accepted a security write")
+	}
+	if err := migrateStandaloneSQL(database, source); err == nil {
+		t.Fatal("closed database accepted a legacy import")
+	}
+	for filename, document := range map[string][]byte{source: capabilities, source + ".oauth": oauth} {
+		preserved, err := os.ReadFile(filename)
+		if err != nil || string(preserved) != string(document) {
+			t.Fatal("unavailable database modified a legacy source", err)
+		}
+	}
+}

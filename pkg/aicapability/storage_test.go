@@ -46,6 +46,16 @@ func TestRoutedFacadeRejectsUnknownSitesAndRevokesTheOwningSession(t *testing.T)
 	if _, err := facade.Exchange(firstToken, "two.example"); err == nil {
 		t.Fatal("facade crossed the site boundary")
 	}
+	if _, err := facade.Lookup(firstSession.Token, ""); err == nil {
+		t.Fatal("facade accepted a lookup without a site binding")
+	}
+	unavailableRegistry := NewRoutedManager(resolve, func() []string { return []string{"unavailable.example", "two.example"} })
+	if err := unavailableRegistry.Revoke(secondToken); err == nil {
+		t.Fatal("routed revoke ignored registry resolution failure")
+	}
+	if _, err := facade.Lookup(secondSession.Token, "two.example"); err != nil {
+		t.Fatal("failed registry lookup modified another site's active grant", err)
+	}
 	if err := facade.Revoke(secondToken); err != nil {
 		t.Fatal(err)
 	}
