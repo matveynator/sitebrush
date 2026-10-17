@@ -45,6 +45,11 @@ Existing connections configured with the removed URL must reconnect using the
 query URL. Existing durable grant hashes, scopes and revocations are retained;
 resource bindings are not widened to make old credentials fit a different URL.
 
+The public browser Analytics transport also uses a query selector:
+`?request=analytics` for WebSocket upgrades and POST beacons, independent of
+pathname. Ordinary GET navigation with that query stays in the public router.
+The former `/_sitebrush/analytics` pathname has no transport handler.
+
 ## Database owners
 
 The server control dispatcher owns the global database, including hosting
@@ -101,6 +106,10 @@ process. Restoring a control database restores its grants, narrowed scopes,
 revocations, provider settings and administrator IP policies; it does not revive
 in-memory bearer sessions or authorization codes. A content import is not a
 security-database restore.
+
+A failed security-state reload also closes active AI session channels and drops
+temporary pairing state. Restoring valid durable grants permits new
+authorization; it never resurrects the old access sessions.
 
 ## Sources and validation
 

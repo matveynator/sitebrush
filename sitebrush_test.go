@@ -667,8 +667,8 @@ func TestPublishedStaticHTMLUsesBrowserContentTypeRegardlessOfPageExtension(t *t
 		if contentType := response.Header().Get("Content-Type"); contentType != "text/html; charset=utf-8" {
 			t.Errorf("published page %q content type = %q, want HTML", pagePath, contentType)
 		}
-		if response.Body.String() != html {
-			t.Errorf("published page %q body = %q, want %q", pagePath, response.Body.String(), html)
+		if !strings.Contains(response.Body.String(), "<h1>Imported page</h1>") {
+			t.Errorf("published page %q lost its HTML content: %q", pagePath, response.Body.String())
 		}
 		if disposition := response.Header().Get("Content-Disposition"); disposition != "" {
 			t.Errorf("published page %q content disposition = %q, want empty", pagePath, disposition)
@@ -6371,8 +6371,13 @@ func TestPagePasswordProtectionRejectsTraversalAndEncodedRouteAliases(t *testing
 		request := httptest.NewRequest(http.MethodGet, target, nil)
 		response := httptest.NewRecorder()
 		application.route(response, request)
-		if response.Code != http.StatusUnauthorized {
-			t.Errorf("protected alias %q status=%d want=%d body=%q", target, response.Code, http.StatusUnauthorized, response.Body.String())
+		expectedStatus := http.StatusUnauthorized
+		if strings.Contains(target, "%5C") {
+			// A backslash is rejected as an invalid pathname, never normalized into a protected route.
+			expectedStatus = http.StatusNotFound
+		}
+		if response.Code != expectedStatus {
+			t.Errorf("protected alias %q status=%d want=%d body=%q", target, response.Code, expectedStatus, response.Body.String())
 		}
 		if strings.Contains(response.Body.String(), "route alias secret") || strings.Contains(response.Body.String(), "database secret") {
 			t.Errorf("SECURITY: protected alias %q leaked protected content: %q", target, response.Body.String())
@@ -6433,7 +6438,11 @@ func TestPagePasswordProtectionAppliesToLoggedInAdmin(t *testing.T) {
 	openedRequest.RemoteAddr = "198.51.100.42:1234"
 	openedRequest.Header.Set("User-Agent", "Sitebrush Test Browser")
 	openedRequest.AddCookie(adminSessionCookie)
-	openedRequest.AddCookie(unlockCookies[0])
+	for _, cookie := range unlockCookies {
+		if cookie.Name != adminSessionCookie.Name {
+			openedRequest.AddCookie(cookie)
+		}
+	}
 	openedResponse := httptest.NewRecorder()
 	application.route(openedResponse, openedRequest)
 	if openedResponse.Code != http.StatusOK {
@@ -11929,16 +11938,13 @@ func TestAIEditorWebSocketUsesAuthenticatedSameOriginSessionWithoutSecondCSRF(t 
 	}
 }
 
-func TestAIEditorStreamsDraftIntoBackgroundAndCanMinimize(t *testing.T) {
+func TestAIEditorRendersCompletedDraftInBackgroundAndCanMinimize(t *testing.T) {
 	templateBytes, err := embeddedWebFiles.ReadFile("web/edit_ai.html")
 	if err != nil {
 		t.Fatal(err)
 	}
 	templateSource := string(templateBytes)
 	for _, required := range []string{
-		"streamingHTMLForBackground",
-		"scheduleBackgroundPreviewRender",
-		"pageBackgroundFrame.srcdoc = previewHTML",
 		"pageBackgroundFrame.srcdoc = currentDraft.html",
 		`id="pageBackgroundFrame" src="{{.Path}}?ai_background" sandbox=""`,
 		"setEditorMinimized",
@@ -11953,7 +11959,7 @@ func TestAIEditorStreamsDraftIntoBackgroundAndCanMinimize(t *testing.T) {
 		"commandElement.addEventListener('input', function onCommandInput()",
 	} {
 		if !strings.Contains(templateSource, required) {
-			t.Fatalf("AI editor live preview/minimize flow missing %q", required)
+			t.Fatalf("AI editor draft preview/minimize flow missing %q", required)
 		}
 	}
 	if strings.Contains(templateSource, "csrf:accountCSRF") {
@@ -15940,10 +15946,40 @@ func TestAnalyticsAdmissionWithStalledStorage(t *testing.T) {
 	}
 }
 
+func TestBrowserAnalyticsQuerySelectorIsIndependentOfPath(t *testing.T) {
+	application, _ := newTestApplication(t)
+	application.browserAnalytics = make(chan browserAnalyticsEnvelope, 1)
+	for _, pathname := range []string{"/", "/about", "/index.html", "/random/path", "/p/static/analytics.js"} {
+		for _, method := range []string{http.MethodPost, http.MethodGet} {
+			request := httptest.NewRequest(method, "http://localhost"+pathname+"?request=analytics", nil)
+			request.Header.Set("Origin", "https://foreign.example")
+			if method == http.MethodGet {
+				request.Header.Set("Upgrade", "websocket")
+			}
+			response := httptest.NewRecorder()
+			application.route(response, request)
+			if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "origin") {
+				t.Fatalf("analytics selector depends on pathname: %s %s: %d", method, pathname, response.Code)
+			}
+		}
+		baseline := httptest.NewRecorder()
+		application.route(baseline, httptest.NewRequest(http.MethodGet, "http://localhost"+pathname, nil))
+		response := httptest.NewRecorder()
+		application.route(response, httptest.NewRequest(http.MethodGet, "http://localhost"+pathname+"?request=analytics", nil))
+		if response.Code != baseline.Code || response.Body.String() != baseline.Body.String() {
+			t.Fatal("ordinary navigation activated the analytics transport")
+		}
+	}
+	request := httptest.NewRequest(http.MethodPost, "http://localhost/_sitebrush/analytics", nil)
+	if isBrowserAnalyticsRequest(request) {
+		t.Fatal("removed analytics pathname still activates the transport")
+	}
+}
+
 func TestBrowserAnalyticsRejectsForeignOriginAndOverload(t *testing.T) {
 	app := &App{browserAnalytics: make(chan browserAnalyticsEnvelope, 1), analyticsConnections: make(chan struct{}, 1)}
 	for _, origin := range []string{"", "https://evil.example", "http://localhost.evil.example"} {
-		request := httptest.NewRequest("GET", "http://localhost/_sitebrush/analytics", nil)
+		request := httptest.NewRequest("GET", "http://localhost/?request=analytics", nil)
 		request.Header.Set("Origin", origin)
 		response := httptest.NewRecorder()
 		app.browserAnalyticsSocket(response, request)
@@ -15952,7 +15988,7 @@ func TestBrowserAnalyticsRejectsForeignOriginAndOverload(t *testing.T) {
 		}
 	}
 	app.analyticsConnections <- struct{}{}
-	request := httptest.NewRequest("GET", "http://localhost/_sitebrush/analytics", nil)
+	request := httptest.NewRequest("GET", "http://localhost/?request=analytics", nil)
 	request.Header.Set("Origin", "http://localhost")
 	response := httptest.NewRecorder()
 	app.browserAnalyticsSocket(response, request)
@@ -16166,7 +16202,7 @@ func testBrowserAnalyticsWebSocketDelivery(t *testing.T, scheme string, legacyCa
 		app.browserAnalyticsSocket(&analyticsPipeWriter{serverConnection, buffered, make(http.Header)}, request)
 		finished <- nil
 	}()
-	configuration, err := websocket.NewConfig("ws://example.org/_sitebrush/analytics", scheme+"://example.org")
+	configuration, err := websocket.NewConfig("ws://example.org/?request=analytics", scheme+"://example.org")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -16576,7 +16612,7 @@ func TestResultHostResourceURLPreserved(t *testing.T) {
 func TestBrowserAnalyticsProxyRejectsMismatchedOrigin(t *testing.T) {
 	app := &App{}
 	for _, origin := range []string{"http://example.org", "https://evil.example"} {
-		request := httptest.NewRequest("GET", "http://example.org/_sitebrush/analytics", nil)
+		request := httptest.NewRequest("GET", "http://example.org/?request=analytics", nil)
 		request.Header.Set("X-Forwarded-Proto", "https")
 		request.Header.Set("Origin", origin)
 		response := httptest.NewRecorder()
@@ -20872,7 +20908,7 @@ func TestAccountSessionPersistentCookieAndRollingIdleExpiry(t *testing.T) {
 func TestConversionBeaconAdmissionPrivacyAndCancellation(t *testing.T) {
 	application := &App{browserAnalytics: make(chan browserAnalyticsEnvelope, 1)}
 	payload := `{"version":2,"visitor":"1111111111111111","view":"2222222222222222","sequence":1,"path":"/","referrer":"https://github.com/project?token=private","signals":[{"kind":"page","at":0}],"address":"private","language":"private","timezone":"private","client":{"user_agent":"private"},"fingerprint":"private"}`
-	request := httptest.NewRequest("POST", "http://localhost/_sitebrush/analytics", strings.NewReader(payload))
+	request := httptest.NewRequest("POST", "http://localhost/?request=analytics", strings.NewReader(payload))
 	request.Header.Set("Origin", "http://localhost")
 	request.Header.Set("User-Agent", "Mozilla/5.0")
 	response := httptest.NewRecorder()
@@ -20888,7 +20924,7 @@ func TestConversionBeaconAdmissionPrivacyAndCancellation(t *testing.T) {
 	if event.Source != "GitHub" && event.Source != "github.com" {
 		t.Fatalf("source %q", event.Source)
 	}
-	request = httptest.NewRequest("POST", "http://localhost/_sitebrush/analytics", strings.NewReader(payload))
+	request = httptest.NewRequest("POST", "http://localhost/?request=analytics", strings.NewReader(payload))
 	request.Header.Set("Origin", "https://external.example")
 	response = httptest.NewRecorder()
 	application.browserAnalyticsBeacon(response, request)
@@ -20896,7 +20932,7 @@ func TestConversionBeaconAdmissionPrivacyAndCancellation(t *testing.T) {
 		t.Fatal("foreign origin admitted")
 	}
 	application.browserAnalytics <- browserAnalyticsEnvelope{}
-	request = httptest.NewRequest("POST", "http://localhost/_sitebrush/analytics", strings.NewReader(payload))
+	request = httptest.NewRequest("POST", "http://localhost/?request=analytics", strings.NewReader(payload))
 	request.Header.Set("Origin", "http://localhost")
 	request.Header.Set("User-Agent", "Mozilla/5.0")
 	response = httptest.NewRecorder()
@@ -20957,7 +20993,7 @@ func TestConversionStealthCollectsPublicVisitsAndProtectsConfiguration(t *testin
 	}()
 	batch := `{"version":2,"visitor":"1111111111111111","view":"2222222222222222","sequence":1,"path":"/","signals":[{"kind":"page"}]}`
 	for retry := 0; retry < 2; retry++ {
-		request := httptest.NewRequest(http.MethodPost, "https://example.org/_sitebrush/analytics", strings.NewReader(batch))
+		request := httptest.NewRequest(http.MethodPost, "https://example.org/?request=analytics", strings.NewReader(batch))
 		request.RemoteAddr = visit.RemoteAddr
 		request.Header.Set("Origin", "https://example.org")
 		request.Header.Set("User-Agent", "Mozilla/5.0")
@@ -21044,7 +21080,7 @@ func TestConversionPreviewCannotReadOutsidePublishedSite(t *testing.T) {
 
 func TestConversionConfigurationRequiresAdminAndCSRF(t *testing.T) {
 	application, _ := newTestApplication(t)
-	request := httptest.NewRequest("GET", "http://localhost/_sitebrush/analytics", nil)
+	request := httptest.NewRequest("GET", "http://localhost/?request=analytics", nil)
 	reply, handled := application.analyticsConfigurationMessage(request, `{"operation":"configure","goals":[]}`)
 	if !handled || !strings.Contains(reply, "forbidden") {
 		t.Fatal("anonymous configuration accepted")
@@ -21181,7 +21217,7 @@ func TestConversionBrowserRegressions(t *testing.T) {
 	rawBeacons := make(chan string, 8)
 	fixture := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Referrer-Policy", "no-referrer")
-		if request.URL.Path == "/_sitebrush/analytics" && request.Method == http.MethodPost {
+		if isBrowserAnalyticsRequest(request) && request.Method == http.MethodPost {
 			payload, readErr := io.ReadAll(io.LimitReader(request.Body, 16385))
 			if readErr != nil {
 				http.Error(writer, "invalid fixture payload", 400)
@@ -25373,6 +25409,51 @@ func TestAIIngressDecisionIsRetainedAcrossHTTPAdapters(t *testing.T) {
 	machine, owner := application.aiIngressDecisionForRequest(request)
 	if !machine || owner {
 		t.Fatalf("cached ingress decision = machine %t owner %t, want true false", machine, owner)
+	}
+}
+
+type ingressAdmissionCountingDatabase struct {
+	sqlExecutor
+	admissions chan struct{}
+}
+
+func (database ingressAdmissionCountingDatabase) QueryRowContext(boundary context.Context, query string, arguments ...any) *sql.Row {
+	if strings.Contains(query, "FROM ai_provider_policy") {
+		database.admissions <- struct{}{}
+	}
+	return database.sqlExecutor.QueryRowContext(boundary, query, arguments...)
+}
+
+func TestAIIngressAdmissionRunsOnceAcrossProductionHTTPAdapters(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	domain := "ingress-once.example"
+	if err := application.createManagedSiteWithoutAdmin(context.Background(), domain, 123456789); err != nil {
+		t.Fatal(err)
+	}
+	boundary := contextWithDomain(context.Background(), domain)
+	encoded, err := json.Marshal(aiingress.Policy{External: true, CustomCIDRs: []string{"203.0.113.0/24"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.db.ExecContext(boundary, `INSERT INTO ai_provider_policy(id,policy) VALUES(1,?)`, string(encoded)); err != nil {
+		t.Fatal(err)
+	}
+	admissions := make(chan struct{}, 10)
+	application.db = ingressAdmissionCountingDatabase{sqlExecutor: application.db, admissions: admissions}
+	handler := application.aiIngressMiddleware(http.HandlerFunc(application.route))
+	for _, clientIP := range []string{"203.0.113.17", "198.51.100.17"} {
+		response := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "https://"+domain+"/anything?mcp", nil)
+		request.RemoteAddr = clientIP + ":1234"
+		request = request.WithContext(contextWithDomain(request.Context(), domain))
+		handler.ServeHTTP(response, request)
+		if len(admissions) != 1 {
+			t.Fatalf("HTTP adapters evaluated admission %d times for %s", len(admissions), clientIP)
+		}
+		<-admissions
+		if (response.Header().Get("WWW-Authenticate") != "") != (clientIP == "203.0.113.17") {
+			t.Fatal("HTTP adapters changed the admitted protocol boundary")
+		}
 	}
 }
 

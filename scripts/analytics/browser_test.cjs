@@ -104,7 +104,7 @@ assert.ok(['chromium','webkit'].includes(browserEngine),'Unsupported browser eng
   await visitorPage.locator('#plan').selectOption('pro');
   await visitorPage.locator('#password').fill('password-secret');
   await visitorPage.evaluate(()=>{window.SiteBrushAnalytics.event('download');window.SiteBrushAnalytics.formResult('contact',true);});
-  const beaconRequest = visitorPage.waitForRequest(request=>request.url().includes('/_sitebrush/analytics')&&request.method()==='POST');
+  const beaconRequest = visitorPage.waitForRequest(request=>request.url().includes('/?request=analytics')&&request.method()==='POST');
   await visitorPage.evaluate(()=>window.dispatchEvent(new Event('pagehide')));
   const beacon = await beaconRequest;
   const beaconResponse = await beacon.response();

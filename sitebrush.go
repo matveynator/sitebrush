@@ -4354,7 +4354,7 @@ func (a *App) analyticsMiddleware(next http.Handler) http.Handler {
 			if referrer := browserstats.SafeReferrer(r.Referer()); referrer != "" {
 				source := browserstats.SourceAttribution(browserstats.Campaign{}, referrer, r.Host)
 				if source.Kind != "internal" {
-					http.SetCookie(w, &http.Cookie{Name: "sitebrush_analytics_referrer", Value: url.QueryEscape(referrer), Path: "/_sitebrush/analytics", MaxAge: 1800, HttpOnly: true, Secure: requestScheme(r) == "https", SameSite: http.SameSiteLaxMode})
+					http.SetCookie(w, &http.Cookie{Name: "sitebrush_analytics_referrer", Value: url.QueryEscape(referrer), Path: "/", MaxAge: 1800, HttpOnly: true, Secure: requestScheme(r) == "https", SameSite: http.SameSiteLaxMode})
 				}
 			}
 		}
@@ -4367,7 +4367,7 @@ func (a *App) analyticsMiddleware(next http.Handler) http.Handler {
 			default:
 			}
 		}
-		if a.securityAnalytics != nil && r.URL.Path != "/_sitebrush/analytics" && len(a.securityAnalytics) < cap(a.securityAnalytics) {
+		if a.securityAnalytics != nil && !isBrowserAnalyticsRequest(r) && len(a.securityAnalytics) < cap(a.securityAnalytics) {
 			securityEvent := siteAnalyticsEvent{Bytes: writer.bytesWritten, Domain: a.analyticsEventDomain(r, ""), Path: analyticsBoundedString(r.URL.EscapedPath(), 512), Query: analyticsBoundedString(accountauth.SafeQuery(r.URL.RawQuery), 2048), Method: r.Method, StatusCode: writer.statusCode, OccurredAt: startedAt.UTC(), RemoteAddress: analyticsBoundedString(r.RemoteAddr, 64), Forwarded: analyticsBoundedString(r.Header.Get("Forwarded"), 256), ForwardedFor: analyticsBoundedString(r.Header.Get("X-Forwarded-For"), 256), UserAgent: analyticsBoundedString(r.UserAgent(), 256), AcceptLanguage: analyticsBoundedString(r.Header.Get("Accept-Language"), 64), TrustedPeer: sitebrushPeerRequestTrusted(r, startedAt.UTC()), IndexingCrawler: httpsecurity.IsIndexingCrawlerRequest(r), SecurityBlocked: writer.Header().Get("X-Sitebrush-Security-Incident") != "" || writer.statusCode == http.StatusTooManyRequests || writer.statusCode == http.StatusForbidden}
 			securityEvent.SecurityAlreadyBlocked = writer.Header().Get("X-Sitebrush-Security-Already-Blocked") == "1"
 			select {
@@ -4381,7 +4381,7 @@ func (a *App) analyticsMiddleware(next http.Handler) http.Handler {
 }
 
 func shouldRecordAnalyticsRequest(r *http.Request) bool {
-	if r == nil || r.URL == nil || r.URL.Path == "/_sitebrush/analytics" || r.URL.Path == "/p/static/analytics.js" {
+	if r == nil || r.URL == nil || isBrowserAnalyticsRequest(r) || r.URL.Path == "/p/static/analytics.js" {
 		return false
 	}
 	if r.URL.RawQuery == "" {
@@ -4780,6 +4780,11 @@ type browserAnalyticsSlot struct {
 
 // Admission is bounded before upgrading. A browser connection owns its read loop
 // and session lifetime; slow or abusive clients cannot enter the SQL subsystem.
+func isBrowserAnalyticsRequest(r *http.Request) bool {
+	return r != nil && r.URL != nil && r.URL.Query().Get("request") == "analytics" &&
+		(r.Method == http.MethodPost || r.Method == http.MethodGet && strings.EqualFold(r.Header.Get("Upgrade"), "websocket"))
+}
+
 func (a *App) browserAnalyticsSocket(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		a.browserAnalyticsBeacon(w, r)
@@ -10099,7 +10104,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 		nextRequest := r.WithContext(contextWithDomain(r.Context(), requestDomain))
 		// Query endpoints also work on paths otherwise claimed by embedded assets.
 		query := nextRequest.URL.Query()
-		if query.Has("mcp") || query.Has("oauth") || query.Has("ai") || query.Has("ai_token") || query.Has("ai_session") || query.Has("ai_authorize") {
+		if query.Has("mcp") || query.Has("oauth") || query.Has("ai") || query.Has("ai_token") || query.Has("ai_session") || query.Has("ai_authorize") || isBrowserAnalyticsRequest(nextRequest) {
 			application.route(w, nextRequest)
 			return
 		}
@@ -12230,7 +12235,7 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	}
 	publicTrialEndpoint := publicTrialEndpointFromRequest(r)
 	// Public observations remain available when the administrator UI is hidden.
-	if r.URL.Path == "/_sitebrush/analytics" {
+	if isBrowserAnalyticsRequest(r) {
 		a.browserAnalyticsSocket(w, r)
 		return
 	}

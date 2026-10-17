@@ -285,7 +285,7 @@
         } catch (referrerError) { console.error('SiteBrush analytics: invalid referrer',referrerError.name); return referrer; }
     }
     function analyticsCommand(command,onReply,status) {
-        const contact = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/_sitebrush/analytics');
+        const contact = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/?request=analytics');
         let finished = false;
         contact.addEventListener('open',function submitCommand() { command.csrf=dashboard.dataset.csrf; contact.send(JSON.stringify(command)); });
         contact.addEventListener('message',function receiveReply(messageEvent) {
@@ -460,7 +460,7 @@
         if (model.saving) return;
         model.saving = true;
         const status = document.getElementById('conversion-save-status'); status.textContent = '';
-        model.connection = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/_sitebrush/analytics');
+        model.connection = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/?request=analytics');
         model.connection.addEventListener('open',function sendConfiguration() { model.connection.send(JSON.stringify({operation:'configure',csrf:dashboard.dataset.csrf,goals:model.goals})); });
         model.connection.addEventListener('message',function configurationSaved(messageEvent) {
             const response = JSON.parse(messageEvent.data); status.textContent = response.error ? label('cx_save_error') + ': ' + response.error : label('cx_saved'); model.saving = false; model.connection.close();

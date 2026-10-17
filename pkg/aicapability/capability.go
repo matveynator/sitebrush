@@ -184,11 +184,11 @@ func (manager *Manager) run() {
 					loadErr = errors.New("invalid AI storage snapshot")
 				}
 				manager.loadError = loadErr
+				for key := range sessions {
+					stopSession(sessions, sessionStops, key)
+				}
+				clear(pairings)
 				if loadErr == nil {
-					for key := range sessions {
-						stopSession(sessions, sessionStops, key)
-					}
-					clear(pairings)
 					capabilities, oauth = nextCapabilities, nextOAuth
 					manager.ownedCapabilities, manager.ownedOAuth = capabilities, oauth
 				}

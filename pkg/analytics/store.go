@@ -289,14 +289,25 @@ func (store *Store) executeWithDatabase(root string, request StorageRequest, arc
 	}
 	databasePath := filepath.Join(directory, "analytics.db")
 	if owned == nil {
-		legacyPath := databasePath
-		databasePath = filepath.Join(directory, DatabaseName(request.Domain))
-		if _, pathErr := os.Lstat(databasePath); os.IsNotExist(pathErr) {
-			if legacy, legacyErr := os.Lstat(legacyPath); legacyErr == nil && legacy.Mode().IsRegular() {
-				if renameErr := os.Rename(legacyPath, databasePath); renameErr != nil {
+		// Legacy names stay relative to an opened directory capability, so a
+		// concurrent filesystem change cannot redirect migration outside it.
+		legacyRoot, openErr := os.OpenRoot(directory)
+		if openErr != nil {
+			return StorageResult{Err: openErr}
+		}
+		defer legacyRoot.Close()
+		databaseName := DatabaseName(request.Domain)
+		databasePath = filepath.Join(directory, databaseName)
+		if _, pathErr := legacyRoot.Lstat(databaseName); os.IsNotExist(pathErr) {
+			if legacy, legacyErr := legacyRoot.Lstat("analytics.db"); legacyErr == nil && legacy.Mode().IsRegular() {
+				if renameErr := legacyRoot.Rename("analytics.db", databaseName); renameErr != nil {
 					return StorageResult{Err: renameErr}
 				}
+			} else if legacyErr != nil && !os.IsNotExist(legacyErr) {
+				return StorageResult{Err: legacyErr}
 			}
+		} else if pathErr != nil {
+			return StorageResult{Err: pathErr}
 		}
 	}
 	if info, err := os.Lstat(databasePath); err == nil && !info.Mode().IsRegular() {
