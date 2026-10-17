@@ -8,8 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -106,39 +104,63 @@ type managerResponse struct {
 }
 
 type Manager struct {
-	requests       chan managerRequest
-	stop           chan struct{}
-	persistentPath string
+	done              chan struct{}
+	requests          chan managerRequest
+	stop              chan struct{}
+	storage           Storage
+	resolve           func(string) (*Manager, error)
+	domains           func() []string
+	ownedCapabilities map[string]Capability
+	ownedOAuth        *oauthState
+	loadError         error
 }
 
 func NewManager() *Manager {
-	return newManager("")
+	return newManager()
 }
 
-func NewPersistentManager(path string) *Manager {
-	return newManager(strings.TrimSpace(path))
-}
-
-func newManager(persistentPath string) *Manager {
-	manager := &Manager{requests: make(chan managerRequest), stop: make(chan struct{}), persistentPath: persistentPath}
+func newManager() *Manager {
+	manager := &Manager{requests: make(chan managerRequest), stop: make(chan struct{})}
+	manager.done = make(chan struct{})
 	go manager.run()
 	return manager
 }
 
 func (manager *Manager) run() {
+	defer close(manager.done)
 	capabilities := map[string]Capability{}
 	sessions := map[string]Session{}
 	sessionStops := map[string]chan struct{}{}
 	clock := time.NewTicker(time.Second)
 	defer clock.Stop()
 	defer func() {
+		if closer, ok := manager.storage.(interface{ Close() }); ok {
+			closer.Close()
+		}
+	}()
+	defer func() {
 		for _, stop := range sessionStops {
 			close(stop)
 		}
 	}()
 	pairings := map[string]pairingState{}
-	manager.loadCapabilities(capabilities)
 	oauth := manager.loadOAuth()
+	manager.ownedCapabilities, manager.ownedOAuth = capabilities, oauth
+	if manager.storage != nil {
+		encodedCapabilities, encodedOAuth, err := manager.storage.Load()
+		if err == nil && len(encodedCapabilities) > 0 {
+			err = json.Unmarshal(encodedCapabilities, &capabilities)
+		}
+		if err == nil && len(encodedOAuth) > 0 {
+			err = json.Unmarshal(encodedOAuth, oauth)
+		}
+		if capabilities == nil || oauth.Clients == nil || oauth.Refresh == nil {
+			err = errors.New("invalid control database AI state")
+		}
+		manager.loadError = err
+		manager.ownedCapabilities = capabilities
+		oauth.loadError = err
+	}
 	for {
 		select {
 		case <-manager.stop:
@@ -148,6 +170,35 @@ func (manager *Manager) run() {
 			prunePairings(pairings, now)
 			oauth.prune(now)
 		case request := <-manager.requests:
+			if request.kind == "reload-storage" {
+				encodedCapabilities, encodedOAuth, loadErr := manager.storage.Load()
+				nextCapabilities := map[string]Capability{}
+				nextOAuth := manager.loadOAuth()
+				if loadErr == nil && len(encodedCapabilities) > 0 {
+					loadErr = json.Unmarshal(encodedCapabilities, &nextCapabilities)
+				}
+				if loadErr == nil && len(encodedOAuth) > 0 {
+					loadErr = json.Unmarshal(encodedOAuth, nextOAuth)
+				}
+				if nextCapabilities == nil || nextOAuth.Clients == nil || nextOAuth.Refresh == nil {
+					loadErr = errors.New("invalid AI storage snapshot")
+				}
+				manager.loadError = loadErr
+				for key := range sessions {
+					stopSession(sessions, sessionStops, key)
+				}
+				clear(pairings)
+				if loadErr == nil {
+					capabilities, oauth = nextCapabilities, nextOAuth
+					manager.ownedCapabilities, manager.ownedOAuth = capabilities, oauth
+				}
+				request.reply <- managerResponse{err: loadErr}
+				continue
+			}
+			if manager.loadError != nil && request.kind != "close" {
+				request.reply <- managerResponse{err: manager.loadError}
+				continue
+			}
 			pruneSessions(sessions, sessionStops, time.Now())
 			// Temporary grants live only in this owner process and are never persisted.
 			prunePairings(pairings, time.Now())
@@ -258,10 +309,11 @@ func (manager *Manager) run() {
 				// A session is minted from a persistent capability link. Revoking only
 				// one bearer session would leave that link able to mint a replacement,
 				// so the administrator action revokes the capability and all its sessions.
+				previousRevoked := capability.Revoked
 				capability.Revoked = true
 				capabilities[capability.ID] = capability
 				if err := manager.saveCapabilities(capabilities); err != nil {
-					capability.Revoked = false
+					capability.Revoked = previousRevoked
 					capabilities[capability.ID] = capability
 					request.reply <- managerResponse{err: err}
 					continue
@@ -336,10 +388,11 @@ func (manager *Manager) run() {
 					request.reply <- managerResponse{err: errors.New("capability is invalid")}
 					continue
 				}
+				previousRevoked := capability.Revoked
 				capability.Revoked = true
 				capabilities[capability.ID] = capability
 				if err := manager.saveCapabilities(capabilities); err != nil {
-					capability.Revoked = false
+					capability.Revoked = previousRevoked
 					capabilities[capability.ID] = capability
 					request.reply <- managerResponse{err: err}
 					continue
@@ -356,10 +409,11 @@ func (manager *Manager) run() {
 					request.reply <- managerResponse{err: errors.New("capability is invalid")}
 					continue
 				}
+				previousRevoked := capability.Revoked
 				capability.Revoked = true
 				capabilities[capability.ID] = capability
 				if err := manager.saveCapabilities(capabilities); err != nil {
-					capability.Revoked = false
+					capability.Revoked = previousRevoked
 					capabilities[capability.ID] = capability
 					request.reply <- managerResponse{err: err}
 					continue
@@ -375,49 +429,16 @@ func (manager *Manager) run() {
 	}
 }
 
-func (manager *Manager) loadCapabilities(capabilities map[string]Capability) {
-	if manager.persistentPath == "" {
-		return
-	}
-	data, err := os.ReadFile(manager.persistentPath)
-	if err != nil {
-		return
-	}
-	var stored map[string]Capability
-	if json.Unmarshal(data, &stored) == nil {
-		for capabilityID, capability := range stored {
-			if !capability.Revoked {
-				capabilities[capabilityID] = capability
-			}
-		}
-	}
-}
-
 func (manager *Manager) saveCapabilities(capabilities map[string]Capability) error {
-	if manager.persistentPath == "" {
-		return nil
-	}
-	data, err := json.Marshal(capabilities)
-	if err != nil {
-		return err
-	}
-	temporaryPath := manager.persistentPath + ".tmp"
-	if err := os.MkdirAll(filepath.Dir(manager.persistentPath), 0o700); err != nil {
-		return err
-	}
-	if err := os.WriteFile(temporaryPath, data, 0o600); err != nil {
-		return err
-	}
-	if err := os.Rename(temporaryPath, manager.persistentPath); err != nil {
-		_ = os.Remove(temporaryPath)
-		return err
-	}
-	return nil
+	return manager.persist()
 }
 
 func (manager *Manager) request(request managerRequest) managerResponse {
 	if manager == nil {
 		return managerResponse{err: errors.New("capability manager is unavailable")}
+	}
+	if manager.resolve != nil {
+		return manager.routedRequest(request)
 	}
 	select {
 	case manager.requests <- request:
@@ -504,6 +525,9 @@ func (manager *Manager) RevokeCapabilityID(capabilityID, owner, domain string) e
 }
 
 func (manager *Manager) Close() {
+	if manager != nil && manager.resolve != nil {
+		return
+	}
 	if manager == nil {
 		return
 	}
@@ -513,6 +537,7 @@ func (manager *Manager) Close() {
 		<-reply
 	case <-manager.stop:
 	}
+	<-manager.done
 }
 
 func ManifestJSON(manifest Manifest) ([]byte, error) { return json.Marshal(manifest) }

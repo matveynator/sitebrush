@@ -63,7 +63,7 @@ func TestPairingSeparatesBrowserApprovalFromOneTimeDeviceClaim(t *testing.T) {
 	if err != nil || capability.PagePath != "" || capability.Owner != "owner@example.org" || len(capability.Scopes) != 4 {
 		t.Fatalf("grant: %+v %v", capability, err)
 	}
-	stored, err := os.ReadFile(statePath)
+	stored, err := os.ReadFile(statePath + ".db")
 	if err != nil || strings.Contains(string(stored), token) || strings.Contains(string(stored), pairing.DeviceCode) || strings.Contains(string(stored), pairing.VerificationCode) {
 		t.Fatalf("persisted secrets: %s %v", stored, err)
 	}
@@ -120,11 +120,9 @@ func TestPairingExpiryAndPersistenceFailureFailClosed(t *testing.T) {
 	if len(pairings) != 0 {
 		t.Fatal("expired request survived")
 	}
-	parent := filepath.Join(t.TempDir(), "file")
-	if err := os.WriteFile(parent, []byte("x"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	failing := NewPersistentManager(filepath.Join(parent, "grants.json"))
+	failure := make(chan struct{})
+	close(failure)
+	failing := NewStoredManager(failingSaveStorage{fail: failure})
 	defer failing.Close()
 	pairing, err := failing.BeginPairing("example.org")
 	if err != nil {

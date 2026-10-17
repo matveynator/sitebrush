@@ -17,8 +17,8 @@ func TestServerAppTargets(t *testing.T) {
 	t.Parallel()
 
 	targets := serverAppTargets()
-	if len(targets) != 13 {
-		t.Fatalf("expected 13 server-app targets, got %d", len(targets))
+	if len(targets) != 11 {
+		t.Fatalf("expected 11 server-app targets, got %d", len(targets))
 	}
 
 	if targets[0].goos != "linux" || targets[0].goarch != "amd64" {
@@ -27,15 +27,10 @@ func TestServerAppTargets(t *testing.T) {
 	if targets[len(targets)-1].goos != "windows" || targets[len(targets)-1].goarch != "arm64" {
 		t.Fatalf("unexpected last target: %+v", targets[len(targets)-1])
 	}
-	foundNetBSD := false
 	for _, target := range targets {
-		if target.goos == "netbsd" && target.goarch == "amd64" {
-			foundNetBSD = true
-			break
+		if target.goos == "netbsd" {
+			t.Fatal("server-app targets must exclude NetBSD while modernc.org/sqlite does not compile there")
 		}
-	}
-	if !foundNetBSD {
-		t.Fatal("server-app targets should include NetBSD")
 	}
 }
 

@@ -313,14 +313,14 @@
         }
         if (finalDelivery && navigator.sendBeacon) {
             for (const batch of model.batches) {
-                if (!navigator.sendBeacon('/_sitebrush/analytics',new Blob([JSON.stringify(batch.envelope)],{type:'application/json'}))) break;
+                if (!navigator.sendBeacon('/?request=analytics',new Blob([JSON.stringify(batch.envelope)],{type:'application/json'}))) break;
             }
         } else deliverPendingBatch();
     }
     function connect() {
         if (model.connection && model.connection.readyState < WebSocket.CLOSING || model.stopped || performance.now() < model.nextConnect) return;
         model.nextConnect = performance.now()+15000;
-        model.connection = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://')+location.host+'/_sitebrush/analytics');
+        model.connection = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://')+location.host+'/?request=analytics');
         model.connection.addEventListener('open',function connected() {
             model.retryCount = 0;
             for (const batch of model.batches) batch.sentAt = null;

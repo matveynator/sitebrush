@@ -26,6 +26,13 @@ func TestRootRejectsTraversalAndSymlinkEscape(t *testing.T) {
 	if err := root.WriteFile(filepath.Join("escape", "secret"), []byte("secret"), 0o600); err == nil {
 		t.Fatal("symlink escape was accepted")
 	}
+	if _, err := root.Lstat(filepath.Join("escape", "secret")); err == nil {
+		t.Fatal("metadata lookup escaped through a symlink parent")
+	}
+	info, err := root.Lstat("escape")
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("link metadata was followed instead of inspected: %v", err)
+	}
 	if _, err := os.Stat(filepath.Join(outsidePath, "secret")); !os.IsNotExist(err) {
 		t.Fatalf("outside file was created: %v", err)
 	}
@@ -121,7 +128,6 @@ func TestRootFileLifecycleAndRejectedOperations(t *testing.T) {
 		t.Fatal("missing file opened")
 	}
 }
-
 
 // BEGIN storage capability escape regression tests.
 

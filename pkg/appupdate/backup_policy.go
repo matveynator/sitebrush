@@ -85,10 +85,49 @@ func (scope backupScope) trees() []string {
 	return trees
 }
 
+func (scope backupScope) selectedTrees(root *os.Root) ([]string, error) {
+	trees := scope.trees()
+	if !scope.Policy.Analytics {
+		return trees, nil
+	}
+	sites := path.Join(path.Dir(scope.Control.Control), "sites")
+	directory, err := databaseDirectory(root, sites)
+	if errors.Is(err, os.ErrNotExist) {
+		return trees, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer directory.Close()
+	entries, err := fs.ReadDir(directory.FS(), ".")
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !safeSiteID(entry.Name()) {
+			continue
+		}
+		trees = append(trees, path.Join(sites, entry.Name(), "analytics", "archives"))
+	}
+	return trees, nil
+}
+
+func (scope backupScope) siteAnalyticsArchiveContains(name string) bool {
+	prefix := path.Join(path.Dir(scope.Control.Control), "sites") + "/"
+	if !scope.Policy.Analytics || !strings.HasPrefix(name, prefix) {
+		return false
+	}
+	components := strings.Split(strings.TrimPrefix(name, prefix), "/")
+	return len(components) >= 3 && safeSiteID(components[0]) && components[1] == "analytics" && components[2] == "archives" && (len(components) == 3 || strings.HasSuffix(name, ".json.gz"))
+}
+
 func (scope backupScope) contains(name string) bool {
 	name = strings.ReplaceAll(name, string(os.PathSeparator), "/")
 	if !fs.ValidPath(name) || name == "." || strings.Contains(name, "\\") {
 		return false
+	}
+	if scope.siteAnalyticsArchiveContains(name) {
+		return true
 	}
 	if scope.Control.coreContains(name) {
 		return scope.Policy.Databases
@@ -120,7 +159,11 @@ func walkSelectedFiles(root *os.Root, scope backupScope, stop <-chan struct{}, v
 			return err
 		}
 	}
-	for _, tree := range scope.trees() {
+	trees, err := scope.selectedTrees(root)
+	if err != nil {
+		return err
+	}
+	for _, tree := range trees {
 		directory, err := databaseDirectory(root, tree)
 		if errors.Is(err, os.ErrNotExist) {
 			continue

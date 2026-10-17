@@ -220,10 +220,12 @@ func (store *Store) run(root string, requests <-chan StorageRequest, done chan<-
 }
 
 func storeDirectoryPath(root, domain string) (string, error) {
-	if domain == "" || len(domain) > 253 || strings.ContainsAny(domain, "\x00\r\n/\\") {
+	domain = strings.TrimSpace(domain)
+	safeDomain := filepath.Base(domain)
+	if domain == "" || len(domain) > 253 || strings.ContainsAny(domain, "\x00\r\n/\\") || safeDomain != domain || safeDomain == "." || safeDomain == ".." {
 		return "", errors.New("invalid analytics domain")
 	}
-	directory := filepath.Join(root, "site-"+url.PathEscape(domain))
+	directory := filepath.Join(root, "site-"+url.PathEscape(safeDomain))
 	relative, err := filepath.Rel(root, directory)
 	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
 		return "", errors.New("unsafe analytics directory")
@@ -246,12 +248,30 @@ func storeDirectory(root, domain string) (string, error) {
 	return directory, nil
 }
 
+// ExecuteOwned runs inside the site's analytics participant. The SQL handle and
+// archive-hour map never leave that participant's turn.
+func ExecuteOwned(directory string, request StorageRequest, database *sql.DB, archivedHour map[string]string) StorageResult {
+	return (&Store{}).executeWithDatabase(directory, request, archivedHour, database, "analytics.db")
+}
+
 func (store *Store) execute(root string, request StorageRequest, archivedHour map[string]string) StorageResult {
+	// Only the standalone adapter resolves domain-based legacy directories.
+	// Production participants supply an admitted site-ID directory instead.
+	var directory string
+	var err error
 	if request.Operation == ReadUsage {
-		directory, err := storeDirectoryPath(root, request.Domain)
-		if err != nil {
-			return StorageResult{Err: err}
-		}
+		directory, err = storeDirectoryPath(root, request.Domain)
+	} else {
+		directory, err = storeDirectory(root, request.Domain)
+	}
+	if err != nil {
+		return StorageResult{Err: err}
+	}
+	return store.executeWithDatabase(directory, request, archivedHour, nil, DatabaseName(request.Domain))
+}
+
+func (store *Store) executeWithDatabase(directory string, request StorageRequest, archivedHour map[string]string, owned *sql.DB, databaseName string) StorageResult {
+	if request.Operation == ReadUsage {
 		info, err := os.Lstat(directory)
 		if os.IsNotExist(err) {
 			return StorageResult{}
@@ -262,17 +282,25 @@ func (store *Store) execute(root string, request StorageRequest, archivedHour ma
 		usage, err := directoryBytes(directory)
 		return StorageResult{Bytes: usage, Err: err}
 	}
-	directory, err := storeDirectory(root, request.Domain)
-	if err != nil {
-		return StorageResult{Err: err}
-	}
-	databasePath := filepath.Join(directory, DatabaseName(request.Domain))
-	legacyPath := filepath.Join(directory, "analytics.db")
-	if _, pathErr := os.Lstat(databasePath); os.IsNotExist(pathErr) {
-		if legacy, legacyErr := os.Lstat(legacyPath); legacyErr == nil && legacy.Mode().IsRegular() {
-			if renameErr := os.Rename(legacyPath, databasePath); renameErr != nil {
-				return StorageResult{Err: renameErr}
+	databasePath := filepath.Join(directory, databaseName)
+	if owned == nil {
+		// Legacy names stay relative to an opened directory capability, so a
+		// concurrent filesystem change cannot redirect migration outside it.
+		legacyRoot, openErr := os.OpenRoot(directory)
+		if openErr != nil {
+			return StorageResult{Err: openErr}
+		}
+		defer legacyRoot.Close()
+		if _, pathErr := legacyRoot.Lstat(databaseName); os.IsNotExist(pathErr) {
+			if legacy, legacyErr := legacyRoot.Lstat("analytics.db"); legacyErr == nil && legacy.Mode().IsRegular() {
+				if renameErr := legacyRoot.Rename("analytics.db", databaseName); renameErr != nil {
+					return StorageResult{Err: renameErr}
+				}
+			} else if legacyErr != nil && !os.IsNotExist(legacyErr) {
+				return StorageResult{Err: legacyErr}
 			}
+		} else if pathErr != nil {
+			return StorageResult{Err: pathErr}
 		}
 	}
 	if info, err := os.Lstat(databasePath); err == nil && !info.Mode().IsRegular() {
@@ -318,12 +346,16 @@ func (store *Store) execute(root string, request StorageRequest, archivedHour ma
 			return StorageResult{Err: quotaErr}
 		}
 	}
-	database, err := sql.Open("sqlite", databasePath)
-	if err != nil {
-		return StorageResult{Err: err}
+	database := owned
+	var err error
+	if database == nil {
+		database, err = sql.Open("sqlite", databasePath)
+		if err != nil {
+			return StorageResult{Err: err}
+		}
+		defer database.Close()
+		database.SetMaxOpenConns(1)
 	}
-	defer database.Close()
-	database.SetMaxOpenConns(1)
 	boundary, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	finished := make(chan struct{})
 	defer close(finished)
@@ -341,6 +373,9 @@ func (store *Store) execute(root string, request StorageRequest, archivedHour ma
 	}()
 	// SQLite-specific resource limits are confined to this storage boundary.
 	for _, statement := range []string{`PRAGMA page_size=4096`, `PRAGMA auto_vacuum=INCREMENTAL`, `PRAGMA journal_mode=DELETE`, `PRAGMA busy_timeout=100`, `PRAGMA max_page_count=4096`, `CREATE TABLE IF NOT EXISTS checkpoints(kind TEXT PRIMARY KEY,body TEXT NOT NULL)`} {
+		if owned != nil && strings.HasPrefix(statement, "PRAGMA") {
+			continue
+		}
 		if _, err := database.ExecContext(boundary, statement); err != nil {
 			return StorageResult{Err: err}
 		}
@@ -601,7 +636,9 @@ func DecodeArchive(reader io.Reader) (Report, error) {
 	return report, nil
 }
 
-func DatabaseName(domain string) string { return url.PathEscape(domain) + ".analytics.db" }
+func DatabaseName(domain string) string {
+	return url.PathEscape(filepath.Base(strings.TrimSpace(domain))) + ".analytics.db"
+}
 func directoryBytes(directory string) (int64, error) {
 	entries, err := os.ReadDir(directory)
 	if os.IsNotExist(err) {

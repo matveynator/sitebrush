@@ -45,6 +45,11 @@ jobs:
       - name: Test server authorization and database maintenance
         shell: bash
         run: go test -v -count=1 -timeout=600s -run 'Test(ServerUpdate|Update)' .
+      - name: Test site database ownership and migration
+        shell: bash
+        run: >-
+          go test -count=1 -timeout=600s .
+          -run '^Test(SiteSubsystem|SiteControl|LegacyAIMigration|LegacySitePartition|LegacyAnalytics|ConcurrentSiteControl|SiteDatabaseBackup|PartitionedSiteManagement)'
 
   update_crosscompile:
     runs-on: ubuntu-22.04
@@ -124,12 +129,6 @@ jobs:
           -coverpkg=./pkg/appupdate,./pkg/updateannounce,./pkg/migrations,./pkg/authmail,./pkg/hostingandsupport,./pkg/serviceinstall
           -coverprofile=application-update-coverage.out
           -run 'Test(ServerUpdate|Update|AccountLegacySessionsInvalidatedOnce|AdminIPOptInMigrationRunsForPreviousSchemaVersion)' .
-      - name: Upload coverage
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6
-        with:
-          fail_ci_if_error: true
-          files: coverage.out,application-update-coverage.out
-          use_oidc: true
       - name: Enforce lock-free architecture
         run: go test -count=1 ./scripts/architecture
       - name: Test saved browser page imports
@@ -156,6 +155,22 @@ jobs:
           -run '^(TestAI(Site|CapabilityScopes|CapabilityRevocation|ConcurrentVersion|VersionGuard|Uploads|EditorInlineAttachments|PageSave|Rollback|Unscoped|FileEndpoint|PageScoped)|TestAppAIStore)'
       - name: Test Remote MCP authorization and site lifecycle
         run: go test -count=1 -timeout=180s . -run '^TestMCP'
+      - name: Test hidden AI ingress and site database ownership
+        run: >-
+          go test -count=1 -timeout=180s -covermode=atomic
+          -coverpkg=./pkg/aicapability,./pkg/aiingress,./pkg/analytics,./pkg/appupdate,./pkg/storagejail
+          -coverprofile=application-ai-coverage.out .
+          -run '^Test(MCP|AIIngress|AIProviderGate|SiteSubsystem|SiteControl|LegacyAIMigration|LegacySitePartition|LegacyAnalytics|ConcurrentSiteControl|SiteDatabaseBackup|HiddenAISelectors|PartitionedSiteManagement)'
+      - name: Test public routing and AI editor regressions
+        run: >-
+          go test -count=1 .
+          -run '^Test(PublishedStaticHTMLUsesBrowserContentType|PagePasswordProtection|AIEditorPageEmbedsSessionCSRF|AIEditorRendersCompletedDraft|AIEditorTemplateTreatsClarification|BlockedAdminIPSeesStaticSite|BrowserAnalyticsQuery)'
+      - name: Upload coverage
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6
+        with:
+          fail_ci_if_error: true
+          files: coverage.out,application-update-coverage.out,application-ai-coverage.out
+          use_oidc: true
       - name: Install editor browser test dependencies
         working-directory: scripts/editor
         run: |

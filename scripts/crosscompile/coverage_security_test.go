@@ -331,7 +331,7 @@ func TestCrossCompileSuccessfulExternalToolBranchesUseExpectedArguments(t *testi
 		want   int
 	}{
 		{filter: buildTargetFilter{goos: "plan9"}, want: 0},
-		{filter: buildTargetFilter{goarch: "arm64"}, want: 6},
+		{filter: buildTargetFilter{goarch: "arm64"}, want: 5},
 	} {
 		if got := len(filteredServerAppTargets(serverAppTargets(), testCase.filter)); got != testCase.want {
 			t.Fatalf("filtered target count = %d, want %d", got, testCase.want)

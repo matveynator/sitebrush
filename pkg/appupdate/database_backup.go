@@ -81,11 +81,37 @@ func (scope databaseBackupScope) coreContains(name string) bool {
 	if path.Dir(name) == sites && databaseName(path.Base(name)) {
 		return true
 	}
+	if strings.HasPrefix(name, sites+"/") {
+		relative := strings.TrimPrefix(databaseBaseName(name), sites+"/")
+		components := strings.Split(relative, "/")
+		if len(components) == 2 && safeSiteID(components[0]) && (components[1] == "content.db" || components[1] == "control.db") {
+			return true
+		}
+	}
 	return false
 }
 
 func (scope databaseBackupScope) contains(name string) bool {
-	return scope.coreContains(name) || strings.HasPrefix(name, "storage/analytics/") && databaseName(path.Base(name))
+	return scope.coreContains(name) || scope.analyticsContains(name)
+}
+
+func safeSiteID(identifier string) bool {
+	if len(identifier) != 32 {
+		return false
+	}
+	return strings.Trim(identifier, "0123456789abcdef") == ""
+}
+
+func (scope databaseBackupScope) analyticsContains(name string) bool {
+	if strings.HasPrefix(name, "storage/analytics/") && databaseName(path.Base(name)) {
+		return true
+	}
+	sites := path.Join(path.Dir(scope.Control), "sites") + "/"
+	if !strings.HasPrefix(name, sites) {
+		return false
+	}
+	components := strings.Split(strings.TrimPrefix(databaseBaseName(name), sites), "/")
+	return len(components) == 3 && safeSiteID(components[0]) && components[1] == "analytics" && components[2] == "analytics.db"
 }
 
 // Directory capabilities may not traverse links, even links that currently
@@ -177,6 +203,9 @@ func walkDatabaseFiles(root *os.Root, scope databaseBackupScope, stop <-chan str
 			if directoryName == "storage/analytics" {
 				selected = selections[0].Analytics
 			}
+			if directoryName != "storage/analytics" {
+				selected = selections[0].Databases || selections[0].Analytics
+			}
 			if !selected {
 				continue
 			}
@@ -206,7 +235,10 @@ func walkDatabaseFiles(root *os.Root, scope databaseBackupScope, stop <-chan str
 					return fmt.Errorf("unsafe database backup entry %q", fullName)
 				}
 				if directoryName != "storage/analytics" {
-					return fs.SkipDir
+					components := strings.Split(name, "/")
+					if !safeSiteID(components[0]) || len(components) > 2 || len(components) == 2 && components[1] != "analytics" {
+						return fs.SkipDir
+					}
 				}
 				return nil
 			}
