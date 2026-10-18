@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -18,10 +19,9 @@ type publishTarget struct {
 	goarch string
 }
 
-// publishTargets is the native auto-update matrix produced by the current
-// crosscompile pipeline. NetBSD is deliberately absent while the pinned
-// modernc.org/sqlite version cannot build that target. Supported keeps accepting
-// NetBSD artifacts so older signed manifests remain valid.
+// publishTargets is the complete native auto-update matrix that the current
+// crosscompile pipeline must produce. NetBSD is not required while the pinned
+// modernc.org/sqlite version cannot build that target.
 func publishTargets() []publishTarget {
 	return []publishTarget{
 		{goos: "darwin", goarch: "amd64"},
@@ -37,7 +37,18 @@ func publishTargets() []publishTarget {
 	}
 }
 
-// Publish signs only the complete native auto-update matrix. Desktop packages,
+// optionalPublishTargets preserves explicitly supported release artifacts that
+// may exist in a build directory even though the current crosscompile matrix no
+// longer requires them. This keeps older/manual NetBSD release production
+// compatible without making NetBSD mandatory for every release.
+func optionalPublishTargets() []publishTarget {
+	return []publishTarget{
+		{goos: "netbsd", goarch: "amd64"},
+		{goos: "netbsd", goarch: "arm64"},
+	}
+}
+
+// Publish signs only known native server artifacts. Desktop packages,
 // Linux/386 compatibility builds, and arbitrary build-directory files cannot
 // become server update artifacts.
 func Publish(directory, version, commit string, key ed25519.PrivateKey) error {
@@ -58,10 +69,13 @@ func publish(directory, version, commit string, key ed25519.PrivateKey, trusted 
 	}
 	manifest := Manifest{Protocol: Protocol, Version: version, Sequence: sequence, Commit: commit, Published: time.Now().UTC(), Compatibility: compatibility}
 	var checksums strings.Builder
-	for _, target := range publishTargets() {
+	appendArtifact := func(target publishTarget, required bool) error {
 		name := BinaryName(target.goos, target.goarch)
 		file, err := os.Open(filepath.Join(directory, name))
 		if err != nil {
+			if !required && errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
 			return err
 		}
 		info, err := file.Stat()
@@ -84,6 +98,17 @@ func publish(directory, version, commit string, key ed25519.PrivateKey, trusted 
 		checksum := hex.EncodeToString(digest.Sum(nil))
 		manifest.Artifacts = append(manifest.Artifacts, Artifact{OS: target.goos, Arch: target.goarch, Name: name, Size: size, SHA256: checksum})
 		fmt.Fprintf(&checksums, "%s  %s\n", checksum, name)
+		return nil
+	}
+	for _, target := range publishTargets() {
+		if err := appendArtifact(target, true); err != nil {
+			return err
+		}
+	}
+	for _, target := range optionalPublishTargets() {
+		if err := appendArtifact(target, false); err != nil {
+			return err
+		}
 	}
 	payload, err := Sign(manifest, key)
 	if err != nil {
