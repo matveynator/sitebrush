@@ -52,6 +52,8 @@ func TestQUICPriorityTCPCompatibilityAndPinnedIdentity(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer listener.Close()
+			releaseConnection := make(chan struct{})
+			defer close(releaseConnection)
 			serverFinished := make(chan error, 1)
 			go func() {
 				connection, err := listener.Accept()
@@ -63,6 +65,9 @@ func TestQUICPriorityTCPCompatibilityAndPinnedIdentity(t *testing.T) {
 				_ = connection.SetDeadline(time.Now().Add(5 * time.Second))
 				_, err = io.CopyN(connection, connection, 1)
 				serverFinished <- err
+				// QUIC writes enqueue stream bytes. Retain the connection until the
+				// consumer has actually read the response, as NetChan does with ACKs.
+				<-releaseConnection
 			}()
 			clientTLS, err := netchantls.PinnedClientConfig(fixture.trustedKey)
 			if err != nil {

@@ -108,7 +108,7 @@ func (driver priorityDriver) Listen(endpoint transport.Endpoint, options transpo
 		return nil, err
 	}
 	bound.Scheme, bound.Legacy = "quic", false
-	quicListener, err := (quic.Driver{}).Listen(bound, options)
+	quicListener, err := listenQUIC(bound, options)
 	if err != nil {
 		log.Printf("NetChan QUIC listener unavailable; TCP/TLS remains active: %s", diagnosticlog.SafeLogValue(err.Error()))
 		return tcpListener, nil
@@ -119,12 +119,9 @@ func (driver priorityDriver) Listen(endpoint transport.Endpoint, options transpo
 	done := make(chan struct{})
 	listener := &priorityListener{address: tcpListener.Addr(), accepted: accepted, closeRequests: closeRequests, done: done}
 	go func() {
-		select {
-		case <-closeRequests:
-		case <-driver.stop:
-		case <-options.Done:
-		case <-options.OwnerDone:
-		}
+		// The NetChan owner drains logical sessions before closing its listener.
+		// Consumer cancellation must not tear down those sessions prematurely.
+		<-closeRequests
 		close(stopping)
 		_ = tcpListener.Close()
 		_ = quicListener.Close()

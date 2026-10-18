@@ -15671,6 +15671,105 @@ func readZipTextFile(t *testing.T, archiveFileByName map[string]*zip.File, fileN
 	return string(fileBytes)
 }
 
+func TestCentralNetChanIdentityConfiguresItselfAndPublishesOnlyPublicKey(t *testing.T) {
+	application, _ := newTestApplication(t)
+	t.Setenv("SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM", "")
+	if err := application.withServerControlDatabaseWrite(context.Background(), "test-central-owner", func(database *sql.DB) error {
+		return (hostingandsupport.Store{DB: database}).SetOwner(context.Background(), "sitebrush.com", "owner@sitebrush.com")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	process := application.startCentralNetChanIdentity(stop)
+	t.Cleanup(func() { close(stop); <-process.done })
+	publicKey, err := centralNetChanPublicKey(process, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, storedPublicKey, privateKey, err := application.serviceMailLocalKeyPair(context.Background())
+	if err != nil || !publicKey.Equal(storedPublicKey) {
+		t.Fatal("central bootstrap did not use its persisted Ed25519 identity", err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "https://sitebrush.com/?service_mail_relay&identity=ed25519", nil)
+	response := httptest.NewRecorder()
+	application.serviceMailRelayEndpoint(response, request)
+	var document struct {
+		Algorithm string `json:"algorithm"`
+		PublicKey string `json:"public_key"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &document); err != nil || response.Code != http.StatusOK || document.Algorithm != "Ed25519" || document.PublicKey != base64.StdEncoding.EncodeToString(publicKey) {
+		t.Fatal("central identity discovery did not return its public pin", response.Code, response.Body.String(), err)
+	}
+	if strings.Contains(response.Body.String(), base64.StdEncoding.EncodeToString(privateKey)) {
+		t.Fatal("discovery exposed a private signing key")
+	}
+	request.Host = "customer.example"
+	response = httptest.NewRecorder()
+	application.serviceMailRelayEndpoint(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatal("customer Host exposed central identity discovery")
+	}
+}
+
+func TestCentralNetChanIdentityRestoresCachedTrustAndHonorsExplicitPin(t *testing.T) {
+	application, _ := newTestApplication(t)
+	t.Setenv("SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM", "")
+	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := application.withServerControlDatabaseWrite(context.Background(), "test-cached-central-key", func(database *sql.DB) error {
+		_, err := database.Exec(`INSERT INTO server_settings(name,value,updated_at) VALUES(?,?,?)`, "netchan_central_ed25519_public_key", base64.StdEncoding.EncodeToString(publicKey), time.Now().UTC().Format(time.RFC3339))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		stop := make(chan struct{})
+		process := application.startCentralNetChanIdentity(stop)
+		actual, err := centralNetChanPublicKey(process, nil)
+		close(stop)
+		<-process.done
+		if err != nil || !actual.Equal(publicKey) {
+			t.Fatal("cached central trust changed after restarting the worker", err)
+		}
+	}
+	t.Setenv("SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM", "invalid")
+	if _, err := centralNetChanPublicKey(nil, nil); err == nil {
+		t.Fatal("invalid explicit pin was replaced with discovered trust")
+	}
+}
+
+func TestConcurrentServiceMailIdentityCreationKeepsOnePersistedKey(t *testing.T) {
+	application, _ := newTestApplication(t)
+	type identityResult struct {
+		installationID string
+		publicKey      ed25519.PublicKey
+		err            error
+	}
+	results := make(chan identityResult, 16)
+	for attempt := 0; attempt < cap(results); attempt++ {
+		go func() {
+			installationID, publicKey, _, err := application.serviceMailLocalKeyPair(context.Background())
+			results <- identityResult{installationID: installationID, publicKey: publicKey, err: err}
+		}()
+	}
+	first := <-results
+	if first.err != nil {
+		t.Fatal(first.err)
+	}
+	for attempt := 1; attempt < cap(results); attempt++ {
+		result := <-results
+		if result.err != nil || result.installationID != first.installationID || !result.publicKey.Equal(first.publicKey) {
+			t.Fatal("concurrent startup generated different installation identities", result.err)
+		}
+	}
+	installationID, publicKey, privateKey, err := application.serviceMailLocalKeyPair(context.Background())
+	if err != nil || installationID != first.installationID || !publicKey.Equal(first.publicKey) || !publicKey.Equal(privateKey.Public()) {
+		t.Fatal("persisted installation identity changed", err)
+	}
+}
+
 func TestSitebrushNetChanTLSIdentityIsIndependentOfRelayEncryption(t *testing.T) {
 	application, _ := newTestApplication(t)
 	relayKey, err := ecdh.X25519().GenerateKey(rand.Reader)
@@ -15794,7 +15893,7 @@ func TestSendHostingSnapshotNetChanPayloadDeliversAndCloses(t *testing.T) {
 
 	workerStop := make(chan struct{})
 	defer close(workerStop)
-	deliveries := startHostingSnapshotNetChanDeliveryWorker(workerStop)
+	deliveries := startHostingSnapshotNetChanDeliveryWorker(workerStop, nil)
 	consumerStop := make(chan struct{})
 	defer close(consumerStop)
 	if err := submitHostingSnapshotNetChanDelivery(consumerStop, deliveries, listener.Address, payload); err != nil {
@@ -15817,7 +15916,7 @@ func TestSendHostingSnapshotNetChanPayloadCancelsUnreadDelivery(t *testing.T) {
 
 	workerStop := make(chan struct{})
 	defer close(workerStop)
-	deliveries := startHostingSnapshotNetChanDeliveryWorker(workerStop)
+	deliveries := startHostingSnapshotNetChanDeliveryWorker(workerStop, nil)
 	consumerStop := make(chan struct{})
 	sendFinished := make(chan error, 1)
 	go func() {
@@ -15870,7 +15969,7 @@ func TestHostingSnapshotNetChanConsumerReusesResponseChannel(t *testing.T) {
 
 	workerStop := make(chan struct{})
 	defer close(workerStop)
-	deliveries := startHostingSnapshotNetChanDeliveryWorker(workerStop)
+	deliveries := startHostingSnapshotNetChanDeliveryWorker(workerStop, nil)
 	consumerStop := make(chan struct{})
 	defer close(consumerStop)
 	response := make(chan hostingSnapshotNetChanDeliveryResponse, 1)
@@ -15896,7 +15995,7 @@ func TestHostingSnapshotNetChanListenerReceivesMalformedPayload(t *testing.T) {
 	go application.serveHostingSnapshotNetChanListener(listenerStop, context.Background(), listener)
 	workerStop := make(chan struct{})
 	defer close(workerStop)
-	deliveries := startHostingSnapshotNetChanDeliveryWorker(workerStop)
+	deliveries := startHostingSnapshotNetChanDeliveryWorker(workerStop, nil)
 	consumerStop := make(chan struct{})
 	defer close(consumerStop)
 	if err := submitHostingSnapshotNetChanDelivery(consumerStop, deliveries, listener.Address, []byte("{")); err == nil {
@@ -15919,7 +16018,7 @@ func TestHostingSnapshotNetChanDeliverySkipsTaskWithClosedResponse(t *testing.T)
 
 	workerStop := make(chan struct{})
 	defer close(workerStop)
-	deliveries := startHostingSnapshotNetChanDeliveryWorker(workerStop)
+	deliveries := startHostingSnapshotNetChanDeliveryWorker(workerStop, nil)
 	response := make(chan hostingSnapshotNetChanDeliveryResponse)
 	close(response)
 	deliveries <- hostingSnapshotNetChanDeliveryTask{address: listener.Address, payload: []byte("unneeded"), response: response}

@@ -46,12 +46,23 @@ func ServeReleaseMirror(options MirrorOptions, stop <-chan struct{}) error {
 	}
 	slots := make(chan struct{}, 8)
 	defer func() {
-		// Workers must send logical channel closures before the transport closes;
-		// a disconnected transport otherwise leaves remote sessions resumable.
-		for count := 0; count < cap(slots); count++ {
-			slots <- struct{}{}
+		// Give logical closures a bounded grace period, then close the owning
+		// transport so a vanished QUIC peer cannot hold shutdown open.
+		drained := make(chan struct{})
+		go func() {
+			for count := 0; count < cap(slots); count++ {
+				slots <- struct{}{}
+			}
+			close(drained)
+		}()
+		timer := time.NewTimer(2 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-drained:
+		case <-timer.C:
 		}
-		listener.Close()
+		_ = listener.Close()
+		<-drained
 	}()
 	for {
 		select {
