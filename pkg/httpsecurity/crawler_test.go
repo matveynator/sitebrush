@@ -13,6 +13,7 @@ func TestIndexingCrawlerRequestIsNarrowAndReadOnly(t *testing.T) {
 		"CCBot/2.0 (https://commoncrawl.org/faq/)",
 		"ClaudeBot/1.0",
 		"PerplexityBot/1.0",
+		"SiteBrush/2 (+https://github.com/matveynator/sitebrush)",
 	} {
 		request := httptest.NewRequest(http.MethodGet, "https://example.com/docs/", nil)
 		request.Header.Set("User-Agent", agent)
@@ -21,7 +22,7 @@ func TestIndexingCrawlerRequestIsNarrowAndReadOnly(t *testing.T) {
 		}
 	}
 
-	for _, agent := range []string{"curl/8.0", "Go-http-client/1.1", "generic-crawler", "sqlmap/1.8"} {
+	for _, agent := range []string{"curl/8.0", "Go-http-client/1.1", "generic-crawler", "sqlmap/1.8", "sitebrush"} {
 		request := httptest.NewRequest(http.MethodGet, "https://example.com/", nil)
 		request.Header.Set("User-Agent", agent)
 		if IsIndexingCrawlerRequest(request) {

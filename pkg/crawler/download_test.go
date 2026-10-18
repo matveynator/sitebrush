@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 type htmlDownloadRoundTripper func(*http.Request) (*http.Response, error)
@@ -153,5 +154,45 @@ func TestDownloadHTMLPageRetriesOnlyWhenClassifierAllows(t *testing.T) {
 	})
 	if attempts != 1 {
 		t.Fatalf("permanent response attempts=%d, want 1", attempts)
+	}
+}
+
+func TestDownloadHTMLPageIdentifiesSiteBrushCrawler(t *testing.T) {
+	pageURL := mustCrawlerURL(t, "https://example.test/")
+	seenAgent := ""
+	client := &http.Client{Transport: htmlDownloadRoundTripper(func(request *http.Request) (*http.Response, error) {
+		seenAgent = request.UserAgent()
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: http.Header{"Content-Type": {"text/html"}}, Body: io.NopCloser(strings.NewReader("<html>ok</html>")), Request: request}, nil
+	})}
+	if _, err := DownloadHTMLPageContext(t.Context(), client, pageURL, nil); err != nil {
+		t.Fatal(err)
+	}
+	if seenAgent != SiteBrushCrawlerUserAgent {
+		t.Fatalf("default User-Agent = %q, want %q", seenAgent, SiteBrushCrawlerUserAgent)
+	}
+
+	if _, err := DownloadHTMLPageContext(t.Context(), client, pageURL, func(request *http.Request) {
+		request.Header.Set("User-Agent", "CustomCrawler/1")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if seenAgent != "CustomCrawler/1" {
+		t.Fatalf("custom User-Agent was overwritten: %q", seenAgent)
+	}
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	now := time.Date(2026, 10, 18, 0, 0, 0, 0, time.UTC)
+	if got := parseRetryAfter("7", now); got != 7*time.Second {
+		t.Fatalf("delta Retry-After = %v", got)
+	}
+	retryAt := now.Add(11 * time.Second)
+	if got := parseRetryAfter(retryAt.Format(http.TimeFormat), now); got != 11*time.Second {
+		t.Fatalf("date Retry-After = %v", got)
+	}
+	for _, value := range []string{"", "0", "invalid"} {
+		if got := parseRetryAfter(value, now); got != 0 {
+			t.Fatalf("Retry-After %q = %v, want 0", value, got)
+		}
 	}
 }

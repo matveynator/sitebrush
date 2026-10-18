@@ -8,12 +8,17 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/matveynator/sitebrush/v2/pkg/outboundhttp"
 )
 
-const maxHTMLDownloadBytes int64 = 32 * 1024 * 1024
+const (
+	maxHTMLDownloadBytes int64 = 32 * 1024 * 1024
+	SiteBrushCrawlerUserAgent = "SiteBrush/2 (+https://github.com/matveynator/sitebrush)"
+)
 
 // HTMLDownloadResult carries the document and transport metadata together so
 // callers can keep HTTP details out of application-level download code.
@@ -23,6 +28,7 @@ type HTMLDownloadResult struct {
 	ResolvedURL     *url.URL
 	Status          string
 	StatusCode      int
+	RetryAfter      time.Duration
 	Encoding        string
 	EncodingSource  string
 	EncodingCertain bool
@@ -64,6 +70,7 @@ func DownloadHTMLPageContext(ctx context.Context, client *http.Client, pageURL *
 	if err != nil {
 		return HTMLDownloadResult{}, err
 	}
+	request.Header.Set("User-Agent", SiteBrushCrawlerUserAgent)
 	if applyHeaders != nil {
 		applyHeaders(request)
 	}
@@ -79,6 +86,7 @@ func DownloadHTMLPageContext(ctx context.Context, client *http.Client, pageURL *
 		ResolvedURL: pageURL,
 		Status:      response.Status,
 		StatusCode:  response.StatusCode,
+		RetryAfter:  parseRetryAfter(response.Header.Get("Retry-After"), time.Now()),
 	}
 	if response.Request != nil && response.Request.URL != nil {
 		result.ResolvedURL = response.Request.URL
@@ -134,19 +142,45 @@ func DownloadHTMLPageWithRetriesContext(ctx context.Context, client *http.Client
 		if options.ShouldRetry != nil && !options.ShouldRetry(lastResult, lastErr) {
 			break
 		}
-		if options.OnRetry != nil {
-			options.OnRetry(attempt, attempts, pageURL, lastErr, delay)
+		retryDelay := delay
+		if lastResult.RetryAfter > retryDelay {
+			retryDelay = lastResult.RetryAfter
 		}
-		if delay <= 0 {
+		if options.OnRetry != nil {
+			options.OnRetry(attempt, attempts, pageURL, lastErr, retryDelay)
+		}
+		if retryDelay <= 0 {
 			continue
 		}
 		select {
 		case <-ctx.Done():
 			return lastResult, ctx.Err()
-		case <-time.After(delay):
+		case <-time.After(retryDelay):
 		}
 	}
 	return lastResult, lastErr
+}
+
+func parseRetryAfter(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.ParseInt(value, 10, 32); err == nil {
+		if seconds <= 0 {
+			return 0
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	retryAt, err := http.ParseTime(value)
+	if err != nil {
+		return 0
+	}
+	delay := retryAt.Sub(now)
+	if delay <= 0 {
+		return 0
+	}
+	return delay
 }
 
 func readHTMLBodyWithLimit(reader io.Reader, limitBytes int64) ([]byte, error) {
