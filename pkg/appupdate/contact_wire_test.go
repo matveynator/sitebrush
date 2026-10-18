@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/matveynator/netchan"
+	"github.com/matveynator/netchan/v2"
 )
 
 func TestContactResultsValidateProtocolAndAllowFutureFields(t *testing.T) {
@@ -340,5 +340,16 @@ func TestChildContactRejectsStartupFailureAndRevokedLifecycle(t *testing.T) {
 				t.Fatal("broken contact did not terminate")
 			}
 		})
+	}
+}
+
+// Rapid status polling must not retain completed transports in the bounded
+// admission queue after the observer has already received its response.
+func TestSupervisorCompletedContactsReleaseAdmissionSlots(t *testing.T) {
+	root := newFixtureInstallation(t)
+	startFixtureSupervisor(t, root, "success")
+	for requestIndex := 0; requestIndex < 64; requestIndex++ {
+		fixtureExchange(t, root, "status", "")
+		time.Sleep(20 * time.Millisecond)
 	}
 }

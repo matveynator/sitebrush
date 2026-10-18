@@ -6,16 +6,15 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"math/big"
 	"time"
 
-	"github.com/matveynator/netchan"
+	"github.com/matveynator/netchan/v2"
+	"github.com/matveynator/sitebrush/v2/pkg/netchantls"
+	"github.com/matveynator/sitebrush/v2/pkg/netchantransport"
 )
 
 const Address = "sitebrush.com:9877"
@@ -134,19 +133,7 @@ func (hub *Hub) Check(id string, key ed25519.PublicKey, stop <-chan struct{}) (S
 }
 
 func certificate(id string, key ed25519.PrivateKey) (tls.Certificate, error) {
-	if len(key) != ed25519.PrivateKeySize {
-		return tls.Certificate{}, errors.New("invalid installation private key")
-	}
-	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		return tls.Certificate{}, err
-	}
-	settings := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: id}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().AddDate(10, 0, 0), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}}
-	der, err := x509.CreateCertificate(rand.Reader, settings, settings, key.Public(), key)
-	if err != nil {
-		return tls.Certificate{}, err
-	}
-	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}, nil
+	return netchantls.Certificate(id, key)
 }
 
 type KeyLookup func(string) (ed25519.PublicKey, error)
@@ -171,7 +158,7 @@ func (hub *Hub) Listen(address string, key ed25519.PrivateKey, keys KeyLookup, s
 		}
 		return nil
 	}}
-	listener, err := netchan.Listen[Contact](address, netchan.Config{Capacity: 8, TLS: configuration})
+	listener, err := netchan.Listen[Contact](address, netchantransport.Configure(netchan.Config{Capacity: 8, TLS: configuration}, stop))
 	if err != nil {
 		return err
 	}
@@ -237,17 +224,12 @@ func verifiedCentralTLS(id string, key ed25519.PrivateKey, central ed25519.Publi
 	if err != nil {
 		return nil, err
 	}
-	return &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{identity}, InsecureSkipVerify: true, VerifyConnection: func(connection tls.ConnectionState) error {
-		// The application pins an Ed25519 identity instead of a public CA name.
-		if len(connection.PeerCertificates) != 1 {
-			return errors.New("missing central certificate")
-		}
-		publicKey, ok := connection.PeerCertificates[0].PublicKey.(ed25519.PublicKey)
-		if !ok || !publicKey.Equal(central) {
-			return errors.New("central identity mismatch")
-		}
-		return nil
-	}}, nil
+	configuration, err := netchantls.PinnedClientConfig(central)
+	if err != nil {
+		return nil, err
+	}
+	configuration.Certificates = []tls.Certificate{identity}
+	return configuration, nil
 }
 
 func Agent(address, id string, key ed25519.PrivateKey, central ed25519.PublicKey, status func() (Status, error), stop <-chan struct{}) error {
@@ -265,7 +247,7 @@ func AgentWithStatus(address, id string, key ed25519.PrivateKey, central ed25519
 		return err
 	}
 
-	connection, err := netchan.Dial[Contact](address, netchan.Config{Capacity: 8, TLS: configuration})
+	connection, err := netchan.Dial[Contact](address, netchantransport.Configure(netchan.Config{Capacity: 8, TLS: configuration}, stop))
 	if err != nil {
 		return err
 	}

@@ -8,8 +8,8 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
-  GO_VERSION: '1.26.9'
   CGO_ENABLED: '0'
+  SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM: ${{ vars.SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM }}
 
 concurrency:
   group: sitebrush-stable-release
@@ -39,7 +39,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "${{ env.GO_VERSION }}"
+          go-version-file: go.mod
           cache: false
 
       - name: Test crosscompile helper
@@ -79,7 +79,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "${{ env.GO_VERSION }}"
+          go-version-file: go.mod
           cache: false
 
       - name: Verify Docker
@@ -107,8 +107,63 @@ jobs:
             binaries/${{ needs.prepare_release.outputs.version }}/desktop-app/MD5SUMS
           if-no-files-found: error
 
+  prepare_macos_sdk:
+    runs-on: macos-14
+    steps:
+      - name: Package the installed Xcode SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk_path="$(xcrun --sdk macosx --show-sdk-path)"
+          sdk_path="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$sdk_path")"
+          COPYFILE_DISABLE=1 tar -czf "$RUNNER_TEMP/$(basename "$sdk_path").tar.gz" -C "$(dirname "$sdk_path")" "$(basename "$sdk_path")"
+      - name: Transfer SDK to the Docker compilation job
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: macos-sdk
+          path: ${{ runner.temp }}/MacOSX*.sdk.tar.gz
+          retention-days: 1
+          if-no-files-found: error
+
+  build_desktop_macos_binaries:
+    needs: [prepare_release, prepare_macos_sdk]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Download SDK
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: macos-sdk
+          path: ${{ runner.temp }}/macos-sdk
+      - name: Compile both macOS desktop architectures inside Docker
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk_archives=("$RUNNER_TEMP"/macos-sdk/*.tar.gz)
+          test "${#sdk_archives[@]}" -eq 1
+          go run ./scripts/crosscompile \
+            -mode desktop-app -os darwin -arch universal \
+            -macos-stage build -macos-sdk "${sdk_archives[0]}" \
+            -version "${{ needs.prepare_release.outputs.version }}" -output-dir binaries
+          tar -cf "$RUNNER_TEMP/macos-compiled.tar" \
+            -C "binaries/${{ needs.prepare_release.outputs.version }}/desktop-app" \
+            sitebrush_darwin_universal_desktop
+      - name: Transfer compiled binary to the macOS packaging job
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: macos-compiled
+          path: ${{ runner.temp }}/macos-compiled.tar
+          retention-days: 1
+          if-no-files-found: error
+
   build_desktop_macos:
-    needs: prepare_release
+    needs: [prepare_release, build_desktop_macos_binaries]
     runs-on: macos-14
     steps:
       - name: Checkout
@@ -117,17 +172,26 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "${{ env.GO_VERSION }}"
+          go-version-file: go.mod
           cache: false
 
-      - name: Build macOS universal desktop through crosscompile.go
+      - name: Download Docker-compiled macOS binary
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: macos-compiled
+          path: ${{ runner.temp }}/macos-compiled
+      - name: Package macOS universal desktop without host CGO compilation
         shell: bash
         run: |
           set -euo pipefail
+          desktop_directory="binaries/${{ needs.prepare_release.outputs.version }}/desktop-app"
+          mkdir -p "$desktop_directory"
+          tar -xf "$RUNNER_TEMP/macos-compiled/macos-compiled.tar" -C "$desktop_directory"
           go run ./scripts/crosscompile \
             -mode desktop-app \
             -os darwin \
             -arch universal \
+            -macos-stage package \
             -version "${{ needs.prepare_release.outputs.version }}" \
             -output-dir binaries
 
@@ -154,12 +218,18 @@ jobs:
       - name: Set up Go for release signing
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "${{ env.GO_VERSION }}"
+          go-version-file: go.mod
           cache: false
 
-      - name: Download all build artifacts
+      - name: Download server artifacts
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
+          name: server-app
+          path: dist-raw/server-app
+      - name: Download packaged desktop artifacts
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: desktop-*
           path: dist-raw
 
       - name: Assemble release files and aggregate checksums

@@ -47,7 +47,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/matveynator/netchan"
+	"github.com/matveynator/netchan/v2"
 	"github.com/matveynator/sitebrush/v2/pkg/accountauth"
 	"github.com/matveynator/sitebrush/v2/pkg/aicapability"
 	"github.com/matveynator/sitebrush/v2/pkg/aieditor"
@@ -67,6 +67,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/imageprepare"
 	"github.com/matveynator/sitebrush/v2/pkg/mailout"
 	sitemcp "github.com/matveynator/sitebrush/v2/pkg/mcp"
+	"github.com/matveynator/sitebrush/v2/pkg/netchantls"
 	"github.com/matveynator/sitebrush/v2/pkg/outboundhttp"
 	"github.com/matveynator/sitebrush/v2/pkg/pagearchive"
 	"github.com/matveynator/sitebrush/v2/pkg/securitysync"
@@ -15670,8 +15671,201 @@ func readZipTextFile(t *testing.T, archiveFileByName map[string]*zip.File, fileN
 	return string(fileBytes)
 }
 
+func TestCentralNetChanIdentityConfiguresItselfAndPublishesOnlyPublicKey(t *testing.T) {
+	application, _ := newTestApplication(t)
+	t.Setenv("SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM", "")
+	if err := application.withServerControlDatabaseWrite(context.Background(), "test-central-owner", func(database *sql.DB) error {
+		return (hostingandsupport.Store{DB: database}).SetOwner(context.Background(), "sitebrush.com", "owner@sitebrush.com")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	process := application.startCentralNetChanIdentity(stop)
+	t.Cleanup(func() { close(stop); <-process.done })
+	publicKey, err := centralNetChanPublicKey(process, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, storedPublicKey, privateKey, err := application.serviceMailLocalKeyPair(context.Background())
+	if err != nil || !publicKey.Equal(storedPublicKey) {
+		t.Fatal("central bootstrap did not use its persisted Ed25519 identity", err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "https://sitebrush.com/?service_mail_relay&identity=ed25519", nil)
+	response := httptest.NewRecorder()
+	application.serviceMailRelayEndpoint(response, request)
+	var document struct {
+		Algorithm string `json:"algorithm"`
+		PublicKey string `json:"public_key"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &document); err != nil || response.Code != http.StatusOK || document.Algorithm != "Ed25519" || document.PublicKey != base64.StdEncoding.EncodeToString(publicKey) {
+		t.Fatal("central identity discovery did not return its public pin", response.Code, response.Body.String(), err)
+	}
+	if strings.Contains(response.Body.String(), base64.StdEncoding.EncodeToString(privateKey)) {
+		t.Fatal("discovery exposed a private signing key")
+	}
+	request.Host = "customer.example"
+	response = httptest.NewRecorder()
+	application.serviceMailRelayEndpoint(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatal("customer Host exposed central identity discovery")
+	}
+}
+
+func TestCentralNetChanIdentityRestoresCachedTrustAndHonorsExplicitPin(t *testing.T) {
+	application, _ := newTestApplication(t)
+	t.Setenv("SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM", "")
+	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := application.withServerControlDatabaseWrite(context.Background(), "test-cached-central-key", func(database *sql.DB) error {
+		_, err := database.Exec(`INSERT INTO server_settings(name,value,updated_at) VALUES(?,?,?)`, "netchan_central_ed25519_public_key", base64.StdEncoding.EncodeToString(publicKey), time.Now().UTC().Format(time.RFC3339))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		stop := make(chan struct{})
+		process := application.startCentralNetChanIdentity(stop)
+		actual, err := centralNetChanPublicKey(process, nil)
+		close(stop)
+		<-process.done
+		if err != nil || !actual.Equal(publicKey) {
+			t.Fatal("cached central trust changed after restarting the worker", err)
+		}
+	}
+	t.Setenv("SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM", "invalid")
+	if _, err := centralNetChanPublicKey(nil, nil); err == nil {
+		t.Fatal("invalid explicit pin was replaced with discovered trust")
+	}
+}
+
+func TestConcurrentServiceMailIdentityCreationKeepsOnePersistedKey(t *testing.T) {
+	application, _ := newTestApplication(t)
+	type identityResult struct {
+		installationID string
+		publicKey      ed25519.PublicKey
+		err            error
+	}
+	results := make(chan identityResult, 16)
+	for attempt := 0; attempt < cap(results); attempt++ {
+		go func() {
+			installationID, publicKey, _, err := application.serviceMailLocalKeyPair(context.Background())
+			results <- identityResult{installationID: installationID, publicKey: publicKey, err: err}
+		}()
+	}
+	first := <-results
+	if first.err != nil {
+		t.Fatal(first.err)
+	}
+	for attempt := 1; attempt < cap(results); attempt++ {
+		result := <-results
+		if result.err != nil || result.installationID != first.installationID || !result.publicKey.Equal(first.publicKey) {
+			t.Fatal("concurrent startup generated different installation identities", result.err)
+		}
+	}
+	installationID, publicKey, privateKey, err := application.serviceMailLocalKeyPair(context.Background())
+	if err != nil || installationID != first.installationID || !publicKey.Equal(first.publicKey) || !publicKey.Equal(privateKey.Public()) {
+		t.Fatal("persisted installation identity changed", err)
+	}
+}
+
+func TestSitebrushNetChanTLSIdentityIsIndependentOfRelayEncryption(t *testing.T) {
+	application, _ := newTestApplication(t)
+	relayKey, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_RELAY_PUBLIC_KEY_SITEBRUSH_COM", base64.StdEncoding.EncodeToString(relayKey.PublicKey().Bytes()))
+	t.Setenv("SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM", "invalid")
+	// Provisioning the listener depends only on its persisted Ed25519 private
+	// identity. Neither the X25519 key nor a client's pin controls local startup.
+	serverConfiguration, err := application.sitebrushNetChanServerTLS(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, signingKey, _, err := application.serviceMailLocalKeyPair(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate, err := x509.ParseCertificate(serverConfiguration.Certificates[0].Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	actualKey, ok := certificate.PublicKey.(ed25519.PublicKey)
+	if !ok || !actualKey.Equal(signingKey) {
+		t.Fatal("listener did not use the persisted Ed25519 signing identity")
+	}
+	if _, err := sitebrushNetChanClientTLS(); err == nil {
+		t.Fatal("client trusted the relay key without a valid dedicated TLS pin")
+	}
+	t.Setenv("SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM", base64.StdEncoding.EncodeToString(signingKey))
+	clientConfiguration, err := sitebrushNetChanClientTLS()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := clientConfiguration.VerifyConnection(tls.ConnectionState{PeerCertificates: []*x509.Certificate{certificate}}); err != nil {
+		t.Fatal(err)
+	}
+	relayPublicKey, configured := serviceMailRelayPublicKeyForDomain("sitebrush.com")
+	if !configured || !bytes.Equal(relayPublicKey, relayKey.PublicKey().Bytes()) {
+		t.Fatal("TLS provisioning changed relay encryption trust")
+	}
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_RELAY_PUBLIC_KEY_SITEBRUSH_COM", "invalid")
+	if _, err := sitebrushNetChanClientTLS(); err != nil {
+		t.Fatal("relay encryption configuration changed TLS trust", err)
+	}
+	if _, err := serverReleaseCatalog(signingKey); err != nil {
+		t.Fatal("release catalog depended on relay encryption trust", err)
+	}
+}
+
+func TestSitebrushNetChanRequiresTLSAndRejectsSubstitutedCentralIdentity(t *testing.T) {
+	if listener, err := netchan.Listen[sitebrushNetChanRequest]("127.0.0.1:0"); err == nil {
+		listener.Close()
+		t.Fatal("network listener accepted a missing TLS configuration")
+	}
+	listener, err := listenTestSitebrushNetChan(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_NETCHAN_ADDRESS", listener.Address)
+	substitute, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM", base64.StdEncoding.EncodeToString(substitute))
+	configuration, err := sitebrushNetChanClientTLS()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if connection, err := netchan.Dial[sitebrushNetChanRequest](listener.Address, netchan.Config{TLS: configuration}); err == nil {
+		connection.Abort()
+		t.Fatal("address override bypassed the configured central identity")
+	}
+	t.Setenv("SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM", "invalid")
+	if _, err := sitebrushNetChanClientTLS(); err == nil {
+		t.Fatal("invalid trusted key accepted")
+	}
+}
+
+func listenTestSitebrushNetChan(t *testing.T) (*netchan.Listener[sitebrushNetChanRequest], error) {
+	t.Helper()
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	t.Setenv("SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM", base64.StdEncoding.EncodeToString(publicKey))
+	configuration, err := netchantls.ServerConfig("sitebrush.com", privateKey)
+	if err != nil {
+		return nil, err
+	}
+	return netchan.Listen[sitebrushNetChanRequest]("127.0.0.1:0", netchan.Config{TLS: configuration})
+}
+
 func TestSendHostingSnapshotNetChanPayloadDeliversAndCloses(t *testing.T) {
-	listener, err := netchan.Listen[sitebrushNetChanRequest]("127.0.0.1:0")
+	listener, err := listenTestSitebrushNetChan(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -15699,7 +15893,7 @@ func TestSendHostingSnapshotNetChanPayloadDeliversAndCloses(t *testing.T) {
 
 	workerStop := make(chan struct{})
 	defer close(workerStop)
-	deliveries := startHostingSnapshotNetChanDeliveryWorker(workerStop)
+	deliveries := startHostingSnapshotNetChanDeliveryWorker(workerStop, nil)
 	consumerStop := make(chan struct{})
 	defer close(consumerStop)
 	if err := submitHostingSnapshotNetChanDelivery(consumerStop, deliveries, listener.Address, payload); err != nil {
@@ -15714,7 +15908,7 @@ func TestSendHostingSnapshotNetChanPayloadDeliversAndCloses(t *testing.T) {
 }
 
 func TestSendHostingSnapshotNetChanPayloadCancelsUnreadDelivery(t *testing.T) {
-	listener, err := netchan.Listen[sitebrushNetChanRequest]("127.0.0.1:0")
+	listener, err := listenTestSitebrushNetChan(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -15722,7 +15916,7 @@ func TestSendHostingSnapshotNetChanPayloadCancelsUnreadDelivery(t *testing.T) {
 
 	workerStop := make(chan struct{})
 	defer close(workerStop)
-	deliveries := startHostingSnapshotNetChanDeliveryWorker(workerStop)
+	deliveries := startHostingSnapshotNetChanDeliveryWorker(workerStop, nil)
 	consumerStop := make(chan struct{})
 	sendFinished := make(chan error, 1)
 	go func() {
@@ -15748,7 +15942,7 @@ func TestSendHostingSnapshotNetChanPayloadCancelsUnreadDelivery(t *testing.T) {
 }
 
 func TestHostingSnapshotNetChanConsumerReusesResponseChannel(t *testing.T) {
-	listener, err := netchan.Listen[sitebrushNetChanRequest]("127.0.0.1:0")
+	listener, err := listenTestSitebrushNetChan(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -15775,7 +15969,7 @@ func TestHostingSnapshotNetChanConsumerReusesResponseChannel(t *testing.T) {
 
 	workerStop := make(chan struct{})
 	defer close(workerStop)
-	deliveries := startHostingSnapshotNetChanDeliveryWorker(workerStop)
+	deliveries := startHostingSnapshotNetChanDeliveryWorker(workerStop, nil)
 	consumerStop := make(chan struct{})
 	defer close(consumerStop)
 	response := make(chan hostingSnapshotNetChanDeliveryResponse, 1)
@@ -15791,7 +15985,7 @@ func TestHostingSnapshotNetChanConsumerReusesResponseChannel(t *testing.T) {
 }
 
 func TestHostingSnapshotNetChanListenerReceivesMalformedPayload(t *testing.T) {
-	listener, err := netchan.Listen[sitebrushNetChanRequest]("127.0.0.1:0")
+	listener, err := listenTestSitebrushNetChan(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -15801,7 +15995,7 @@ func TestHostingSnapshotNetChanListenerReceivesMalformedPayload(t *testing.T) {
 	go application.serveHostingSnapshotNetChanListener(listenerStop, context.Background(), listener)
 	workerStop := make(chan struct{})
 	defer close(workerStop)
-	deliveries := startHostingSnapshotNetChanDeliveryWorker(workerStop)
+	deliveries := startHostingSnapshotNetChanDeliveryWorker(workerStop, nil)
 	consumerStop := make(chan struct{})
 	defer close(consumerStop)
 	if err := submitHostingSnapshotNetChanDelivery(consumerStop, deliveries, listener.Address, []byte("{")); err == nil {
@@ -15816,7 +16010,7 @@ func TestHostingSnapshotNetChanListenerReceivesMalformedPayload(t *testing.T) {
 }
 
 func TestHostingSnapshotNetChanDeliverySkipsTaskWithClosedResponse(t *testing.T) {
-	listener, err := netchan.Listen[sitebrushNetChanRequest]("127.0.0.1:0")
+	listener, err := listenTestSitebrushNetChan(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -15824,7 +16018,7 @@ func TestHostingSnapshotNetChanDeliverySkipsTaskWithClosedResponse(t *testing.T)
 
 	workerStop := make(chan struct{})
 	defer close(workerStop)
-	deliveries := startHostingSnapshotNetChanDeliveryWorker(workerStop)
+	deliveries := startHostingSnapshotNetChanDeliveryWorker(workerStop, nil)
 	response := make(chan hostingSnapshotNetChanDeliveryResponse)
 	close(response)
 	deliveries <- hostingSnapshotNetChanDeliveryTask{address: listener.Address, payload: []byte("unneeded"), response: response}
@@ -15837,7 +16031,7 @@ func TestHostingSnapshotNetChanDeliverySkipsTaskWithClosedResponse(t *testing.T)
 }
 
 func TestHostingSnapshotNetChanListenerStopsActiveConnections(t *testing.T) {
-	listener, err := netchan.Listen[sitebrushNetChanRequest]("127.0.0.1:0")
+	listener, err := listenTestSitebrushNetChan(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -15845,7 +16039,11 @@ func TestHostingSnapshotNetChanListenerStopsActiveConnections(t *testing.T) {
 	stop := make(chan struct{})
 	application := &App{}
 	go application.serveHostingSnapshotNetChanListener(stop, context.Background(), listener)
-	connection, err := netchan.Dial[sitebrushNetChanRequest](listener.Address)
+	configuration, err := sitebrushNetChanClientTLS()
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := netchan.Dial[sitebrushNetChanRequest](listener.Address, netchan.Config{TLS: configuration})
 	if err != nil {
 		close(stop)
 		t.Fatal(err)
@@ -20626,7 +20824,7 @@ func TestSecurityGlobalSyncPullsAtStartupAndWake(t *testing.T) {
 	application.securityGlobalSignals = make(chan securitysync.Signal, 1)
 	application.securityGlobalWake = make(chan struct{}, 1)
 	application.securityGlobalStatus = make(chan chan securityGlobalSyncStatus)
-	listener, err := netchan.Listen[sitebrushNetChanRequest]("127.0.0.1:0")
+	listener, err := listenTestSitebrushNetChan(t)
 	if err != nil {
 		t.Fatal(err)
 	}

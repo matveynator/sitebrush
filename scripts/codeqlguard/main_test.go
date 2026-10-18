@@ -119,6 +119,22 @@ func TestScanDirectoryAcceptsOnlyExactValidatedBaselineFingerprint(t *testing.T)
 	}
 }
 
+func TestPinnedTLSBaselineRejectsOtherCertificateCheckDisabling(t *testing.T) {
+	for _, fixture := range []struct {
+		uri, hash string
+		accepted  bool
+	}{
+		{"pkg/netchantls/tls.go", "be6625082a040deb:1", true},
+		{"pkg/netchantls/tls.go", "another-location:1", false},
+		{"sitebrush.go", "be6625082a040deb:1", false},
+	} {
+		_, accepted := baselineJustification("go/disabled-certificate-check", fixture.uri, fixture.hash, 0)
+		if accepted != fixture.accepted {
+			t.Fatalf("TLS boundary %q %q accepted=%v", fixture.uri, fixture.hash, accepted)
+		}
+	}
+}
+
 func TestValidatedMCPDownloadBoundaryMatchesOnlyReviewedCall(t *testing.T) {
 	t.Chdir(repositoryRoot(t))
 	source, err := os.ReadFile("sitebrush.go")

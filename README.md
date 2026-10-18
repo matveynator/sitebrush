@@ -765,7 +765,7 @@ The update page shows the running HTTP server version separately from the versio
 
 The operation card includes the source and target versions, a progress bar, completed steps, start time, elapsed time and current-step duration. The overall percentage represents completed steps, with measured byte/file progress inside supported steps. Download and backup estimates use observed transfer speed; steps without reliable measurements display “Calculating” instead of an invented completion time. The final 100% requires a completed operation and a matching running server version. The last operation's timestamped journal is stored in the private update state, capped at 256 KiB, and can be copied or downloaded. CLI `-upgrade` reads the same event sequence, so short steps remain visible between status requests.
 
-Files and settings are first copied while the HTTP server remains available. After stopping the server and all writers, SiteBrush reconciles changed, replaced, added and deleted files, then copies the selected databases and performs migrations. This reduces downtime; the final database copy and migration still require a maintenance interval. An already open page preserves its last confirmed progress, continues its elapsed timer and reconnects automatically; no new progress is claimed while disconnected. Once the server returns, the page restores the complete retained journal and result. Closing the page does not cancel the supervisor's operation. Announcement contact failures on TCP 9877 appear as separate warnings and do not disable release verification or downloading.
+Files and settings are first copied while the HTTP server remains available. After stopping the server and all writers, SiteBrush reconciles changed, replaced, added and deleted files, then copies the selected databases and performs migrations. This reduces downtime; the final database copy and migration still require a maintenance interval. An already open page preserves its last confirmed progress, continues its elapsed timer and reconnects automatically; no new progress is claimed while disconnected. Once the server returns, the page restores the complete retained journal and result. Closing the page does not cancel the supervisor's operation. Announcement contact failures on UDP/TCP 9877 appear as separate warnings and do not disable release verification or downloading.
 
 ### Bootstrapping an older updater
 
@@ -793,7 +793,7 @@ An explicit `none` creates no recovery snapshot. Excluded groups are never resto
 
 The candidate starts with public requests paused and outbound background jobs held until database, migration, HTTP and process checks succeed for 60 seconds. Cancellation of an operation has its own channel and does not cancel the previous server's recovery health checks. Stopping the whole service persists an interrupted recovery boundary for the next exclusive startup. Closing the browser page does not cancel an accepted operation. After writes reopen, snapshot recovery never overwrites new user writes; binary rollback requires format compatibility.
 
-Preparation and backup report bytes, files, speed and heartbeat through the same durable state and timestamped journal, with progress events at ten-second intervals during long stages. Notification errors distinguish an invalid public panel URL from a refused central connection or failed authentication. These warnings do not block updates: release downloading retains its signed HTTPS fallback if NetChan TCP 9878 is unavailable.
+Preparation and backup report bytes, files, speed and heartbeat through the same durable state and timestamped journal, with progress events at ten-second intervals during long stages. Notification errors distinguish an invalid public panel URL from a refused central connection or failed authentication. These warnings do not block updates: release downloading retains its signed HTTPS fallback if NetChan UDP/TCP 9878 is unavailable.
 
 Backup options require a supervisor built with this feature. An old supervisor rejects the new command instead of silently ignoring the policy. Install the verified new launcher at the service's existing executable path and restart the service once as described above; keep the installation and update journal intact. The update page and CLI report when this bootstrap is required.
 
@@ -801,7 +801,7 @@ At least the previous working binary and recovery backup are retained. After the
 
 Publishing or discovering a release never sends update emails. Only the authenticated owner of the pinned central sitebrush.com installation can preview and start an important-release campaign: security fixes, significant features, or both. The central update page provides the announcement button, a localized branded preview, recipient estimate, delivery counts and cancellation. All such mail uses `SiteBrush <sitebrush@sitebrush.com>`; customer installations and the generic mail relay cannot create release announcements.
 
-Before each delivery attempt, the central server requests a fresh nonce-bound Ed25519 status over the installation's outgoing NetChan session. TLS pins the central signing identity and verifies the registered installation key. The central listener uses TCP port **9877**; installations need outbound access, including those behind NAT, and require no public update-status endpoint. Status includes the actual selected version, active update state, current owners and their saved mail languages. The link must match the registered installation domain. Only confirmed owner addresses are eligible. Already updated installations are excluded; busy, offline or unknown installations wait for up to seven days. No fresh proof means no email.
+Before each delivery attempt, the central server requests a fresh nonce-bound Ed25519 status over the installation's outgoing NetChan session. TLS pins the central signing identity and verifies the registered installation key. The central listener uses UDP and TCP port **9877**; installations need outbound access, including those behind NAT, and require no public update-status endpoint. Status includes the actual selected version, active update state, current owners and their saved mail languages. The link must match the registered installation domain. Only confirmed owner addresses are eligible. Already updated installations are excluded; busy, offline or unknown installations wait for up to seven days. No fresh proof means no email.
 
 Each owner receives at most one announcement per release; several qualifying installations are grouped into one message. Durable campaign history survives restarts and outbox cleanup. Saved languages come from successful account authentication and survive logout; the supported-language fallback is English. Ordinary version checks and manual updates remain available without a campaign.
 
@@ -829,6 +829,36 @@ The legacy `site-schema-v12` and `billing-schema-v27` chains are frozen compatib
 4. Install and start the first updater-enabled release normally. Later installations can use the protected update page or `sitebrush -upgrade`.
 5. For an exceptional security or feature announcement, open the **sitebrush.com server update panel**, choose its reason, preview the message, and explicitly press the notification button. Releasing frequently never performs this step automatically.
 
+## Build toolchain and macOS desktop
+
+The project pins Go **1.27.2** in `go.mod`. CI and every Docker builder read that same directive. Server binaries and ordinary tests use `CGO_ENABLED=0`; CGO is confined to desktop compilation inside Docker. macOS binaries require **macOS 13 Ventura or newer** on both Intel and Apple Silicon.
+
+NetChan uses `github.com/matveynator/netchan/v2 v2.1.0`. External hosting/mail/security, announcement and release contacts prefer **QUIC over UDP**, then **TCP with TLS 1.3**. Both listeners use the same port number: allow UDP and TCP **9876**, **9877** and **9878** on the central server. Existing `host:port` addresses and application message schemas remain valid. A QUIC handshake gets 750 ms before TCP/TLS is attempted with a three-second limit. Transport selection precedes application delivery and does not replay an operation. Existing HTTPS adapters remain the last fallback for hosting/mail and signed release delivery. Security synchronization and announcement sessions retain their authenticated outbound channels and reconnect; they do not expose new HTTP endpoints. Local supervisor contacts remain on loopback TCP/TLS.
+
+TLS pins a dedicated **Ed25519** identity. On `sitebrush.com`, the listeners and announcement services automatically use the persisted `server_settings.service_mail_public_key` / `service_mail_private_key` pair. Missing or damaged pairs are generated atomically by the control database owner; replacing the executable preserves valid keys. A new installation without an explicit pin obtains only the public key from `https://sitebrush.com/?service_mail_relay&identity=ed25519` through ordinary certificate-verified HTTPS, without redirects, then stores it in its control database as `netchan_central_ed25519_public_key`. This discovery runs outside HTTP handling; unavailable discovery leaves signed HTTPS release delivery available and retries later. A saved pin is restored after restart and never silently replaced. The launcher can use the same fixed HTTPS discovery without opening an application database.
+
+`SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM` remains an optional explicit override. Set this public value as a GitHub Actions repository variable of the same name, or export it before crosscompilation, to embed the pin in all server and Docker desktop builds. An invalid explicit or stored pin fails closed and is not replaced by discovered trust. The X25519 `SITEBRUSH_SERVICE_MAIL_RELAY_PUBLIC_KEY_SITEBRUSH_COM` key remains exclusively for relay payload encryption. Address overrides never change TLS trust. No private key is published or transferred during discovery.
+
+Registration still uses the signed/encrypted application protocol before an installation has registered its own key. Keep the HTTPS fallback available during a rolling upgrade. Update `sitebrush.com` and its launcher/supervisor first, then distribute the new customer binaries. They bootstrap the central public pin automatically; embedding it at build time remains optional. Keep UDP and TCP ports 9876-9878 reachable on the central server.
+
+On macOS, the default crosscompile command packages the SDK selected by `xcrun`, compiles both desktop architectures with pinned OSXCross inside Docker, and creates the universal DMG on the host. Docker image identities include the Go version, OSXCross commit, and SDK digest. The SDK is a build input and is not published with release artifacts.
+
+For separate Linux compilation and macOS packaging, transfer an Xcode SDK archive containing one `MacOSX<version>.sdk` directory to the Linux builder:
+
+```sh
+CGO_ENABLED=0 go run ./scripts/crosscompile -mode desktop-app -os darwin -arch universal \
+  -macos-stage build -macos-sdk /path/MacOSX14.4.sdk.tar.gz -version 123
+```
+
+Copy the resulting `binaries/123/desktop-app/sitebrush_darwin_universal_desktop` to the same location on macOS, then package it without recompilation:
+
+```sh
+CGO_ENABLED=0 go run ./scripts/crosscompile -mode desktop-app -os darwin -arch universal \
+  -macos-stage package -version 123
+```
+
+The build stage retains intermediate binaries and does not update `binaries/latest` or publish them. The packaging stage consumes existing binaries without clearing its input directory. A missing architecture, unavailable SDK/toolchain, or failed DMG creation fails the build explicitly.
+
 ## Local publication and NetChan downloads
 
 The existing publishing command remains valid, including Docker desktop builds:
@@ -841,9 +871,9 @@ go run scripts/crosscompile/crosscompile.go \
 
 Docker readiness checks print their current step and stop after 30 seconds if the daemon or a cached-platform probe does not respond. Check that `docker info` returns normally before retrying; build and image-download output remains streamed, without a short compilation timeout. Publishing with `-sync` does not require stopping the running service. Avoid appending unconditional SSH replacement commands with `;`: they would execute even if compilation or signing failed. Subsequent installed updates use the protected panel or `sitebrush -upgrade`.
 
-The command builds and publishes artifacts; it does not replace the running executable. Signed `update.json` and `SHA256SUMS` accompany the complete server matrix before publication. Missing or mismatched signing keys fail before compilation. The private key stays on the build machine. Desktop binaries continue to use the existing Docker/native build and distribution paths.
+The command builds and publishes artifacts; it does not replace the running executable. Signed `update.json` and `SHA256SUMS` accompany the complete server matrix before publication. Missing or mismatched signing keys fail before compilation. The private key stays on the build machine. Desktop compilation uses Docker for Linux, Windows, and macOS. Only macOS app bundling, ad-hoc signing, and DMG packaging run on a macOS host.
 
-After the first updater-enabled installation has been started on sitebrush.com, its pinned central identity serves the published `storage/chroot/sitebrush.com/download` tree over TCP **9878**. Allow inbound access on that central server and outbound access from installations. Public release reads need no installation registration, email or administrative token. Channel/session delivery, bounded backpressure, verified resume and HTTPS fallback are documented in [pkg/appupdate/netchan.md](pkg/appupdate/netchan.md). Updating an installation still requires its protected confirmation page or `sitebrush -upgrade`.
+After the first updater-enabled installation has been started on sitebrush.com, its pinned central identity serves the published `storage/chroot/sitebrush.com/download` tree over UDP and TCP **9878**. Allow inbound access on that central server and outbound access from installations. Public release reads need no installation registration, email or administrative token. Channel/session delivery, bounded backpressure, verified resume and HTTPS fallback are documented in [pkg/appupdate/netchan.md](pkg/appupdate/netchan.md). Updating an installation still requires its protected confirmation page or `sitebrush -upgrade`.
 
 
 ## Importing browser-saved pages

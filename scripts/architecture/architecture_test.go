@@ -58,8 +58,8 @@ func TestStableReleaseWorkflowFailsClosedAndUsesArtifactAllowlist(t *testing.T) 
 	if !strings.Contains(workflow, "set -euo pipefail") {
 		t.Fatal("release assembly must fail on an unchecked command")
 	}
-	if strings.Count(workflow, "if-no-files-found: error") != 3 {
-		t.Fatal("release workflow must fail when each of the three build artifact sets is empty")
+	if strings.Count(workflow, "if-no-files-found: error") != strings.Count(workflow, "uses: actions/upload-artifact@") {
+		t.Fatal("release workflow must fail when any build artifact set is empty")
 	}
 	if !strings.Contains(workflow, "-name 'sitebrush_*'") ||
 		!strings.Contains(workflow, "-name '*.zip'") ||

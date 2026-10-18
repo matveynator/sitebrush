@@ -28,7 +28,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/matveynator/netchan"
+	"github.com/matveynator/netchan/v2"
 	"html/template"
 	"io"
 	"io/fs"
@@ -83,6 +83,9 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/mailout"
 	sitemcp "github.com/matveynator/sitebrush/v2/pkg/mcp"
 	"github.com/matveynator/sitebrush/v2/pkg/migrations"
+	"github.com/matveynator/sitebrush/v2/pkg/netchanidentity"
+	"github.com/matveynator/sitebrush/v2/pkg/netchantls"
+	"github.com/matveynator/sitebrush/v2/pkg/netchantransport"
 	"github.com/matveynator/sitebrush/v2/pkg/outboundhttp"
 	"github.com/matveynator/sitebrush/v2/pkg/pagearchive"
 	"github.com/matveynator/sitebrush/v2/pkg/securitysync"
@@ -174,8 +177,13 @@ var errHostingSnapshotNetChanDeliveryCanceled = errors.New("netchan delivery can
 var sitebrushComServiceMailRelayPublicKey = "axM/Ha8N6Ci/IiLs2SqULfu1DVlQKrkswNsOPgnx4kY="
 var sitebrushRuServiceMailRelayPublicKey = ""
 
+// Release builders may embed the central Ed25519 identity after provisioning it.
+// The X25519 relay encryption key is never a signing or TLS trust anchor.
+var sitebrushComNetChanTLSPublicKey = ""
+
 // App keeps only explicit dependencies to stay readable and easy to swap.
 type App struct {
+	centralNetChanIdentity         *centralNetChanIdentityProcess
 	updateActivation               <-chan struct{}
 	announcementContacts           *updateannounce.Hub
 	imageJobs                      chan<- imageprepare.Job
@@ -4368,7 +4376,7 @@ func (a *App) analyticsMiddleware(next http.Handler) http.Handler {
 			}
 		}
 		if a.securityAnalytics != nil && !isBrowserAnalyticsRequest(r) && len(a.securityAnalytics) < cap(a.securityAnalytics) {
-			securityEvent := siteAnalyticsEvent{Bytes: writer.bytesWritten, Domain: a.analyticsEventDomain(r, ""), Path: analyticsBoundedString(r.URL.EscapedPath(), 512), Query: analyticsBoundedString(accountauth.SafeQuery(r.URL.RawQuery), 2048), Method: r.Method, StatusCode: writer.statusCode, OccurredAt: startedAt.UTC(), RemoteAddress: analyticsBoundedString(r.RemoteAddr, 64), Forwarded: analyticsBoundedString(r.Header.Get("Forwarded"), 256), ForwardedFor: analyticsBoundedString(r.Header.Get("X-Forwarded-For"), 256), UserAgent: analyticsBoundedString(r.UserAgent(), 256), AcceptLanguage: analyticsBoundedString(r.Header.Get("Accept-Language"), 64), TrustedPeer: sitebrushPeerRequestTrusted(r, startedAt.UTC()), IndexingCrawler: httpsecurity.IsIndexingCrawlerRequest(r), SecurityBlocked: writer.Header().Get("X-Sitebrush-Security-Incident") != "" || writer.statusCode == http.StatusTooManyRequests || writer.statusCode == http.StatusForbidden}
+			securityEvent := siteAnalyticsEvent{Bytes: writer.bytesWritten, Domain: a.analyticsEventDomain(r, ""), Path: analyticsBoundedString(r.URL.EscapedPath(), 512), Query: analyticsBoundedString(accountauth.SafeQuery(r.URL.RawQuery), 2048), Method: r.Method, StatusCode: writer.statusCode, OccurredAt: startedAt.UTC(), RemoteAddress: analyticsBoundedString(r.RemoteAddr, 64), Forwarded: analyticsBoundedString(r.Header.Get("Forwarded"), 256), ForwardedFor: analyticsBoundedString(r.Header.Get("X-Forwarded-For"), 256), UserAgent: analyticsBoundedString(r.UserAgent(), 256), AcceptLanguage: analyticsBoundedString(r.Header.Get("Accept-Language"), 64), TrustedPeer: a.sitebrushPeerRequestTrusted(r, startedAt.UTC()), IndexingCrawler: httpsecurity.IsIndexingCrawlerRequest(r), SecurityBlocked: writer.Header().Get("X-Sitebrush-Security-Incident") != "" || writer.statusCode == http.StatusTooManyRequests || writer.statusCode == http.StatusForbidden}
 			securityEvent.SecurityAlreadyBlocked = writer.Header().Get("X-Sitebrush-Security-Already-Blocked") == "1"
 			select {
 			case a.securityAnalytics <- securityEvent:
@@ -9005,7 +9013,7 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 		now := time.Now().UTC()
 		clientIP := clientIPAddress(r)
 		domain := normalizeDomainName(a.siteDomain(r.Context(), r))
-		trusted := httpsecurity.IsLocalRequest(r) || sitebrushPeerRequestTrusted(r, now)
+		trusted := httpsecurity.IsLocalRequest(r) || a.sitebrushPeerRequestTrusted(r, now)
 		crawlerRead := httpsecurity.IsIndexingCrawlerRequest(r)
 		if !trusted && a.attackGuard != nil {
 			trusted = a.trustRecordedAdminIP(r, domain, clientIP, now)
@@ -10063,9 +10071,10 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 		application.startAnalyticsWorkers(ctx)
 		application.startServerOwnerRecoveryWorker(ctx)
 		application.startDemoSiteCleanupWorker(ctx)
+		application.centralNetChanIdentity = application.startCentralNetChanIdentity(ctx.Done())
 		application.startServiceMailKeyPairWorker(ctx)
 		go application.runSecurityGlobalSync(ctx.Done())
-		application.hostingSnapshotDeliveries = startHostingSnapshotNetChanDeliveryWorker(ctx.Done())
+		application.hostingSnapshotDeliveries = startHostingSnapshotNetChanDeliveryWorker(ctx.Done(), application.centralNetChanIdentity)
 		application.hostingSnapshotReports = application.startHostingSnapshotReporter(ctx)
 		application.startHostingSnapshotMetricsMonitor(ctx)
 		application.startHostingSnapshotNetChanListener(ctx)
@@ -30259,13 +30268,26 @@ func (a *App) startHostingSnapshotNetChanListener(ctx context.Context) {
 		return
 	}
 	go func() {
-		listener, err := netchan.Listen[sitebrushNetChanRequest](net.JoinHostPort("", hostingSnapshotNetChanPort))
+		configuration, err := a.sitebrushNetChanServerTLS(ctx)
+		if err != nil {
+			log.Printf("hosting snapshot netchan TLS failed: %v", err)
+			return
+		}
+		listener, err := netchan.Listen[sitebrushNetChanRequest](net.JoinHostPort("", hostingSnapshotNetChanPort), netchantransport.Configure(netchan.Config{TLS: configuration}, ctx.Done()))
 		if err != nil {
 			log.Printf("hosting snapshot netchan listen failed: %v", err)
 			return
 		}
 		a.serveHostingSnapshotNetChanListener(ctx.Done(), ctx, listener)
 	}()
+}
+
+func (a *App) sitebrushNetChanServerTLS(ctx context.Context) (*tls.Config, error) {
+	_, _, privateKey, err := a.serviceMailLocalKeyPair(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return netchantls.ServerConfig("sitebrush.com", privateKey)
 }
 
 func (a *App) serveHostingSnapshotNetChanListener(stop <-chan struct{}, legacyContext context.Context, listener *netchan.Listener[sitebrushNetChanRequest]) {
@@ -30636,11 +30658,11 @@ func (a *App) withSitebrushPeerAttestation(ctx context.Context, sourceOptions gr
 		return sourceOptions
 	}
 	token := string(response.Payload)
-	centralPublicKeyBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(sitebrushComServiceMailRelayPublicKey))
-	if err != nil || len(centralPublicKeyBytes) != ed25519.PublicKeySize {
+	centralPublicKey, err := centralNetChanPublicKey(a.centralNetChanIdentity, ctx.Done())
+	if err != nil {
 		return sourceOptions
 	}
-	attestation, err := securitysync.VerifyPeerAttestation(token, ed25519.PublicKey(centralPublicKeyBytes), time.Now().UTC())
+	attestation, err := securitysync.VerifyPeerAttestation(token, centralPublicKey, time.Now().UTC())
 	if err != nil {
 		return sourceOptions
 	}
@@ -30653,18 +30675,18 @@ func (a *App) withSitebrushPeerAttestation(ctx context.Context, sourceOptions gr
 	return sourceOptions
 }
 
-func sitebrushPeerRequestTrusted(r *http.Request, now time.Time) bool {
+func (a *App) sitebrushPeerRequestTrusted(r *http.Request, now time.Time) bool {
 	token := strings.TrimSpace(r.Header.Get("X-Sitebrush-Peer-Attestation"))
 	timestamp := strings.TrimSpace(r.Header.Get("X-Sitebrush-Peer-Time"))
 	signatureText := strings.TrimSpace(r.Header.Get("X-Sitebrush-Peer-Signature"))
 	if token == "" || len(token) > 4096 || timestamp == "" || len(timestamp) > 64 || signatureText == "" || len(signatureText) > 256 {
 		return false
 	}
-	centralPublicKeyBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(sitebrushComServiceMailRelayPublicKey))
-	if err != nil || len(centralPublicKeyBytes) != ed25519.PublicKeySize {
+	centralPublicKey, err := centralNetChanPublicKey(a.centralNetChanIdentity, r.Context().Done())
+	if err != nil {
 		return false
 	}
-	attestation, err := securitysync.VerifyPeerAttestation(token, ed25519.PublicKey(centralPublicKeyBytes), now)
+	attestation, err := securitysync.VerifyPeerAttestation(token, centralPublicKey, now)
 	if err != nil {
 		return false
 	}
@@ -30709,16 +30731,15 @@ func sitebrushPeerRequestSignaturePayload(r *http.Request, attestation, timestam
 }
 
 func (a *App) handleSecurityAttestationRequest(ctx context.Context, request serviceMailRequest) (string, int, []byte) {
+	if !a.hostingSnapshotNetChanListenerEnabled(ctx) {
+		return "central attestation authority is unavailable", http.StatusServiceUnavailable, nil
+	}
 	if err := a.validateSecuritySyncInstallation(ctx, request); err != nil {
 		return err.Error(), http.StatusForbidden, nil
 	}
-	_, centralPublicKey, centralPrivateKey, err := a.serviceMailLocalKeyPair(ctx)
+	_, _, centralPrivateKey, err := a.serviceMailLocalKeyPair(ctx)
 	if err != nil {
 		return err.Error(), http.StatusServiceUnavailable, nil
-	}
-	encodedCentralPublicKey := base64.StdEncoding.EncodeToString(centralPublicKey)
-	if strings.TrimSpace(encodedCentralPublicKey) != strings.TrimSpace(sitebrushComServiceMailRelayPublicKey) {
-		return "central attestation key mismatch", http.StatusServiceUnavailable, nil
 	}
 	token, err := securitysync.IssuePeerAttestation(centralPrivateKey, request.InstallationID, request.PublicKey, time.Now().UTC(), time.Hour)
 	if err != nil {
@@ -30811,7 +30832,7 @@ func (a *App) reportHostingSnapshotNetChan(ctx context.Context) error {
 	var lastErr error
 	deliveries := a.hostingSnapshotDeliveries
 	if deliveries == nil {
-		deliveries = startHostingSnapshotNetChanDeliveryWorker(ctx.Done())
+		deliveries = startHostingSnapshotNetChanDeliveryWorker(ctx.Done(), a.centralNetChanIdentity)
 	}
 	for _, address := range addresses {
 		err := a.sendSignedRequestCompatible(ctx, request, func(payload []byte) error {
@@ -30829,6 +30850,145 @@ func (a *App) reportHostingSnapshotNetChan(ctx context.Context) error {
 	return errors.New("hosting snapshot netchan address is empty")
 }
 
+var errCentralNetChanIdentityMissing = errors.New("central Ed25519 network channel identity is not configured")
+
+type centralNetChanIdentityResponse struct {
+	publicKey ed25519.PublicKey
+	err       error
+}
+
+type centralNetChanIdentityProcess struct {
+	requests chan chan<- centralNetChanIdentityResponse
+	done     <-chan struct{}
+}
+
+// The worker owns the cached pin. Official HTTPS bootstrap runs separately so
+// ordinary request authentication never waits for a network discovery attempt.
+func (a *App) startCentralNetChanIdentity(stop <-chan struct{}) *centralNetChanIdentityProcess {
+	done := make(chan struct{})
+	process := &centralNetChanIdentityProcess{requests: make(chan chan<- centralNetChanIdentityResponse), done: done}
+	go func() {
+		defer close(done)
+		var keyText, ownerDomain string
+		err := a.withServerControlDatabaseRead(context.Background(), "central-netchan-identity-read", func(database *sql.DB) error {
+			keyText = hostingandsupport.SettingText(context.Background(), database, "netchan_central_ed25519_public_key")
+			ownerDomain, _ = (hostingandsupport.Store{DB: database}).OwnerDomain(context.Background())
+			return nil
+		})
+		current := centralNetChanIdentityResponse{err: errCentralNetChanIdentityMissing}
+		configuredKey, configurationErr := sitebrushNetChanPublicKey()
+		if !errors.Is(configurationErr, errCentralNetChanIdentityMissing) {
+			current = centralNetChanIdentityResponse{publicKey: configuredKey, err: configurationErr}
+		} else if err != nil {
+			current.err = err
+		} else if normalizeDomainName(ownerDomain) == "sitebrush.com" {
+			_, current.publicKey, _, current.err = a.serviceMailLocalKeyPair(context.Background())
+		} else if keyText != "" {
+			current.publicKey, current.err = decodeCentralNetChanPublicKey(keyText)
+		}
+		results := make(chan centralNetChanIdentityResponse, 1)
+		fetching := false
+		startFetch := func() {
+			if fetching || !errors.Is(current.err, errCentralNetChanIdentityMissing) {
+				return
+			}
+			fetching = true
+			go func() {
+				publicKey, err := netchanidentity.Fetch(stop)
+				select {
+				case results <- centralNetChanIdentityResponse{publicKey: publicKey, err: err}:
+				case <-stop:
+				}
+			}()
+		}
+		startFetch()
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case reply := <-process.requests:
+				response := centralNetChanIdentityResponse{publicKey: append(ed25519.PublicKey(nil), current.publicKey...), err: current.err}
+				select {
+				case reply <- response:
+				case <-stop:
+					return
+				default:
+				}
+			case result := <-results:
+				fetching = false
+				if result.err != nil {
+					log.Printf("central NetChan identity discovery: %s", diagnosticlog.SafeLogValue(result.err.Error()))
+					continue
+				}
+				if err := a.withServerControlDatabaseWrite(context.Background(), "central-netchan-identity-save", func(database *sql.DB) error {
+					_, err := database.Exec(`INSERT INTO server_settings(name,value,updated_at) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, "netchan_central_ed25519_public_key", base64.StdEncoding.EncodeToString(result.publicKey), time.Now().UTC().Format(time.RFC3339))
+					return err
+				}); err != nil {
+					log.Printf("central NetChan identity persistence: %s", diagnosticlog.SafeLogValue(err.Error()))
+					continue
+				}
+				current = result
+			case <-ticker.C:
+				startFetch()
+			}
+		}
+	}()
+	return process
+}
+
+func centralNetChanPublicKey(process *centralNetChanIdentityProcess, stop <-chan struct{}) (ed25519.PublicKey, error) {
+	publicKey, err := sitebrushNetChanPublicKey()
+	if !errors.Is(err, errCentralNetChanIdentityMissing) || process == nil {
+		return publicKey, err
+	}
+	reply := make(chan centralNetChanIdentityResponse, 1)
+	select {
+	case process.requests <- reply:
+	case <-process.done:
+		return nil, errors.New("central identity worker stopped")
+	case <-stop:
+		return nil, errors.New("central identity consumer stopped")
+	}
+	select {
+	case response := <-reply:
+		return response.publicKey, response.err
+	case <-process.done:
+		return nil, errors.New("central identity worker stopped")
+	case <-stop:
+		return nil, errors.New("central identity consumer stopped")
+	}
+}
+
+func decodeCentralNetChanPublicKey(keyText string) (ed25519.PublicKey, error) {
+	publicKey, err := base64.StdEncoding.DecodeString(strings.TrimSpace(keyText))
+	if err != nil || len(publicKey) != ed25519.PublicKeySize {
+		return nil, errors.New("central Ed25519 network channel identity is invalid")
+	}
+	return ed25519.PublicKey(publicKey), nil
+}
+
+// Routing and relay encryption overrides cannot change the TLS signing identity.
+func sitebrushNetChanPublicKey() (ed25519.PublicKey, error) {
+	keyText := strings.TrimSpace(os.Getenv("SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM"))
+	if keyText == "" {
+		keyText = strings.TrimSpace(sitebrushComNetChanTLSPublicKey)
+	}
+	if keyText == "" {
+		return nil, errCentralNetChanIdentityMissing
+	}
+	return decodeCentralNetChanPublicKey(keyText)
+}
+
+func sitebrushNetChanClientTLS() (*tls.Config, error) {
+	publicKey, err := sitebrushNetChanPublicKey()
+	if err != nil {
+		return nil, err
+	}
+	return netchantls.PinnedClientConfig(publicKey)
+}
+
 func centralHostingSnapshotNetChanAddresses() []string {
 	return []string{net.JoinHostPort("sitebrush.com", hostingSnapshotNetChanPort)}
 }
@@ -30841,7 +31001,7 @@ func sendHostingSnapshotNetChanPayload(ctx context.Context, deliveries chan<- ho
 	return err
 }
 
-func startHostingSnapshotNetChanDeliveryWorker(stop <-chan struct{}) chan hostingSnapshotNetChanDeliveryTask {
+func startHostingSnapshotNetChanDeliveryWorker(stop <-chan struct{}, identity *centralNetChanIdentityProcess) chan hostingSnapshotNetChanDeliveryTask {
 	deliveries := make(chan hostingSnapshotNetChanDeliveryTask)
 	go func() {
 		for {
@@ -30855,7 +31015,7 @@ func startHostingSnapshotNetChanDeliveryWorker(stop <-chan struct{}) chan hostin
 				if hostingSnapshotNetChanDeliveryCanceled(task.response) {
 					continue
 				}
-				err, responseNeeded := performHostingSnapshotNetChanDelivery(stop, task)
+				err, responseNeeded := performHostingSnapshotNetChanDelivery(stop, task, identity)
 				if responseNeeded {
 					sendHostingSnapshotNetChanDeliveryResponse(task.response, err)
 				}
@@ -30892,7 +31052,7 @@ func submitHostingSnapshotNetChanDeliveryWithResponse(stop <-chan struct{}, deli
 	}
 }
 
-func performHostingSnapshotNetChanDelivery(stop <-chan struct{}, task hostingSnapshotNetChanDeliveryTask) (error, bool) {
+func performHostingSnapshotNetChanDelivery(stop <-chan struct{}, task hostingSnapshotNetChanDeliveryTask, identity *centralNetChanIdentityProcess) (error, bool) {
 	address := strings.TrimSpace(task.address)
 	if address == "" {
 		return errors.New("netchan address is empty"), true
@@ -30900,7 +31060,15 @@ func performHostingSnapshotNetChanDelivery(stop <-chan struct{}, task hostingSna
 	if hostingSnapshotNetChanDeliveryCanceled(task.response) {
 		return errHostingSnapshotNetChanDeliveryCanceled, false
 	}
-	connection, err := netchan.Dial[sitebrushNetChanRequest](address)
+	publicKey, err := centralNetChanPublicKey(identity, stop)
+	if err != nil {
+		return err, true
+	}
+	configuration, err := netchantls.PinnedClientConfig(publicKey)
+	if err != nil {
+		return err, true
+	}
+	connection, err := netchan.Dial[sitebrushNetChanRequest](address, netchantransport.Configure(netchan.Config{TLS: configuration}, stop))
 	if err != nil {
 		return err, true
 	}
@@ -31862,7 +32030,15 @@ func (a *App) sendServiceMailNetChanRequest(ctx context.Context, request *servic
 	if address == "" {
 		address = net.JoinHostPort("sitebrush.com", hostingSnapshotNetChanPort)
 	}
-	connection, err := netchan.Dial[sitebrushNetChanRequest](address)
+	publicKey, err := centralNetChanPublicKey(a.centralNetChanIdentity, ctx.Done())
+	if err != nil {
+		return sitebrushNetChanResponse{}, err
+	}
+	configuration, err := netchantls.PinnedClientConfig(publicKey)
+	if err != nil {
+		return sitebrushNetChanResponse{}, err
+	}
+	connection, err := netchan.Dial[sitebrushNetChanRequest](address, netchantransport.Configure(netchan.Config{TLS: configuration}, ctx.Done()))
 	if err != nil {
 		return sitebrushNetChanResponse{}, err
 	}
@@ -32052,6 +32228,21 @@ func postServiceMailRelayPayload(ctx context.Context, relayURL string, payload [
 }
 
 func (a *App) serviceMailRelayEndpoint(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet && r.URL.Query().Get("identity") == "ed25519" {
+		if normalizeDomainName(r.Host) != "sitebrush.com" || !a.hostingSnapshotNetChanListenerEnabled(r.Context()) {
+			http.NotFound(w, r)
+			return
+		}
+		_, publicKey, _, err := a.serviceMailLocalKeyPair(r.Context())
+		if err != nil {
+			http.Error(w, "central identity unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		_ = json.NewEncoder(w).Encode(netchanidentity.Document{Algorithm: "Ed25519", PublicKey: base64.StdEncoding.EncodeToString(publicKey)})
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -32724,45 +32915,51 @@ func validateServiceMailContent(request serviceMailRequest) error {
 
 func (a *App) serviceMailLocalKeyPair(ctx context.Context) (string, ed25519.PublicKey, ed25519.PrivateKey, error) {
 	var installationID string
-	var publicKeyText string
-	var privateKeyText string
-	err := a.withServerControlDatabaseRead(ctx, "service-mail-key-read", func(database *sql.DB) error {
+	var publicKey ed25519.PublicKey
+	var privateKey ed25519.PrivateKey
+	// Read, validation and creation belong to one owner job. Concurrent startup
+	// subscribers must never generate and publish different installation keys.
+	err := a.withServerControlDatabaseWrite(ctx, "service-mail-key-pair", func(database *sql.DB) error {
 		installationID = hostingandsupport.SettingText(ctx, database, "service_mail_installation_id")
-		publicKeyText = hostingandsupport.SettingText(ctx, database, "service_mail_public_key")
-		privateKeyText = hostingandsupport.SettingText(ctx, database, "service_mail_private_key")
-		return nil
-	})
-	if err != nil {
-		return "", nil, nil, err
-	}
-	publicKey, publicErr := base64.StdEncoding.DecodeString(publicKeyText)
-	privateKey, privateErr := base64.StdEncoding.DecodeString(privateKeyText)
-	if installationID != "" && publicErr == nil && privateErr == nil && len(publicKey) == ed25519.PublicKeySize && len(privateKey) == ed25519.PrivateKeySize {
-		return installationID, ed25519.PublicKey(publicKey), ed25519.PrivateKey(privateKey), nil
-	}
-	generatedPublicKey, generatedPrivateKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		return "", nil, nil, err
-	}
-	installationID = randomAccessToken()
-	now := time.Now().UTC().Format(time.RFC3339)
-	settings := map[string]string{
-		"service_mail_installation_id": installationID,
-		"service_mail_public_key":      base64.StdEncoding.EncodeToString(generatedPublicKey),
-		"service_mail_private_key":     base64.StdEncoding.EncodeToString(generatedPrivateKey),
-	}
-	err = a.withServerControlDatabaseWrite(ctx, "service-mail-key-save", func(database *sql.DB) error {
-		for name, value := range settings {
-			if _, writeErr := database.ExecContext(ctx, `INSERT INTO server_settings(name,value,updated_at) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, name, value, now); writeErr != nil {
-				return writeErr
+		storedPublicKey, publicErr := base64.StdEncoding.DecodeString(hostingandsupport.SettingText(ctx, database, "service_mail_public_key"))
+		storedPrivateKey, privateErr := base64.StdEncoding.DecodeString(hostingandsupport.SettingText(ctx, database, "service_mail_private_key"))
+		if installationID != "" && publicErr == nil && privateErr == nil && len(storedPublicKey) == ed25519.PublicKeySize && len(storedPrivateKey) == ed25519.PrivateKeySize {
+			publicKey = ed25519.PublicKey(storedPublicKey)
+			privateKey = ed25519.PrivateKey(storedPrivateKey)
+			if publicKey.Equal(privateKey.Public()) && bytes.Equal(privateKey, ed25519.NewKeyFromSeed(privateKey[:ed25519.SeedSize])) {
+				return nil
 			}
 		}
+		generatedPublicKey, generatedPrivateKey, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			return err
+		}
+		generatedInstallationID := randomAccessToken()
+		transaction, err := database.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer transaction.Rollback()
+		now := time.Now().UTC().Format(time.RFC3339)
+		for settingName, settingText := range map[string]string{
+			"service_mail_installation_id": generatedInstallationID,
+			"service_mail_public_key":      base64.StdEncoding.EncodeToString(generatedPublicKey),
+			"service_mail_private_key":     base64.StdEncoding.EncodeToString(generatedPrivateKey),
+		} {
+			if _, err := transaction.ExecContext(ctx, `INSERT INTO server_settings(name,value,updated_at) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, settingName, settingText, now); err != nil {
+				return err
+			}
+		}
+		if err := transaction.Commit(); err != nil {
+			return err
+		}
+		installationID, publicKey, privateKey = generatedInstallationID, generatedPublicKey, generatedPrivateKey
 		return nil
 	})
 	if err != nil {
 		return "", nil, nil, err
 	}
-	return installationID, generatedPublicKey, generatedPrivateKey, nil
+	return installationID, publicKey, privateKey, nil
 }
 
 func (a *App) startServiceMailKeyPairWorker(ctx context.Context) {
@@ -42301,23 +42498,32 @@ func resolvePathInsideRootForWrite(rootRealPath string, candidatePath string) (s
 	if err != nil {
 		return "", err
 	}
-	if !sameCleanPath(existingPath, candidateAbsolutePath) {
-		// nearestExistingPath only walks parents of the storage-root-derived candidate.
-		// lgtm[go/path-injection]
-		existingInfo, statErr := os.Stat(existingPath)
-		if statErr != nil {
-			return "", statErr
-		}
-		if !existingInfo.IsDir() {
-			return "", errors.New("path parent is not a directory")
-		}
-	}
 	existingRealPath, err := filepath.EvalSymlinks(existingPath)
 	if err != nil {
 		return "", err
 	}
 	if !isPathWithinRoot(rootRealPath, existingRealPath) {
 		return "", errors.New("path parent escapes allowed storage root")
+	}
+	if !sameCleanPath(existingPath, candidateAbsolutePath) {
+		// Inspect the canonical parent through the storage jail so a link swap
+		// cannot redirect metadata access outside the already validated root.
+		jail, err := os.OpenRoot(rootRealPath)
+		if err != nil {
+			return "", err
+		}
+		defer jail.Close()
+		relativeParent, err := filepath.Rel(rootRealPath, existingRealPath)
+		if err != nil {
+			return "", err
+		}
+		existingInfo, err := jail.Stat(relativeParent)
+		if err != nil {
+			return "", err
+		}
+		if !existingInfo.IsDir() {
+			return "", errors.New("path parent is not a directory")
+		}
 	}
 	relativeTail, err := filepath.Rel(existingPath, candidateAbsolutePath)
 	if err != nil {
@@ -42656,19 +42862,17 @@ func (a *App) normalizeAndValidateChrootLocationPath(domain, rawDirectoryPath st
 	if err != nil {
 		return "", err
 	}
-	// candidateRealPath is accepted only after EvalSymlinks and root containment validation below.
-	// lgtm[go/path-injection]
-	// candidateRealPath is accepted only after EvalSymlinks and domain-root containment validation.
-	// lgtm[go/path-injection]
-	info, err := os.Stat(candidateRealPath)
+	if !isPathWithinRoot(rootRealPath, candidateRealPath) {
+		return "", errors.New("directory path is outside allowed chroot")
+	}
+	// The storage jail binds metadata access to an open root, including when
+	// filesystem links change after the domain containment check.
+	info, err := a.statInsideStorage(candidateRealPath)
 	if err != nil {
 		return "", err
 	}
 	if !info.IsDir() {
 		return "", errors.New("directory path must point to a folder")
-	}
-	if !isPathWithinRoot(rootRealPath, candidateRealPath) {
-		return "", errors.New("directory path is outside allowed chroot")
 	}
 	return candidateRealPath, nil
 }
@@ -42754,7 +42958,7 @@ func (a *App) resolveExistingChrootPath(domain string, candidatePath string) (st
 	if !isPathWithinRoot(rootRealPath, candidateRealPath) {
 		return "", nil, errors.New("path escapes allowed domain chroot")
 	}
-	info, err := os.Stat(candidateRealPath)
+	info, err := a.statInsideStorage(candidateRealPath)
 	if err != nil {
 		return "", nil, err
 	}
@@ -46967,8 +47171,8 @@ func serverUpdateEmailURL(domain string) (string, error) {
 	return (&url.URL{Scheme: "https", Host: domain, Path: "/", RawQuery: "server_update"}).String(), nil
 }
 
-// Campaign authorization is tied to both the server owner and the pinned
-// central signing identity. Host headers cannot turn a customer into sitebrush.com.
+// Campaign authorization requires the local central owner and its persisted
+// signing identity. Explicit pins are checked; Host headers confer no authority.
 func (a *App) centralAnnouncementIdentity() (ed25519.PrivateKey, error) {
 	if a.developmentMode {
 		return nil, errors.New("release announcements are unavailable in development builds")
@@ -46987,7 +47191,8 @@ func (a *App) centralAnnouncementIdentity() (ed25519.PrivateKey, error) {
 	if err != nil {
 		return nil, err
 	}
-	if base64.StdEncoding.EncodeToString(publicKey) != sitebrushComServiceMailRelayPublicKey {
+	trustedKey, err := sitebrushNetChanPublicKey()
+	if !errors.Is(err, errCentralNetChanIdentityMissing) && (err != nil || !publicKey.Equal(trustedKey)) {
 		return nil, errors.New("central announcement identity mismatch")
 	}
 	return privateKey, nil
@@ -47109,7 +47314,7 @@ func (a *App) startAnnouncementSubsystems(stop <-chan struct{}) {
 			default:
 			}
 			id, _, key, err := a.serviceMailLocalKeyPair(context.Background())
-			central, decodeErr := updateannounce.DecodeKey(sitebrushComServiceMailRelayPublicKey)
+			central, decodeErr := centralNetChanPublicKey(a.centralNetChanIdentity, stop)
 			if err == nil && decodeErr != nil {
 				err = decodeErr
 			}
@@ -47343,9 +47548,11 @@ func serverRuntimeArgument(arguments []string, name string) string {
 }
 
 func serverReleaseCatalog(releaseKey ed25519.PublicKey) (appupdate.Catalog, error) {
-	central, err := updateannounce.DecodeKey(sitebrushComServiceMailRelayPublicKey)
-	if err != nil {
-		return appupdate.Catalog{}, err
+	central, err := sitebrushNetChanPublicKey()
+	if errors.Is(err, errCentralNetChanIdentityMissing) {
+		// The launcher has no application DB owner. Bootstrap only from the
+		// official HTTPS origin; failed discovery retains signed HTTPS downloads.
+		central, _ = netchanidentity.Fetch(nil)
 	}
 	return appupdate.NewNetworkCatalog(releaseKey, central), nil
 }

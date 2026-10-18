@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/matveynator/netchan"
+	"github.com/matveynator/netchan/v2"
 )
 
 type Options struct {
@@ -468,7 +468,7 @@ func acceptContacts(listener *netchan.Listener[wireRequest], requests chan<- Req
 					var bridgeDone chan struct{}
 					defer func() {
 						if graceful {
-							_ = connection.Close()
+							closeContact(connection, contactCloseGrace)
 						} else {
 							_ = connection.Abort()
 						}

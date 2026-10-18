@@ -18,8 +18,29 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/matveynator/netchan"
+	"github.com/matveynator/netchan/v2"
 )
+
+// Once the application has received a one-shot reply, teardown must release its
+// admission slot promptly even if the peer's physical transport has vanished.
+const contactCloseGrace = 250 * time.Millisecond
+
+func closeContact[T any](contact *netchan.Channel[T], grace time.Duration) {
+	if contact == nil {
+		return
+	}
+	func() {
+		defer func() { _ = recover() }()
+		close(contact.Send)
+	}()
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case <-contact.Done:
+	case <-timer.C:
+		_ = contact.Abort()
+	}
+}
 
 type Request struct {
 	Action       string
@@ -226,7 +247,7 @@ func Exchange(storagePath string, request Request, stop <-chan struct{}) (Respon
 	graceful := false
 	defer func() {
 		if graceful {
-			_ = connection.Close()
+			closeContact(connection, contactCloseGrace)
 		} else {
 			_ = connection.Abort()
 		}

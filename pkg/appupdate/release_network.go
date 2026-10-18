@@ -13,7 +13,9 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/matveynator/netchan"
+	"github.com/matveynator/netchan/v2"
+	"github.com/matveynator/sitebrush/v2/pkg/netchantls"
+	"github.com/matveynator/sitebrush/v2/pkg/netchantransport"
 )
 
 const ReleaseAddress = "sitebrush.com:9878"
@@ -69,20 +71,7 @@ func NewNetworkCatalog(publicKey, centralKey ed25519.PublicKey) Catalog {
 // TLS verification deliberately uses a pinned signing identity instead of a
 // public CA hostname. An empty or substituted identity always fails closed.
 func verifiedReleaseTLS(publicKey ed25519.PublicKey) (*tls.Config, error) {
-	if len(publicKey) != ed25519.PublicKeySize {
-		return nil, errors.New("invalid release mirror identity")
-	}
-	trusted := append(ed25519.PublicKey(nil), publicKey...)
-	return &tls.Config{MinVersion: tls.VersionTLS13, InsecureSkipVerify: true, VerifyConnection: func(connection tls.ConnectionState) error {
-		if len(connection.PeerCertificates) != 1 {
-			return errors.New("missing release mirror certificate")
-		}
-		actual, ok := connection.PeerCertificates[0].PublicKey.(ed25519.PublicKey)
-		if !ok || !actual.Equal(trusted) {
-			return errors.New("release mirror identity mismatch")
-		}
-		return nil
-	}}, nil
+	return netchantls.PinnedClientConfig(publicKey)
 }
 
 func (client ReleaseClient) dial(stop <-chan struct{}) (*netchan.Channel[ReleaseRequest], error) {
@@ -105,7 +94,7 @@ func (client ReleaseClient) dial(stop <-chan struct{}) (*netchan.Channel[Release
 	// The library owns its bounded dial/handshake timeout. A caller can revoke
 	// interest sooner; the dial worker then aborts any late connection itself.
 	go func() {
-		contact, err := netchan.Dial[ReleaseRequest](client.Address, netchan.Config{Capacity: 1, TLS: settings})
+		contact, err := netchan.Dial[ReleaseRequest](client.Address, netchantransport.Configure(netchan.Config{Capacity: 1, TLS: settings}, abandoned))
 		select {
 		case replies <- result{contact, err}:
 		case <-abandoned:
@@ -293,19 +282,5 @@ func (client ReleaseClient) transferProgress(manifest Manifest, artifact Artifac
 // outgoing channel first so the peer can release its nested capabilities and
 // file immediately; fall back to Abort if that exchange cannot complete.
 func closeReleaseContact(contact *netchan.Channel[ReleaseRequest]) {
-	if contact == nil {
-		return
-	}
-	func() {
-		// The transport can revoke a channel concurrently with its local owner.
-		defer func() { _ = recover() }()
-		close(contact.Send)
-	}()
-	timer := time.NewTimer(2 * time.Second)
-	defer timer.Stop()
-	select {
-	case <-contact.Done:
-	case <-timer.C:
-		contact.Abort()
-	}
+	closeContact(contact, 2*time.Second)
 }
