@@ -141,6 +141,12 @@ func main() {
 	if err != nil {
 		fatalf("resolve Go version: %v", err)
 	}
+	if keyText := strings.TrimSpace(os.Getenv("SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM")); keyText != "" {
+		publicKey, err := base64.StdEncoding.DecodeString(keyText)
+		if err != nil || len(publicKey) != ed25519.PublicKeySize {
+			fatalf("SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM must be a base64 Ed25519 public key")
+		}
+	}
 
 	version := strings.TrimSpace(*versionFlag)
 	if version == "" {
@@ -261,7 +267,7 @@ func buildServerAppArtifacts(repoRoot, outputDir, programName, version string, t
 			goarch:     target.goarch,
 			cgoEnabled: "0",
 			tags:       []string{"netgo", "osusergo"},
-			ldflags:    []string{"-s", "-w", "-X", "main.CompileVersion=" + version},
+			ldflags:    releaseLinkerFlags(version),
 		}); err != nil {
 			return err
 		}
@@ -475,14 +481,14 @@ CGO_ENABLED=1 \
 GOOS=linux \
 GOARCH=%s \
 go build -tags "desktop" \
-  -ldflags "-s -w -X main.CompileVersion=%s" \
+  -ldflags %s \
   -o %s
 chmod +x %s
 (
   cd %s
   zip -q -X %s %s
 )
-`, shellQuote(artifactDir), goarch, shellQuote(version), shellQuote(artifactPath), shellQuote(artifactPath), shellQuote(artifactDir), shellQuote(artifactName+".zip"), shellQuote(artifactName))
+`, shellQuote(artifactDir), goarch, shellQuote(strings.Join(releaseLinkerFlags(version), " ")), shellQuote(artifactPath), shellQuote(artifactPath), shellQuote(artifactDir), shellQuote(artifactName+".zip"), shellQuote(artifactName))
 }
 
 func windowsDesktopDockerfile(goarch, goVersion string) string {
@@ -543,14 +549,22 @@ GOARCH=%s \
 CC=%s \
 CXX=%s \
 go build -tags "desktop" \
-  -ldflags "-H windowsgui -s -w -X main.CompileVersion=%s" \
+  -ldflags %s \
   -o %s
 
 (
   cd %s
   zip -q -X %s %s
 )
-`, resourceArch, goarch, goarch, shellQuote(artifactDir), goarch, cc, cxx, shellQuote(version), shellQuote(artifactPath), shellQuote(artifactDir), shellQuote(artifactName+".zip"), shellQuote(artifactName))
+`, resourceArch, goarch, goarch, shellQuote(artifactDir), goarch, cc, cxx, shellQuote("-H windowsgui "+strings.Join(releaseLinkerFlags(version), " ")), shellQuote(artifactPath), shellQuote(artifactDir), shellQuote(artifactName+".zip"), shellQuote(artifactName))
+}
+
+func releaseLinkerFlags(version string) []string {
+	flags := []string{"-s", "-w", "-X", "main.CompileVersion=" + version}
+	if publicKey := strings.TrimSpace(os.Getenv("SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM")); publicKey != "" {
+		flags = append(flags, "-X", "main.sitebrushComNetChanTLSPublicKey="+publicKey)
+	}
+	return flags
 }
 
 func buildGoBinary(repoRoot, outputPath string, request buildRequest) error {
@@ -1648,7 +1662,7 @@ done
 lipo -create %s %s -output %s
 lipo %s -verify_arch x86_64 arm64
 chmod +x %s
-`, shellQuote(artifactDirectory), shellQuote("-s -w -X main.CompileVersion="+version), shellQuote(path.Join(artifactDirectory, programName+"_darwin_")),
+`, shellQuote(artifactDirectory), shellQuote(strings.Join(releaseLinkerFlags(version), " ")), shellQuote(path.Join(artifactDirectory, programName+"_darwin_")),
 		shellQuote(path.Join(artifactDirectory, desktopArtifactName(programName, "darwin", "amd64", ""))),
 		shellQuote(path.Join(artifactDirectory, desktopArtifactName(programName, "darwin", "arm64", ""))),
 		shellQuote(path.Join(artifactDirectory, desktopArtifactName(programName, "darwin", "universal", ""))),

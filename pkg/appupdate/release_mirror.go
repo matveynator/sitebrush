@@ -13,6 +13,7 @@ import (
 
 	"github.com/matveynator/netchan/v2"
 	"github.com/matveynator/sitebrush/v2/pkg/netchantls"
+	"github.com/matveynator/sitebrush/v2/pkg/netchantransport"
 )
 
 type MirrorOptions struct {
@@ -33,7 +34,7 @@ func ServeReleaseMirror(options MirrorOptions, stop <-chan struct{}) error {
 	if err != nil {
 		return err
 	}
-	listener, err := netchan.Listen[ReleaseRequest](options.Address, netchan.Config{Capacity: 1, TLS: configuration})
+	listener, err := netchan.Listen[ReleaseRequest](options.Address, netchantransport.Configure(netchan.Config{Capacity: 1, TLS: configuration}, stop))
 	if err != nil {
 		return err
 	}

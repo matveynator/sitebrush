@@ -9,6 +9,7 @@ permissions:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
   CGO_ENABLED: '0'
+  SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM: ${{ vars.SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM }}
 
 concurrency:
   group: sitebrush-stable-release

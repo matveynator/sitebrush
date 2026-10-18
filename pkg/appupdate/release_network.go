@@ -15,6 +15,7 @@ import (
 
 	"github.com/matveynator/netchan/v2"
 	"github.com/matveynator/sitebrush/v2/pkg/netchantls"
+	"github.com/matveynator/sitebrush/v2/pkg/netchantransport"
 )
 
 const ReleaseAddress = "sitebrush.com:9878"
@@ -93,7 +94,7 @@ func (client ReleaseClient) dial(stop <-chan struct{}) (*netchan.Channel[Release
 	// The library owns its bounded dial/handshake timeout. A caller can revoke
 	// interest sooner; the dial worker then aborts any late connection itself.
 	go func() {
-		contact, err := netchan.Dial[ReleaseRequest](client.Address, netchan.Config{Capacity: 1, TLS: settings})
+		contact, err := netchan.Dial[ReleaseRequest](client.Address, netchantransport.Configure(netchan.Config{Capacity: 1, TLS: settings}, abandoned))
 		select {
 		case replies <- result{contact, err}:
 		case <-abandoned:

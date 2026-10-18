@@ -14,6 +14,7 @@ import (
 
 	"github.com/matveynator/netchan/v2"
 	"github.com/matveynator/sitebrush/v2/pkg/netchantls"
+	"github.com/matveynator/sitebrush/v2/pkg/netchantransport"
 )
 
 const Address = "sitebrush.com:9877"
@@ -157,7 +158,7 @@ func (hub *Hub) Listen(address string, key ed25519.PrivateKey, keys KeyLookup, s
 		}
 		return nil
 	}}
-	listener, err := netchan.Listen[Contact](address, netchan.Config{Capacity: 8, TLS: configuration})
+	listener, err := netchan.Listen[Contact](address, netchantransport.Configure(netchan.Config{Capacity: 8, TLS: configuration}, stop))
 	if err != nil {
 		return err
 	}
@@ -246,7 +247,7 @@ func AgentWithStatus(address, id string, key ed25519.PrivateKey, central ed25519
 		return err
 	}
 
-	connection, err := netchan.Dial[Contact](address, netchan.Config{Capacity: 8, TLS: configuration})
+	connection, err := netchan.Dial[Contact](address, netchantransport.Configure(netchan.Config{Capacity: 8, TLS: configuration}, stop))
 	if err != nil {
 		return err
 	}

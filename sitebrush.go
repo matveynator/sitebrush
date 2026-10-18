@@ -84,6 +84,7 @@ import (
 	sitemcp "github.com/matveynator/sitebrush/v2/pkg/mcp"
 	"github.com/matveynator/sitebrush/v2/pkg/migrations"
 	"github.com/matveynator/sitebrush/v2/pkg/netchantls"
+	"github.com/matveynator/sitebrush/v2/pkg/netchantransport"
 	"github.com/matveynator/sitebrush/v2/pkg/outboundhttp"
 	"github.com/matveynator/sitebrush/v2/pkg/pagearchive"
 	"github.com/matveynator/sitebrush/v2/pkg/securitysync"
@@ -174,6 +175,10 @@ var errHostingSnapshotNetChanDeliveryCanceled = errors.New("netchan delivery can
 
 var sitebrushComServiceMailRelayPublicKey = "axM/Ha8N6Ci/IiLs2SqULfu1DVlQKrkswNsOPgnx4kY="
 var sitebrushRuServiceMailRelayPublicKey = ""
+
+// Release builders may embed the central Ed25519 identity after provisioning it.
+// The X25519 relay encryption key is never a signing or TLS trust anchor.
+var sitebrushComNetChanTLSPublicKey = ""
 
 // App keeps only explicit dependencies to stay readable and easy to swap.
 type App struct {
@@ -30260,24 +30265,26 @@ func (a *App) startHostingSnapshotNetChanListener(ctx context.Context) {
 		return
 	}
 	go func() {
-		_, publicKey, privateKey, err := a.serviceMailLocalKeyPair(ctx)
-		trustedKey, configured := serviceMailRelayPublicKeyForDomain("sitebrush.com")
-		if err != nil || !configured || !bytes.Equal(publicKey, trustedKey) {
-			log.Printf("hosting snapshot netchan identity is unavailable or does not match the central key")
-			return
-		}
-		configuration, err := netchantls.ServerConfig("sitebrush.com", privateKey)
+		configuration, err := a.sitebrushNetChanServerTLS(ctx)
 		if err != nil {
 			log.Printf("hosting snapshot netchan TLS failed: %v", err)
 			return
 		}
-		listener, err := netchan.Listen[sitebrushNetChanRequest](net.JoinHostPort("", hostingSnapshotNetChanPort), netchan.Config{TLS: configuration})
+		listener, err := netchan.Listen[sitebrushNetChanRequest](net.JoinHostPort("", hostingSnapshotNetChanPort), netchantransport.Configure(netchan.Config{TLS: configuration}, ctx.Done()))
 		if err != nil {
 			log.Printf("hosting snapshot netchan listen failed: %v", err)
 			return
 		}
 		a.serveHostingSnapshotNetChanListener(ctx.Done(), ctx, listener)
 	}()
+}
+
+func (a *App) sitebrushNetChanServerTLS(ctx context.Context) (*tls.Config, error) {
+	_, _, privateKey, err := a.serviceMailLocalKeyPair(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return netchantls.ServerConfig("sitebrush.com", privateKey)
 }
 
 func (a *App) serveHostingSnapshotNetChanListener(stop <-chan struct{}, legacyContext context.Context, listener *netchan.Listener[sitebrushNetChanRequest]) {
@@ -30648,11 +30655,11 @@ func (a *App) withSitebrushPeerAttestation(ctx context.Context, sourceOptions gr
 		return sourceOptions
 	}
 	token := string(response.Payload)
-	centralPublicKeyBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(sitebrushComServiceMailRelayPublicKey))
-	if err != nil || len(centralPublicKeyBytes) != ed25519.PublicKeySize {
+	centralPublicKey, err := sitebrushNetChanPublicKey()
+	if err != nil {
 		return sourceOptions
 	}
-	attestation, err := securitysync.VerifyPeerAttestation(token, ed25519.PublicKey(centralPublicKeyBytes), time.Now().UTC())
+	attestation, err := securitysync.VerifyPeerAttestation(token, centralPublicKey, time.Now().UTC())
 	if err != nil {
 		return sourceOptions
 	}
@@ -30672,11 +30679,11 @@ func sitebrushPeerRequestTrusted(r *http.Request, now time.Time) bool {
 	if token == "" || len(token) > 4096 || timestamp == "" || len(timestamp) > 64 || signatureText == "" || len(signatureText) > 256 {
 		return false
 	}
-	centralPublicKeyBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(sitebrushComServiceMailRelayPublicKey))
-	if err != nil || len(centralPublicKeyBytes) != ed25519.PublicKeySize {
+	centralPublicKey, err := sitebrushNetChanPublicKey()
+	if err != nil {
 		return false
 	}
-	attestation, err := securitysync.VerifyPeerAttestation(token, ed25519.PublicKey(centralPublicKeyBytes), now)
+	attestation, err := securitysync.VerifyPeerAttestation(token, centralPublicKey, now)
 	if err != nil {
 		return false
 	}
@@ -30728,8 +30735,8 @@ func (a *App) handleSecurityAttestationRequest(ctx context.Context, request serv
 	if err != nil {
 		return err.Error(), http.StatusServiceUnavailable, nil
 	}
-	encodedCentralPublicKey := base64.StdEncoding.EncodeToString(centralPublicKey)
-	if strings.TrimSpace(encodedCentralPublicKey) != strings.TrimSpace(sitebrushComServiceMailRelayPublicKey) {
+	trustedKey, err := sitebrushNetChanPublicKey()
+	if err != nil || !centralPublicKey.Equal(trustedKey) {
 		return "central attestation key mismatch", http.StatusServiceUnavailable, nil
 	}
 	token, err := securitysync.IssuePeerAttestation(centralPrivateKey, request.InstallationID, request.PublicKey, time.Now().UTC(), time.Hour)
@@ -30841,14 +30848,25 @@ func (a *App) reportHostingSnapshotNetChan(ctx context.Context) error {
 	return errors.New("hosting snapshot netchan address is empty")
 }
 
-// The address override changes routing, while the configured central key remains
-// the trust anchor for hosting, registration, mail, and security synchronization.
-func sitebrushNetChanClientTLS() (*tls.Config, error) {
-	publicKey, configured := serviceMailRelayPublicKeyForDomain("sitebrush.com")
-	if !configured {
-		return nil, errors.New("central network channel identity is not configured")
+// Routing and relay encryption overrides cannot change the TLS signing identity.
+func sitebrushNetChanPublicKey() (ed25519.PublicKey, error) {
+	keyText := strings.TrimSpace(os.Getenv("SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM"))
+	if keyText == "" {
+		keyText = strings.TrimSpace(sitebrushComNetChanTLSPublicKey)
 	}
-	return netchantls.PinnedClientConfig(ed25519.PublicKey(publicKey))
+	publicKey, err := base64.StdEncoding.DecodeString(keyText)
+	if err != nil || len(publicKey) != ed25519.PublicKeySize {
+		return nil, errors.New("central Ed25519 network channel identity is missing or invalid")
+	}
+	return ed25519.PublicKey(publicKey), nil
+}
+
+func sitebrushNetChanClientTLS() (*tls.Config, error) {
+	publicKey, err := sitebrushNetChanPublicKey()
+	if err != nil {
+		return nil, err
+	}
+	return netchantls.PinnedClientConfig(publicKey)
 }
 
 func centralHostingSnapshotNetChanAddresses() []string {
@@ -30926,7 +30944,7 @@ func performHostingSnapshotNetChanDelivery(stop <-chan struct{}, task hostingSna
 	if err != nil {
 		return err, true
 	}
-	connection, err := netchan.Dial[sitebrushNetChanRequest](address, netchan.Config{TLS: configuration})
+	connection, err := netchan.Dial[sitebrushNetChanRequest](address, netchantransport.Configure(netchan.Config{TLS: configuration}, stop))
 	if err != nil {
 		return err, true
 	}
@@ -31892,7 +31910,7 @@ func (a *App) sendServiceMailNetChanRequest(ctx context.Context, request *servic
 	if err != nil {
 		return sitebrushNetChanResponse{}, err
 	}
-	connection, err := netchan.Dial[sitebrushNetChanRequest](address, netchan.Config{TLS: configuration})
+	connection, err := netchan.Dial[sitebrushNetChanRequest](address, netchantransport.Configure(netchan.Config{TLS: configuration}, ctx.Done()))
 	if err != nil {
 		return sitebrushNetChanResponse{}, err
 	}
@@ -42331,23 +42349,32 @@ func resolvePathInsideRootForWrite(rootRealPath string, candidatePath string) (s
 	if err != nil {
 		return "", err
 	}
-	if !sameCleanPath(existingPath, candidateAbsolutePath) {
-		// nearestExistingPath only walks parents of the storage-root-derived candidate.
-		// lgtm[go/path-injection]
-		existingInfo, statErr := os.Stat(existingPath)
-		if statErr != nil {
-			return "", statErr
-		}
-		if !existingInfo.IsDir() {
-			return "", errors.New("path parent is not a directory")
-		}
-	}
 	existingRealPath, err := filepath.EvalSymlinks(existingPath)
 	if err != nil {
 		return "", err
 	}
 	if !isPathWithinRoot(rootRealPath, existingRealPath) {
 		return "", errors.New("path parent escapes allowed storage root")
+	}
+	if !sameCleanPath(existingPath, candidateAbsolutePath) {
+		// Inspect the canonical parent through the storage jail so a link swap
+		// cannot redirect metadata access outside the already validated root.
+		jail, err := os.OpenRoot(rootRealPath)
+		if err != nil {
+			return "", err
+		}
+		defer jail.Close()
+		relativeParent, err := filepath.Rel(rootRealPath, existingRealPath)
+		if err != nil {
+			return "", err
+		}
+		existingInfo, err := jail.Stat(relativeParent)
+		if err != nil {
+			return "", err
+		}
+		if !existingInfo.IsDir() {
+			return "", errors.New("path parent is not a directory")
+		}
 	}
 	relativeTail, err := filepath.Rel(existingPath, candidateAbsolutePath)
 	if err != nil {
@@ -47015,7 +47042,8 @@ func (a *App) centralAnnouncementIdentity() (ed25519.PrivateKey, error) {
 	if err != nil {
 		return nil, err
 	}
-	if base64.StdEncoding.EncodeToString(publicKey) != sitebrushComServiceMailRelayPublicKey {
+	trustedKey, err := sitebrushNetChanPublicKey()
+	if err != nil || !publicKey.Equal(trustedKey) {
 		return nil, errors.New("central announcement identity mismatch")
 	}
 	return privateKey, nil
@@ -47137,7 +47165,7 @@ func (a *App) startAnnouncementSubsystems(stop <-chan struct{}) {
 			default:
 			}
 			id, _, key, err := a.serviceMailLocalKeyPair(context.Background())
-			central, decodeErr := updateannounce.DecodeKey(sitebrushComServiceMailRelayPublicKey)
+			central, decodeErr := sitebrushNetChanPublicKey()
 			if err == nil && decodeErr != nil {
 				err = decodeErr
 			}
@@ -47371,10 +47399,8 @@ func serverRuntimeArgument(arguments []string, name string) string {
 }
 
 func serverReleaseCatalog(releaseKey ed25519.PublicKey) (appupdate.Catalog, error) {
-	central, err := updateannounce.DecodeKey(sitebrushComServiceMailRelayPublicKey)
-	if err != nil {
-		return appupdate.Catalog{}, err
-	}
+	// An unprovisioned NetChan pin leaves signed HTTPS release delivery available.
+	central, _ := sitebrushNetChanPublicKey()
 	return appupdate.NewNetworkCatalog(releaseKey, central), nil
 }
 

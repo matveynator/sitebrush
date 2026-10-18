@@ -13,6 +13,31 @@ import (
 	"testing"
 )
 
+func TestReleaseBuildsEmbedDedicatedNetChanTrustPin(t *testing.T) {
+	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyText := base64.StdEncoding.EncodeToString(publicKey)
+	t.Setenv("SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM", keyText)
+	want := "main.sitebrushComNetChanTLSPublicKey=" + keyText
+	for name, command := range map[string]string{
+		"server":  strings.Join(releaseLinkerFlags("123"), " "),
+		"linux":   linuxDesktopDockerScript("/work/linux", "linux", "amd64", "gtk40", "123"),
+		"windows": windowsDesktopDockerScript("/work/windows", "windows", "amd64", "123"),
+		"macOS":   macOSDesktopDockerScript("/work", "sitebrush", "123"),
+	} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("%s build omitted the dedicated Ed25519 trust pin", name)
+		}
+	}
+	t.Setenv("SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM", "")
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_RELAY_PUBLIC_KEY_SITEBRUSH_COM", keyText)
+	if strings.Contains(strings.Join(releaseLinkerFlags("123"), " "), "NetChanTLS") {
+		t.Fatal("relay encryption key entered the TLS trust configuration")
+	}
+}
+
 func TestServerAppTargets(t *testing.T) {
 	t.Parallel()
 

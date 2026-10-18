@@ -15671,6 +15671,56 @@ func readZipTextFile(t *testing.T, archiveFileByName map[string]*zip.File, fileN
 	return string(fileBytes)
 }
 
+func TestSitebrushNetChanTLSIdentityIsIndependentOfRelayEncryption(t *testing.T) {
+	application, _ := newTestApplication(t)
+	relayKey, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_RELAY_PUBLIC_KEY_SITEBRUSH_COM", base64.StdEncoding.EncodeToString(relayKey.PublicKey().Bytes()))
+	t.Setenv("SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM", "invalid")
+	// Provisioning the listener depends only on its persisted Ed25519 private
+	// identity. Neither the X25519 key nor a client's pin controls local startup.
+	serverConfiguration, err := application.sitebrushNetChanServerTLS(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, signingKey, _, err := application.serviceMailLocalKeyPair(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate, err := x509.ParseCertificate(serverConfiguration.Certificates[0].Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	actualKey, ok := certificate.PublicKey.(ed25519.PublicKey)
+	if !ok || !actualKey.Equal(signingKey) {
+		t.Fatal("listener did not use the persisted Ed25519 signing identity")
+	}
+	if _, err := sitebrushNetChanClientTLS(); err == nil {
+		t.Fatal("client trusted the relay key without a valid dedicated TLS pin")
+	}
+	t.Setenv("SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM", base64.StdEncoding.EncodeToString(signingKey))
+	clientConfiguration, err := sitebrushNetChanClientTLS()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := clientConfiguration.VerifyConnection(tls.ConnectionState{PeerCertificates: []*x509.Certificate{certificate}}); err != nil {
+		t.Fatal(err)
+	}
+	relayPublicKey, configured := serviceMailRelayPublicKeyForDomain("sitebrush.com")
+	if !configured || !bytes.Equal(relayPublicKey, relayKey.PublicKey().Bytes()) {
+		t.Fatal("TLS provisioning changed relay encryption trust")
+	}
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_RELAY_PUBLIC_KEY_SITEBRUSH_COM", "invalid")
+	if _, err := sitebrushNetChanClientTLS(); err != nil {
+		t.Fatal("relay encryption configuration changed TLS trust", err)
+	}
+	if _, err := serverReleaseCatalog(signingKey); err != nil {
+		t.Fatal("release catalog depended on relay encryption trust", err)
+	}
+}
+
 func TestSitebrushNetChanRequiresTLSAndRejectsSubstitutedCentralIdentity(t *testing.T) {
 	if listener, err := netchan.Listen[sitebrushNetChanRequest]("127.0.0.1:0"); err == nil {
 		listener.Close()
@@ -15686,7 +15736,7 @@ func TestSitebrushNetChanRequiresTLSAndRejectsSubstitutedCentralIdentity(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("SITEBRUSH_SERVICE_MAIL_RELAY_PUBLIC_KEY_SITEBRUSH_COM", base64.StdEncoding.EncodeToString(substitute))
+	t.Setenv("SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM", base64.StdEncoding.EncodeToString(substitute))
 	configuration, err := sitebrushNetChanClientTLS()
 	if err != nil {
 		t.Fatal(err)
@@ -15695,7 +15745,7 @@ func TestSitebrushNetChanRequiresTLSAndRejectsSubstitutedCentralIdentity(t *test
 		connection.Abort()
 		t.Fatal("address override bypassed the configured central identity")
 	}
-	t.Setenv("SITEBRUSH_SERVICE_MAIL_RELAY_PUBLIC_KEY_SITEBRUSH_COM", "invalid")
+	t.Setenv("SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM", "invalid")
 	if _, err := sitebrushNetChanClientTLS(); err == nil {
 		t.Fatal("invalid trusted key accepted")
 	}
@@ -15707,7 +15757,7 @@ func listenTestSitebrushNetChan(t *testing.T) (*netchan.Listener[sitebrushNetCha
 	if err != nil {
 		return nil, err
 	}
-	t.Setenv("SITEBRUSH_SERVICE_MAIL_RELAY_PUBLIC_KEY_SITEBRUSH_COM", base64.StdEncoding.EncodeToString(publicKey))
+	t.Setenv("SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM", base64.StdEncoding.EncodeToString(publicKey))
 	configuration, err := netchantls.ServerConfig("sitebrush.com", privateKey)
 	if err != nil {
 		return nil, err
