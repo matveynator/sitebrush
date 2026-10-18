@@ -829,6 +829,30 @@ The legacy `site-schema-v12` and `billing-schema-v27` chains are frozen compatib
 4. Install and start the first updater-enabled release normally. Later installations can use the protected update page or `sitebrush -upgrade`.
 5. For an exceptional security or feature announcement, open the **sitebrush.com server update panel**, choose its reason, preview the message, and explicitly press the notification button. Releasing frequently never performs this step automatically.
 
+## Build toolchain and macOS desktop
+
+The project pins Go **1.27.2** in `go.mod`. CI and every Docker builder read that same directive. Server binaries and ordinary tests use `CGO_ENABLED=0`; CGO is confined to desktop compilation inside Docker. macOS binaries require **macOS 13 Ventura or newer** on both Intel and Apple Silicon.
+
+NetChan uses `github.com/matveynator/netchan/v2 v2.1.0`. Existing bare TCP addresses and application message schemas are retained. TCP 9876 now authenticates the configured central Ed25519 key with explicit TLS 1.3, like the update services. The existing `SITEBRUSH_SERVICE_MAIL_RELAY_PUBLIC_KEY_SITEBRUSH_COM` override selects the trusted central identity; changing `SITEBRUSH_SERVICE_MAIL_NETCHAN_ADDRESS` alone never changes trust. Registration still uses the signed/encrypted application protocol before an installation has registered its own key. Keep the existing HTTPS fallback available during a rolling upgrade and update the central listeners and launcher/supervisor before customer installations.
+
+On macOS, the default crosscompile command packages the SDK selected by `xcrun`, compiles both desktop architectures with pinned OSXCross inside Docker, and creates the universal DMG on the host. Docker image identities include the Go version, OSXCross commit, and SDK digest. The SDK is a build input and is not published with release artifacts.
+
+For separate Linux compilation and macOS packaging, transfer an Xcode SDK archive containing one `MacOSX<version>.sdk` directory to the Linux builder:
+
+```sh
+CGO_ENABLED=0 go run ./scripts/crosscompile -mode desktop-app -os darwin -arch universal \
+  -macos-stage build -macos-sdk /path/MacOSX14.4.sdk.tar.gz -version 123
+```
+
+Copy the resulting `binaries/123/desktop-app/sitebrush_darwin_universal_desktop` to the same location on macOS, then package it without recompilation:
+
+```sh
+CGO_ENABLED=0 go run ./scripts/crosscompile -mode desktop-app -os darwin -arch universal \
+  -macos-stage package -version 123
+```
+
+The build stage retains intermediate binaries and does not update `binaries/latest` or publish them. The packaging stage consumes existing binaries without clearing its input directory. A missing architecture, unavailable SDK/toolchain, or failed DMG creation fails the build explicitly.
+
 ## Local publication and NetChan downloads
 
 The existing publishing command remains valid, including Docker desktop builds:
@@ -841,7 +865,7 @@ go run scripts/crosscompile/crosscompile.go \
 
 Docker readiness checks print their current step and stop after 30 seconds if the daemon or a cached-platform probe does not respond. Check that `docker info` returns normally before retrying; build and image-download output remains streamed, without a short compilation timeout. Publishing with `-sync` does not require stopping the running service. Avoid appending unconditional SSH replacement commands with `;`: they would execute even if compilation or signing failed. Subsequent installed updates use the protected panel or `sitebrush -upgrade`.
 
-The command builds and publishes artifacts; it does not replace the running executable. Signed `update.json` and `SHA256SUMS` accompany the complete server matrix before publication. Missing or mismatched signing keys fail before compilation. The private key stays on the build machine. Desktop binaries continue to use the existing Docker/native build and distribution paths.
+The command builds and publishes artifacts; it does not replace the running executable. Signed `update.json` and `SHA256SUMS` accompany the complete server matrix before publication. Missing or mismatched signing keys fail before compilation. The private key stays on the build machine. Desktop compilation uses Docker for Linux, Windows, and macOS. Only macOS app bundling, ad-hoc signing, and DMG packaging run on a macOS host.
 
 After the first updater-enabled installation has been started on sitebrush.com, its pinned central identity serves the published `storage/chroot/sitebrush.com/download` tree over TCP **9878**. Allow inbound access on that central server and outbound access from installations. Public release reads need no installation registration, email or administrative token. Channel/session delivery, bounded backpressure, verified resume and HTTPS fallback are documented in [pkg/appupdate/netchan.md](pkg/appupdate/netchan.md). Updating an installation still requires its protected confirmation page or `sitebrush -upgrade`.
 

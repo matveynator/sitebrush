@@ -2,21 +2,17 @@ package appupdate
 
 import (
 	"crypto/ed25519"
-	"crypto/rand"
 	"crypto/sha256"
-	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/hex"
 	"errors"
 	"io"
-	"math/big"
 	"os"
 	"path/filepath"
 	"strconv"
 	"time"
 
-	"github.com/matveynator/netchan"
+	"github.com/matveynator/netchan/v2"
+	"github.com/matveynator/sitebrush/v2/pkg/netchantls"
 )
 
 type MirrorOptions struct {
@@ -33,16 +29,11 @@ func ServeReleaseMirror(options MirrorOptions, stop <-chan struct{}) error {
 	if len(options.PrivateKey) != ed25519.PrivateKeySize || len(options.ReleaseKey) != ed25519.PublicKeySize {
 		return errors.New("invalid release mirror keys")
 	}
-	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	configuration, err := netchantls.ServerConfig("SiteBrush releases", options.PrivateKey)
 	if err != nil {
 		return err
 	}
-	settings := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: "SiteBrush releases"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().AddDate(10, 0, 0), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
-	encoded, err := x509.CreateCertificate(rand.Reader, settings, settings, options.PrivateKey.Public(), options.PrivateKey)
-	if err != nil {
-		return err
-	}
-	listener, err := netchan.Listen[ReleaseRequest](options.Address, netchan.Config{Capacity: 1, TLS: &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{{Certificate: [][]byte{encoded}, PrivateKey: options.PrivateKey}}}})
+	listener, err := netchan.Listen[ReleaseRequest](options.Address, netchan.Config{Capacity: 1, TLS: configuration})
 	if err != nil {
 		return err
 	}

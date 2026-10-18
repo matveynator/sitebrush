@@ -144,8 +144,8 @@ func TestLinuxDesktopBaseImage(t *testing.T) {
 func TestLinuxDesktopDockerImage(t *testing.T) {
 	t.Parallel()
 
-	got := linuxDesktopDockerImage("amd64", "gtk40")
-	if want := "sitebrush-crosscompile:linux-amd64-gtk40-go1.26.6-v1"; got != want {
+	got := linuxDesktopDockerImage("amd64", "gtk40", "1.27.2")
+	if want := "sitebrush-crosscompile:linux-amd64-gtk40-go1.27.2-v1"; got != want {
 		t.Fatalf("linuxDesktopDockerImage() = %q, want %q", got, want)
 	}
 }
@@ -153,7 +153,7 @@ func TestLinuxDesktopDockerImage(t *testing.T) {
 func TestLinuxDesktopDockerfile(t *testing.T) {
 	t.Parallel()
 
-	dockerfile := linuxDesktopDockerfile("amd64", "gtk40")
+	dockerfile := linuxDesktopDockerfile("amd64", "gtk40", "1.27.2")
 	if !strings.Contains(dockerfile, "FROM --platform=linux/amd64 ubuntu:22.04") {
 		t.Fatalf("linuxDesktopDockerfile() missing base image")
 	}
@@ -163,7 +163,7 @@ func TestLinuxDesktopDockerfile(t *testing.T) {
 	if !strings.Contains(dockerfile, "libwebkit2gtk-4.0-dev") {
 		t.Fatalf("linuxDesktopDockerfile() missing gtk40 webkit package")
 	}
-	if !strings.Contains(dockerfile, "go1.26.6.linux-amd64.tar.gz") {
+	if !strings.Contains(dockerfile, "go1.27.2.linux-amd64.tar.gz") {
 		t.Fatalf("linuxDesktopDockerfile() missing Go tarball URL")
 	}
 }
@@ -183,8 +183,8 @@ func TestLinuxDesktopDockerScript(t *testing.T) {
 func TestWindowsDesktopDockerImage(t *testing.T) {
 	t.Parallel()
 
-	got := windowsDesktopDockerImage("arm64")
-	if want := "sitebrush-crosscompile:windows-arm64-go1.26.6-v1"; got != want {
+	got := windowsDesktopDockerImage("arm64", "1.27.2")
+	if want := "sitebrush-crosscompile:windows-arm64-go1.27.2-v1"; got != want {
 		t.Fatalf("windowsDesktopDockerImage() = %q, want %q", got, want)
 	}
 }
@@ -192,14 +192,14 @@ func TestWindowsDesktopDockerImage(t *testing.T) {
 func TestWindowsDesktopDockerfile(t *testing.T) {
 	t.Parallel()
 
-	dockerfile := windowsDesktopDockerfile("amd64")
+	dockerfile := windowsDesktopDockerfile("amd64", "1.27.2")
 	if !strings.Contains(dockerfile, "mingw-w64") {
 		t.Fatalf("windowsDesktopDockerfile() missing mingw package")
 	}
 	if !strings.Contains(dockerfile, `SHELL ["/bin/bash", "-o", "pipefail", "-c"]`) {
 		t.Fatalf("windowsDesktopDockerfile() missing pipefail shell")
 	}
-	if !strings.Contains(dockerfile, "go1.26.6.linux-amd64.tar.gz") {
+	if !strings.Contains(dockerfile, "go1.27.2.linux-amd64.tar.gz") {
 		t.Fatalf("windowsDesktopDockerfile() missing Go tarball URL")
 	}
 	if !strings.Contains(dockerfile, "go install github.com/akavel/rsrc@latest") {
@@ -210,7 +210,7 @@ func TestWindowsDesktopDockerfile(t *testing.T) {
 func TestWindowsArm64DesktopDockerfile(t *testing.T) {
 	t.Parallel()
 
-	dockerfile := windowsDesktopDockerfile("arm64")
+	dockerfile := windowsDesktopDockerfile("arm64", "1.27.2")
 	if !strings.Contains(dockerfile, `LLVM_MINGW_VERSION="20260505"`) {
 		t.Fatalf("windowsDesktopDockerfile() missing llvm-mingw archive")
 	}
@@ -240,8 +240,8 @@ func TestWindowsDesktopDockerScript(t *testing.T) {
 func TestDockerVolumeName(t *testing.T) {
 	t.Parallel()
 
-	got := dockerVolumeName("sitebrush-crosscompile:linux-amd64-gtk40-go1.26.6-v1", "gomod")
-	want := "sitebrush-crosscompile-linux-amd64-gtk40-go1.26.6-v1-gomod"
+	got := dockerVolumeName("sitebrush-crosscompile:linux-amd64-gtk40-go1.27.2-v1", "gomod")
+	want := "sitebrush-crosscompile-linux-amd64-gtk40-go1.27.2-v1-gomod"
 	if got != want {
 		t.Fatalf("dockerVolumeName() = %q, want %q", got, want)
 	}
@@ -269,8 +269,8 @@ func TestNormalizeDockerArchitecture(t *testing.T) {
 func TestDockerPlatformProbeArgs(t *testing.T) {
 	t.Parallel()
 
-	got := strings.Join(dockerPlatformProbeArgs("linux/arm64", "sitebrush-crosscompile:linux-arm64-gtk40-go1.26.6-v1"), " ")
-	want := "run --rm --pull never --platform linux/arm64 sitebrush-crosscompile:linux-arm64-gtk40-go1.26.6-v1 true"
+	got := strings.Join(dockerPlatformProbeArgs("linux/arm64", "sitebrush-crosscompile:linux-arm64-gtk40-go1.27.2-v1"), " ")
+	want := "run --rm --pull never --platform linux/arm64 sitebrush-crosscompile:linux-arm64-gtk40-go1.27.2-v1 true"
 	if got != want {
 		t.Fatalf("dockerPlatformProbeArgs() = %q, want %q", got, want)
 	}
@@ -572,13 +572,13 @@ func TestBuildServerArtifactsWithStubCompiler(t *testing.T) {
 
 func TestDesktopBuildTargetSelectionErrors(t *testing.T) {
 	filtered := buildTargetFilter{goos: "freebsd"}
-	if built, err := buildLinuxDesktopArtifacts(t.TempDir(), t.TempDir(), "sitebrush", "test", desktopBuildOptions{targetFilter: filtered}); err != nil || built {
+	if built, err := buildLinuxDesktopArtifacts(t.TempDir(), t.TempDir(), "sitebrush", "test", desktopBuildOptions{goVersion: "1.27.2", targetFilter: filtered}); err != nil || built {
 		t.Fatalf("non-Linux target = %v, %v", built, err)
 	}
-	if built, err := buildWindowsDesktopArtifacts(t.TempDir(), t.TempDir(), "sitebrush", "test", desktopBuildOptions{targetFilter: filtered}); err != nil || built {
+	if built, err := buildWindowsDesktopArtifacts(t.TempDir(), t.TempDir(), "sitebrush", "test", desktopBuildOptions{goVersion: "1.27.2", targetFilter: filtered}); err != nil || built {
 		t.Fatalf("non-Windows target = %v, %v", built, err)
 	}
-	if err := buildDesktopAppArtifacts(t.TempDir(), t.TempDir(), "sitebrush", "test", desktopBuildOptions{targetFilter: filtered}); err == nil {
+	if err := buildDesktopAppArtifacts(t.TempDir(), t.TempDir(), "sitebrush", "test", desktopBuildOptions{goVersion: "1.27.2", targetFilter: filtered}); err == nil {
 		t.Fatal("unsupported target set succeeded")
 	}
 	if matches := (buildTargetFilter{goos: "windows"}).matchesOS("linux"); matches {
@@ -620,7 +620,7 @@ func TestDesktopArtifactBuildOrchestrationWithStubCommands(t *testing.T) {
 	if err := os.MkdirAll(desktopDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := buildMacOSDesktopArtifacts(root, desktopDir, "sitebrush", "test"); err != nil {
+	if _, err := packageMacOSDesktopDMG(desktopDir, "sitebrush", filepath.Join(desktopDir, "universal"), "test"); err != nil {
 		t.Fatal(err)
 	}
 	if err := verifyNonEmptyFile(filepath.Join(desktopDir, "sitebrush_darwin_universal_desktop.dmg")); err != nil {
@@ -633,10 +633,10 @@ func TestDesktopArtifactBuildOrchestrationWithStubCommands(t *testing.T) {
 			t.Fatal(err)
 		}
 		if target.os == "linux" {
-			if err := buildLinuxDesktopArtifactInDocker(root, desktopDir, "sitebrush", "test", target.arch, target.variant, desktopBuildOptions{}); err != nil {
+			if err := buildLinuxDesktopArtifactInDocker(root, desktopDir, "sitebrush", "test", target.arch, target.variant, desktopBuildOptions{goVersion: "1.27.2"}); err != nil {
 				t.Fatal(err)
 			}
-		} else if err := buildWindowsDesktopArtifactInDocker(root, desktopDir, "sitebrush", "test", target.arch, desktopBuildOptions{}); err != nil {
+		} else if err := buildWindowsDesktopArtifactInDocker(root, desktopDir, "sitebrush", "test", target.arch, desktopBuildOptions{goVersion: "1.27.2"}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -747,7 +747,7 @@ func TestDesktopBuildWrappersWithStubDocker(t *testing.T) {
 		desktopDir,
 		"sitebrush",
 		"test",
-		desktopBuildOptions{targetFilter: buildTargetFilter{goos: "linux", goarch: "amd64"}},
+		desktopBuildOptions{goVersion: "1.27.2", targetFilter: buildTargetFilter{goos: "linux", goarch: "amd64"}},
 	)
 	if err != nil || !built {
 		t.Fatalf("linux wrapper built=%v err=%v", built, err)
@@ -762,7 +762,7 @@ func TestDesktopBuildWrappersWithStubDocker(t *testing.T) {
 		desktopDir,
 		"sitebrush",
 		"test",
-		desktopBuildOptions{targetFilter: buildTargetFilter{goos: "windows", goarch: "amd64"}},
+		desktopBuildOptions{goVersion: "1.27.2", targetFilter: buildTargetFilter{goos: "windows", goarch: "amd64"}},
 	)
 	if err != nil || !built {
 		t.Fatalf("windows wrapper built=%v err=%v", built, err)
@@ -792,7 +792,7 @@ func TestDesktopBuildOrchestratorWithStubDocker(t *testing.T) {
 		outputDir,
 		"sitebrush",
 		"test",
-		desktopBuildOptions{targetFilter: buildTargetFilter{goos: "linux", goarch: "amd64"}},
+		desktopBuildOptions{goVersion: "1.27.2", targetFilter: buildTargetFilter{goos: "linux", goarch: "amd64"}},
 	)
 	if err != nil {
 		t.Fatal(err)

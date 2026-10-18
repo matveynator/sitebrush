@@ -1,9 +1,13 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"crypto/ed25519"
 	"crypto/md5"
+	"crypto/sha256"
+	"debug/macho"
 	"encoding/base64"
 	"errors"
 	"flag"
@@ -32,7 +36,6 @@ const (
 
 const (
 	dockerBuilderImageVersion = "v1"
-	dockerGoVersion           = "1.26.6"
 	dockerWorkspaceRoot       = "/workspace"
 	windowsDesktopPlatform    = "linux/amd64"
 	llvmMingwVersion          = "20260505"
@@ -49,6 +52,9 @@ type buildTargetFilter struct {
 }
 
 type desktopBuildOptions struct {
+	goVersion           string
+	macOSSDK            string
+	macOSStage          string
 	rebuildDockerImages bool
 	targetFilter        buildTargetFilter
 }
@@ -100,6 +106,8 @@ func main() {
 		targetOS            = flag.String("os", "", "optional GOOS target filter, for example linux")
 		targetArch          = flag.String("arch", "", "optional GOARCH target filter, for example amd64")
 		rebuildDockerImages = flag.Bool("rebuild-docker-images", false, "rebuild cached Docker builder images before Docker-based desktop builds")
+		macOSSDK            = flag.String("macos-sdk", "", "macOS SDK tar archive; defaults to the installed Xcode SDK on macOS")
+		macOSStage          = flag.String("macos-stage", "all", "macOS desktop stage: all, build, or package")
 		syncTargets         syncDestinationFlags
 	)
 	flag.Var(&syncTargets, "sync", "optional repeatable publication target in host=/remote/base format, for example root@sitebrush.com=/var/lib/sitebrush/storage/chroot/sitebrush.com/download")
@@ -124,6 +132,14 @@ func main() {
 	repoRoot, err := findRepoRoot()
 	if err != nil {
 		fatalf("resolve repo root: %v", err)
+	}
+
+	if err := validateMacOSStage(*macOSStage, mode, targetFilter); err != nil {
+		fatalf("macOS stage: %v", err)
+	}
+	goVersion, err := projectGoVersion(repoRoot)
+	if err != nil {
+		fatalf("resolve Go version: %v", err)
 	}
 
 	version := strings.TrimSpace(*versionFlag)
@@ -155,9 +171,16 @@ func main() {
 		}
 	}
 
-	outputDir := filepath.Join(repoRoot, *outputRoot, version)
-	if err := os.RemoveAll(outputDir); err != nil {
-		fatalf("clean output dir: %v", err)
+	artifactsRoot := *outputRoot
+	if !filepath.IsAbs(artifactsRoot) {
+		artifactsRoot = filepath.Join(repoRoot, artifactsRoot)
+	}
+	outputDir := filepath.Join(artifactsRoot, version)
+	// Packaging consumes the binaries transferred from the Docker build stage.
+	if *macOSStage != "package" {
+		if err := os.RemoveAll(outputDir); err != nil {
+			fatalf("clean output dir: %v", err)
+		}
 	}
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		fatalf("create output dir: %v", err)
@@ -179,6 +202,9 @@ func main() {
 
 	if mode == modeAll || mode == modeDesktopApp {
 		if err := buildDesktopAppArtifacts(repoRoot, outputDir, *programName, version, desktopBuildOptions{
+			goVersion:           goVersion,
+			macOSSDK:            *macOSSDK,
+			macOSStage:          *macOSStage,
 			rebuildDockerImages: *rebuildDockerImages,
 			targetFilter:        targetFilter,
 		}); err != nil {
@@ -196,13 +222,18 @@ func main() {
 		}
 	}
 
-	if err := updateLatestSymlink(filepath.Join(repoRoot, *outputRoot), version); err != nil {
+	// Intermediate binaries must never replace the published latest build.
+	if *macOSStage == "build" {
+		fmt.Println("macOS Docker compilation complete; run -macos-stage package on macOS")
+		return
+	}
+	if err := updateLatestSymlink(artifactsRoot, version); err != nil {
 		fatalf("update latest symlink: %v", err)
 	}
 
 	destinations := syncPublicationDestinations(syncTargets)
 	for _, destination := range destinations {
-		if err := syncArtifacts(repoRoot, filepath.Join(repoRoot, *outputRoot), version, destination.host, destination.base); err != nil {
+		if err := syncArtifacts(repoRoot, artifactsRoot, version, destination.host, destination.base); err != nil {
 			fatalf("sync artifacts to %s: %v", destination.host, err)
 		}
 	}
@@ -246,8 +277,8 @@ func buildDesktopAppArtifacts(repoRoot, outputDir, programName, version string, 
 	}
 
 	builtAny := false
-	if options.targetFilter.matches("darwin", "universal") && runtime.GOOS == "darwin" {
-		if err := buildMacOSDesktopArtifacts(repoRoot, desktopDir, programName, version); err != nil {
+	if options.targetFilter.matches("darwin", "universal") && (runtime.GOOS == "darwin" || options.targetFilter.goos == "darwin") {
+		if err := buildMacOSDesktopArtifacts(repoRoot, desktopDir, programName, version, options); err != nil {
 			return err
 		}
 		builtAny = true
@@ -269,72 +300,13 @@ func buildDesktopAppArtifacts(repoRoot, outputDir, programName, version string, 
 		return fmt.Errorf("no desktop-app targets match %s", options.targetFilter.label())
 	}
 
+	if options.macOSStage == "build" {
+		return nil
+	}
 	if err := cleanupDesktopBuildIntermediates(desktopDir); err != nil {
 		return err
 	}
 	return writeMD5SumsFile(desktopDir)
-}
-
-func buildMacOSDesktopArtifacts(repoRoot, desktopDir, programName, version string) error {
-	fmt.Println("== macOS desktop builds ==")
-
-	amd64Binary := filepath.Join(desktopDir, desktopArtifactName(programName, "darwin", "amd64", ""))
-	if err := buildGoBinary(repoRoot, amd64Binary, buildRequest{
-		goos:       "darwin",
-		goarch:     "amd64",
-		cgoEnabled: "1",
-		tags:       []string{"desktop"},
-		ldflags:    []string{"-s", "-w", "-X", "main.CompileVersion=" + version},
-		extraEnv: map[string]string{
-			"MACOSX_DEPLOYMENT_TARGET": "10.13",
-			"CC":                       "clang -arch x86_64",
-			"CXX":                      "clang++ -arch x86_64",
-			"CGO_CFLAGS":               "-arch x86_64 -mmacosx-version-min=10.13",
-			"CGO_CXXFLAGS":             "-arch x86_64 -mmacosx-version-min=10.13",
-			"CGO_LDFLAGS":              "-arch x86_64 -mmacosx-version-min=10.13",
-		},
-	}); err != nil {
-		return err
-	}
-
-	arm64Binary := filepath.Join(desktopDir, desktopArtifactName(programName, "darwin", "arm64", ""))
-	if err := buildGoBinary(repoRoot, arm64Binary, buildRequest{
-		goos:       "darwin",
-		goarch:     "arm64",
-		cgoEnabled: "1",
-		tags:       []string{"desktop"},
-		ldflags:    []string{"-s", "-w", "-X", "main.CompileVersion=" + version},
-		extraEnv: map[string]string{
-			"MACOSX_DEPLOYMENT_TARGET": "11.0",
-			"CC":                       "clang -arch arm64",
-			"CXX":                      "clang++ -arch arm64",
-			"CGO_CFLAGS":               "-arch arm64 -mmacosx-version-min=11.0",
-			"CGO_CXXFLAGS":             "-arch arm64 -mmacosx-version-min=11.0",
-			"CGO_LDFLAGS":              "-arch arm64 -mmacosx-version-min=11.0",
-		},
-	}); err != nil {
-		return err
-	}
-
-	universalBinary := filepath.Join(desktopDir, desktopArtifactName(programName, "darwin", "universal", ""))
-	if err := runCommand(repoRoot, "lipo", "-create", amd64Binary, arm64Binary, "-output", universalBinary); err != nil {
-		return err
-	}
-	if err := runCommand(repoRoot, "lipo", universalBinary, "-verify_arch", "x86_64", "arm64"); err != nil {
-		return err
-	}
-	if err := os.Chmod(universalBinary, 0o755); err != nil {
-		return err
-	}
-
-	dmgPath, err := packageMacOSDesktopDMG(desktopDir, programName, universalBinary, version)
-	if err != nil {
-		return err
-	}
-	if dmgPath != "" {
-		fmt.Printf("created %s\n", dmgPath)
-	}
-	return nil
 }
 
 func buildLinuxDesktopArtifacts(repoRoot, desktopDir, programName, version string, options desktopBuildOptions) (bool, error) {
@@ -372,7 +344,7 @@ func buildLinuxDesktopArtifacts(repoRoot, desktopDir, programName, version strin
 		if target.goarch == checkedArchitecture {
 			continue
 		}
-		builderImage := linuxDesktopDockerImage(target.goarch, target.variant)
+		builderImage := linuxDesktopDockerImage(target.goarch, target.variant, options.goVersion)
 		if err := ensureDockerPlatformSupport(repoRoot, "linux/"+target.goarch, builderImage); err != nil {
 			return false, err
 		}
@@ -406,7 +378,7 @@ func buildWindowsDesktopArtifacts(repoRoot, desktopDir, programName, version str
 	if !commandExists("docker") {
 		return false, fmt.Errorf("docker is required to build Windows desktop variants")
 	}
-	probeImage := windowsDesktopDockerImage(matchingArchitectures[0])
+	probeImage := windowsDesktopDockerImage(matchingArchitectures[0], options.goVersion)
 	if err := ensureDockerPlatformSupport(repoRoot, windowsDesktopPlatform, probeImage); err != nil {
 		return false, err
 	}
@@ -427,8 +399,8 @@ func buildLinuxDesktopArtifactInDocker(repoRoot, desktopDir, programName, versio
 		return err
 	}
 	dockerPlatform := "linux/" + goarch
-	dockerImage := linuxDesktopDockerImage(goarch, variant)
-	if err := ensureDockerBuilderImage(repoRoot, dockerPlatform, dockerImage, linuxDesktopDockerfile(goarch, variant), options.rebuildDockerImages); err != nil {
+	dockerImage := linuxDesktopDockerImage(goarch, variant, options.goVersion)
+	if err := ensureDockerBuilderImage(repoRoot, dockerPlatform, dockerImage, linuxDesktopDockerfile(goarch, variant, options.goVersion), options.rebuildDockerImages); err != nil {
 		return err
 	}
 	dockerScript := linuxDesktopDockerScript(containerArtifactPath, artifactName, goarch, variant, version)
@@ -446,8 +418,8 @@ func buildWindowsDesktopArtifactInDocker(repoRoot, desktopDir, programName, vers
 	if err != nil {
 		return err
 	}
-	dockerImage := windowsDesktopDockerImage(goarch)
-	if err := ensureDockerBuilderImage(repoRoot, windowsDesktopPlatform, dockerImage, windowsDesktopDockerfile(goarch), options.rebuildDockerImages); err != nil {
+	dockerImage := windowsDesktopDockerImage(goarch, options.goVersion)
+	if err := ensureDockerBuilderImage(repoRoot, windowsDesktopPlatform, dockerImage, windowsDesktopDockerfile(goarch, options.goVersion), options.rebuildDockerImages); err != nil {
 		return err
 	}
 	dockerScript := windowsDesktopDockerScript(containerArtifactPath, artifactName, goarch, version)
@@ -465,15 +437,15 @@ func linuxDesktopBaseImage(variant string) string {
 	return "ubuntu:22.04"
 }
 
-func linuxDesktopDockerImage(goarch, variant string) string {
-	return fmt.Sprintf("sitebrush-crosscompile:linux-%s-%s-go%s-%s", goarch, variant, dockerGoVersion, dockerBuilderImageVersion)
+func linuxDesktopDockerImage(goarch, variant, goVersion string) string {
+	return fmt.Sprintf("sitebrush-crosscompile:linux-%s-%s-go%s-%s", goarch, variant, goVersion, dockerBuilderImageVersion)
 }
 
-func windowsDesktopDockerImage(goarch string) string {
-	return fmt.Sprintf("sitebrush-crosscompile:windows-%s-go%s-%s", goarch, dockerGoVersion, dockerBuilderImageVersion)
+func windowsDesktopDockerImage(goarch, goVersion string) string {
+	return fmt.Sprintf("sitebrush-crosscompile:windows-%s-go%s-%s", goarch, goVersion, dockerBuilderImageVersion)
 }
 
-func linuxDesktopDockerfile(goarch, variant string) string {
+func linuxDesktopDockerfile(goarch, variant, goVersion string) string {
 	webkitPackage := "libwebkit2gtk-4.0-dev"
 	if variant == "gtk41" {
 		webkitPackage = "libwebkit2gtk-4.1-dev"
@@ -489,7 +461,7 @@ RUN if ! pkg-config --exists webkit2gtk-4.0 && pkg-config --exists webkit2gtk-4.
   install -d /usr/local/lib/pkgconfig; \
   printf 'prefix=/usr\nexec_prefix=${prefix}\nlibdir=${exec_prefix}/lib\nincludedir=${prefix}/include\n\nName: webkit2gtk-4.0\nDescription: Compatibility shim for webkit2gtk-4.1\nVersion: 4.0\nRequires: webkit2gtk-4.1\nLibs:\nCflags:\n' > /usr/local/lib/pkgconfig/webkit2gtk-4.0.pc; \
 fi
-`, goarch, linuxDesktopBaseImage(variant), webkitPackage, dockerGoVersion, goarch)
+`, goarch, linuxDesktopBaseImage(variant), webkitPackage, goVersion, goarch)
 }
 
 func linuxDesktopDockerScript(artifactPath, artifactName, goarch, variant, version string) string {
@@ -513,7 +485,7 @@ chmod +x %s
 `, shellQuote(artifactDir), goarch, shellQuote(version), shellQuote(artifactPath), shellQuote(artifactPath), shellQuote(artifactDir), shellQuote(artifactName+".zip"), shellQuote(artifactName))
 }
 
-func windowsDesktopDockerfile(goarch string) string {
+func windowsDesktopDockerfile(goarch, goVersion string) string {
 	installPackages := "apt-get install -y ca-certificates curl build-essential mingw-w64 zip tar"
 	installCrossCompiler := ""
 
@@ -541,7 +513,7 @@ RUN set -e; apt-get update; %s; rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL "https://go.dev/dl/go%s.linux-amd64.tar.gz" | tar -C /usr/local -xz
 ENV PATH="/usr/local/go/bin:/root/go/bin:/opt/llvm-mingw/bin:${PATH}"
 RUN go install github.com/akavel/rsrc@latest
-`, installPackages, installCrossCompiler, dockerGoVersion)
+`, installPackages, installCrossCompiler, goVersion)
 }
 
 func windowsDesktopDockerScript(artifactPath, artifactName, goarch, version string) string {
@@ -582,6 +554,9 @@ go build -tags "desktop" \
 }
 
 func buildGoBinary(repoRoot, outputPath string, request buildRequest) error {
+	if request.cgoEnabled != "0" {
+		return errors.New("CGO compilation is restricted to desktop Docker builders")
+	}
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
 		return err
 	}
@@ -741,8 +716,7 @@ func packageMacOSDesktopDMG(desktopDir, programName, universalBinary, version st
 		return "", err
 	}
 	if err := runCommand(desktopDir, "hdiutil", "create", "-volname", fmt.Sprintf("%s %s", programName, version), "-srcfolder", stagingDir, "-ov", "-format", "UDZO", dmgPath); err != nil {
-		fmt.Printf("warn: macOS DMG build failed, continuing without DMG: %v\n", err)
-		return "", nil
+		return "", fmt.Errorf("create macOS DMG: %w", err)
 	}
 	return dmgPath, nil
 }
@@ -797,7 +771,7 @@ func createMacOSAppBundle(appDir, universalBinary, version string) error {
   <key>CFBundlePackageType</key>
   <string>APPL</string>
 %s  <key>LSMinimumSystemVersion</key>
-  <string>10.13</string>
+  <string>13.0</string>
 </dict>
 </plist>
 `, version, version, iconSection)
@@ -1023,7 +997,9 @@ func runDockerShellScript(repoRoot, platform, image, shellScript string, extraEn
 		"--platform", platform,
 		"-v", repoRoot + ":" + dockerWorkspaceRoot,
 		"-v", dockerVolumeName(image, "gocache") + ":/root/.cache/go-build",
-		"-v", dockerVolumeName(image, "gomod") + ":/root/go/pkg/mod",
+		// Module archives are immutable and Go owns their download locks. Sharing
+		// them avoids downloading the same source for every target and SDK image.
+		"-v", "sitebrush-crosscompile-gomod:/root/go/pkg/mod",
 		"-w", dockerWorkspaceRoot,
 	}
 	for key, value := range extraEnv {
@@ -1412,4 +1388,351 @@ func loadReleaseSigningKey(filename, encoded string, trusted ed25519.PublicKey) 
 		return nil, errors.New("release key does not match the embedded public trust anchor")
 	}
 	return key, nil
+}
+
+// macOS SDK ownership and Docker compilation stages.
+
+const osxcrossCommit = "27d21e4977c9751d01199c7a226a6faf494c3dd9"
+
+// The module directive owns the compiler version for CI and every Docker image.
+// Keeping it as a per-build value avoids a mutable process-wide configuration.
+func projectGoVersion(repoRoot string) (string, error) {
+	moduleBytes, err := os.ReadFile(filepath.Join(repoRoot, "go.mod"))
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(string(moduleBytes), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[0] != "go" {
+			continue
+		}
+		version := fields[1]
+		parts := strings.Split(version, ".")
+		if len(parts) != 3 {
+			return "", errors.New("go.mod must pin a complete Go release, including the patch version")
+		}
+		for _, part := range parts {
+			if part == "" || strings.Trim(part, "0123456789") != "" {
+				return "", errors.New("invalid Go release in go.mod")
+			}
+		}
+		return version, nil
+	}
+	return "", errors.New("missing Go directive in go.mod")
+}
+
+func validateMacOSStage(stage string, mode buildMode, filter buildTargetFilter) error {
+	if stage == "all" {
+		return nil
+	}
+	if stage != "build" && stage != "package" {
+		return errors.New("expected all, build, or package")
+	}
+	if mode != modeDesktopApp || filter.goos != "darwin" || (filter.goarch != "" && filter.goarch != "universal") {
+		return errors.New("separate macOS stages require -mode desktop-app -os darwin and optional -arch universal")
+	}
+	return nil
+}
+
+func buildMacOSDesktopArtifacts(repoRoot, desktopDir, programName, version string, options desktopBuildOptions) error {
+	stage := options.macOSStage
+	if stage == "" {
+		stage = "all"
+	}
+	if stage != "build" && runtime.GOOS != "darwin" {
+		return errors.New("DMG packaging requires macOS; use -macos-stage build for Docker compilation on Linux")
+	}
+	if stage != "package" {
+		if err := buildMacOSDesktopInDocker(repoRoot, desktopDir, programName, version, options); err != nil {
+			return err
+		}
+	}
+	if stage == "build" {
+		return nil
+	}
+	universalBinary := filepath.Join(desktopDir, desktopArtifactName(programName, "darwin", "universal", ""))
+	if err := verifyMacOSUniversalBinary(universalBinary); err != nil {
+		return err
+	}
+	if err := os.Chmod(universalBinary, 0o755); err != nil {
+		return err
+	}
+	dmgPath, err := packageMacOSDesktopDMG(desktopDir, programName, universalBinary, version)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("created %s\n", dmgPath)
+	return verifyNonEmptyFile(dmgPath)
+}
+
+func buildMacOSDesktopInDocker(repoRoot, desktopDir, programName, version string, options desktopBuildOptions) error {
+	if !commandExists("docker") {
+		return errors.New("docker is required to build macOS desktop binaries")
+	}
+	archivePath, cleanup, err := macOSSDKArchive(repoRoot, options.macOSSDK)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	archive, err := os.Open(archivePath)
+	if err != nil {
+		return err
+	}
+	digest := sha256.New()
+	_, copyErr := io.Copy(digest, archive)
+	closeErr := archive.Close()
+	if err := errors.Join(copyErr, closeErr); err != nil {
+		return err
+	}
+	// Both the SDK and the toolchain revision are part of the image identity.
+	goarch := runtime.GOARCH
+	if goarch != "arm64" {
+		goarch = "amd64"
+	}
+	platform := "linux/" + goarch
+	image := fmt.Sprintf("sitebrush-crosscompile:darwin-%s-go%s-sdk%x-%s-rt18-%s", goarch, options.goVersion, digest.Sum(nil)[:12], osxcrossCommit[:12], dockerBuilderImageVersion)
+	if err := ensureDockerPlatformSupport(repoRoot, platform, image); err != nil {
+		return err
+	}
+	exists, err := dockerImageExists(repoRoot, image)
+	if err != nil {
+		return err
+	}
+	if options.rebuildDockerImages || !exists {
+		if err := buildMacOSDockerImage(repoRoot, platform, image, archivePath, macOSDesktopDockerfile(goarch, options.goVersion)); err != nil {
+			return err
+		}
+	}
+	containerDirectory, err := dockerWorkspacePath(repoRoot, desktopDir)
+	if err != nil {
+		return err
+	}
+	if err := runDockerShellScript(repoRoot, platform, image, macOSDesktopDockerScript(containerDirectory, programName, version), nil); err != nil {
+		return err
+	}
+	return verifyMacOSUniversalBinary(filepath.Join(desktopDir, desktopArtifactName(programName, "darwin", "universal", "")))
+}
+
+func macOSSDKArchive(repoRoot, suppliedPath string) (string, func(), error) {
+	if suppliedPath != "" {
+		archivePath, err := filepath.Abs(suppliedPath)
+		if err != nil {
+			return "", nil, err
+		}
+		if err := verifyNonEmptyFile(archivePath); err != nil {
+			return "", nil, fmt.Errorf("macOS SDK archive: %w", err)
+		}
+		return archivePath, func() {}, nil
+	}
+	if runtime.GOOS != "darwin" {
+		return "", nil, errors.New("-macos-sdk must identify a packaged Xcode SDK on non-macOS hosts")
+	}
+	sdkPath, err := runOutput(repoRoot, "xcrun", "--sdk", "macosx", "--show-sdk-path")
+	if err != nil {
+		return "", nil, fmt.Errorf("locate Xcode SDK: %w", err)
+	}
+	sdkPath, err = filepath.EvalSymlinks(strings.TrimSpace(sdkPath))
+	if err != nil {
+		return "", nil, err
+	}
+	temporaryDirectory, err := os.MkdirTemp("", "sitebrush-macos-sdk-")
+	if err != nil {
+		return "", nil, err
+	}
+	cleanup := func() { _ = os.RemoveAll(temporaryDirectory) }
+	archivePath := filepath.Join(temporaryDirectory, filepath.Base(sdkPath)+".tar.gz")
+	if err := archiveMacOSSDK(sdkPath, archivePath); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	return archivePath, cleanup, nil
+}
+
+// Canonical metadata and a timestamp-free gzip header keep the SDK cache key
+// stable across repeated builds and exclude host-specific extended attributes.
+func archiveMacOSSDK(sdkPath, archivePath string) error {
+	archive, err := os.Create(archivePath)
+	if err != nil {
+		return err
+	}
+	compressed := gzip.NewWriter(archive)
+	writer := tar.NewWriter(compressed)
+	walkErr := filepath.WalkDir(sdkPath, func(filename string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		information, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		linkTarget := ""
+		if information.Mode()&os.ModeSymlink != 0 {
+			linkTarget, err = os.Readlink(filename)
+			if err != nil {
+				return err
+			}
+		}
+		header, err := tar.FileInfoHeader(information, linkTarget)
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(filepath.Dir(sdkPath), filename)
+		if err != nil {
+			return err
+		}
+		header.Name = filepath.ToSlash(relative)
+		header.Uid, header.Gid = 0, 0
+		header.Uname, header.Gname = "", ""
+		header.AccessTime, header.ChangeTime = time.Time{}, time.Time{}
+		if err := writer.WriteHeader(header); err != nil {
+			return err
+		}
+		if !information.Mode().IsRegular() {
+			return nil
+		}
+		source, err := os.Open(filename)
+		if err != nil {
+			return err
+		}
+		_, copyErr := io.Copy(writer, source)
+		return errors.Join(copyErr, source.Close())
+	})
+	return errors.Join(walkErr, writer.Close(), compressed.Close(), archive.Close())
+}
+
+func macOSDesktopDockerfile(goarch, goVersion string) string {
+	return fmt.Sprintf(`FROM --platform=linux/%s ubuntu:24.04
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y ca-certificates curl git clang llvm lld cmake make g++ patch python3 xz-utils libssl-dev libxml2-dev zlib1g-dev && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL "https://go.dev/dl/go%s.linux-%s.tar.gz" | tar -C /usr/local -xz
+RUN git clone https://github.com/tpoechtrager/osxcross.git /opt/osxcross && cd /opt/osxcross && git checkout --detach %s
+ENV PATH="/usr/lib/llvm-18/bin:/usr/local/go/bin:${PATH}"
+COPY sdk.tar.gz /opt/sdk.tar.gz
+RUN mkdir /opt/sdk && tar -xf /opt/sdk.tar.gz -C /opt/sdk && \
+    sdk_directory=(/opt/sdk/MacOSX*.sdk) && test "${#sdk_directory[@]}" -eq 1 && test -d "${sdk_directory[0]}" && \
+    tar -czf "/opt/osxcross/tarballs/$(basename "${sdk_directory[0]}").tar.gz" -C /opt/sdk "$(basename "${sdk_directory[0]}")" && \
+    cd /opt/osxcross && UNATTENDED=1 BUILD_FLAVOR=llvm ENABLE_ARCHS="x86_64 arm64" OSX_VERSION_MIN=13.0 TARGET_DIR=/opt/osxcross/target ./build.sh && \
+    rm -rf /opt/sdk /opt/sdk.tar.gz /opt/osxcross/tarballs/*
+ENV PATH="/opt/osxcross/target/bin:${PATH}" GOTOOLCHAIN=local
+# WebView's @available checks need compiler-rt's Darwin version-check builtins.
+# Build the upstream implementation, pinned by digest, for both target CPUs.
+RUN curl -fsSL https://raw.githubusercontent.com/llvm/llvm-project/llvmorg-18.1.8/compiler-rt/lib/builtins/os_version_check.c -o /opt/osxcross/os_version_check.c && \
+    echo "8ed75fa38482b18f17797c1530739688b6939b7c6495b2ffc1361114b1184c1c  /opt/osxcross/os_version_check.c" | sha256sum -c - && \
+    for architecture in x86_64 arm64; do \
+      compiler=(/opt/osxcross/target/bin/"$architecture"-apple-darwin*-clang); \
+      "${compiler[0]}" -c -O2 -fPIC -mmacosx-version-min=13.0 /opt/osxcross/os_version_check.c -o "/tmp/version-$architecture.o"; \
+      llvm-ar rcs "/tmp/runtime-$architecture.a" "/tmp/version-$architecture.o"; \
+    done && \
+    runtime_directory="$(clang -print-resource-dir)/lib/darwin" && mkdir -p "$runtime_directory" && \
+    lipo -create /tmp/runtime-x86_64.a /tmp/runtime-arm64.a -output "$runtime_directory/libclang_rt.osx.a" && \
+    rm /tmp/version-*.o /tmp/runtime-*.a
+`, goarch, goVersion, goarch, osxcrossCommit)
+}
+
+func macOSDesktopDockerScript(artifactDirectory, programName, version string) string {
+	return fmt.Sprintf(`set -euo pipefail
+mkdir -p %s
+for target in amd64 arm64; do
+  compiler_arch=x86_64
+  if [ "$target" = arm64 ]; then compiler_arch=arm64; fi
+  compiler=()
+  for compiler_path in /opt/osxcross/target/bin/"$compiler_arch"-apple-darwin*-clang; do
+    if [[ "$compiler_path" != *-cmake-clang ]]; then compiler+=("$compiler_path"); fi
+  done
+  test "${#compiler[@]}" -eq 1
+  CGO_ENABLED=1 GOOS=darwin GOARCH="$target" CC="${compiler[0]}" CXX="${compiler[0]}++" \
+    MACOSX_DEPLOYMENT_TARGET=13.0 GOFLAGS="-trimpath -buildvcs=false" \
+    go build -tags desktop -ldflags %s -o %s"${target}_desktop" .
+done
+lipo -create %s %s -output %s
+lipo %s -verify_arch x86_64 arm64
+chmod +x %s
+`, shellQuote(artifactDirectory), shellQuote("-s -w -X main.CompileVersion="+version), shellQuote(path.Join(artifactDirectory, programName+"_darwin_")),
+		shellQuote(path.Join(artifactDirectory, desktopArtifactName(programName, "darwin", "amd64", ""))),
+		shellQuote(path.Join(artifactDirectory, desktopArtifactName(programName, "darwin", "arm64", ""))),
+		shellQuote(path.Join(artifactDirectory, desktopArtifactName(programName, "darwin", "universal", ""))),
+		shellQuote(path.Join(artifactDirectory, desktopArtifactName(programName, "darwin", "universal", ""))),
+		shellQuote(path.Join(artifactDirectory, desktopArtifactName(programName, "darwin", "universal", ""))))
+}
+
+// Docker only receives a bounded build context containing the Dockerfile and SDK.
+// The SDK remains a local build input and is excluded from release assembly.
+func buildMacOSDockerImage(repoRoot, platform, image, archivePath, dockerfile string) error {
+	buildDirectory, err := os.MkdirTemp("", "sitebrush-macos-builder-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(buildDirectory)
+	if err := os.WriteFile(filepath.Join(buildDirectory, "Dockerfile"), []byte(dockerfile), 0o600); err != nil {
+		return err
+	}
+	source, err := os.Open(archivePath)
+	if err != nil {
+		return err
+	}
+	defer source.Close()
+	destination, err := os.Create(filepath.Join(buildDirectory, "sdk.tar.gz"))
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(destination, source)
+	if err := errors.Join(copyErr, destination.Close()); err != nil {
+		return err
+	}
+	command := exec.Command("docker", "build", "--platform", platform, "-t", image, buildDirectory)
+	command.Dir = repoRoot
+	command.Stdout, command.Stderr = os.Stdout, os.Stderr
+	return command.Run()
+}
+
+func verifyMacOSUniversalBinary(filename string) error {
+	binary, err := macho.OpenFat(filename)
+	if err != nil {
+		return fmt.Errorf("read macOS universal binary: %w", err)
+	}
+	defer binary.Close()
+	amd64, arm64 := false, false
+	for _, architecture := range binary.Arches {
+		if err := verifyMacOSMinimumVersion(architecture.File); err != nil {
+			return err
+		}
+		switch architecture.Cpu {
+		case macho.CpuAmd64:
+			amd64 = true
+		case macho.CpuArm64:
+			arm64 = true
+		}
+	}
+	if !amd64 || !arm64 {
+		return errors.New("macOS universal binary must contain amd64 and arm64")
+	}
+	return nil
+}
+
+func verifyMacOSMinimumVersion(binary *macho.File) error {
+	for _, load := range binary.Loads {
+		encoded := load.Raw()
+		if len(encoded) < 16 {
+			continue
+		}
+		command := binary.ByteOrder.Uint32(encoded)
+		versionOffset := 0
+		switch command {
+		case 0x32: // LC_BUILD_VERSION carries the platform before the minimum OS.
+			if len(encoded) < 24 || binary.ByteOrder.Uint32(encoded[8:]) != 1 {
+				continue
+			}
+			versionOffset = 12
+		case 0x24: // LC_VERSION_MIN_MACOSX is emitted by older external linkers.
+			versionOffset = 8
+		default:
+			continue
+		}
+		if binary.ByteOrder.Uint32(encoded[versionOffset:]) != 13<<16 {
+			return errors.New("macOS binary must declare the supported minimum OS 13.0")
+		}
+		return nil
+	}
+	return errors.New("macOS binary does not declare its minimum OS")
 }

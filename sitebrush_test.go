@@ -47,7 +47,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/matveynator/netchan"
+	"github.com/matveynator/netchan/v2"
 	"github.com/matveynator/sitebrush/v2/pkg/accountauth"
 	"github.com/matveynator/sitebrush/v2/pkg/aicapability"
 	"github.com/matveynator/sitebrush/v2/pkg/aieditor"
@@ -67,6 +67,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/imageprepare"
 	"github.com/matveynator/sitebrush/v2/pkg/mailout"
 	sitemcp "github.com/matveynator/sitebrush/v2/pkg/mcp"
+	"github.com/matveynator/sitebrush/v2/pkg/netchantls"
 	"github.com/matveynator/sitebrush/v2/pkg/outboundhttp"
 	"github.com/matveynator/sitebrush/v2/pkg/pagearchive"
 	"github.com/matveynator/sitebrush/v2/pkg/securitysync"
@@ -15670,8 +15671,52 @@ func readZipTextFile(t *testing.T, archiveFileByName map[string]*zip.File, fileN
 	return string(fileBytes)
 }
 
+func TestSitebrushNetChanRequiresTLSAndRejectsSubstitutedCentralIdentity(t *testing.T) {
+	if listener, err := netchan.Listen[sitebrushNetChanRequest]("127.0.0.1:0"); err == nil {
+		listener.Close()
+		t.Fatal("network listener accepted a missing TLS configuration")
+	}
+	listener, err := listenTestSitebrushNetChan(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_NETCHAN_ADDRESS", listener.Address)
+	substitute, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_RELAY_PUBLIC_KEY_SITEBRUSH_COM", base64.StdEncoding.EncodeToString(substitute))
+	configuration, err := sitebrushNetChanClientTLS()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if connection, err := netchan.Dial[sitebrushNetChanRequest](listener.Address, netchan.Config{TLS: configuration}); err == nil {
+		connection.Abort()
+		t.Fatal("address override bypassed the configured central identity")
+	}
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_RELAY_PUBLIC_KEY_SITEBRUSH_COM", "invalid")
+	if _, err := sitebrushNetChanClientTLS(); err == nil {
+		t.Fatal("invalid trusted key accepted")
+	}
+}
+
+func listenTestSitebrushNetChan(t *testing.T) (*netchan.Listener[sitebrushNetChanRequest], error) {
+	t.Helper()
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_RELAY_PUBLIC_KEY_SITEBRUSH_COM", base64.StdEncoding.EncodeToString(publicKey))
+	configuration, err := netchantls.ServerConfig("sitebrush.com", privateKey)
+	if err != nil {
+		return nil, err
+	}
+	return netchan.Listen[sitebrushNetChanRequest]("127.0.0.1:0", netchan.Config{TLS: configuration})
+}
+
 func TestSendHostingSnapshotNetChanPayloadDeliversAndCloses(t *testing.T) {
-	listener, err := netchan.Listen[sitebrushNetChanRequest]("127.0.0.1:0")
+	listener, err := listenTestSitebrushNetChan(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -15714,7 +15759,7 @@ func TestSendHostingSnapshotNetChanPayloadDeliversAndCloses(t *testing.T) {
 }
 
 func TestSendHostingSnapshotNetChanPayloadCancelsUnreadDelivery(t *testing.T) {
-	listener, err := netchan.Listen[sitebrushNetChanRequest]("127.0.0.1:0")
+	listener, err := listenTestSitebrushNetChan(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -15748,7 +15793,7 @@ func TestSendHostingSnapshotNetChanPayloadCancelsUnreadDelivery(t *testing.T) {
 }
 
 func TestHostingSnapshotNetChanConsumerReusesResponseChannel(t *testing.T) {
-	listener, err := netchan.Listen[sitebrushNetChanRequest]("127.0.0.1:0")
+	listener, err := listenTestSitebrushNetChan(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -15791,7 +15836,7 @@ func TestHostingSnapshotNetChanConsumerReusesResponseChannel(t *testing.T) {
 }
 
 func TestHostingSnapshotNetChanListenerReceivesMalformedPayload(t *testing.T) {
-	listener, err := netchan.Listen[sitebrushNetChanRequest]("127.0.0.1:0")
+	listener, err := listenTestSitebrushNetChan(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -15816,7 +15861,7 @@ func TestHostingSnapshotNetChanListenerReceivesMalformedPayload(t *testing.T) {
 }
 
 func TestHostingSnapshotNetChanDeliverySkipsTaskWithClosedResponse(t *testing.T) {
-	listener, err := netchan.Listen[sitebrushNetChanRequest]("127.0.0.1:0")
+	listener, err := listenTestSitebrushNetChan(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -15837,7 +15882,7 @@ func TestHostingSnapshotNetChanDeliverySkipsTaskWithClosedResponse(t *testing.T)
 }
 
 func TestHostingSnapshotNetChanListenerStopsActiveConnections(t *testing.T) {
-	listener, err := netchan.Listen[sitebrushNetChanRequest]("127.0.0.1:0")
+	listener, err := listenTestSitebrushNetChan(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -15845,7 +15890,11 @@ func TestHostingSnapshotNetChanListenerStopsActiveConnections(t *testing.T) {
 	stop := make(chan struct{})
 	application := &App{}
 	go application.serveHostingSnapshotNetChanListener(stop, context.Background(), listener)
-	connection, err := netchan.Dial[sitebrushNetChanRequest](listener.Address)
+	configuration, err := sitebrushNetChanClientTLS()
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := netchan.Dial[sitebrushNetChanRequest](listener.Address, netchan.Config{TLS: configuration})
 	if err != nil {
 		close(stop)
 		t.Fatal(err)
@@ -20626,7 +20675,7 @@ func TestSecurityGlobalSyncPullsAtStartupAndWake(t *testing.T) {
 	application.securityGlobalSignals = make(chan securitysync.Signal, 1)
 	application.securityGlobalWake = make(chan struct{}, 1)
 	application.securityGlobalStatus = make(chan chan securityGlobalSyncStatus)
-	listener, err := netchan.Listen[sitebrushNetChanRequest]("127.0.0.1:0")
+	listener, err := listenTestSitebrushNetChan(t)
 	if err != nil {
 		t.Fatal(err)
 	}

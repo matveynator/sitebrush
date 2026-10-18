@@ -8,7 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
-	"github.com/matveynator/netchan"
+	"github.com/matveynator/netchan/v2"
 	"io"
 	"math/big"
 	"net/http"

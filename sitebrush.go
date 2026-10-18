@@ -28,7 +28,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/matveynator/netchan"
+	"github.com/matveynator/netchan/v2"
 	"html/template"
 	"io"
 	"io/fs"
@@ -83,6 +83,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/mailout"
 	sitemcp "github.com/matveynator/sitebrush/v2/pkg/mcp"
 	"github.com/matveynator/sitebrush/v2/pkg/migrations"
+	"github.com/matveynator/sitebrush/v2/pkg/netchantls"
 	"github.com/matveynator/sitebrush/v2/pkg/outboundhttp"
 	"github.com/matveynator/sitebrush/v2/pkg/pagearchive"
 	"github.com/matveynator/sitebrush/v2/pkg/securitysync"
@@ -30259,7 +30260,18 @@ func (a *App) startHostingSnapshotNetChanListener(ctx context.Context) {
 		return
 	}
 	go func() {
-		listener, err := netchan.Listen[sitebrushNetChanRequest](net.JoinHostPort("", hostingSnapshotNetChanPort))
+		_, publicKey, privateKey, err := a.serviceMailLocalKeyPair(ctx)
+		trustedKey, configured := serviceMailRelayPublicKeyForDomain("sitebrush.com")
+		if err != nil || !configured || !bytes.Equal(publicKey, trustedKey) {
+			log.Printf("hosting snapshot netchan identity is unavailable or does not match the central key")
+			return
+		}
+		configuration, err := netchantls.ServerConfig("sitebrush.com", privateKey)
+		if err != nil {
+			log.Printf("hosting snapshot netchan TLS failed: %v", err)
+			return
+		}
+		listener, err := netchan.Listen[sitebrushNetChanRequest](net.JoinHostPort("", hostingSnapshotNetChanPort), netchan.Config{TLS: configuration})
 		if err != nil {
 			log.Printf("hosting snapshot netchan listen failed: %v", err)
 			return
@@ -30829,6 +30841,16 @@ func (a *App) reportHostingSnapshotNetChan(ctx context.Context) error {
 	return errors.New("hosting snapshot netchan address is empty")
 }
 
+// The address override changes routing, while the configured central key remains
+// the trust anchor for hosting, registration, mail, and security synchronization.
+func sitebrushNetChanClientTLS() (*tls.Config, error) {
+	publicKey, configured := serviceMailRelayPublicKeyForDomain("sitebrush.com")
+	if !configured {
+		return nil, errors.New("central network channel identity is not configured")
+	}
+	return netchantls.PinnedClientConfig(ed25519.PublicKey(publicKey))
+}
+
 func centralHostingSnapshotNetChanAddresses() []string {
 	return []string{net.JoinHostPort("sitebrush.com", hostingSnapshotNetChanPort)}
 }
@@ -30900,7 +30922,11 @@ func performHostingSnapshotNetChanDelivery(stop <-chan struct{}, task hostingSna
 	if hostingSnapshotNetChanDeliveryCanceled(task.response) {
 		return errHostingSnapshotNetChanDeliveryCanceled, false
 	}
-	connection, err := netchan.Dial[sitebrushNetChanRequest](address)
+	configuration, err := sitebrushNetChanClientTLS()
+	if err != nil {
+		return err, true
+	}
+	connection, err := netchan.Dial[sitebrushNetChanRequest](address, netchan.Config{TLS: configuration})
 	if err != nil {
 		return err, true
 	}
@@ -31862,7 +31888,11 @@ func (a *App) sendServiceMailNetChanRequest(ctx context.Context, request *servic
 	if address == "" {
 		address = net.JoinHostPort("sitebrush.com", hostingSnapshotNetChanPort)
 	}
-	connection, err := netchan.Dial[sitebrushNetChanRequest](address)
+	configuration, err := sitebrushNetChanClientTLS()
+	if err != nil {
+		return sitebrushNetChanResponse{}, err
+	}
+	connection, err := netchan.Dial[sitebrushNetChanRequest](address, netchan.Config{TLS: configuration})
 	if err != nil {
 		return sitebrushNetChanResponse{}, err
 	}
@@ -42656,19 +42686,17 @@ func (a *App) normalizeAndValidateChrootLocationPath(domain, rawDirectoryPath st
 	if err != nil {
 		return "", err
 	}
-	// candidateRealPath is accepted only after EvalSymlinks and root containment validation below.
-	// lgtm[go/path-injection]
-	// candidateRealPath is accepted only after EvalSymlinks and domain-root containment validation.
-	// lgtm[go/path-injection]
-	info, err := os.Stat(candidateRealPath)
+	if !isPathWithinRoot(rootRealPath, candidateRealPath) {
+		return "", errors.New("directory path is outside allowed chroot")
+	}
+	// The storage jail binds metadata access to an open root, including when
+	// filesystem links change after the domain containment check.
+	info, err := a.statInsideStorage(candidateRealPath)
 	if err != nil {
 		return "", err
 	}
 	if !info.IsDir() {
 		return "", errors.New("directory path must point to a folder")
-	}
-	if !isPathWithinRoot(rootRealPath, candidateRealPath) {
-		return "", errors.New("directory path is outside allowed chroot")
 	}
 	return candidateRealPath, nil
 }
@@ -42754,7 +42782,7 @@ func (a *App) resolveExistingChrootPath(domain string, candidatePath string) (st
 	if !isPathWithinRoot(rootRealPath, candidateRealPath) {
 		return "", nil, errors.New("path escapes allowed domain chroot")
 	}
-	info, err := os.Stat(candidateRealPath)
+	info, err := a.statInsideStorage(candidateRealPath)
 	if err != nil {
 		return "", nil, err
 	}
