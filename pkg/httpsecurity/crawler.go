@@ -47,6 +47,7 @@ func IsIndexingCrawlerAgent(agent string) bool {
 		"facebookbot",
 		"bytespider",
 		"ccbot",
+		"sitebrush/",
 	} {
 		if strings.Contains(lowered, token) {
 			return true
