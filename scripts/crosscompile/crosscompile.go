@@ -719,7 +719,8 @@ func packageMacOSDesktopDMG(desktopDir, programName, universalBinary, version st
 		return "", err
 	}
 
-	if err := runCommand(desktopDir, "cp", "-R", appDir, stagingDir+"/"); err != nil {
+	// Keep one staged copy of the app so the runner has room for hdiutil's image.
+	if err := os.Rename(appDir, filepath.Join(stagingDir, filepath.Base(appDir))); err != nil {
 		return "", err
 	}
 	if err := runCommand(desktopDir, "ln", "-s", "/Applications", filepath.Join(stagingDir, "Applications")); err != nil {
@@ -730,10 +731,38 @@ func packageMacOSDesktopDMG(desktopDir, programName, universalBinary, version st
 	if err := os.RemoveAll(dmgPath); err != nil {
 		return "", err
 	}
-	if err := runCommand(desktopDir, "hdiutil", "create", "-volname", fmt.Sprintf("%s %s", programName, version), "-srcfolder", stagingDir, "-ov", "-format", "UDZO", dmgPath); err != nil {
+	imageSizeMiB, err := macOSDMGSizeMiB(stagingDir)
+	if err != nil {
+		return "", err
+	}
+	if err := runCommand(desktopDir, "hdiutil", "create", "-volname", fmt.Sprintf("%s %s", programName, version), "-srcfolder", stagingDir, "-size", strconv.FormatInt(imageSizeMiB, 10)+"m", "-ov", "-format", "UDZO", dmgPath); err != nil {
 		return "", fmt.Errorf("create macOS DMG: %w", err)
 	}
 	return dmgPath, nil
+}
+
+// hdiutil's automatic sizing can undercount a cross-compiled universal app.
+// Allow room for both the app and filesystem metadata inside the image.
+func macOSDMGSizeMiB(stagingDir string) (int64, error) {
+	var contentBytes int64
+	err := filepath.WalkDir(stagingDir, func(filename string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !entry.Type().IsRegular() {
+			return nil
+		}
+		information, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		contentBytes += information.Size()
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return contentBytes/(1<<20)*2 + 128, nil
 }
 
 func createMacOSAppBundle(appDir, universalBinary, version string) error {
