@@ -2,12 +2,6 @@ name: Stable Release
 
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - '.github/workflows/release.yml'
-      - 'scripts/crosscompile/**'
-      - 'go.mod'
-      - 'go.sum'
 
 permissions:
   contents: read
@@ -18,8 +12,8 @@ env:
   SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM: ${{ vars.SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM }}
 
 concurrency:
-  group: ${{ github.event_name == 'workflow_dispatch' && 'sitebrush-stable-release' || format('sitebrush-macos-desktop-{0}', github.event.pull_request.number) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: sitebrush-stable-release
+  cancel-in-progress: false
 
 jobs:
   prepare_release:
@@ -36,7 +30,6 @@ jobs:
         shell: bash
         run: echo "version=$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
   build_server_app:
-    if: github.event_name == 'workflow_dispatch'
     needs: prepare_release
     runs-on: ubuntu-22.04
     steps:
@@ -71,7 +64,6 @@ jobs:
           if-no-files-found: error
 
   build_desktop_docker:
-    if: github.event_name == 'workflow_dispatch'
     needs: prepare_release
     runs-on: ubuntu-22.04
     strategy:
@@ -213,7 +205,6 @@ jobs:
           if-no-files-found: error
 
   release:
-    if: github.event_name == 'workflow_dispatch'
     needs:
       - prepare_release
       - build_server_app
