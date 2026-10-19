@@ -244,6 +244,9 @@ jobs:
   codeql:
     name: CodeQL (${{ matrix.language }})
     runs-on: ubuntu-22.04
+    # The SARIF gate must see the same findings on pull requests and main.
+    env:
+      CODEQL_ACTION_DIFF_INFORMED_QUERIES: "false"
     strategy:
       fail-fast: false
       matrix:

@@ -528,7 +528,7 @@ func (state *SecurityState) Prune(now time.Time) {
 	}
 }
 func (state *SecurityState) Report(now time.Time, days int) SecurityReport {
-	activitySeverity := make(map[string]int, len(state.ActivitySeverity)+len(state.ActivityDays))
+	activitySeverity := make(map[string]int, len(state.ActivitySeverity))
 	for date, severity := range state.ActivitySeverity {
 		activitySeverity[date] = severity
 	}
