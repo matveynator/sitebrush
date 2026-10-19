@@ -627,6 +627,7 @@ type profileEmailDeliveryDNSHelp struct {
 type emailDeliveryResult struct {
 	Message mailout.Message
 	ID      string
+	Route   string
 	Pending bool
 	Err     error
 	Warning string
@@ -27880,11 +27881,18 @@ func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var userCount int
-	_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM users WHERE domain=? AND email=? AND is_admin=1`, domain, email).Scan(&userCount)
+	if err := a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM users WHERE domain=? AND email=? AND is_admin=1`, domain, email).Scan(&userCount); err != nil {
+		log.Printf("MAIL recovery lookup failed domain=%q recipient=%q error=%s",
+			diagnosticlog.SafeLogValue(domain), diagnosticlog.SafeLogValue(email), diagnosticlog.SafeLogValue(err.Error()))
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
 	if userCount == 0 {
+		log.Printf("MAIL recovery skipped domain=%q recipient=%q reason=account_not_found",
+			diagnosticlog.SafeLogValue(domain), diagnosticlog.SafeLogValue(email))
 		a.renderRecoveryPage(w, r, map[string]any{
-			"Status":                 translationOrDefault(translations, "recover_status_sent", "The recovery email was sent."),
-			"StatusClass":            "success",
+			"Status":                 translationOrDefault(translations, "recover_status_if_registered", "If this address is registered for this site, a recovery email will be sent. Check the address and spam folder."),
+			"StatusClass":            "warning",
 			"ShowManualPasswordForm": true,
 			"RecoveryEmail":          email,
 		})
@@ -27922,7 +27930,10 @@ func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	deliveryStatus := mailout.StatusSent
-	status := translationOrDefault(translations, "recover_status_sent", "The recovery email was sent.")
+	status := translationOrDefault(translations, "recover_status_sent", "The mail server accepted the recovery email for delivery. Check the inbox and spam folder.")
+	if deliveryResult.Route == mailout.RouteRelay {
+		status = translationOrDefault(translations, "recover_status_relay_accepted", "The central mail relay accepted the recovery email. Final delivery is not yet confirmed; check the inbox and spam folder.")
+	}
 	statusClass := "success"
 	if deliveryResult.Pending {
 		deliveryStatus = mailout.StatusPending
@@ -28957,7 +28968,7 @@ func (a *App) sendServiceEmailNow(ctx context.Context, r *http.Request, codeKind
 	log.Printf("service mail relayed domain=%s relay=%s kind=%s recipient_domain=%s reason=%s",
 		diagnosticlog.SafeLogValue(domain), diagnosticlog.SafeLogValue(relayURL), diagnosticlog.SafeLogValue(codeKind),
 		diagnosticlog.SafeLogValue(emailAddressDomain(recipient)), diagnosticlog.SafeLogValue(route.Reason))
-	return emailDeliveryResult{Message: message}
+	return emailDeliveryResult{Message: message, Route: mailout.RouteRelay}
 }
 
 func (a *App) markServiceMailRecipientVerified(ctx context.Context, domain, recipient, languageCode string) {
@@ -29060,20 +29071,20 @@ func (a *App) sendEmailNow(ctx context.Context, message mailout.Message) emailDe
 		task := mailout.NewTask(message.Kind, route.route, message, mailExpirationForKind(message.Kind, time.Now().UTC()), resultChannel)
 		task.Done = observerDone
 		if err := a.submitDurableMailTask(ctx.Done(), task); err != nil {
-			return emailDeliveryResult{ID: task.ID, Message: message, Err: err}
+			return emailDeliveryResult{ID: task.ID, Message: message, Route: route.route, Err: err}
 		}
 		waitTimer := time.NewTimer(45 * time.Second)
 		defer waitTimer.Stop()
 		select {
 		case result := <-resultChannel:
 			if result.Status == mailout.StatusSent {
-				return emailDeliveryResult{ID: task.ID, Message: message}
+				return emailDeliveryResult{ID: task.ID, Message: message, Route: route.route}
 			}
-			return emailDeliveryResult{ID: task.ID, Message: message, Err: result.Err}
+			return emailDeliveryResult{ID: task.ID, Message: message, Route: route.route, Err: result.Err}
 		case <-ctx.Done():
-			return emailDeliveryResult{ID: task.ID, Message: message, Pending: true}
+			return emailDeliveryResult{ID: task.ID, Message: message, Route: route.route, Pending: true}
 		case <-waitTimer.C:
-			return emailDeliveryResult{ID: task.ID, Message: message, Pending: true}
+			return emailDeliveryResult{ID: task.ID, Message: message, Route: route.route, Pending: true}
 		}
 	}
 	sender := a.defaultEmailSender()
@@ -29081,12 +29092,12 @@ func (a *App) sendEmailNow(ctx context.Context, message mailout.Message) emailDe
 	defer cancel()
 	err := sender(sendCtx, message)
 	if err != nil {
-		log.Printf("email delivery failed recipient_domain=%s error=%s",
-			diagnosticlog.SafeLogValue(emailAddressDomain(message.To)), fmt.Sprintf("type=%T smtp=%s", err, smtpStatusCodeFromError(err)))
+		log.Printf("email delivery failed recipient=%q recipient_domain=%s error=%s",
+			diagnosticlog.SafeLogValue(message.To), diagnosticlog.SafeLogValue(emailAddressDomain(message.To)), fmt.Sprintf("type=%T smtp=%s", err, smtpStatusCodeFromError(err)))
 		return emailDeliveryResult{Message: message, Err: err}
 	}
-	log.Printf("email delivery accepted recipient_domain=%s", diagnosticlog.SafeLogValue(emailAddressDomain(message.To)))
-	return emailDeliveryResult{Message: message}
+	log.Printf("email delivery accepted recipient=%q recipient_domain=%s accepted_by=recipient_smtp", diagnosticlog.SafeLogValue(message.To), diagnosticlog.SafeLogValue(emailAddressDomain(message.To)))
+	return emailDeliveryResult{Message: message, Route: mailout.RouteLocal}
 }
 
 func (a *App) startDurableMailProcess(stop <-chan struct{}) chan mailout.Task {
@@ -29142,11 +29153,12 @@ func (a *App) runDurableMailProcess(stop <-chan struct{}, tasks <-chan mailout.T
 				}
 				continue
 			}
-			log.Printf("MAIL attempt id=%s kind=%s route=%s attempt=%d recipient_domain=%s",
+			log.Printf("MAIL attempt id=%s kind=%s route=%s attempt=%d recipient=%q recipient_domain=%s",
 				diagnosticlog.SafeLogValue(dueRecord.ID),
 				diagnosticlog.SafeLogValue(dueRecord.Kind),
 				diagnosticlog.SafeLogValue(dueRecord.Route),
 				dueRecord.Attempts+1,
+				diagnosticlog.SafeLogValue(dueRecord.Message.To),
 				diagnosticlog.SafeLogValue(emailAddressDomain(dueRecord.Message.To)))
 			activeDeliveries++
 			go func(record mailout.Record) {
@@ -29193,19 +29205,21 @@ func (a *App) runDurableMailProcess(stop <-chan struct{}, tasks <-chan mailout.T
 			})
 			sendMailTaskAccepted(task.Accepted, insertErr)
 			if insertErr != nil {
-				log.Printf("MAIL queue failed id=%s kind=%s route=%s recipient_domain=%s error=%s",
+				log.Printf("MAIL queue failed id=%s kind=%s route=%s recipient=%q recipient_domain=%s error=%s",
 					diagnosticlog.SafeLogValue(normalizedTask.ID),
 					diagnosticlog.SafeLogValue(normalizedTask.Kind),
 					diagnosticlog.SafeLogValue(normalizedTask.Route),
+					diagnosticlog.SafeLogValue(normalizedTask.Message.To),
 					diagnosticlog.SafeLogValue(emailAddressDomain(normalizedTask.Message.To)),
 					diagnosticlog.SafeLogValue(insertErr.Error()))
 				sendMailDeliveryResult(task.Reply, mailout.Result{ID: normalizedTask.ID, Status: mailout.StatusFailed, Err: insertErr})
 				continue
 			}
-			log.Printf("MAIL queued id=%s kind=%s route=%s recipient_domain=%s expires_at=%s duplicate=%t",
+			log.Printf("MAIL queued id=%s kind=%s route=%s recipient=%q recipient_domain=%s expires_at=%s duplicate=%t",
 				diagnosticlog.SafeLogValue(normalizedTask.ID),
 				diagnosticlog.SafeLogValue(normalizedTask.Kind),
 				diagnosticlog.SafeLogValue(normalizedTask.Route),
+				diagnosticlog.SafeLogValue(normalizedTask.Message.To),
 				diagnosticlog.SafeLogValue(emailAddressDomain(normalizedTask.Message.To)),
 				normalizedTask.ExpiresAt.Format(time.RFC3339),
 				!inserted)
@@ -29260,28 +29274,32 @@ func (a *App) runDurableMailProcess(stop <-chan struct{}, tasks <-chan mailout.T
 				log.Printf("MAIL completion failed id=%s error=%s", diagnosticlog.SafeLogValue(completion.record.ID), diagnosticlog.SafeLogValue(writeErr.Error()))
 			} else if terminal {
 				if result.Status == mailout.StatusSent {
-					log.Printf("MAIL sent id=%s kind=%s route=%s attempts=%d recipient_domain=%s",
+					log.Printf("MAIL accepted id=%s kind=%s route=%s attempts=%d recipient=%q recipient_domain=%s accepted_by=%s",
 						diagnosticlog.SafeLogValue(completion.record.ID),
 						diagnosticlog.SafeLogValue(completion.record.Kind),
 						diagnosticlog.SafeLogValue(completion.record.Route),
 						attempts,
-						diagnosticlog.SafeLogValue(emailAddressDomain(completion.record.Message.To)))
+						diagnosticlog.SafeLogValue(completion.record.Message.To),
+						diagnosticlog.SafeLogValue(emailAddressDomain(completion.record.Message.To)),
+						mailAcceptanceBoundary(completion.record.Route))
 				} else {
-					log.Printf("MAIL failed id=%s kind=%s route=%s attempts=%d recipient_domain=%s error=%s",
+					log.Printf("MAIL failed id=%s kind=%s route=%s attempts=%d recipient=%q recipient_domain=%s error=%s",
 						diagnosticlog.SafeLogValue(completion.record.ID),
 						diagnosticlog.SafeLogValue(completion.record.Kind),
 						diagnosticlog.SafeLogValue(completion.record.Route),
 						attempts,
+						diagnosticlog.SafeLogValue(completion.record.Message.To),
 						diagnosticlog.SafeLogValue(emailAddressDomain(completion.record.Message.To)),
 						fmt.Sprintf("type=%T smtp=%s", completion.err, smtpStatusCodeFromError(completion.err)))
 				}
 				notifyTerminal(result)
 			} else {
-				log.Printf("MAIL retry scheduled id=%s kind=%s route=%s attempts=%d recipient_domain=%s next_attempt_at=%s error=%s",
+				log.Printf("MAIL retry scheduled id=%s kind=%s route=%s attempts=%d recipient=%q recipient_domain=%s next_attempt_at=%s error=%s",
 					diagnosticlog.SafeLogValue(completion.record.ID),
 					diagnosticlog.SafeLogValue(completion.record.Kind),
 					diagnosticlog.SafeLogValue(completion.record.Route),
 					attempts,
+					diagnosticlog.SafeLogValue(completion.record.Message.To),
 					diagnosticlog.SafeLogValue(emailAddressDomain(completion.record.Message.To)),
 					result.NextAttempt.Format(time.RFC3339),
 					fmt.Sprintf("type=%T smtp=%s", completion.err, smtpStatusCodeFromError(completion.err)))
@@ -29321,6 +29339,13 @@ func (a *App) submitDurableMailTask(stop <-chan struct{}, task mailout.Task) err
 	case err := <-accepted:
 		return err
 	}
+}
+
+func mailAcceptanceBoundary(route string) string {
+	if route == mailout.RouteRelay {
+		return "central_relay"
+	}
+	return "recipient_smtp"
 }
 
 func (a *App) deliverMailRecord(stop <-chan struct{}, record mailout.Record) error {
@@ -33048,6 +33073,11 @@ func profileEmailDeliveryViewForResult(translations map[string]string, result em
 		view.FixTitle = translationOrDefault(translations, "profile_email_delivery_success_next_title", "What this means")
 		view.FixText = translationOrDefault(translations, "profile_email_delivery_success_next_text", "If the email is not in your inbox, check spam and mailbox filters.")
 		view.Log = "status=accepted"
+		if result.Route == mailout.RouteRelay {
+			view.Summary = translationOrDefault(translations, "recover_status_relay_accepted", "The central mail relay accepted the recovery email. Final delivery is not yet confirmed; check the inbox and spam folder.")
+			view.Description = view.Summary
+			view.Log += "\naccepted_by=central_relay"
+		}
 		if strings.TrimSpace(result.Warning) != "" {
 			view.Kind = "warning"
 			view.Summary = translationOrDefault(translations, "profile_email_delivery_fallback_summary", "The relay was unavailable, so SiteBrush used local SMTP fallback.")

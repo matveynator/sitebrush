@@ -5966,6 +5966,37 @@ func TestRecoverPageSkipsSiteDNSForRelayDelivery(t *testing.T) {
 	}
 }
 
+func TestRecoveryUnknownAddressDoesNotClaimDelivery(t *testing.T) {
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
+	withEmailSPFAllowed(t)
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "owner@example.com", "old-password"); err != nil {
+		t.Fatalf("insert administrator: %v", err)
+	}
+	form := url.Values{"recovery_action": {"request"}, "email": {"wrong@example.com"}, "captcha": {"1234"}}
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?recover", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept-Language", "ru")
+	request.AddCookie(&http.Cookie{Name: "sitebrush_captcha", Value: "1234"})
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("recovery status = %d", response.Code)
+	}
+	if !strings.Contains(response.Body.String(), "Если этот адрес зарегистрирован") || strings.Contains(response.Body.String(), "Письмо для восстановления отправлено") {
+		t.Fatalf("unknown address received misleading status: %s", response.Body.String())
+	}
+	select {
+	case mailJob := <-application.emailDelivery:
+		t.Fatalf("unexpected recovery mail: %#v", mailJob.Message)
+	default:
+	}
+	var confirmations int
+	if err := rawDB.QueryRow(`SELECT COUNT(1) FROM email_confirmations WHERE domain=? AND action='recover'`, "localhost").Scan(&confirmations); err != nil || confirmations != 0 {
+		t.Fatalf("unknown address created %d confirmations: %v", confirmations, err)
+	}
+}
+
 func TestRecoverPasswordThroughEmailLink(t *testing.T) {
 	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
 	withEmailSPFAllowed(t)
@@ -6148,7 +6179,7 @@ func TestRecoveryUsesBrowserLanguageForInterfaceAndQueuedEmail(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("request status = %d, body=%q", response.Code, response.Body.String())
 	}
-	for _, expectedFragment := range []string{"Die Wiederherstellungs-E-Mail wurde gesendet.", "6-stelliger Wiederherstellungscode", "Neues Passwort", "Neues Passwort festlegen", "profile-delivery-link", "profile-delivery-modal"} {
+	for _, expectedFragment := range []string{translationsForLanguageCode("de")["recover_status_sent"], "6-stelliger Wiederherstellungscode", "Neues Passwort", "Neues Passwort festlegen", "profile-delivery-link", "profile-delivery-modal"} {
 		if !strings.Contains(response.Body.String(), expectedFragment) {
 			t.Fatalf("German recovery interface is missing %q in %s", expectedFragment, response.Body.String())
 		}
