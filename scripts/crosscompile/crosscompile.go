@@ -8,6 +8,7 @@ import (
 	"crypto/md5"
 	"crypto/sha256"
 	"debug/macho"
+	_ "embed"
 	"encoding/base64"
 	"errors"
 	"flag"
@@ -1408,6 +1409,9 @@ func loadReleaseSigningKey(filename, encoded string, trusted ed25519.PublicKey) 
 
 const osxcrossCommit = "27d21e4977c9751d01199c7a226a6faf494c3dd9"
 
+//go:embed prepare_osxcross_sdk.sh
+var prepareOSXCrossSDKScript string
+
 // The module directive owns the compiler version for CI and every Docker image.
 // Keeping it as a per-build value avoids a mutable process-wide configuration.
 func projectGoVersion(repoRoot string) (string, error) {
@@ -1623,9 +1627,8 @@ RUN curl -fsSL "https://go.dev/dl/go%s.linux-%s.tar.gz" | tar -C /usr/local -xz
 RUN git clone https://github.com/tpoechtrager/osxcross.git /opt/osxcross && cd /opt/osxcross && git checkout --detach %s
 ENV PATH="/usr/lib/llvm-18/bin:/usr/local/go/bin:${PATH}"
 COPY sdk.tar.gz /opt/sdk.tar.gz
-RUN mkdir /opt/sdk && tar -xf /opt/sdk.tar.gz -C /opt/sdk && \
-    sdk_directory=(/opt/sdk/MacOSX*.sdk) && test "${#sdk_directory[@]}" -eq 1 && test -d "${sdk_directory[0]}" && \
-    tar -czf "/opt/osxcross/tarballs/$(basename "${sdk_directory[0]}").tar.gz" -C /opt/sdk "$(basename "${sdk_directory[0]}")" && \
+COPY prepare_osxcross_sdk.sh /opt/prepare_osxcross_sdk.sh
+RUN bash /opt/prepare_osxcross_sdk.sh /opt/sdk.tar.gz /opt/sdk /opt/osxcross/tarballs && \
     cd /opt/osxcross && UNATTENDED=1 BUILD_FLAVOR=llvm ENABLE_ARCHS="x86_64 arm64" OSX_VERSION_MIN=13.0 TARGET_DIR=/opt/osxcross/target ./build.sh && \
     rm -rf /opt/sdk /opt/sdk.tar.gz /opt/osxcross/tarballs/*
 ENV PATH="/opt/osxcross/target/bin:${PATH}" GOTOOLCHAIN=local
@@ -1679,6 +1682,9 @@ func buildMacOSDockerImage(repoRoot, platform, image, archivePath, dockerfile st
 	}
 	defer os.RemoveAll(buildDirectory)
 	if err := os.WriteFile(filepath.Join(buildDirectory, "Dockerfile"), []byte(dockerfile), 0o600); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(buildDirectory, "prepare_osxcross_sdk.sh"), []byte(prepareOSXCrossSDKScript), 0o600); err != nil {
 		return err
 	}
 	source, err := os.Open(archivePath)

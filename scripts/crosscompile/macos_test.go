@@ -7,7 +7,9 @@ import (
 	"debug/macho"
 	"encoding/binary"
 	"flag"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -61,6 +63,61 @@ func TestMacOSSDKArchiveIsStableAndPreservesSymlinks(t *testing.T) {
 			}
 			break
 		}
+	}
+}
+
+func TestOSXCrossSDKPreparationNamesArchiveFromSDKSettings(t *testing.T) {
+	directory := t.TempDir()
+	sdk := filepath.Join(directory, "MacOSX.sdk")
+	if err := os.Mkdir(sdk, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	settings := []byte(`<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>Version</key><string>14.4</string></dict></plist>`)
+	if err := os.WriteFile(filepath.Join(sdk, "SDKSettings.plist"), settings, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("SDKSettings.plist", filepath.Join(sdk, "settings-link")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	archivePath := filepath.Join(directory, "runner-sdk.tar.gz")
+	if err := archiveMacOSSDK(sdk, archivePath); err != nil {
+		t.Fatal(err)
+	}
+	tarballs := filepath.Join(directory, "tarballs")
+	command := exec.Command("bash", "-s", "--", archivePath, filepath.Join(directory, "staging"), tarballs)
+	command.Stdin = strings.NewReader(prepareOSXCrossSDKScript)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("prepare OSXCross SDK: %v\n%s", err, output)
+	}
+	prepared, err := os.Open(filepath.Join(tarballs, "MacOSX14.4.sdk.tar.gz"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Close()
+	compressed, err := gzip.NewReader(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer compressed.Close()
+	reader := tar.NewReader(compressed)
+	foundSettings, foundLink := false, false
+	for {
+		header, err := reader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch header.Name {
+		case "MacOSX14.4.sdk/SDKSettings.plist":
+			foundSettings = true
+		case "MacOSX14.4.sdk/settings-link":
+			foundLink = header.Typeflag == tar.TypeSymlink && header.Linkname == "SDKSettings.plist"
+		}
+	}
+	if !foundSettings || !foundLink {
+		t.Fatalf("prepared SDK missing settings or symlink: settings=%v link=%v", foundSettings, foundLink)
 	}
 }
 
