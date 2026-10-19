@@ -735,10 +735,34 @@ func packageMacOSDesktopDMG(desktopDir, programName, universalBinary, version st
 	if err != nil {
 		return "", err
 	}
-	if err := runCommand(desktopDir, "hdiutil", "create", "-volname", fmt.Sprintf("%s %s", programName, version), "-srcfolder", stagingDir, "-size", strconv.FormatInt(imageSizeMiB, 10)+"m", "-ov", "-format", "UDZO", dmgPath); err != nil {
+	if err := createMacOSDiskImage(desktopDir, stagingDir, dmgPath, fmt.Sprintf("%s %s", programName, version), imageSizeMiB); err != nil {
 		return "", fmt.Errorf("create macOS DMG: %w", err)
 	}
 	return dmgPath, nil
+}
+
+// DiskImages can briefly return EBUSY on macOS CI runners after mounting its
+// temporary volume. Retry only that transient error and discard partial images.
+func createMacOSDiskImage(desktopDir, stagingDir, dmgPath, volumeName string, imageSizeMiB int64) error {
+	for attempt := 1; attempt <= 3; attempt++ {
+		command := exec.Command("hdiutil", "create", "-volname", volumeName, "-srcfolder", stagingDir, "-size", strconv.FormatInt(imageSizeMiB, 10)+"m", "-ov", "-format", "UDZO", dmgPath)
+		command.Dir = desktopDir
+		output, err := command.CombinedOutput()
+		if len(output) > 0 {
+			fmt.Print(string(output))
+		}
+		if err == nil {
+			return nil
+		}
+		if !strings.Contains(string(output), "Resource busy") || attempt == 3 {
+			return err
+		}
+		if err := os.Remove(dmgPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		time.Sleep(time.Duration(attempt) * 2 * time.Second)
+	}
+	return errors.New("hdiutil did not create a disk image")
 }
 
 // hdiutil's automatic sizing can undercount a cross-compiled universal app.

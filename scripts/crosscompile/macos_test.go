@@ -241,7 +241,9 @@ func TestMacOSPackageStageConsumesExistingBinaryWithoutCompilation(t *testing.T)
 	writeCommandStub(t, commands, "cp", `if [ "$1" = "-R" ]; then exit 0; fi; for argument in "$@"; do destination="$argument"; done; printf binary > "$destination"`)
 	writeCommandStub(t, commands, "sips", `previous=""; for argument in "$@"; do if [ "$previous" = "--out" ]; then printf icon > "$argument"; fi; previous="$argument"; done`)
 	writeCommandStub(t, commands, "iconutil", `previous=""; for argument in "$@"; do if [ "$previous" = "-o" ]; then printf icon > "$argument"; fi; previous="$argument"; done`)
-	writeCommandStub(t, commands, "hdiutil", `previous=""; size=""; for argument in "$@"; do if [ "$previous" = "-size" ]; then size="$argument"; fi; previous="$argument"; destination="$argument"; done; test -n "$size"; printf dmg > "$destination"`)
+	retryMarker := filepath.Join(t.TempDir(), "hdiutil-retried")
+	t.Setenv("SITEBRUSH_TEST_DMG_RETRY_MARKER", retryMarker)
+	writeCommandStub(t, commands, "hdiutil", `previous=""; size=""; for argument in "$@"; do if [ "$previous" = "-size" ]; then size="$argument"; fi; previous="$argument"; destination="$argument"; done; test -n "$size"; if [ ! -f "$SITEBRUSH_TEST_DMG_RETRY_MARKER" ]; then printf attempted > "$SITEBRUSH_TEST_DMG_RETRY_MARKER"; printf 'hdiutil: create failed - Resource busy\n' >&2; exit 1; fi; printf dmg > "$destination"`)
 	writeCommandStub(t, commands, "ln", "exit 0")
 	t.Setenv("PATH", commands)
 	outputRoot := t.TempDir()
@@ -257,5 +259,8 @@ func TestMacOSPackageStageConsumesExistingBinaryWithoutCompilation(t *testing.T)
 	main()
 	if err := verifyNonEmptyFile(filepath.Join(desktopDirectory, "sitebrush_darwin_universal_desktop.dmg")); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := os.Stat(retryMarker); err != nil {
+		t.Fatalf("hdiutil busy retry was not attempted: %v", err)
 	}
 }
