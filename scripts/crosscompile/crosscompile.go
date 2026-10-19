@@ -8,6 +8,7 @@ import (
 	"crypto/md5"
 	"crypto/sha256"
 	"debug/macho"
+	_ "embed"
 	"encoding/base64"
 	"errors"
 	"flag"
@@ -718,7 +719,8 @@ func packageMacOSDesktopDMG(desktopDir, programName, universalBinary, version st
 		return "", err
 	}
 
-	if err := runCommand(desktopDir, "cp", "-R", appDir, stagingDir+"/"); err != nil {
+	// Keep one staged copy of the app so the runner has room for hdiutil's image.
+	if err := os.Rename(appDir, filepath.Join(stagingDir, filepath.Base(appDir))); err != nil {
 		return "", err
 	}
 	if err := runCommand(desktopDir, "ln", "-s", "/Applications", filepath.Join(stagingDir, "Applications")); err != nil {
@@ -729,10 +731,62 @@ func packageMacOSDesktopDMG(desktopDir, programName, universalBinary, version st
 	if err := os.RemoveAll(dmgPath); err != nil {
 		return "", err
 	}
-	if err := runCommand(desktopDir, "hdiutil", "create", "-volname", fmt.Sprintf("%s %s", programName, version), "-srcfolder", stagingDir, "-ov", "-format", "UDZO", dmgPath); err != nil {
+	imageSizeMiB, err := macOSDMGSizeMiB(stagingDir)
+	if err != nil {
+		return "", err
+	}
+	if err := createMacOSDiskImage(desktopDir, stagingDir, dmgPath, fmt.Sprintf("%s %s", programName, version), imageSizeMiB); err != nil {
 		return "", fmt.Errorf("create macOS DMG: %w", err)
 	}
 	return dmgPath, nil
+}
+
+// DiskImages can briefly return EBUSY on macOS CI runners after mounting its
+// temporary volume. Retry only that transient error and discard partial images.
+func createMacOSDiskImage(desktopDir, stagingDir, dmgPath, volumeName string, imageSizeMiB int64) error {
+	for attempt := 1; attempt <= 3; attempt++ {
+		command := exec.Command("hdiutil", "create", "-volname", volumeName, "-srcfolder", stagingDir, "-size", strconv.FormatInt(imageSizeMiB, 10)+"m", "-ov", "-format", "UDZO", dmgPath)
+		command.Dir = desktopDir
+		output, err := command.CombinedOutput()
+		if len(output) > 0 {
+			fmt.Print(string(output))
+		}
+		if err == nil {
+			return nil
+		}
+		if !strings.Contains(string(output), "Resource busy") || attempt == 3 {
+			return err
+		}
+		if err := os.Remove(dmgPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		time.Sleep(time.Duration(attempt) * 2 * time.Second)
+	}
+	return errors.New("hdiutil did not create a disk image")
+}
+
+// hdiutil's automatic sizing can undercount a cross-compiled universal app.
+// Allow room for both the app and filesystem metadata inside the image.
+func macOSDMGSizeMiB(stagingDir string) (int64, error) {
+	var contentBytes int64
+	err := filepath.WalkDir(stagingDir, func(filename string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !entry.Type().IsRegular() {
+			return nil
+		}
+		information, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		contentBytes += information.Size()
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return contentBytes/(1<<20)*2 + 128, nil
 }
 
 func createMacOSAppBundle(appDir, universalBinary, version string) error {
@@ -1408,6 +1462,9 @@ func loadReleaseSigningKey(filename, encoded string, trusted ed25519.PublicKey) 
 
 const osxcrossCommit = "27d21e4977c9751d01199c7a226a6faf494c3dd9"
 
+//go:embed prepare_osxcross_sdk.sh
+var prepareOSXCrossSDKScript string
+
 // The module directive owns the compiler version for CI and every Docker image.
 // Keeping it as a per-build value avoids a mutable process-wide configuration.
 func projectGoVersion(repoRoot string) (string, error) {
@@ -1623,9 +1680,8 @@ RUN curl -fsSL "https://go.dev/dl/go%s.linux-%s.tar.gz" | tar -C /usr/local -xz
 RUN git clone https://github.com/tpoechtrager/osxcross.git /opt/osxcross && cd /opt/osxcross && git checkout --detach %s
 ENV PATH="/usr/lib/llvm-18/bin:/usr/local/go/bin:${PATH}"
 COPY sdk.tar.gz /opt/sdk.tar.gz
-RUN mkdir /opt/sdk && tar -xf /opt/sdk.tar.gz -C /opt/sdk && \
-    sdk_directory=(/opt/sdk/MacOSX*.sdk) && test "${#sdk_directory[@]}" -eq 1 && test -d "${sdk_directory[0]}" && \
-    tar -czf "/opt/osxcross/tarballs/$(basename "${sdk_directory[0]}").tar.gz" -C /opt/sdk "$(basename "${sdk_directory[0]}")" && \
+COPY prepare_osxcross_sdk.sh /opt/prepare_osxcross_sdk.sh
+RUN bash /opt/prepare_osxcross_sdk.sh /opt/sdk.tar.gz /opt/sdk /opt/osxcross/tarballs && \
     cd /opt/osxcross && UNATTENDED=1 BUILD_FLAVOR=llvm ENABLE_ARCHS="x86_64 arm64" OSX_VERSION_MIN=13.0 TARGET_DIR=/opt/osxcross/target ./build.sh && \
     rm -rf /opt/sdk /opt/sdk.tar.gz /opt/osxcross/tarballs/*
 ENV PATH="/opt/osxcross/target/bin:${PATH}" GOTOOLCHAIN=local
@@ -1679,6 +1735,9 @@ func buildMacOSDockerImage(repoRoot, platform, image, archivePath, dockerfile st
 	}
 	defer os.RemoveAll(buildDirectory)
 	if err := os.WriteFile(filepath.Join(buildDirectory, "Dockerfile"), []byte(dockerfile), 0o600); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(buildDirectory, "prepare_osxcross_sdk.sh"), []byte(prepareOSXCrossSDKScript), 0o600); err != nil {
 		return err
 	}
 	source, err := os.Open(archivePath)

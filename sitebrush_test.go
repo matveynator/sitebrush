@@ -19895,6 +19895,7 @@ func insertTemplateAttackPage(database *sql.DB, domain, path, title, html string
 func TestReleaseWorkflowsDoNotExposeReleaseToUntrustedPullRequests(t *testing.T) {
 	releaseRequestWorkflow := readRepositoryTestFile(t, filepath.Join(".github", "workflows", "release-request.yml"))
 	stableReleaseWorkflow := readRepositoryTestFile(t, filepath.Join(".github", "workflows", "release.yml"))
+	macOSPRWorkflow := readRepositoryTestFile(t, filepath.Join(".github", "workflows", "macos-desktop-pr.yml"))
 
 	if strings.Contains(releaseRequestWorkflow, "pull_request") || strings.Contains(stableReleaseWorkflow, "pull_request") {
 		t.Fatal("release workflows must not run from an untrusted pull request event")
@@ -19910,6 +19911,14 @@ func TestReleaseWorkflowsDoNotExposeReleaseToUntrustedPullRequests(t *testing.T)
 	}
 	if !strings.Contains(releaseRequestWorkflow, "gh workflow run release.yml --ref main") {
 		t.Fatal("release request must dispatch the release workflow from main")
+	}
+	if !strings.Contains(macOSPRWorkflow, "pull_request:") || strings.Contains(macOSPRWorkflow, "workflow_dispatch:") {
+		t.Fatal("macOS desktop verification must run only on pull requests")
+	}
+	for _, forbidden := range []string{"contents: write", "action-gh-release", "gh workflow run release.yml"} {
+		if strings.Contains(macOSPRWorkflow, forbidden) {
+			t.Fatalf("macOS pull request workflow contains release capability %q", forbidden)
+		}
 	}
 }
 
