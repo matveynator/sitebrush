@@ -52,7 +52,7 @@ func (event Event) Diagnostic() Diagnostic {
 			diagnostic.Identifiers = event.Detail
 		}
 	}
-	if event.Detail != "" && diagnostic.Transport == "" {
+	if event.Detail != "" && diagnostic.Transport == "" && (event.Stage == "failed" || event.Stage == "retry" || strings.HasSuffix(event.Stage, "_failed")) {
 		diagnostic.Failure = "Delivery failed"
 	}
 	return diagnostic
