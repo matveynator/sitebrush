@@ -29362,7 +29362,7 @@ func (a *App) runDurableMailProcess(stop <-chan struct{}, tasks <-chan mailout.T
 						if record.Route != mailout.RouteRelay {
 							continue
 						}
-						a.recordMailMonitorEvent(context.Background(), mailmonitor.Event{
+						a.recordMailDiagnostic(context.Background(), mailmonitor.Event{
 							ID: mailmonitor.NewID(), MessageID: record.ID, Kind: record.Kind, Stage: "transport_sent",
 							Domain: mailMonitorDomainForMessage(record.Message), Recipient: record.Message.To,
 							Route: record.Route, Attempt: record.Attempts + 1, Detail: details,
@@ -32488,7 +32488,7 @@ func (a *App) sendServiceMailThroughRelay(ctx context.Context, relayURL string, 
 		select {
 		case details := <-reports:
 			if relayRequest.MessageID != "" {
-				a.recordMailMonitorEvent(context.Background(), mailmonitor.Event{ID: mailmonitor.NewID(), MessageID: relayRequest.MessageID, Kind: relayRequest.CodeKind, Stage: "transport_sent", Recipient: relayRequest.Recipient, Domain: relayRequest.SourceDomain, Route: mailout.RouteRelay, Detail: details})
+				a.recordMailDiagnostic(ctx, mailmonitor.Event{ID: mailmonitor.NewID(), MessageID: relayRequest.MessageID, Kind: relayRequest.CodeKind, Stage: "transport_sent", Recipient: relayRequest.Recipient, Domain: relayRequest.SourceDomain, Route: mailout.RouteRelay, Detail: details})
 			}
 		default:
 		}

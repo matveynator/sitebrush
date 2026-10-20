@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/matveynator/sitebrush/v2/pkg/mailmonitor"
 	"github.com/matveynator/sitebrush/v2/pkg/mailout"
@@ -20,7 +21,7 @@ func (a *App) observeSMTP(ctx context.Context, message mailout.Message) context.
 		if d.Outcome == "attempt" {
 			stage = "smtp_attempt"
 		}
-		a.recordMailMonitorEvent(context.Background(), mailmonitor.Event{
+		a.recordMailDiagnostic(ctx, mailmonitor.Event{
 			ID: mailmonitor.NewID(), MessageID: message.MessageID, FlowID: message.MonitorFlowID,
 			Kind: firstNonEmpty(message.Kind, "system"), Stage: stage, Domain: mailMonitorDomainForMessage(message),
 			Recipient: message.To, Route: mailout.RouteLocal, Attempt: attempt, SMTPCode: d.Code,
@@ -35,7 +36,7 @@ func (a *App) recordMailReceipt(ctx context.Context, request serviceMailRequest)
 	if !ok || strings.TrimSpace(request.MessageID) == "" {
 		return
 	}
-	a.recordMailMonitorEvent(context.Background(), mailmonitor.Event{
+	a.recordMailDiagnostic(ctx, mailmonitor.Event{
 		ID: mailmonitor.NewID(), MessageID: request.MessageID, Kind: request.CodeKind, Stage: "transport_received",
 		Domain: request.SourceDomain, Recipient: request.Recipient, Route: mailout.RouteRelay,
 		Detail: fmt.Sprintf("direction=received transport=%s protocol=%s network=%s", d.Transport, d.Protocol, d.Network),
@@ -61,4 +62,11 @@ func mailNetworkReceipt(network string) mailReceiptTransport {
 	default:
 		return mailReceiptTransport{"netchan", "unknown", "unknown"}
 	}
+}
+
+// Optional diagnostics must not hold delivery workers behind a busy database.
+func (a *App) recordMailDiagnostic(ctx context.Context, event mailmonitor.Event) {
+	diagnosticContext, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	a.recordMailMonitorEvent(diagnosticContext, event)
 }

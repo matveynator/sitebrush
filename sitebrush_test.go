@@ -26462,3 +26462,31 @@ func TestMailReceiverProtocolRejectsUntrustedMetadata(t *testing.T) {
 		t.Fatal("untrusted receiver protocol accepted")
 	}
 }
+
+func TestMailMonitorOptionalDiagnosticsRespectDeliveryCancellation(t *testing.T) {
+	app, _ := newTestApplication(t)
+	enableMailMonitorForTest(t, app)
+	started, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(finished)
+		_ = app.withServerControlDatabaseWrite(context.Background(), "hold-diagnostic-writer", func(*sql.DB) error {
+			close(started)
+			<-release
+			return nil
+		})
+	}()
+	<-started
+	defer func() { close(release); <-finished }()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		app.recordMailDiagnostic(ctx, mailmonitor.Event{Kind: "test", Stage: "smtp_attempt"})
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("optional diagnostic ignored delivery cancellation")
+	}
+}
