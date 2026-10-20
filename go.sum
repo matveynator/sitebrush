@@ -56,8 +56,6 @@ github.com/mattn/go-isatty v0.0.20 h1:xfD0iDuEKnDkl03q4limB+vH+GxLEtL/jb4xVJSWWE
 github.com/mattn/go-isatty v0.0.20/go.mod h1:W+V8PltTTMOvKvAeJH7IuucS94S2C6jfK/D7dTCTo3Y=
 github.com/matveynator/netchan/v2 v2.1.0 h1:AeSx/H9alcPJnBWg53UoQE1WU0mIIOCwY7yCpZSvRK4=
 github.com/matveynator/netchan/v2 v2.1.0/go.mod h1:9oRJOw/cQ+dLpaW77kcK9tQJ5hVInpacfbM//MZXPyo=
-github.com/matveynator/netchan/v2 v2.1.1-0.20261020123518-ac3d42944334 h1:9AAScvQAcsPHKtJNKxVtZbVApL0dDtEcnu9gXyOcTLM=
-github.com/matveynator/netchan/v2 v2.1.1-0.20261020123518-ac3d42944334/go.mod h1:9oRJOw/cQ+dLpaW77kcK9tQJ5hVInpacfbM//MZXPyo=
 github.com/miekg/dns v1.1.43 h1:JKfpVSCB84vrAmHzyrsxB5NAr5kLoMXZArPSw7Qlgyg=
 github.com/miekg/dns v1.1.43/go.mod h1:+evo5L0630/F6ca/Z9+GAqzhjGyn8/c+TBaOyfEl0V4=
 github.com/modelcontextprotocol/go-sdk v1.8.0 h1:KIvahhYqwtbeniWVPs3TcXEA7b8jEtwfBpOTAI+Urx4=
