@@ -18,13 +18,16 @@ import (
 )
 
 type Message struct {
-	MessageID string
-	Kind      string
-	From      string
-	To        string
-	Subject   string
-	Body      string
-	HTMLBody  string
+	// Monitoring metadata is recorded when queued and never included in the email.
+	MonitorDomain string
+	MonitorFlowID string
+	MessageID     string
+	Kind          string
+	From          string
+	To            string
+	Subject       string
+	Body          string
+	HTMLBody      string
 }
 
 const DeliveryQueueSize = 256

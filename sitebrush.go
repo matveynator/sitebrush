@@ -80,6 +80,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/hostingandsupport"
 	"github.com/matveynator/sitebrush/v2/pkg/httpsecurity"
 	"github.com/matveynator/sitebrush/v2/pkg/imageprepare"
+	"github.com/matveynator/sitebrush/v2/pkg/mailmonitor"
 	"github.com/matveynator/sitebrush/v2/pkg/mailout"
 	sitemcp "github.com/matveynator/sitebrush/v2/pkg/mcp"
 	"github.com/matveynator/sitebrush/v2/pkg/migrations"
@@ -150,6 +151,10 @@ const hostingSnapshotPath = "/?hosting_snapshot"
 const serviceMailRelayTimeout = 12 * time.Second
 const serviceMailRelayBodyLimitBytes int64 = 256 * 1024
 const hostingSnapshotNetChanPayloadLimitBytes int64 = serviceMailRelayBodyLimitBytes
+
+// The signed JSON must also fit after HTTPS wraps it in base64 ciphertext.
+// Reserve 4 KiB for envelope fields and 16 bytes for the GCM authentication tag.
+const mailMonitorSyncPayloadLimitBytes int64 = (serviceMailRelayBodyLimitBytes-4096)/4*3 - 16
 const serviceMailPerInstallationHourLimit = 120
 const serviceMailNewInstallationHourLimit = 10
 const serviceMailPerIPHourLimit = 240
@@ -295,8 +300,9 @@ type systemMailRouteSnapshot struct {
 }
 
 type mailDeliveryCompletion struct {
-	record mailout.Record
-	err    error
+	record    mailout.Record
+	err       error
+	transport string
 }
 
 type mailDeliveryObserver struct {
@@ -419,6 +425,8 @@ type demoSiteStatusView struct {
 }
 
 type serviceMailRequest struct {
+	NetChanVersion   string                             `json:"netchan_version,omitempty"`
+	MailEvents       []mailmonitor.Event                `json:"mail_events,omitempty"`
 	RequestIP        string                             `json:"request_ip,omitempty"`
 	RequestedAt      string                             `json:"requested_at,omitempty"`
 	RegistrationCode string                             `json:"registration_code,omitempty"`
@@ -8921,11 +8929,12 @@ func (a *App) securityIncidentReport(w http.ResponseWriter, r *http.Request) {
 	body.WriteString("\nFind this incident in Analytics → Security by searching for Incident ID " + block.IncidentID + ".\n")
 
 	mail := mailout.Message{
-		Kind:    "security_incident_report",
-		From:    a.emailFromAddress(domain),
-		To:      strings.TrimSpace(administratorEmail),
-		Subject: "SiteBrush security incident " + block.IncidentID + " on " + domain,
-		Body:    body.String(),
+		Kind:          "security_incident_report",
+		MonitorDomain: domain,
+		From:          a.emailFromAddress(domain),
+		To:            strings.TrimSpace(administratorEmail),
+		Subject:       "SiteBrush security incident " + block.IncidentID + " on " + domain,
+		Body:          body.String(),
 	}
 	if err = a.enqueueEmail(r.Context(), mail); err != nil {
 		http.Error(w, "could not send incident report", http.StatusServiceUnavailable)
@@ -16441,6 +16450,7 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 		}
 		a.promoteFirstServerOwner(registrationContext, domain, email)
 		a.createSessionForDomain(w, r, registrationContext, domain, email)
+		a.recordMailMonitorEvent(registrationContext, mailmonitor.Event{Kind: "registration", Stage: "registration_complete", Domain: domain, Recipient: email, Detail: "local account setup"})
 		httpsecurity.RedirectLocal(w, r, safeConfirmationReturnPath(requestedReturnPath(r)), http.StatusSeeOther)
 		return
 	}
@@ -16823,6 +16833,7 @@ func (a *App) createSiteRegistrationRequestFromForm(r *http.Request, domain, nam
 	if phone == "" {
 		return "Укажите телефон."
 	}
+	var requestID int
 	err := a.withServerControlDatabaseWrite(r.Context(), "site-registration-request", func(database *sql.DB) error {
 		store := hostingandsupport.Store{DB: database}
 		if planID <= 0 {
@@ -16836,12 +16847,16 @@ func (a *App) createSiteRegistrationRequestFromForm(r *http.Request, domain, nam
 		if _, found := store.PlanByID(r.Context(), planID); !found {
 			return errors.New("Выбранный тариф не найден.")
 		}
-		return store.CreateSiteRequest(r.Context(), domain, name, email, phone, planID)
+		if err := store.CreateSiteRequest(r.Context(), domain, name, email, phone, planID); err != nil {
+			return err
+		}
+		return database.QueryRowContext(r.Context(), `SELECT id FROM site_registration_requests WHERE domain=? AND email=? AND status='pending' ORDER BY id DESC LIMIT 1`, domain, email).Scan(&requestID)
 	})
 	if err != nil {
 		return err.Error()
 	}
 	a.logHostingSupportEvent(r.Context(), "support_request", "created", email, domain, "site registration request")
+	a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{FlowID: mailMonitorFlowID("site-request:" + strconv.Itoa(requestID)), Kind: "registration", Stage: "registration_requested", Domain: domain, Recipient: email, Detail: "awaiting server administrator approval"})
 	a.enqueueSiteRegistrationRequestOwnerEmails(r.Context(), r, domain, name, email, phone, planID)
 	return "Заявка отправлена владельцу сервера. После проверки вы получите ответ на email."
 }
@@ -16980,7 +16995,7 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 		if recipient == "" {
 			recipient = email
 		}
-		result := a.sendServiceEmailNow(r.Context(), r, "account_login_code", domain, recipient, outcome.Code, outcome.Language, link)
+		result := a.sendServiceEmailNow(r.Context(), r, "account_login_code", domain, recipient, outcome.Code, outcome.Language, link, "")
 		status := translationsForRequest(r)["auth_code_sent"]
 		if result.Err != nil {
 			status = translationsForRequest(r)["auth_delivery_failed"]
@@ -22903,6 +22918,8 @@ func (a *App) revisionsPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) expensesPage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
 	if a.redirectToHostingAndSupportMainDomain(w, r) {
 		return
 	}
@@ -23331,7 +23348,7 @@ func billingInvoiceEmailMessage(fromAddress string, invoice hostingandsupport.In
 	amountLabel := hostingandsupport.MoneyLabel(invoice.AmountMinor, invoice.Currency)
 	textBody := "Invoice " + invoice.Number + "\n\nServer: " + invoice.ServerName + "\nPeriod: " + invoice.PeriodStart + " - " + invoice.PeriodEnd + "\nTotal: " + amountLabel + "\nDue: " + invoice.DueAt + "\n\nView and pay: " + invoiceURL + "\nBilling schedule: " + scheduleURL
 	htmlBody := `<!doctype html><html><body style="margin:0;background:#f4f7f8;color:#172126;font-family:Arial,sans-serif"><div style="max-width:680px;margin:0 auto;padding:32px 18px"><div style="background:#fff;border:1px solid #d9e2e5;border-radius:8px;padding:28px"><div style="font-size:22px;font-weight:700;color:#087f8c">SiteBrush</div><h1 style="font-size:26px;margin:24px 0 8px">Invoice ` + template.HTMLEscapeString(invoice.Number) + `</h1><p style="color:#607078">` + template.HTMLEscapeString(invoice.ServerName) + ` · ` + template.HTMLEscapeString(invoice.PeriodStart) + ` - ` + template.HTMLEscapeString(invoice.PeriodEnd) + `</p><div style="font-size:30px;font-weight:700;margin:24px 0">` + template.HTMLEscapeString(amountLabel) + `</div><p>Payment due: <strong>` + template.HTMLEscapeString(invoice.DueAt) + `</strong></p><p><a href="` + template.HTMLEscapeString(invoiceURL) + `" style="display:inline-block;background:#087f8c;color:white;text-decoration:none;padding:12px 18px;border-radius:6px">View invoice and pay</a></p><p style="margin-top:28px;font-size:13px;color:#607078"><a href="` + template.HTMLEscapeString(scheduleURL) + `">Choose invoice day and payment term</a></p></div></div></body></html>`
-	return mailout.Message{Kind: "invoice", From: fromAddress, To: invoice.CustomerEmail, Subject: "SiteBrush invoice " + invoice.Number, Body: textBody, HTMLBody: htmlBody}
+	return mailout.Message{MonitorDomain: invoice.Domain, Kind: "invoice", From: fromAddress, To: invoice.CustomerEmail, Subject: "SiteBrush invoice " + invoice.Number, Body: textBody, HTMLBody: htmlBody}
 }
 
 func (a *App) refreshHostingAndSupportPanel() {
@@ -23911,6 +23928,97 @@ func (a *App) applyHostingAndSupportPanelQuotaChange(snapshot hostingAndSupportP
 
 func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSupportPanelSnapshot) map[string]any {
 	translations := translationsForRequest(r)
+	expenseServers := simplifiedExpenseServerViews(snapshot.Servers, snapshot.Clients, snapshot.Invoices)
+	selectedMailServer := strings.TrimSpace(r.URL.Query().Get("mail_server"))
+	selectedMailServerFound := false
+	for _, server := range expenseServers {
+		if server.Server.ID == selectedMailServer {
+			selectedMailServerFound = true
+			break
+		}
+	}
+	if !selectedMailServerFound {
+		selectedMailServer = ""
+	}
+	mailDays, _ := strconv.Atoi(r.URL.Query().Get("mail_days"))
+	if mailDays != 1 && mailDays != 7 && mailDays != 30 && mailDays != 90 {
+		mailDays = 90
+	}
+	mailStage := strings.TrimSpace(r.URL.Query().Get("mail_stage"))
+	switch mailStage {
+	case "", "queued", "attempt", "retry", "accepted", "failed", "registration_requested", "registration_verified", "registration_complete", "registration_failed", "registration_rejected", "recovery_requested", "recovery_complete", "recovery_failed", "recovery_skipped", "recovery_mail_failed":
+	default:
+		mailStage = ""
+	}
+	mailKind := strings.TrimSpace(r.URL.Query().Get("mail_kind"))
+	if len(mailKind) > 60 {
+		mailKind = ""
+	}
+	mailRecipient := strings.TrimSpace(r.URL.Query().Get("mail_recipient"))
+	if len(mailRecipient) > 254 {
+		mailRecipient = ""
+	}
+	for serverIndex := range expenseServers {
+		expenseServers[serverIndex].MailSelected = (selectedMailServer != "" && selectedMailServer == expenseServers[serverIndex].Server.ID) || (selectedMailServer == "" && serverIndex == 0)
+	}
+	mailNow := time.Now().UTC()
+	if readErr := a.withServerControlDatabaseRead(r.Context(), "hosting-panel-mail-monitor", func(database *sql.DB) error {
+		store := mailmonitor.Store{DB: database}
+		for serverIndex := range expenseServers {
+			serverID := expenseServers[serverIndex].Server.ID
+			if serverID == "" {
+				continue
+			}
+			displayServerID := serverID
+			if expenseServers[serverIndex].Server.Local {
+				serverID = "local"
+			}
+			var err error
+			expenseServers[serverIndex].MailLastDay, err = store.CountsSince(r.Context(), serverID, mailNow.Add(-24*time.Hour))
+			if err != nil {
+				return err
+			}
+			expenseServers[serverIndex].MailLast90Days, err = store.CountsSince(r.Context(), serverID, mailNow.Add(-mailmonitor.Retention))
+			if err != nil {
+				return err
+			}
+			expenseServers[serverIndex].MailAvailable = true
+			if !expenseServers[serverIndex].Server.Local {
+				expenseServers[serverIndex].MailReceivedAt, err = store.LastReceived(r.Context(), serverID)
+				if err != nil {
+					return err
+				}
+				expenseServers[serverIndex].MailAvailable = expenseServers[serverIndex].MailReceivedAt != ""
+			}
+			if selectedMailServer != displayServerID {
+				continue
+			}
+			expenseServers[serverIndex].MailExpanded = true
+			expenseServers[serverIndex].MailFilterDays = mailDays
+			expenseServers[serverIndex].MailFilterStage = mailStage
+			expenseServers[serverIndex].MailFilterKind = mailKind
+			expenseServers[serverIndex].MailFilterRecipient = mailRecipient
+			mailFilter := mailmonitor.Filter{InstallationID: serverID, Since: mailNow.Add(-time.Duration(mailDays) * 24 * time.Hour), Stage: mailStage, Kind: mailKind, Recipient: mailRecipient, Limit: 50}
+			count, err := store.CountFiltered(r.Context(), mailFilter)
+			if err != nil {
+				return err
+			}
+			pagination := mailMonitorPage(r, displayServerID, serverIndex, count, mailDays, mailFilter)
+			expenseServers[serverIndex].MailPagination = pagination
+			mailFilter.Offset = (pagination.Page - 1) * 50
+			expenseServers[serverIndex].MailEvents, err = store.RecentFiltered(r.Context(), mailFilter)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}); readErr != nil {
+		for serverIndex := range expenseServers {
+			expenseServers[serverIndex].MailAvailable = false
+			expenseServers[serverIndex].MailExpanded = false
+		}
+		log.Printf("MAIL monitor panel read failed error=%s", diagnosticlog.SafeLogValue(readErr.Error()))
+	}
 	trialAvailability := a.publicTrialAvailabilityForSettings(r.Context(), snapshot.MainDomain, snapshot.AutoRegistrationEnabled, snapshot.PublicTrialEnabled)
 	trialUnavailableText := ""
 	if !trialAvailability.Enabled {
@@ -23986,7 +24094,7 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 		"ShowCentralRegistry":        snapshot.ShowCentralRegistry,
 		"ShowDemo":                   snapshot.DemoSettings.Enabled && normalizeDomainName(snapshot.DemoSettings.Domain) != "",
 		"SimplifiedExpenses":         true,
-		"ExpenseServers":             simplifiedExpenseServerViews(snapshot.Servers, snapshot.Clients, snapshot.Invoices),
+		"ExpenseServers":             expenseServers,
 	}
 }
 
@@ -24015,8 +24123,58 @@ func (a *App) demoSiteStatusView(ctx context.Context, settings demo.Settings) de
 }
 
 type simplifiedExpenseServerView struct {
-	Server  hostingandsupport.ServerView
-	Clients []simplifiedExpenseClientView
+	Server              hostingandsupport.ServerView
+	Clients             []simplifiedExpenseClientView
+	MailLastDay         mailmonitor.Counts
+	MailLast90Days      mailmonitor.Counts
+	MailAvailable       bool
+	MailReceivedAt      string
+	MailEvents          []mailmonitor.Event
+	MailExpanded        bool
+	MailSelected        bool
+	MailPagination      mailMonitorPagination
+	MailFilterDays      int
+	MailFilterStage     string
+	MailFilterKind      string
+	MailFilterRecipient string
+}
+
+type mailMonitorPagination struct {
+	Page, Pages, Count                      int
+	FirstURL, PreviousURL, NextURL, LastURL string
+	Links                                   []mailMonitorPageLink
+}
+
+type mailMonitorPageLink struct {
+	Number  int
+	URL     string
+	Current bool
+}
+
+func mailMonitorPage(r *http.Request, serverID string, serverIndex, count, days int, filter mailmonitor.Filter) mailMonitorPagination {
+	pages := 1
+	if count > 0 {
+		pages = (count-1)/50 + 1
+	}
+	requestedPage, _ := strconv.Atoi(r.URL.Query().Get("mail_page"))
+	page := min(pages, max(1, requestedPage))
+	pagination := mailMonitorPagination{Page: page, Pages: pages, Count: count}
+	pageURL := func(number int) string {
+		parameters := url.Values{"expenses": {""}, "mail_server": {serverID}, "mail_page": {strconv.Itoa(number)}, "mail_days": {strconv.Itoa(days)}, "mail_stage": {filter.Stage}, "mail_kind": {filter.Kind}, "mail_recipient": {filter.Recipient}}
+		return "?" + parameters.Encode() + "#mail-monitor-" + strconv.Itoa(serverIndex)
+	}
+	if page > 1 {
+		pagination.FirstURL = pageURL(1)
+		pagination.PreviousURL = pageURL(page - 1)
+	}
+	if page < pages {
+		pagination.NextURL = pageURL(page + 1)
+		pagination.LastURL = pageURL(pages)
+	}
+	for number := max(1, page-2); number <= min(pages, page+2); number++ {
+		pagination.Links = append(pagination.Links, mailMonitorPageLink{Number: number, URL: pageURL(number), Current: number == page})
+	}
+	return pagination
 }
 
 type simplifiedExpenseClientView struct {
@@ -25541,6 +25699,7 @@ func (a *App) approveSiteRegistrationRequestFromForm(r *http.Request) string {
 		return err.Error()
 	}
 	a.logHostingSupportEvent(r.Context(), "support_request", "approved", siteRequest.Email, siteRequest.Domain, "site registration request approved")
+	a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{FlowID: mailMonitorFlowID("site-request:" + strconv.Itoa(siteRequest.ID)), Kind: "registration", Stage: "registration_complete", Domain: siteRequest.Domain, Recipient: siteRequest.Email, Detail: "approved by server administrator"})
 	a.reportHostingSnapshotAsync(r.Context())
 	if err := a.enqueueSiteRegistrationDecisionEmail(r.Context(), r, siteRequest, plan, "approved", ownerMessage, temporaryPassword); err != nil {
 		return fmt.Sprintf(translationOrDefault(translations, "billing_status_site_approved_email_failed", "Site %s was activated, but the customer email was not queued: %s"), siteRequest.Domain, err.Error())
@@ -25574,6 +25733,7 @@ func (a *App) rejectSiteRegistrationRequestFromForm(r *http.Request) string {
 		return err.Error()
 	}
 	a.logHostingSupportEvent(r.Context(), "support_request", "rejected", siteRequest.Email, siteRequest.Domain, "site registration request rejected")
+	a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{FlowID: mailMonitorFlowID("site-request:" + strconv.Itoa(siteRequest.ID)), Kind: "registration", Stage: "registration_rejected", Domain: siteRequest.Domain, Recipient: siteRequest.Email})
 	if err := a.enqueueSiteRegistrationDecisionEmail(r.Context(), r, siteRequest, plan, "rejected", ownerMessage, ""); err != nil {
 		return fmt.Sprintf(translationOrDefault(translations, "billing_status_request_rejected_email_failed", "Request was rejected, but the customer email was not queued: %s"), err.Error())
 	}
@@ -25614,7 +25774,7 @@ func (a *App) enqueueSiteRegistrationRequestOwnerEmails(ctx context.Context, r *
 	}, "\n")
 	fromAddress := a.emailFromAddress(a.siteDomain(r.Context(), r))
 	for _, ownerEmail := range ownerEmails {
-		if err := a.enqueueEmail(ctx, mailout.Message{Kind: "site_request", From: fromAddress, To: ownerEmail, Subject: subject, Body: body}); err != nil {
+		if err := a.enqueueEmail(ctx, mailout.Message{MonitorDomain: domain, Kind: "site_request", From: fromAddress, To: ownerEmail, Subject: subject, Body: body}); err != nil {
 			log.Printf("site request owner email enqueue failed domain=%s to=%s error=%v", domain, ownerEmail, err)
 		}
 	}
@@ -25642,11 +25802,13 @@ func (a *App) enqueueSiteRegistrationDecisionEmail(ctx context.Context, r *http.
 		lines = append(lines, "", "Сообщение владельца сервера:", ownerMessage)
 	}
 	return a.enqueueEmail(ctx, mailout.Message{
-		Kind:    "site_request_decision",
-		From:    a.emailFromAddress(siteRequest.Domain),
-		To:      siteRequest.Email,
-		Subject: subject,
-		Body:    strings.Join(lines, "\n"),
+		Kind:          "site_request_decision",
+		MonitorDomain: siteRequest.Domain,
+		MonitorFlowID: mailMonitorFlowID("site-request:" + strconv.Itoa(siteRequest.ID)),
+		From:          a.emailFromAddress(siteRequest.Domain),
+		To:            siteRequest.Email,
+		Subject:       subject,
+		Body:          strings.Join(lines, "\n"),
 	})
 }
 
@@ -26537,11 +26699,12 @@ func (a *App) enqueueManagedSiteDeletionBackupEmails(ctx context.Context, domain
 			continue
 		}
 		err := a.enqueueEmail(ctx, mailout.Message{
-			Kind:    "backup_notice",
-			From:    a.emailFromAddress(domain),
-			To:      strings.TrimSpace(email),
-			Subject: subject,
-			Body:    body,
+			Kind:          "backup_notice",
+			MonitorDomain: domain,
+			From:          a.emailFromAddress(domain),
+			To:            strings.TrimSpace(email),
+			Subject:       subject,
+			Body:          body,
 		})
 		if err != nil {
 			log.Printf("deletion backup email enqueue failed domain=%s to=%s error=%v", domain, email, err)
@@ -27882,12 +28045,14 @@ func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
 	}
 	var userCount int
 	if err := a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM users WHERE domain=? AND email=? AND is_admin=1`, domain, email).Scan(&userCount); err != nil {
+		a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{Kind: "recovery", Stage: "recovery_failed", Domain: domain, Recipient: email, Detail: "account lookup failed"})
 		log.Printf("MAIL recovery lookup failed domain=%q recipient=%q error=%s",
 			diagnosticlog.SafeLogValue(domain), diagnosticlog.SafeLogValue(email), diagnosticlog.SafeLogValue(err.Error()))
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
 	if userCount == 0 {
+		a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{Kind: "recovery", Stage: "recovery_skipped", Domain: domain, Recipient: email, Detail: "administrator address is not registered"})
 		log.Printf("MAIL recovery skipped domain=%q recipient=%q reason=account_not_found",
 			diagnosticlog.SafeLogValue(domain), diagnosticlog.SafeLogValue(email))
 		a.renderRecoveryPage(w, r, map[string]any{
@@ -27899,6 +28064,7 @@ func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.reserveAccountMail(r, domain, email); err != nil {
+		a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{Kind: "recovery", Stage: "recovery_failed", Domain: domain, Recipient: email, Detail: mailmonitor.SafeError(err)})
 		a.renderRecoveryPage(w, r, map[string]any{"Status": err.Error(), "ShowForm": true})
 		return
 	}
@@ -27911,14 +28077,17 @@ func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
 	_, err = a.db.ExecContext(r.Context(), `INSERT INTO email_confirmations(token,domain,action,email,password,verification_code,current_email,return_path,language_code,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
 		recoveryToken, domain, "recover", email, "", recoveryCode, "", requestedReturnPath(r), languageCode, now.Format(time.RFC3339), expiresAt.Format(time.RFC3339))
 	if err != nil {
+		a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{FlowID: mailMonitorFlowID(recoveryToken), Kind: "recovery", Stage: "recovery_failed", Domain: domain, Recipient: email, Detail: "recovery request could not be saved"})
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{FlowID: mailMonitorFlowID(recoveryToken), Kind: "recovery", Stage: "recovery_requested", Domain: domain, Recipient: email})
 	recoveryURL := recoveryConfirmationURL(r, recoveryToken)
 	dnsHelp := a.profileEmailDeliveryDNSHelp(r.Context(), translations, domain, a.emailFromAddress(domain))
-	deliveryResult := a.sendServiceEmailNow(r.Context(), r, "login_code", domain, email, recoveryCode, languageCode, recoveryURL)
+	deliveryResult := a.sendServiceEmailNow(r.Context(), r, "login_code", domain, email, recoveryCode, languageCode, recoveryURL, mailMonitorFlowID(recoveryToken))
 	emailDeliveryView := profileEmailDeliveryViewForResult(translations, deliveryResult, dnsHelp)
 	if deliveryResult.Err != nil {
+		a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{FlowID: mailMonitorFlowID(recoveryToken), MessageID: deliveryResult.ID, Kind: "recovery", Stage: "recovery_mail_failed", Domain: domain, Recipient: email, Detail: mailmonitor.SafeError(deliveryResult.Err), SMTPCode: smtpStatusCodeFromError(deliveryResult.Err)})
 		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, recoveryToken)
 		a.renderRecoveryPage(w, r, map[string]any{
 			"Status":        translationOrDefault(translations, "recover_status_smtp_failed_prefix", "SMTP send failed: ") + deliveryResult.Err.Error(),
@@ -28069,10 +28238,12 @@ func (a *App) completeRecoveryPassword(w http.ResponseWriter, r *http.Request, d
 		a.renderRecoveryPage(w, r, view)
 		return
 	} else if err != nil {
+		a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{FlowID: mailMonitorFlowID(token), Kind: "recovery", Stage: "recovery_failed", Domain: domain, Recipient: email, Detail: "password change could not be saved"})
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	a.clearFailedLoginAttempts(r.Context(), failureDomain, clientIPAddress(r))
+	a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{FlowID: mailMonitorFlowID(token), Kind: "recovery", Stage: "recovery_complete", Domain: domain, Recipient: email})
 	a.clearFailedLoginAttempts(r.Context(), domain, clientIPAddress(r))
 	a.markServiceMailRecipientVerified(r.Context(), domain, email, preferredLanguageCode(r.Header.Get("Accept-Language")))
 	a.logHostingSupportEvent(r.Context(), "password_changed", "success", email, domain, "password recovered")
@@ -28232,7 +28403,7 @@ func (a *App) createAndSendProfileCode(r *http.Request, domain, currentEmail, ne
 	}
 	change := emailChangeMail{Current: currentEmail, Next: nextEmail, URL: requestScheme(r) + "://" + r.Host + "/?profile&profile_resume=" + url.QueryEscape(token)}
 	actionURL := requestScheme(r) + "://" + r.Host + "/?profile&profile_resume=" + url.QueryEscape(token)
-	deliveryResult := a.sendServiceEmailNow(r.Context(), r, codeKind, domain, currentEmail, code, languageCode, actionURL, change)
+	deliveryResult := a.sendServiceEmailNow(r.Context(), r, codeKind, domain, currentEmail, code, languageCode, actionURL, "", change)
 	if deliveryResult.Err != nil {
 		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, token)
 		return "", deliveryResult, dnsHelp, deliveryResult.Err
@@ -28270,7 +28441,7 @@ func (a *App) createAndSendProfileEmailConfirmation(r *http.Request, domain, cur
 	}
 	change := emailChangeMail{Current: currentEmail, Next: email, URL: confirmationURL}
 	dnsHelp := a.profileEmailDeliveryDNSHelp(r.Context(), translations, domain, a.emailFromAddress(domain))
-	deliveryResult := a.sendServiceEmailNow(r.Context(), r, "email_change_confirm", domain, email, confirmationURL, languageCode, confirmationURL, change)
+	deliveryResult := a.sendServiceEmailNow(r.Context(), r, "email_change_confirm", domain, email, confirmationURL, languageCode, confirmationURL, "", change)
 	if deliveryResult.Err != nil {
 		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, token)
 		return deliveryResult, dnsHelp, deliveryResult.Err
@@ -28512,7 +28683,7 @@ func (a *App) createAndSendEmailConfirmation(r *http.Request, action, domain, cu
 	return a.createAndSendEmailConfirmationForLanguage(r, action, domain, currentEmail, email, password, returnPath, preferredLanguageCode(r.Header.Get("Accept-Language")))
 }
 
-func (a *App) createAndSendEmailConfirmationForLanguage(r *http.Request, action, domain, currentEmail, email, password, returnPath, languageCode string, pending ...*EmailConfirmation) error {
+func (a *App) createAndSendEmailConfirmationForLanguage(r *http.Request, action, domain, currentEmail, email, password, returnPath, languageCode string, pending ...*EmailConfirmation) (resultErr error) {
 	translations := translationsForRequest(r)
 	email = strings.TrimSpace(email)
 	if _, err := stdmail.ParseAddress(email); err != nil {
@@ -28538,6 +28709,12 @@ func (a *App) createAndSendEmailConfirmationForLanguage(r *http.Request, action,
 	}
 	confirmationURL := emailConfirmationURL(r, token)
 	if action == "register" {
+		a.recordMailMonitorEvent(databaseContext, mailmonitor.Event{FlowID: mailMonitorFlowID(token), Kind: "registration", Stage: "registration_requested", Domain: domain, Recipient: email})
+		defer func() {
+			if resultErr != nil {
+				a.recordMailMonitorEvent(databaseContext, mailmonitor.Event{FlowID: mailMonitorFlowID(token), Kind: "registration", Stage: "registration_failed", Domain: domain, Recipient: email, Detail: mailmonitor.SafeError(resultErr)})
+			}
+		}()
 		if err := a.reserveAccountMail(r, domain, email); err != nil {
 			return err
 		}
@@ -28550,7 +28727,7 @@ func (a *App) createAndSendEmailConfirmationForLanguage(r *http.Request, action,
 		if err := a.saveRegistrationConfirmation(databaseContext, confirmation); err != nil {
 			return err
 		}
-		if err := a.enqueueServiceEmailContent(databaseContext, r, "email_confirm", domain, email, confirmationURL, "", languageCode, confirmation.Code); err != nil {
+		if err := a.enqueueServiceEmailContent(databaseContext, r, "email_confirm", domain, email, confirmationURL, "", languageCode, confirmation.Code, mailMonitorFlowID(token)); err != nil {
 			a.deleteRegistrationConfirmation(databaseContext, token)
 			return err
 		}
@@ -28601,6 +28778,7 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if confirmation.Action == "register" {
+		a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{FlowID: mailMonitorFlowID(token), Kind: "registration", Stage: "registration_verified", Domain: confirmation.Domain, Recipient: confirmation.Email})
 		if err := a.confirmRegistrationDomain(r, confirmation); err != nil {
 			a.renderEmailConfirmationStatus(w, r, http.StatusConflict, err.Error())
 			return
@@ -28659,6 +28837,7 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 			return err
 		}, func(error) {})
 		if quotaErr != nil {
+			a.recordMailMonitorEvent(registerContext, mailmonitor.Event{FlowID: mailMonitorFlowID(token), Kind: "registration", Stage: "registration_failed", Domain: confirmation.Domain, Recipient: confirmation.Email, Detail: "site content settings unavailable"})
 			a.renderEmailConfirmationStatus(w, r, http.StatusServiceUnavailable, "site content settings unavailable")
 			return
 		}
@@ -28678,6 +28857,7 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 			return nil
 		})
 		if err != nil {
+			a.recordMailMonitorEvent(registerContext, mailmonitor.Event{FlowID: mailMonitorFlowID(token), Kind: "registration", Stage: "registration_failed", Domain: confirmation.Domain, Recipient: confirmation.Email, Detail: mailmonitor.SafeError(err)})
 			a.renderEmailConfirmationStatus(w, r, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -28692,6 +28872,7 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 		a.promoteFirstServerOwner(registerContext, confirmation.Domain, confirmation.Email)
 		a.markServiceMailRecipientVerified(registerContext, confirmation.Domain, confirmation.Email, confirmation.LanguageCode)
 		a.logHostingSupportEvent(registerContext, "client_registered", "success", confirmation.Email, confirmation.Domain, "email confirmed")
+		a.recordMailMonitorEvent(registerContext, mailmonitor.Event{FlowID: mailMonitorFlowID(token), Kind: "registration", Stage: "registration_complete", Domain: confirmation.Domain, Recipient: confirmation.Email})
 		a.reportHostingSnapshotAsync(registerContext)
 		a.createSessionForDomain(w, r, registerContext, confirmation.Domain, confirmation.Email)
 		a.observeAutomaticSSLRegistration(r, confirmation.Domain)
@@ -28751,7 +28932,7 @@ func (a *App) enqueueEmailChangeNotice(r *http.Request, confirmation EmailConfir
 	if err != nil {
 		return err
 	}
-	return a.enqueueEmail(r.Context(), mailout.Message{Kind: "email_change_notice", From: a.emailFromAddress(confirmation.Domain), To: confirmation.CurrentEmail, Subject: "[" + confirmation.Domain + "] " + content.Title, Body: body, HTMLBody: htmlBody})
+	return a.enqueueEmail(r.Context(), mailout.Message{MonitorDomain: confirmation.Domain, Kind: "email_change_notice", From: a.emailFromAddress(confirmation.Domain), To: confirmation.CurrentEmail, Subject: "[" + confirmation.Domain + "] " + content.Title, Body: body, HTMLBody: htmlBody})
 }
 
 func (a *App) emailConfirmationByToken(ctx context.Context, token string) (EmailConfirmation, bool) {
@@ -28840,17 +29021,19 @@ func (a *App) enqueueServiceEmail(ctx context.Context, r *http.Request, codeKind
 }
 
 func (a *App) enqueueServiceEmailWithActionURL(ctx context.Context, r *http.Request, codeKind, domain, recipient, secretValue, actionURL, languageCode string, changes ...emailChangeMail) error {
-	return a.enqueueServiceEmailContent(ctx, r, codeKind, domain, recipient, secretValue, actionURL, languageCode, "", changes...)
+	return a.enqueueServiceEmailContent(ctx, r, codeKind, domain, recipient, secretValue, actionURL, languageCode, "", "", changes...)
 }
 
-func (a *App) enqueueServiceEmailContent(ctx context.Context, r *http.Request, codeKind, domain, recipient, secretValue, actionURL, languageCode, registrationCode string, changes ...emailChangeMail) error {
+func (a *App) enqueueServiceEmailContent(ctx context.Context, r *http.Request, codeKind, domain, recipient, secretValue, actionURL, languageCode, registrationCode, monitorFlowID string, changes ...emailChangeMail) error {
 	message := mailout.Message{
-		Kind:     strings.TrimSpace(codeKind),
-		From:     a.emailFromAddress(domain),
-		To:       recipient,
-		Subject:  emailSubjectForServiceMail(languageCode, codeKind, domain),
-		Body:     emailBodyForServiceMailWithActionURL(languageCode, codeKind, domain, secretValue, actionURL),
-		HTMLBody: emailHTMLBodyForServiceMailWithActionURL(languageCode, codeKind, domain, secretValue, actionURL),
+		MonitorDomain: domain,
+		MonitorFlowID: monitorFlowID,
+		Kind:          strings.TrimSpace(codeKind),
+		From:          a.emailFromAddress(domain),
+		To:            recipient,
+		Subject:       emailSubjectForServiceMail(languageCode, codeKind, domain),
+		Body:          emailBodyForServiceMailWithActionURL(languageCode, codeKind, domain, secretValue, actionURL),
+		HTMLBody:      emailHTMLBodyForServiceMailWithActionURL(languageCode, codeKind, domain, secretValue, actionURL),
 	}
 	if registrationCode != "" {
 		applyRegistrationMail(&message, languageCode, domain, secretValue, registrationCode)
@@ -28904,14 +29087,16 @@ func (a *App) enqueueServiceEmailContent(ctx context.Context, r *http.Request, c
 	return nil
 }
 
-func (a *App) sendServiceEmailNow(ctx context.Context, r *http.Request, codeKind, domain, recipient, secretValue, languageCode, actionURL string, changes ...emailChangeMail) emailDeliveryResult {
+func (a *App) sendServiceEmailNow(ctx context.Context, r *http.Request, codeKind, domain, recipient, secretValue, languageCode, actionURL, monitorFlowID string, changes ...emailChangeMail) emailDeliveryResult {
 	message := mailout.Message{
-		Kind:     strings.TrimSpace(codeKind),
-		From:     a.emailFromAddress(domain),
-		To:       recipient,
-		Subject:  emailSubjectForServiceMail(languageCode, codeKind, domain),
-		Body:     emailBodyForServiceMailWithActionURL(languageCode, codeKind, domain, secretValue, actionURL),
-		HTMLBody: emailHTMLBodyForServiceMailWithActionURL(languageCode, codeKind, domain, secretValue, actionURL),
+		MonitorDomain: domain,
+		MonitorFlowID: monitorFlowID,
+		Kind:          strings.TrimSpace(codeKind),
+		From:          a.emailFromAddress(domain),
+		To:            recipient,
+		Subject:       emailSubjectForServiceMail(languageCode, codeKind, domain),
+		Body:          emailBodyForServiceMailWithActionURL(languageCode, codeKind, domain, secretValue, actionURL),
+		HTMLBody:      emailHTMLBodyForServiceMailWithActionURL(languageCode, codeKind, domain, secretValue, actionURL),
 	}
 	var change *emailChangeMail
 	if len(changes) > 0 && changes[0].Next != "" && (codeKind == "email_change" || codeKind == "email_change_confirm") {
@@ -29114,7 +29299,10 @@ func (a *App) runDurableMailProcess(stop <-chan struct{}, tasks <-chan mailout.T
 	defer cleanupTicker.Stop()
 
 	recoverErr := a.withServerControlDatabaseWrite(context.Background(), "mail-outbox-recover", func(database *sql.DB) error {
-		return mailout.RecoverInterrupted(context.Background(), database, time.Now().UTC())
+		if err := mailout.RecoverInterrupted(context.Background(), database, time.Now().UTC()); err != nil {
+			return err
+		}
+		return (mailmonitor.Store{DB: database}).Purge(context.Background(), time.Now().UTC().Add(-mailmonitor.Retention))
 	})
 	if recoverErr != nil {
 		log.Printf("MAIL outbox recovery failed error=%s", diagnosticlog.SafeLogValue(recoverErr.Error()))
@@ -29142,9 +29330,12 @@ func (a *App) runDurableMailProcess(stop <-chan struct{}, tasks <-chan mailout.T
 		}
 		for _, dueRecord := range dueRecords {
 			claimed := false
-			claimErr := a.withServerControlDatabaseWrite(context.Background(), "mail-outbox-claim", func(database *sql.DB) error {
+			claimErr := a.withMailOutboxTransaction(context.Background(), "mail-outbox-claim", func(database *sql.Tx) error {
 				var err error
 				claimed, err = mailout.Claim(context.Background(), database, dueRecord.ID)
+				if err == nil && claimed {
+					err = appendMailMonitorTask(context.Background(), database, dueRecord.Task, "attempt", dueRecord.Attempts+1, "", nil)
+				}
 				return err
 			})
 			if claimErr != nil || !claimed {
@@ -29162,7 +29353,17 @@ func (a *App) runDurableMailProcess(stop <-chan struct{}, tasks <-chan mailout.T
 				diagnosticlog.SafeLogValue(emailAddressDomain(dueRecord.Message.To)))
 			activeDeliveries++
 			go func(record mailout.Record) {
-				completions <- mailDeliveryCompletion{record: record, err: a.deliverMailRecord(stop, record)}
+				transportReports := make(chan string, 16)
+				completion := mailDeliveryCompletion{record: record, err: a.deliverMailRecord(stop, record, transportReports)}
+				for {
+					select {
+					case details := <-transportReports:
+						completion.transport = details
+					default:
+						completions <- completion
+						return
+					}
+				}
 			}(dueRecord)
 		}
 	}
@@ -29198,9 +29399,12 @@ func (a *App) runDurableMailProcess(stop <-chan struct{}, tasks <-chan mailout.T
 				continue
 			}
 			inserted := false
-			insertErr := a.withServerControlDatabaseWrite(context.Background(), "mail-outbox-insert", func(database *sql.DB) error {
+			insertErr := a.withMailOutboxTransaction(context.Background(), "mail-outbox-insert", func(database *sql.Tx) error {
 				var err error
 				inserted, err = mailout.Insert(context.Background(), database, normalizedTask)
+				if err == nil && inserted {
+					err = appendMailMonitorTask(context.Background(), database, normalizedTask, "queued", 0, "", nil)
+				}
 				return err
 			})
 			sendMailTaskAccepted(task.Accepted, insertErr)
@@ -29214,6 +29418,9 @@ func (a *App) runDurableMailProcess(stop <-chan struct{}, tasks <-chan mailout.T
 					diagnosticlog.SafeLogValue(insertErr.Error()))
 				sendMailDeliveryResult(task.Reply, mailout.Result{ID: normalizedTask.ID, Status: mailout.StatusFailed, Err: insertErr})
 				continue
+			}
+			if inserted {
+				a.reportHostingSnapshotAsync(context.Background())
 			}
 			log.Printf("MAIL queued id=%s kind=%s route=%s recipient=%q recipient_domain=%s expires_at=%s duplicate=%t",
 				diagnosticlog.SafeLogValue(normalizedTask.ID),
@@ -29253,48 +29460,60 @@ func (a *App) runDurableMailProcess(stop <-chan struct{}, tasks <-chan mailout.T
 			attempts := completion.record.Attempts + 1
 			result := mailout.Result{ID: completion.record.ID, Attempts: attempts}
 			terminal := false
-			writeErr := a.withServerControlDatabaseWrite(context.Background(), "mail-outbox-complete", func(database *sql.DB) error {
+			writeErr := a.withMailOutboxTransaction(context.Background(), "mail-outbox-complete", func(database *sql.Tx) error {
 				switch {
 				case completion.err == nil:
 					terminal = true
 					result.Status = mailout.StatusSent
-					return mailout.MarkSent(context.Background(), database, completion.record.ID, attempts, now)
+					if err := mailout.MarkSent(context.Background(), database, completion.record.ID, attempts, now); err != nil {
+						return err
+					}
+					return appendMailMonitorTask(context.Background(), database, completion.record.Task, "accepted", attempts, mailAcceptanceBoundary(completion.record.Route), completion.err, completion.transport)
 				case mailout.IsPermanentFailure(completion.err), !now.Before(completion.record.ExpiresAt):
 					terminal = true
 					result.Status = mailout.StatusFailed
 					result.Err = completion.err
-					return mailout.MarkFailed(context.Background(), database, completion.record.ID, attempts, safeMailDeliveryError(completion.err))
+					if err := mailout.MarkFailed(context.Background(), database, completion.record.ID, attempts, safeMailDeliveryError(completion.err)); err != nil {
+						return err
+					}
+					return appendMailMonitorTask(context.Background(), database, completion.record.Task, "failed", attempts, "", completion.err, completion.transport)
 				default:
 					result.Status = mailout.StatusPending
 					result.NextAttempt = now.Add(mailout.RetryDelayWithJitter(attempts))
-					return mailout.MarkPending(context.Background(), database, completion.record.ID, attempts, result.NextAttempt, safeMailDeliveryError(completion.err))
+					if err := mailout.MarkPending(context.Background(), database, completion.record.ID, attempts, result.NextAttempt, safeMailDeliveryError(completion.err)); err != nil {
+						return err
+					}
+					return appendMailMonitorTask(context.Background(), database, completion.record.Task, "retry", attempts, "", completion.err, completion.transport)
 				}
 			})
 			if writeErr != nil {
 				log.Printf("MAIL completion failed id=%s error=%s", diagnosticlog.SafeLogValue(completion.record.ID), diagnosticlog.SafeLogValue(writeErr.Error()))
 			} else if terminal {
 				if result.Status == mailout.StatusSent {
-					log.Printf("MAIL accepted id=%s kind=%s route=%s attempts=%d recipient=%q recipient_domain=%s accepted_by=%s",
+					a.reportHostingSnapshotAsync(context.Background())
+					log.Printf("MAIL accepted id=%s kind=%s route=%s attempts=%d recipient=%q recipient_domain=%s accepted_by=%s %s",
 						diagnosticlog.SafeLogValue(completion.record.ID),
 						diagnosticlog.SafeLogValue(completion.record.Kind),
 						diagnosticlog.SafeLogValue(completion.record.Route),
 						attempts,
 						diagnosticlog.SafeLogValue(completion.record.Message.To),
 						diagnosticlog.SafeLogValue(emailAddressDomain(completion.record.Message.To)),
-						mailAcceptanceBoundary(completion.record.Route))
+						mailAcceptanceBoundary(completion.record.Route), diagnosticlog.SafeLogValue(completion.transport))
 				} else {
-					log.Printf("MAIL failed id=%s kind=%s route=%s attempts=%d recipient=%q recipient_domain=%s error=%s",
+					a.reportHostingSnapshotAsync(context.Background())
+					log.Printf("MAIL failed id=%s kind=%s route=%s attempts=%d recipient=%q recipient_domain=%s error=%s %s",
 						diagnosticlog.SafeLogValue(completion.record.ID),
 						diagnosticlog.SafeLogValue(completion.record.Kind),
 						diagnosticlog.SafeLogValue(completion.record.Route),
 						attempts,
 						diagnosticlog.SafeLogValue(completion.record.Message.To),
 						diagnosticlog.SafeLogValue(emailAddressDomain(completion.record.Message.To)),
-						fmt.Sprintf("type=%T smtp=%s", completion.err, smtpStatusCodeFromError(completion.err)))
+						fmt.Sprintf("type=%T smtp=%s", completion.err, smtpStatusCodeFromError(completion.err)), diagnosticlog.SafeLogValue(completion.transport))
 				}
 				notifyTerminal(result)
 			} else {
-				log.Printf("MAIL retry scheduled id=%s kind=%s route=%s attempts=%d recipient=%q recipient_domain=%s next_attempt_at=%s error=%s",
+				a.reportHostingSnapshotAsync(context.Background())
+				log.Printf("MAIL retry scheduled id=%s kind=%s route=%s attempts=%d recipient=%q recipient_domain=%s next_attempt_at=%s error=%s %s",
 					diagnosticlog.SafeLogValue(completion.record.ID),
 					diagnosticlog.SafeLogValue(completion.record.Kind),
 					diagnosticlog.SafeLogValue(completion.record.Route),
@@ -29302,7 +29521,7 @@ func (a *App) runDurableMailProcess(stop <-chan struct{}, tasks <-chan mailout.T
 					diagnosticlog.SafeLogValue(completion.record.Message.To),
 					diagnosticlog.SafeLogValue(emailAddressDomain(completion.record.Message.To)),
 					result.NextAttempt.Format(time.RFC3339),
-					fmt.Sprintf("type=%T smtp=%s", completion.err, smtpStatusCodeFromError(completion.err)))
+					fmt.Sprintf("type=%T smtp=%s", completion.err, smtpStatusCodeFromError(completion.err)), diagnosticlog.SafeLogValue(completion.transport))
 			}
 			startDueDeliveries()
 		case <-ticker.C:
@@ -29316,7 +29535,10 @@ func (a *App) runDurableMailProcess(stop <-chan struct{}, tasks <-chan mailout.T
 			startDueDeliveries()
 		case <-cleanupTicker.C:
 			_ = a.withServerControlDatabaseWrite(context.Background(), "mail-outbox-purge", func(database *sql.DB) error {
-				return mailout.PurgeTerminal(context.Background(), database, time.Now().UTC().Add(-mailout.TerminalRetention))
+				if err := mailout.PurgeTerminal(context.Background(), database, time.Now().UTC().Add(-mailout.TerminalRetention)); err != nil {
+					return err
+				}
+				return (mailmonitor.Store{DB: database}).Purge(context.Background(), time.Now().UTC().Add(-mailmonitor.Retention))
 			})
 		}
 	}
@@ -29348,11 +29570,151 @@ func mailAcceptanceBoundary(route string) string {
 	return "recipient_smtp"
 }
 
-func (a *App) deliverMailRecord(stop <-chan struct{}, record mailout.Record) error {
+func mailMonitorDomainForMessage(message mailout.Message) string {
+	if message.MonitorDomain != "" {
+		host := canonicalLocalDomain(message.MonitorDomain)
+		if host == "localhost" {
+			return host
+		}
+		if address := net.ParseIP(host); address != nil {
+			return address.String()
+		}
+		return normalizeDomainName(host)
+	}
+	subject := strings.TrimSpace(message.Subject)
+	if !strings.HasPrefix(subject, "[") {
+		return ""
+	}
+	closingBracket := strings.IndexByte(subject, ']')
+	if closingBracket <= 1 {
+		return ""
+	}
+	return normalizeDomainName(subject[1:closingBracket])
+}
+
+func (a *App) recordMailMonitorEvent(ctx context.Context, event mailmonitor.Event) {
+	if a.controlDatabase == nil {
+		return
+	}
+	if event.InstallationID == "" {
+		event.InstallationID = "local"
+	}
+	writeErr := a.withServerControlDatabaseWrite(ctx, "mail-monitor-event", func(database *sql.DB) error {
+		return (mailmonitor.Store{DB: database}).Append(ctx, event)
+	})
+	if writeErr != nil {
+		log.Printf("MAIL monitor event failed kind=%s stage=%s error=%s", diagnosticlog.SafeLogValue(event.Kind), diagnosticlog.SafeLogValue(event.Stage), diagnosticlog.SafeLogValue(writeErr.Error()))
+		return
+	}
+	if event.InstallationID == "local" {
+		a.reportHostingSnapshotAsync(ctx)
+	}
+}
+
+func mailMonitorFlowID(token string) string {
+	if token == "" {
+		return mailmonitor.NewID()
+	}
+	// Callers supply opaque random confirmation tokens or non-secret request IDs,
+	// never passwords or short verification codes from email content.
+	hash := sha256.Sum256([]byte("sitebrush mail monitor flow\n" + token))
+	return hex.EncodeToString(hash[:])
+}
+
+func appendMailMonitorTask(ctx context.Context, database mailmonitor.Database, task mailout.Task, stage string, attempt int, acceptedBy string, deliveryErr error, transport ...string) error {
+	// Each installation records its own transport attempt. A central relay's SMTP
+	// attempt belongs to the central server; the origin records its relay attempt.
+	detail := mailmonitor.SafeError(deliveryErr)
+	if len(transport) > 0 && transport[0] != "" {
+		if detail == "" {
+			detail = transport[0]
+		} else {
+			detail = transport[0] + "; " + detail
+		}
+	}
+	return (mailmonitor.Store{DB: database}).Append(ctx, mailmonitor.Event{
+		MessageID: task.ID, FlowID: task.Message.MonitorFlowID, Kind: task.Kind,
+		Stage: stage, Domain: mailMonitorDomainForMessage(task.Message), Recipient: task.Message.To,
+		Route: task.Route, AcceptedBy: acceptedBy, Attempt: attempt,
+		SMTPCode: smtpStatusCodeFromError(deliveryErr), Detail: detail,
+	})
+}
+
+func netChanVersionLabel(version string) string {
+	if version == "" || len(version) > 80 {
+		return "unknown"
+	}
+	for _, letter := range version {
+		if !(letter >= 'a' && letter <= 'z' || letter >= 'A' && letter <= 'Z' || letter >= '0' && letter <= '9' || strings.ContainsRune(".+_-", letter)) {
+			return "unknown"
+		}
+	}
+	return version
+}
+
+func netChanPeerVersion(payload []byte) string {
+	var peer struct {
+		Version string `json:"netchan_version"`
+	}
+	if err := json.Unmarshal(payload, &peer); err != nil {
+		return "unknown"
+	}
+	return netChanVersionLabel(peer.Version)
+}
+
+func netChanMailTransportDetails(protocol, peerVersion string) string {
+	network := "unknown"
+	if protocol == "quic" {
+		network = "udp"
+	}
+	if protocol == "tcp+tls" {
+		network = "tcp"
+	}
+	return fmt.Sprintf("transport=netchan netchan_sender=%s netchan_receiver=%s wire_version=2 protocol=%s network=%s fallback=%t", netChanVersionLabel(netchantransport.LibraryVersion()), netChanVersionLabel(peerVersion), protocol, network, protocol == "tcp+tls")
+}
+
+// Diagnostics use the consumer's bounded response channel and cannot hold up a
+// delivery when that consumer has already stopped accepting optional reports.
+func reportMailTransport(reports []chan<- string, details string) {
+	defer func() { _ = recover() }()
+	for _, report := range reports {
+		select {
+		case report <- details:
+		default:
+		}
+	}
+}
+
+func logMailTransportPayload(payload []byte, wireBytes int, details string, status int, deliveryErr error) {
+	var labels struct {
+		MessageID string `json:"message_id"`
+		CodeKind  string `json:"code_kind"`
+	}
+	_ = json.Unmarshal(payload, &labels)
+	log.Printf("MAIL transport id=%s kind=%s %s bytes=%d status=%d error=%s", diagnosticlog.SafeLogValue(labels.MessageID), diagnosticlog.SafeLogValue(labels.CodeKind), diagnosticlog.SafeLogValue(details), wireBytes, status, diagnosticlog.SafeLogValue(mailmonitor.SafeError(deliveryErr)))
+}
+
+// Outbox state and its audit event commit together, including after a crash.
+func (a *App) withMailOutboxTransaction(ctx context.Context, operation string, write func(*sql.Tx) error) error {
+	return a.withServerControlDatabaseWrite(ctx, operation, func(database *sql.DB) error {
+		transaction, err := database.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer transaction.Rollback()
+		if err := write(transaction); err != nil {
+			return err
+		}
+		return transaction.Commit()
+	})
+}
+
+func (a *App) deliverMailRecord(stop <-chan struct{}, record mailout.Record, transportReports ...chan<- string) error {
 	if strings.HasPrefix(record.Kind, "application_update:") {
 		return mailout.PermanentError{Err: errors.New("automatic release mail is disabled; only central manual campaigns are allowed")}
 	}
 	if strings.HasPrefix(record.Kind, updateannounce.Kind) {
+		reportMailTransport(transportReports, "transport=smtp")
 		return a.deliverReleaseAnnouncement(stop, record)
 	}
 
@@ -29369,8 +29731,9 @@ func (a *App) deliverMailRecord(stop <-chan struct{}, record mailout.Record) err
 		}
 	}()
 	if record.Route == mailout.RouteRelay {
-		return a.sendMailoutTaskThroughNetChan(deliveryContext, record)
+		return a.sendMailoutTaskThroughNetChan(deliveryContext, record, transportReports...)
 	}
+	reportMailTransport(transportReports, "transport=smtp")
 	return a.defaultEmailSender()(deliveryContext, record.Message)
 }
 
@@ -29744,7 +30107,7 @@ func (a *App) decodeServiceMailRelayRequest(ctx context.Context, requestBody []b
 	if err := json.Unmarshal(requestBody, &request); err != nil {
 		return serviceMailRequest{}, err
 	}
-	if (strings.TrimSpace(request.CodeKind) == "hosting_snapshot" || request.HostingSnapshot != nil) && !envelope.Encrypted {
+	if (strings.TrimSpace(request.CodeKind) == "hosting_snapshot" || request.HostingSnapshot != nil || request.CodeKind == "mail_monitor_sync" || len(request.MailEvents) > 0) && !envelope.Encrypted {
 		return serviceMailRequest{}, errors.New("hosting snapshot must be encrypted")
 	}
 	return request, nil
@@ -30233,6 +30596,85 @@ func (a *App) reportHostingSnapshotWithTimeout(ctx context.Context) {
 	}
 }
 
+// A separate signed request makes acknowledgment explicit: older peers reject
+// this kind instead of silently discarding fields from an otherwise valid snapshot.
+func (a *App) syncMailMonitor(ctx context.Context, deliver func([]byte) error) error {
+	for {
+		var pendingEvents []mailmonitor.Event
+		if err := a.withServerControlDatabaseRead(ctx, "mail-monitor-export", func(database *sql.DB) error {
+			var err error
+			pendingEvents, err = (mailmonitor.Store{DB: database}).Unsynced(ctx, 80)
+			return err
+		}); err != nil {
+			return err
+		}
+		events := pendingEvents
+		request := serviceMailRequest{Version: 1, NetChanVersion: netchantransport.LibraryVersion(), CodeKind: "mail_monitor_sync", CreatedAt: time.Now().UTC().Format(time.RFC3339)}
+		var payload []byte
+		for {
+			request.MailEvents = events
+			if err := a.signServiceMailRequest(ctx, &request); err != nil {
+				return err
+			}
+			var err error
+			payload, err = json.Marshal(request)
+			if err != nil {
+				return err
+			}
+			if int64(len(payload)) <= mailMonitorSyncPayloadLimitBytes {
+				break
+			}
+			if len(events) <= 1 {
+				return errors.New("mail monitor event exceeds synchronization payload limit")
+			}
+			// JSON escaping can multiply field sizes. Shrink a prefix and sign it
+			// again; only that acknowledged prefix may leave the local backlog.
+			events = events[:len(events)/2]
+		}
+		if err := deliver(payload); err != nil {
+			return err
+		}
+		if err := a.withServerControlDatabaseWrite(ctx, "mail-monitor-acknowledge", func(database *sql.DB) error {
+			return (mailmonitor.Store{DB: database}).MarkSynced(ctx, events)
+		}); err != nil {
+			return err
+		}
+		if len(events) == len(pendingEvents) && len(pendingEvents) < 80 {
+			return nil
+		}
+	}
+}
+
+func (a *App) handleMailMonitorSync(ctx context.Context, request serviceMailRequest) (string, int) {
+	if strings.EqualFold(strings.TrimSpace(request.InstallationID), "local") {
+		return "reserved installation ID", http.StatusForbidden
+	}
+	if err := a.validateSecuritySyncInstallation(ctx, request); err != nil {
+		return "mail monitor authorization failed", http.StatusForbidden
+	}
+	if err := mailmonitor.ValidateBatch(request.MailEvents); err != nil {
+		return err.Error(), http.StatusBadRequest
+	}
+	err := a.withServerControlDatabaseWrite(ctx, "mail-monitor-import", func(database *sql.DB) error {
+		transaction, err := database.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer transaction.Rollback()
+		if err := (mailmonitor.Store{DB: transaction}).Import(ctx, request.InstallationID, request.MailEvents); err != nil {
+			return err
+		}
+		if err := (mailmonitor.Store{DB: transaction}).MarkReceived(ctx, request.InstallationID); err != nil {
+			return err
+		}
+		return transaction.Commit()
+	})
+	if err != nil {
+		return "mail monitor storage failed", http.StatusInternalServerError
+	}
+	return "mail monitor stored", http.StatusOK
+}
+
 func (a *App) reportHostingSnapshot(ctx context.Context) error {
 	if err := a.reportHostingSnapshotNetChan(ctx); err == nil {
 		return nil
@@ -30274,13 +30716,19 @@ func (a *App) reportHostingSnapshot(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
-			return postServiceMailRelayPayload(ctx, snapshotURL, encrypted)
+			return postServiceMailRelayPayload(ctx, snapshotURL, encrypted, payload, true)
 		})
 		if err != nil {
 			lastErr = err
 			continue
 		}
-		return nil
+		return a.syncMailMonitor(ctx, func(payload []byte) error {
+			encrypted, err := serviceMailEncryptPayloadForRelay(snapshotURL, payload)
+			if err != nil {
+				return err
+			}
+			return postServiceMailRelayPayload(ctx, snapshotURL, encrypted, payload, true)
+		})
 	}
 	if lastErr != nil {
 		return lastErr
@@ -30431,6 +30879,12 @@ func (a *App) handleSitebrushNetChanPayload(ctx context.Context, payload []byte)
 	if statusCode >= 400 {
 		log.Printf("hosting snapshot netchan rejected: %s", diagnosticlog.SafeLogValue(status))
 	}
+	if len(responsePayload) == 0 {
+		responsePayload, _ = json.Marshal(struct {
+			Version string `json:"netchan_version"`
+		}{Version: netchantransport.LibraryVersion()})
+	}
+	log.Printf("MAIL received id=%s kind=%s transport=netchan netchan_sender=%s netchan_receiver=%s wire_version=2 status=%d", diagnosticlog.SafeLogValue(request.MessageID), diagnosticlog.SafeLogValue(request.CodeKind), netChanVersionLabel(request.NetChanVersion), netChanVersionLabel(netchantransport.LibraryVersion()), statusCode)
 	return sitebrushNetChanResponse{Status: status, StatusCode: statusCode, Payload: responsePayload}
 }
 
@@ -30867,7 +31321,9 @@ func (a *App) reportHostingSnapshotNetChan(ctx context.Context) error {
 			lastErr = err
 			continue
 		}
-		return nil
+		return a.syncMailMonitor(ctx, func(payload []byte) error {
+			return sendHostingSnapshotNetChanPayload(ctx, deliveries, address, payload)
+		})
 	}
 	if lastErr != nil {
 		return lastErr
@@ -31077,7 +31533,19 @@ func submitHostingSnapshotNetChanDeliveryWithResponse(stop <-chan struct{}, deli
 	}
 }
 
-func performHostingSnapshotNetChanDelivery(stop <-chan struct{}, task hostingSnapshotNetChanDeliveryTask, identity *centralNetChanIdentityProcess) (error, bool) {
+func performHostingSnapshotNetChanDelivery(stop <-chan struct{}, task hostingSnapshotNetChanDeliveryTask, identity *centralNetChanIdentityProcess) (deliveryErr error, notify bool) {
+	protocolReports := make(chan string, 1)
+	protocol := "not_connected"
+	status := 0
+	peerVersion := "unknown"
+	defer func() {
+		select {
+		case selected := <-protocolReports:
+			protocol = selected
+		default:
+		}
+		logMailTransportPayload(task.payload, len(task.payload), netChanMailTransportDetails(protocol, peerVersion), status, deliveryErr)
+	}()
 	address := strings.TrimSpace(task.address)
 	if address == "" {
 		return errors.New("netchan address is empty"), true
@@ -31093,7 +31561,7 @@ func performHostingSnapshotNetChanDelivery(stop <-chan struct{}, task hostingSna
 	if err != nil {
 		return err, true
 	}
-	connection, err := netchan.Dial[sitebrushNetChanRequest](address, netchantransport.Configure(netchan.Config{TLS: configuration}, stop))
+	connection, err := netchan.Dial[sitebrushNetChanRequest](address, netchantransport.ConfigureWithReports(netchan.Config{TLS: configuration}, stop, protocolReports))
 	if err != nil {
 		return err, true
 	}
@@ -31118,6 +31586,8 @@ func performHostingSnapshotNetChanDelivery(stop <-chan struct{}, task hostingSna
 	var responseError error
 	for {
 		select {
+		case selected := <-protocolReports:
+			protocol = selected
 		case <-stop:
 			_ = connection.Abort()
 			return errHostingSnapshotNetChanDeliveryCanceled, false
@@ -31135,6 +31605,8 @@ func performHostingSnapshotNetChanDelivery(stop <-chan struct{}, task hostingSna
 			deliveryComplete = true
 			deliveryFinished = nil
 		case response := <-networkResponse:
+			status = response.StatusCode
+			peerVersion = netChanPeerVersion(response.Payload)
 			responseReceived = true
 			networkResponse = nil
 			if response.StatusCode >= 400 {
@@ -31982,26 +32454,27 @@ func (a *App) sendServiceMailThroughRelay(ctx context.Context, relayURL string, 
 		if err != nil {
 			return err
 		}
-		return postServiceMailRelayPayload(ctx, relayURL, encrypted)
+		return postServiceMailRelayPayload(ctx, relayURL, encrypted, payload, false)
 	})
 }
 
-func (a *App) sendMailoutTaskThroughNetChan(ctx context.Context, record mailout.Record) error {
+func (a *App) sendMailoutTaskThroughNetChan(ctx context.Context, record mailout.Record, transportReports ...chan<- string) error {
 	sourceDomain := a.systemMailOwnerDomain(ctx)
 	request := serviceMailRequest{
-		Version:      2,
-		MessageID:    record.ID,
-		SourceDomain: sourceDomain,
-		Recipient:    strings.TrimSpace(record.Message.To),
-		CodeKind:     strings.TrimSpace(record.Kind),
-		Subject:      strings.TrimSpace(record.Message.Subject),
-		Body:         record.Message.Body,
-		HTMLBody:     record.Message.HTMLBody,
-		ExpiresAt:    record.ExpiresAt.UTC().Format(time.RFC3339Nano),
-		LanguageCode: "en",
-		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+		Version:        2,
+		NetChanVersion: netchantransport.LibraryVersion(),
+		MessageID:      record.ID,
+		SourceDomain:   sourceDomain,
+		Recipient:      strings.TrimSpace(record.Message.To),
+		CodeKind:       strings.TrimSpace(record.Kind),
+		Subject:        strings.TrimSpace(record.Message.Subject),
+		Body:           record.Message.Body,
+		HTMLBody:       record.Message.HTMLBody,
+		ExpiresAt:      record.ExpiresAt.UTC().Format(time.RFC3339Nano),
+		LanguageCode:   "en",
+		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
 	}
-	response, err := a.sendServiceMailNetChanRequest(ctx, &request)
+	response, err := a.sendServiceMailNetChanRequest(ctx, &request, transportReports...)
 	if err == nil {
 		err = serviceMailNetChanResponseError(response)
 	}
@@ -32009,27 +32482,44 @@ func (a *App) sendMailoutTaskThroughNetChan(ctx context.Context, record mailout.
 		return err
 	}
 	registration := serviceMailRequest{
-		Version:      2,
-		CodeKind:     "installation_register",
-		SourceDomain: sourceDomain,
-		LanguageCode: "en",
-		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+		Version:        2,
+		NetChanVersion: netchantransport.LibraryVersion(),
+		CodeKind:       "installation_register",
+		SourceDomain:   sourceDomain,
+		LanguageCode:   "en",
+		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
 	}
-	registrationResponse, registrationErr := a.sendServiceMailNetChanRequest(ctx, &registration)
+	registrationResponse, registrationErr := a.sendServiceMailNetChanRequest(ctx, &registration, transportReports...)
 	if registrationErr != nil {
 		return registrationErr
 	}
 	if responseErr := serviceMailNetChanResponseError(registrationResponse); responseErr != nil {
 		return responseErr
 	}
-	response, err = a.sendServiceMailNetChanRequest(ctx, &request)
+	response, err = a.sendServiceMailNetChanRequest(ctx, &request, transportReports...)
 	if err != nil {
 		return err
 	}
 	return serviceMailNetChanResponseError(response)
 }
 
-func (a *App) sendServiceMailNetChanRequest(ctx context.Context, request *serviceMailRequest) (sitebrushNetChanResponse, error) {
+func (a *App) sendServiceMailNetChanRequest(ctx context.Context, request *serviceMailRequest, transportReports ...chan<- string) (response sitebrushNetChanResponse, deliveryErr error) {
+	protocolReports := make(chan string, 1)
+	protocol := "not_connected"
+	retried := false
+	defer func() {
+		if retried {
+			return
+		}
+		select {
+		case selected := <-protocolReports:
+			protocol = selected
+		default:
+		}
+		details := netChanMailTransportDetails(protocol, netChanPeerVersion(response.Payload))
+		reportMailTransport(transportReports, details)
+		log.Printf("MAIL transport id=%s kind=%s %s status=%d error=%s", diagnosticlog.SafeLogValue(request.MessageID), diagnosticlog.SafeLogValue(request.CodeKind), diagnosticlog.SafeLogValue(details), response.StatusCode, diagnosticlog.SafeLogValue(mailmonitor.SafeError(deliveryErr)))
+	}()
 	relayURL := "https://sitebrush.com" + serviceMailRelayPath
 	relayRequest := *request
 	if !strings.HasPrefix(strings.TrimSpace(relayRequest.CodeKind), "security_") {
@@ -32063,7 +32553,7 @@ func (a *App) sendServiceMailNetChanRequest(ctx context.Context, request *servic
 	if err != nil {
 		return sitebrushNetChanResponse{}, err
 	}
-	connection, err := netchan.Dial[sitebrushNetChanRequest](address, netchantransport.Configure(netchan.Config{TLS: configuration}, ctx.Done()))
+	connection, err := netchan.Dial[sitebrushNetChanRequest](address, netchantransport.ConfigureWithReports(netchan.Config{TLS: configuration}, ctx.Done(), protocolReports))
 	if err != nil {
 		return sitebrushNetChanResponse{}, err
 	}
@@ -32077,6 +32567,8 @@ func (a *App) sendServiceMailNetChanRequest(ctx context.Context, request *servic
 	errorsChannel := connection.Errors
 	for {
 		select {
+		case selected := <-protocolReports:
+			protocol = selected
 		case <-ctx.Done():
 			return sitebrushNetChanResponse{}, ctx.Err()
 		case deliveryErr := <-deliveryFinished:
@@ -32089,7 +32581,8 @@ func (a *App) sendServiceMailNetChanRequest(ctx context.Context, request *servic
 			if response.StatusCode == http.StatusForbidden && strings.TrimSpace(response.Status) == "signature verification failed" {
 				if compatible, changed := legacyHostingRequest(relayRequest); changed {
 					connection.Abort()
-					return a.sendServiceMailNetChanRequest(ctx, &compatible)
+					retried = true
+					return a.sendServiceMailNetChanRequest(ctx, &compatible, transportReports...)
 				}
 			}
 			return response, nil
@@ -32167,12 +32660,14 @@ func (rejection serviceMailRelayRejection) Error() string {
 // once with that schema, freshly signed; totals still include analytics usage.
 // The receiver's signature verification and authorization remain unchanged.
 func legacyHostingRequest(request serviceMailRequest) (serviceMailRequest, bool) {
+	changed := request.NetChanVersion != ""
+	request.NetChanVersion = ""
+	request.Signature = ""
 	if request.HostingSnapshot == nil {
-		return request, false
+		return request, changed
 	}
 	snapshot := *request.HostingSnapshot
 	snapshot.Sites = append([]hostingandsupport.HostingSnapshotSite(nil), snapshot.Sites...)
-	changed := false
 	for index := range snapshot.Sites {
 		if snapshot.Sites[index].AnalyticsBytes != 0 {
 			snapshot.Sites[index].AnalyticsBytes = 0
@@ -32187,6 +32682,7 @@ func legacyHostingRequest(request serviceMailRequest) (serviceMailRequest, bool)
 // Context is the existing compatibility boundary for SQL identity lookup and
 // external transports. Requests and snapshot slices belong to this one sender.
 func (a *App) sendSignedRequestCompatible(boundary context.Context, request serviceMailRequest, deliver func([]byte) error) error {
+	request.NetChanVersion = netchantransport.LibraryVersion()
 	for attempt := 0; attempt < 2; attempt++ {
 		if err := a.signServiceMailRequest(boundary, &request); err != nil {
 			return err
@@ -32232,7 +32728,18 @@ func (a *App) signServiceMailRequest(ctx context.Context, request *serviceMailRe
 	return nil
 }
 
-func postServiceMailRelayPayload(ctx context.Context, relayURL string, payload []byte) error {
+func postServiceMailRelayPayload(ctx context.Context, relayURL string, payload, plainPayload []byte, fallback bool) (deliveryErr error) {
+	protocol := "not_connected"
+	status := 0
+	peerVersion := "unknown"
+	defer func() {
+		transport := "https"
+		if parsed, err := url.Parse(relayURL); err == nil && parsed.Scheme == "http" {
+			transport = "http"
+		}
+		details := fmt.Sprintf("transport=%s netchan_sender=%s netchan_receiver=%s fallback=%t protocol=%s network=tcp", transport, netChanVersionLabel(netchantransport.LibraryVersion()), peerVersion, fallback, protocol)
+		logMailTransportPayload(plainPayload, len(payload), details, status, deliveryErr)
+	}()
 	sendCtx, cancel := context.WithTimeout(ctx, serviceMailRelayTimeout)
 	defer cancel()
 	httpRequest, err := http.NewRequestWithContext(sendCtx, http.MethodPost, relayURL, bytes.NewReader(payload))
@@ -32245,6 +32752,9 @@ func postServiceMailRelayPayload(ctx context.Context, relayURL string, payload [
 		return err
 	}
 	defer httpResponse.Body.Close()
+	protocol = httpResponse.Proto
+	peerVersion = netChanVersionLabel(httpResponse.Header.Get("X-SiteBrush-NetChan-Version"))
+	status = httpResponse.StatusCode
 	if httpResponse.StatusCode < 200 || httpResponse.StatusCode >= 300 {
 		bodyBytes, _ := io.ReadAll(io.LimitReader(httpResponse.Body, 1024))
 		return serviceMailRelayRejection{StatusCode: httpResponse.StatusCode, Message: strings.TrimSpace(string(bodyBytes))}
@@ -32253,6 +32763,7 @@ func postServiceMailRelayPayload(ctx context.Context, relayURL string, payload [
 }
 
 func (a *App) serviceMailRelayEndpoint(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("X-SiteBrush-NetChan-Version", netchantransport.LibraryVersion())
 	if r.Method == http.MethodGet && r.URL.Query().Get("identity") == "ed25519" {
 		if normalizeDomainName(r.Host) != "sitebrush.com" || !a.hostingSnapshotNetChanListenerEnabled(r.Context()) {
 			http.NotFound(w, r)
@@ -32293,6 +32804,7 @@ func (a *App) serviceMailRelayEndpoint(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) hostingSnapshotEndpoint(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("X-SiteBrush-NetChan-Version", netchantransport.LibraryVersion())
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -32317,6 +32829,9 @@ func (a *App) hostingSnapshotEndpoint(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleHostingSnapshotRequest(ctx context.Context, request serviceMailRequest, sourceIP string) (string, int) {
+	if request.CodeKind == "mail_monitor_sync" {
+		return a.handleMailMonitorSync(ctx, request)
+	}
 	if strings.TrimSpace(request.CodeKind) != "hosting_snapshot" {
 		return "unsupported snapshot kind", http.StatusBadRequest
 	}
@@ -32412,11 +32927,12 @@ func (a *App) notifyHostingSnapshotDiskThreshold(ctx context.Context, snapshot h
 		formatFileSize(snapshot.DiskFreeBytes),
 		formatFileSize(snapshot.DiskTotalBytes))
 	err := a.enqueueEmail(ctx, mailout.Message{
-		Kind:    "disk_alert",
-		From:    a.emailFromAddress("sitebrush.com"),
-		To:      ownerEmail,
-		Subject: "SiteBrush: на сервере заканчивается место",
-		Body:    body,
+		Kind:          "disk_alert",
+		MonitorDomain: snapshot.ServerDomain,
+		From:          a.emailFromAddress("sitebrush.com"),
+		To:            ownerEmail,
+		Subject:       "SiteBrush: на сервере заканчивается место",
+		Body:          body,
 	})
 	if err != nil {
 		log.Printf("hosting disk alert email enqueue failed installation=%s error=%s",
@@ -32451,6 +32967,9 @@ func (a *App) notifyServiceMailRequestHostingSnapshotDiskThreshold(ctx context.C
 }
 
 func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request, request serviceMailRequest, sourceIP string) (string, int) {
+	if request.CodeKind == "mail_monitor_sync" {
+		return a.handleMailMonitorSync(ctx, request)
+	}
 	if strings.HasPrefix(request.CodeKind, "application_update:") || strings.HasPrefix(request.CodeKind, updateannounce.Kind) {
 		return "release announcements require a central administrator campaign", http.StatusForbidden
 	}
@@ -32589,12 +33108,13 @@ func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request
 		relayDomain = "sitebrush.com"
 	}
 	message := mailout.Message{
-		Kind:     strings.TrimSpace(request.CodeKind),
-		From:     serviceMailRelayFromAddress(relayDomain),
-		To:       strings.TrimSpace(request.Recipient),
-		Subject:  emailSubjectForServiceMail(request.LanguageCode, request.CodeKind, request.SourceDomain),
-		Body:     emailBodyForServiceMailWithActionURL(request.LanguageCode, request.CodeKind, request.SourceDomain, request.SecretValue, request.ActionURL),
-		HTMLBody: emailHTMLBodyForServiceMailWithActionURL(request.LanguageCode, request.CodeKind, request.SourceDomain, request.SecretValue, request.ActionURL),
+		Kind:          strings.TrimSpace(request.CodeKind),
+		MonitorDomain: request.SourceDomain,
+		From:          serviceMailRelayFromAddress(relayDomain),
+		To:            strings.TrimSpace(request.Recipient),
+		Subject:       emailSubjectForServiceMail(request.LanguageCode, request.CodeKind, request.SourceDomain),
+		Body:          emailBodyForServiceMailWithActionURL(request.LanguageCode, request.CodeKind, request.SourceDomain, request.SecretValue, request.ActionURL),
+		HTMLBody:      emailHTMLBodyForServiceMailWithActionURL(request.LanguageCode, request.CodeKind, request.SourceDomain, request.SecretValue, request.ActionURL),
 	}
 	if request.RegistrationCode != "" {
 		applyRegistrationMail(&message, request.LanguageCode, request.SourceDomain, request.SecretValue, request.RegistrationCode)
@@ -32653,6 +33173,7 @@ func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request
 
 func (a *App) deliverAcceptedServiceMail(ctx context.Context, request serviceMailRequest, message mailout.Message) emailDeliveryResult {
 	message.MessageID = strings.TrimSpace(request.MessageID)
+	message.MonitorDomain = request.SourceDomain
 	if a.durableMailTasks == nil {
 		sendContext, cancel := context.WithTimeout(ctx, 45*time.Second)
 		defer cancel()
@@ -47537,7 +48058,7 @@ func releaseAnnouncementMessage(language, reason, version, current, recipient st
 		notice.Direction = "rtl"
 	}
 	body, markup, err := authmail.RenderNotice(notice)
-	return mailout.Message{Kind: updateannounce.Kind + version, From: "SiteBrush <sitebrush@sitebrush.com>", To: recipient, Subject: notice.Title, Body: body, HTMLBody: markup}, err
+	return mailout.Message{MonitorDomain: "sitebrush.com", Kind: updateannounce.Kind + version, From: "SiteBrush <sitebrush@sitebrush.com>", To: recipient, Subject: notice.Title, Body: body, HTMLBody: markup}, err
 }
 
 func runStoppedUpdateSupervisor(config serverRunConfig) error {

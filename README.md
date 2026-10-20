@@ -881,3 +881,7 @@ After the first updater-enabled installation has been started on sitebrush.com, 
 On a missing page, the archive form accepts SiteBrush ZIP backups, Safari `.webarchive` files (binary or XML), and ZIP files containing Firefox's saved HTML and adjacent resource folder. A common outer folder and macOS ZIP metadata are accepted. A Firefox archive must have one unambiguous main HTML document; HTML frames inside its resource folder are preserved as resources.
 
 Browser saves create the main page at the exact address entered in the form and then open its visual editor. Captured images, stylesheets, fonts, scripts and frames receive local URLs in a unique import directory. HTML, CSS imports, `srcset`, relative URLs, base URLs and text encodings are rewritten without fetching external resources. Missing remote resources remain external links. Normal authentication, CSRF checks, storage quotas, transactional page storage and revision/publication rules apply. SiteBrush ZIP backups continue to restore their original page hierarchy beneath the chosen base path.
+
+## Mail and account monitoring
+
+Server administrators can inspect delivery attempts, full recipients, safe SMTP diagnostics and registration/recovery outcomes under each server's metrics in Hosting and support. See [Mail and account monitoring](doc/mail-monitoring.md) for counters, remote synchronization and 90-day retention.

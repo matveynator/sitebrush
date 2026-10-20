@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"runtime/debug"
 	"time"
 
 	"github.com/matveynator/netchan/v2"
@@ -22,13 +23,38 @@ const tcpDialTimeout = 3 * time.Second
 // alternative schemes retain their NetChan meaning. No application request is
 // submitted until one transport has completed its authenticated handshake.
 func Configure(configuration netchan.Config, stop <-chan struct{}) netchan.Config {
+	return ConfigureWithReports(configuration, stop, nil)
+}
+
+// Each consumer owns its report channel. A successful authenticated physical
+// connection reports the driver actually selected, including reconnects.
+func ConfigureWithReports(configuration netchan.Config, stop <-chan struct{}, reports chan<- string) netchan.Config {
 	drivers := append([]transport.Driver(nil), configuration.Transports...)
-	configuration.Transports = append(drivers, priorityDriver{stop: stop})
+	configuration.Transports = append(drivers, priorityDriver{stop: stop, reports: reports}, reportedDriver{Driver: quic.Driver{}, stop: stop, reports: reports})
 	return configuration
 }
 
+func LibraryVersion() string {
+	build, ok := debug.ReadBuildInfo()
+	if ok {
+		for _, dependency := range build.Deps {
+			if dependency.Path == "github.com/matveynator/netchan/v2" {
+				if dependency.Replace != nil {
+					if dependency.Replace.Version != "" {
+						return dependency.Replace.Version
+					}
+					return "local-replace"
+				}
+				return dependency.Version
+			}
+		}
+	}
+	return "unknown"
+}
+
 type priorityDriver struct {
-	stop <-chan struct{}
+	stop    <-chan struct{}
+	reports chan<- string
 }
 
 func (priorityDriver) Scheme() string { return "tcp" }
@@ -38,13 +64,41 @@ func (driver priorityDriver) Dial(endpoint transport.Endpoint, options transport
 	quicEndpoint.Scheme, quicEndpoint.Legacy = "quic", false
 	connection, quicErr := dialTransport(quic.Driver{}, quicEndpoint, options, driver.stop, quicDialTimeout)
 	if quicErr == nil {
-		return connection, nil
+		return reportConnection(connection, "quic", driver.reports, driver.stop, options)
 	}
 	connection, tcpErr := dialTransport(tcp.Driver{}, endpoint, options, driver.stop, tcpDialTimeout)
 	if tcpErr != nil {
 		return nil, errors.Join(fmt.Errorf("QUIC: %w", quicErr), fmt.Errorf("TCP/TLS: %w", tcpErr))
 	}
-	return connection, nil
+	return reportConnection(connection, "tcp+tls", driver.reports, driver.stop, options)
+}
+
+type reportedDriver struct {
+	transport.Driver
+	stop    <-chan struct{}
+	reports chan<- string
+}
+
+func (driver reportedDriver) Dial(endpoint transport.Endpoint, options transport.Options) (net.Conn, error) {
+	connection, err := driver.Driver.Dial(endpoint, options)
+	if err != nil {
+		return nil, err
+	}
+	return reportConnection(connection, driver.Scheme(), driver.reports, driver.stop, options)
+}
+
+func reportConnection(connection net.Conn, protocol string, reports chan<- string, stop <-chan struct{}, options transport.Options) (net.Conn, error) {
+	if reports == nil {
+		return connection, nil
+	}
+	select {
+	case reports <- protocol:
+		return connection, nil
+	case <-stop:
+	case <-options.OwnerDone:
+	}
+	_ = connection.Close()
+	return nil, net.ErrClosed
 }
 
 type dialResult struct {

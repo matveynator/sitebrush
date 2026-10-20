@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/matveynator/sitebrush/v2/pkg/hostingandsupport"
+	"github.com/matveynator/sitebrush/v2/pkg/mailmonitor"
 	"github.com/matveynator/sitebrush/v2/pkg/mailout"
 	"github.com/matveynator/sitebrush/v2/pkg/updateannounce"
 	_ "modernc.org/sqlite"
@@ -52,6 +53,54 @@ func TestUpdateNotificationTransactionFailureDoesNotSuppressRetry(t *testing.T) 
 	}
 	if err := database.QueryRow(`SELECT COUNT(1) FROM mail_outbox`).Scan(&count); err != nil || count != 1 {
 		t.Fatal("campaign could not retry", count, err)
+	}
+}
+
+func TestCampaignJournalDomainSurvivesOutboxReload(t *testing.T) {
+	database := newCampaignDatabase(t)
+	seedAnnouncementOwner(t, database)
+	now := time.Now().UTC()
+	if err := updateannounce.Start(database, "2", "feature", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`CREATE TRIGGER reject_journal BEFORE INSERT ON mail_monitor_events BEGIN SELECT RAISE(ABORT,'journal unavailable'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateannounce.Queue(database, now); err == nil {
+		t.Fatal("campaign acknowledged an untracked message")
+	}
+	for _, table := range []string{"release_campaign_deliveries", "mail_outbox"} {
+		var count int
+		if err := database.QueryRow(`SELECT COUNT(1) FROM ` + table).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("journal failure left %s rows: %d, %v", table, count, err)
+		}
+	}
+	if _, err := database.Exec(`DROP TRIGGER reject_journal`); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := updateannounce.Queue(database, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx := context.Background()
+	records, err := mailout.Due(ctx, database, now.Add(time.Minute), 10)
+	if err != nil || len(records) != 1 {
+		t.Fatalf("campaign outbox: %+v, %v", records, err)
+	}
+	record := records[0]
+	store := mailmonitor.Store{DB: database}
+	if err := store.Append(ctx, mailmonitor.Event{MessageID: record.ID, Kind: record.Kind, Stage: "attempt", Recipient: record.Message.To, Attempt: 1}); err != nil {
+		t.Fatal(err)
+	}
+	events, err := store.Recent(ctx, "local", time.Time{}, 10, 0)
+	if err != nil || len(events) != 2 {
+		t.Fatalf("campaign journal: %+v, %v", events, err)
+	}
+	for _, event := range events {
+		if event.Domain != "sitebrush.com" || event.Recipient != "owner@example.com" || event.MessageID != record.ID {
+			t.Fatalf("campaign lost monitoring metadata: %+v", event)
+		}
 	}
 }
 
