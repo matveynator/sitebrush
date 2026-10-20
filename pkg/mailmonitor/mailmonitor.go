@@ -124,13 +124,20 @@ func (store Store) Append(ctx context.Context, event Event) error {
 	}
 	// Later attempts are reconstructed from the outbox; inherit non-secret flow
 	// metadata from the first event so it survives process restarts.
-	if event.MessageID != "" && event.FlowID == "" {
+	if event.MessageID != "" && (event.FlowID == "" || event.Domain == "") {
 		rows, queryErr := store.DB.QueryContext(ctx, `SELECT flow_id,domain FROM mail_monitor_events WHERE installation_id=? AND message_id=? AND stage='queued' LIMIT 1`, event.InstallationID, event.MessageID)
 		if queryErr != nil {
 			return queryErr
 		}
 		if rows.Next() {
-			queryErr = rows.Scan(&event.FlowID, &event.Domain)
+			var queuedFlowID, queuedDomain string
+			queryErr = rows.Scan(&queuedFlowID, &queuedDomain)
+			if event.FlowID == "" {
+				event.FlowID = queuedFlowID
+			}
+			if event.Domain == "" {
+				event.Domain = queuedDomain
+			}
 		}
 		if queryErr == nil {
 			queryErr = rows.Err()

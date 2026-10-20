@@ -2877,7 +2877,7 @@ func TestHostingSnapshotDiskThresholdSendsSingleOwnerEmail(t *testing.T) {
 	if len(messages) != 1 {
 		t.Fatalf("messages = %d, want 1", len(messages))
 	}
-	if messages[0].To != "owner@example.com" || !strings.Contains(messages[0].Body, "занято 96%") {
+	if messages[0].MonitorDomain != snapshot.ServerDomain || messages[0].To != "owner@example.com" || !strings.Contains(messages[0].Body, "занято 96%") {
 		t.Fatalf("unexpected alert message: %#v", messages[0])
 	}
 }
@@ -2945,7 +2945,7 @@ func TestAutomaticBillingCreatesInvoicesForClientAndServerOwner(t *testing.T) {
 		select {
 		case delivery := <-mailQueue:
 			invoice := invoicesByEmail[delivery.Message.To]
-			if delivery.Message.HTMLBody == "" || !strings.Contains(delivery.Message.HTMLBody, invoice.Number) {
+			if invoice.Domain == "" || delivery.Message.MonitorDomain != invoice.Domain || delivery.Message.HTMLBody == "" || !strings.Contains(delivery.Message.HTMLBody, invoice.Number) {
 				t.Fatalf("invoice email = %#v", delivery.Message)
 			}
 			deliveredTo[delivery.Message.To] = true
@@ -4693,6 +4693,9 @@ func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
 			t.Fatalf("confirmation email has no localized HTML action: %#v", mailJob.Message)
 		}
 		pendingToken = confirmationTokenFromBody(t, mailJob.Message.Body)
+		if mailJob.Message.MonitorDomain != "localhost" || mailJob.Message.MonitorFlowID != mailMonitorFlowID(pendingToken) {
+			t.Fatal("registration mail lost explicit monitoring metadata")
+		}
 	default:
 		t.Fatal("registration did not enqueue confirmation email")
 	}
@@ -5144,7 +5147,7 @@ func TestSiteRequestStoresApplicantWithoutCreatingAdmin(t *testing.T) {
 	}
 	select {
 	case mailJob := <-application.emailDelivery:
-		if mailJob.Message.To != "owner@example.com" || !strings.Contains(mailJob.Message.Body, "customer.example") {
+		if mailJob.Message.MonitorDomain != "customer.example" || mailJob.Message.To != "owner@example.com" || !strings.Contains(mailJob.Message.Body, "customer.example") {
 			t.Fatalf("owner notification = %#v", mailJob.Message)
 		}
 	default:
@@ -7365,6 +7368,9 @@ func TestSecurityIncidentReportBypassesUnavailableStealthSettings(t *testing.T) 
 	}
 	select {
 	case delivery := <-application.emailDelivery:
+		if delivery.Message.MonitorDomain != domain {
+			t.Fatalf("incident report lost site domain: %+v", delivery.Message)
+		}
 		if delivery.Message.Kind != "security_incident_report" {
 			t.Fatalf("queued email kind = %q, want security_incident_report", delivery.Message.Kind)
 		}
@@ -15646,6 +15652,9 @@ func TestBillingDeleteSiteCreatesVerifiedBackupBeforeRemovingData(t *testing.T) 
 	}
 	select {
 	case mailJob := <-application.emailDelivery:
+		if mailJob.Message.MonitorDomain != domain {
+			t.Fatalf("backup notice lost site domain: %+v", mailJob.Message)
+		}
 		if mailJob.Message.To != "admin@customer.example" && mailJob.Message.To != "owner@example.com" {
 			t.Fatalf("unexpected backup email recipient: %+v", mailJob.Message)
 		}
@@ -23120,7 +23129,7 @@ func TestUpdateEmailLinkAndBrandedNotice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if message.From != "SiteBrush <sitebrush@sitebrush.com>" || !strings.Contains(message.HTMLBody, "Посмотреть и обновиться прямо сейчас") || !strings.Contains(message.HTMLBody, link) || !strings.Contains(message.HTMLBody, "#087f8c") {
+	if message.MonitorDomain != "sitebrush.com" || message.From != "SiteBrush <sitebrush@sitebrush.com>" || !strings.Contains(message.HTMLBody, "Посмотреть и обновиться прямо сейчас") || !strings.Contains(message.HTMLBody, link) || !strings.Contains(message.HTMLBody, "#087f8c") {
 		t.Fatal("missing central branded mail and safe CTA")
 	}
 	for _, required := range []string{"%s", "permanent_admin_token"} {
@@ -26005,5 +26014,25 @@ func TestMailMonitorRegistrationProgressAndCompletion(t *testing.T) {
 	events = mailMonitorEventsForTest(t, application, "local")
 	if len(events) != 2 || events[0].Stage != "registration_complete" || events[0].FlowID != events[1].FlowID {
 		t.Fatalf("completion not correlated: %+v", events)
+	}
+}
+
+func TestMailMonitorDoesNotDeriveFlowFromMailSecrets(t *testing.T) {
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
+	application, _ := newTestApplication(t)
+	captureImmediateProfileEmail(t, application)
+	request := httptest.NewRequest(http.MethodPost, "https://localhost/?recover", nil)
+	secretURL := "https://localhost/?recovery_token=123456&email_confirm=password"
+	result := application.sendServiceEmailNow(request.Context(), request, "login_code", "localhost", "owner@example.com", secretURL, "en", secretURL, "")
+	if result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	select {
+	case delivery := <-application.emailDelivery:
+		if delivery.Message.MonitorFlowID != "" || delivery.Message.MonitorDomain != "localhost" {
+			t.Fatal("monitoring inferred an identifier from email credentials")
+		}
+	default:
+		t.Fatal("service mail was not sent")
 	}
 }

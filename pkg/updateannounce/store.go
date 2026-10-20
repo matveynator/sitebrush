@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/matveynator/sitebrush/v2/pkg/mailmonitor"
 	"github.com/matveynator/sitebrush/v2/pkg/mailout"
 )
 
@@ -208,9 +209,17 @@ func Queue(database *sql.DB, now time.Time) error {
 			id := "release-announcement-" + hex.EncodeToString(digest[:])
 			_, err = transaction.Exec(`INSERT INTO release_campaign_deliveries(version,email,installations,message_id,status) VALUES(?,?,?,?,'waiting')`, campaign.Version, email, string(encoded), id)
 			if err == nil {
-				task := mailout.NewTask(Kind+campaign.Version, mailout.RouteLocal, mailout.Message{From: "SiteBrush <sitebrush@sitebrush.com>", To: email}, expires, nil)
+				task := mailout.NewTask(Kind+campaign.Version, mailout.RouteLocal, mailout.Message{MonitorDomain: "sitebrush.com", From: "SiteBrush <sitebrush@sitebrush.com>", To: email}, expires, nil)
 				task.ID = id
 				_, err = mailout.Insert(context.Background(), transaction, task)
+				if err == nil {
+					// Campaigns bypass the application enqueue path. Commit their
+					// journal metadata with the outbox so attempts can inherit it.
+					err = (mailmonitor.Store{DB: transaction}).Append(context.Background(), mailmonitor.Event{
+						MessageID: task.ID, Kind: task.Kind, Stage: "queued",
+						Domain: task.Message.MonitorDomain, Recipient: task.Message.To, Route: task.Route,
+					})
+				}
 			}
 			if err != nil {
 				transaction.Rollback()

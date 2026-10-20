@@ -8923,11 +8923,12 @@ func (a *App) securityIncidentReport(w http.ResponseWriter, r *http.Request) {
 	body.WriteString("\nFind this incident in Analytics → Security by searching for Incident ID " + block.IncidentID + ".\n")
 
 	mail := mailout.Message{
-		Kind:    "security_incident_report",
-		From:    a.emailFromAddress(domain),
-		To:      strings.TrimSpace(administratorEmail),
-		Subject: "SiteBrush security incident " + block.IncidentID + " on " + domain,
-		Body:    body.String(),
+		Kind:          "security_incident_report",
+		MonitorDomain: domain,
+		From:          a.emailFromAddress(domain),
+		To:            strings.TrimSpace(administratorEmail),
+		Subject:       "SiteBrush security incident " + block.IncidentID + " on " + domain,
+		Body:          body.String(),
 	}
 	if err = a.enqueueEmail(r.Context(), mail); err != nil {
 		http.Error(w, "could not send incident report", http.StatusServiceUnavailable)
@@ -16988,7 +16989,7 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 		if recipient == "" {
 			recipient = email
 		}
-		result := a.sendServiceEmailNow(r.Context(), r, "account_login_code", domain, recipient, outcome.Code, outcome.Language, link)
+		result := a.sendServiceEmailNow(r.Context(), r, "account_login_code", domain, recipient, outcome.Code, outcome.Language, link, "")
 		status := translationsForRequest(r)["auth_code_sent"]
 		if result.Err != nil {
 			status = translationsForRequest(r)["auth_delivery_failed"]
@@ -23341,7 +23342,7 @@ func billingInvoiceEmailMessage(fromAddress string, invoice hostingandsupport.In
 	amountLabel := hostingandsupport.MoneyLabel(invoice.AmountMinor, invoice.Currency)
 	textBody := "Invoice " + invoice.Number + "\n\nServer: " + invoice.ServerName + "\nPeriod: " + invoice.PeriodStart + " - " + invoice.PeriodEnd + "\nTotal: " + amountLabel + "\nDue: " + invoice.DueAt + "\n\nView and pay: " + invoiceURL + "\nBilling schedule: " + scheduleURL
 	htmlBody := `<!doctype html><html><body style="margin:0;background:#f4f7f8;color:#172126;font-family:Arial,sans-serif"><div style="max-width:680px;margin:0 auto;padding:32px 18px"><div style="background:#fff;border:1px solid #d9e2e5;border-radius:8px;padding:28px"><div style="font-size:22px;font-weight:700;color:#087f8c">SiteBrush</div><h1 style="font-size:26px;margin:24px 0 8px">Invoice ` + template.HTMLEscapeString(invoice.Number) + `</h1><p style="color:#607078">` + template.HTMLEscapeString(invoice.ServerName) + ` · ` + template.HTMLEscapeString(invoice.PeriodStart) + ` - ` + template.HTMLEscapeString(invoice.PeriodEnd) + `</p><div style="font-size:30px;font-weight:700;margin:24px 0">` + template.HTMLEscapeString(amountLabel) + `</div><p>Payment due: <strong>` + template.HTMLEscapeString(invoice.DueAt) + `</strong></p><p><a href="` + template.HTMLEscapeString(invoiceURL) + `" style="display:inline-block;background:#087f8c;color:white;text-decoration:none;padding:12px 18px;border-radius:6px">View invoice and pay</a></p><p style="margin-top:28px;font-size:13px;color:#607078"><a href="` + template.HTMLEscapeString(scheduleURL) + `">Choose invoice day and payment term</a></p></div></div></body></html>`
-	return mailout.Message{Kind: "invoice", From: fromAddress, To: invoice.CustomerEmail, Subject: "SiteBrush invoice " + invoice.Number, Body: textBody, HTMLBody: htmlBody}
+	return mailout.Message{MonitorDomain: invoice.Domain, Kind: "invoice", From: fromAddress, To: invoice.CustomerEmail, Subject: "SiteBrush invoice " + invoice.Number, Body: textBody, HTMLBody: htmlBody}
 }
 
 func (a *App) refreshHostingAndSupportPanel() {
@@ -25739,7 +25740,7 @@ func (a *App) enqueueSiteRegistrationRequestOwnerEmails(ctx context.Context, r *
 	}, "\n")
 	fromAddress := a.emailFromAddress(a.siteDomain(r.Context(), r))
 	for _, ownerEmail := range ownerEmails {
-		if err := a.enqueueEmail(ctx, mailout.Message{Kind: "site_request", From: fromAddress, To: ownerEmail, Subject: subject, Body: body}); err != nil {
+		if err := a.enqueueEmail(ctx, mailout.Message{MonitorDomain: domain, Kind: "site_request", From: fromAddress, To: ownerEmail, Subject: subject, Body: body}); err != nil {
 			log.Printf("site request owner email enqueue failed domain=%s to=%s error=%v", domain, ownerEmail, err)
 		}
 	}
@@ -26664,11 +26665,12 @@ func (a *App) enqueueManagedSiteDeletionBackupEmails(ctx context.Context, domain
 			continue
 		}
 		err := a.enqueueEmail(ctx, mailout.Message{
-			Kind:    "backup_notice",
-			From:    a.emailFromAddress(domain),
-			To:      strings.TrimSpace(email),
-			Subject: subject,
-			Body:    body,
+			Kind:          "backup_notice",
+			MonitorDomain: domain,
+			From:          a.emailFromAddress(domain),
+			To:            strings.TrimSpace(email),
+			Subject:       subject,
+			Body:          body,
 		})
 		if err != nil {
 			log.Printf("deletion backup email enqueue failed domain=%s to=%s error=%v", domain, email, err)
@@ -28048,7 +28050,7 @@ func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
 	a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{FlowID: mailMonitorFlowID(recoveryToken), Kind: "recovery", Stage: "recovery_requested", Domain: domain, Recipient: email})
 	recoveryURL := recoveryConfirmationURL(r, recoveryToken)
 	dnsHelp := a.profileEmailDeliveryDNSHelp(r.Context(), translations, domain, a.emailFromAddress(domain))
-	deliveryResult := a.sendServiceEmailNow(r.Context(), r, "login_code", domain, email, recoveryCode, languageCode, recoveryURL)
+	deliveryResult := a.sendServiceEmailNow(r.Context(), r, "login_code", domain, email, recoveryCode, languageCode, recoveryURL, mailMonitorFlowID(recoveryToken))
 	emailDeliveryView := profileEmailDeliveryViewForResult(translations, deliveryResult, dnsHelp)
 	if deliveryResult.Err != nil {
 		a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{FlowID: mailMonitorFlowID(recoveryToken), MessageID: deliveryResult.ID, Kind: "recovery", Stage: "recovery_mail_failed", Domain: domain, Recipient: email, Detail: mailmonitor.SafeError(deliveryResult.Err), SMTPCode: smtpStatusCodeFromError(deliveryResult.Err)})
@@ -28367,7 +28369,7 @@ func (a *App) createAndSendProfileCode(r *http.Request, domain, currentEmail, ne
 	}
 	change := emailChangeMail{Current: currentEmail, Next: nextEmail, URL: requestScheme(r) + "://" + r.Host + "/?profile&profile_resume=" + url.QueryEscape(token)}
 	actionURL := requestScheme(r) + "://" + r.Host + "/?profile&profile_resume=" + url.QueryEscape(token)
-	deliveryResult := a.sendServiceEmailNow(r.Context(), r, codeKind, domain, currentEmail, code, languageCode, actionURL, change)
+	deliveryResult := a.sendServiceEmailNow(r.Context(), r, codeKind, domain, currentEmail, code, languageCode, actionURL, "", change)
 	if deliveryResult.Err != nil {
 		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, token)
 		return "", deliveryResult, dnsHelp, deliveryResult.Err
@@ -28405,7 +28407,7 @@ func (a *App) createAndSendProfileEmailConfirmation(r *http.Request, domain, cur
 	}
 	change := emailChangeMail{Current: currentEmail, Next: email, URL: confirmationURL}
 	dnsHelp := a.profileEmailDeliveryDNSHelp(r.Context(), translations, domain, a.emailFromAddress(domain))
-	deliveryResult := a.sendServiceEmailNow(r.Context(), r, "email_change_confirm", domain, email, confirmationURL, languageCode, confirmationURL, change)
+	deliveryResult := a.sendServiceEmailNow(r.Context(), r, "email_change_confirm", domain, email, confirmationURL, languageCode, confirmationURL, "", change)
 	if deliveryResult.Err != nil {
 		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, token)
 		return deliveryResult, dnsHelp, deliveryResult.Err
@@ -28691,7 +28693,7 @@ func (a *App) createAndSendEmailConfirmationForLanguage(r *http.Request, action,
 		if err := a.saveRegistrationConfirmation(databaseContext, confirmation); err != nil {
 			return err
 		}
-		if err := a.enqueueServiceEmailContent(databaseContext, r, "email_confirm", domain, email, confirmationURL, "", languageCode, confirmation.Code); err != nil {
+		if err := a.enqueueServiceEmailContent(databaseContext, r, "email_confirm", domain, email, confirmationURL, "", languageCode, confirmation.Code, mailMonitorFlowID(token)); err != nil {
 			a.deleteRegistrationConfirmation(databaseContext, token)
 			return err
 		}
@@ -28896,7 +28898,7 @@ func (a *App) enqueueEmailChangeNotice(r *http.Request, confirmation EmailConfir
 	if err != nil {
 		return err
 	}
-	return a.enqueueEmail(r.Context(), mailout.Message{Kind: "email_change_notice", From: a.emailFromAddress(confirmation.Domain), To: confirmation.CurrentEmail, Subject: "[" + confirmation.Domain + "] " + content.Title, Body: body, HTMLBody: htmlBody})
+	return a.enqueueEmail(r.Context(), mailout.Message{MonitorDomain: confirmation.Domain, Kind: "email_change_notice", From: a.emailFromAddress(confirmation.Domain), To: confirmation.CurrentEmail, Subject: "[" + confirmation.Domain + "] " + content.Title, Body: body, HTMLBody: htmlBody})
 }
 
 func (a *App) emailConfirmationByToken(ctx context.Context, token string) (EmailConfirmation, bool) {
@@ -28985,13 +28987,13 @@ func (a *App) enqueueServiceEmail(ctx context.Context, r *http.Request, codeKind
 }
 
 func (a *App) enqueueServiceEmailWithActionURL(ctx context.Context, r *http.Request, codeKind, domain, recipient, secretValue, actionURL, languageCode string, changes ...emailChangeMail) error {
-	return a.enqueueServiceEmailContent(ctx, r, codeKind, domain, recipient, secretValue, actionURL, languageCode, "", changes...)
+	return a.enqueueServiceEmailContent(ctx, r, codeKind, domain, recipient, secretValue, actionURL, languageCode, "", "", changes...)
 }
 
-func (a *App) enqueueServiceEmailContent(ctx context.Context, r *http.Request, codeKind, domain, recipient, secretValue, actionURL, languageCode, registrationCode string, changes ...emailChangeMail) error {
+func (a *App) enqueueServiceEmailContent(ctx context.Context, r *http.Request, codeKind, domain, recipient, secretValue, actionURL, languageCode, registrationCode, monitorFlowID string, changes ...emailChangeMail) error {
 	message := mailout.Message{
 		MonitorDomain: domain,
-		MonitorFlowID: mailMonitorServiceFlowID(codeKind, secretValue, actionURL),
+		MonitorFlowID: monitorFlowID,
 		Kind:          strings.TrimSpace(codeKind),
 		From:          a.emailFromAddress(domain),
 		To:            recipient,
@@ -29051,10 +29053,10 @@ func (a *App) enqueueServiceEmailContent(ctx context.Context, r *http.Request, c
 	return nil
 }
 
-func (a *App) sendServiceEmailNow(ctx context.Context, r *http.Request, codeKind, domain, recipient, secretValue, languageCode, actionURL string, changes ...emailChangeMail) emailDeliveryResult {
+func (a *App) sendServiceEmailNow(ctx context.Context, r *http.Request, codeKind, domain, recipient, secretValue, languageCode, actionURL, monitorFlowID string, changes ...emailChangeMail) emailDeliveryResult {
 	message := mailout.Message{
 		MonitorDomain: domain,
-		MonitorFlowID: mailMonitorServiceFlowID(codeKind, secretValue, actionURL),
+		MonitorFlowID: monitorFlowID,
 		Kind:          strings.TrimSpace(codeKind),
 		From:          a.emailFromAddress(domain),
 		To:            recipient,
@@ -29524,24 +29526,6 @@ func mailAcceptanceBoundary(route string) string {
 	return "recipient_smtp"
 }
 
-func mailMonitorServiceFlowID(kind, secret, actionURL string) string {
-	if kind != "email_confirm" && kind != "login_code" {
-		return ""
-	}
-	for _, candidate := range []string{actionURL, secret} {
-		parsed, err := url.Parse(candidate)
-		if err != nil {
-			continue
-		}
-		for _, parameter := range []string{"email_confirm", "recovery_token"} {
-			if token := parsed.Query().Get(parameter); token != "" {
-				return mailMonitorFlowID(token)
-			}
-		}
-	}
-	return ""
-}
-
 func mailMonitorDomainForMessage(message mailout.Message) string {
 	if message.MonitorDomain != "" {
 		return normalizeDomainName(message.MonitorDomain)
@@ -29580,6 +29564,8 @@ func mailMonitorFlowID(token string) string {
 	if token == "" {
 		return mailmonitor.NewID()
 	}
+	// Callers supply opaque random confirmation tokens or non-secret request IDs,
+	// never passwords or short verification codes from email content.
 	hash := sha256.Sum256([]byte("sitebrush mail monitor flow\n" + token))
 	return hex.EncodeToString(hash[:])
 }
@@ -32742,11 +32728,12 @@ func (a *App) notifyHostingSnapshotDiskThreshold(ctx context.Context, snapshot h
 		formatFileSize(snapshot.DiskFreeBytes),
 		formatFileSize(snapshot.DiskTotalBytes))
 	err := a.enqueueEmail(ctx, mailout.Message{
-		Kind:    "disk_alert",
-		From:    a.emailFromAddress("sitebrush.com"),
-		To:      ownerEmail,
-		Subject: "SiteBrush: на сервере заканчивается место",
-		Body:    body,
+		Kind:          "disk_alert",
+		MonitorDomain: snapshot.ServerDomain,
+		From:          a.emailFromAddress("sitebrush.com"),
+		To:            ownerEmail,
+		Subject:       "SiteBrush: на сервере заканчивается место",
+		Body:          body,
 	})
 	if err != nil {
 		log.Printf("hosting disk alert email enqueue failed installation=%s error=%s",
@@ -32922,12 +32909,13 @@ func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request
 		relayDomain = "sitebrush.com"
 	}
 	message := mailout.Message{
-		Kind:     strings.TrimSpace(request.CodeKind),
-		From:     serviceMailRelayFromAddress(relayDomain),
-		To:       strings.TrimSpace(request.Recipient),
-		Subject:  emailSubjectForServiceMail(request.LanguageCode, request.CodeKind, request.SourceDomain),
-		Body:     emailBodyForServiceMailWithActionURL(request.LanguageCode, request.CodeKind, request.SourceDomain, request.SecretValue, request.ActionURL),
-		HTMLBody: emailHTMLBodyForServiceMailWithActionURL(request.LanguageCode, request.CodeKind, request.SourceDomain, request.SecretValue, request.ActionURL),
+		Kind:          strings.TrimSpace(request.CodeKind),
+		MonitorDomain: request.SourceDomain,
+		From:          serviceMailRelayFromAddress(relayDomain),
+		To:            strings.TrimSpace(request.Recipient),
+		Subject:       emailSubjectForServiceMail(request.LanguageCode, request.CodeKind, request.SourceDomain),
+		Body:          emailBodyForServiceMailWithActionURL(request.LanguageCode, request.CodeKind, request.SourceDomain, request.SecretValue, request.ActionURL),
+		HTMLBody:      emailHTMLBodyForServiceMailWithActionURL(request.LanguageCode, request.CodeKind, request.SourceDomain, request.SecretValue, request.ActionURL),
 	}
 	if request.RegistrationCode != "" {
 		applyRegistrationMail(&message, request.LanguageCode, request.SourceDomain, request.SecretValue, request.RegistrationCode)
@@ -47871,7 +47859,7 @@ func releaseAnnouncementMessage(language, reason, version, current, recipient st
 		notice.Direction = "rtl"
 	}
 	body, markup, err := authmail.RenderNotice(notice)
-	return mailout.Message{Kind: updateannounce.Kind + version, From: "SiteBrush <sitebrush@sitebrush.com>", To: recipient, Subject: notice.Title, Body: body, HTMLBody: markup}, err
+	return mailout.Message{MonitorDomain: "sitebrush.com", Kind: updateannounce.Kind + version, From: "SiteBrush <sitebrush@sitebrush.com>", To: recipient, Subject: notice.Title, Body: body, HTMLBody: markup}, err
 }
 
 func runStoppedUpdateSupervisor(config serverRunConfig) error {

@@ -71,6 +71,54 @@ func TestSafeErrorRemovesSecretsAndControls(t *testing.T) {
 	}
 }
 
+func TestAttemptInheritsOnlyMissingMetadata(t *testing.T) {
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "metadata.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	for _, statement := range SchemaQueries() {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store := Store{DB: database}
+	ctx := context.Background()
+	for _, scenario := range []struct {
+		name         string
+		queuedDomain string
+		queuedFlowID string
+		domain       string
+		flowID       string
+		wantDomain   string
+		wantFlowID   string
+	}{
+		{"reload", "site.example", "flow", "", "", "site.example", "flow"},
+		{"domain without flow", "site.example", "", "", "", "site.example", ""},
+		{"known domain", "", "flow", "site.example", "", "site.example", "flow"},
+		{"known flow", "site.example", "old-flow", "", "new-flow", "site.example", "new-flow"},
+		{"explicit metadata", "old.example", "old-flow", "site.example", "new-flow", "site.example", "new-flow"},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			for _, event := range []Event{
+				{MessageID: scenario.name, Kind: "invoice", Stage: "queued", Domain: scenario.queuedDomain, FlowID: scenario.queuedFlowID},
+				{MessageID: scenario.name, Kind: "invoice", Stage: "attempt", Domain: scenario.domain, FlowID: scenario.flowID, Attempt: 1},
+			} {
+				if err := store.Append(ctx, event); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var domain, flowID string
+			if err := database.QueryRow(`SELECT domain,flow_id FROM mail_monitor_events WHERE message_id=? AND stage='attempt'`, scenario.name).Scan(&domain, &flowID); err != nil {
+				t.Fatal(err)
+			}
+			if domain != scenario.wantDomain || flowID != scenario.wantFlowID {
+				t.Fatalf("metadata = (%q, %q), want (%q, %q)", domain, flowID, scenario.wantDomain, scenario.wantFlowID)
+			}
+		})
+	}
+}
+
 func TestJournalFiltersRetentionAndFlowReplay(t *testing.T) {
 	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "journal.db"))
 	if err != nil {
