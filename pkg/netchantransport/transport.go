@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/matveynator/netchan/v2"
@@ -45,15 +46,28 @@ func LibraryVersion() string {
 			if dependency.Path == "github.com/matveynator/netchan/v2" {
 				if dependency.Replace != nil {
 					if dependency.Replace.Version != "" {
-						return dependency.Replace.Version
+						return diagnosticVersion(dependency.Replace.Version)
 					}
 					return "local-replace"
 				}
-				return dependency.Version
+				return diagnosticVersion(dependency.Version)
 			}
 		}
 	}
 	return "unknown"
+}
+
+// Pseudo-version timestamps resemble secret tokens to the journal redactor.
+// Keep an unambiguous version plus commit without weakening secret filtering.
+func diagnosticVersion(version string) string {
+	parts := strings.Split(version, "-")
+	if len(parts) == 3 && len(parts[2]) == 12 && len(parts[1]) >= 14 {
+		timestamp := strings.TrimPrefix(parts[1], "0.")
+		if len(timestamp) == 14 && strings.Trim(timestamp, "0123456789") == "" && strings.Trim(parts[2], "0123456789abcdef") == "" {
+			return parts[0] + "-dev." + parts[2]
+		}
+	}
+	return version
 }
 
 type priorityDriver struct {
