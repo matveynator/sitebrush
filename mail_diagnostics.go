@@ -48,3 +48,17 @@ func receivedMailProtocol(ctx context.Context) string {
 	}
 	return "unknown"
 }
+
+// Only receiver-owned stream networks are translated into protocol labels.
+func mailNetworkReceipt(network string) mailReceiptTransport {
+	switch network {
+	case "tcp", "tcp4", "tcp6":
+		return mailReceiptTransport{"netchan", "tcp+tls", "tcp"}
+	case "udp", "udp4", "udp6":
+		return mailReceiptTransport{"netchan", "quic", "udp"}
+	case "rfcomm", "ble":
+		return mailReceiptTransport{"netchan", network, "bluetooth"}
+	default:
+		return mailReceiptTransport{"netchan", "unknown", "unknown"}
+	}
+}

@@ -26380,14 +26380,14 @@ func TestMailReceiverJournalsOwnTCPAndQUICProtocols(t *testing.T) {
 			if protocol == "quic" {
 				scheme, network = "quic", "udp"
 			}
-			listener, err := netchan.Listen[sitebrushNetChanRequest](scheme+"://127.0.0.1:0", netchantransport.ReceiverConfig(netchan.Config{TLS: serverTLS}, protocol))
+			listener, err := netchan.Listen[sitebrushNetChanRequest]("127.0.0.1:0", netchantransport.Configure(netchan.Config{TLS: serverTLS}, nil))
 			if err != nil {
 				t.Fatal(err)
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			serverDone := make(chan struct{})
-			receiverContext := context.WithValue(ctx, mailReceiptContextKey{}, mailReceiptTransport{"netchan", protocol, network})
+			receiverContext := ctx
 			go func() {
 				defer close(serverDone)
 				app.serveHostingSnapshotNetChanListener(ctx.Done(), receiverContext, listener)
@@ -26401,7 +26401,7 @@ func TestMailReceiverJournalsOwnTCPAndQUICProtocols(t *testing.T) {
 			if !strings.Contains(address, "://") {
 				address = scheme + "://" + address
 			}
-			connection, err := netchan.Dial[sitebrushNetChanRequest](address, netchantransport.ReceiverConfig(netchan.Config{TLS: clientTLS}, protocol))
+			connection, err := netchan.Dial[sitebrushNetChanRequest](address, netchan.Config{TLS: clientTLS})
 			if err != nil {
 				t.Fatal(err)
 			}

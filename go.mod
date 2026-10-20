@@ -7,7 +7,7 @@ require (
 	github.com/go-webauthn/webauthn v0.17.4
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/jchv/go-webview-selector v0.0.0-20250730141630-a5f64a01ba3a
-	github.com/matveynator/netchan/v2 v2.1.0
+	github.com/matveynator/netchan/v2 v2.1.1-0.20261020123155-8e38ec468921
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	golang.org/x/crypto v0.57.0

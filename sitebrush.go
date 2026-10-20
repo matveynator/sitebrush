@@ -30772,25 +30772,12 @@ func (a *App) startHostingSnapshotNetChanListener(ctx context.Context) {
 			log.Printf("hosting snapshot netchan TLS failed: %v", err)
 			return
 		}
-		// Independent TCP and QUIC listeners bind the same numeric port on their
-		// respective networks. Each logical session now has receiver-owned metadata;
-		// concurrent clients and reconnects cannot overwrite a shared protocol label.
-		for _, protocol := range []string{"tcp+tls", "quic"} {
-			protocol := protocol
-			go func() {
-				scheme, network := "tcp", "tcp"
-				if protocol == "quic" {
-					scheme, network = "quic", "udp"
-				}
-				listener, err := netchan.Listen[sitebrushNetChanRequest](scheme+"://"+net.JoinHostPort("", hostingSnapshotNetChanPort), netchantransport.ReceiverConfig(netchan.Config{TLS: configuration}, protocol))
-				if err != nil {
-					log.Printf("hosting snapshot netchan listen failed protocol=%s error_type=%T", protocol, err)
-					return
-				}
-				receiverContext := context.WithValue(ctx, mailReceiptContextKey{}, mailReceiptTransport{"netchan", protocol, network})
-				a.serveHostingSnapshotNetChanListener(ctx.Done(), receiverContext, listener)
-			}()
+		listener, err := netchan.Listen[sitebrushNetChanRequest](net.JoinHostPort("", hostingSnapshotNetChanPort), netchantransport.Configure(netchan.Config{TLS: configuration}, ctx.Done()))
+		if err != nil {
+			log.Printf("hosting snapshot netchan listen failed: %v", err)
+			return
 		}
+		a.serveHostingSnapshotNetChanListener(ctx.Done(), ctx, listener)
 	}()
 }
 
@@ -30833,7 +30820,7 @@ func (a *App) serveHostingSnapshotNetChanConnection(stop <-chan struct{}, legacy
 		select {
 		case <-stop:
 			return
-		case task, isOpen := <-connection.Receive:
+		case received, isOpen := <-connection.ReceiveWithMetadata:
 			if !isOpen {
 				return
 			}
@@ -30844,10 +30831,12 @@ func (a *App) serveHostingSnapshotNetChanConnection(stop <-chan struct{}, legacy
 				return
 			default:
 			}
+			task := received.Value
 			if task.Response == nil {
 				continue
 			}
-			response := a.handleSitebrushNetChanPayload(legacyContext, task.Payload)
+			receiveContext := context.WithValue(legacyContext, mailReceiptContextKey{}, mailNetworkReceipt(received.Network))
+			response := a.handleSitebrushNetChanPayload(receiveContext, task.Payload)
 			select {
 			case <-stop:
 				return
@@ -32538,7 +32527,7 @@ func (a *App) sendMailoutTaskThroughNetChan(ctx context.Context, record mailout.
 		LanguageCode:   "en",
 		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
 	}
-	registrationResponse, registrationErr := a.sendServiceMailNetChanRequest(ctx, &registration, transportReports...)
+	registrationResponse, registrationErr := a.sendServiceMailNetChanRequest(ctx, &registration)
 	if registrationErr != nil {
 		return registrationErr
 	}

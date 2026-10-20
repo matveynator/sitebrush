@@ -70,6 +70,9 @@ func TestSMTPDiagnosticsFinalReplyAndSecretIsolation(t *testing.T) {
 			if (err != nil) != (scenario.rejectAt != "") {
 				t.Fatalf("unexpected result: %v", err)
 			}
+			if want := strings.HasPrefix(scenario.code, "5"); IsPermanentFailure(err) != want {
+				t.Fatalf("permanent failure classification: err=%v want=%t", err, want)
+			}
 			last := events[len(events)-1]
 			if last.Outcome != scenario.outcome || last.Stage != scenario.stage || last.Code != scenario.code || last.EnhancedCode != scenario.enhanced || last.TLSMode != "plaintext" {
 				t.Fatalf("wrong diagnostic: %+v", last)

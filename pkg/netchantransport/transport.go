@@ -249,21 +249,3 @@ func acceptConnections(listener net.Listener, accepted chan<- dialResult, closeR
 		}
 	}
 }
-
-// ReceiverConfig keeps sessions on one physical driver so their receiver-side
-// protocol is known without trusting a sender-provided label or correlating
-// unrelated connection reports. TCP and UDP may listen on the same port.
-func ReceiverConfig(configuration netchan.Config, protocol string) netchan.Config {
-	if protocol == "quic" {
-		configuration.Transports = []transport.Driver{ownedQUICDriver{}}
-	} else {
-		configuration.Transports = []transport.Driver{tcp.Driver{}}
-	}
-	return configuration
-}
-
-type ownedQUICDriver struct{ quic.Driver }
-
-func (ownedQUICDriver) Listen(endpoint transport.Endpoint, options transport.Options) (net.Listener, error) {
-	return listenQUIC(endpoint, options)
-}
