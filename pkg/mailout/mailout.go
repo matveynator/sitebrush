@@ -19,16 +19,17 @@ import (
 
 type Message struct {
 	// Monitoring metadata is recorded when queued and never included in the email.
-	MonitorDomain string
-	MonitorFlowID string
-	Reports       chan<- SMTPReport `json:"-"`
-	MessageID     string
-	Kind          string
-	From          string
-	To            string
-	Subject       string
-	Body          string
-	HTMLBody      string
+	MonitorDomain   string
+	MonitorClientIP string
+	MonitorFlowID   string
+	Reports         chan<- SMTPReport `json:"-"`
+	MessageID       string
+	Kind            string
+	From            string
+	To              string
+	Subject         string
+	Body            string
+	HTMLBody        string
 }
 
 const DeliveryQueueSize = 256

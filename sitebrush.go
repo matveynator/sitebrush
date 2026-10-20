@@ -66,6 +66,7 @@ import (
 	browserstats "github.com/matveynator/sitebrush/v2/pkg/analytics"
 	"github.com/matveynator/sitebrush/v2/pkg/appupdate"
 	"github.com/matveynator/sitebrush/v2/pkg/authmail"
+	"github.com/matveynator/sitebrush/v2/pkg/captcha"
 	"github.com/matveynator/sitebrush/v2/pkg/channelacme"
 	appcli "github.com/matveynator/sitebrush/v2/pkg/cli"
 	"github.com/matveynator/sitebrush/v2/pkg/crawler"
@@ -81,6 +82,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/hostingandsupport"
 	"github.com/matveynator/sitebrush/v2/pkg/httpsecurity"
 	"github.com/matveynator/sitebrush/v2/pkg/imageprepare"
+	"github.com/matveynator/sitebrush/v2/pkg/mailguard"
 	"github.com/matveynator/sitebrush/v2/pkg/mailmonitor"
 	"github.com/matveynator/sitebrush/v2/pkg/mailout"
 	sitemcp "github.com/matveynator/sitebrush/v2/pkg/mcp"
@@ -3253,6 +3255,7 @@ type siteAnalyticsEvent struct {
 	VisitorID                    string
 	TrustedPeer, IndexingCrawler bool
 	SecurityBlocked              bool
+	SecurityCategory             string
 	SecurityAlreadyBlocked       bool
 	IsAdmin                      bool
 	IsAsset                      bool
@@ -5506,6 +5509,18 @@ func (a *App) runSecurityAnalytics(stop <-chan struct{}) {
 			}
 		case event := <-a.securityAnalytics:
 			domain := a.resolveAnalyticsDomain(event.Domain, resolutions)
+			if domain == "" && event.SecurityCategory == mailguard.RegistrationMailAbuse {
+				var ownerDomain string
+				adapterContext, cancel := context.WithTimeout(context.Background(), time.Second)
+				ownerErr := a.withServerControlDatabaseRead(adapterContext, "registration-abuse-owner", func(database *sql.DB) error {
+					ownerDomain, _ = (hostingandsupport.Store{DB: database}).OwnerDomain(adapterContext)
+					return nil
+				})
+				cancel()
+				if ownerErr == nil && ownerDomain != "" {
+					domain = a.resolveAnalyticsDomain(ownerDomain, resolutions)
+				}
+			}
 			if domain == "" {
 				continue
 			}
@@ -5528,6 +5543,7 @@ func (a *App) runSecurityAnalytics(stop <-chan struct{}) {
 			}
 			observation := browserstats.RequestObservation{Time: event.OccurredAt, IP: address, Path: event.Path, Query: event.Query, Method: event.Method, Status: event.StatusCode, Bytes: event.Bytes, Agent: event.UserAgent, Language: analyticsLanguageLabel(event.AcceptLanguage), Country: country, City: city, Blocked: event.SecurityBlocked, AlreadyBlocked: event.SecurityAlreadyBlocked, ServerLoadHigh: sitebrushSecurityLoadWasHigh(hostLoadHistory, event.OccurredAt), Trusted: event.TrustedPeer, IndexingCrawler: event.IndexingCrawler}
 			observation.Latitude, observation.Longitude, observation.GeoKnown = latitude, longitude, geoKnown
+			observation.ConfirmedCategory = event.SecurityCategory
 			category := state.Record(observation)
 			if category != "" && a.attackGuard != nil {
 				description := securityIncidentDescription(category, event.Path, event.StatusCode)
@@ -5742,6 +5758,8 @@ func securityIncidentDescription(category, requestPath string, statusCode int) s
 		return "Injection pattern detected in request to " + pathText + suffix
 	case "enumeration":
 		return "Scanned many distinct URLs; latest request: " + pathText + suffix
+	case mailguard.RegistrationMailAbuse:
+		return "Repeated unsuccessful registrations to different recipients reached the three-day cooldown"
 	case "authentication-failures":
 		return "Repeated authentication failures; latest request: " + pathText + suffix
 	case "scanner-client":
@@ -8315,6 +8333,7 @@ func analyticsSecurityTypeAxes() []string {
 		"cms",
 		"admin-discovery",
 		"authentication-failures",
+		mailguard.RegistrationMailAbuse,
 		"repository",
 		"source-backup",
 		"sitebrush-exploit",
@@ -10080,6 +10099,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 		application.billingInvoices = application.startBillingInvoiceProcess(ctx.Done())
 		application.startDomainLogWorker(ctx)
 		application.startAnalyticsWorkers(ctx)
+		go application.runRegistrationCooldownProcess(ctx.Done())
 		application.startServerOwnerRecoveryWorker(ctx)
 		application.startDemoSiteCleanupWorker(ctx)
 		application.centralNetChanIdentity = application.startCentralNetChanIdentity(ctx.Done())
@@ -12300,6 +12320,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	}
 	if requestWithSensitiveCookieRequiresHTTPS(r) {
 		// Dispatch the password-free boundary explicitly so mixed query flags cannot bypass HTTPS.
+		if registrationCaptchaRequest(r) {
+			a.captchaImage(w, r)
+			return
+		}
 		if hasQueryFlag(r, "email_confirm") {
 			a.confirmEmailToken(w, r)
 			return
@@ -15891,7 +15915,16 @@ func (a *App) isRegistrationOnboardingRequest(r *http.Request, domain string) bo
 		confirmation, found := a.registrationForDelivery(r, handle)
 		return found && confirmation.Action == "register" && normalizeDomainName(confirmation.Domain) == domain
 	}
-	return hasQueryFlag(r, "register") || hasQueryFlag(r, "site_request")
+	return hasQueryFlag(r, "register") || hasQueryFlag(r, "site_request") || registrationCaptchaRequest(r)
+}
+
+func registrationCaptchaRequest(r *http.Request) bool {
+	query := r.URL.Query()
+	if r.Method != http.MethodGet || len(query) != 2 || !hasQueryFlag(r, "captcha") {
+		return false
+	}
+	purpose := query.Get("purpose")
+	return purpose == "register" || purpose == "site_request"
 }
 
 // An IP restriction removes the session before normal routing, so public pages
@@ -16455,9 +16488,18 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 		httpsecurity.RedirectLocal(w, r, safeConfirmationReturnPath(requestedReturnPath(r)), http.StatusSeeOther)
 		return
 	}
+	if !a.authorizeAccountMailForm(w, r, "register") {
+		return
+	}
 	pending := EmailConfirmation{}
 	if err := a.createAndSendEmailConfirmationForLanguage(r, "register", domain, "", email, password, requestedReturnPath(r), preferredLanguageCode(r.Header.Get("Accept-Language")), &pending); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
+		var cooldown registrationCooldownError
+		if errors.As(err, &cooldown) {
+			w.Header().Set("Retry-After", strconv.Itoa(max(1, int(time.Until(cooldown.until).Seconds()))))
+			w.WriteHeader(http.StatusTooManyRequests)
+		} else {
+			w.WriteHeader(http.StatusBadRequest)
+		}
 		a.renderSetupPage(w, r, domain, email, err.Error())
 		return
 	}
@@ -16472,11 +16514,16 @@ func (a *App) confirmRegistrationCode(w http.ResponseWriter, r *http.Request) {
 	code := strings.TrimSpace(r.FormValue("registration_code"))
 	confirmation, valid := a.registrationConfirmationForCode(r.Context(), domain, formToken, code)
 	if !valid {
+		if confirmation.Token != "" && confirmation.Attempts >= 5 {
+			if err := a.finishRegistrationAttempt(mailMonitorFlowID(confirmation.Token), "rejected"); err != nil {
+				log.Printf("MAIL registration rejection accounting failed error_type=%T", err)
+			}
+		}
 		w.WriteHeader(http.StatusUnauthorized)
 		if confirmation.FormToken != "" && confirmation.Attempts < 5 {
-			a.render(w, r, "setup.html", map[string]any{"Domain": domain, "ConfirmationPending": true, "RecipientEmail": confirmation.Email, "RegistrationFormToken": formToken, "Status": translationOrDefault(translationsForRequest(r), "profile_password_code_status_invalid", "The code is invalid or expired."), "WebmailURL": webmailProviderForAddress(confirmation.Email).URL, "WebmailName": webmailProviderForAddress(confirmation.Email).Name})
+			a.renderRegistrationView(w, r, map[string]any{"Domain": domain, "ConfirmationPending": true, "RecipientEmail": confirmation.Email, "RegistrationFormToken": formToken, "Status": translationOrDefault(translationsForRequest(r), "profile_password_code_status_invalid", "The code is invalid or expired."), "WebmailURL": webmailProviderForAddress(confirmation.Email).URL, "WebmailName": webmailProviderForAddress(confirmation.Email).Name})
 		} else {
-			a.render(w, r, "recover.html", map[string]any{"ShowForm": false, "Status": translationOrDefault(translationsForRequest(r), "profile_password_code_status_invalid", "The code is invalid or expired.")})
+			a.renderSetupPage(w, r, domain, "", translationOrDefault(translationsForRequest(r), "profile_password_code_status_invalid", "The code is invalid or expired."))
 		}
 		return
 	}
@@ -16697,7 +16744,7 @@ func (a *App) registerPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) renderSetupPage(w http.ResponseWriter, r *http.Request, domain, email, status string) {
-	a.render(w, r, "setup.html", map[string]any{"Domain": domain, "Email": strings.TrimSpace(email), "Status": strings.TrimSpace(status), "ReturnPath": requestedReturnPath(r), "LocalAccount": localAccountRequest(r)})
+	a.renderRegistrationView(w, r, map[string]any{"Domain": domain, "Email": strings.TrimSpace(email), "Status": strings.TrimSpace(status), "ReturnPath": requestedReturnPath(r), "LocalAccount": localAccountRequest(r)})
 }
 
 func (a *App) renderSetupConfirmationPage(w http.ResponseWriter, r *http.Request, domain, recipient string, pending ...EmailConfirmation) {
@@ -16708,7 +16755,7 @@ func (a *App) renderSetupConfirmationPage(w http.ResponseWriter, r *http.Request
 		formToken = pending[0].FormToken
 	}
 	provider := webmailProviderForAddress(recipient)
-	a.render(w, r, "setup.html", map[string]any{
+	a.renderRegistrationView(w, r, map[string]any{
 		"Domain":                domain,
 		"ConfirmationPending":   true,
 		"EmailDelivery":         profileEmailDeliveryViewForResult(translationsForRequest(r), emailDeliveryResult{Pending: true, Message: mailout.Message{To: recipient}}, profileEmailDeliveryDNSHelp{}),
@@ -16785,6 +16832,9 @@ func (a *App) siteRequestPage(w http.ResponseWriter, r *http.Request) {
 		a.renderSiteRequestPage(w, r, domain, "", "", "", "", 0)
 		return
 	}
+	if !a.authorizeAccountMailForm(w, r, "site_request") {
+		return
+	}
 	name := strings.TrimSpace(r.FormValue("name"))
 	email := strings.TrimSpace(r.FormValue("email"))
 	phone := strings.TrimSpace(r.FormValue("phone"))
@@ -16798,7 +16848,7 @@ func (a *App) renderSiteRequestPage(w http.ResponseWriter, r *http.Request, doma
 	if selectedPlanID == 0 && len(plans) > 0 {
 		selectedPlanID = plans[0].ID
 	}
-	a.render(w, r, "setup.html", map[string]any{
+	a.renderRegistrationView(w, r, map[string]any{
 		"Domain":               domain,
 		"Status":               strings.TrimSpace(status),
 		"RegistrationDisabled": true,
@@ -16857,7 +16907,7 @@ func (a *App) createSiteRegistrationRequestFromForm(r *http.Request, domain, nam
 		return err.Error()
 	}
 	a.logHostingSupportEvent(r.Context(), "support_request", "created", email, domain, "site registration request")
-	a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{FlowID: mailMonitorFlowID("site-request:" + strconv.Itoa(requestID)), Kind: "registration", Stage: "registration_requested", Domain: domain, Recipient: email, Detail: "awaiting server administrator approval"})
+	a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{FlowID: mailMonitorFlowID("site-request:" + strconv.Itoa(requestID)), Kind: "registration", Stage: "registration_requested", Domain: domain, Recipient: email, ClientIP: accountClientIP(r), Detail: "awaiting server administrator approval"})
 	a.enqueueSiteRegistrationRequestOwnerEmails(r.Context(), r, domain, name, email, phone, planID)
 	return "Заявка отправлена владельцу сервера. После проверки вы получите ответ на email."
 }
@@ -23554,6 +23604,10 @@ func (a *App) handleExpensesAction(r *http.Request) string {
 		return a.addServiceMailBlockFromForm(r)
 	case "delete_service_mail_block":
 		return a.deleteServiceMailBlockFromForm(r)
+	case "block_account_mail_ip":
+		return a.updateAccountMailBlockFromForm(r, true)
+	case "unblock_account_mail_ip":
+		return a.updateAccountMailBlockFromForm(r, false)
 	case "delete_service_mail_events":
 		return a.deleteServiceMailEventsFromForm(r)
 	default:
@@ -23947,7 +24001,7 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 	}
 	mailStage := strings.TrimSpace(r.URL.Query().Get("mail_stage"))
 	switch mailStage {
-	case "", "transport_sent", "queued", "attempt", "retry", "accepted", "failed", "registration_requested", "registration_verified", "registration_complete", "registration_failed", "registration_rejected", "recovery_requested", "recovery_complete", "recovery_failed", "recovery_skipped", "recovery_mail_failed":
+	case "", "mail_blocked", "mail_unblocked", "transport_sent", "queued", "attempt", "retry", "accepted", "failed", "registration_requested", "registration_verified", "registration_complete", "registration_failed", "registration_rejected", "recovery_requested", "recovery_complete", "recovery_failed", "recovery_skipped", "recovery_mail_failed":
 	default:
 		mailStage = ""
 	}
@@ -24010,6 +24064,12 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 			expenseServers[serverIndex].MailEvents, err = store.RecentFiltered(r.Context(), mailFilter)
 			if err != nil {
 				return err
+			}
+			if expenseServers[serverIndex].Server.Local {
+				expenseServers[serverIndex].MailBlockedIPs, err = mailguard.Blocks(database, mailNow)
+				if err != nil {
+					return err
+				}
 			}
 		}
 		return nil
@@ -24130,6 +24190,7 @@ type simplifiedExpenseServerView struct {
 	MailLast90Days      mailmonitor.Counts
 	MailAvailable       bool
 	MailReceivedAt      string
+	MailBlockedIPs      []mailguard.Block
 	MailEvents          []mailmonitor.Event
 	MailExpanded        bool
 	MailSelected        bool
@@ -28038,22 +28099,19 @@ func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	email := strings.TrimSpace(r.FormValue("email"))
-	captchaValue := strings.TrimSpace(r.FormValue("captcha"))
-	captchaCookie, err := r.Cookie("sitebrush_captcha")
-	if err != nil || captchaCookie.Value == "" || captchaCookie.Value != captchaValue {
-		a.renderRecoveryPage(w, r, map[string]any{"Status": translationOrDefault(translations, "recover_status_captcha_invalid", "Captcha is invalid"), "StatusClass": "danger", "ShowForm": true})
+	if !a.authorizeAccountMailForm(w, r, "recover") {
 		return
 	}
 	var userCount int
 	if err := a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM users WHERE domain=? AND email=? AND is_admin=1`, domain, email).Scan(&userCount); err != nil {
-		a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{Kind: "recovery", Stage: "recovery_failed", Domain: domain, Recipient: email, Detail: "account lookup failed"})
+		a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{Kind: "recovery", Stage: "recovery_failed", Domain: domain, Recipient: email, ClientIP: accountClientIP(r), Detail: "account lookup failed"})
 		log.Printf("MAIL recovery lookup failed domain=%q recipient=%q error=%s",
 			diagnosticlog.SafeLogValue(domain), diagnosticlog.SafeLogValue(email), diagnosticlog.SafeLogValue(err.Error()))
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
 	if userCount == 0 {
-		a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{Kind: "recovery", Stage: "recovery_skipped", Domain: domain, Recipient: email, Detail: "administrator address is not registered"})
+		a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{Kind: "recovery", Stage: "recovery_skipped", Domain: domain, Recipient: email, ClientIP: accountClientIP(r), Detail: "administrator address is not registered"})
 		log.Printf("MAIL recovery skipped domain=%q recipient=%q reason=account_not_found",
 			diagnosticlog.SafeLogValue(domain), diagnosticlog.SafeLogValue(email))
 		a.renderRecoveryPage(w, r, map[string]any{
@@ -28065,7 +28123,7 @@ func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.reserveAccountMail(r, domain, email); err != nil {
-		a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{Kind: "recovery", Stage: "recovery_failed", Domain: domain, Recipient: email, Detail: mailmonitor.SafeError(err)})
+		a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{Kind: "recovery", Stage: "recovery_failed", Domain: domain, Recipient: email, ClientIP: accountClientIP(r), Detail: mailmonitor.SafeError(err)})
 		a.renderRecoveryPage(w, r, map[string]any{"Status": err.Error(), "ShowForm": true})
 		return
 	}
@@ -28075,20 +28133,20 @@ func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
 	expiresAt := now.Add(profilePasswordCodeTTL)
 	_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE expires_at<>'' AND expires_at<?`, now.Format(time.RFC3339))
 	_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE domain=? AND action='recover' AND email=?`, domain, email)
-	_, err = a.db.ExecContext(r.Context(), `INSERT INTO email_confirmations(token,domain,action,email,password,verification_code,current_email,return_path,language_code,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+	_, err := a.db.ExecContext(r.Context(), `INSERT INTO email_confirmations(token,domain,action,email,password,verification_code,current_email,return_path,language_code,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
 		recoveryToken, domain, "recover", email, "", recoveryCode, "", requestedReturnPath(r), languageCode, now.Format(time.RFC3339), expiresAt.Format(time.RFC3339))
 	if err != nil {
-		a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{FlowID: mailMonitorFlowID(recoveryToken), Kind: "recovery", Stage: "recovery_failed", Domain: domain, Recipient: email, Detail: "recovery request could not be saved"})
+		a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{FlowID: mailMonitorFlowID(recoveryToken), Kind: "recovery", Stage: "recovery_failed", Domain: domain, Recipient: email, ClientIP: accountClientIP(r), Detail: "recovery request could not be saved"})
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{FlowID: mailMonitorFlowID(recoveryToken), Kind: "recovery", Stage: "recovery_requested", Domain: domain, Recipient: email})
+	a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{FlowID: mailMonitorFlowID(recoveryToken), Kind: "recovery", Stage: "recovery_requested", Domain: domain, Recipient: email, ClientIP: accountClientIP(r)})
 	recoveryURL := recoveryConfirmationURL(r, recoveryToken)
 	dnsHelp := a.profileEmailDeliveryDNSHelp(r.Context(), translations, domain, a.emailFromAddress(domain))
 	deliveryResult := a.sendServiceEmailNow(r.Context(), r, "login_code", domain, email, recoveryCode, languageCode, recoveryURL, mailMonitorFlowID(recoveryToken))
 	emailDeliveryView := profileEmailDeliveryViewForResult(translations, deliveryResult, dnsHelp)
 	if deliveryResult.Err != nil {
-		a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{FlowID: mailMonitorFlowID(recoveryToken), MessageID: deliveryResult.ID, Kind: "recovery", Stage: "recovery_mail_failed", Domain: domain, Recipient: email, Detail: mailmonitor.SafeError(deliveryResult.Err), SMTPCode: smtpStatusCodeFromError(deliveryResult.Err)})
+		a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{FlowID: mailMonitorFlowID(recoveryToken), MessageID: deliveryResult.ID, Kind: "recovery", Stage: "recovery_mail_failed", Domain: domain, Recipient: email, ClientIP: accountClientIP(r), Detail: mailmonitor.SafeError(deliveryResult.Err), SMTPCode: smtpStatusCodeFromError(deliveryResult.Err)})
 		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, recoveryToken)
 		a.renderRecoveryPage(w, r, map[string]any{
 			"Status":        translationOrDefault(translations, "recover_status_smtp_failed_prefix", "SMTP send failed: ") + deliveryResult.Err.Error(),
@@ -28147,6 +28205,11 @@ func (a *App) renderRecoveryPage(w http.ResponseWriter, r *http.Request, view ma
 	view["PasswordCodeLabel"] = translationOrDefault(translations, "recover_code_label", "6-digit recovery code")
 	view["PasswordCodeHelp"] = translationOrDefault(translations, "recover_code_help", "Enter the code from the recovery email.")
 	view["PasswordSubmitLabel"] = translationOrDefault(translations, "recover_save_password", "Set new password")
+	if shown, _ := view["ShowForm"].(bool); shown {
+		if err := a.addAccountCaptchaToView(r, view, "recover"); err != nil {
+			view["CaptchaUnavailable"] = true
+		}
+	}
 	a.render(w, r, "recover.html", view)
 }
 
@@ -28710,10 +28773,10 @@ func (a *App) createAndSendEmailConfirmationForLanguage(r *http.Request, action,
 	}
 	confirmationURL := emailConfirmationURL(r, token)
 	if action == "register" {
-		a.recordMailMonitorEvent(databaseContext, mailmonitor.Event{FlowID: mailMonitorFlowID(token), Kind: "registration", Stage: "registration_requested", Domain: domain, Recipient: email})
+		a.recordMailMonitorEvent(databaseContext, mailmonitor.Event{FlowID: mailMonitorFlowID(token), Kind: "registration", Stage: "registration_requested", Domain: domain, Recipient: email, ClientIP: accountClientIP(r)})
 		defer func() {
 			if resultErr != nil {
-				a.recordMailMonitorEvent(databaseContext, mailmonitor.Event{FlowID: mailMonitorFlowID(token), Kind: "registration", Stage: "registration_failed", Domain: domain, Recipient: email, Detail: mailmonitor.SafeError(resultErr)})
+				a.recordMailMonitorEvent(databaseContext, mailmonitor.Event{FlowID: mailMonitorFlowID(token), Kind: "registration", Stage: "registration_failed", Domain: domain, Recipient: email, ClientIP: accountClientIP(r), Detail: mailmonitor.SafeError(resultErr)})
 			}
 		}()
 		if err := a.reserveAccountMail(r, domain, email); err != nil {
@@ -28725,6 +28788,33 @@ func (a *App) createAndSendEmailConfirmationForLanguage(r *http.Request, action,
 		if dnsSetup, dnsSetupRequired := a.registrationDomainAddressSetupView(databaseContext, domain, languageCode); dnsSetupRequired {
 			return errors.New(dnsSetup.PlainText)
 		}
+		var admitted bool
+		var registration mailguard.Registration
+		expiry, expiryErr := time.Parse(time.RFC3339, confirmation.ExpiresAt)
+		if expiryErr != nil {
+			return expiryErr
+		}
+		admissionErr := a.withAccountMailTransaction(r, "registration-mail-admit", func(transaction *sql.Tx) error {
+			var reserveErr error
+			registration, admitted, reserveErr = mailguard.BeginRegistration(transaction, accountClientIP(r), domain, mailMonitorFlowID(token), expiry, now)
+			if reserveErr != nil || !admitted {
+				return reserveErr
+			}
+			return mailguard.TrackRegistrationRecipient(transaction, mailMonitorFlowID(token), email)
+		})
+		if admissionErr != nil {
+			return admissionErr
+		}
+		if !admitted {
+			return registrationCooldownError{until: registration.RetryAt}
+		}
+		defer func() {
+			if resultErr != nil {
+				if rollbackErr := a.finishRegistrationAttempt(mailMonitorFlowID(token), "technical"); rollbackErr != nil {
+					log.Printf("MAIL registration admission rollback failed error_type=%T", rollbackErr)
+				}
+			}
+		}()
 		if err := a.saveRegistrationConfirmation(databaseContext, confirmation); err != nil {
 			return err
 		}
@@ -28781,11 +28871,15 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 	if confirmation.Action == "register" {
 		a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{FlowID: mailMonitorFlowID(token), Kind: "registration", Stage: "registration_verified", Domain: confirmation.Domain, Recipient: confirmation.Email})
 		if err := a.confirmRegistrationDomain(r, confirmation); err != nil {
+			_ = a.finishRegistrationAttempt(mailMonitorFlowID(token), "technical")
 			a.renderEmailConfirmationStatus(w, r, http.StatusConflict, err.Error())
 			return
 		}
 	}
 	if !httpsecurity.UsesHTTPS(r) && !httpsecurity.IsLocalRequest(r) {
+		if confirmation.Action == "register" && !a.accountHTTPSReady(confirmation.Domain) {
+			_ = a.finishRegistrationAttempt(mailMonitorFlowID(token), "technical")
+		}
 		a.awaitAccountHTTPS(w, r)
 		return
 	}
@@ -28811,6 +28905,7 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 		}
 		confirmationContext := contextWithDomain(r.Context(), confirmation.Domain)
 		if a.hasAdmin(confirmationContext, confirmation.Domain) {
+			_ = a.finishRegistrationAttempt(mailMonitorFlowID(token), "rejected")
 			a.deleteRegistrationConfirmation(r.Context(), token)
 			a.renderEmailConfirmationStatus(w, r, http.StatusConflict, translationOrDefault(confirmationTranslations, "email_confirmation_status_admin_exists", "Administrator already exists."))
 			return
@@ -28820,6 +28915,7 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if dnsSetup, dnsSetupRequired := a.registrationDomainAddressSetupView(confirmationContext, confirmation.Domain, confirmation.LanguageCode); dnsSetupRequired {
+			_ = a.finishRegistrationAttempt(mailMonitorFlowID(token), "technical")
 			a.renderEmailConfirmationStatus(w, r, http.StatusBadRequest, dnsSetup.PlainText)
 			return
 		}
@@ -28838,6 +28934,7 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 			return err
 		}, func(error) {})
 		if quotaErr != nil {
+			_ = a.finishRegistrationAttempt(mailMonitorFlowID(token), "technical")
 			a.recordMailMonitorEvent(registerContext, mailmonitor.Event{FlowID: mailMonitorFlowID(token), Kind: "registration", Stage: "registration_failed", Domain: confirmation.Domain, Recipient: confirmation.Email, Detail: "site content settings unavailable"})
 			a.renderEmailConfirmationStatus(w, r, http.StatusServiceUnavailable, "site content settings unavailable")
 			return
@@ -28858,9 +28955,13 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 			return nil
 		})
 		if err != nil {
+			_ = a.finishRegistrationAttempt(mailMonitorFlowID(token), "technical")
 			a.recordMailMonitorEvent(registerContext, mailmonitor.Event{FlowID: mailMonitorFlowID(token), Kind: "registration", Stage: "registration_failed", Domain: confirmation.Domain, Recipient: confirmation.Email, Detail: mailmonitor.SafeError(err)})
 			a.renderEmailConfirmationStatus(w, r, http.StatusBadRequest, err.Error())
 			return
+		}
+		if resetErr := a.finishRegistrationAttempt(mailMonitorFlowID(token), "complete"); resetErr != nil {
+			log.Printf("MAIL registration cooldown reset failed error_type=%T", resetErr)
 		}
 		a.activatePublicTrialAfterAdminRegistration(registerContext, confirmation.Domain)
 		a.deleteRegistrationConfirmation(registerContext, token)
@@ -29027,14 +29128,15 @@ func (a *App) enqueueServiceEmailWithActionURL(ctx context.Context, r *http.Requ
 
 func (a *App) enqueueServiceEmailContent(ctx context.Context, r *http.Request, codeKind, domain, recipient, secretValue, actionURL, languageCode, registrationCode, monitorFlowID string, changes ...emailChangeMail) error {
 	message := mailout.Message{
-		MonitorDomain: domain,
-		MonitorFlowID: monitorFlowID,
-		Kind:          strings.TrimSpace(codeKind),
-		From:          a.emailFromAddress(domain),
-		To:            recipient,
-		Subject:       emailSubjectForServiceMail(languageCode, codeKind, domain),
-		Body:          emailBodyForServiceMailWithActionURL(languageCode, codeKind, domain, secretValue, actionURL),
-		HTMLBody:      emailHTMLBodyForServiceMailWithActionURL(languageCode, codeKind, domain, secretValue, actionURL),
+		MonitorDomain:   domain,
+		MonitorClientIP: accountClientIP(r),
+		MonitorFlowID:   monitorFlowID,
+		Kind:            strings.TrimSpace(codeKind),
+		From:            a.emailFromAddress(domain),
+		To:              recipient,
+		Subject:         emailSubjectForServiceMail(languageCode, codeKind, domain),
+		Body:            emailBodyForServiceMailWithActionURL(languageCode, codeKind, domain, secretValue, actionURL),
+		HTMLBody:        emailHTMLBodyForServiceMailWithActionURL(languageCode, codeKind, domain, secretValue, actionURL),
 	}
 	if registrationCode != "" {
 		applyRegistrationMail(&message, languageCode, domain, secretValue, registrationCode)
@@ -29090,14 +29192,15 @@ func (a *App) enqueueServiceEmailContent(ctx context.Context, r *http.Request, c
 
 func (a *App) sendServiceEmailNow(ctx context.Context, r *http.Request, codeKind, domain, recipient, secretValue, languageCode, actionURL, monitorFlowID string, changes ...emailChangeMail) emailDeliveryResult {
 	message := mailout.Message{
-		MonitorDomain: domain,
-		MonitorFlowID: monitorFlowID,
-		Kind:          strings.TrimSpace(codeKind),
-		From:          a.emailFromAddress(domain),
-		To:            recipient,
-		Subject:       emailSubjectForServiceMail(languageCode, codeKind, domain),
-		Body:          emailBodyForServiceMailWithActionURL(languageCode, codeKind, domain, secretValue, actionURL),
-		HTMLBody:      emailHTMLBodyForServiceMailWithActionURL(languageCode, codeKind, domain, secretValue, actionURL),
+		MonitorDomain:   domain,
+		MonitorClientIP: accountClientIP(r),
+		MonitorFlowID:   monitorFlowID,
+		Kind:            strings.TrimSpace(codeKind),
+		From:            a.emailFromAddress(domain),
+		To:              recipient,
+		Subject:         emailSubjectForServiceMail(languageCode, codeKind, domain),
+		Body:            emailBodyForServiceMailWithActionURL(languageCode, codeKind, domain, secretValue, actionURL),
+		HTMLBody:        emailHTMLBodyForServiceMailWithActionURL(languageCode, codeKind, domain, secretValue, actionURL),
 	}
 	var change *emailChangeMail
 	if len(changes) > 0 && changes[0].Next != "" && (codeKind == "email_change" || codeKind == "email_change_confirm") {
@@ -29334,6 +29437,17 @@ func (a *App) runDurableMailProcess(stop <-chan struct{}, tasks <-chan mailout.T
 			claimErr := a.withMailOutboxTransaction(context.Background(), "mail-outbox-claim", func(database *sql.Tx) error {
 				var err error
 				claimed, err = mailout.Claim(context.Background(), database, dueRecord.ID)
+				if err != nil || !claimed {
+					return err
+				}
+				var queuedDetail, queuedFlowID, queuedDomain string
+				err = database.QueryRow(`SELECT detail,flow_id,domain FROM mail_monitor_events WHERE installation_id='local' AND message_id=? AND stage='queued' LIMIT 1`, dueRecord.ID).Scan(&queuedDetail, &queuedFlowID, &queuedDomain)
+				if errors.Is(err, sql.ErrNoRows) {
+					return nil
+				}
+				dueRecord.Message.MonitorClientIP = (mailmonitor.Event{Detail: queuedDetail}).Diagnostic().ClientIP
+				dueRecord.Message.MonitorFlowID = queuedFlowID
+				dueRecord.Message.MonitorDomain = queuedDomain
 				return err
 			})
 			if claimErr != nil || !claimed {
@@ -29645,13 +29759,30 @@ func appendMailMonitorTask(ctx context.Context, database mailmonitor.Database, t
 			diagnostic.Failure = mailDeliveryFailure(deliveryErr)
 		}
 	}
+	diagnostic.ClientIP = task.Message.MonitorClientIP
 	code := diagnostic.SMTPCode
-	return (mailmonitor.Store{DB: database}).Append(ctx, mailmonitor.Event{
+	err := (mailmonitor.Store{DB: database}).Append(ctx, mailmonitor.Event{
 		MessageID: task.ID, FlowID: task.Message.MonitorFlowID, Kind: task.Kind,
 		Stage: stage, Domain: mailMonitorDomainForMessage(task.Message), Recipient: task.Message.To,
 		Route: task.Route, AcceptedBy: acceptedBy, Attempt: attempt,
 		SMTPCode: code, Detail: diagnostic.String(),
 	})
+	if err != nil || task.Kind != "email_confirm" || task.Message.MonitorFlowID == "" {
+		return err
+	}
+	transaction, transactional := database.(*sql.Tx)
+	if !transactional {
+		return nil
+	}
+	switch stage {
+	case "queued":
+		return mailguard.QueueRegistration(transaction, task.Message.MonitorFlowID, task.ID)
+	case "accepted":
+		return mailguard.RegistrationDelivered(transaction, task.Message.MonitorFlowID, time.Now().UTC())
+	case "failed":
+		return mailguard.AbortRegistration(transaction, task.Message.MonitorFlowID)
+	}
+	return nil
 }
 
 func netChanVersionLabel(version string) string {
@@ -29760,6 +29891,19 @@ func (a *App) deliverMailRecord(stop <-chan struct{}, record mailout.Record, tra
 		case <-deliveryContext.Done():
 		}
 	}()
+	if record.Message.MonitorClientIP != "" {
+		blocked := false
+		if err := a.withServerControlDatabaseRead(deliveryContext, "mail-outbox-source-block", func(database *sql.DB) error {
+			var readErr error
+			blocked, readErr = mailguard.Blocked(database, record.Message.MonitorClientIP, time.Now().UTC())
+			return readErr
+		}); err != nil {
+			return err
+		}
+		if blocked {
+			return mailout.PermanentError{Err: errors.New("account mail source IP is blocked")}
+		}
+	}
 	if record.Route == mailout.RouteRelay {
 		return a.sendMailoutTaskThroughNetChan(deliveryContext, record, transportReports...)
 	}
@@ -33960,16 +34104,32 @@ func (a *App) deleteRegistrationConfirmation(ctx context.Context, token string) 
 }
 
 func (a *App) defaultEmailSender() mailout.Sender {
-	if a.sendEmail != nil {
-		return a.sendEmail
-	}
-	hostName := strings.TrimSpace(os.Getenv("SITEBRUSH_SMTP_HOSTNAME"))
-	if hostName == "" {
-		if systemHostName, err := os.Hostname(); err == nil {
-			hostName = systemHostName
+	sender := a.sendEmail
+	if sender == nil {
+		hostName := strings.TrimSpace(os.Getenv("SITEBRUSH_SMTP_HOSTNAME"))
+		if hostName == "" {
+			if systemHostName, err := os.Hostname(); err == nil {
+				hostName = systemHostName
+			}
 		}
+		sender = mailout.DirectSender{Hostname: hostName}.Send
 	}
-	return mailout.DirectSender{Hostname: hostName}.Send
+	if a.durableMailTasks != nil {
+		return sender
+	}
+	// Legacy senders lack an outbox transaction; persist their terminal result
+	// without turning a bookkeeping failure into a duplicate SMTP submission.
+	return func(adapterContext context.Context, message mailout.Message) error {
+		deliveryErr := sender(adapterContext, message)
+		if message.Kind == "email_confirm" && message.MonitorFlowID != "" {
+			outcome := "delivered"
+			if deliveryErr != nil {
+				outcome = "technical"
+			}
+			_ = a.finishRegistrationAttempt(message.MonitorFlowID, outcome)
+		}
+		return deliveryErr
+	}
 }
 
 func (a *App) emailFromAddress(domain string) string {
@@ -34936,11 +35096,366 @@ func recoveryEmailBodyForLanguage(languageCode, domain, code string) string {
 	}
 }
 
+// Account mail admission is installation-wide. The existing database process
+// serializes quotas and one-use challenge consumption before mail is created.
+type registrationCooldownError struct{ until time.Time }
+
+func (registrationCooldownError) Error() string {
+	return "Registration is temporarily paused. Please try again later."
+}
+
+type registrationCooldownView struct {
+	Active     bool
+	RetryUnix  int64
+	ServerUnix int64
+	Remaining  string
+}
+
+func (a *App) readRegistrationCooldown(r *http.Request) (mailguard.Registration, error) {
+	var registration mailguard.Registration
+	err := a.withAccountMailTransaction(r, "registration-mail-status", func(transaction *sql.Tx) error {
+		var readErr error
+		registration, readErr = mailguard.ReadRegistration(transaction, accountClientIP(r), a.siteDomain(r.Context(), r), time.Now().UTC())
+		return readErr
+	})
+	if err == nil && registration.AbuseDetected {
+		a.recordRegistrationMailAbuse(registration, r.UserAgent())
+	}
+	return registration, err
+}
+
+func (a *App) recordRegistrationMailAbuse(registration mailguard.Registration, agent string) {
+	now := time.Now().UTC()
+	a.recordMailMonitorEvent(context.Background(), mailmonitor.Event{Kind: "registration", Stage: "mail_blocked", Domain: registration.Domain, ClientIP: registration.IP, Detail: (mailmonitor.Diagnostic{Failure: mailguard.RegistrationMailAbuse}).String()})
+	event := siteAnalyticsEvent{Domain: registration.Domain, Path: "/", Method: http.MethodPost, StatusCode: http.StatusTooManyRequests, OccurredAt: now, RemoteAddress: net.JoinHostPort(registration.IP, "0"), UserAgent: analyticsBoundedString(agent, 256), SecurityBlocked: true, SecurityCategory: mailguard.RegistrationMailAbuse}
+	select {
+	case a.securityAnalytics <- event:
+	default:
+		select {
+		case a.securityLosses <- registration.Domain:
+		default:
+		}
+	}
+}
+
+func (a *App) runRegistrationCooldownProcess(stop <-chan struct{}) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		default:
+		}
+		var detected []mailguard.Registration
+		adapterContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := a.withMailOutboxTransaction(adapterContext, "registration-mail-expiry", func(transaction *sql.Tx) error {
+			var sweepErr error
+			detected, sweepErr = mailguard.SweepRegistrations(transaction, time.Now().UTC())
+			return sweepErr
+		})
+		cancel()
+		if err != nil {
+			log.Printf("MAIL registration expiry write failed error_type=%T", err)
+		} else {
+			for _, registration := range detected {
+				a.recordRegistrationMailAbuse(registration, "")
+			}
+		}
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// Outcome bookkeeping must survive the request or sender session ending.
+// Context is confined to the external database adapter, with an independent bound.
+func (a *App) finishRegistrationAttempt(attemptID, outcome string) error {
+	adapterContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := a.withServerControlDatabaseWrite(adapterContext, "registration-mail-outcome", func(database *sql.DB) error {
+		transaction, beginErr := database.BeginTx(adapterContext, nil)
+		if beginErr != nil {
+			return beginErr
+		}
+		defer transaction.Rollback()
+		var updateErr error
+		switch outcome {
+		case "complete":
+			updateErr = mailguard.CompleteRegistration(transaction, attemptID)
+		case "rejected":
+			updateErr = mailguard.FailRegistration(transaction, attemptID)
+		case "delivered":
+			updateErr = mailguard.RegistrationDelivered(transaction, attemptID, time.Now().UTC())
+		case "technical":
+			updateErr = mailguard.AbortRegistration(transaction, attemptID)
+		default:
+			return errors.New("unknown registration outcome")
+		}
+		if updateErr != nil {
+			return updateErr
+		}
+		return transaction.Commit()
+	})
+	if err != nil {
+		log.Printf("MAIL registration outcome write failed error_type=%T", err)
+	}
+	return err
+}
+
+func registrationRemaining(duration time.Duration) string {
+	seconds := max(0, int(duration.Seconds()))
+	if seconds >= 86400 {
+		return fmt.Sprintf("%dd %dh", seconds/86400, seconds%86400/3600)
+	}
+	if seconds >= 3600 {
+		return fmt.Sprintf("%dh %dm", seconds/3600, seconds%3600/60)
+	}
+	return fmt.Sprintf("%02d:%02d", seconds/60, seconds%60)
+}
+
+func (a *App) renderRegistrationView(w http.ResponseWriter, r *http.Request, view map[string]any) {
+	local, _ := view["LocalAccount"].(bool)
+	requestOnly, _ := view["RegistrationDisabled"].(bool)
+	pending, _ := view["ConfirmationPending"].(bool)
+	blocked := false
+	if !local && !requestOnly {
+		registration, err := a.readRegistrationCooldown(r)
+		if err != nil {
+			view["RegistrationGuardUnavailable"] = true
+		} else {
+			now := time.Now().UTC()
+			blocked = registration.Blocked(now)
+			until := registration.RetryAt
+			if blocked && !until.After(now) {
+				until = now.Add(30 * time.Second)
+			}
+			view["RegistrationCooldown"] = registrationCooldownView{Active: blocked, RetryUnix: until.Unix(), ServerUnix: now.Unix(), Remaining: registrationRemaining(until.Sub(now))}
+		}
+	}
+	if !local && !pending && !blocked && view["RegistrationGuardUnavailable"] != true {
+		purpose := "register"
+		if requestOnly {
+			purpose = "site_request"
+		}
+		if err := a.addAccountCaptchaToView(r, view, purpose); err != nil {
+			view["RegistrationGuardUnavailable"] = true
+		}
+	}
+	a.render(w, r, "setup.html", view)
+}
+
+func (a *App) addAccountCaptchaToView(r *http.Request, view map[string]any, purpose string) error {
+	challenge, err := captcha.New()
+	if err != nil {
+		return err
+	}
+	allowed := false
+	err = a.withAccountMailTransaction(r, "account-captcha-form", func(transaction *sql.Tx) error {
+		blocked, readErr := mailguard.Blocked(transaction, accountClientIP(r), time.Now().UTC())
+		if readErr != nil || blocked {
+			return readErr
+		}
+		var saveErr error
+		allowed, saveErr = captcha.Save(transaction, challenge, accountClientIP(r), a.siteDomain(r.Context(), r), purpose, time.Now().UTC())
+		return saveErr
+	})
+	if err != nil {
+		return err
+	}
+	if !allowed {
+		return errors.New("CAPTCHA issuance unavailable")
+	}
+	encoded, err := captcha.Render(challenge.Answer)
+	if err != nil {
+		return err
+	}
+	view["CaptchaID"] = challenge.Token
+	view["CaptchaImage"] = template.URL("data:image/png;base64," + base64.StdEncoding.EncodeToString(encoded))
+	return nil
+}
+
+func (a *App) withAccountMailTransaction(r *http.Request, operation string, write func(*sql.Tx) error) error {
+	return a.withServerControlDatabaseWrite(r.Context(), operation, func(database *sql.DB) error {
+		transaction, err := database.BeginTx(r.Context(), nil)
+		if err != nil {
+			return err
+		}
+		defer transaction.Rollback()
+		if err := write(transaction); err != nil {
+			return err
+		}
+		return transaction.Commit()
+	})
+}
+
+func (a *App) authorizeAccountMailForm(w http.ResponseWriter, r *http.Request, purpose string) bool {
+	if purpose == "register" {
+		registration, readErr := a.readRegistrationCooldown(r)
+		if readErr != nil {
+			a.renderAccountMailFailure(w, r, purpose, "account_mail_unavailable", "Email requests are temporarily unavailable. Please try later.", http.StatusServiceUnavailable)
+			return false
+		}
+		if registration.Blocked(time.Now().UTC()) {
+			w.Header().Set("Retry-After", strconv.Itoa(max(1, int(time.Until(registration.RetryAt).Seconds()))))
+			a.renderAccountMailFailure(w, r, purpose, "registration_cooldown", "Registration is temporarily paused. Please try again later.", http.StatusTooManyRequests)
+			return false
+		}
+	}
+	email := strings.TrimSpace(r.FormValue("email"))
+	parsed, parseErr := stdmail.ParseAddress(email)
+	if parseErr != nil || parsed.Address != email || len(email) > 254 {
+		a.renderAccountMailFailure(w, r, purpose, "email_confirmation_status_invalid_email", "Email address is invalid.", http.StatusBadRequest)
+		return false
+	}
+	ip := accountClientIP(r)
+	now := time.Now().UTC()
+	var decision mailguard.Decision
+	err := a.withAccountMailTransaction(r, "account-mail-observe", func(transaction *sql.Tx) error {
+		var observeErr error
+		decision, observeErr = mailguard.Observe(transaction, ip, email, purpose, now)
+		return observeErr
+	})
+	if err != nil {
+		a.renderAccountMailFailure(w, r, purpose, "account_mail_unavailable", "Email requests are temporarily unavailable. Please try later.", http.StatusServiceUnavailable)
+		return false
+	}
+	if !decision.Allowed {
+		if decision.NewBlock {
+			a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{Kind: purpose, Stage: "mail_blocked", Domain: a.siteDomain(r.Context(), r), Recipient: email, ClientIP: ip, Detail: (mailmonitor.Diagnostic{Failure: decision.Reason}).String()})
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(max(1, int(decision.Until.Sub(now).Seconds()))))
+		a.renderAccountMailFailure(w, r, purpose, "account_mail_limited", "Too many email requests from this IP. Please try later.", http.StatusTooManyRequests)
+		return false
+	}
+	challengeToken := strings.TrimSpace(r.FormValue("captcha_id"))
+	if challengeToken == "" {
+		if cookie, cookieErr := r.Cookie("sitebrush_captcha_" + purpose); cookieErr == nil {
+			challengeToken = cookie.Value
+		}
+	}
+	verified := false
+	reservation := mailguard.Decision{}
+	if challengeToken != "" {
+		err = a.withAccountMailTransaction(r, "account-mail-verify", func(transaction *sql.Tx) error {
+			var verifyErr error
+			verified, verifyErr = captcha.Verify(transaction, challengeToken, r.FormValue("captcha"), ip, a.siteDomain(r.Context(), r), purpose, now)
+			if verifyErr != nil || !verified {
+				return verifyErr
+			}
+			reservation, verifyErr = mailguard.Reserve(transaction, ip, email, purpose, now)
+			return verifyErr
+		})
+	}
+	setAccountCaptchaCookie(w, r, purpose, "", -1)
+	if err != nil {
+		a.renderAccountMailFailure(w, r, purpose, "account_mail_unavailable", "Email requests are temporarily unavailable. Please try later.", http.StatusServiceUnavailable)
+		return false
+	}
+	if !verified {
+		a.renderAccountMailFailure(w, r, purpose, "recover_status_captcha_invalid", "Captcha is invalid", http.StatusBadRequest)
+		return false
+	}
+	if !reservation.Allowed {
+		w.Header().Set("Retry-After", "60")
+		a.renderAccountMailFailure(w, r, purpose, "auth_send_limited", "Please wait before requesting another email.", http.StatusTooManyRequests)
+		return false
+	}
+	return true
+}
+
+func (a *App) updateAccountMailBlockFromForm(r *http.Request, blocked bool) string {
+	address, parseErr := netip.ParseAddr(strings.TrimSpace(r.FormValue("client_ip")))
+	if parseErr != nil {
+		return translationOrDefault(translationsForRequest(r), "account_mail_ip_invalid", "A valid client IP is required.")
+	}
+	ip := address.Unmap().String()
+	err := a.withAccountMailTransaction(r, "account-mail-block-update", func(transaction *sql.Tx) error {
+		if blocked {
+			return mailguard.SetBlock(transaction, ip, "Blocked by server administrator", time.Now().UTC().Add(24*time.Hour))
+		}
+		return mailguard.Unblock(transaction, ip)
+	})
+	if err != nil {
+		return translationOrDefault(translationsForRequest(r), "account_mail_unavailable", "Email requests are temporarily unavailable. Please try later.")
+	}
+	stage := "mail_unblocked"
+	if blocked {
+		stage = "mail_blocked"
+	}
+	a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{Kind: "account_mail", Stage: stage, Domain: a.siteDomain(r.Context(), r), ClientIP: ip})
+	return translationOrDefault(translationsForRequest(r), "account_mail_ip_updated", "Email request IP restrictions updated.")
+}
+
+func (a *App) renderAccountMailFailure(w http.ResponseWriter, r *http.Request, purpose, translationKey, fallback string, status int) {
+	message := translationOrDefault(translationsForRequest(r), translationKey, fallback)
+	w.WriteHeader(status)
+	if purpose == "recover" {
+		a.renderRecoveryPage(w, r, map[string]any{"Status": message, "StatusClass": "danger", "ShowForm": true, "RecoveryEmail": strings.TrimSpace(r.FormValue("email"))})
+		return
+	}
+	if purpose == "site_request" {
+		planID, _ := strconv.Atoi(r.FormValue("plan_id"))
+		a.renderSiteRequestPage(w, r, a.siteDomain(r.Context(), r), message, r.FormValue("name"), r.FormValue("email"), r.FormValue("phone"), planID)
+		return
+	}
+	a.renderSetupPage(w, r, a.siteDomain(r.Context(), r), r.FormValue("email"), message)
+}
+
+// Image endpoint cookies are HTTPS-only. Password-free HTTP onboarding carries
+// the same non-authorizing nonce inside its POST form instead.
+func setAccountCaptchaCookie(w http.ResponseWriter, r *http.Request, purpose, token string, maxAge int) {
+	http.SetCookie(w, &http.Cookie{Name: "sitebrush_captcha_" + purpose, Value: token, Path: "/", MaxAge: maxAge, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: true})
+}
+
 func (a *App) captchaImage(w http.ResponseWriter, r *http.Request) {
-	captchaCode := fmt.Sprintf("%04d", time.Now().UnixNano()%10000)
-	httpsecurity.SetSensitiveCookie(w, r, &http.Cookie{Name: "sitebrush_captcha", Value: captchaCode, MaxAge: 300})
-	w.Header().Set("Content-Type", "image/svg+xml")
-	_, _ = w.Write([]byte("<svg xmlns='http://www.w3.org/2000/svg' width='140' height='40'><rect width='100%' height='100%' fill='#f4f4f4'/><text x='15' y='28' font-size='24' font-family='monospace' fill='#333'>" + captchaCode + "</text></svg>"))
+	w.Header().Set("Cache-Control", "no-store, max-age=0")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	purpose := r.URL.Query().Get("purpose")
+	switch purpose {
+	case "register", "recover", "site_request":
+	default:
+		http.Error(w, "invalid challenge purpose", http.StatusBadRequest)
+		return
+	}
+	challenge, err := captcha.New()
+	if err != nil {
+		http.Error(w, "challenge unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	allowed := false
+	err = a.withAccountMailTransaction(r, "account-captcha-issue", func(transaction *sql.Tx) error {
+		blocked, readErr := mailguard.Blocked(transaction, accountClientIP(r), time.Now().UTC())
+		if readErr != nil || blocked {
+			return readErr
+		}
+		var saveErr error
+		allowed, saveErr = captcha.Save(transaction, challenge, accountClientIP(r), a.siteDomain(r.Context(), r), purpose, time.Now().UTC())
+		return saveErr
+	})
+	if err != nil {
+		http.Error(w, "challenge unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if !allowed {
+		w.Header().Set("Retry-After", "60")
+		http.Error(w, "too many challenges", http.StatusTooManyRequests)
+		return
+	}
+	encoded, err := captcha.Render(challenge.Answer)
+	if err != nil {
+		http.Error(w, "challenge unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	setAccountCaptchaCookie(w, r, purpose, challenge.Token, int(captcha.Lifetime.Seconds()))
+	w.Header().Set("Content-Type", "image/png")
+	_, _ = w.Write(encoded)
 }
 
 func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {

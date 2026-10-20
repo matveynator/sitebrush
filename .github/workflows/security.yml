@@ -89,6 +89,10 @@ jobs:
           exit 0
       - name: Test packages
         run: go test -count=1 -covermode=atomic -coverprofile=coverage.out ./pkg/... ./scripts/...
+      - name: Test account email abuse boundaries and CAPTCHA
+        run: >-
+          go test -count=1 -timeout=300s .
+          -run '^Test(AccountMailGuard|AccountCaptcha|Register|RegistrationCooldown|Recover|Recovery|SiteRequestStores|LocalhostWithoutSiteDatabase|UnknownAndDeletedHostnames)'
       - name: Test concise mail journal and transport attribution
         run: go test -count=1 -timeout=180s . -run '^Test(MailMonitor|HTTPSFallbackLog|MailTransportVersion)'
       - name: Test old and new NetChan peers
@@ -186,6 +190,7 @@ jobs:
           node ../../pkg/imageprepare/image_replacement_test.cjs
           node ../../pkg/analytics/browser_test.cjs
           node ../../pkg/accountpasskey/browser_test.cjs
+          node ../../pkg/mailguard/registration_cooldown_test.cjs
           npx playwright install --with-deps chromium
       - name: Test conversion analytics on desktop and narrow mobile
         env:
