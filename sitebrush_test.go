@@ -26311,8 +26311,19 @@ func TestHTTPSFallbackLogReportsHTTPProtocolWithoutMailContent(t *testing.T) {
 	log.SetOutput(&captured)
 	defer log.SetOutput(previousLogOutput)
 	plainPayload := []byte(`{"message_id":"fallback-id","code_kind":"mail_monitor_sync","secret_value":"PRIVATE-MAIL-TOKEN","body":"PRIVATE-MAIL-CONTENT"}`)
-	if err := postServiceMailRelayPayload(context.Background(), server.URL, []byte(`{"ciphertext":"opaque"}`), plainPayload, true); err != nil {
+	reports := make(chan string, 1)
+	if err := postServiceMailRelayPayload(context.Background(), server.URL, []byte(`{"ciphertext":"opaque"}`), plainPayload, true, reports); err != nil {
 		t.Fatal(err)
+	}
+	select {
+	case details := <-reports:
+		for _, fragment := range []string{"transport=https", "fallback=true", "status=200", "outcome=accepted"} {
+			if !strings.Contains(details, fragment) {
+				t.Fatalf("journal report missing %s: %s", fragment, details)
+			}
+		}
+	default:
+		t.Fatal("HTTPS fallback was not reported to journal consumer")
 	}
 	for _, fragment := range []string{"id=fallback-id", "kind=mail_monitor_sync", "transport=https", "netchan_sender=" + netchantransport.LibraryVersion(), "netchan_receiver=v2.0.7", "fallback=true", "protocol=" + <-actualProtocol} {
 		if !strings.Contains(captured.String(), fragment) {

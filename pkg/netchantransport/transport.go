@@ -31,6 +31,10 @@ func Configure(configuration netchan.Config, stop <-chan struct{}) netchan.Confi
 func ConfigureWithReports(configuration netchan.Config, stop <-chan struct{}, reports chan<- string) netchan.Config {
 	drivers := append([]transport.Driver(nil), configuration.Transports...)
 	configuration.Transports = append(drivers, priorityDriver{stop: stop, reports: reports}, reportedDriver{Driver: quic.Driver{}, stop: stop, reports: reports})
+	if reports != nil {
+		configuration.Transports = appendRFCOMMReports(configuration.Transports, stop, reports)
+		configuration.Transports = appendBLEReports(configuration.Transports, stop, reports)
+	}
 	return configuration
 }
 
@@ -77,6 +81,14 @@ type reportedDriver struct {
 	transport.Driver
 	stop    <-chan struct{}
 	reports chan<- string
+}
+
+// Preserve discovery when wrapping Bluetooth drivers for diagnostics.
+func (driver reportedDriver) Discover(service string, results chan<- transport.Candidate, done <-chan struct{}) error {
+	if discovery, ok := driver.Driver.(transport.Discoverer); ok {
+		return discovery.Discover(service, results, done)
+	}
+	return transport.ErrUnsupported
 }
 
 func (driver reportedDriver) Dial(endpoint transport.Endpoint, options transport.Options) (net.Conn, error) {
@@ -236,4 +248,22 @@ func acceptConnections(listener net.Listener, accepted chan<- dialResult, closeR
 			return
 		}
 	}
+}
+
+// ReceiverConfig keeps sessions on one physical driver so their receiver-side
+// protocol is known without trusting a sender-provided label or correlating
+// unrelated connection reports. TCP and UDP may listen on the same port.
+func ReceiverConfig(configuration netchan.Config, protocol string) netchan.Config {
+	if protocol == "quic" {
+		configuration.Transports = []transport.Driver{ownedQUICDriver{}}
+	} else {
+		configuration.Transports = []transport.Driver{tcp.Driver{}}
+	}
+	return configuration
+}
+
+type ownedQUICDriver struct{ quic.Driver }
+
+func (ownedQUICDriver) Listen(endpoint transport.Endpoint, options transport.Options) (net.Listener, error) {
+	return listenQUIC(endpoint, options)
 }
