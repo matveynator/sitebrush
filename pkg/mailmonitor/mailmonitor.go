@@ -35,31 +35,6 @@ type Event struct {
 	CreatedAt      string `json:"created_at"`
 }
 
-// SMTPMeaningKey selects a local explanation from structured protocol metadata.
-// No arbitrary SMTP reply text is rendered as an explanation.
-func (event Event) SMTPMeaningKey() string {
-	if event.Stage != "smtp_result" {
-		return ""
-	}
-	if strings.Contains(event.Detail, "outcome=accepted_goodbye_failed") {
-		return "mail_monitor_smtp_goodbye"
-	}
-	if strings.Contains(event.Detail, "outcome=tls_negotiation_failed") {
-		return "mail_monitor_smtp_tls"
-	}
-	if len(event.SMTPCode) == 3 {
-		switch event.SMTPCode[0] {
-		case '2':
-			return "mail_monitor_smtp_accepted"
-		case '4':
-			return "mail_monitor_smtp_temporary"
-		case '5':
-			return "mail_monitor_smtp_permanent"
-		}
-	}
-	return "mail_monitor_smtp_connection"
-}
-
 type Counts struct {
 	Queued                int
 	Accepted              int

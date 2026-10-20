@@ -87,8 +87,6 @@ jobs:
           fi
           echo "database test status: $status"
           exit 0
-      - name: Test mail transport journal and receiver protocols
-        run: go test -count=1 -timeout=180s . -run '^Test(MailMonitor|MailReceiver|HTTPSFallbackLog|MailTransportVersion)'
       - name: Test packages
         run: go test -count=1 -covermode=atomic -coverprofile=coverage.out ./pkg/... ./scripts/...
       - name: Test old and new NetChan peers
