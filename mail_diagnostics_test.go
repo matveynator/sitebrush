@@ -22,7 +22,7 @@ func TestMailReceiverJournalsOwnTCPAndQUICProtocols(t *testing.T) {
 			app, _ := newTestApplication(t)
 			enableMailMonitorForTest(t, app)
 			app.sendEmail = func(context.Context, mailout.Message) error { return nil }
-			request := signedServiceMailRequestForTest(t, app, serviceMailRequest{Version: 1, MessageID: "receiver-test", SourceDomain: "customer.example", Recipient: "owner@example.net", CodeKind: "password_change_code", SecretValue: "123456", LanguageCode: "en", CreatedAt: time.Now().UTC().Format(time.RFC3339)})
+			request := signedServiceMailRequestForTest(t, app, serviceMailRequest{Version: 2, MessageID: "receiver-test", Subject: "Account verification", Body: "123456", ExpiresAt: time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano), SourceDomain: "customer.example", Recipient: "owner@example.net", CodeKind: "password_change_code", SecretValue: "123456", LanguageCode: "en", CreatedAt: time.Now().UTC().Format(time.RFC3339)})
 			registerServiceMailInstallationForTest(t, app, request)
 			public, private, err := ed25519.GenerateKey(rand.Reader)
 			if err != nil {
@@ -53,7 +53,11 @@ func TestMailReceiverJournalsOwnTCPAndQUICProtocols(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			connection, err := netchan.Dial[sitebrushNetChanRequest](listener.Address, netchantransport.ReceiverConfig(netchan.Config{TLS: clientTLS}, protocol))
+			address := listener.Address
+			if !strings.Contains(address, "://") {
+				address = scheme + "://" + address
+			}
+			connection, err := netchan.Dial[sitebrushNetChanRequest](address, netchantransport.ReceiverConfig(netchan.Config{TLS: clientTLS}, protocol))
 			if err != nil {
 				t.Fatal(err)
 			}
