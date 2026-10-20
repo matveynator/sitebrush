@@ -2745,7 +2745,7 @@ func TestSecurityAnalyticsChartsRenderDailyActivityAndVisibleCategoryBars(t *tes
 	for _, category := range []string{
 		"rapid-crawl", "enumeration", "secret", "cms", "admin-discovery",
 		"authentication-failures", "repository", "source-backup", "sitebrush-exploit",
-		"traversal", "injection", "scanner-client",
+		"traversal", "injection", "scanner-client", "registration-mail-abuse",
 	} {
 		quotedCategoryColor := "'" + category + "': '#"
 		plainCategoryColor := category + ": '#"
@@ -22575,7 +22575,7 @@ func TestLANPasswordLoginAcceptsFormWithStaleCookieAndOpaqueOrigin(t *testing.T)
 				t.Fatalf("LAN verification status=%d location=%s body=%s", postResponse.Code, postResponse.Header().Get("Location"), postResponse.Body.String())
 			}
 			cookies := postResponse.Result().Cookies()
-			if len(cookies) != 1 || cookies[0].Name != "sitebrush_session" || cookies[0].Value == staleCookie.Value || !cookies[0].Secure || !cookies[0].HttpOnly || !cookies[0].Secure {
+			if len(cookies) != 1 || cookies[0].Name != "sitebrush_session" || cookies[0].Value == staleCookie.Value || !cookies[0].Secure || !cookies[0].HttpOnly {
 				t.Fatal("LAN login must replace the stale cookie with a secure authenticated session")
 			}
 			profileRequest := httptest.NewRequest(http.MethodGet, "https://"+domain+"/?profile", nil)
@@ -26566,5 +26566,68 @@ func TestRegistrationCooldownRejectsChangedEmailAndReleasesTechnicalFailure(t *t
 	state, err = application.readRegistrationCooldown(request)
 	if err != nil || state.Failures != 1 || time.Until(state.RetryAt) < 5*time.Hour || time.Until(state.RetryAt) > 6*time.Hour {
 		t.Fatal("unconfirmed attempt did not advance to six hours", state, err)
+	}
+}
+
+func TestRegistrationCooldownSpamReachesSecurityAnalytics(t *testing.T) {
+	application, _ := newTestApplication(t)
+	enableMailMonitorForTest(t, application)
+	application.securityAnalytics = make(chan siteAnalyticsEvent, 2)
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?register", nil)
+	request.RemoteAddr = "192.0.2.99:1234"
+	err := application.withAccountMailTransaction(request, "test-registration-spam", func(transaction *sql.Tx) error {
+		now := time.Now().UTC().Add(-48 * time.Hour)
+		for index := 0; index < 4; index++ {
+			attemptID := fmt.Sprint(index)
+			registration, allowed, err := mailguard.BeginRegistration(transaction, "192.0.2.99", "localhost", attemptID, now.Add(15*time.Minute), now)
+			if err != nil {
+				return err
+			}
+			if !allowed {
+				return errors.New("test registration unexpectedly blocked")
+			}
+			if err := mailguard.TrackRegistrationRecipient(transaction, attemptID, fmt.Sprintf("victim%d@example.com", index)); err != nil {
+				return err
+			}
+			if err := mailguard.RegistrationDelivered(transaction, attemptID, now); err != nil {
+				return err
+			}
+			if index < 3 {
+				if err := mailguard.FailRegistration(transaction, attemptID); err != nil {
+					return err
+				}
+			}
+			now = registration.RetryAt
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	select {
+	case event := <-application.securityAnalytics:
+		if event.SecurityCategory != mailguard.RegistrationMailAbuse || event.RemoteAddress != "192.0.2.99:0" || !event.SecurityBlocked {
+			t.Fatal("wrong security evidence", event)
+		}
+	default:
+		t.Fatal("registration spam missing from security analytics")
+	}
+	if _, err := application.readRegistrationCooldown(request); err != nil {
+		t.Fatal(err)
+	}
+	if len(application.securityAnalytics) != 0 {
+		t.Fatal("page refresh duplicated the spam incident")
+	}
+	err = application.withServerControlDatabaseRead(context.Background(), "test-registration-source-block", func(database *sql.DB) error {
+		blocked, err := mailguard.Blocked(database, "192.0.2.99", time.Now().Add(71*time.Hour))
+		if err == nil && !blocked {
+			return errors.New("three-day account-mail IP block missing")
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }

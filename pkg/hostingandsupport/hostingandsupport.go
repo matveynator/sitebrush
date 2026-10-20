@@ -29,7 +29,7 @@ import (
 
 const DefaultStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
 const DefaultDeletionBackupRetentionDays = 365
-const currentBillingSchemaVersion = 30
+const currentBillingSchemaVersion = 31
 
 const InstallationKindServer = "server"
 const InstallationKindDesktop = "desktop"
@@ -940,6 +940,11 @@ func hostingSchemaSteps(ctx context.Context, repair bool) []migrations.Step {
 	}
 	for index, query := range mailguard.RegistrationSchemaQueries() {
 		step := migrations.SQL(fmt.Sprintf("registration-mail-cooldown-%03d", index+1), query)
+		step.Ensure = repair
+		steps = append(steps, step)
+	}
+	for index, query := range mailguard.RegistrationAbuseSchemaQueries() {
+		step := migrations.SQL(fmt.Sprintf("registration-mail-abuse-%03d", index+1), query)
 		step.Ensure = repair
 		steps = append(steps, step)
 	}

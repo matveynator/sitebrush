@@ -3255,6 +3255,7 @@ type siteAnalyticsEvent struct {
 	VisitorID                    string
 	TrustedPeer, IndexingCrawler bool
 	SecurityBlocked              bool
+	SecurityCategory             string
 	SecurityAlreadyBlocked       bool
 	IsAdmin                      bool
 	IsAsset                      bool
@@ -5508,6 +5509,18 @@ func (a *App) runSecurityAnalytics(stop <-chan struct{}) {
 			}
 		case event := <-a.securityAnalytics:
 			domain := a.resolveAnalyticsDomain(event.Domain, resolutions)
+			if domain == "" && event.SecurityCategory == mailguard.RegistrationMailAbuse {
+				var ownerDomain string
+				adapterContext, cancel := context.WithTimeout(context.Background(), time.Second)
+				ownerErr := a.withServerControlDatabaseRead(adapterContext, "registration-abuse-owner", func(database *sql.DB) error {
+					ownerDomain, _ = (hostingandsupport.Store{DB: database}).OwnerDomain(adapterContext)
+					return nil
+				})
+				cancel()
+				if ownerErr == nil && ownerDomain != "" {
+					domain = a.resolveAnalyticsDomain(ownerDomain, resolutions)
+				}
+			}
 			if domain == "" {
 				continue
 			}
@@ -5530,6 +5543,7 @@ func (a *App) runSecurityAnalytics(stop <-chan struct{}) {
 			}
 			observation := browserstats.RequestObservation{Time: event.OccurredAt, IP: address, Path: event.Path, Query: event.Query, Method: event.Method, Status: event.StatusCode, Bytes: event.Bytes, Agent: event.UserAgent, Language: analyticsLanguageLabel(event.AcceptLanguage), Country: country, City: city, Blocked: event.SecurityBlocked, AlreadyBlocked: event.SecurityAlreadyBlocked, ServerLoadHigh: sitebrushSecurityLoadWasHigh(hostLoadHistory, event.OccurredAt), Trusted: event.TrustedPeer, IndexingCrawler: event.IndexingCrawler}
 			observation.Latitude, observation.Longitude, observation.GeoKnown = latitude, longitude, geoKnown
+			observation.ConfirmedCategory = event.SecurityCategory
 			category := state.Record(observation)
 			if category != "" && a.attackGuard != nil {
 				description := securityIncidentDescription(category, event.Path, event.StatusCode)
@@ -5744,6 +5758,8 @@ func securityIncidentDescription(category, requestPath string, statusCode int) s
 		return "Injection pattern detected in request to " + pathText + suffix
 	case "enumeration":
 		return "Scanned many distinct URLs; latest request: " + pathText + suffix
+	case mailguard.RegistrationMailAbuse:
+		return "Repeated unsuccessful registrations to different recipients reached the three-day cooldown"
 	case "authentication-failures":
 		return "Repeated authentication failures; latest request: " + pathText + suffix
 	case "scanner-client":
@@ -8317,6 +8333,7 @@ func analyticsSecurityTypeAxes() []string {
 		"cms",
 		"admin-discovery",
 		"authentication-failures",
+		mailguard.RegistrationMailAbuse,
 		"repository",
 		"source-backup",
 		"sitebrush-exploit",
@@ -10082,6 +10099,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 		application.billingInvoices = application.startBillingInvoiceProcess(ctx.Done())
 		application.startDomainLogWorker(ctx)
 		application.startAnalyticsWorkers(ctx)
+		go application.runRegistrationCooldownProcess(ctx.Done())
 		application.startServerOwnerRecoveryWorker(ctx)
 		application.startDemoSiteCleanupWorker(ctx)
 		application.centralNetChanIdentity = application.startCentralNetChanIdentity(ctx.Done())
@@ -28779,7 +28797,10 @@ func (a *App) createAndSendEmailConfirmationForLanguage(r *http.Request, action,
 		admissionErr := a.withAccountMailTransaction(r, "registration-mail-admit", func(transaction *sql.Tx) error {
 			var reserveErr error
 			registration, admitted, reserveErr = mailguard.BeginRegistration(transaction, accountClientIP(r), domain, mailMonitorFlowID(token), expiry, now)
-			return reserveErr
+			if reserveErr != nil || !admitted {
+				return reserveErr
+			}
+			return mailguard.TrackRegistrationRecipient(transaction, mailMonitorFlowID(token), email)
 		})
 		if admissionErr != nil {
 			return admissionErr
@@ -35097,7 +35118,56 @@ func (a *App) readRegistrationCooldown(r *http.Request) (mailguard.Registration,
 		registration, readErr = mailguard.ReadRegistration(transaction, accountClientIP(r), a.siteDomain(r.Context(), r), time.Now().UTC())
 		return readErr
 	})
+	if err == nil && registration.AbuseDetected {
+		a.recordRegistrationMailAbuse(registration, r.UserAgent())
+	}
 	return registration, err
+}
+
+func (a *App) recordRegistrationMailAbuse(registration mailguard.Registration, agent string) {
+	now := time.Now().UTC()
+	a.recordMailMonitorEvent(context.Background(), mailmonitor.Event{Kind: "registration", Stage: "mail_blocked", Domain: registration.Domain, ClientIP: registration.IP, Detail: (mailmonitor.Diagnostic{Failure: mailguard.RegistrationMailAbuse}).String()})
+	event := siteAnalyticsEvent{Domain: registration.Domain, Path: "/", Method: http.MethodPost, StatusCode: http.StatusTooManyRequests, OccurredAt: now, RemoteAddress: net.JoinHostPort(registration.IP, "0"), UserAgent: analyticsBoundedString(agent, 256), SecurityBlocked: true, SecurityCategory: mailguard.RegistrationMailAbuse}
+	select {
+	case a.securityAnalytics <- event:
+	default:
+		select {
+		case a.securityLosses <- registration.Domain:
+		default:
+		}
+	}
+}
+
+func (a *App) runRegistrationCooldownProcess(stop <-chan struct{}) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		default:
+		}
+		var detected []mailguard.Registration
+		adapterContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := a.withMailOutboxTransaction(adapterContext, "registration-mail-expiry", func(transaction *sql.Tx) error {
+			var sweepErr error
+			detected, sweepErr = mailguard.SweepRegistrations(transaction, time.Now().UTC())
+			return sweepErr
+		})
+		cancel()
+		if err != nil {
+			log.Printf("MAIL registration expiry write failed error_type=%T", err)
+		} else {
+			for _, registration := range detected {
+				a.recordRegistrationMailAbuse(registration, "")
+			}
+		}
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // Outcome bookkeeping must survive the request or sender session ending.

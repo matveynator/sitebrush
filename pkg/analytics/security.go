@@ -13,6 +13,7 @@ type RequestObservation struct {
 	Time                                                    time.Time
 	IP, Path, Query, Method, Agent, Language, Country, City string
 	Status                                                  int
+	ConfirmedCategory                                       string
 	Bytes                                                   int64
 	Blocked, ServerLoadHigh                                 bool
 	AlreadyBlocked, GeoKnown                                bool
@@ -256,6 +257,9 @@ func (state *SecurityState) Record(request RequestObservation) string {
 	category := ""
 	if !request.Trusted {
 		category = ProbeCategory(request.Path, request.Query)
+		if request.ConfirmedCategory == "registration-mail-abuse" {
+			category = request.ConfirmedCategory
+		}
 	}
 	if !request.Trusted && !request.IndexingCrawler {
 		window := state.Windows[request.IP]

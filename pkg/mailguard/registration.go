@@ -8,14 +8,15 @@ import (
 )
 
 type Registration struct {
-	IP        string
-	Domain    string
-	AttemptID string
-	MessageID string
-	Phase     string
-	Failures  int
-	RetryAt   time.Time
-	ExpiresAt time.Time
+	IP            string
+	Domain        string
+	AttemptID     string
+	MessageID     string
+	Phase         string
+	Failures      int
+	RetryAt       time.Time
+	ExpiresAt     time.Time
+	AbuseDetected bool
 }
 
 func RegistrationSchemaQueries() []string {
@@ -60,8 +61,19 @@ func ReadRegistration(transaction *sql.Tx, ip, domain string, now time.Time) (Re
 		if err := AbortRegistration(transaction, registration.AttemptID); err != nil {
 			return registration, err
 		}
-		registration.Phase, registration.AttemptID = "idle", ""
+		registration.Phase = "idle"
 		registration.RetryAt = time.Time{}
+	}
+	registration.AbuseDetected, err = DetectRegistrationAbuse(transaction, registration, now)
+	if err != nil {
+		return registration, err
+	}
+	if registration.AbuseDetected {
+		var retry int64
+		if err := transaction.QueryRow(`SELECT retry_at FROM registration_mail_cooldowns WHERE attempt_id=?`, registration.AttemptID).Scan(&retry); err != nil {
+			return registration, err
+		}
+		registration.RetryAt = time.Unix(retry, 0).UTC()
 	}
 	return registration, nil
 }
@@ -114,15 +126,21 @@ func FailRegistration(transaction *sql.Tx, attemptID string) error {
 		return err
 	}
 	_, err = transaction.Exec(`UPDATE registration_mail_cooldowns SET phase='failed',failures=? WHERE attempt_id=? AND phase='pending'`, min(4, registration.Failures+1), attemptID)
-	return err
+	if err != nil {
+		return err
+	}
+	return rememberRegistrationFailure(transaction, attemptID)
 }
 
 func AbortRegistration(transaction *sql.Tx, attemptID string) error {
-	_, err := transaction.Exec(`UPDATE registration_mail_cooldowns SET attempt_id='',message_id='',phase='idle',retry_at=0,expires_at=0 WHERE attempt_id=? AND phase IN ('delivering','pending')`, attemptID)
+	_, err := transaction.Exec(`UPDATE registration_mail_cooldowns SET message_id='',phase='idle',retry_at=0,expires_at=0 WHERE attempt_id=? AND phase IN ('delivering','pending')`, attemptID)
 	return err
 }
 
 func CompleteRegistration(transaction *sql.Tx, attemptID string) error {
+	if _, err := transaction.Exec(`DELETE FROM registration_mail_abuse WHERE attempt_id=?`, attemptID); err != nil {
+		return err
+	}
 	_, err := transaction.Exec(`DELETE FROM registration_mail_cooldowns WHERE attempt_id=?`, attemptID)
 	return err
 }

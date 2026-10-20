@@ -623,7 +623,11 @@ func blockLocalSecurityIP(blocks map[string]SecurityBlock, ip, domain, reason, d
 		delete(blocks, ip)
 	}
 	previous = blocks[ip]
-	block := blockSecurityIP(blocks, ip, reason, description, "local", now, automaticSecurityBlockTTL(previous.Violations+1))
+	ttl := automaticSecurityBlockTTL(previous.Violations + 1)
+	if reason == "registration-mail-abuse" && ttl < 72*time.Hour {
+		ttl = 72 * time.Hour
+	}
+	block := blockSecurityIP(blocks, ip, reason, description, "local", now, ttl)
 	block.Domain = cleanSecurityText(domain, 255)
 	blocks[ip] = block
 	return block
@@ -638,7 +642,7 @@ func securityCategoryBlocks(category string) bool {
 // malformed request, shared NAT/VPN address, or spoofed User-Agent.
 func securityCategoryThreshold(category string) int {
 	switch category {
-	case "traversal", "repository", "secret", "enumeration":
+	case "traversal", "repository", "secret", "enumeration", "registration-mail-abuse":
 		return 1
 	case "injection":
 		return 2

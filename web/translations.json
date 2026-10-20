@@ -1,5 +1,7 @@
 {
   "en": {
+    "ax_risk_registration-mail-abuse": "Registration email spam",
+    "ax_risk_desc_registration-mail-abuse": "Four unsuccessful registrations to different email addresses from one IP on one domain reached the three-day cooldown. Delivery failures do not count; account email requests from the IP are blocked for three days.",
     "registration_cooldown": "Registration from this IP on this domain is temporarily paused, including requests with a different email.",
     "registration_try_again_in": "Try again in",
     "registration_try_again_now": "Try again",
@@ -1559,6 +1561,8 @@
     "mail_monitor_stage_mail_unblocked": "Email request IP unblocked"
   },
   "fr": {
+    "ax_risk_registration-mail-abuse": "Registration email spam",
+    "ax_risk_desc_registration-mail-abuse": "Four unsuccessful registrations to different email addresses from one IP on one domain reached the three-day cooldown. Delivery failures do not count; account email requests from the IP are blocked for three days.",
     "registration_cooldown": "Registration from this IP on this domain is temporarily paused, including requests with a different email.",
     "registration_try_again_in": "Try again in",
     "registration_try_again_now": "Try again",
@@ -2907,6 +2911,8 @@
     "mail_monitor_stage_mail_unblocked": "Email request IP unblocked"
   },
   "ru": {
+    "ax_risk_registration-mail-abuse": "Спам регистрационными письмами",
+    "ax_risk_desc_registration-mail-abuse": "Четыре неудачные регистрации с разными email с одного IP на одном домене дошли до паузы в три дня. Ошибки доставки не учитываются. Отправка писем с этого IP заблокирована на три дня.",
     "registration_cooldown": "Регистрация с этого IP на этом домене временно приостановлена, в том числе с другим email.",
     "registration_try_again_in": "Повторить через",
     "registration_try_again_now": "Повторить попытку",
@@ -4466,6 +4472,8 @@
     "mail_monitor_stage_mail_unblocked": "Запросы писем с IP разрешены"
   },
   "ja": {
+    "ax_risk_registration-mail-abuse": "Registration email spam",
+    "ax_risk_desc_registration-mail-abuse": "Four unsuccessful registrations to different email addresses from one IP on one domain reached the three-day cooldown. Delivery failures do not count; account email requests from the IP are blocked for three days.",
     "registration_cooldown": "Registration from this IP on this domain is temporarily paused, including requests with a different email.",
     "registration_try_again_in": "Try again in",
     "registration_try_again_now": "Try again",
@@ -5810,6 +5818,8 @@
     "mail_monitor_stage_mail_unblocked": "Email request IP unblocked"
   },
   "it": {
+    "ax_risk_registration-mail-abuse": "Registration email spam",
+    "ax_risk_desc_registration-mail-abuse": "Four unsuccessful registrations to different email addresses from one IP on one domain reached the three-day cooldown. Delivery failures do not count; account email requests from the IP are blocked for three days.",
     "registration_cooldown": "Registration from this IP on this domain is temporarily paused, including requests with a different email.",
     "registration_try_again_in": "Try again in",
     "registration_try_again_now": "Try again",
@@ -7154,6 +7164,8 @@
     "mail_monitor_stage_mail_unblocked": "Email request IP unblocked"
   },
   "sv": {
+    "ax_risk_registration-mail-abuse": "Registration email spam",
+    "ax_risk_desc_registration-mail-abuse": "Four unsuccessful registrations to different email addresses from one IP on one domain reached the three-day cooldown. Delivery failures do not count; account email requests from the IP are blocked for three days.",
     "registration_cooldown": "Registration from this IP on this domain is temporarily paused, including requests with a different email.",
     "registration_try_again_in": "Try again in",
     "registration_try_again_now": "Try again",
@@ -8498,6 +8510,8 @@
     "mail_monitor_stage_mail_unblocked": "Email request IP unblocked"
   },
   "fi": {
+    "ax_risk_registration-mail-abuse": "Registration email spam",
+    "ax_risk_desc_registration-mail-abuse": "Four unsuccessful registrations to different email addresses from one IP on one domain reached the three-day cooldown. Delivery failures do not count; account email requests from the IP are blocked for three days.",
     "registration_cooldown": "Registration from this IP on this domain is temporarily paused, including requests with a different email.",
     "registration_try_again_in": "Try again in",
     "registration_try_again_now": "Try again",
@@ -9842,6 +9856,8 @@
     "mail_monitor_stage_mail_unblocked": "Email request IP unblocked"
   },
   "mn": {
+    "ax_risk_registration-mail-abuse": "Registration email spam",
+    "ax_risk_desc_registration-mail-abuse": "Four unsuccessful registrations to different email addresses from one IP on one domain reached the three-day cooldown. Delivery failures do not count; account email requests from the IP are blocked for three days.",
     "registration_cooldown": "Registration from this IP on this domain is temporarily paused, including requests with a different email.",
     "registration_try_again_in": "Try again in",
     "registration_try_again_now": "Try again",
@@ -11186,6 +11202,8 @@
     "mail_monitor_stage_mail_unblocked": "Email request IP unblocked"
   },
   "zh": {
+    "ax_risk_registration-mail-abuse": "Registration email spam",
+    "ax_risk_desc_registration-mail-abuse": "Four unsuccessful registrations to different email addresses from one IP on one domain reached the three-day cooldown. Delivery failures do not count; account email requests from the IP are blocked for three days.",
     "registration_cooldown": "Registration from this IP on this domain is temporarily paused, including requests with a different email.",
     "registration_try_again_in": "Try again in",
     "registration_try_again_now": "Try again",
@@ -12530,6 +12548,8 @@
     "mail_monitor_stage_mail_unblocked": "Email request IP unblocked"
   },
   "he": {
+    "ax_risk_registration-mail-abuse": "Registration email spam",
+    "ax_risk_desc_registration-mail-abuse": "Four unsuccessful registrations to different email addresses from one IP on one domain reached the three-day cooldown. Delivery failures do not count; account email requests from the IP are blocked for three days.",
     "registration_cooldown": "Registration from this IP on this domain is temporarily paused, including requests with a different email.",
     "registration_try_again_in": "Try again in",
     "registration_try_again_now": "Try again",
@@ -13874,6 +13894,8 @@
     "mail_monitor_stage_mail_unblocked": "Email request IP unblocked"
   },
   "fa": {
+    "ax_risk_registration-mail-abuse": "Registration email spam",
+    "ax_risk_desc_registration-mail-abuse": "Four unsuccessful registrations to different email addresses from one IP on one domain reached the three-day cooldown. Delivery failures do not count; account email requests from the IP are blocked for three days.",
     "registration_cooldown": "Registration from this IP on this domain is temporarily paused, including requests with a different email.",
     "registration_try_again_in": "Try again in",
     "registration_try_again_now": "Try again",
@@ -15218,6 +15240,8 @@
     "mail_monitor_stage_mail_unblocked": "Email request IP unblocked"
   },
   "de": {
+    "ax_risk_registration-mail-abuse": "Registration email spam",
+    "ax_risk_desc_registration-mail-abuse": "Four unsuccessful registrations to different email addresses from one IP on one domain reached the three-day cooldown. Delivery failures do not count; account email requests from the IP are blocked for three days.",
     "registration_cooldown": "Registration from this IP on this domain is temporarily paused, including requests with a different email.",
     "registration_try_again_in": "Try again in",
     "registration_try_again_now": "Try again",
@@ -16562,6 +16586,8 @@
     "mail_monitor_stage_mail_unblocked": "Email request IP unblocked"
   },
   "tr": {
+    "ax_risk_registration-mail-abuse": "Registration email spam",
+    "ax_risk_desc_registration-mail-abuse": "Four unsuccessful registrations to different email addresses from one IP on one domain reached the three-day cooldown. Delivery failures do not count; account email requests from the IP are blocked for three days.",
     "registration_cooldown": "Registration from this IP on this domain is temporarily paused, including requests with a different email.",
     "registration_try_again_in": "Try again in",
     "registration_try_again_now": "Try again",
@@ -17906,6 +17932,8 @@
     "mail_monitor_stage_mail_unblocked": "Email request IP unblocked"
   },
   "kk": {
+    "ax_risk_registration-mail-abuse": "Registration email spam",
+    "ax_risk_desc_registration-mail-abuse": "Four unsuccessful registrations to different email addresses from one IP on one domain reached the three-day cooldown. Delivery failures do not count; account email requests from the IP are blocked for three days.",
     "registration_cooldown": "Registration from this IP on this domain is temporarily paused, including requests with a different email.",
     "registration_try_again_in": "Try again in",
     "registration_try_again_now": "Try again",
@@ -19250,6 +19278,8 @@
     "mail_monitor_stage_mail_unblocked": "Email request IP unblocked"
   },
   "es": {
+    "ax_risk_registration-mail-abuse": "Registration email spam",
+    "ax_risk_desc_registration-mail-abuse": "Four unsuccessful registrations to different email addresses from one IP on one domain reached the three-day cooldown. Delivery failures do not count; account email requests from the IP are blocked for three days.",
     "registration_cooldown": "Registration from this IP on this domain is temporarily paused, including requests with a different email.",
     "registration_try_again_in": "Try again in",
     "registration_try_again_now": "Try again",
@@ -20594,6 +20624,8 @@
     "mail_monitor_stage_mail_unblocked": "Email request IP unblocked"
   },
   "pt": {
+    "ax_risk_registration-mail-abuse": "Registration email spam",
+    "ax_risk_desc_registration-mail-abuse": "Four unsuccessful registrations to different email addresses from one IP on one domain reached the three-day cooldown. Delivery failures do not count; account email requests from the IP are blocked for three days.",
     "registration_cooldown": "Registration from this IP on this domain is temporarily paused, including requests with a different email.",
     "registration_try_again_in": "Try again in",
     "registration_try_again_now": "Try again",

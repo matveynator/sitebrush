@@ -10,7 +10,7 @@ import (
 func registrationDatabase(t *testing.T) *sql.DB {
 	t.Helper()
 	database := guardDatabase(t)
-	for _, query := range RegistrationSchemaQueries() {
+	for _, query := range append(RegistrationSchemaQueries(), RegistrationAbuseSchemaQueries()...) {
 		if _, err := database.Exec(query); err != nil {
 			t.Fatal(err)
 		}
