@@ -27,6 +27,7 @@ import (
 	"image/png"
 	"io"
 	"io/fs"
+	"log"
 	"math/big"
 	"mime/multipart"
 	"net"
@@ -70,6 +71,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/mailout"
 	sitemcp "github.com/matveynator/sitebrush/v2/pkg/mcp"
 	"github.com/matveynator/sitebrush/v2/pkg/netchantls"
+	"github.com/matveynator/sitebrush/v2/pkg/netchantransport"
 	"github.com/matveynator/sitebrush/v2/pkg/outboundhttp"
 	"github.com/matveynator/sitebrush/v2/pkg/pagearchive"
 	"github.com/matveynator/sitebrush/v2/pkg/securitysync"
@@ -25829,6 +25831,9 @@ func TestMailMonitorDurableDeliveryAndAtomicQueue(t *testing.T) {
 			t.Fatalf("restart metadata lost: %+v", event)
 		}
 		if event.Stage == "accepted" {
+			if !strings.Contains(event.Detail, "transport=smtp") {
+				t.Fatal("journal lost SMTP transport", event)
+			}
 			accepted++
 			if event.AcceptedBy != "recipient_smtp" {
 				t.Fatal(event)
@@ -26034,5 +26039,312 @@ func TestMailMonitorDoesNotDeriveFlowFromMailSecrets(t *testing.T) {
 		}
 	default:
 		t.Fatal("service mail was not sent")
+	}
+}
+
+func TestMailMonitorEscapedBatchesFitBothTransportsAndDrainAfterRetry(t *testing.T) {
+	for _, transportName := range []string{"netchan", "https"} {
+		t.Run(transportName, func(t *testing.T) {
+			application, _ := newTestApplication(t)
+			enableMailMonitorForTest(t, application)
+			ctx := context.Background()
+			key, err := ecdh.X25519().GenerateKey(rand.Reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("SITEBRUSH_SERVICE_MAIL_RELAY_PUBLIC_KEY_SITEBRUSH_COM", base64.StdEncoding.EncodeToString(key.PublicKey().Bytes()))
+			t.Setenv("SITEBRUSH_SERVICE_MAIL_RELAY_PRIVATE_KEY_SITEBRUSH_COM", base64.StdEncoding.EncodeToString(key.Bytes()))
+			registration := serviceMailRequest{CodeKind: "installation_register"}
+			if err := application.signServiceMailRequest(ctx, &registration); err != nil {
+				t.Fatal(err)
+			}
+			if status, code := application.handleServiceMailRelayRequest(ctx, nil, registration, "netchan"); code != http.StatusOK {
+				t.Fatal(code, status)
+			}
+			const eventCount = 165
+			if err := application.withServerControlDatabaseWrite(ctx, "test-escaped-backlog", func(database *sql.DB) error {
+				store := mailmonitor.Store{DB: database}
+				for number := range eventCount {
+					event := mailmonitor.Event{ID: fmt.Sprintf("%03d", number) + strings.Repeat("<", 125), FlowID: strings.Repeat("&", 128), MessageID: strings.Repeat(">", 128), Kind: "invoice", Stage: "failed", Domain: strings.Repeat("<", 253), Recipient: strings.Repeat("&", 320), Detail: strings.Repeat(">", 500), Route: strings.Repeat("<", 60), AcceptedBy: strings.Repeat("&", 60), SMTPCode: strings.Repeat(">", 60)}
+					if err := store.Append(ctx, event); err != nil {
+						return err
+					}
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			var firstIDs []string
+			batches := 0
+			deliver := func(payload []byte) error {
+				var request serviceMailRequest
+				if err := json.Unmarshal(payload, &request); err != nil {
+					return err
+				}
+				if err := verifyServiceMailRequestSignature(request); err != nil {
+					return err
+				}
+				if err := mailmonitor.ValidateBatch(request.MailEvents); err != nil {
+					return err
+				}
+				if len(request.MailEvents) >= 80 {
+					t.Error("escaped backlog was not split by encoded size")
+				}
+				var ids []string
+				for _, event := range request.MailEvents {
+					ids = append(ids, event.ID)
+				}
+				if batches == 0 {
+					firstIDs = ids
+				} else if batches == 1 && !reflect.DeepEqual(firstIDs, ids) {
+					t.Error("retry skipped unacknowledged events")
+				}
+				batches++
+				if transportName == "https" {
+					encrypted, err := serviceMailEncryptPayloadForRelay("https://sitebrush.com/?service_mail_relay", payload)
+					if err != nil {
+						return err
+					}
+					if int64(len(encrypted)) > serviceMailRelayBodyLimitBytes {
+						t.Fatalf("HTTPS payload too large: %d", len(encrypted))
+					}
+					response := httptest.NewRecorder()
+					application.serviceMailRelayEndpoint(response, httptest.NewRequest(http.MethodPost, "https://sitebrush.com/?service_mail_relay", bytes.NewReader(encrypted)))
+					if response.Code != http.StatusOK {
+						return fmt.Errorf("HTTPS rejected batch: %d %s", response.Code, response.Body.String())
+					}
+				} else {
+					if int64(len(payload)) > hostingSnapshotNetChanPayloadLimitBytes {
+						t.Fatalf("NetChan payload too large: %d", len(payload))
+					}
+					response := application.handleSitebrushNetChanPayload(ctx, payload)
+					if response.StatusCode != http.StatusOK {
+						return fmt.Errorf("NetChan rejected batch: %+v", response)
+					}
+				}
+				if batches == 1 {
+					return errors.New("acknowledgment lost")
+				}
+				return nil
+			}
+			if err := application.syncMailMonitor(ctx, deliver); err == nil {
+				t.Fatal("lost acknowledgment succeeded")
+			}
+			if err := application.syncMailMonitor(ctx, deliver); err != nil {
+				t.Fatal(err)
+			}
+			if err := application.withServerControlDatabaseRead(ctx, "test-drained-backlog", func(database *sql.DB) error {
+				store := mailmonitor.Store{DB: database}
+				pending, err := store.Unsynced(ctx, 80)
+				if err != nil {
+					return err
+				}
+				if len(pending) != 0 {
+					t.Error("sized batches left a stuck backlog")
+				}
+				count, err := store.CountFiltered(ctx, mailmonitor.Filter{InstallationID: registration.InstallationID})
+				if count != eventCount {
+					t.Errorf("received %d events, want %d", count, eventCount)
+				}
+				return err
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if batches < 4 {
+				t.Fatal("test did not exercise a byte-limited backlog")
+			}
+		})
+	}
+}
+
+func TestMailMonitorPaginationKeepsFiltersAndClampsPages(t *testing.T) {
+	application, _ := newTestApplication(t)
+	enableMailMonitorForTest(t, application)
+	ctx := context.Background()
+	const recipient = "owner+_%&@example.com"
+	if err := application.withServerControlDatabaseWrite(ctx, "test-pagination", func(database *sql.DB) error {
+		store := mailmonitor.Store{DB: database}
+		for number := range 123 {
+			if err := store.Append(ctx, mailmonitor.Event{ID: fmt.Sprintf("event-%03d", number), Kind: "invoice", Stage: "failed", Recipient: recipient}); err != nil {
+				return err
+			}
+		}
+		for _, event := range []mailmonitor.Event{{ID: "other-server", InstallationID: "remote", Kind: "invoice", Stage: "failed", Recipient: recipient}, {ID: "other-stage", Kind: "invoice", Stage: "queued", Recipient: recipient}, {ID: "other-kind", Kind: "login_code", Stage: "failed", Recipient: recipient}, {ID: "other-recipient", Kind: "invoice", Stage: "failed", Recipient: "someone@example.com"}, {ID: "old", Kind: "invoice", Stage: "failed", Recipient: recipient, CreatedAt: time.Now().Add(-8 * 24 * time.Hour).UTC().Format(time.RFC3339)}} {
+			if err := store.Append(ctx, event); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := hostingAndSupportPanelSnapshot{Servers: []hostingandsupport.ServerView{{ID: "merged-local", Local: true}}}
+	for _, scenario := range []struct {
+		requested  string
+		page, rows int
+	}{{"2", 2, 50}, {"999999999", 3, 23}, {"0", 1, 50}, {"invalid", 1, 50}} {
+		parameters := url.Values{"expenses": {""}, "mail_server": {"merged-local"}, "mail_days": {"7"}, "mail_stage": {"failed"}, "mail_kind": {"invoice"}, "mail_recipient": {recipient}, "mail_page": {scenario.requested}}
+		request := httptest.NewRequest(http.MethodGet, "https://localhost/?"+parameters.Encode(), nil)
+		view := application.hostingAndSupportPanelView(request, snapshot)
+		server := view["ExpenseServers"].([]simplifiedExpenseServerView)[0]
+		pagination := server.MailPagination
+		if pagination.Count != 123 || pagination.Pages != 3 || pagination.Page != scenario.page || len(server.MailEvents) != scenario.rows {
+			t.Fatalf("page %s: %+v, rows=%d", scenario.requested, pagination, len(server.MailEvents))
+		}
+		for _, link := range pagination.Links {
+			parsed, err := url.Parse(link.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range []string{"mail_server", "mail_days", "mail_stage", "mail_kind", "mail_recipient"} {
+				if parsed.Query().Get(name) != parameters.Get(name) {
+					t.Errorf("page link lost %s: %s", name, link.URL)
+				}
+			}
+			if parsed.Fragment != "mail-monitor-0" || link.Current != (link.Number == scenario.page) {
+				t.Fatal("page link lost selected journal")
+			}
+		}
+		if scenario.page == 2 {
+			if pagination.FirstURL == "" || pagination.PreviousURL == "" || pagination.NextURL == "" || pagination.LastURL == "" {
+				t.Fatal("middle page lost navigation")
+			}
+			templateBytes, err := embeddedWebFiles.ReadFile("web/expenses.html")
+			if err != nil {
+				t.Fatal(err)
+			}
+			parsed, err := template.New("expenses.html").Parse(string(templateBytes))
+			if err != nil {
+				t.Fatal(err)
+			}
+			view["T"] = translationsForLanguageCode("ru")
+			var rendered bytes.Buffer
+			if err := parsed.Execute(&rendered, view); err != nil {
+				t.Fatal(err)
+			}
+			for _, fragment := range []string{`aria-current="page">2`, `name="mail_page" min="1" max="3" value="2"`, `Событий: 123`, `В начало`, `В конец`} {
+				if !strings.Contains(rendered.String(), fragment) {
+					t.Fatalf("paginator missing %q", fragment)
+				}
+			}
+		}
+	}
+}
+
+func TestMailMonitorStoresActualNetChanTransport(t *testing.T) {
+	application, _ := newTestApplication(t)
+	enableMailMonitorForTest(t, application)
+	listener, err := listenTestSitebrushNetChan(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_NETCHAN_ADDRESS", listener.Address)
+	serverFinished := make(chan struct{})
+	serverRelease := make(chan struct{})
+	defer func() { close(serverRelease); <-serverFinished }()
+	go func() {
+		defer close(serverFinished)
+		connection, open := <-listener.Channels
+		if !open {
+			return
+		}
+		defer connection.Abort()
+		request, open := <-connection.Receive
+		if !open {
+			return
+		}
+		request.Response <- sitebrushNetChanResponse{Status: "stored", StatusCode: http.StatusOK, Payload: []byte(`{"netchan_version":"v2.0.7"}`)}
+		<-serverRelease
+	}()
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	tasks := make(chan mailout.Task)
+	application.durableMailTasks = tasks
+	go func() { defer close(done); application.runDurableMailProcess(stop, tasks) }()
+	t.Cleanup(func() { close(stop); <-done })
+	replies := make(chan mailout.Result, 1)
+	task := mailout.NewTask("security_transport_probe", mailout.RouteRelay, mailout.Message{MonitorDomain: "localhost", From: "sender@example.com", To: "owner@example.com", Subject: "Transport test", Body: "Notice"}, time.Now().Add(time.Hour), replies)
+	if err := application.submitDurableMailTask(stop, task); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case result := <-replies:
+		if result.Err != nil || result.Status != mailout.StatusSent {
+			t.Fatalf("delivery failed: %+v", result)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("NetChan delivery timed out")
+	}
+	found := false
+	for _, event := range mailMonitorEventsForTest(t, application, "local") {
+		if event.Stage != "accepted" {
+			continue
+		}
+		found = true
+		for _, fragment := range []string{"transport=netchan", "netchan_sender=" + netchantransport.LibraryVersion(), "netchan_receiver=v2.0.7", "wire_version=2", "protocol=tcp+tls", "network=tcp", "fallback=true"} {
+			if !strings.Contains(event.Detail, fragment) {
+				t.Fatalf("journal missing %q: %+v", fragment, event)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("NetChan acceptance was not recorded")
+	}
+}
+
+func TestHTTPSFallbackLogReportsHTTPProtocolWithoutMailContent(t *testing.T) {
+	actualProtocol := make(chan string, 1)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		actualProtocol <- r.Proto
+		w.Header().Set("X-SiteBrush-NetChan-Version", "v2.0.7")
+		w.WriteHeader(http.StatusOK)
+	}))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	defer server.Close()
+	previousClient := http.DefaultClient
+	http.DefaultClient = server.Client()
+	defer func() { http.DefaultClient = previousClient }()
+	previousLogOutput := log.Writer()
+	var captured bytes.Buffer
+	log.SetOutput(&captured)
+	defer log.SetOutput(previousLogOutput)
+	plainPayload := []byte(`{"message_id":"fallback-id","code_kind":"mail_monitor_sync","secret_value":"PRIVATE-MAIL-TOKEN","body":"PRIVATE-MAIL-CONTENT"}`)
+	if err := postServiceMailRelayPayload(context.Background(), server.URL, []byte(`{"ciphertext":"opaque"}`), plainPayload, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range []string{"id=fallback-id", "kind=mail_monitor_sync", "transport=https", "netchan_sender=" + netchantransport.LibraryVersion(), "netchan_receiver=v2.0.7", "fallback=true", "protocol=" + <-actualProtocol} {
+		if !strings.Contains(captured.String(), fragment) {
+			t.Fatalf("fallback log missing %q: %s", fragment, captured.String())
+		}
+	}
+	if strings.Contains(captured.String(), "PRIVATE-MAIL-") || strings.Contains(captured.String(), "ciphertext") {
+		t.Fatal("transport log exposed email content")
+	}
+}
+
+func TestMailTransportVersionMetadataRetriesOldSignedSchema(t *testing.T) {
+	application, _ := newTestApplication(t)
+	attempts := 0
+	err := application.sendSignedRequestCompatible(context.Background(), serviceMailRequest{CodeKind: "login_code"}, func(payload []byte) error {
+		attempts++
+		var incoming serviceMailRequest
+		if err := json.Unmarshal(payload, &incoming); err != nil {
+			return err
+		}
+		incoming.NetChanVersion = ""
+		if err := verifyServiceMailRequestSignature(incoming); err != nil {
+			return serviceMailRelayRejection{StatusCode: http.StatusForbidden, Message: "signature verification failed"}
+		}
+		return nil
+	})
+	if err != nil || attempts != 2 {
+		t.Fatalf("old receiver compatibility: attempts=%d error=%v", attempts, err)
+	}
+	for _, payload := range [][]byte{nil, []byte(`{"netchan_version":""}`), []byte(`{"netchan_version":"bad\nversion"}`)} {
+		if netChanPeerVersion(payload) != "unknown" {
+			t.Fatal("missing or invalid receiver version was inferred")
+		}
 	}
 }

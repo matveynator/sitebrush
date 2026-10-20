@@ -157,10 +157,26 @@
               </div>
               {{else}}<div class="text-muted">{{index $.T "mail_monitor_empty"}}</div>{{end}}
             </div>
-            <div>
-              {{if gt $expenseServer.MailPage 0}}<a class="btn btn-outline-primary btn-sm" href="?expenses&amp;mail_server={{urlquery $server.ID}}&amp;mail_page={{$expenseServer.MailPreviousPage}}&amp;mail_days={{$expenseServer.MailFilterDays}}&amp;mail_stage={{urlquery $expenseServer.MailFilterStage}}&amp;mail_kind={{urlquery $expenseServer.MailFilterKind}}&amp;mail_recipient={{urlquery $expenseServer.MailFilterRecipient}}#mail-monitor-{{$serverIndex}}">{{index $.T "mail_monitor_previous"}}</a>{{end}}
-              {{if $expenseServer.MailHasNextPage}}<a class="btn btn-outline-primary btn-sm" href="?expenses&amp;mail_server={{urlquery $server.ID}}&amp;mail_page={{$expenseServer.MailNextPage}}&amp;mail_days={{$expenseServer.MailFilterDays}}&amp;mail_stage={{urlquery $expenseServer.MailFilterStage}}&amp;mail_kind={{urlquery $expenseServer.MailFilterKind}}&amp;mail_recipient={{urlquery $expenseServer.MailFilterRecipient}}#mail-monitor-{{$serverIndex}}">{{index $.T "mail_monitor_next"}}</a>{{end}}
-            </div>
+            {{with $expenseServer.MailPagination}}
+            <nav class="d-flex flex-wrap gap-2 align-items-center" aria-label="{{index $.T "account_pagination"}}">
+              <span>{{index $.T "mail_monitor_page"}} {{.Page}} / {{.Pages}} · {{index $.T "mail_monitor_total"}}: {{.Count}}</span>
+              {{if .FirstURL}}<a class="btn btn-outline-primary btn-sm" href="{{.FirstURL}}">{{index $.T "mail_monitor_first"}}</a>{{end}}
+              {{if .PreviousURL}}<a class="btn btn-outline-primary btn-sm" href="{{.PreviousURL}}">{{index $.T "mail_monitor_previous"}}</a>{{end}}
+              {{if gt .Pages 1}}{{range .Links}}{{if .Current}}<span class="btn btn-primary btn-sm" aria-current="page">{{.Number}}</span>{{else}}<a class="btn btn-outline-primary btn-sm" href="{{.URL}}">{{.Number}}</a>{{end}}{{end}}{{end}}
+              {{if .NextURL}}<a class="btn btn-outline-primary btn-sm" href="{{.NextURL}}">{{index $.T "mail_monitor_next"}}</a>{{end}}
+              {{if .LastURL}}<a class="btn btn-outline-primary btn-sm" href="{{.LastURL}}">{{index $.T "mail_monitor_last"}}</a>{{end}}
+              {{if gt .Pages 1}}<form method="get" action="/#mail-monitor-{{$serverIndex}}" class="d-flex flex-wrap gap-2 align-items-center">
+                <input type="hidden" name="expenses" value="">
+                <input type="hidden" name="mail_server" value="{{$server.ID}}">
+                <input type="hidden" name="mail_days" value="{{$expenseServer.MailFilterDays}}">
+                <input type="hidden" name="mail_stage" value="{{$expenseServer.MailFilterStage}}">
+                <input type="hidden" name="mail_kind" value="{{$expenseServer.MailFilterKind}}">
+                <input type="hidden" name="mail_recipient" value="{{$expenseServer.MailFilterRecipient}}">
+                <label class="d-flex gap-2 align-items-center">{{index $.T "mail_monitor_page"}} <input type="number" class="form-control form-control-sm" name="mail_page" min="1" max="{{.Pages}}" value="{{.Page}}" required></label>
+                <button class="btn btn-outline-primary btn-sm" type="submit">{{index $.T "mail_monitor_show"}}</button>
+              </form>{{end}}
+            </nav>
+            {{end}}
             {{else}}<a class="btn btn-outline-primary btn-sm" href="?expenses&amp;mail_server={{urlquery $server.ID}}#mail-monitor-{{$serverIndex}}">{{index $.T "mail_monitor_journal"}}</a>{{end}}
           </section>
           {{if not $server.DiskCapacityKnown}}

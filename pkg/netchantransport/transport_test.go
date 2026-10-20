@@ -77,16 +77,34 @@ func TestQUICPriorityTCPCompatibilityAndPinnedIdentity(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			connection, err := (priorityDriver{stop: stop}).Dial(bound, transport.Options{TLS: clientTLS, Done: stop, OwnerDone: stop})
+			reports := make(chan string, 1)
+			connection, err := (priorityDriver{stop: stop, reports: reports}).Dial(bound, transport.Options{TLS: clientTLS, Done: stop, OwnerDone: stop})
 			if fixture.network == "" {
 				if err == nil {
 					connection.Close()
 					t.Fatal("substituted identity accepted")
 				}
+				select {
+				case <-reports:
+					t.Fatal("failed TLS identity reported as an established transport")
+				default:
+				}
 				return
 			}
 			if err != nil {
 				t.Fatal(err)
+			}
+			wantProtocol := "tcp+tls"
+			if fixture.network == "udp" {
+				wantProtocol = "quic"
+			}
+			select {
+			case protocol := <-reports:
+				if protocol != wantProtocol {
+					t.Fatalf("reported %s, want %s", protocol, wantProtocol)
+				}
+			default:
+				t.Fatal("selected transport was not reported")
 			}
 			defer connection.Close()
 			if network := connection.RemoteAddr().Network(); network != fixture.network {

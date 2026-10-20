@@ -238,7 +238,36 @@ func (store Store) RecentFiltered(ctx context.Context, filter Filter) ([]Event, 
 	if filter.Offset < 0 {
 		filter.Offset = 0
 	}
-	query := `SELECT id,installation_id,flow_id,message_id,kind,stage,domain,recipient,route,accepted_by,attempt,smtp_code,detail,created_at FROM mail_monitor_events WHERE installation_id=? AND created_at>=?`
+	where, arguments := eventFilterSQL(filter)
+	query := `SELECT id,installation_id,flow_id,message_id,kind,stage,domain,recipient,route,accepted_by,attempt,smtp_code,detail,created_at FROM mail_monitor_events` + where + ` ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`
+	arguments = append(arguments, filter.Limit, filter.Offset)
+	rows, err := store.DB.QueryContext(ctx, query, arguments...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanEvents(rows)
+}
+
+func (store Store) CountFiltered(ctx context.Context, filter Filter) (int, error) {
+	where, arguments := eventFilterSQL(filter)
+	rows, err := store.DB.QueryContext(ctx, `SELECT COUNT(*) FROM mail_monitor_events`+where, arguments...)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	var count int
+	if rows.Next() {
+		if err := rows.Scan(&count); err != nil {
+			return 0, err
+		}
+	}
+	return count, rows.Err()
+}
+
+// Counts and page contents must use identical server, time and search boundaries.
+func eventFilterSQL(filter Filter) (string, []any) {
+	query := ` WHERE installation_id=? AND created_at>=?`
 	arguments := []any{filter.InstallationID, filter.Since.UTC().Format(timestampLayout)}
 	if filter.Stage != "" {
 		query += ` AND stage=?`
@@ -253,14 +282,7 @@ func (store Store) RecentFiltered(ctx context.Context, filter Filter) ([]Event, 
 		escapedRecipient := strings.NewReplacer("!", "!!", "%", "!%", "_", "!_").Replace(strings.ToLower(filter.Recipient))
 		arguments = append(arguments, "%"+escapedRecipient+"%")
 	}
-	query += ` ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`
-	arguments = append(arguments, filter.Limit, filter.Offset)
-	rows, err := store.DB.QueryContext(ctx, query, arguments...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanEvents(rows)
+	return query, arguments
 }
 
 func (store Store) CountsSince(ctx context.Context, installationID string, since time.Time) (Counts, error) {
