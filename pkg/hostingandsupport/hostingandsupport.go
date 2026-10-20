@@ -16,9 +16,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/matveynator/sitebrush/v2/pkg/captcha"
 	"github.com/matveynator/sitebrush/v2/pkg/demo"
 	"github.com/matveynator/sitebrush/v2/pkg/domainregistration"
 	"github.com/matveynator/sitebrush/v2/pkg/expenses"
+	"github.com/matveynator/sitebrush/v2/pkg/mailguard"
 	"github.com/matveynator/sitebrush/v2/pkg/mailmonitor"
 	"github.com/matveynator/sitebrush/v2/pkg/mailout"
 	"github.com/matveynator/sitebrush/v2/pkg/migrations"
@@ -27,7 +29,7 @@ import (
 
 const DefaultStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
 const DefaultDeletionBackupRetentionDays = 365
-const currentBillingSchemaVersion = 28
+const currentBillingSchemaVersion = 29
 
 const InstallationKindServer = "server"
 const InstallationKindDesktop = "desktop"
@@ -928,6 +930,11 @@ func hostingSchemaSteps(ctx context.Context, repair bool) []migrations.Step {
 	// Inserting table queries before those columns would change recorded ordinals.
 	for index, query := range mailmonitor.SchemaQueries() {
 		step := migrations.SQL(fmt.Sprintf("mail-monitor-%03d", index+1), query)
+		step.Ensure = repair
+		steps = append(steps, step)
+	}
+	for index, query := range append(mailguard.SchemaQueries(), captcha.SchemaQueries()...) {
+		step := migrations.SQL(fmt.Sprintf("account-mail-guard-%03d", index+1), query)
 		step.Ensure = repair
 		steps = append(steps, step)
 	}

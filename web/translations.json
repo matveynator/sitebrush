@@ -1542,7 +1542,18 @@
     "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email.",
     "mail_monitor_stage_sent": "Sent",
     "mail_monitor_stage_rejected": "Rejected",
-    "mail_monitor_stage_temporary_failure": "Temporary failure"
+    "mail_monitor_stage_temporary_failure": "Temporary failure",
+    "account_captcha_label": "Characters from the image",
+    "account_captcha_help": "Enter the six characters. Each image can be used once and expires in five minutes. Reload the page for another image.",
+    "account_mail_limited": "Too many email requests from this IP. Please try later.",
+    "account_mail_unavailable": "Email requests are temporarily unavailable. Please try later.",
+    "account_mail_block_ip": "Block email requests from this IP for 24 hours",
+    "account_mail_blocked_ips": "Blocked email request IPs",
+    "account_mail_unblock_ip": "Unblock email requests",
+    "account_mail_ip_updated": "Email request IP restrictions updated.",
+    "account_mail_ip_invalid": "A valid client IP is required.",
+    "mail_monitor_stage_mail_blocked": "Email request IP blocked",
+    "mail_monitor_stage_mail_unblocked": "Email request IP unblocked"
   },
   "fr": {
     "edit_saving": "Enregistrement de la page…",
@@ -2876,7 +2887,18 @@
     "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email.",
     "mail_monitor_stage_sent": "Sent",
     "mail_monitor_stage_rejected": "Rejected",
-    "mail_monitor_stage_temporary_failure": "Temporary failure"
+    "mail_monitor_stage_temporary_failure": "Temporary failure",
+    "account_captcha_label": "Characters from the image",
+    "account_captcha_help": "Enter the six characters. Each image can be used once and expires in five minutes. Reload the page for another image.",
+    "account_mail_limited": "Too many email requests from this IP. Please try later.",
+    "account_mail_unavailable": "Email requests are temporarily unavailable. Please try later.",
+    "account_mail_block_ip": "Block email requests from this IP for 24 hours",
+    "account_mail_blocked_ips": "Blocked email request IPs",
+    "account_mail_unblock_ip": "Unblock email requests",
+    "account_mail_ip_updated": "Email request IP restrictions updated.",
+    "account_mail_ip_invalid": "A valid client IP is required.",
+    "mail_monitor_stage_mail_blocked": "Email request IP blocked",
+    "mail_monitor_stage_mail_unblocked": "Email request IP unblocked"
   },
   "ru": {
     "mail_monitor_title": "Почта и аккаунты · 24 часа / 90 дней",
@@ -4421,7 +4443,18 @@
     "auth_https_expired": "Срок действия ссылки истёк. Начните регистрацию заново, чтобы получить новое письмо.",
     "mail_monitor_stage_sent": "Отправлено",
     "mail_monitor_stage_rejected": "Отклонено SMTP-сервером",
-    "mail_monitor_stage_temporary_failure": "Временная ошибка"
+    "mail_monitor_stage_temporary_failure": "Временная ошибка",
+    "account_captcha_label": "Символы с картинки",
+    "account_captcha_help": "Введите шесть символов. Картинка действует пять минут и используется один раз. Обновите страницу, чтобы получить другую.",
+    "account_mail_limited": "С этого IP поступило слишком много запросов писем. Попробуйте позже.",
+    "account_mail_unavailable": "Запросы писем временно недоступны. Попробуйте позже.",
+    "account_mail_block_ip": "Запретить запросы писем с этого IP на 24 часа",
+    "account_mail_blocked_ips": "IP с запретом запросов писем",
+    "account_mail_unblock_ip": "Разрешить запросы писем",
+    "account_mail_ip_updated": "Ограничения запросов писем по IP обновлены.",
+    "account_mail_ip_invalid": "Укажите корректный IP клиента.",
+    "mail_monitor_stage_mail_blocked": "Запросы писем с IP заблокированы",
+    "mail_monitor_stage_mail_unblocked": "Запросы писем с IP разрешены"
   },
   "ja": {
     "edit_saving": "ページを保存中…",
@@ -5751,7 +5784,18 @@
     "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email.",
     "mail_monitor_stage_sent": "Sent",
     "mail_monitor_stage_rejected": "Rejected",
-    "mail_monitor_stage_temporary_failure": "Temporary failure"
+    "mail_monitor_stage_temporary_failure": "Temporary failure",
+    "account_captcha_label": "Characters from the image",
+    "account_captcha_help": "Enter the six characters. Each image can be used once and expires in five minutes. Reload the page for another image.",
+    "account_mail_limited": "Too many email requests from this IP. Please try later.",
+    "account_mail_unavailable": "Email requests are temporarily unavailable. Please try later.",
+    "account_mail_block_ip": "Block email requests from this IP for 24 hours",
+    "account_mail_blocked_ips": "Blocked email request IPs",
+    "account_mail_unblock_ip": "Unblock email requests",
+    "account_mail_ip_updated": "Email request IP restrictions updated.",
+    "account_mail_ip_invalid": "A valid client IP is required.",
+    "mail_monitor_stage_mail_blocked": "Email request IP blocked",
+    "mail_monitor_stage_mail_unblocked": "Email request IP unblocked"
   },
   "it": {
     "edit_saving": "Salvataggio della pagina…",
@@ -7081,7 +7125,18 @@
     "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email.",
     "mail_monitor_stage_sent": "Sent",
     "mail_monitor_stage_rejected": "Rejected",
-    "mail_monitor_stage_temporary_failure": "Temporary failure"
+    "mail_monitor_stage_temporary_failure": "Temporary failure",
+    "account_captcha_label": "Characters from the image",
+    "account_captcha_help": "Enter the six characters. Each image can be used once and expires in five minutes. Reload the page for another image.",
+    "account_mail_limited": "Too many email requests from this IP. Please try later.",
+    "account_mail_unavailable": "Email requests are temporarily unavailable. Please try later.",
+    "account_mail_block_ip": "Block email requests from this IP for 24 hours",
+    "account_mail_blocked_ips": "Blocked email request IPs",
+    "account_mail_unblock_ip": "Unblock email requests",
+    "account_mail_ip_updated": "Email request IP restrictions updated.",
+    "account_mail_ip_invalid": "A valid client IP is required.",
+    "mail_monitor_stage_mail_blocked": "Email request IP blocked",
+    "mail_monitor_stage_mail_unblocked": "Email request IP unblocked"
   },
   "sv": {
     "edit_saving": "Sparar sidan…",
@@ -8411,7 +8466,18 @@
     "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email.",
     "mail_monitor_stage_sent": "Sent",
     "mail_monitor_stage_rejected": "Rejected",
-    "mail_monitor_stage_temporary_failure": "Temporary failure"
+    "mail_monitor_stage_temporary_failure": "Temporary failure",
+    "account_captcha_label": "Characters from the image",
+    "account_captcha_help": "Enter the six characters. Each image can be used once and expires in five minutes. Reload the page for another image.",
+    "account_mail_limited": "Too many email requests from this IP. Please try later.",
+    "account_mail_unavailable": "Email requests are temporarily unavailable. Please try later.",
+    "account_mail_block_ip": "Block email requests from this IP for 24 hours",
+    "account_mail_blocked_ips": "Blocked email request IPs",
+    "account_mail_unblock_ip": "Unblock email requests",
+    "account_mail_ip_updated": "Email request IP restrictions updated.",
+    "account_mail_ip_invalid": "A valid client IP is required.",
+    "mail_monitor_stage_mail_blocked": "Email request IP blocked",
+    "mail_monitor_stage_mail_unblocked": "Email request IP unblocked"
   },
   "fi": {
     "edit_saving": "Tallennetaan sivua…",
@@ -9741,7 +9807,18 @@
     "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email.",
     "mail_monitor_stage_sent": "Sent",
     "mail_monitor_stage_rejected": "Rejected",
-    "mail_monitor_stage_temporary_failure": "Temporary failure"
+    "mail_monitor_stage_temporary_failure": "Temporary failure",
+    "account_captcha_label": "Characters from the image",
+    "account_captcha_help": "Enter the six characters. Each image can be used once and expires in five minutes. Reload the page for another image.",
+    "account_mail_limited": "Too many email requests from this IP. Please try later.",
+    "account_mail_unavailable": "Email requests are temporarily unavailable. Please try later.",
+    "account_mail_block_ip": "Block email requests from this IP for 24 hours",
+    "account_mail_blocked_ips": "Blocked email request IPs",
+    "account_mail_unblock_ip": "Unblock email requests",
+    "account_mail_ip_updated": "Email request IP restrictions updated.",
+    "account_mail_ip_invalid": "A valid client IP is required.",
+    "mail_monitor_stage_mail_blocked": "Email request IP blocked",
+    "mail_monitor_stage_mail_unblocked": "Email request IP unblocked"
   },
   "mn": {
     "edit_saving": "Хуудсыг хадгалж байна…",
@@ -11071,7 +11148,18 @@
     "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email.",
     "mail_monitor_stage_sent": "Sent",
     "mail_monitor_stage_rejected": "Rejected",
-    "mail_monitor_stage_temporary_failure": "Temporary failure"
+    "mail_monitor_stage_temporary_failure": "Temporary failure",
+    "account_captcha_label": "Characters from the image",
+    "account_captcha_help": "Enter the six characters. Each image can be used once and expires in five minutes. Reload the page for another image.",
+    "account_mail_limited": "Too many email requests from this IP. Please try later.",
+    "account_mail_unavailable": "Email requests are temporarily unavailable. Please try later.",
+    "account_mail_block_ip": "Block email requests from this IP for 24 hours",
+    "account_mail_blocked_ips": "Blocked email request IPs",
+    "account_mail_unblock_ip": "Unblock email requests",
+    "account_mail_ip_updated": "Email request IP restrictions updated.",
+    "account_mail_ip_invalid": "A valid client IP is required.",
+    "mail_monitor_stage_mail_blocked": "Email request IP blocked",
+    "mail_monitor_stage_mail_unblocked": "Email request IP unblocked"
   },
   "zh": {
     "edit_saving": "正在保存页面…",
@@ -12401,7 +12489,18 @@
     "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email.",
     "mail_monitor_stage_sent": "Sent",
     "mail_monitor_stage_rejected": "Rejected",
-    "mail_monitor_stage_temporary_failure": "Temporary failure"
+    "mail_monitor_stage_temporary_failure": "Temporary failure",
+    "account_captcha_label": "Characters from the image",
+    "account_captcha_help": "Enter the six characters. Each image can be used once and expires in five minutes. Reload the page for another image.",
+    "account_mail_limited": "Too many email requests from this IP. Please try later.",
+    "account_mail_unavailable": "Email requests are temporarily unavailable. Please try later.",
+    "account_mail_block_ip": "Block email requests from this IP for 24 hours",
+    "account_mail_blocked_ips": "Blocked email request IPs",
+    "account_mail_unblock_ip": "Unblock email requests",
+    "account_mail_ip_updated": "Email request IP restrictions updated.",
+    "account_mail_ip_invalid": "A valid client IP is required.",
+    "mail_monitor_stage_mail_blocked": "Email request IP blocked",
+    "mail_monitor_stage_mail_unblocked": "Email request IP unblocked"
   },
   "he": {
     "edit_saving": "שמירת הדף…",
@@ -13731,7 +13830,18 @@
     "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email.",
     "mail_monitor_stage_sent": "Sent",
     "mail_monitor_stage_rejected": "Rejected",
-    "mail_monitor_stage_temporary_failure": "Temporary failure"
+    "mail_monitor_stage_temporary_failure": "Temporary failure",
+    "account_captcha_label": "Characters from the image",
+    "account_captcha_help": "Enter the six characters. Each image can be used once and expires in five minutes. Reload the page for another image.",
+    "account_mail_limited": "Too many email requests from this IP. Please try later.",
+    "account_mail_unavailable": "Email requests are temporarily unavailable. Please try later.",
+    "account_mail_block_ip": "Block email requests from this IP for 24 hours",
+    "account_mail_blocked_ips": "Blocked email request IPs",
+    "account_mail_unblock_ip": "Unblock email requests",
+    "account_mail_ip_updated": "Email request IP restrictions updated.",
+    "account_mail_ip_invalid": "A valid client IP is required.",
+    "mail_monitor_stage_mail_blocked": "Email request IP blocked",
+    "mail_monitor_stage_mail_unblocked": "Email request IP unblocked"
   },
   "fa": {
     "edit_saving": "در حال ذخیره صفحه…",
@@ -15061,7 +15171,18 @@
     "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email.",
     "mail_monitor_stage_sent": "Sent",
     "mail_monitor_stage_rejected": "Rejected",
-    "mail_monitor_stage_temporary_failure": "Temporary failure"
+    "mail_monitor_stage_temporary_failure": "Temporary failure",
+    "account_captcha_label": "Characters from the image",
+    "account_captcha_help": "Enter the six characters. Each image can be used once and expires in five minutes. Reload the page for another image.",
+    "account_mail_limited": "Too many email requests from this IP. Please try later.",
+    "account_mail_unavailable": "Email requests are temporarily unavailable. Please try later.",
+    "account_mail_block_ip": "Block email requests from this IP for 24 hours",
+    "account_mail_blocked_ips": "Blocked email request IPs",
+    "account_mail_unblock_ip": "Unblock email requests",
+    "account_mail_ip_updated": "Email request IP restrictions updated.",
+    "account_mail_ip_invalid": "A valid client IP is required.",
+    "mail_monitor_stage_mail_blocked": "Email request IP blocked",
+    "mail_monitor_stage_mail_unblocked": "Email request IP unblocked"
   },
   "de": {
     "edit_saving": "Seite wird gespeichert…",
@@ -16391,7 +16512,18 @@
     "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email.",
     "mail_monitor_stage_sent": "Sent",
     "mail_monitor_stage_rejected": "Rejected",
-    "mail_monitor_stage_temporary_failure": "Temporary failure"
+    "mail_monitor_stage_temporary_failure": "Temporary failure",
+    "account_captcha_label": "Characters from the image",
+    "account_captcha_help": "Enter the six characters. Each image can be used once and expires in five minutes. Reload the page for another image.",
+    "account_mail_limited": "Too many email requests from this IP. Please try later.",
+    "account_mail_unavailable": "Email requests are temporarily unavailable. Please try later.",
+    "account_mail_block_ip": "Block email requests from this IP for 24 hours",
+    "account_mail_blocked_ips": "Blocked email request IPs",
+    "account_mail_unblock_ip": "Unblock email requests",
+    "account_mail_ip_updated": "Email request IP restrictions updated.",
+    "account_mail_ip_invalid": "A valid client IP is required.",
+    "mail_monitor_stage_mail_blocked": "Email request IP blocked",
+    "mail_monitor_stage_mail_unblocked": "Email request IP unblocked"
   },
   "tr": {
     "edit_saving": "Sayfa kaydediliyor…",
@@ -17721,7 +17853,18 @@
     "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email.",
     "mail_monitor_stage_sent": "Sent",
     "mail_monitor_stage_rejected": "Rejected",
-    "mail_monitor_stage_temporary_failure": "Temporary failure"
+    "mail_monitor_stage_temporary_failure": "Temporary failure",
+    "account_captcha_label": "Characters from the image",
+    "account_captcha_help": "Enter the six characters. Each image can be used once and expires in five minutes. Reload the page for another image.",
+    "account_mail_limited": "Too many email requests from this IP. Please try later.",
+    "account_mail_unavailable": "Email requests are temporarily unavailable. Please try later.",
+    "account_mail_block_ip": "Block email requests from this IP for 24 hours",
+    "account_mail_blocked_ips": "Blocked email request IPs",
+    "account_mail_unblock_ip": "Unblock email requests",
+    "account_mail_ip_updated": "Email request IP restrictions updated.",
+    "account_mail_ip_invalid": "A valid client IP is required.",
+    "mail_monitor_stage_mail_blocked": "Email request IP blocked",
+    "mail_monitor_stage_mail_unblocked": "Email request IP unblocked"
   },
   "kk": {
     "edit_saving": "Бет сақталуда…",
@@ -19051,7 +19194,18 @@
     "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email.",
     "mail_monitor_stage_sent": "Sent",
     "mail_monitor_stage_rejected": "Rejected",
-    "mail_monitor_stage_temporary_failure": "Temporary failure"
+    "mail_monitor_stage_temporary_failure": "Temporary failure",
+    "account_captcha_label": "Characters from the image",
+    "account_captcha_help": "Enter the six characters. Each image can be used once and expires in five minutes. Reload the page for another image.",
+    "account_mail_limited": "Too many email requests from this IP. Please try later.",
+    "account_mail_unavailable": "Email requests are temporarily unavailable. Please try later.",
+    "account_mail_block_ip": "Block email requests from this IP for 24 hours",
+    "account_mail_blocked_ips": "Blocked email request IPs",
+    "account_mail_unblock_ip": "Unblock email requests",
+    "account_mail_ip_updated": "Email request IP restrictions updated.",
+    "account_mail_ip_invalid": "A valid client IP is required.",
+    "mail_monitor_stage_mail_blocked": "Email request IP blocked",
+    "mail_monitor_stage_mail_unblocked": "Email request IP unblocked"
   },
   "es": {
     "edit_saving": "Guardando la página…",
@@ -20381,7 +20535,18 @@
     "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email.",
     "mail_monitor_stage_sent": "Sent",
     "mail_monitor_stage_rejected": "Rejected",
-    "mail_monitor_stage_temporary_failure": "Temporary failure"
+    "mail_monitor_stage_temporary_failure": "Temporary failure",
+    "account_captcha_label": "Characters from the image",
+    "account_captcha_help": "Enter the six characters. Each image can be used once and expires in five minutes. Reload the page for another image.",
+    "account_mail_limited": "Too many email requests from this IP. Please try later.",
+    "account_mail_unavailable": "Email requests are temporarily unavailable. Please try later.",
+    "account_mail_block_ip": "Block email requests from this IP for 24 hours",
+    "account_mail_blocked_ips": "Blocked email request IPs",
+    "account_mail_unblock_ip": "Unblock email requests",
+    "account_mail_ip_updated": "Email request IP restrictions updated.",
+    "account_mail_ip_invalid": "A valid client IP is required.",
+    "mail_monitor_stage_mail_blocked": "Email request IP blocked",
+    "mail_monitor_stage_mail_unblocked": "Email request IP unblocked"
   },
   "pt": {
     "edit_saving": "A guardar a página…",
@@ -21711,6 +21876,17 @@
     "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email.",
     "mail_monitor_stage_sent": "Sent",
     "mail_monitor_stage_rejected": "Rejected",
-    "mail_monitor_stage_temporary_failure": "Temporary failure"
+    "mail_monitor_stage_temporary_failure": "Temporary failure",
+    "account_captcha_label": "Characters from the image",
+    "account_captcha_help": "Enter the six characters. Each image can be used once and expires in five minutes. Reload the page for another image.",
+    "account_mail_limited": "Too many email requests from this IP. Please try later.",
+    "account_mail_unavailable": "Email requests are temporarily unavailable. Please try later.",
+    "account_mail_block_ip": "Block email requests from this IP for 24 hours",
+    "account_mail_blocked_ips": "Blocked email request IPs",
+    "account_mail_unblock_ip": "Unblock email requests",
+    "account_mail_ip_updated": "Email request IP restrictions updated.",
+    "account_mail_ip_invalid": "A valid client IP is required.",
+    "mail_monitor_stage_mail_blocked": "Email request IP blocked",
+    "mail_monitor_stage_mail_unblocked": "Email request IP unblocked"
   }
 }

@@ -9,6 +9,7 @@ import (
 // envelope. They do not change the mail relay or NetChan protocols.
 type Diagnostic struct {
 	Transport   string `json:"transport,omitempty"`
+	ClientIP    string `json:"client_ip,omitempty"`
 	SMTPServer  string `json:"smtp_server,omitempty"`
 	SMTPReply   string `json:"smtp_reply,omitempty"`
 	SMTPCode    string `json:"smtp_code,omitempty"`
@@ -18,6 +19,7 @@ type Diagnostic struct {
 
 func (diagnostic Diagnostic) String() string {
 	diagnostic.Transport = boundedField(diagnostic.Transport, 64)
+	diagnostic.ClientIP = boundedField(diagnostic.ClientIP, 45)
 	diagnostic.SMTPServer = boundedField(diagnostic.SMTPServer, 253)
 	diagnostic.SMTPCode = boundedField(diagnostic.SMTPCode, 3)
 	diagnostic.SMTPReply = boundedField(diagnostic.SMTPReply, 64)
@@ -28,6 +30,11 @@ func (diagnostic Diagnostic) String() string {
 	payload, _ := json.Marshal(diagnostic)
 	if len(payload) > 500 {
 		diagnostic.Identifiers = ""
+		payload, _ = json.Marshal(diagnostic)
+	}
+	if len(payload) > 500 {
+		diagnostic.SMTPReply = boundedField(diagnostic.SMTPReply, 32)
+		diagnostic.Failure = boundedField(diagnostic.Failure, 32)
 		payload, _ = json.Marshal(diagnostic)
 	}
 	return string(payload)

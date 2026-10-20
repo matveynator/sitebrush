@@ -19,6 +19,7 @@ const Retention = 90 * 24 * time.Hour
 const timestampLayout = "2006-01-02T15:04:05.000000000Z"
 
 type Event struct {
+	ClientIP       string `json:"-"`
 	ID             string `json:"id"`
 	InstallationID string `json:"installation_id"`
 	FlowID         string `json:"flow_id,omitempty"`
@@ -119,24 +120,36 @@ func (store Store) Append(ctx context.Context, event Event) error {
 	}
 	event.Domain = boundedField(event.Domain, 253)
 	event.Recipient = boundedField(event.Recipient, 320)
+	if event.ClientIP != "" {
+		diagnostic := event.Diagnostic()
+		diagnostic.ClientIP = event.ClientIP
+		event.Detail = diagnostic.String()
+	}
 	if event.Detail != "" {
 		event.Detail = SafeError(errors.New(event.Detail))
 	}
 	// Later attempts are reconstructed from the outbox; inherit non-secret flow
 	// metadata from the first event so it survives process restarts.
-	if event.MessageID != "" && (event.FlowID == "" || event.Domain == "") {
-		rows, queryErr := store.DB.QueryContext(ctx, `SELECT flow_id,domain FROM mail_monitor_events WHERE installation_id=? AND message_id=? AND stage='queued' LIMIT 1`, event.InstallationID, event.MessageID)
+	if event.MessageID != "" && (event.FlowID == "" || event.Domain == "" || event.Diagnostic().ClientIP == "") {
+		rows, queryErr := store.DB.QueryContext(ctx, `SELECT flow_id,domain,detail FROM mail_monitor_events WHERE installation_id=? AND message_id=? AND stage='queued' LIMIT 1`, event.InstallationID, event.MessageID)
 		if queryErr != nil {
 			return queryErr
 		}
 		if rows.Next() {
-			var queuedFlowID, queuedDomain string
-			queryErr = rows.Scan(&queuedFlowID, &queuedDomain)
+			var queuedFlowID, queuedDomain, queuedDetail string
+			queryErr = rows.Scan(&queuedFlowID, &queuedDomain, &queuedDetail)
 			if event.FlowID == "" {
 				event.FlowID = queuedFlowID
 			}
 			if event.Domain == "" {
 				event.Domain = queuedDomain
+			}
+			diagnostic := event.Diagnostic()
+			if diagnostic.ClientIP == "" {
+				diagnostic.ClientIP = (Event{Detail: queuedDetail}).Diagnostic().ClientIP
+				if diagnostic.ClientIP != "" {
+					event.Detail = diagnostic.String()
+				}
 			}
 		}
 		if queryErr == nil {

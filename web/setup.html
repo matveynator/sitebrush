@@ -118,6 +118,11 @@
         <div class="alert alert-warning">{{index .T "setup_request_no_plans"}}</div>
         {{end}}
       </div>
+    <div class="account-captcha">
+      <label>{{index .T "account_captcha_label"}}<input type="text" class="form-control" name="captcha" autocomplete="off" autocapitalize="characters" spellcheck="false" minlength="6" maxlength="6" pattern="[A-Za-z2-9]{6}" required></label>
+      <img src="?captcha&amp;purpose=site_request" width="320" height="100" alt="{{index .T "recover_captcha_alt"}}">
+      <small>{{index .T "account_captcha_help"}}</small>
+    </div>
       <div><button type="submit" class="btn btn-primary"><img src="/p/static/profile.png" alt="">{{index .T "setup_request_submit"}}</button></div>
     </form>
   </div>
@@ -135,7 +140,13 @@
     <p class="hint">{{index .T "auth_local_setup"}}</p>
     <label>{{index .T "login_password_placeholder"}}<input type="password" name="password" autocomplete="new-password" required></label>
     <label>{{index .T "profile_confirm_password"}}<input type="password" name="password_confirm" autocomplete="new-password" required></label>
-    {{else}}<p class="hint">{{index .T "auth_registration_secure"}}</p>{{end}}
+    {{else}}<p class="hint">{{index .T "auth_registration_secure"}}</p>
+    <div class="account-captcha">
+      <label>{{index .T "account_captcha_label"}}<input type="text" class="form-control" name="captcha" autocomplete="off" autocapitalize="characters" spellcheck="false" minlength="6" maxlength="6" pattern="[A-Za-z2-9]{6}" required></label>
+      <img src="?captcha&amp;purpose=register" width="320" height="100" alt="{{index .T "recover_captcha_alt"}}">
+      <small>{{index .T "account_captcha_help"}}</small>
+    </div>
+    {{end}}
     <div><button type="submit" class="btn btn-primary">{{index .T "setup_create_admin"}}</button></div>
   </form>
   {{end}}

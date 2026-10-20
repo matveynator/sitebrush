@@ -44,3 +44,25 @@ The detailed journal covers 90 days. Old records are removed at process startup 
 Rendered from the actual expenses template using synthetic addresses and metrics. The screenshot demonstrates layout; it does not represent live mail delivery.
 
 ![Desktop mail journal](mail-monitoring-desktop.png)
+
+## Account email abuse protection
+
+Registration, password recovery and site registration requests require a one-use, six-character PNG CAPTCHA. Its random answer is stored only as a salted hash in the server control database; the browser receives an opaque HttpOnly nonce. A challenge is bound to its source IP, domain and form purpose, lasts five minutes, requires at least two seconds before submission and is consumed even on a wrong answer. Image issuance is limited to six per IP per minute, with at most 10,000 live challenges. New-domain registration remains available before HTTPS without creating a site database or transmitting a password.
+
+The server applies these limits across all sites and both registration/recovery forms:
+
+| Boundary | Limit |
+| --- | --- |
+| Source IP requests, including invalid CAPTCHA attempts | 8/minute, 20/hour, 40/day |
+| Different recipient addresses requested by one IP | 3/hour, 5/day; the next distinct address triggers a block |
+| Different recipients inside one minute | 3; the next distinct address triggers a block |
+| Network requests | 100/hour per IPv4 /24 or IPv6 /64 |
+| CAPTCHA-approved requests to one recipient across all source IPs | 60-second cooldown, 3/hour, 6/day |
+
+A source violation blocks account email requests from that IP for one hour, or 24 hours for a daily violation. It does not lock the victim's account or disable ordinary website visits. Blocks survive restarts. Recipient delivery quotas are charged only after a valid CAPTCHA, so simply naming a victim in an unsolved request cannot exhaust that recipient's allowance. The request ledger is retained for 24 hours and capped at 20,000 rows; reaching capacity fails closed for new account email requests.
+
+The mail journal shows the initiating IP when known. Follow-up outbox events inherit it from the queued event, including after restart. Historical rows do not acquire inferred IPs. Under the local server's **Diagnostic identifiers**, administrators can block account email requests from an IP for 24 hours; **Blocked email request IPs** provides an unblock action. Delivery workers recheck source blocks before sending queued messages. An already accepted SMTP message cannot be withdrawn.
+
+IP attribution uses the account subsystem's trusted proxy chain. Configure `SITEBRUSH_TRUSTED_PROXIES` for an actual reverse proxy; direct clients cannot select their identity with forwarded headers. Requests with unavailable client identity fail closed. Remote server journals retain their originating IPs in the existing signed diagnostic synchronization; blocking controls apply on the server that owns the requests.
+
+A raster CAPTCHA is a barrier against trivial parsing and guessing, not a guarantee against OCR, browser automation or human solving services. Independent IP, network and recipient limits remain mandatory.

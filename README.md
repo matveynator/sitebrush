@@ -884,4 +884,4 @@ Browser saves create the main page at the exact address entered in the form and 
 
 ## Mail and account monitoring
 
-Server administrators can inspect delivery attempts, full recipients, safe SMTP diagnostics and registration/recovery outcomes under each server's metrics in Hosting and support. See [Mail and account monitoring](doc/mail-monitoring.md) for counters, remote synchronization and 90-day retention.
+Server administrators can inspect delivery attempts, full recipients, safe SMTP diagnostics and registration/recovery outcomes under each server's metrics in Hosting and support. Public registration, recovery and site-request forms use a one-use server-validated PNG CAPTCHA plus persistent IP, network and recipient limits. The journal shows known source IPs and lets local server administrators block or unblock email requests. See [Mail and account monitoring](doc/mail-monitoring.md) for counters, remote synchronization and 90-day retention.

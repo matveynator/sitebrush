@@ -58,6 +58,7 @@ import (
 	browserstats "github.com/matveynator/sitebrush/v2/pkg/analytics"
 	"github.com/matveynator/sitebrush/v2/pkg/appupdate"
 	"github.com/matveynator/sitebrush/v2/pkg/authmail"
+	"github.com/matveynator/sitebrush/v2/pkg/captcha"
 	"github.com/matveynator/sitebrush/v2/pkg/channelacme"
 	"github.com/matveynator/sitebrush/v2/pkg/crawler"
 	"github.com/matveynator/sitebrush/v2/pkg/demo"
@@ -67,6 +68,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/hostingandsupport"
 	"github.com/matveynator/sitebrush/v2/pkg/httpsecurity"
 	"github.com/matveynator/sitebrush/v2/pkg/imageprepare"
+	"github.com/matveynator/sitebrush/v2/pkg/mailguard"
 	"github.com/matveynator/sitebrush/v2/pkg/mailmonitor"
 	"github.com/matveynator/sitebrush/v2/pkg/mailout"
 	sitemcp "github.com/matveynator/sitebrush/v2/pkg/mcp"
@@ -4664,6 +4666,8 @@ func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
 	request.Header.Set("Accept-Language", "ru")
 	response := httptest.NewRecorder()
 
+	prepareAccountMailCaptchaForTest(t, application, request)
+
 	application.route(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
@@ -4715,6 +4719,7 @@ func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
 	confirmRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?register", strings.NewReader(codeForm.Encode()))
 	confirmRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	confirmResponse := httptest.NewRecorder()
+	prepareAccountMailCaptchaForTest(t, application, confirmRequest)
 	application.route(confirmResponse, confirmRequest)
 	if confirmResponse.Code != http.StatusOK || !strings.Contains(confirmResponse.Body.String(), `autocomplete="new-password"`) {
 		t.Fatal("verified email should open password setup")
@@ -4723,6 +4728,7 @@ func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
 	passwordRequest := httptest.NewRequest(http.MethodPost, "https://localhost/?email_confirm="+url.QueryEscape(pendingToken), strings.NewReader(passwordForm.Encode()))
 	passwordRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	confirmResponse = httptest.NewRecorder()
+	prepareAccountMailCaptchaForTest(t, application, passwordRequest)
 	application.route(confirmResponse, passwordRequest)
 	if confirmResponse.Code != http.StatusFound {
 		t.Fatalf("confirm status = %d, body=%q", confirmResponse.Code, confirmResponse.Body.String())
@@ -4899,6 +4905,8 @@ func TestRegisterRejectsUnverifiedDomainBeforeCreatingSiteDatabase(t *testing.T)
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	response := httptest.NewRecorder()
 
+	prepareAccountMailCaptchaForTest(t, application, request)
+
 	application.route(response, request)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
@@ -4939,6 +4947,7 @@ func TestLocalhostWithoutSiteDatabaseOpensRegistration(t *testing.T) {
 			request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "stale"})
 		}
 		response := httptest.NewRecorder()
+		prepareAccountMailCaptchaForTest(t, application, request)
 		application.route(response, request)
 		if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/?register" {
 			t.Fatalf("missing local database stale_session=%t status=%d location=%q body=%q", staleSession, response.Code, response.Header().Get("Location"), response.Body.String())
@@ -4952,6 +4961,7 @@ func TestLocalhostWithoutSiteDatabaseOpensRegistration(t *testing.T) {
 	setupRequest.RemoteAddr = "[::1]:1234"
 	setupRequest.AddCookie(staleCookie)
 	setupResponse := httptest.NewRecorder()
+	prepareAccountMailCaptchaForTest(t, application, setupRequest)
 	application.route(setupResponse, setupRequest)
 	csrfToken := accountCSRF(setupRequest)
 	if setupResponse.Code != http.StatusOK || !strings.Contains(setupResponse.Body.String(), `name="account_csrf" value="`+csrfToken+`"`) {
@@ -4964,6 +4974,7 @@ func TestLocalhostWithoutSiteDatabaseOpensRegistration(t *testing.T) {
 	registerRequest.Header.Set("Origin", "null")
 	registerRequest.AddCookie(staleCookie)
 	registerResponse := httptest.NewRecorder()
+	prepareAccountMailCaptchaForTest(t, application, registerRequest)
 	application.route(registerResponse, registerRequest)
 	if registerResponse.Code != http.StatusSeeOther {
 		t.Fatalf("local registration with stale cookie status=%d body=%q", registerResponse.Code, registerResponse.Body.String())
@@ -5008,6 +5019,7 @@ func TestRegisterCreatesSiteDatabaseOnlyAfterConfirmedVerifiedDomain(t *testing.
 	}
 	loginRequest := httptest.NewRequest(http.MethodGet, "https://"+domain+"/?login", nil)
 	loginResponse := httptest.NewRecorder()
+	prepareAccountMailCaptchaForTest(t, application, loginRequest)
 	application.route(loginResponse, loginRequest)
 	if loginResponse.Code != http.StatusSeeOther || loginResponse.Header().Get("Location") != "/?register" {
 		t.Fatalf("missing site must offer registration: status=%d location=%q body=%q", loginResponse.Code, loginResponse.Header().Get("Location"), loginResponse.Body.String())
@@ -5018,6 +5030,8 @@ func TestRegisterCreatesSiteDatabaseOnlyAfterConfirmedVerifiedDomain(t *testing.
 	request := httptest.NewRequest(http.MethodPost, "https://"+domain+"/?register", strings.NewReader(form.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	response := httptest.NewRecorder()
+
+	prepareAccountMailCaptchaForTest(t, application, request)
 
 	application.route(response, request)
 	if response.Code != http.StatusOK {
@@ -5037,6 +5051,7 @@ func TestRegisterCreatesSiteDatabaseOnlyAfterConfirmedVerifiedDomain(t *testing.
 
 	confirmationPageRequest := httptest.NewRequest(http.MethodGet, "https://"+domain+"/?email_confirm="+url.QueryEscape(pendingToken), nil)
 	confirmationPageResponse := httptest.NewRecorder()
+	prepareAccountMailCaptchaForTest(t, application, confirmationPageRequest)
 	application.route(confirmationPageResponse, confirmationPageRequest)
 	if confirmationPageResponse.Code != http.StatusOK {
 		t.Fatalf("confirmation page status = %d, body=%q", confirmationPageResponse.Code, confirmationPageResponse.Body.String())
@@ -5056,6 +5071,7 @@ func TestRegisterCreatesSiteDatabaseOnlyAfterConfirmedVerifiedDomain(t *testing.
 	confirmRequest := httptest.NewRequest(http.MethodPost, "https://"+domain+"/?email_confirm="+url.QueryEscape(pendingToken), strings.NewReader("password=secret&password_confirm=secret"))
 	confirmRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	confirmResponse := httptest.NewRecorder()
+	prepareAccountMailCaptchaForTest(t, application, confirmRequest)
 	application.route(confirmResponse, confirmRequest)
 	if confirmResponse.Code != http.StatusFound {
 		t.Fatalf("confirm status = %d, body=%q", confirmResponse.Code, confirmResponse.Body.String())
@@ -5125,6 +5141,7 @@ func TestSiteRequestStoresApplicantWithoutCreatingAdmin(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "http://customer.example/?site_request", strings.NewReader(form.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	response := httptest.NewRecorder()
+	prepareAccountMailCaptchaForTest(t, application, request)
 	application.route(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
@@ -5911,7 +5928,7 @@ func TestRecoverPageShowsSPFSetupBeforeEmailForm(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?recover", strings.NewReader(form.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.Header.Set("Accept-Language", "ru")
-	request.AddCookie(&http.Cookie{Name: "sitebrush_captcha", Value: "1234"})
+	prepareAccountMailCaptchaForTest(t, application, request)
 	response := httptest.NewRecorder()
 
 	application.route(response, request)
@@ -5985,7 +6002,7 @@ func TestRecoveryUnknownAddressDoesNotClaimDelivery(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?recover", strings.NewReader(form.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.Header.Set("Accept-Language", "ru")
-	request.AddCookie(&http.Cookie{Name: "sitebrush_captcha", Value: "1234"})
+	prepareAccountMailCaptchaForTest(t, application, request)
 	response := httptest.NewRecorder()
 	application.route(response, request)
 	if response.Code != http.StatusOK {
@@ -6031,7 +6048,7 @@ func TestRecoverPasswordThroughEmailLink(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "https://localhost/?recover", strings.NewReader(requestForm.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.Header.Set("Accept-Language", "ru")
-	request.AddCookie(&http.Cookie{Name: "sitebrush_captcha", Value: "1234"})
+	prepareAccountMailCaptchaForTest(t, application, request)
 	response := httptest.NewRecorder()
 	application.route(response, request)
 	if response.Code != http.StatusOK {
@@ -6123,7 +6140,7 @@ func TestRecoverPasswordThroughManualCode(t *testing.T) {
 	requestForm := url.Values{"recovery_action": {"request"}, "email": {"admin@example.com"}, "captcha": {"1234"}}
 	request := httptest.NewRequest(http.MethodPost, "https://localhost/?recover", strings.NewReader(requestForm.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	request.AddCookie(&http.Cookie{Name: "sitebrush_captcha", Value: "1234"})
+	prepareAccountMailCaptchaForTest(t, application, request)
 	application.route(httptest.NewRecorder(), request)
 	select {
 	case <-application.emailDelivery:
@@ -6192,7 +6209,7 @@ func TestRecoveryUsesBrowserLanguageForInterfaceAndQueuedEmail(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "https://localhost/?recover", strings.NewReader(requestForm.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.Header.Set("Accept-Language", "de-DE,de;q=0.9,en;q=0.8")
-	request.AddCookie(&http.Cookie{Name: "sitebrush_captcha", Value: "1234"})
+	prepareAccountMailCaptchaForTest(t, application, request)
 	response := httptest.NewRecorder()
 	application.route(response, request)
 	if response.Code != http.StatusOK {
@@ -6234,7 +6251,7 @@ func TestRecoveryShowsKnownWebmailProvider(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "https://localhost/?recover", strings.NewReader(form.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.Header.Set("Accept-Language", "en")
-	request.AddCookie(&http.Cookie{Name: "sitebrush_captcha", Value: "1234"})
+	prepareAccountMailCaptchaForTest(t, application, request)
 	response := httptest.NewRecorder()
 	application.route(response, request)
 	if response.Code != http.StatusOK {
@@ -21857,6 +21874,7 @@ func TestUnknownAndDeletedHostnamesOfferRegistrationOrRequest(t *testing.T) {
 					request := httptest.NewRequest(http.MethodGet, "https://"+domain+path, nil)
 					request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "stale-session"})
 					response := httptest.NewRecorder()
+					prepareAccountMailCaptchaForTest(t, application, request)
 					application.route(response, request)
 					if response.Code != http.StatusSeeOther || !strings.HasSuffix(response.Header().Get("Location"), "?register") {
 						t.Fatalf("status=%d location=%q body=%s", response.Code, response.Header().Get("Location"), response.Body.String())
@@ -21864,6 +21882,7 @@ func TestUnknownAndDeletedHostnamesOfferRegistrationOrRequest(t *testing.T) {
 				}
 				request := httptest.NewRequest(http.MethodGet, "https://"+domain+"/?register", nil)
 				response := httptest.NewRecorder()
+				prepareAccountMailCaptchaForTest(t, application, request)
 				application.route(response, request)
 				expected := `action="?register"`
 				if !automatic {
@@ -21876,12 +21895,29 @@ func TestUnknownAndDeletedHostnamesOfferRegistrationOrRequest(t *testing.T) {
 				if _, err := os.Stat(databasePath); !errors.Is(err, os.ErrNotExist) {
 					t.Fatalf("opening registration created DB: %v", err)
 				}
+				purpose := "register"
+				if !automatic {
+					purpose = "site_request"
+				}
+				imageRequest := httptest.NewRequest(http.MethodGet, "http://"+domain+"/?captcha&purpose="+purpose, nil)
+				imageResponse := httptest.NewRecorder()
+				application.route(imageResponse, imageRequest)
+				if imageResponse.Code != http.StatusOK || imageResponse.Header().Get("Content-Type") != "image/png" {
+					t.Fatalf("password-free onboarding CAPTCHA unavailable: %d %s", imageResponse.Code, imageResponse.Body.String())
+				}
+				if cookies := imageResponse.Result().Cookies(); len(cookies) != 1 || cookies[0].Secure {
+					t.Fatal("pre-HTTPS CAPTCHA nonce cannot return to the registration form")
+				}
+				if _, err := os.Stat(databasePath); !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("CAPTCHA created an unconfirmed site database")
+				}
 				if !automatic {
 					plan, _ := (hostingandsupport.Store{DB: control}).DefaultPlan(context.Background())
 					form := url.Values{"name": {"New owner"}, "email": {"new@example.com"}, "phone": {"123"}, "plan_id": {fmt.Sprint(plan.ID)}}
 					request = httptest.NewRequest(http.MethodPost, "https://"+domain+"/?site_request", strings.NewReader(form.Encode()))
 					request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 					response = httptest.NewRecorder()
+					prepareAccountMailCaptchaForTest(t, application, request)
 					application.route(response, request)
 					var count int
 					if err := control.QueryRow(`SELECT COUNT(1) FROM site_registration_requests WHERE domain=?`, domain).Scan(&count); err != nil || count != 1 {
@@ -25809,7 +25845,7 @@ func TestMailMonitorDurableDeliveryAndAtomicQueue(t *testing.T) {
 	t.Cleanup(func() { close(stop); <-done })
 	replies := make(chan mailout.Result, 2)
 	for _, recipient := range []string{"ok@example.com", "failed@example.com"} {
-		task := mailout.NewTask("email_confirm", mailout.RouteLocal, mailout.Message{From: "sender@example.com", To: recipient, Subject: "Account", Body: "123456", MonitorDomain: "customer.example", MonitorFlowID: "safe-flow-" + recipient}, time.Now().Add(time.Hour), replies)
+		task := mailout.NewTask("email_confirm", mailout.RouteLocal, mailout.Message{From: "sender@example.com", To: recipient, Subject: "Account", Body: "123456", MonitorDomain: "customer.example", MonitorClientIP: "192.0.2.77", MonitorFlowID: "safe-flow-" + recipient}, time.Now().Add(time.Hour), replies)
 		if err := application.submitDurableMailTask(stop, task); err != nil {
 			t.Fatal(err)
 		}
@@ -25827,7 +25863,7 @@ func TestMailMonitorDurableDeliveryAndAtomicQueue(t *testing.T) {
 	}
 	accepted, failed := 0, 0
 	for _, event := range events {
-		if event.Domain != "customer.example" || event.FlowID != "safe-flow-"+event.Recipient {
+		if event.Domain != "customer.example" || event.FlowID != "safe-flow-"+event.Recipient || event.Diagnostic().ClientIP != "192.0.2.77" {
 			t.Fatalf("restart metadata lost: %+v", event)
 		}
 		if event.Stage == "accepted" {
@@ -26346,5 +26382,120 @@ func TestMailTransportVersionMetadataRetriesOldSignedSchema(t *testing.T) {
 		if netChanPeerVersion(payload) != "unknown" {
 			t.Fatal("missing or invalid receiver version was inferred")
 		}
+	}
+}
+
+func prepareAccountMailCaptchaForTest(t *testing.T, application *App, request *http.Request) {
+	t.Helper()
+	if request.Method != http.MethodPost {
+		return
+	}
+	purpose := ""
+	for _, candidate := range []string{"register", "recover", "site_request"} {
+		if hasQueryFlag(request, candidate) {
+			purpose = candidate
+		}
+	}
+	if purpose == "" || (purpose == "register" && (localAccountRequest(request) || request.FormValue("registration_form_token") != "")) || (purpose == "recover" && request.FormValue("recovery_action") != "request" && request.FormValue("recovery_action") != "") {
+		return
+	}
+	challenge, err := captcha.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = application.withAccountMailTransaction(request, "test-captcha", func(transaction *sql.Tx) error {
+		issued, saveErr := captcha.Save(transaction, challenge, accountClientIP(request), application.siteDomain(request.Context(), request), purpose, time.Now().UTC().Add(-3*time.Second))
+		if saveErr == nil && !issued {
+			saveErr = errors.New("test challenge issuance limited")
+		}
+		return saveErr
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := request.ParseForm(); err != nil {
+		t.Fatal(err)
+	}
+	request.Form.Set("captcha", challenge.Answer)
+	request.PostForm.Set("captcha", challenge.Answer)
+	request.AddCookie(&http.Cookie{Name: "sitebrush_captcha_" + purpose, Value: challenge.Token})
+}
+
+func TestAccountMailGuardBlocksForgedCaptchaAndRecipientSpray(t *testing.T) {
+	withEmailSPFAllowed(t)
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
+	application, _ := newTestApplication(t)
+	enableMailMonitorForTest(t, application)
+	for attempt := 0; attempt < 4; attempt++ {
+		form := url.Values{"email": {fmt.Sprintf("victim%d@example.com", attempt)}, "captcha": {"1234"}}
+		request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?register", strings.NewReader(form.Encode()))
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		request.RemoteAddr = "192.0.2.80:1234"
+		request.Header.Set("X-Forwarded-For", fmt.Sprintf("198.51.100.%d", attempt+1))
+		request.AddCookie(&http.Cookie{Name: "sitebrush_captcha", Value: "1234"})
+		response := httptest.NewRecorder()
+		application.route(response, request)
+		expected := http.StatusBadRequest
+		if attempt == 3 {
+			expected = http.StatusTooManyRequests
+		}
+		if response.Code != expected {
+			t.Fatalf("attempt %d status=%d body=%s", attempt, response.Code, response.Body.String())
+		}
+	}
+	if len(application.emailDelivery) != 0 {
+		t.Fatal("forged CAPTCHA queued spam")
+	}
+	found := false
+	for _, event := range mailMonitorEventsForTest(t, application, "local") {
+		if event.Stage == "mail_blocked" && event.Diagnostic().ClientIP == "192.0.2.80" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("source IP block missing from mail journal")
+	}
+	if err := application.withServerControlDatabaseRead(context.Background(), "test-mail-block", func(database *sql.DB) error {
+		blocked, err := mailguard.Blocked(database, "192.0.2.80", time.Now())
+		if err == nil && !blocked {
+			err = errors.New("source IP block was not persisted")
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAccountCaptchaEndpointReturnsOpaqueCookieAndRaster(t *testing.T) {
+	application, _ := newTestApplication(t)
+	request := httptest.NewRequest(http.MethodGet, "https://localhost/?captcha&purpose=recover", nil)
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "image/png" || !strings.Contains(response.Header().Get("Cache-Control"), "no-store") {
+		t.Fatalf("CAPTCHA response: %d %v", response.Code, response.Header())
+	}
+	if _, err := png.Decode(bytes.NewReader(response.Body.Bytes())); err != nil {
+		t.Fatal("CAPTCHA is not a PNG", err)
+	}
+	cookies := response.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Name != "sitebrush_captcha_recover" || len(cookies[0].Value) != 64 || !cookies[0].HttpOnly {
+		t.Fatal("CAPTCHA cookie must contain only a protected opaque challenge identifier")
+	}
+}
+
+func TestAccountMailGuardPreventsQueuedDeliveryAfterSourceBlock(t *testing.T) {
+	application, _ := newTestApplication(t)
+	request := httptest.NewRequest(http.MethodPost, "https://localhost/?recover", nil)
+	if err := application.withAccountMailTransaction(request, "test-block-queued", func(transaction *sql.Tx) error {
+		return mailguard.SetBlock(transaction, "192.0.2.81", "mail abuse", time.Now().Add(time.Hour))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	delivered := make(chan struct{}, 1)
+	application.sendEmail = func(context.Context, mailout.Message) error { delivered <- struct{}{}; return nil }
+	task := mailout.NewTask("login_code", mailout.RouteLocal, mailout.Message{To: "owner@example.com", MonitorClientIP: "192.0.2.81"}, time.Now().Add(time.Hour), nil)
+	err := application.deliverMailRecord(nil, mailout.Record{Task: task})
+	if !mailout.IsPermanentFailure(err) || len(delivered) != 0 {
+		t.Fatal("blocked source reached SMTP", err)
 	}
 }
