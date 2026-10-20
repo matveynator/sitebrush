@@ -150,10 +150,17 @@
             <div class="expense-mail-monitor-events">
               {{range $expenseServer.MailEvents}}
               <div class="expense-mail-monitor-event">
-                <strong>{{$stageLabel := index $.T (printf "mail_monitor_stage_%s" .Stage)}}{{if $stageLabel}}{{$stageLabel}}{{else}}{{.Stage}}{{end}}</strong> · {{$kindLabel := index $.T (printf "mail_monitor_kind_%s" .Kind)}}{{if $kindLabel}}{{$kindLabel}}{{else}}{{.Kind}}{{end}} · {{.Recipient}}
-                <small>{{.CreatedAt}} · {{.Domain}}{{if .Route}} · {{.Route}}{{end}}{{if .AcceptedBy}} · {{$boundaryLabel := index $.T (printf "mail_monitor_boundary_%s" .AcceptedBy)}}{{if $boundaryLabel}}{{$boundaryLabel}}{{else}}{{.AcceptedBy}}{{end}}{{end}}{{if .Attempt}} · {{index $.T "mail_monitor_attempt_label"}} {{.Attempt}}{{end}}{{if .SMTPCode}} · SMTP {{.SMTPCode}}{{end}}</small>
-                {{if .Detail}}<small>{{.Detail}}</small>{{end}}
-                {{if or .MessageID .FlowID}}<details><summary>{{index $.T "mail_monitor_identifiers"}}</summary>{{if .MessageID}}<small>{{index $.T "mail_monitor_message_id"}} {{.MessageID}}</small>{{end}}{{if .FlowID}}<small>{{index $.T "mail_monitor_flow_id"}} {{.FlowID}}</small>{{end}}</details>{{end}}
+                {{$diagnostic := .Diagnostic}}
+                {{if $diagnostic.Transport}}<small>transport={{$diagnostic.Transport}}</small>{{end}}
+                {{if $diagnostic.SMTPServer}}<small>SMTP · {{$diagnostic.SMTPServer}}</small>{{end}}
+                <strong>{{$stageLabel := index $.T (printf "mail_monitor_stage_%s" .DisplayStage)}}{{if $stageLabel}}{{$stageLabel}}{{else}}{{.DisplayStage}}{{end}}</strong>{{if .SMTPCode}} · {{.SMTPCode}}{{end}}{{if $diagnostic.SMTPReply}} · {{$diagnostic.SMTPReply}}{{else if $diagnostic.Failure}} · {{$diagnostic.Failure}}{{end}} · {{.Kind}} · {{.Recipient}}
+                <small>{{.CreatedAt}}</small>
+                <details><summary>{{index $.T "mail_monitor_identifiers"}}</summary>
+                  {{if .MessageID}}<small>{{index $.T "mail_monitor_message_id"}} {{.MessageID}}</small>{{end}}
+                  {{if .FlowID}}<small>{{index $.T "mail_monitor_flow_id"}} {{.FlowID}}</small>{{end}}
+                  <small>{{.Domain}}{{if .Route}} · {{.Route}}{{end}}{{if .Attempt}} · {{index $.T "mail_monitor_attempt_label"}} {{.Attempt}}{{end}}</small>
+                  {{if $diagnostic.Identifiers}}<small>{{$diagnostic.Identifiers}}</small>{{end}}
+                </details>
               </div>
               {{else}}<div class="text-muted">{{index $.T "mail_monitor_empty"}}</div>{{end}}
             </div>

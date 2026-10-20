@@ -1539,7 +1539,10 @@
     "auth_https_next_retry": "Next automatic attempt in:",
     "auth_https_status_error": "Could not refresh the status. Reconnecting automatically.",
     "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site.",
-    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email."
+    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email.",
+    "mail_monitor_stage_sent": "Sent",
+    "mail_monitor_stage_rejected": "Rejected",
+    "mail_monitor_stage_temporary_failure": "Temporary failure"
   },
   "fr": {
     "edit_saving": "Enregistrement de la page…",
@@ -2870,7 +2873,10 @@
     "auth_https_next_retry": "Next automatic attempt in:",
     "auth_https_status_error": "Could not refresh the status. Reconnecting automatically.",
     "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site.",
-    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email."
+    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email.",
+    "mail_monitor_stage_sent": "Sent",
+    "mail_monitor_stage_rejected": "Rejected",
+    "mail_monitor_stage_temporary_failure": "Temporary failure"
   },
   "ru": {
     "mail_monitor_title": "Почта и аккаунты · 24 часа / 90 дней",
@@ -4412,7 +4418,10 @@
     "auth_https_next_retry": "Следующая автоматическая попытка через:",
     "auth_https_status_error": "Не удалось обновить статус. Переподключаемся автоматически.",
     "auth_domain_reserved": "Домен уже забронирован. Продолжите по ссылке из письма владельцу; для нового сайта выберите другое имя.",
-    "auth_https_expired": "Срок действия ссылки истёк. Начните регистрацию заново, чтобы получить новое письмо."
+    "auth_https_expired": "Срок действия ссылки истёк. Начните регистрацию заново, чтобы получить новое письмо.",
+    "mail_monitor_stage_sent": "Отправлено",
+    "mail_monitor_stage_rejected": "Отклонено SMTP-сервером",
+    "mail_monitor_stage_temporary_failure": "Временная ошибка"
   },
   "ja": {
     "edit_saving": "ページを保存中…",
@@ -5739,7 +5748,10 @@
     "auth_https_next_retry": "Next automatic attempt in:",
     "auth_https_status_error": "Could not refresh the status. Reconnecting automatically.",
     "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site.",
-    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email."
+    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email.",
+    "mail_monitor_stage_sent": "Sent",
+    "mail_monitor_stage_rejected": "Rejected",
+    "mail_monitor_stage_temporary_failure": "Temporary failure"
   },
   "it": {
     "edit_saving": "Salvataggio della pagina…",
@@ -7066,7 +7078,10 @@
     "auth_https_next_retry": "Next automatic attempt in:",
     "auth_https_status_error": "Could not refresh the status. Reconnecting automatically.",
     "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site.",
-    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email."
+    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email.",
+    "mail_monitor_stage_sent": "Sent",
+    "mail_monitor_stage_rejected": "Rejected",
+    "mail_monitor_stage_temporary_failure": "Temporary failure"
   },
   "sv": {
     "edit_saving": "Sparar sidan…",
@@ -8393,7 +8408,10 @@
     "auth_https_next_retry": "Next automatic attempt in:",
     "auth_https_status_error": "Could not refresh the status. Reconnecting automatically.",
     "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site.",
-    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email."
+    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email.",
+    "mail_monitor_stage_sent": "Sent",
+    "mail_monitor_stage_rejected": "Rejected",
+    "mail_monitor_stage_temporary_failure": "Temporary failure"
   },
   "fi": {
     "edit_saving": "Tallennetaan sivua…",
@@ -9720,7 +9738,10 @@
     "auth_https_next_retry": "Next automatic attempt in:",
     "auth_https_status_error": "Could not refresh the status. Reconnecting automatically.",
     "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site.",
-    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email."
+    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email.",
+    "mail_monitor_stage_sent": "Sent",
+    "mail_monitor_stage_rejected": "Rejected",
+    "mail_monitor_stage_temporary_failure": "Temporary failure"
   },
   "mn": {
     "edit_saving": "Хуудсыг хадгалж байна…",
@@ -11047,7 +11068,10 @@
     "auth_https_next_retry": "Next automatic attempt in:",
     "auth_https_status_error": "Could not refresh the status. Reconnecting automatically.",
     "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site.",
-    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email."
+    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email.",
+    "mail_monitor_stage_sent": "Sent",
+    "mail_monitor_stage_rejected": "Rejected",
+    "mail_monitor_stage_temporary_failure": "Temporary failure"
   },
   "zh": {
     "edit_saving": "正在保存页面…",
@@ -12374,7 +12398,10 @@
     "auth_https_next_retry": "Next automatic attempt in:",
     "auth_https_status_error": "Could not refresh the status. Reconnecting automatically.",
     "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site.",
-    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email."
+    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email.",
+    "mail_monitor_stage_sent": "Sent",
+    "mail_monitor_stage_rejected": "Rejected",
+    "mail_monitor_stage_temporary_failure": "Temporary failure"
   },
   "he": {
     "edit_saving": "שמירת הדף…",
@@ -13701,7 +13728,10 @@
     "auth_https_next_retry": "Next automatic attempt in:",
     "auth_https_status_error": "Could not refresh the status. Reconnecting automatically.",
     "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site.",
-    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email."
+    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email.",
+    "mail_monitor_stage_sent": "Sent",
+    "mail_monitor_stage_rejected": "Rejected",
+    "mail_monitor_stage_temporary_failure": "Temporary failure"
   },
   "fa": {
     "edit_saving": "در حال ذخیره صفحه…",
@@ -15028,7 +15058,10 @@
     "auth_https_next_retry": "Next automatic attempt in:",
     "auth_https_status_error": "Could not refresh the status. Reconnecting automatically.",
     "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site.",
-    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email."
+    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email.",
+    "mail_monitor_stage_sent": "Sent",
+    "mail_monitor_stage_rejected": "Rejected",
+    "mail_monitor_stage_temporary_failure": "Temporary failure"
   },
   "de": {
     "edit_saving": "Seite wird gespeichert…",
@@ -16355,7 +16388,10 @@
     "auth_https_next_retry": "Next automatic attempt in:",
     "auth_https_status_error": "Could not refresh the status. Reconnecting automatically.",
     "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site.",
-    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email."
+    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email.",
+    "mail_monitor_stage_sent": "Sent",
+    "mail_monitor_stage_rejected": "Rejected",
+    "mail_monitor_stage_temporary_failure": "Temporary failure"
   },
   "tr": {
     "edit_saving": "Sayfa kaydediliyor…",
@@ -17682,7 +17718,10 @@
     "auth_https_next_retry": "Next automatic attempt in:",
     "auth_https_status_error": "Could not refresh the status. Reconnecting automatically.",
     "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site.",
-    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email."
+    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email.",
+    "mail_monitor_stage_sent": "Sent",
+    "mail_monitor_stage_rejected": "Rejected",
+    "mail_monitor_stage_temporary_failure": "Temporary failure"
   },
   "kk": {
     "edit_saving": "Бет сақталуда…",
@@ -19009,7 +19048,10 @@
     "auth_https_next_retry": "Next automatic attempt in:",
     "auth_https_status_error": "Could not refresh the status. Reconnecting automatically.",
     "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site.",
-    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email."
+    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email.",
+    "mail_monitor_stage_sent": "Sent",
+    "mail_monitor_stage_rejected": "Rejected",
+    "mail_monitor_stage_temporary_failure": "Temporary failure"
   },
   "es": {
     "edit_saving": "Guardando la página…",
@@ -20336,7 +20378,10 @@
     "auth_https_next_retry": "Next automatic attempt in:",
     "auth_https_status_error": "Could not refresh the status. Reconnecting automatically.",
     "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site.",
-    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email."
+    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email.",
+    "mail_monitor_stage_sent": "Sent",
+    "mail_monitor_stage_rejected": "Rejected",
+    "mail_monitor_stage_temporary_failure": "Temporary failure"
   },
   "pt": {
     "edit_saving": "A guardar a página…",
@@ -21663,6 +21708,9 @@
     "auth_https_next_retry": "Next automatic attempt in:",
     "auth_https_status_error": "Could not refresh the status. Reconnecting automatically.",
     "auth_domain_reserved": "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site.",
-    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email."
+    "auth_https_expired": "The confirmation link has expired. Start registration again to receive a new email.",
+    "mail_monitor_stage_sent": "Sent",
+    "mail_monitor_stage_rejected": "Rejected",
+    "mail_monitor_stage_temporary_failure": "Temporary failure"
   }
 }

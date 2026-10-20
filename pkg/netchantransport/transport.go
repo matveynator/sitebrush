@@ -29,8 +29,22 @@ func Configure(configuration netchan.Config, stop <-chan struct{}) netchan.Confi
 // Each consumer owns its report channel. A successful authenticated physical
 // connection reports the driver actually selected, including reconnects.
 func ConfigureWithReports(configuration netchan.Config, stop <-chan struct{}, reports chan<- string) netchan.Config {
+	return configureReports(configuration, stop, reports, nil)
+}
+
+type ConnectionReport struct {
+	Protocol string
+	Port     int
+}
+
+// The port comes from the connected socket, never the configured endpoint.
+func ConfigureWithConnectionReports(configuration netchan.Config, stop <-chan struct{}, reports chan<- ConnectionReport) netchan.Config {
+	return configureReports(configuration, stop, nil, reports)
+}
+
+func configureReports(configuration netchan.Config, stop <-chan struct{}, reports chan<- string, connections chan<- ConnectionReport) netchan.Config {
 	drivers := append([]transport.Driver(nil), configuration.Transports...)
-	configuration.Transports = append(drivers, priorityDriver{stop: stop, reports: reports}, reportedDriver{Driver: quic.Driver{}, stop: stop, reports: reports})
+	configuration.Transports = append(drivers, priorityDriver{stop: stop, reports: reports, connections: connections}, reportedDriver{Driver: quic.Driver{}, stop: stop, reports: reports, connections: connections})
 	return configuration
 }
 
@@ -53,8 +67,9 @@ func LibraryVersion() string {
 }
 
 type priorityDriver struct {
-	stop    <-chan struct{}
-	reports chan<- string
+	stop        <-chan struct{}
+	reports     chan<- string
+	connections chan<- ConnectionReport
 }
 
 func (priorityDriver) Scheme() string { return "tcp" }
@@ -64,19 +79,20 @@ func (driver priorityDriver) Dial(endpoint transport.Endpoint, options transport
 	quicEndpoint.Scheme, quicEndpoint.Legacy = "quic", false
 	connection, quicErr := dialTransport(quic.Driver{}, quicEndpoint, options, driver.stop, quicDialTimeout)
 	if quicErr == nil {
-		return reportConnection(connection, "quic", driver.reports, driver.stop, options)
+		return reportConnection(connection, "quic", driver.reports, driver.stop, options, driver.connections)
 	}
 	connection, tcpErr := dialTransport(tcp.Driver{}, endpoint, options, driver.stop, tcpDialTimeout)
 	if tcpErr != nil {
 		return nil, errors.Join(fmt.Errorf("QUIC: %w", quicErr), fmt.Errorf("TCP/TLS: %w", tcpErr))
 	}
-	return reportConnection(connection, "tcp+tls", driver.reports, driver.stop, options)
+	return reportConnection(connection, "tcp+tls", driver.reports, driver.stop, options, driver.connections)
 }
 
 type reportedDriver struct {
 	transport.Driver
-	stop    <-chan struct{}
-	reports chan<- string
+	stop        <-chan struct{}
+	reports     chan<- string
+	connections chan<- ConnectionReport
 }
 
 func (driver reportedDriver) Dial(endpoint transport.Endpoint, options transport.Options) (net.Conn, error) {
@@ -84,10 +100,28 @@ func (driver reportedDriver) Dial(endpoint transport.Endpoint, options transport
 	if err != nil {
 		return nil, err
 	}
-	return reportConnection(connection, driver.Scheme(), driver.reports, driver.stop, options)
+	return reportConnection(connection, driver.Scheme(), driver.reports, driver.stop, options, driver.connections)
 }
 
-func reportConnection(connection net.Conn, protocol string, reports chan<- string, stop <-chan struct{}, options transport.Options) (net.Conn, error) {
+func reportConnection(connection net.Conn, protocol string, reports chan<- string, stop <-chan struct{}, options transport.Options, consumers ...chan<- ConnectionReport) (net.Conn, error) {
+	report := ConnectionReport{Protocol: protocol}
+	switch address := connection.RemoteAddr().(type) {
+	case *net.TCPAddr:
+		report.Port = address.Port
+	case *net.UDPAddr:
+		report.Port = address.Port
+	}
+	for _, consumer := range consumers {
+		if consumer != nil {
+			select {
+			case consumer <- report:
+			case <-stop:
+			case <-options.OwnerDone:
+			default:
+				// Optional observations cannot delay a physical connection.
+			}
+		}
+	}
 	if reports == nil {
 		return connection, nil
 	}

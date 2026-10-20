@@ -25822,7 +25822,7 @@ func TestMailMonitorDurableDeliveryAndAtomicQueue(t *testing.T) {
 		}
 	}
 	events := mailMonitorEventsForTest(t, application, "local")
-	if len(events) != 6 {
+	if len(events) != 4 {
 		t.Fatalf("missing durable events: %+v", events)
 	}
 	accepted, failed := 0, 0
@@ -25841,7 +25841,7 @@ func TestMailMonitorDurableDeliveryAndAtomicQueue(t *testing.T) {
 		}
 		if event.Stage == "failed" {
 			failed++
-			if event.SMTPCode != "550" || !strings.Contains(event.Detail, "mx.example") || strings.Contains(event.Detail, "secret") || strings.Contains(event.Detail, "123456") {
+			if event.SMTPCode != "550" || event.Diagnostic().SMTPReply != "Message rejected" || strings.Contains(event.Detail, "secret") || strings.Contains(event.Detail, "123456") {
 				t.Fatal(event)
 			}
 		}

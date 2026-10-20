@@ -272,6 +272,10 @@ func eventFilterSQL(filter Filter) (string, []any) {
 	if filter.Stage != "" {
 		query += ` AND stage=?`
 		arguments = append(arguments, filter.Stage)
+	} else {
+		// Hide historical attempt rows and repeated recovery errors before paging,
+		// so the count and page contents describe the same concise journal.
+		query += ` AND stage NOT IN ('attempt','smtp_attempt','transport_received') AND (stage<>'recovery_mail_failed' OR message_id='' OR NOT EXISTS(SELECT 1 FROM mail_monitor_events outcome WHERE outcome.installation_id=mail_monitor_events.installation_id AND outcome.message_id=mail_monitor_events.message_id AND outcome.stage IN ('failed','retry')))`
 	}
 	if filter.Kind != "" {
 		query += ` AND kind=?`

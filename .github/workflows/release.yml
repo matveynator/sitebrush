@@ -214,27 +214,47 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Select signed publication or build artifacts only
+        id: signing
+        shell: bash
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.SITEBRUSH_RELEASE_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "${RELEASE_SIGNING_KEY}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Builds completed. Release signing key is kept locally; GitHub publication is skipped."
+            echo "## Build artifacts ready" >> "$GITHUB_STEP_SUMMARY"
+            echo "Download the server-app and desktop-* artifacts from this run. Signing and publication remain on the local build machine; no unsigned release was published." >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Checkout
+        if: steps.signing.outputs.enabled == 'true'
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up Go for release signing
+        if: steps.signing.outputs.enabled == 'true'
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
           cache: false
 
       - name: Download server artifacts
+        if: steps.signing.outputs.enabled == 'true'
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: server-app
           path: dist-raw/server-app
       - name: Download packaged desktop artifacts
+        if: steps.signing.outputs.enabled == 'true'
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           pattern: desktop-*
           path: dist-raw
 
       - name: Assemble release files and aggregate checksums
+        if: steps.signing.outputs.enabled == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -260,6 +280,7 @@ jobs:
           cat dist-release/MD5SUMS
 
       - name: Sign native server update manifest
+        if: steps.signing.outputs.enabled == 'true'
         shell: bash
         env:
           SITEBRUSH_RELEASE_PRIVATE_KEY: ${{ secrets.SITEBRUSH_RELEASE_PRIVATE_KEY }}
@@ -269,6 +290,7 @@ jobs:
             -version "${{ needs.prepare_release.outputs.version }}" -commit "${GITHUB_SHA}"
 
       - name: Publish versioned server release
+        if: steps.signing.outputs.enabled == 'true'
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -284,6 +306,7 @@ jobs:
             dist-release/update.json
 
       - name: Publish GitHub Release (stable tag)
+        if: steps.signing.outputs.enabled == 'true'
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
