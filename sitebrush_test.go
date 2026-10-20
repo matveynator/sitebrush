@@ -4727,6 +4727,7 @@ func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
 	passwordForm := url.Values{"password": {"secret"}, "password_confirm": {"secret"}}
 	passwordRequest := httptest.NewRequest(http.MethodPost, "https://localhost/?email_confirm="+url.QueryEscape(pendingToken), strings.NewReader(passwordForm.Encode()))
 	passwordRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	passwordRequest.RemoteAddr = "198.51.100.45:4567"
 	confirmResponse = httptest.NewRecorder()
 	prepareAccountMailCaptchaForTest(t, application, passwordRequest)
 	application.route(confirmResponse, passwordRequest)
@@ -4737,6 +4738,10 @@ func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
 	if userCount != 1 {
 		t.Fatalf("confirmed admin count = %d, want 1", userCount)
 	}
+	registration, cooldownErr := application.readRegistrationCooldown(request)
+	if cooldownErr != nil || registration.AttemptID != "" || registration.Failures != 0 || registration.Blocked(time.Now()) {
+		t.Fatal("successful registration from another IP did not reset its original cooldown", registration, cooldownErr)
+	}
 	if _, valid := application.registrationConfirmationForCode(context.Background(), "localhost", pending.FormToken, pending.Code); valid {
 		t.Fatal("registration code reused")
 	}
@@ -4746,7 +4751,7 @@ func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
 }
 
 func TestSetupConfirmationOffersKnownWebmailWithoutRegistrationForm(t *testing.T) {
-	application := &App{}
+	application, _ := newTestApplication(t)
 	request := httptest.NewRequest(http.MethodGet, "https://example.com/?register", nil)
 	request = request.WithContext(contextWithDomain(request.Context(), "example.com"))
 	request.Header.Set("Accept-Language", "ru")
@@ -5916,7 +5921,7 @@ func TestRecoverPageShowsSPFSetupBeforeEmailForm(t *testing.T) {
 			t.Fatalf("recover page missing %q in %s", expectedFragment, getBody)
 		}
 	}
-	for _, hiddenFragment := range []string{`name="email"`, `name="captcha"`, `?captcha`} {
+	for _, hiddenFragment := range []string{`name="email"`, `name="captcha"`, `name="captcha_id"`, `data:image/png;base64,`} {
 		if strings.Contains(getBody, hiddenFragment) {
 			t.Fatalf("recover page showed form fragment %q before SPF setup: %s", hiddenFragment, getBody)
 		}
@@ -5961,7 +5966,7 @@ func TestRecoverPageShowsEmailFormAfterSPFSetup(t *testing.T) {
 		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
 	}
 	body := response.Body.String()
-	for _, expectedFragment := range []string{`name="email"`, `name="captcha"`, `?captcha`} {
+	for _, expectedFragment := range []string{`name="email"`, `name="captcha"`, `name="captcha_id"`, `data:image/png;base64,`} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("recover page missing form fragment %q in %s", expectedFragment, body)
 		}
@@ -21905,8 +21910,8 @@ func TestUnknownAndDeletedHostnamesOfferRegistrationOrRequest(t *testing.T) {
 				if imageResponse.Code != http.StatusOK || imageResponse.Header().Get("Content-Type") != "image/png" {
 					t.Fatalf("password-free onboarding CAPTCHA unavailable: %d %s", imageResponse.Code, imageResponse.Body.String())
 				}
-				if cookies := imageResponse.Result().Cookies(); len(cookies) != 1 || cookies[0].Secure {
-					t.Fatal("pre-HTTPS CAPTCHA nonce cannot return to the registration form")
+				if cookies := imageResponse.Result().Cookies(); len(cookies) != 1 || !cookies[0].Secure {
+					t.Fatal("CAPTCHA endpoint cookies must remain HTTPS-only")
 				}
 				if _, err := os.Stat(databasePath); !errors.Is(err, os.ErrNotExist) {
 					t.Fatal("CAPTCHA created an unconfirmed site database")
@@ -22570,7 +22575,7 @@ func TestLANPasswordLoginAcceptsFormWithStaleCookieAndOpaqueOrigin(t *testing.T)
 				t.Fatalf("LAN verification status=%d location=%s body=%s", postResponse.Code, postResponse.Header().Get("Location"), postResponse.Body.String())
 			}
 			cookies := postResponse.Result().Cookies()
-			if len(cookies) != 1 || cookies[0].Name != "sitebrush_session" || cookies[0].Value == staleCookie.Value || !cookies[0].Secure || !cookies[0].HttpOnly {
+			if len(cookies) != 1 || cookies[0].Name != "sitebrush_session" || cookies[0].Value == staleCookie.Value || !cookies[0].Secure || !cookies[0].HttpOnly || !cookies[0].Secure {
 				t.Fatal("LAN login must replace the stale cookie with a secure authenticated session")
 			}
 			profileRequest := httptest.NewRequest(http.MethodGet, "https://"+domain+"/?profile", nil)
@@ -26418,7 +26423,8 @@ func prepareAccountMailCaptchaForTest(t *testing.T, application *App, request *h
 	}
 	request.Form.Set("captcha", challenge.Answer)
 	request.PostForm.Set("captcha", challenge.Answer)
-	request.AddCookie(&http.Cookie{Name: "sitebrush_captcha_" + purpose, Value: challenge.Token})
+	request.Form.Set("captcha_id", challenge.Token)
+	request.PostForm.Set("captcha_id", challenge.Token)
 }
 
 func TestAccountMailGuardBlocksForgedCaptchaAndRecipientSpray(t *testing.T) {
@@ -26478,7 +26484,7 @@ func TestAccountCaptchaEndpointReturnsOpaqueCookieAndRaster(t *testing.T) {
 		t.Fatal("CAPTCHA is not a PNG", err)
 	}
 	cookies := response.Result().Cookies()
-	if len(cookies) != 1 || cookies[0].Name != "sitebrush_captcha_recover" || len(cookies[0].Value) != 64 || !cookies[0].HttpOnly {
+	if len(cookies) != 1 || cookies[0].Name != "sitebrush_captcha_recover" || len(cookies[0].Value) != 64 || !cookies[0].HttpOnly || !cookies[0].Secure {
 		t.Fatal("CAPTCHA cookie must contain only a protected opaque challenge identifier")
 	}
 }
@@ -26497,5 +26503,68 @@ func TestAccountMailGuardPreventsQueuedDeliveryAfterSourceBlock(t *testing.T) {
 	err := application.deliverMailRecord(nil, mailout.Record{Task: task})
 	if !mailout.IsPermanentFailure(err) || len(delivered) != 0 {
 		t.Fatal("blocked source reached SMTP", err)
+	}
+}
+
+func TestRegistrationCooldownRejectsChangedEmailAndReleasesTechnicalFailure(t *testing.T) {
+	withEmailSPFAllowed(t)
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
+	application, _ := newTestApplication(t)
+	enableMailMonitorForTest(t, application)
+	submit := func(email string, solveCaptcha bool) (*httptest.ResponseRecorder, *http.Request) {
+		form := url.Values{"email": {email}}
+		request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?register", strings.NewReader(form.Encode()))
+		request.RemoteAddr = "192.0.2.90:1234"
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		if solveCaptcha {
+			prepareAccountMailCaptchaForTest(t, application, request)
+		}
+		response := httptest.NewRecorder()
+		application.route(response, request)
+		return response, request
+	}
+	first, request := submit("first@example.com", true)
+	if first.Code != http.StatusOK || len(application.emailDelivery) != 1 {
+		t.Fatal("first registration was not queued", first.Code, first.Body.String())
+	}
+	message := (<-application.emailDelivery).Message
+	blocked, _ := submit("different@example.com", false)
+	if blocked.Code != http.StatusTooManyRequests || len(application.emailDelivery) != 0 || blocked.Header().Get("Retry-After") == "" {
+		t.Fatal("email change bypassed server cooldown", blocked.Code, blocked.Body.String())
+	}
+	for _, fragment := range []string{"data-registration-countdown", "data-registration-retry disabled", "registration-cooldown.js"} {
+		if !strings.Contains(blocked.Body.String(), fragment) {
+			t.Fatal("cooldown UI missing", fragment)
+		}
+	}
+	application.sendEmail = func(context.Context, mailout.Message) error { return errors.New("SMTP connection unavailable") }
+	if err := application.defaultEmailSender()(context.Background(), message); err == nil {
+		t.Fatal("expected technical delivery failure")
+	}
+	state, err := application.readRegistrationCooldown(request)
+	if err != nil || state.Blocked(time.Now()) || state.Failures != 0 {
+		t.Fatal("delivery failure increased penalty", state, err)
+	}
+	second, _ := submit("second@example.com", true)
+	if second.Code != http.StatusOK || len(application.emailDelivery) != 1 {
+		t.Fatal("technical failure did not release registration", second.Code, second.Body.String())
+	}
+	message = (<-application.emailDelivery).Message
+	if err := application.finishRegistrationAttempt(message.MonitorFlowID, "delivered"); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.withAccountMailTransaction(request, "test-expire-registration", func(transaction *sql.Tx) error {
+		_, err := transaction.Exec(`UPDATE registration_mail_cooldowns SET expires_at=?,retry_at=? WHERE attempt_id=?`, time.Now().Add(-time.Minute).Unix(), time.Now().Add(-time.Second).Unix(), message.MonitorFlowID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	third, _ := submit("third@example.com", true)
+	if third.Code != http.StatusOK || len(application.emailDelivery) != 1 {
+		t.Fatal("allowed retry was not queued", third.Code, third.Body.String())
+	}
+	state, err = application.readRegistrationCooldown(request)
+	if err != nil || state.Failures != 1 || time.Until(state.RetryAt) < 5*time.Hour || time.Until(state.RetryAt) > 6*time.Hour {
+		t.Fatal("unconfirmed attempt did not advance to six hours", state, err)
 	}
 }

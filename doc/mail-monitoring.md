@@ -47,7 +47,7 @@ Rendered from the actual expenses template using synthetic addresses and metrics
 
 ## Account email abuse protection
 
-Registration, password recovery and site registration requests require a one-use, six-character PNG CAPTCHA. Its random answer is stored only as a salted hash in the server control database; the browser receives an opaque HttpOnly nonce. A challenge is bound to its source IP, domain and form purpose, lasts five minutes, requires at least two seconds before submission and is consumed even on a wrong answer. Image issuance is limited to six per IP per minute, with at most 10,000 live challenges. New-domain registration remains available before HTTPS without creating a site database or transmitting a password.
+Registration, password recovery and site registration requests require a one-use, six-character PNG CAPTCHA. Its random answer is stored only as a salted hash in the server control database; the browser receives an opaque form nonce and an inline PNG. The image endpoint uses HTTPS-only HttpOnly cookies; password-free HTTP onboarding posts its nonce as a hidden field. A challenge is bound to its source IP, domain and form purpose, lasts five minutes, requires at least two seconds before submission and is consumed even on a wrong answer. Image issuance is limited to six per IP per minute, with at most 10,000 live challenges. New-domain registration remains available before HTTPS without creating a site database or transmitting a password.
 
 The server applies these limits across all sites and both registration/recovery forms:
 
@@ -66,3 +66,11 @@ The mail journal shows the initiating IP when known. Follow-up outbox events inh
 IP attribution uses the account subsystem's trusted proxy chain. Configure `SITEBRUSH_TRUSTED_PROXIES` for an actual reverse proxy; direct clients cannot select their identity with forwarded headers. Requests with unavailable client identity fail closed. Remote server journals retain their originating IPs in the existing signed diagnostic synchronization; blocking controls apply on the server that owns the requests.
 
 A raster CAPTCHA is a barrier against trivial parsing and guessing, not a guarantee against OCR, browser automation or human solving services. Independent IP, network and recipient limits remain mandatory.
+
+## Registration cooldown
+
+New registration emails reserve a cooldown for the source IP and normalized domain, independently of the recipient address. The first unsuccessful attempt permits retry after one hour, the second after six hours, the third after 24 hours, and the fourth and later after three days. An admitted request reserves its pause immediately, preventing parallel submissions or email changes from producing additional letters. Requests rejected during a pause do not extend it or raise the penalty.
+
+Only a delivered, unconfirmed attempt (after the confirmation deadline), or an explicitly rejected confirmation, raises the failure count. Each attempt counts once. Delivery still in progress retains its reservation without counting as a user failure. Terminal SMTP/NetChan/HTTPS failures, expired delivery, abandoned preparation and known account-creation infrastructure failures release the reservation and preserve the previous failure count. Ordinary CAPTCHA/recipient safety quotas still apply. Successful account creation clears the originating attempt's IP/domain state, even when confirmation uses another IP. The control database retains cooldowns across restarts.
+
+Registration shows the server-derived remaining time, disables retry while paused and keeps confirmation available. At expiry, retry loads a fresh form and CAPTCHA. Server admission remains authoritative; changing the browser clock or omitting JavaScript cannot authorize another email.
