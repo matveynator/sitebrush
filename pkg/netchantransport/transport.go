@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/matveynator/netchan/v2"
@@ -31,6 +32,10 @@ func Configure(configuration netchan.Config, stop <-chan struct{}) netchan.Confi
 func ConfigureWithReports(configuration netchan.Config, stop <-chan struct{}, reports chan<- string) netchan.Config {
 	drivers := append([]transport.Driver(nil), configuration.Transports...)
 	configuration.Transports = append(drivers, priorityDriver{stop: stop, reports: reports}, reportedDriver{Driver: quic.Driver{}, stop: stop, reports: reports})
+	if reports != nil {
+		configuration.Transports = appendRFCOMMReports(configuration.Transports, stop, reports)
+		configuration.Transports = appendBLEReports(configuration.Transports, stop, reports)
+	}
 	return configuration
 }
 
@@ -41,15 +46,28 @@ func LibraryVersion() string {
 			if dependency.Path == "github.com/matveynator/netchan/v2" {
 				if dependency.Replace != nil {
 					if dependency.Replace.Version != "" {
-						return dependency.Replace.Version
+						return diagnosticVersion(dependency.Replace.Version)
 					}
 					return "local-replace"
 				}
-				return dependency.Version
+				return diagnosticVersion(dependency.Version)
 			}
 		}
 	}
 	return "unknown"
+}
+
+// Pseudo-version timestamps resemble secret tokens to the journal redactor.
+// Keep an unambiguous version plus commit without weakening secret filtering.
+func diagnosticVersion(version string) string {
+	parts := strings.Split(version, "-")
+	if len(parts) == 3 && len(parts[2]) == 12 && len(parts[1]) >= 14 {
+		timestamp := strings.TrimPrefix(parts[1], "0.")
+		if len(timestamp) == 14 && strings.Trim(timestamp, "0123456789") == "" && strings.Trim(parts[2], "0123456789abcdef") == "" {
+			return parts[0] + "-dev." + parts[2]
+		}
+	}
+	return version
 }
 
 type priorityDriver struct {
@@ -77,6 +95,14 @@ type reportedDriver struct {
 	transport.Driver
 	stop    <-chan struct{}
 	reports chan<- string
+}
+
+// Preserve discovery when wrapping Bluetooth drivers for diagnostics.
+func (driver reportedDriver) Discover(service string, results chan<- transport.Candidate, done <-chan struct{}) error {
+	if discovery, ok := driver.Driver.(transport.Discoverer); ok {
+		return discovery.Discover(service, results, done)
+	}
+	return transport.ErrUnsupported
 }
 
 func (driver reportedDriver) Dial(endpoint transport.Endpoint, options transport.Options) (net.Conn, error) {

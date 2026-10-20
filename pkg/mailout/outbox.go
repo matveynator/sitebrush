@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/textproto"
 	"strconv"
 	"strings"
 	"time"
@@ -266,6 +267,10 @@ func IsPermanentFailure(err error) bool {
 	var permanentError PermanentError
 	if errors.As(err, &permanentError) {
 		return true
+	}
+	var reply *textproto.Error
+	if errors.As(err, &reply) {
+		return reply.Code >= 500 && reply.Code < 600
 	}
 	for _, field := range strings.Fields(err.Error()) {
 		field = strings.Trim(field, ":;,()[]")

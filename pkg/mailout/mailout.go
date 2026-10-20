@@ -68,9 +68,12 @@ func (sender DirectSender) Send(ctx context.Context, message Message) error {
 	if lookupHosts == nil {
 		lookupHosts = lookupMailHosts
 	}
+	reportSMTP(ctx, SMTPDiagnostic{Host: recipientDomain, Stage: "mx_lookup", Outcome: "attempt"})
 	targetHosts, err := lookupHosts(ctx, recipientDomain)
 	if err != nil {
-		return err
+		d := smtpFailure(SMTPDiagnostic{Host: recipientDomain, Stage: "mx_lookup"}, err)
+		reportSMTP(ctx, d)
+		return smtpDeliveryError{diagnostic: d, cause: err}
 	}
 	payload := buildMessagePayloadWithID(fromAddress, toAddress, message.Subject, message.Body, message.HTMLBody, message.MessageID)
 	var lastErr error
@@ -148,7 +151,16 @@ func legacySMTPConfig(targetHost string) *tls.Config {
 	return config
 }
 
-func (sender DirectSender) sendSMTP(ctx context.Context, targetHost, endpoint, fromAddress, toAddress string, payload []byte, mode string) error {
+func (sender DirectSender) sendSMTP(ctx context.Context, targetHost, endpoint, fromAddress, toAddress string, payload []byte, mode string) (deliveryErr error) {
+	diagnostic := SMTPDiagnostic{Host: targetHost, Stage: "connect", TLSMode: mode, Outcome: "attempt"}
+	reportSMTP(ctx, diagnostic)
+	defer func() {
+		if deliveryErr != nil {
+			diagnostic = smtpFailure(diagnostic, deliveryErr)
+			reportSMTP(ctx, diagnostic)
+			deliveryErr = smtpDeliveryError{diagnostic: diagnostic, cause: deliveryErr}
+		}
+	}()
 	timeout := sender.DialTimeout
 	if timeout <= 0 {
 		timeout = 12 * time.Second
@@ -181,11 +193,13 @@ func (sender DirectSender) sendSMTP(ctx context.Context, targetHost, endpoint, f
 		case <-finished:
 		}
 	}()
+	diagnostic.Stage = "greeting"
 	client, err := smtp.NewClient(connection, targetHost)
 	if err != nil {
 		return fmt.Errorf("%s: %w", targetHost, err)
 	}
 	defer client.Close()
+	diagnostic.Stage = "hello"
 	if err := client.Hello(hostName); err != nil {
 		return fmt.Errorf("%s hello: %w", targetHost, err)
 	}
@@ -194,34 +208,55 @@ func (sender DirectSender) sendSMTP(ctx context.Context, targetHost, endpoint, f
 		if mode == "legacy" {
 			tlsConfig = legacySMTPConfig(targetHost)
 		}
+		diagnostic.Stage = "starttls"
 		if err := client.StartTLS(tlsConfig); err != nil {
 			return fmt.Errorf("%s: %w", targetHost, startTLSError{cause: err})
 		}
 	} else {
+		diagnostic.TLSMode = "plaintext"
 		log.Printf("MAIL transport host=%q mode=plaintext encrypted=false", targetHost)
 	}
 	if state, encrypted := client.TLSConnectionState(); encrypted {
 		log.Printf("MAIL transport host=%q mode=%s tls_version=%x certificate_verified=%t", targetHost, mode, state.Version, len(state.VerifiedChains) > 0)
 	}
+	diagnostic.Stage = "mail_from"
 	if err := client.Mail(fromAddress); err != nil {
 		return fmt.Errorf("%s mail from: %w", targetHost, err)
 	}
+	diagnostic.Stage = "rcpt_to"
 	if err := client.Rcpt(toAddress); err != nil {
 		return fmt.Errorf("%s rcpt to: %w", targetHost, err)
 	}
-	writer, err := client.Data()
-	if err != nil {
-		return fmt.Errorf("%s data: %w", targetHost, err)
+	diagnostic.Stage = "data"
+	// net/smtp.Data discards the final successful reply. Read this one exchange
+	// through its public text connection so the journal can retain status codes.
+	if err := client.Text.PrintfLine("DATA"); err != nil {
+		return err
 	}
+	if _, _, err := client.Text.ReadResponse(354); err != nil {
+		return err
+	}
+	diagnostic.Stage = "body"
+	writer := client.Text.DotWriter()
 	if _, err := writer.Write(payload); err != nil {
-		_ = writer.Close()
-		return fmt.Errorf("%s write: %w", targetHost, err)
+		return err
 	}
 	if err := writer.Close(); err != nil {
-		return fmt.Errorf("%s close data: %w", targetHost, err)
+		return err
 	}
+	diagnostic.Stage = "data_reply"
+	code, reply, err := client.Text.ReadResponse(250)
+	if err != nil {
+		return err
+	}
+	diagnostic.Code, diagnostic.EnhancedCode = smtpReplyCodes(code, reply)
+	diagnostic.Outcome = "accepted_for_delivery"
+	reportSMTP(ctx, diagnostic)
 	// DATA acceptance is final; a broken goodbye must not queue a duplicate code.
 	if err := client.Quit(); err != nil {
+		warning := diagnostic
+		warning.Stage, warning.Outcome = "quit", "accepted_goodbye_failed"
+		reportSMTP(ctx, warning)
 		log.Printf("MAIL accepted host=%q quit_error_type=%T", targetHost, err)
 	}
 	return nil
