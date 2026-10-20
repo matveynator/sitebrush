@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/matveynator/sitebrush/v2/pkg/expenses"
+	"github.com/matveynator/sitebrush/v2/pkg/mailmonitor"
+	"github.com/matveynator/sitebrush/v2/pkg/migrations"
 	_ "modernc.org/sqlite"
 )
 
@@ -1298,5 +1300,44 @@ func TestPurgeDemoBillingRemovesDemoOnlyAndKeepsRealCustomer(t *testing.T) {
 	}
 	if _, err := store.BillingCustomerByEmail(context.Background(), "demo-user@example.com"); err == nil {
 		t.Fatal("orphan demo customer still exists")
+	}
+}
+
+func TestMailMonitoringMigrationPreservesExistingLedger(t *testing.T) {
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "upgrade.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	ctx := context.Background()
+	currentSteps := hostingSchemaSteps(ctx, false)
+	legacySteps := currentSteps[:len(currentSteps)-len(mailmonitor.SchemaQueries())]
+	if err := migrations.Run(database, "billing-schema-v27", legacySteps); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`CREATE TABLE schema_migrations(component TEXT PRIMARY KEY,version INTEGER,updated_at TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := setSchemaMigrationVersion(ctx, database, "billing", 27); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO server_settings(name,value,updated_at) VALUES('owner_domain','owner.example','')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckMigrationSource(ctx, database); err != nil {
+		t.Fatalf("existing migration prefix rejected: %v", err)
+	}
+	if err := Migrate(ctx, database); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(ctx, database); err != nil {
+		t.Fatalf("second migration is not idempotent: %v", err)
+	}
+	if err := CheckMigrations(ctx, database); err != nil {
+		t.Fatal(err)
+	}
+	var owner string
+	if err := database.QueryRow(`SELECT value FROM server_settings WHERE name='owner_domain'`).Scan(&owner); err != nil || owner != "owner.example" {
+		t.Fatal("owner configuration changed", owner, err)
 	}
 }

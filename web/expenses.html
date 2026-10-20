@@ -34,6 +34,17 @@
     .expense-simple-server-monitoring { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 1px; background: var(--theme-border); border: 1px solid var(--theme-border); }
     .expense-simple-server-metric { display: grid; gap: 2px; min-width: 0; padding: 9px 10px; background: var(--theme-card); }
     .expense-simple-server-metric strong, .expense-simple-server-metric span, .expense-simple-server-metric small { overflow-wrap: anywhere; }
+    .expense-mail-monitor { display: grid; gap: 10px; padding: 14px; border: 1px solid var(--theme-border); border-radius: var(--theme-radius); }
+    .expense-simple-page > *, .expense-simple-summary, .expense-simple-summary > *, .expense-mail-monitor > * { min-width: 0; }
+    .expense-mail-monitor form label { min-width: 0; max-width: 100%; }
+    .expense-mail-monitor select, .expense-mail-monitor input { max-width: 100%; }
+    @media (max-width: 760px) {
+      .expense-mail-monitor form { display: grid !important; grid-template-columns: minmax(0, 1fr); }
+    }
+    .expense-mail-monitor-counts { display: flex; flex-wrap: wrap; gap: 8px 16px; }
+    .expense-mail-monitor-events { display: grid; gap: 8px; }
+    .expense-mail-monitor-event { padding: 9px 0; border-top: 1px solid var(--theme-border); overflow-wrap: anywhere; }
+    .expense-mail-monitor-event small { display: block; }
     .expense-simple-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; background: var(--theme-border); border: 1px solid var(--theme-border); }
     .expense-simple-metric { display: grid; gap: 3px; min-width: 0; padding: 12px; background: var(--theme-card); }
     .expense-simple-metric strong { font-size: 1.15rem; overflow-wrap: anywhere; }
@@ -72,14 +83,14 @@
       <div class="expense-simple-toolbar mb-3">
         <label>{{index .T "expenses_server_select"}}
           <select class="form-select" data-expense-server-select>
-            {{range $serverIndex, $expenseServer := .ExpenseServers}}<option value="{{$serverIndex}}">{{$expenseServer.Server.Name}}</option>{{end}}
+            {{range $serverIndex, $expenseServer := .ExpenseServers}}<option value="{{$serverIndex}}" {{if $expenseServer.MailSelected}}selected{{end}}>{{$expenseServer.Server.Name}}</option>{{end}}
           </select>
         </label>
       </div>
       {{end}}
       {{range $serverIndex, $expenseServer := .ExpenseServers}}
       {{$server := $expenseServer.Server}}
-      <div data-expense-server-panel="{{$serverIndex}}" {{if $serverIndex}}hidden{{end}}>
+      <div data-expense-server-panel="{{$serverIndex}}" {{if not $expenseServer.MailSelected}}hidden{{end}}>
         <section class="expense-simple-summary">
           <div class="expense-simple-summary-head">
             <div>
@@ -110,6 +121,48 @@
             </div>
             {{end}}
           </div>
+          <section class="expense-mail-monitor" id="mail-monitor-{{$serverIndex}}">
+            <strong>{{index $.T "mail_monitor_title"}}</strong>
+            {{if $expenseServer.MailAvailable}}
+            <div class="expense-mail-monitor-counts">
+              <span>{{index $.T "mail_monitor_queued_count"}}: {{$expenseServer.MailLastDay.Queued}} / {{$expenseServer.MailLast90Days.Queued}}</span>
+              <span>{{index $.T "mail_monitor_accepted_count"}}: {{$expenseServer.MailLastDay.Accepted}} / {{$expenseServer.MailLast90Days.Accepted}}</span>
+              <span>{{index $.T "mail_monitor_failed_count"}}: {{$expenseServer.MailLastDay.Failed}} / {{$expenseServer.MailLast90Days.Failed}}</span>
+              <span>{{index $.T "mail_monitor_registration_requested_count"}}: {{$expenseServer.MailLastDay.RegistrationRequested}} / {{$expenseServer.MailLast90Days.RegistrationRequested}}</span>
+              <span>{{index $.T "mail_monitor_registration_complete_count"}}: {{$expenseServer.MailLastDay.RegistrationComplete}} / {{$expenseServer.MailLast90Days.RegistrationComplete}}</span>
+              <span>{{index $.T "mail_monitor_recovery_requested_count"}}: {{$expenseServer.MailLastDay.RecoveryRequested}} / {{$expenseServer.MailLast90Days.RecoveryRequested}}</span>
+              <span>{{index $.T "mail_monitor_recovery_complete_count"}}: {{$expenseServer.MailLastDay.RecoveryComplete}} / {{$expenseServer.MailLast90Days.RecoveryComplete}}</span>
+            </div>
+            {{else}}<div class="text-danger">{{index $.T "mail_monitor_unavailable"}}</div>{{end}}
+            {{if $expenseServer.MailReceivedAt}}<small>{{index $.T "mail_monitor_received_at"}}: {{$expenseServer.MailReceivedAt}}</small>{{end}}
+            {{if not $server.Local}}<small class="text-muted">{{index $.T "mail_monitor_remote_note"}}</small>{{end}}
+            <small class="text-muted">{{index $.T "mail_monitor_boundary"}}</small>
+            {{if $expenseServer.MailExpanded}}
+            <form method="get" action="/" class="d-flex flex-wrap gap-2 align-items-end">
+              <input type="hidden" name="expenses" value="">
+              <input type="hidden" name="mail_server" value="{{$server.ID}}">
+              <label>{{index $.T "mail_monitor_period"}} <select class="form-select form-select-sm" name="mail_days"><option value="1" {{if eq $expenseServer.MailFilterDays 1}}selected{{end}}>{{index $.T "mail_monitor_day"}}</option><option value="7" {{if eq $expenseServer.MailFilterDays 7}}selected{{end}}>{{index $.T "mail_monitor_week"}}</option><option value="30" {{if eq $expenseServer.MailFilterDays 30}}selected{{end}}>{{index $.T "mail_monitor_month"}}</option><option value="90" {{if eq $expenseServer.MailFilterDays 90}}selected{{end}}>{{index $.T "mail_monitor_quarter"}}</option></select></label>
+              <label>{{index $.T "mail_monitor_state"}} <select class="form-select form-select-sm" name="mail_stage"><option value="">{{index $.T "mail_monitor_all"}}</option><option value="queued" {{if eq $expenseServer.MailFilterStage "queued"}}selected{{end}}>{{index $.T "mail_monitor_stage_queued"}}</option><option value="accepted" {{if eq $expenseServer.MailFilterStage "accepted"}}selected{{end}}>{{index $.T "mail_monitor_stage_accepted"}}</option><option value="failed" {{if eq $expenseServer.MailFilterStage "failed"}}selected{{end}}>{{index $.T "mail_monitor_stage_failed"}}</option><option value="retry" {{if eq $expenseServer.MailFilterStage "retry"}}selected{{end}}>{{index $.T "mail_monitor_stage_retry"}}</option><option value="registration_complete" {{if eq $expenseServer.MailFilterStage "registration_complete"}}selected{{end}}>{{index $.T "mail_monitor_stage_registration_complete"}}</option><option value="recovery_complete" {{if eq $expenseServer.MailFilterStage "recovery_complete"}}selected{{end}}>{{index $.T "mail_monitor_stage_recovery_complete"}}</option><option value="recovery_skipped" {{if eq $expenseServer.MailFilterStage "recovery_skipped"}}selected{{end}}>{{index $.T "mail_monitor_stage_recovery_skipped"}}</option><option value="attempt" {{if eq $expenseServer.MailFilterStage "attempt"}}selected{{end}}>{{index $.T "mail_monitor_stage_attempt"}}</option><option value="registration_requested" {{if eq $expenseServer.MailFilterStage "registration_requested"}}selected{{end}}>{{index $.T "mail_monitor_stage_registration_requested"}}</option><option value="registration_verified" {{if eq $expenseServer.MailFilterStage "registration_verified"}}selected{{end}}>{{index $.T "mail_monitor_stage_registration_verified"}}</option><option value="registration_failed" {{if eq $expenseServer.MailFilterStage "registration_failed"}}selected{{end}}>{{index $.T "mail_monitor_stage_registration_failed"}}</option><option value="registration_rejected" {{if eq $expenseServer.MailFilterStage "registration_rejected"}}selected{{end}}>{{index $.T "mail_monitor_stage_registration_rejected"}}</option><option value="recovery_requested" {{if eq $expenseServer.MailFilterStage "recovery_requested"}}selected{{end}}>{{index $.T "mail_monitor_stage_recovery_requested"}}</option><option value="recovery_failed" {{if eq $expenseServer.MailFilterStage "recovery_failed"}}selected{{end}}>{{index $.T "mail_monitor_stage_recovery_failed"}}</option><option value="recovery_mail_failed" {{if eq $expenseServer.MailFilterStage "recovery_mail_failed"}}selected{{end}}>{{index $.T "mail_monitor_stage_recovery_mail_failed"}}</option></select></label>
+              <label>{{index $.T "mail_monitor_kind"}} <input class="form-control form-control-sm" name="mail_kind" value="{{$expenseServer.MailFilterKind}}" maxlength="60" placeholder="login_code, email_confirm..."></label>
+              <label>{{index $.T "mail_monitor_recipient"}} <input class="form-control form-control-sm" name="mail_recipient" value="{{$expenseServer.MailFilterRecipient}}" maxlength="254" autocomplete="off"></label>
+              <button class="btn btn-outline-primary btn-sm" type="submit">{{index $.T "mail_monitor_show"}}</button>
+            </form>
+            <div class="expense-mail-monitor-events">
+              {{range $expenseServer.MailEvents}}
+              <div class="expense-mail-monitor-event">
+                <strong>{{$stageLabel := index $.T (printf "mail_monitor_stage_%s" .Stage)}}{{if $stageLabel}}{{$stageLabel}}{{else}}{{.Stage}}{{end}}</strong> · {{$kindLabel := index $.T (printf "mail_monitor_kind_%s" .Kind)}}{{if $kindLabel}}{{$kindLabel}}{{else}}{{.Kind}}{{end}} · {{.Recipient}}
+                <small>{{.CreatedAt}} · {{.Domain}}{{if .Route}} · {{.Route}}{{end}}{{if .AcceptedBy}} · {{$boundaryLabel := index $.T (printf "mail_monitor_boundary_%s" .AcceptedBy)}}{{if $boundaryLabel}}{{$boundaryLabel}}{{else}}{{.AcceptedBy}}{{end}}{{end}}{{if .Attempt}} · {{index $.T "mail_monitor_attempt_label"}} {{.Attempt}}{{end}}{{if .SMTPCode}} · SMTP {{.SMTPCode}}{{end}}</small>
+                {{if .Detail}}<small>{{.Detail}}</small>{{end}}
+                {{if or .MessageID .FlowID}}<details><summary>{{index $.T "mail_monitor_identifiers"}}</summary>{{if .MessageID}}<small>{{index $.T "mail_monitor_message_id"}} {{.MessageID}}</small>{{end}}{{if .FlowID}}<small>{{index $.T "mail_monitor_flow_id"}} {{.FlowID}}</small>{{end}}</details>{{end}}
+              </div>
+              {{else}}<div class="text-muted">{{index $.T "mail_monitor_empty"}}</div>{{end}}
+            </div>
+            <div>
+              {{if gt $expenseServer.MailPage 0}}<a class="btn btn-outline-primary btn-sm" href="?expenses&amp;mail_server={{urlquery $server.ID}}&amp;mail_page={{$expenseServer.MailPreviousPage}}&amp;mail_days={{$expenseServer.MailFilterDays}}&amp;mail_stage={{urlquery $expenseServer.MailFilterStage}}&amp;mail_kind={{urlquery $expenseServer.MailFilterKind}}&amp;mail_recipient={{urlquery $expenseServer.MailFilterRecipient}}#mail-monitor-{{$serverIndex}}">{{index $.T "mail_monitor_previous"}}</a>{{end}}
+              {{if $expenseServer.MailHasNextPage}}<a class="btn btn-outline-primary btn-sm" href="?expenses&amp;mail_server={{urlquery $server.ID}}&amp;mail_page={{$expenseServer.MailNextPage}}&amp;mail_days={{$expenseServer.MailFilterDays}}&amp;mail_stage={{urlquery $expenseServer.MailFilterStage}}&amp;mail_kind={{urlquery $expenseServer.MailFilterKind}}&amp;mail_recipient={{urlquery $expenseServer.MailFilterRecipient}}#mail-monitor-{{$serverIndex}}">{{index $.T "mail_monitor_next"}}</a>{{end}}
+            </div>
+            {{else}}<a class="btn btn-outline-primary btn-sm" href="?expenses&amp;mail_server={{urlquery $server.ID}}#mail-monitor-{{$serverIndex}}">{{index $.T "mail_monitor_journal"}}</a>{{end}}
+          </section>
           {{if not $server.DiskCapacityKnown}}
           <div class="alert alert-warning mb-0">{{index $.T "expenses_disk_unknown"}}</div>
           {{else}}

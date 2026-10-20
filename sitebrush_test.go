@@ -32,6 +32,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
 	"net/url"
 	"os"
 	"os/exec"
@@ -65,6 +66,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/hostingandsupport"
 	"github.com/matveynator/sitebrush/v2/pkg/httpsecurity"
 	"github.com/matveynator/sitebrush/v2/pkg/imageprepare"
+	"github.com/matveynator/sitebrush/v2/pkg/mailmonitor"
 	"github.com/matveynator/sitebrush/v2/pkg/mailout"
 	sitemcp "github.com/matveynator/sitebrush/v2/pkg/mcp"
 	"github.com/matveynator/sitebrush/v2/pkg/netchantls"
@@ -5970,6 +5972,7 @@ func TestRecoveryUnknownAddressDoesNotClaimDelivery(t *testing.T) {
 	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
 	withEmailSPFAllowed(t)
 	application, rawDB := newTestApplication(t)
+	enableMailMonitorForTest(t, application)
 	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "owner@example.com", "old-password"); err != nil {
 		t.Fatalf("insert administrator: %v", err)
 	}
@@ -5995,12 +5998,18 @@ func TestRecoveryUnknownAddressDoesNotClaimDelivery(t *testing.T) {
 	if err := rawDB.QueryRow(`SELECT COUNT(1) FROM email_confirmations WHERE domain=? AND action='recover'`, "localhost").Scan(&confirmations); err != nil || confirmations != 0 {
 		t.Fatalf("unknown address created %d confirmations: %v", confirmations, err)
 	}
+	events := mailMonitorEventsForTest(t, application, "local")
+	if len(events) != 1 || events[0].Stage != "recovery_skipped" || events[0].Recipient != "wrong@example.com" {
+		t.Fatalf("skipped recovery absent: %+v", events)
+	}
+
 }
 
 func TestRecoverPasswordThroughEmailLink(t *testing.T) {
 	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
 	withEmailSPFAllowed(t)
 	application, rawDB := newTestApplication(t)
+	enableMailMonitorForTest(t, application)
 	captureImmediateProfileEmail(t, application)
 	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
 	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old-password"); err != nil {
@@ -6089,6 +6098,11 @@ func TestRecoverPasswordThroughEmailLink(t *testing.T) {
 	if reusedResponse.Code != http.StatusNotFound {
 		t.Fatalf("reused link status = %d, want %d", reusedResponse.Code, http.StatusNotFound)
 	}
+	events := mailMonitorEventsForTest(t, application, "local")
+	if len(events) != 2 || events[0].Stage != "recovery_complete" || events[1].Stage != "recovery_requested" || events[0].FlowID != events[1].FlowID || message.MonitorFlowID != events[0].FlowID {
+		t.Fatalf("recovery flow not correlated: %+v", events)
+	}
+
 }
 
 func TestRecoverPasswordThroughManualCode(t *testing.T) {
@@ -25733,5 +25747,263 @@ func TestLegacyAnalyticsMigrationRejectsEscapingSymlinkParents(t *testing.T) {
 				t.Fatal("migration changed outside state", err)
 			}
 		})
+	}
+}
+
+func enableMailMonitorForTest(t *testing.T, application *App) {
+	t.Helper()
+	database, err := openServerControlDatabaseForTest(context.Background(), application)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher, err := startServerControlDatabaseDispatcher(application.serverControlDBPath(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.controlDatabase = dispatcher
+	t.Cleanup(func() { dispatcher.Close() })
+}
+
+func mailMonitorEventsForTest(t *testing.T, application *App, installationID string) []mailmonitor.Event {
+	t.Helper()
+	var events []mailmonitor.Event
+	err := application.withServerControlDatabaseRead(context.Background(), "test-mail-events", func(database *sql.DB) error {
+		var err error
+		events, err = (mailmonitor.Store{DB: database}).Recent(context.Background(), installationID, time.Time{}, 50, 0)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return events
+}
+
+func TestMailMonitorDurableDeliveryAndAtomicQueue(t *testing.T) {
+	application, _ := newTestApplication(t)
+	enableMailMonitorForTest(t, application)
+	application.sendEmail = func(_ context.Context, message mailout.Message) error {
+		if message.To == "failed@example.com" {
+			return mailout.PermanentError{Err: &textproto.Error{Code: 550, Msg: "mx.example rcpt to rejected token=secret 123456"}}
+		}
+		return nil
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	tasks := make(chan mailout.Task, 2)
+	application.durableMailTasks = tasks
+	go func() { defer close(done); application.runDurableMailProcess(stop, tasks) }()
+	t.Cleanup(func() { close(stop); <-done })
+	replies := make(chan mailout.Result, 2)
+	for _, recipient := range []string{"ok@example.com", "failed@example.com"} {
+		task := mailout.NewTask("email_confirm", mailout.RouteLocal, mailout.Message{From: "sender@example.com", To: recipient, Subject: "Account", Body: "123456", MonitorDomain: "customer.example", MonitorFlowID: "safe-flow-" + recipient}, time.Now().Add(time.Hour), replies)
+		if err := application.submitDurableMailTask(stop, task); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 2 {
+		select {
+		case <-replies:
+		case <-time.After(5 * time.Second):
+			t.Fatal("mail process did not finish")
+		}
+	}
+	events := mailMonitorEventsForTest(t, application, "local")
+	if len(events) != 6 {
+		t.Fatalf("missing durable events: %+v", events)
+	}
+	accepted, failed := 0, 0
+	for _, event := range events {
+		if event.Domain != "customer.example" || event.FlowID != "safe-flow-"+event.Recipient {
+			t.Fatalf("restart metadata lost: %+v", event)
+		}
+		if event.Stage == "accepted" {
+			accepted++
+			if event.AcceptedBy != "recipient_smtp" {
+				t.Fatal(event)
+			}
+		}
+		if event.Stage == "failed" {
+			failed++
+			if event.SMTPCode != "550" || !strings.Contains(event.Detail, "mx.example") || strings.Contains(event.Detail, "secret") || strings.Contains(event.Detail, "123456") {
+				t.Fatal(event)
+			}
+		}
+	}
+	if accepted != 1 || failed != 1 {
+		t.Fatalf("accepted=%d failed=%d", accepted, failed)
+	}
+	// A journal write failure must roll back the queue row, not acknowledge an untracked message.
+	if err := application.withServerControlDatabaseWrite(context.Background(), "test-monitor-failure", func(database *sql.DB) error {
+		_, err := database.Exec(`CREATE TRIGGER reject_mail_monitor BEFORE INSERT ON mail_monitor_events BEGIN SELECT RAISE(ABORT,'monitor unavailable'); END`)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rejected := mailout.NewTask("invoice", mailout.RouteLocal, mailout.Message{From: "sender@example.com", To: "other@example.com", Subject: "Invoice", Body: "Test"}, time.Now().Add(time.Hour), nil)
+	if err := application.submitDurableMailTask(stop, rejected); err == nil {
+		t.Fatal("untracked message acknowledged")
+	}
+	if err := application.withServerControlDatabaseRead(context.Background(), "test-queue-rollback", func(database *sql.DB) error {
+		_, found, err := mailout.ByID(context.Background(), database, rejected.ID)
+		if found {
+			t.Error("outbox row survived failed journal transaction")
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMailMonitorSyncAcknowledgmentReplayAndIsolation(t *testing.T) {
+	application, _ := newTestApplication(t)
+	enableMailMonitorForTest(t, application)
+	ctx := context.Background()
+	registration := serviceMailRequest{CodeKind: "installation_register"}
+	if err := application.signServiceMailRequest(ctx, &registration); err != nil {
+		t.Fatal(err)
+	}
+	if status, code := application.handleServiceMailRelayRequest(ctx, nil, registration, "netchan"); code != http.StatusOK {
+		t.Fatal(code, status)
+	}
+	if err := application.withServerControlDatabaseWrite(ctx, "test-mail-backlog", func(database *sql.DB) error {
+		store := mailmonitor.Store{DB: database}
+		for number := range 85 {
+			if err := store.Append(ctx, mailmonitor.Event{ID: fmt.Sprint(number), Kind: "invoice", Stage: "queued", Recipient: "owner@example.com"}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	failedDelivery := func([]byte) error {
+		return serviceMailRelayRejection{StatusCode: http.StatusBadRequest, Message: "unsupported snapshot kind"}
+	}
+	if err := application.syncMailMonitor(ctx, failedDelivery); err == nil {
+		t.Fatal("old server acknowledged monitor events")
+	}
+	receivedBatches := 0
+	deliver := func(payload []byte) error {
+		var request serviceMailRequest
+		if err := json.Unmarshal(payload, &request); err != nil {
+			return err
+		}
+		if request.CodeKind != "mail_monitor_sync" {
+			return errors.New("wrong request kind")
+		}
+		if _, err := application.decodeServiceMailRelayRequest(ctx, payload, "sitebrush.com"); err == nil {
+			t.Error("plaintext HTTPS monitor batch accepted")
+		}
+		response := application.handleSitebrushNetChanPayload(ctx, payload)
+		if response.StatusCode != http.StatusOK {
+			return fmt.Errorf("sync status: %+v", response)
+		}
+		receivedBatches++
+		if receivedBatches == 1 {
+			return errors.New("acknowledgment lost")
+		}
+		return nil
+	}
+	if err := application.syncMailMonitor(ctx, deliver); err == nil {
+		t.Fatal("lost acknowledgment treated as successful")
+	}
+	if err := application.syncMailMonitor(ctx, deliver); err != nil {
+		t.Fatal(err)
+	}
+	if receivedBatches != 3 {
+		t.Fatalf("backlog not drained/replayed: %d", receivedBatches)
+	}
+	if err := application.withServerControlDatabaseRead(ctx, "test-mail-sync", func(database *sql.DB) error {
+		store := mailmonitor.Store{DB: database}
+		events, err := store.Unsynced(ctx, 80)
+		if err != nil {
+			return err
+		}
+		if len(events) != 0 {
+			t.Error("acknowledged events still pending")
+		}
+		counts, err := store.CountsSince(ctx, registration.InstallationID, time.Time{})
+		if counts.Queued != 85 {
+			t.Errorf("replay changed total: %+v", counts)
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	forged := serviceMailRequest{CodeKind: "mail_monitor_sync", MailEvents: []mailmonitor.Event{{ID: "foreign", InstallationID: "another-server", Kind: "invoice", Stage: "failed", CreatedAt: time.Now().UTC().Format(time.RFC3339)}}}
+	if err := application.signServiceMailRequest(ctx, &forged); err != nil {
+		t.Fatal(err)
+	}
+	if status, code := application.handleMailMonitorSync(ctx, forged); code != http.StatusOK {
+		t.Fatal(code, status)
+	}
+	if events := mailMonitorEventsForTest(t, application, "another-server"); len(events) != 0 {
+		t.Fatal("caller chose another installation's journal")
+	}
+	forged.MailEvents[0].Recipient = "tampered@example.com"
+	if _, code := application.handleMailMonitorSync(ctx, forged); code != http.StatusForbidden {
+		t.Fatal("tampered signature accepted")
+	}
+}
+
+func TestMailMonitorPanelMergedLocalServerAndRemoteScope(t *testing.T) {
+	application, _ := newTestApplication(t)
+	enableMailMonitorForTest(t, application)
+	application.recordMailMonitorEvent(context.Background(), mailmonitor.Event{Kind: "invoice", Stage: "queued", Recipient: "local@example.com"})
+	snapshot := hostingAndSupportPanelSnapshot{Servers: []hostingandsupport.ServerView{{ID: "merged-local", Name: "Local", Local: true}, {ID: "remote", Name: "Remote"}}}
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/?expenses&mail_server=merged-local", nil)
+	view := application.hostingAndSupportPanelView(request, snapshot)
+	servers := view["ExpenseServers"].([]simplifiedExpenseServerView)
+	if !servers[0].MailSelected || !servers[0].MailAvailable || servers[0].MailLastDay.Queued != 1 || len(servers[0].MailEvents) != 1 {
+		t.Fatalf("merged local journal lost: %+v", servers[0])
+	}
+	if servers[1].MailAvailable {
+		t.Fatal("remote with no heartbeat presented as synchronized")
+	}
+	request = httptest.NewRequest(http.MethodGet, "http://localhost/?expenses&mail_server=remote", nil)
+	servers = application.hostingAndSupportPanelView(request, snapshot)["ExpenseServers"].([]simplifiedExpenseServerView)
+	if !servers[1].MailSelected || len(servers[1].MailEvents) != 0 {
+		t.Fatal("remote journal leaked local messages")
+	}
+	request = httptest.NewRequest(http.MethodGet, "http://localhost/?expenses&mail_server=unknown", nil)
+	servers = application.hostingAndSupportPanelView(request, snapshot)["ExpenseServers"].([]simplifiedExpenseServerView)
+	if !servers[0].MailSelected || servers[0].MailExpanded {
+		t.Fatal("unknown server selected an unrestricted journal")
+	}
+}
+
+func TestMailMonitorRegistrationProgressAndCompletion(t *testing.T) {
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
+	application, _ := newTestApplication(t)
+	enableMailMonitorForTest(t, application)
+	confirmation := EmailConfirmation{Token: "mail-secret", FormToken: "form-handle", Domain: "localhost", Action: "register", Email: "owner@example.org", Code: "123456", ExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339)}
+	if err := application.saveRegistrationConfirmation(context.Background(), confirmation); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		response := httptest.NewRecorder()
+		application.confirmEmailToken(response, httptest.NewRequest(http.MethodGet, "https://localhost/?email_confirm=mail-secret", nil))
+		if response.Code != http.StatusOK {
+			t.Fatal(response.Code, response.Body.String())
+		}
+	}
+	events := mailMonitorEventsForTest(t, application, "local")
+	if len(events) != 1 || events[0].Stage != "registration_verified" || events[0].FlowID != mailMonitorFlowID(confirmation.Token) {
+		t.Fatalf("GET counted completed signup or duplicated verification: %+v", events)
+	}
+	form := url.Values{"password": {"new-password"}, "password_confirm": {"new-password"}}
+	request := httptest.NewRequest(http.MethodPost, "https://localhost/?email_confirm=mail-secret", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	application.confirmEmailToken(response, request)
+	if response.Code != http.StatusFound {
+		t.Fatal(response.Code, response.Body.String())
+	}
+	events = mailMonitorEventsForTest(t, application, "local")
+	if len(events) != 2 || events[0].Stage != "registration_complete" || events[0].FlowID != events[1].FlowID {
+		t.Fatalf("completion not correlated: %+v", events)
 	}
 }
