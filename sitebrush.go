@@ -29574,7 +29574,7 @@ func (a *App) runDurableMailProcess(stop <-chan struct{}, tasks <-chan mailout.T
 				if err != nil || !claimed {
 					return err
 				}
-				return nil
+				return appendMailMonitorTask(context.Background(), database, dueRecord.Task, "attempt", dueRecord.Attempts+1, "", nil)
 			})
 			if claimErr != nil || !claimed {
 				if claimErr != nil {

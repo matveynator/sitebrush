@@ -665,11 +665,11 @@ func CheckMigrations(ctx context.Context, database *sql.DB) error {
 	if version < currentBillingSchemaVersion || !complete {
 		return fmt.Errorf("required server database migrations are incomplete")
 	}
-	completed, err := migrations.Check(database, "billing-schema-v27", hostingSchemaSteps(ctx, false))
+	steps, completed, err := hostingSchemaHistory(ctx, database, false)
 	if err != nil {
 		return err
 	}
-	if completed != len(hostingSchemaSteps(ctx, false)) {
+	if completed != len(steps) {
 		return fmt.Errorf("required billing migration steps are incomplete")
 	}
 	completed, err = migrations.Check(database, "domain-registration-v1", domainRegistrationSteps(false))
@@ -716,7 +716,7 @@ func CheckMigrationSource(ctx context.Context, database *sql.DB) error {
 	if err != nil || !found {
 		return err
 	}
-	if _, err = migrations.Check(database, "billing-schema-v27", hostingSchemaSteps(ctx, false)); err != nil {
+	if _, _, err = hostingSchemaHistory(ctx, database, false); err != nil {
 		return err
 	}
 	if _, err = migrations.Check(database, "domain-registration-v1", domainRegistrationSteps(false)); err != nil {
@@ -753,7 +753,10 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("verify billing schema: %w", err)
 	}
-	steps := hostingSchemaSteps(ctx, !schemaComplete || schemaVersion < currentBillingSchemaVersion)
+	steps, _, err := hostingSchemaHistory(ctx, database, !schemaComplete || schemaVersion < currentBillingSchemaVersion)
+	if err != nil {
+		return err
+	}
 	if err := migrations.Run(database, "billing-schema-v27", steps); err != nil {
 		return err
 	}
@@ -862,6 +865,47 @@ func migrateLegacyBillingData(ctx context.Context, database *sql.DB) error {
 		return fmt.Errorf("backfill public trial sites: %w", err)
 	}
 	return nil
+}
+
+// The standalone journal and account protection branches published different
+// append-only tails. Preserve the database's exact known prefix instead of
+// rewriting its history or inserting another branch's steps ahead of it.
+func hostingSchemaHistory(ctx context.Context, database *sql.DB, repair bool) ([]migrations.Step, int, error) {
+	steps := hostingSchemaSteps(ctx, repair)
+	found, err := tableExists(ctx, database, "application_migration_steps")
+	if err != nil || !found {
+		return steps, 0, err
+	}
+	completed, currentErr := migrations.Check(database, "billing-schema-v27", steps)
+	if currentErr == nil {
+		return steps, completed, nil
+	}
+	guardStart, journalStart, journalEnd := -1, -1, -1
+	for index, step := range steps {
+		switch step.ID {
+		case "account-mail-guard-001":
+			guardStart = index
+		case "mail-monitor-006":
+			journalStart = index
+		case "mail-monitor-021":
+			journalEnd = index + 1
+		}
+	}
+	if guardStart < 0 || journalStart <= guardStart || journalEnd <= journalStart {
+		return nil, 0, currentErr
+	}
+	// Pin the historical tail: future journal steps must follow the complete
+	// selected chain, including the account protection appended during this upgrade.
+	legacy := make([]migrations.Step, 0, len(steps))
+	legacy = append(legacy, steps[:guardStart]...)
+	legacy = append(legacy, steps[journalStart:journalEnd]...)
+	legacy = append(legacy, steps[guardStart:journalStart]...)
+	legacy = append(legacy, steps[journalEnd:]...)
+	completed, legacyErr := migrations.Check(database, "billing-schema-v27", legacy)
+	if legacyErr != nil {
+		return nil, 0, fmt.Errorf("%w; standalone mail journal history: %v", currentErr, legacyErr)
+	}
+	return legacy, completed, nil
 }
 
 func hostingSchemaSteps(ctx context.Context, repair bool) []migrations.Step {

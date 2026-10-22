@@ -96,7 +96,11 @@ func Check(database *sql.DB, component string, steps []Step) (int, error) {
 		}
 		if ordinal != completed+1 || ordinal > len(steps) || steps[completed].ID != id || steps[completed].Revision != revision {
 			rows.Close()
-			return 0, errors.New("migration history does not match this binary; refusing a missing, changed or newer step")
+			expectedID, expectedRevision := "<end of known history>", ""
+			if completed < len(steps) {
+				expectedID, expectedRevision = steps[completed].ID, steps[completed].Revision
+			}
+			return 0, fmt.Errorf("migration history does not match this binary: component=%q ordinal=%d expected_ordinal=%d stored_step=%q stored_revision=%q expected_step=%q expected_revision=%q; refusing a missing, changed or newer step", component, ordinal, completed+1, id, revision, expectedID, expectedRevision)
 		}
 		completed++
 	}
