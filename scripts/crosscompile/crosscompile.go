@@ -119,7 +119,7 @@ func runCrosscompile() error {
 		programName         = flag.String("program", "sitebrush", "program name used in binary names")
 		versionFlag         = flag.String("version", "", "version folder under binaries/; defaults to git rev-list count, then GITHUB_RUN_NUMBER, then git describe")
 		signUpdates         = flag.Bool("sign-updates", false, "sign the complete server matrix; automatic for official -sync destinations")
-		releaseKeyFile      = flag.String("release-key", "", "private signing key file; defaults to the SiteBrush user configuration directory")
+		releaseKeyFile      = flag.String("release-key", "", "private signing key file; the wizard can remember a custom path")
 		outputRoot          = flag.String("output-dir", "binaries", "root output directory for generated artifacts")
 		modeFlag            = flag.String("mode", string(modeAll), "build scope: all, server-app, or desktop-app")
 		targetOS            = flag.String("os", "", "optional GOOS target filter, for example linux")
@@ -189,18 +189,39 @@ func runCrosscompile() error {
 	options := desktopBuildOptions{goVersion: goVersion, macOSSDK: *macOSSDK, macOSStage: *macOSStage,
 		rebuildDockerImages: *rebuildDockerImages, targetFilter: targetFilter}
 
+	var publication publicationPlan
+	inputReader := bufio.NewReader(os.Stdin)
+	keyFilename := strings.TrimSpace(*releaseKeyFile)
+	if interactive {
+		configurationDirectory, err := os.UserConfigDir()
+		if err != nil {
+			return err
+		}
+		publication, err = loadPublicationPlan(filepath.Join(configurationDirectory, "sitebrush", "crosscompile.json"))
+		if err != nil {
+			return err
+		}
+		if keyFilename == "" {
+			keyFilename = publication.releaseKeyFile
+		}
+	}
 	console.Heading("SiteBrush build and upload")
-	showSigningGuide(console, *releaseKeyFile)
+	if interactive && strings.TrimSpace(os.Getenv("SITEBRUSH_RELEASE_PRIVATE_KEY")) == "" {
+		keyFilename, err = configureReleaseKeyFile(console, inputReader, keyFilename)
+		if err != nil {
+			return err
+		}
+		publication.releaseKeyFile = keyFilename
+	}
+	showSigningGuide(console, keyFilename)
 	console.Info("Version: %s | Go: %s | Program: %s", version, goVersion, *programName)
 	console.Info("Repository: %s\nOutput: %s", repoRoot, outputDir)
 	if commit, err := runOutput(repoRoot, "git", "rev-parse", "HEAD"); err == nil {
 		console.Info("Source commit: %s", strings.TrimSpace(commit))
 	}
 	showBuildMatrix(console, mode, targetFilter, runtime.GOOS, *macOSStage)
-	var publication publicationPlan
-	inputReader := bufio.NewReader(os.Stdin)
 	if interactive {
-		publication, err = configurePublication(console, inputReader, syncTargets)
+		publication, err = configurePublicationPlan(console, inputReader, syncTargets, publication)
 		if err != nil {
 			return err
 		}
@@ -237,7 +258,7 @@ func runCrosscompile() error {
 		if err != nil {
 			return fmt.Errorf("release trust anchor: %w", err)
 		}
-		signingKey, err = loadReleaseSigningKey(*releaseKeyFile, os.Getenv("SITEBRUSH_RELEASE_PRIVATE_KEY"), trusted)
+		signingKey, err = loadReleaseSigningKey(keyFilename, os.Getenv("SITEBRUSH_RELEASE_PRIVATE_KEY"), trusted)
 		if err != nil {
 			return fmt.Errorf("release signing key: %w", err)
 		}
@@ -255,7 +276,7 @@ func runCrosscompile() error {
 		}); err != nil {
 			return err
 		}
-		if err := savePublicationConfig(publication.configPath, publication.saved); err != nil {
+		if err := savePublicationConfig(publication.configPath, publication.saved, publication.releaseKeyFile); err != nil {
 			return fmt.Errorf("save publication settings: %w", err)
 		}
 		console.OK("Publication settings saved to " + publication.configPath)
@@ -336,12 +357,14 @@ type publicationTarget struct {
 type publicationConfig struct {
 	Version      int                 `json:"version"`
 	Destinations []publicationTarget `json:"destinations"`
+	ReleaseKey   string              `json:"release_key,omitempty"`
 }
 
 type publicationPlan struct {
-	targets    []publicationTarget
-	saved      []publicationTarget
-	configPath string
+	targets        []publicationTarget
+	saved          []publicationTarget
+	configPath     string
+	releaseKeyFile string
 }
 
 func (plan publicationPlan) syncDestinations() syncDestinationFlags {
@@ -400,13 +423,13 @@ func validatePublicationTarget(target publicationTarget) error {
 	return nil
 }
 
-func loadPublicationConfig(filename string) ([]publicationTarget, error) {
+func loadPublicationConfig(filename string) (publicationConfig, error) {
 	file, err := os.Open(filename)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
+		return publicationConfig{Version: 1}, nil
 	}
 	if err != nil {
-		return nil, err
+		return publicationConfig{}, err
 	}
 	defer file.Close()
 	decoder := json.NewDecoder(io.LimitReader(file, 64<<10))
@@ -414,32 +437,32 @@ func loadPublicationConfig(filename string) ([]publicationTarget, error) {
 	// when saving the upload-only configuration.
 	var configuration publicationConfig
 	if err := decoder.Decode(&configuration); err != nil {
-		return nil, err
+		return publicationConfig{}, err
 	}
 	if decoder.Decode(new(any)) != io.EOF {
-		return nil, errors.New("unexpected content after publication settings")
+		return publicationConfig{}, errors.New("unexpected content after publication settings")
 	}
 	if configuration.Version != 1 || len(configuration.Destinations) > 64 {
-		return nil, errors.New("unsupported publication settings version or more than 64 destinations")
+		return publicationConfig{}, errors.New("unsupported publication settings version or more than 64 destinations")
 	}
 	for index, target := range configuration.Destinations {
 		if err := validatePublicationTarget(target); err != nil {
-			return nil, fmt.Errorf("destination %d: %w", index+1, err)
+			return publicationConfig{}, fmt.Errorf("destination %d: %w", index+1, err)
 		}
 		for _, earlier := range configuration.Destinations[:index] {
 			if earlier.Domain == target.Domain {
-				return nil, fmt.Errorf("duplicate domain %s", target.Domain)
+				return publicationConfig{}, fmt.Errorf("duplicate domain %s", target.Domain)
 			}
 		}
 	}
-	return configuration.Destinations, nil
+	return configuration, nil
 }
 
-func savePublicationConfig(filename string, destinations []publicationTarget) error {
+func savePublicationConfig(filename string, destinations []publicationTarget, releaseKeyFile string) error {
 	if err := os.MkdirAll(filepath.Dir(filename), 0o700); err != nil {
 		return err
 	}
-	encoded, err := json.MarshalIndent(publicationConfig{Version: 1, Destinations: destinations}, "", "  ")
+	encoded, err := json.MarshalIndent(publicationConfig{Version: 1, Destinations: destinations, ReleaseKey: releaseKeyFile}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -456,20 +479,24 @@ func savePublicationConfig(filename string, destinations []publicationTarget) er
 	return os.Rename(file.Name(), filename)
 }
 
-func configurePublication(console *buildconsole.Console, reader *bufio.Reader, explicit []syncDestination) (publicationPlan, error) {
-	configurationDirectory, err := os.UserConfigDir()
+func loadPublicationPlan(filename string) (publicationPlan, error) {
+	configuration, err := loadPublicationConfig(filename)
 	if err != nil {
-		return publicationPlan{}, err
+		return publicationPlan{}, fmt.Errorf("read %s: %w", filename, err)
 	}
-	return configurePublicationWithConfig(console, reader, explicit, filepath.Join(configurationDirectory, "sitebrush", "crosscompile.json"))
+	return publicationPlan{configPath: filename, saved: configuration.Destinations, releaseKeyFile: configuration.ReleaseKey}, nil
 }
 
 func configurePublicationWithConfig(console *buildconsole.Console, reader *bufio.Reader, explicit []syncDestination, filename string) (publicationPlan, error) {
-	plan := publicationPlan{configPath: filename}
-	saved, err := loadPublicationConfig(plan.configPath)
+	plan, err := loadPublicationPlan(filename)
 	if err != nil {
-		return plan, fmt.Errorf("read %s: %w", plan.configPath, err)
+		return plan, err
 	}
+	return configurePublicationPlan(console, reader, explicit, plan)
+}
+
+func configurePublicationPlan(console *buildconsole.Console, reader *bufio.Reader, explicit []syncDestination, plan publicationPlan) (publicationPlan, error) {
+	saved := plan.saved
 	plan.saved = []publicationTarget{defaultPublicationTarget("sitebrush.com"), defaultPublicationTarget("sitebrush.ru")}
 	for _, target := range saved {
 		plan.saved = rememberPublicationTarget(plan.saved, target)
@@ -658,6 +685,33 @@ func defaultReleaseKeyFile() (string, error) {
 	return filepath.Join(configuration, "sitebrush", "release-ed25519.key"), nil
 }
 
+// Save an absolute local path so later launches can use another working
+// directory. The trusted private key itself is never copied or regenerated.
+func configureReleaseKeyFile(console *buildconsole.Console, reader *bufio.Reader, filename string) (string, error) {
+	if filename == "" {
+		var err error
+		filename, err = defaultReleaseKeyFile()
+		if err != nil {
+			return "", err
+		}
+	}
+	filename, err := console.Line(reader, "Signing key file (Enter to keep)", filename)
+	if err != nil {
+		return "", err
+	}
+	if filename == "~" || strings.HasPrefix(filename, "~/") || strings.HasPrefix(filename, "~\\") {
+		homeDirectory, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		filename = filepath.Join(homeDirectory, strings.TrimLeft(filename[1:], "/\\"))
+	}
+	if strings.ContainsAny(filename, "\x00\r\n") {
+		return "", errors.New("signing key path contains a control character")
+	}
+	return filepath.Abs(filename)
+}
+
 func showSigningGuide(console *buildconsole.Console, explicitFile string) {
 	filename, err := defaultReleaseKeyFile()
 	if err != nil {
@@ -668,7 +722,7 @@ func showSigningGuide(console *buildconsole.Console, explicitFile string) {
 		source = explicitFile
 	}
 	if strings.TrimSpace(os.Getenv("SITEBRUSH_RELEASE_PRIVATE_KEY")) != "" {
-		console.Info("Signing key: SITEBRUSH_RELEASE_PRIVATE_KEY (takes precedence over files)")
+		console.Info("Signing key: SITEBRUSH_RELEASE_PRIVATE_KEY (takes precedence; unset it to choose a file)")
 		console.Info("Default key file: %s", filename)
 	} else {
 		if absolute, err := filepath.Abs(source); source != "" && err == nil {

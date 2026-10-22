@@ -29,10 +29,11 @@ func TestPublicationWizardRemembersUploadDestinations(t *testing.T) {
 	if err != nil || !confirmed {
 		t.Fatalf("wizard consumed the final confirmation: %v", err)
 	}
-	if err := savePublicationConfig(filename, plan.saved); err != nil {
+	if err := savePublicationConfig(filename, plan.saved, plan.releaseKeyFile); err != nil {
 		t.Fatal(err)
 	}
-	saved, err := loadPublicationConfig(filename)
+	configuration, err := loadPublicationConfig(filename)
+	saved := configuration.Destinations
 	if err != nil || len(saved) != 3 || saved[2].Domain != "example.com" {
 		t.Fatalf("saved settings or consent: %+v, %v", saved, err)
 	}
@@ -58,6 +59,61 @@ func TestWizardExplicitTargetsDoNotAcquireOfficialDestinations(t *testing.T) {
 	plan, err := configurePublicationWithConfig(console, reader, explicit, filepath.Join(t.TempDir(), "settings.json"))
 	if err != nil || len(plan.targets) != 1 || plan.targets[0].Host != "deploy@example.com" || plan.targets[0].Directory != "/srv/releases" {
 		t.Fatalf("explicit targets changed: %+v, %v", plan, err)
+	}
+}
+
+func TestWizardRemembersCustomSigningKeyPath(t *testing.T) {
+	console, _ := buildconsole.New(io.Discard, "never")
+	filename := filepath.Join(t.TempDir(), "crosscompile.json")
+	customKey := filepath.Join(t.TempDir(), "private keys", "release.key")
+	chosen, err := configureReleaseKeyFile(console, bufio.NewReader(strings.NewReader(customKey+"\n")), "previous-platform-path")
+	if err != nil || chosen != customKey {
+		t.Fatalf("custom key choice: %q, %v", chosen, err)
+	}
+	plan := publicationPlan{releaseKeyFile: chosen}
+	reader := bufio.NewReader(strings.NewReader("no\nno\n\n"))
+	plan, err = configurePublicationPlan(console, reader, nil, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := savePublicationConfig(filename, plan.saved, plan.releaseKeyFile); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := loadPublicationPlan(filename)
+	if err != nil || restored.releaseKeyFile != customKey {
+		t.Fatalf("saved key path: %+v, %v", restored, err)
+	}
+	retained, err := configureReleaseKeyFile(console, bufio.NewReader(strings.NewReader("\n")), restored.releaseKeyFile)
+	if err != nil || retained != customKey {
+		t.Fatalf("Enter changed the remembered key path: %q, %v", retained, err)
+	}
+	if _, err := os.Stat(customKey); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("selecting a path created or replaced the private key")
+	}
+}
+
+func TestWizardSigningKeyPathSupportsRelativeAndHomePaths(t *testing.T) {
+	console, _ := buildconsole.New(io.Discard, "never")
+	homeDirectory, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relativeKey, err := filepath.Abs(filepath.Join("private keys", "release.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, scenario := range []struct{ input, expected string }{
+		{filepath.Join("private keys", "release.key"), relativeKey},
+		{"~/private keys/release.key", filepath.Join(homeDirectory, "private keys", "release.key")},
+		{"~", homeDirectory},
+	} {
+		chosen, err := configureReleaseKeyFile(console, bufio.NewReader(strings.NewReader(scenario.input+"\n")), "old-path")
+		if err != nil || chosen != scenario.expected {
+			t.Errorf("path %q -> %q, %v; want %q", scenario.input, chosen, err, scenario.expected)
+		}
+	}
+	if _, err := configureReleaseKeyFile(console, bufio.NewReader(strings.NewReader("")), "previous.key"); err == nil {
+		t.Fatal("closed input silently accepted the previous path")
 	}
 }
 
@@ -108,11 +164,12 @@ func TestPublicationSettingsValidateUploadPathsAndIgnoreLegacyActions(t *testing
 	if err := os.WriteFile(filename, []byte(`{"version":1,"destinations":[{"domain":"example.com","host":"root@example.com","directory":"/srv/download","service":"sitebrush-80","binary":"/usr/local/bin/sitebrush","storage":"/var/lib/sitebrush","restart":true}]}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	saved, err := loadPublicationConfig(filename)
+	configuration, err := loadPublicationConfig(filename)
+	saved := configuration.Destinations
 	if err != nil || len(saved) != 1 || saved[0].Directory != "/srv/download" {
 		t.Fatalf("legacy upload settings: %+v, %v", saved, err)
 	}
-	if err := savePublicationConfig(filename, saved); err != nil {
+	if err := savePublicationConfig(filename, saved, configuration.ReleaseKey); err != nil {
 		t.Fatal(err)
 	}
 	contents, _ := os.ReadFile(filename)
