@@ -397,7 +397,9 @@ POST delete_page (write): JSON path and expected_version. Marks a draft deletion
 publication removes the public page and static file while retaining revisions.
 POST delete_revision (write): JSON path, revision_id and expected_version.
 Disables that revision and restores the newest active revision as a draft.
-If no active revisions remain, it marks a draft deletion instead.
+If no active revisions remain, it marks the entire page for draft deletion;
+a later publish removes the public page and static file. Tell the owner explicitly
+when deleting a revision queues this page-deletion fallback.
 Saving or rolling back a pending-deletion page cancels its draft deletion.
 POST set_page_password (write): JSON path and password. Applies immediately to
 that path AND descendants. Passwords must never be repeated in responses/logs.

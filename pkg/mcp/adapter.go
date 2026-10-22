@@ -235,7 +235,7 @@ func toolDescriptor(operation string) *sdk.Tool {
 		"get_site_state":        "Read publication state and pending changes without exposing credentials.",
 		"get_page_settings":     "Read page title, version, pending deletion and inherited password protection without exposing passwords.",
 		"delete_page":           "Mark a page for deletion as a draft using expected_version. Publication removes the public page; revisions are retained for restoration.",
-		"delete_revision":       "Disable a chosen revision using expected_version and restore the previous active revision as a draft. Does not publish.",
+		"delete_revision":       "Disable a chosen active revision using expected_version. Restore the newest remaining active revision as a draft; if none remain, mark the ENTIRE PAGE for deletion, so a later publish removes the public page and static file. Does not publish. Tell the owner when this queues page deletion.",
 		"set_page_password":     "Immediately protect a page AND its descendants using the normal password protection mechanism. Requires site-wide write access. Never repeat passwords in your response.",
 		"remove_page_password":  "Immediately remove the password rule rooted at this path. Requires site-wide write access. Inherited ancestor rules remain in effect.",
 		"freeze_site":           "Keep the current published site visible while its owner edits drafts. Requires publish permission. Use publish to release all pending changes and unfreeze.",

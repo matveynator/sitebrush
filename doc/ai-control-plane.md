@@ -16,6 +16,15 @@ IP, and then OAuth or capability
 authorization. Updates and rollbacks remain drafts; publication is separate and
 version checks remain required.
 
+Deleting the last active revision queues deletion of the entire page; a later
+publication removes its public page and static file. The MCP tool descriptor
+and working guide disclose this fallback and require reporting it to the owner.
+
+Draft imports download concurrently, then commit quota, asset metadata and pages
+through the site's content participant in one transaction. Asset writes never
+reconcile away page reservations between these steps. A rejected or canceled
+batch restores replaced files and removes newly written files before completing.
+
 Provider selection is site local. A missing policy defaults to all listed
 providers enabled; saved exclusions remain effective, and newly added providers
 inherit the default. A corrupt or unavailable policy never grants network access.

@@ -13375,11 +13375,6 @@ func (a *App) runAIImport(request aiimport.Request, id string, stop <-chan struc
 	finished := make(chan struct{})
 	defer close(finished)
 	defer cancel()
-	defer func() {
-		cleanup, finishCleanup := wholeSiteImportCleanupContext(boundary)
-		defer finishCleanup()
-		a.rebuildDomainStorageUsage(cleanup, request.Domain)
-	}()
 	select {
 	case <-stop:
 		return crawler.ImportResult{}, aieditor.ErrTaskCanceled
@@ -13445,24 +13440,68 @@ func (a *App) runAIImport(request aiimport.Request, id string, stop <-chan struc
 		return crawler.ImportResult{}, boundary.Err()
 	}
 	pages := []wholeSiteImportedPage{{SourceURL: resolved.String(), LocalPath: importRequest.PagePath, HTML: importedHTML}}
-	pageDelta, publishedDelta, revisionDelta, staticDelta := a.estimateImportedPagesStorageDelta(boundary, request.Domain, pages, true)
-	fileDelta := a.estimateImportedFileDelta(request.Domain, spider)
-	if err := a.applyDomainStorageDelta(boundary, request.Domain, pageDelta, publishedDelta, revisionDelta, fileDelta, staticDelta); err != nil {
-		return crawler.ImportResult{}, err
-	}
-	if err := a.persistSpiderAssets(boundary, spider, importRequest.PagePath); err != nil {
-		a.rebuildDomainStorageUsage(boundary, request.Domain)
-		return crawler.ImportResult{}, err
-	}
-	if err := a.storeWholeSiteImportedPages(boundary, request.Domain, pages, true); err != nil {
-		a.rebuildDomainStorageUsage(boundary, request.Domain)
+	if err := a.persistImportedDraftPages(boundary, request.Domain, importRequest.PagePath, pages, spider); err != nil {
 		return crawler.ImportResult{}, err
 	}
 	return crawler.ImportResult{RedirectPath: importRequest.PagePath, FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap()}, nil
 }
 
 func (a *App) storeImportedDraftPages(ctx context.Context, domain string, pages []wholeSiteImportedPage) error {
-	return a.siteContentTransaction(ctx, func(transaction *sql.Tx) error {
+	return a.persistImportedDraftPages(ctx, domain, "/", pages, nil)
+}
+
+// The content participant owns quota, assets and drafts in one turn. No
+// reservation is exposed between jobs or lost to an asset usage reconciliation.
+func (a *App) persistImportedDraftPages(ctx context.Context, domain, ownerPath string, pages []wholeSiteImportedPage, spider *pageSpider) error {
+	a.ensureDomainStorageUsageRow(ctx, domain)
+	type assetWrite struct {
+		filename, name, contentType string
+		content, previous           []byte
+		existed                     bool
+	}
+	written := []assetWrite{}
+	started := make(chan struct{})
+	completed := make(chan error, 1)
+	err := a.siteContentTransaction(ctx, func(transaction *sql.Tx) error {
+		close(started)
+		usage := domainStorageUsage{}
+		if err := transaction.QueryRowContext(ctx, `SELECT page_bytes,published_page_bytes,revision_bytes,file_bytes,published_static_bytes,COALESCE(import_queue_bytes,0),COALESCE(analytics_bytes,0),COALESCE(analytics_reserved_bytes,0),limit_bytes FROM domain_storage_usage WHERE domain=?`, domain).Scan(&usage.PageBytes, &usage.PublishedPageBytes, &usage.RevisionBytes, &usage.FileBytes, &usage.PublishedStaticBytes, &usage.ImportQueueBytes, &usage.AnalyticsBytes, &usage.AnalyticsReservedBytes, &usage.LimitBytes); err != nil {
+			return err
+		}
+		// A legacy reconciliation may have measured before another commit.
+		// Re-read committed content here without releasing other reservations.
+		for _, component := range []struct {
+			query string
+			bytes *int64
+		}{
+			{`SELECT html FROM pages WHERE domain=?`, &usage.PageBytes},
+			{`SELECT html FROM published_pages WHERE domain=?`, &usage.PublishedPageBytes},
+			{`SELECT html FROM revisions WHERE domain=?`, &usage.RevisionBytes},
+		} {
+			rows, err := transaction.QueryContext(ctx, component.query, domain)
+			if err != nil {
+				return err
+			}
+			var measured int64
+			for rows.Next() {
+				var html string
+				if err = rows.Scan(&html); err != nil {
+					break
+				}
+				measured += int64(len(html))
+			}
+			if err == nil {
+				err = rows.Err()
+			}
+			rows.Close()
+			if err != nil {
+				return err
+			}
+			*component.bytes = max(*component.bytes, measured)
+		}
+		usage.FileBytes = max(usage.FileBytes, a.directorySizeInsideStorage(a.domainFilesDirForDomain(domain))+a.directorySizeInsideStorage(a.domainChrootRootDir(domain)))
+		usage.PublishedStaticBytes = max(usage.PublishedStaticBytes, a.directorySizeInsideStorage(a.domainStaticDir(domain)))
+		var pageDelta, revisionDelta, fileDelta int64
 		for _, page := range pages {
 			pagePath := cleanPath(page.LocalPath)
 			var count int
@@ -13485,9 +13524,84 @@ func (a *App) storeImportedDraftPages(ctx context.Context, domain string, pages 
 			if _, err := transaction.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, domain, pagePath, page.HTML, time.Now().UTC().Format(time.RFC3339)); err != nil {
 				return err
 			}
+			pageDelta += int64(len(page.HTML))
+			revisionDelta += int64(len(page.HTML))
+		}
+		assets := []assetWrite{}
+		if spider != nil {
+			references := make(map[string]bool)
+			for _, resource := range spider.resources {
+				if resource == nil || !resource.persist || strings.TrimSpace(resource.assetPath) == "" {
+					continue
+				}
+				name := publicAssetReferenceFromPath(resource.assetPath)
+				if name == "" || references[name] {
+					continue
+				}
+				references[name] = true
+				asset := assetWrite{filename: filepath.Join(a.domainFilesDirForDomain(domain), filepath.FromSlash(name)), name: name, content: resource.content, contentType: resource.contentType}
+				previous, err := a.readFileInsideStorage(asset.filename)
+				if err != nil && !errors.Is(err, os.ErrNotExist) {
+					return err
+				}
+				asset.existed, asset.previous = err == nil, previous
+				if asset.contentType == "" {
+					asset.contentType = mime.TypeByExtension(path.Ext(name))
+				}
+				fileDelta += int64(len(asset.content) - len(previous))
+				assets = append(assets, asset)
+			}
+		}
+		usage.PageBytes += pageDelta
+		usage.RevisionBytes += revisionDelta
+		usage.FileBytes += fileDelta
+		reserved, err := transaction.ExecContext(ctx, `UPDATE domain_storage_usage SET page_bytes=?,published_page_bytes=?,revision_bytes=?,file_bytes=?,published_static_bytes=?,updated_at=? WHERE domain=? AND ?<=limit_bytes`, usage.PageBytes, usage.PublishedPageBytes, usage.RevisionBytes, usage.FileBytes, usage.PublishedStaticBytes, time.Now().UTC().Format(time.RFC3339), domain, usage.totalBytes()+usage.AnalyticsReservedBytes)
+		if err != nil {
+			return err
+		}
+		count, err := reserved.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if count != 1 {
+			return errors.New("storage limit reached")
+		}
+		for _, asset := range assets {
+			if !asset.existed || !bytes.Equal(asset.previous, asset.content) {
+				if err := a.writeAtomicStorageFile(asset.filename, asset.content); err != nil {
+					return err
+				}
+				written = append(written, asset)
+			}
+			if err := updateOrInsertFileMetadata(ctx, transaction, domainStorageName(domain), asset.name, cleanPath(ownerPath), len(asset.content), asset.contentType, time.Now().UTC().Format(time.RFC3339), "import"); err != nil {
+				return err
+			}
 		}
 		return nil
-	}, func(error) {})
+	}, func(storeErr error) {
+		var recoveryErr error
+		if storeErr != nil {
+			for _, asset := range written {
+				if asset.existed {
+					recoveryErr = errors.Join(recoveryErr, a.writeAtomicStorageFile(asset.filename, asset.previous))
+				} else {
+					recoveryErr = errors.Join(recoveryErr, a.removeInsideStorage(asset.filename))
+				}
+			}
+		}
+		completed <- errors.Join(storeErr, recoveryErr)
+	})
+	// Cancellation can end the SQL adapter's wait before compensation ends.
+	// A started batch retains its response channel until its files are settled.
+	select {
+	case <-started:
+		err = <-completed
+	default:
+	}
+	if err == nil {
+		a.reportHostingSnapshotAsync(ctx)
+	}
+	return err
 }
 
 func (a *App) saveAIPage(ctx context.Context, domain string, request aieditor.Request) (Page, error) {
@@ -22667,19 +22781,7 @@ func (a *App) importWholeRemoteSite(ctx context.Context, importRequest grabImpor
 		}
 		return result, nil
 	}
-	pageDelta, publishedPageDelta, revisionDelta, publishedStaticDelta := a.estimateImportedPagesStorageDelta(ctx, importRequest.Domain, importedPages, importRequest.DraftOnly)
-	fileDelta := a.estimateImportedFileDelta(importRequest.Domain, spider)
-	if storageErr := a.applyDomainStorageDelta(ctx, importRequest.Domain, pageDelta, publishedPageDelta, revisionDelta, fileDelta, publishedStaticDelta); storageErr != nil {
-		_ = crawler.SetImportFrontierRunState(ctx, a.db, importRequest.ImportID, importRequest.Domain, "partial")
-		return grabImportResult{FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap()}, storageErr
-	}
-	if persistErr := a.persistSpiderAssets(ctx, spider, importRequest.PagePath); persistErr != nil {
-		_ = a.applyDomainStorageDelta(ctx, importRequest.Domain, -pageDelta, -publishedPageDelta, -revisionDelta, -fileDelta, -publishedStaticDelta)
-		_ = crawler.SetImportFrontierRunState(ctx, a.db, importRequest.ImportID, importRequest.Domain, "partial")
-		return grabImportResult{FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap()}, persistErr
-	}
-	if storeErr := a.storeWholeSiteImportedPages(ctx, importRequest.Domain, importedPages, importRequest.DraftOnly); storeErr != nil {
-		_ = a.applyDomainStorageDelta(ctx, importRequest.Domain, -pageDelta, -publishedPageDelta, -revisionDelta, -fileDelta, -publishedStaticDelta)
+	if storeErr := a.persistWholeSiteImportBatch(ctx, importRequest, importedPages, spider); storeErr != nil {
 		_ = crawler.SetImportFrontierRunState(ctx, a.db, importRequest.ImportID, importRequest.Domain, "partial")
 		return grabImportResult{FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap()}, storeErr
 	}
@@ -22708,13 +22810,7 @@ func (a *App) importWholeRemoteSite(ctx context.Context, importRequest grabImpor
 				a.preserveWholeSiteImportForResume(ctx, importRequest.Domain, importRequest.ImportID, completedPageKeys)
 				return grabImportResult{}, detectErr
 			}
-			templatePageDelta, templatePublishedPageDelta, templateRevisionDelta, templateStaticDelta := a.estimateImportedPagesStorageDelta(ctx, importRequest.Domain, detectedPages, importRequest.DraftOnly)
-			if storageErr := a.applyDomainStorageDelta(ctx, importRequest.Domain, templatePageDelta, templatePublishedPageDelta, templateRevisionDelta, 0, templateStaticDelta); storageErr != nil {
-				a.preserveWholeSiteImportForResume(ctx, importRequest.Domain, importRequest.ImportID, completedPageKeys)
-				return grabImportResult{}, storageErr
-			}
-			if storeErr := a.storeWholeSiteImportedPages(ctx, importRequest.Domain, detectedPages, importRequest.DraftOnly); storeErr != nil {
-				_ = a.applyDomainStorageDelta(ctx, importRequest.Domain, -templatePageDelta, -templatePublishedPageDelta, -templateRevisionDelta, 0, -templateStaticDelta)
+			if storeErr := a.persistWholeSiteImportBatch(ctx, importRequest, detectedPages, nil); storeErr != nil {
 				a.preserveWholeSiteImportForResume(ctx, importRequest.Domain, importRequest.ImportID, completedPageKeys)
 				return grabImportResult{}, storeErr
 			}
@@ -23014,6 +23110,26 @@ func downloadWholeSitePageHTMLWithRetries(ctx context.Context, client *http.Clie
 		}
 	}
 	return "", false, lastErr
+}
+
+func (a *App) persistWholeSiteImportBatch(ctx context.Context, request grabImportRequest, pages []wholeSiteImportedPage, spider *pageSpider) error {
+	if request.DraftOnly {
+		return a.persistImportedDraftPages(ctx, request.Domain, request.PagePath, pages, spider)
+	}
+	pageDelta, publishedDelta, revisionDelta, staticDelta := a.estimateImportedPagesStorageDelta(ctx, request.Domain, pages)
+	fileDelta := a.estimateImportedFileDelta(request.Domain, spider)
+	if err := a.applyDomainStorageDelta(ctx, request.Domain, pageDelta, publishedDelta, revisionDelta, fileDelta, staticDelta); err != nil {
+		return err
+	}
+	if err := a.persistSpiderAssets(ctx, spider, request.PagePath); err != nil {
+		_ = a.applyDomainStorageDelta(ctx, request.Domain, -pageDelta, -publishedDelta, -revisionDelta, -fileDelta, -staticDelta)
+		return err
+	}
+	if err := a.storeWholeSiteImportedPages(ctx, request.Domain, pages); err != nil {
+		_ = a.applyDomainStorageDelta(ctx, request.Domain, -pageDelta, -publishedDelta, -revisionDelta, -fileDelta, -staticDelta)
+		return err
+	}
+	return nil
 }
 
 func (a *App) storeWholeSiteImportedPages(ctx context.Context, domain string, importedPages []wholeSiteImportedPage, draftOnly ...bool) error {
@@ -36799,16 +36915,16 @@ func (a *App) storePreparedImageReplacement(r *http.Request, currentPath string,
 	return a.storePreparedFiles(r.Context(), a.siteDomain(r.Context(), r), currentPath, prepared)
 }
 
-func updateOrInsertUploadedFileMetadata(ctx context.Context, database sqlExecutor, domain, filename, pagePath string, size int, mime, now string) error {
+func updateOrInsertFileMetadata(ctx context.Context, database sqlExecutor, domain, filename, pagePath string, size int, mime, now, source string) error {
 	var existing int
 	if err := database.QueryRowContext(ctx, `SELECT COUNT(1) FROM file_metadata WHERE domain=? AND file_name=?`, domain, filename).Scan(&existing); err != nil {
 		return err
 	}
 	if existing != 0 {
-		_, err := database.ExecContext(ctx, `UPDATE file_metadata SET page_path=?,size=?,mime_type=?,updated_at=?,source=? WHERE domain=? AND file_name=?`, pagePath, size, mime, now, "upload", domain, filename)
+		_, err := database.ExecContext(ctx, `UPDATE file_metadata SET page_path=?,size=?,mime_type=?,updated_at=?,source=? WHERE domain=? AND file_name=?`, pagePath, size, mime, now, source, domain, filename)
 		return err
 	}
-	_, err := database.ExecContext(ctx, `INSERT INTO file_metadata(domain,file_name,page_path,size,mime_type,created_at,updated_at,source,download_count) VALUES(?,?,?,?,?,?,?,?,0)`, domain, filename, pagePath, size, mime, now, now, "upload")
+	_, err := database.ExecContext(ctx, `INSERT INTO file_metadata(domain,file_name,page_path,size,mime_type,created_at,updated_at,source,download_count) VALUES(?,?,?,?,?,?,?,?,0)`, domain, filename, pagePath, size, mime, now, now, source)
 	return err
 }
 
@@ -36871,7 +36987,7 @@ func (a *App) storePreparedFiles(ctx context.Context, domain, currentPath string
 				}
 				created = append(created, target)
 			}
-			if err := updateOrInsertUploadedFileMetadata(ctx, transaction, domainStorageName(domain), write.name, currentPath, len(write.file.Content), write.file.MIME, now); err != nil {
+			if err := updateOrInsertFileMetadata(ctx, transaction, domainStorageName(domain), write.name, currentPath, len(write.file.Content), write.file.MIME, now, "upload"); err != nil {
 				return err
 			}
 		}

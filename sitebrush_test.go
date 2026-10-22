@@ -27627,6 +27627,167 @@ func TestAIImportUsesExistingCrawlerWithoutPublishing(t *testing.T) {
 	}
 }
 
+type importDraftTestDatabase struct {
+	sqlExecutor
+	write func(context.Context, func(*sql.Tx) error, func(error)) error
+}
+
+func (database importDraftTestDatabase) WriteTransactionWithFinish(boundary context.Context, write func(*sql.Tx) error, finish func(error)) error {
+	return database.write(boundary, write, finish)
+}
+
+func TestAIImportConcurrentAssetsKeepPageQuota(t *testing.T) {
+	for _, mode := range []string{"page", "site"} {
+		t.Run(mode, func(t *testing.T) {
+			application := newRouterTestApplication(t)
+			boundary := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), "localhost"))
+			application.ensureDomainStorageUsageRow(boundary, "localhost")
+			if _, err := application.db.ExecContext(boundary, `UPDATE domain_storage_usage SET limit_bytes=? WHERE domain='localhost'`, 56*1024); err != nil {
+				t.Fatal(err)
+			}
+			owner := application.db.(interface {
+				WriteTransactionWithFinish(context.Context, func(*sql.Tx) error, func(error)) error
+			})
+			entered := make(chan struct{}, 4)
+			release := make(chan struct{})
+			released := false
+			defer func() {
+				if !released {
+					close(release)
+				}
+			}()
+			application.db = importDraftTestDatabase{sqlExecutor: application.db, write: func(boundary context.Context, write func(*sql.Tx) error, finish func(error)) error {
+				entered <- struct{}{}
+				select {
+				case <-release:
+					return owner.WriteTransactionWithFinish(boundary, write, finish)
+				case <-boundary.Done():
+					return boundary.Err()
+				}
+			}}
+			previousClient := newGrabHTTPClient
+			newGrabHTTPClient = func() *http.Client {
+				return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+					contentType := "text/html"
+					body := `<html><body><img src="/asset-` + strings.TrimPrefix(request.URL.Path, "/") + `.png"><p>` + strings.Repeat("x", 16*1024) + `</p></body></html>`
+					if strings.HasSuffix(request.URL.Path, ".png") {
+						contentType, body = "image/png", request.URL.Path+strings.Repeat("y", 2048)
+					}
+					return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{contentType}}, Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
+				})}
+			}
+			defer func() { newGrabHTTPClient = previousClient }()
+			stop := make(chan struct{})
+			defer close(stop)
+			results := make(chan error, 4)
+			for index := 0; index < 4; index++ {
+				go func(index int) {
+					request := aiimport.Request{Domain: "localhost", Grant: "grant", SourceURL: fmt.Sprintf("https://source.example/page-%d", index), Path: fmt.Sprintf("/import-%d", index), Mode: mode, Done: stop}
+					_, err := application.runAIImport(request, fmt.Sprintf("quota-%d", index), stop, make(chan crawler.ProgressEvent, 64))
+					results <- err
+				}(index)
+			}
+			for range 4 {
+				select {
+				case <-entered:
+				case err := <-results:
+					t.Fatalf("import failed before persistence barrier: %v", err)
+				case <-time.After(10 * time.Second):
+					t.Fatal("concurrent imports did not reach persistence")
+				}
+			}
+			close(release)
+			released = true
+			succeeded := 0
+			for range 4 {
+				select {
+				case err := <-results:
+					if err == nil {
+						succeeded++
+					} else if !strings.Contains(err.Error(), "storage limit reached") {
+						t.Fatalf("unexpected import failure: %v", err)
+					}
+				case <-time.After(10 * time.Second):
+					t.Fatal("import persistence did not finish")
+				}
+			}
+			if succeeded != 1 {
+				t.Fatalf("%d imports committed, want exactly one within the quota", succeeded)
+			}
+			usage := application.domainStorageUsage(boundary, "localhost")
+			if usage.totalBytes() > usage.LimitBytes {
+				t.Fatalf("imports exceeded quota: %+v", usage)
+			}
+			for _, table := range []string{"pages", "revisions", "file_metadata"} {
+				var count int
+				if err := application.db.QueryRowContext(boundary, `SELECT COUNT(*) FROM `+table+` WHERE domain='localhost'`).Scan(&count); err != nil || count != 1 {
+					t.Fatalf("%s committed %d records: %v", table, count, err)
+				}
+			}
+			files, err := listStoredFiles(application.domainFilesDirForDomain("localhost"))
+			if err != nil || len(files) != 1 {
+				t.Fatalf("rejected imports left assets: %d files, %v", len(files), err)
+			}
+		})
+	}
+}
+
+func TestAIImportDraftFailureRestoresAssetsAndQuota(t *testing.T) {
+	for _, canceled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("canceled=%t", canceled), func(t *testing.T) {
+			application := newRouterTestApplication(t)
+			boundary, cancel := context.WithCancel(contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), "localhost")))
+			defer cancel()
+			filename := filepath.Join(application.domainFilesDirForDomain("localhost"), "existing.css")
+			if err := application.writeAtomicStorageFile(filename, []byte("original")); err != nil {
+				t.Fatal(err)
+			}
+			before := application.domainStorageUsage(boundary, "localhost")
+			owner := application.db.(interface {
+				WriteTransactionWithFinish(context.Context, func(*sql.Tx) error, func(error)) error
+			})
+			application.db = importDraftTestDatabase{sqlExecutor: application.db, write: func(boundary context.Context, write func(*sql.Tx) error, finish func(error)) error {
+				return owner.WriteTransactionWithFinish(boundary, func(transaction *sql.Tx) error {
+					if err := write(transaction); err != nil {
+						return err
+					}
+					if canceled {
+						cancel()
+						return nil
+					}
+					return errors.New("fixture transaction failure")
+				}, finish)
+			}}
+			spider := &pageSpider{domain: "localhost", resources: map[string]*mirroredResource{
+				"existing": {assetPath: "/p/existing.css", persist: true, content: []byte("updated")},
+				"new":      {assetPath: "/p/new.css", persist: true, content: []byte("created")},
+			}}
+			err := application.persistImportedDraftPages(boundary, "localhost", "/failed", []wholeSiteImportedPage{{LocalPath: "/failed", HTML: "<h1>Draft</h1>"}}, spider)
+			if err == nil {
+				t.Fatal("failed transaction reported success")
+			}
+			contents, err := application.readFileInsideStorage(filename)
+			if err != nil || string(contents) != "original" {
+				t.Fatalf("existing asset changed after rollback: %q, %v", contents, err)
+			}
+			if _, err := application.statInsideStorage(filepath.Join(application.domainFilesDirForDomain("localhost"), "new.css")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("new asset survived rollback: %v", err)
+			}
+			cleanup := contextWithDomain(context.Background(), "localhost")
+			after := application.storedDomainStorageUsage(cleanup, "localhost")
+			if before != after {
+				t.Fatalf("rollback changed quota: before %+v after %+v", before, after)
+			}
+			for _, table := range []string{"pages", "revisions", "file_metadata"} {
+				var count int
+				if err := application.db.QueryRowContext(cleanup, `SELECT COUNT(*) FROM `+table+` WHERE domain='localhost'`).Scan(&count); err != nil || count != 0 {
+					t.Fatalf("%s survived rollback: %d, %v", table, count, err)
+				}
+			}
+		})
+	}
+}
+
 func TestAISiteToolsMigrationPreservesHistoryAndUnpublishedDrafts(t *testing.T) {
 	application, database := newTestApplication(t)
 	for _, query := range []string{
