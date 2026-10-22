@@ -53,6 +53,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/accountauth"
 	"github.com/matveynator/sitebrush/v2/pkg/aicapability"
 	"github.com/matveynator/sitebrush/v2/pkg/aieditor"
+	"github.com/matveynator/sitebrush/v2/pkg/aiimport"
 	"github.com/matveynator/sitebrush/v2/pkg/aiingress"
 	"github.com/matveynator/sitebrush/v2/pkg/aiprovider"
 	browserstats "github.com/matveynator/sitebrush/v2/pkg/analytics"
@@ -2333,7 +2334,7 @@ func TestExpensesTemplateShowsOnlyLocalServerAndEnabledDemoOutsideSitebrushCom(t
 	}
 
 	disabledDemoHTML := renderSnapshot(baseSnapshot)
-	if !strings.Contains(disabledDemoHTML, "Сервер и расходы") {
+	if !strings.Contains(disabledDemoHTML, "Настройки сервера") {
 		t.Fatal("regular server did not render the singular expenses title")
 	}
 	for _, forbiddenFragment := range []string{
@@ -2430,10 +2431,10 @@ func TestExpensesTitlesUseServerScopeInEveryLanguage(t *testing.T) {
 		mainDomain string
 		expected   string
 	}{
-		{name: "regular Russian server", language: "ru", mainDomain: "owner.example", expected: "Сервер и расходы"},
-		{name: "central Russian server", language: "ru", mainDomain: "sitebrush.com", expected: "Серверы и расходы"},
-		{name: "regular English server", language: "en", mainDomain: "owner.example", expected: "Server and expenses"},
-		{name: "central English server", language: "en", mainDomain: "sitebrush.com", expected: "Servers and expenses"},
+		{name: "regular Russian server", language: "ru", mainDomain: "owner.example", expected: "Настройки сервера"},
+		{name: "central Russian server", language: "ru", mainDomain: "sitebrush.com", expected: "Настройки сервера"},
+		{name: "regular English server", language: "en", mainDomain: "owner.example", expected: "Server settings"},
+		{name: "central English server", language: "en", mainDomain: "sitebrush.com", expected: "Server settings"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			request := httptest.NewRequest(http.MethodGet, "https://"+testCase.mainDomain+"/?expenses", nil)
@@ -2636,6 +2637,7 @@ func TestMobileServicePageDesignCoversEverySharedTemplate(t *testing.T) {
 		"files.html",
 		"import.html",
 		"login.html",
+		"mcp.html",
 		"missing.html",
 		"profile.html",
 		"recover.html",
@@ -4460,12 +4462,12 @@ func TestServerManagerEmailTreatsLoopbackAsLocalhost(t *testing.T) {
 	if !strings.Contains(menuScript, "?expenses") {
 		t.Fatal("server manager menu does not contain expenses link")
 	}
-	if !strings.Contains(menuScript, "Сервер и расходы") {
-		t.Fatal("regular server menu does not use the singular expenses title")
+	if !strings.Contains(menuScript, "Настройки сервера") {
+		t.Fatal("regular server menu does not use the server settings title")
 	}
 	centralMenuScript := buildContextMenuScript(true, true, false, false, true, "/", "sitebrush.com", 0, 0, "", "", translationsForLanguageCode("ru"))
-	if !strings.Contains(centralMenuScript, "Серверы и расходы") {
-		t.Fatal("sitebrush.com menu does not use the plural expenses title")
+	if !strings.Contains(centralMenuScript, "Настройки сервера") {
+		t.Fatal("sitebrush.com menu does not use the server settings title")
 	}
 }
 
@@ -22218,6 +22220,7 @@ func TestProfilePaginatesAIAccessAndKeepsSessionIPOrder(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('localhost','owner@example.com','old',1)`); err != nil {
 		t.Fatal(err)
 	}
+	enableAIIngressForTest(t, application)
 	cookie := newAdminSessionCookie(t, application, "owner@example.com")
 	request := httptest.NewRequest(http.MethodGet, "http://localhost/?profile", nil)
 	request.AddCookie(cookie)
@@ -22228,6 +22231,11 @@ func TestProfilePaginatesAIAccessAndKeepsSessionIPOrder(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), `id="ai-access"`) {
 		t.Fatal("AI connection instructions are missing before the first grant")
+	}
+	for _, expected := range []string{`id="AICurrentIPAccess"`, `name="ai_xai" checked`, `href="#ProfileAdminIPs"`} {
+		if !strings.Contains(response.Body.String(), expected) {
+			t.Fatalf("AI network access status missing %s", expected)
+		}
 	}
 	application.aiCapabilities = aicapability.NewManager()
 	defer application.aiCapabilities.Close()
@@ -25889,6 +25897,27 @@ func (database ingressAdmissionCountingDatabase) QueryRowContext(boundary contex
 	return database.sqlExecutor.QueryRowContext(boundary, query, arguments...)
 }
 
+func TestAIIngressPublicPagesSkipControlSQL(t *testing.T) {
+	application, _ := newTestApplication(t)
+	admissions := make(chan struct{}, 10)
+	application.db = ingressAdmissionCountingDatabase{sqlExecutor: application.db, admissions: admissions}
+	handler := application.aiIngressMiddleware(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		machine, owner := application.aiIngressDecisionForRequest(request)
+		if machine || owner {
+			t.Fatal("public request received a control-plane decision")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	for _, target := range []string{"/", "/about", "/p/static/technical_pages.css"} {
+		request := httptest.NewRequest(http.MethodGet, "https://localhost"+target, nil)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusNoContent || len(admissions) != 0 {
+			t.Fatalf("public request %s waited for AI admission", target)
+		}
+	}
+}
+
 func TestAIIngressAdmissionRunsOnceAcrossProductionHTTPAdapters(t *testing.T) {
 	application := newPartitionedTestApplication(t)
 	domain := "ingress-once.example"
@@ -25919,6 +25948,41 @@ func TestAIIngressAdmissionRunsOnceAcrossProductionHTTPAdapters(t *testing.T) {
 		if (response.Header().Get("WWW-Authenticate") != "") != (clientIP == "203.0.113.17") {
 			t.Fatal("HTTP adapters changed the admitted protocol boundary")
 		}
+	}
+}
+
+func BenchmarkAIIngressHTTP(b *testing.B) {
+	database, err := sql.Open("sqlite", filepath.Join(b.TempDir(), "ingress.db"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer database.Close()
+	for _, statement := range []string{
+		`CREATE TABLE domain_aliases(alias_domain TEXT,primary_domain TEXT,is_verified INTEGER,dns_a_ok INTEGER)`,
+		`CREATE TABLE admin_ip_policies(domain TEXT,email TEXT)`,
+		`CREATE TABLE admin_allowed_ips(domain TEXT,email TEXT,client_ip TEXT)`,
+		`CREATE TABLE users(domain TEXT,email TEXT,is_admin INTEGER)`,
+		`CREATE TABLE ai_provider_policy(id INTEGER,policy TEXT)`,
+	} {
+		if _, err := database.Exec(statement); err != nil {
+			b.Fatal(err)
+		}
+	}
+	stop := make(chan struct{})
+	defer close(stop)
+	application := &App{db: database, aiProviderNetworks: aiingress.NewNetworks(stop, nil)}
+	handler := application.aiIngressMiddleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	for _, target := range []string{"/", "/p/static/technical_pages.css", "/?utm_source=example", "/?mcp"} {
+		b.Run(target, func(b *testing.B) {
+			request := httptest.NewRequest(http.MethodGet, "https://example.org"+target, nil)
+			request.RemoteAddr = "203.0.113.8:1234"
+			writer := &analyticsBenchmarkWriter{headers: make(http.Header)}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for index := 0; index < b.N; index++ {
+				handler.ServeHTTP(writer, request)
+			}
+		})
 	}
 }
 
@@ -27316,5 +27380,568 @@ func TestRegistrationCooldownSpamReachesSecurityAnalytics(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAIRestoredRoutesResolveDomainBeforeAdmission(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	for _, domain := range []string{"restored-one.example", "restored-two.example"} {
+		boundary := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), domain))
+		for _, statement := range []struct {
+			query     string
+			arguments []any
+		}{
+			{`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, []any{domain, "owner@example.org", "test"}},
+			{`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES(?,?,1)`, []any{domain, "owner@example.org"}},
+			{`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES(?,?,?,1)`, []any{domain, "owner@example.org", "198.51.100.42"}},
+			{`INSERT INTO ai_provider_policy(id,policy) VALUES(1,?)`, []any{`{"external":true,"custom_cidrs":["203.0.113.0/24"]}`}},
+		} {
+			if _, err := application.db.ExecContext(boundary, statement.query, statement.arguments...); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	handler := application.siteHTTPHandler(http.HandlerFunc(application.route))
+	requestFor := func(domain, selector, address, accept string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest("GET", "https://"+domain+"/some/path?"+selector, nil)
+		request.RemoteAddr = address + ":1234"
+		request.Header.Set("Accept", accept)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+	for _, domain := range []string{"restored-one.example", "restored-two.example"} {
+		instructions := requestFor(domain, "mcp", "198.51.100.42", "text/html")
+		if instructions.Code != 200 || !strings.Contains(instructions.Body.String(), "https://"+domain+"/?mcp") || !strings.Contains(instructions.Body.String(), "claude mcp add") || instructions.Header().Get("WWW-Authenticate") != "" {
+			t.Fatalf("instructions %s: %d %s", domain, instructions.Code, instructions.Body.String())
+		}
+		editor := requestFor(domain, "ai", "198.51.100.42", "text/html")
+		location, err := url.Parse(editor.Header().Get("Location"))
+		if err != nil || editor.Code != 302 || !location.Query().Has("login") || !strings.Contains(location.Query().Get("return_path"), "?ai") {
+			t.Fatalf("editor login %s: %d %s", domain, editor.Code, editor.Header().Get("Location"))
+		}
+		machine := requestFor(domain, "mcp", "203.0.113.42", "application/json, text/event-stream")
+		if machine.Code != 401 || !strings.Contains(machine.Header().Get("WWW-Authenticate"), domain+"/?oauth=resource") {
+			t.Fatalf("machine %s: %d %s", domain, machine.Code, machine.Body.String())
+		}
+	}
+	aliasBoundary := contextWithDomain(context.Background(), "restored-one.example")
+	if _, err := application.db.ExecContext(aliasBoundary, `INSERT INTO domain_aliases(primary_domain,alias_domain,is_verified,dns_a_ok) VALUES('restored-one.example','restored-alias.example',1,1)`); err != nil {
+		t.Fatal(err)
+	}
+	if response := requestFor("restored-alias.example", "mcp", "198.51.100.42", "text/html"); response.Code != 200 || !strings.Contains(response.Body.String(), "https://restored-alias.example/?mcp") {
+		t.Fatalf("alias instructions: %d %s", response.Code, response.Body.String())
+	}
+	for _, header := range []string{"Authorization", "MCP-Protocol-Version"} {
+		request := httptest.NewRequest("GET", "https://restored-one.example/?mcp", nil)
+		request.RemoteAddr = "198.51.100.42:1234"
+		request.Header.Set("Accept", "text/html")
+		request.Header.Set(header, "invalid")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != 401 || strings.Contains(response.Body.String(), "claude mcp add") {
+			t.Fatalf("protocol request became HTML: %s %d", header, response.Code)
+		}
+	}
+	before := application.siteDatabaseRouter.Domains(context.Background())
+	unknown := requestFor("unknown-restored.example", "mcp", "198.51.100.42", "text/html")
+	if unknown.Header().Get("WWW-Authenticate") != "" || strings.Contains(unknown.Body.String(), "claude mcp add") {
+		t.Fatal("unknown host discovered MCP")
+	}
+	after := application.siteDatabaseRouter.Domains(context.Background())
+	if len(before) != len(after) {
+		t.Fatal("unknown host created a site participant")
+	}
+
+	boundary := contextWithDomain(context.Background(), "restored-one.example")
+	if _, err := application.db.ExecContext(boundary, `INSERT INTO sessions(token,user_email,created_at,last_used_at,client_ip) VALUES(?,?,?,?,?)`, "restored-session", "restored-one.example|owner@example.org", time.Now().UTC().Format(time.RFC3339), time.Now().Unix(), "198.51.100.42"); err != nil {
+		t.Fatal(err)
+	}
+	for _, domain := range []string{"restored-one.example", "restored-two.example"} {
+		request := httptest.NewRequest("GET", "https://"+domain+"/?ai", nil)
+		request.RemoteAddr = "198.51.100.42:1234"
+		request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "restored-session"})
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if domain == "restored-one.example" && (response.Code != 200 || !strings.Contains(response.Body.String(), "ai_execute_ws")) {
+			t.Fatalf("session editor: %d %s", response.Code, response.Body.String())
+		}
+		if domain == "restored-two.example" && response.Code != 302 {
+			t.Fatalf("foreign session admitted: %d", response.Code)
+		}
+	}
+}
+
+func TestAISiteToolsKeepDeletionAndRevisionChangesAsDrafts(t *testing.T) {
+	application, database := newTestApplication(t)
+	application.aiExecutor = aieditor.NewExecutor(&appAIStore{application: application}, 4)
+	t.Cleanup(application.aiExecutor.Close)
+	for _, html := range []string{"<p>old</p>", "<p>new</p>"} {
+		if err := application.persistFinalPageSave(context.Background(), "localhost", "/docs", "/docs", "Docs", html); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var revisionID string
+	if err := database.QueryRow(`SELECT MAX(id) FROM revisions WHERE domain='localhost' AND page_path='/docs'`).Scan(&revisionID); err != nil {
+		t.Fatal(err)
+	}
+	session := aicapability.Session{Scopes: aicapability.StandardScopes(), Done: make(chan struct{})}
+	capability := aicapability.Capability{ID: "grant", Domain: "localhost"}
+	invoke := func(operation string, arguments sitemcp.Arguments, scopes []string, pagePath string) sitemcp.Result {
+		sessionCopy := session
+		sessionCopy.Scopes = scopes
+		grant := capability
+		grant.PagePath = pagePath
+		result, err := application.invokeMCPAIContent(httptest.NewRequest("POST", "http://localhost/?mcp", nil), "localhost", sitemcp.Invocation{Operation: operation, Arguments: arguments, Session: sessionCopy, Capability: grant})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	read := func() aiPageView {
+		page, err := application.readAIPage(context.Background(), "localhost", "/docs")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return page
+	}
+	original := read()
+	if result := invoke("delete_revision", sitemcp.Arguments{Path: "/docs", RevisionID: revisionID, ExpectedVersion: original.Version}, session.Scopes, ""); result.Status != 200 {
+		t.Fatalf("revision: %+v", result)
+	}
+	if page := read(); page.HTML != "<p>old</p>" || page.Version == original.Version {
+		t.Fatalf("revision draft %+v", page)
+	}
+	var published string
+	if err := database.QueryRow(`SELECT html FROM published_pages WHERE domain='localhost' AND path='/docs'`).Scan(&published); err != nil || published != "<p>new</p>" {
+		t.Fatalf("revision changed public page: %q %v", published, err)
+	}
+	if result := invoke("delete_page", sitemcp.Arguments{Path: "/docs", ExpectedVersion: original.Version}, session.Scopes, ""); result.Status != 409 {
+		t.Fatalf("stale deletion %+v", result)
+	}
+	for _, scenario := range []struct {
+		operation string
+		scopes    []string
+		pagePath  string
+	}{
+		{"delete_page", []string{aicapability.ScopeRead}, ""},
+		{"freeze_site", []string{aicapability.ScopeWrite}, ""},
+		{"set_page_password", session.Scopes, "/docs"},
+		{"delete_page", session.Scopes, "/other"},
+	} {
+		if result := invoke(scenario.operation, sitemcp.Arguments{Path: "/docs", Password: "test-password", ExpectedVersion: read().Version}, scenario.scopes, scenario.pagePath); result.Status != 403 {
+			t.Fatalf("scope %s %+v", scenario.operation, result)
+		}
+	}
+	for _, operation := range []string{"set_page_password", "get_page_settings", "remove_page_password"} {
+		result := invoke(operation, sitemcp.Arguments{Path: "/docs", Password: "test-password"}, session.Scopes, "")
+		encoded, _ := json.Marshal(result)
+		if result.Status != 200 || strings.Contains(string(encoded), "test-password") || strings.Contains(string(encoded), "password_hash") {
+			t.Fatalf("protection %s: %s", operation, encoded)
+		}
+	}
+	if result := invoke("delete_page", sitemcp.Arguments{Path: "/docs", ExpectedVersion: read().Version}, session.Scopes, ""); result.Status != 200 {
+		t.Fatalf("deletion %+v", result)
+	}
+	pending := read()
+	if !pending.PendingDelete {
+		t.Fatal("missing pending deletion")
+	}
+	if _, changed, _ := application.countPublishChanges(context.Background(), "localhost"); changed != 1 {
+		t.Fatal("deletion absent from publication preview")
+	}
+	if _, err := application.saveAIPage(context.Background(), "localhost", aieditor.Request{Operation: aieditor.OperationUpdatePage, Path: pending.Path, Title: pending.Title, HTML: pending.HTML, ExpectedVersion: pending.Version, StrictVersion: true, DraftOnly: true}); err != nil {
+		t.Fatal(err)
+	}
+	if read().PendingDelete {
+		t.Fatal("saving did not cancel pending deletion")
+	}
+	if result := invoke("delete_page", sitemcp.Arguments{Path: "/docs", ExpectedVersion: read().Version}, session.Scopes, ""); result.Status != 200 {
+		t.Fatalf("second deletion %+v", result)
+	}
+	if err := application.publishAI(context.Background(), "localhost"); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"pages", "published_pages", "page_pending_deletions"} {
+		var count int
+		if err := database.QueryRow(`SELECT COUNT(*) FROM ` + table + ` WHERE domain='localhost' AND path='/docs'`).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("deleted %s: %d %v", table, count, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(application.domainStaticDir("localhost"), staticRelativePathForPage("/docs"))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("public static deletion", err)
+	}
+	var revisionCount int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM revisions WHERE domain='localhost' AND page_path='/docs'`).Scan(&revisionCount); err != nil || revisionCount < 2 {
+		t.Fatal("deletion lost history", err)
+	}
+}
+
+func TestAIImportUsesExistingCrawlerWithoutPublishing(t *testing.T) {
+	application, database := newTestApplication(t)
+	previousClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			sourceHTML := "<!doctype html><html><head><title>Import</title></head><body><p>Imported</p></body></html>"
+			if request.URL.Path == "/" {
+				sourceHTML = "<!doctype html><html><head><title>Home</title></head><body><a href='/about'>About</a></body></html>"
+			}
+			if request.URL.Path == "/about" {
+				sourceHTML = "<!doctype html><html><head><title>About</title></head><body><p>About</p></body></html>"
+			}
+			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/html"}}, Body: io.NopCloser(strings.NewReader(sourceHTML)), Request: request}, nil
+		})}
+	}
+	t.Cleanup(func() { newGrabHTTPClient = previousClient })
+	stop := make(chan struct{})
+	defer close(stop)
+	result, err := application.runAIImport(aiimport.Request{Domain: "localhost", Grant: "grant", SourceURL: "https://source.example/page", Path: "/imported", Mode: "page", Done: stop}, "import-test", stop, make(chan crawler.ProgressEvent, 32))
+	if err != nil || result.RedirectPath != "/imported" {
+		t.Fatal(result, err)
+	}
+	var count int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM published_pages WHERE path='/imported'`).Scan(&count); err != nil || count != 0 {
+		t.Fatal("import published", count, err)
+	}
+	if page, err := application.readAIPage(context.Background(), "localhost", "/imported"); err != nil || !strings.Contains(page.HTML, "Imported") {
+		t.Fatal("draft missing", page, err)
+	}
+	whole, err := application.runAIImport(aiimport.Request{Domain: "localhost", Grant: "grant", SourceURL: "https://source.example/", Path: "/whole", Mode: "site", Done: stop}, "whole-import-test", stop, make(chan crawler.ProgressEvent, 32))
+	if err != nil || whole.RemainingPages != 0 {
+		t.Fatal("whole-site import", whole, err)
+	}
+	for _, pagePath := range []string{"/whole", "/whole/about"} {
+		if _, err := application.readAIPage(context.Background(), "localhost", pagePath); err != nil {
+			t.Fatalf("whole-site draft %s: %v", pagePath, err)
+		}
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM published_pages WHERE path LIKE '/whole%'`).Scan(&count); err != nil || count != 0 {
+		t.Fatal("whole-site import published", count, err)
+	}
+
+	if err := application.publishAI(context.Background(), "localhost"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM published_pages WHERE path='/imported'`).Scan(&count); err != nil || count != 1 {
+		t.Fatal("publish omitted import", count, err)
+	}
+}
+
+type importDraftTestDatabase struct {
+	sqlExecutor
+	write func(context.Context, func(*sql.Tx) error, func(error)) error
+}
+
+func (database importDraftTestDatabase) WriteTransactionWithFinish(boundary context.Context, write func(*sql.Tx) error, finish func(error)) error {
+	return database.write(boundary, write, finish)
+}
+
+func TestAIImportConcurrentAssetsKeepPageQuota(t *testing.T) {
+	for _, mode := range []string{"page", "site"} {
+		t.Run(mode, func(t *testing.T) {
+			application := newRouterTestApplication(t)
+			boundary := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), "localhost"))
+			application.ensureDomainStorageUsageRow(boundary, "localhost")
+			if _, err := application.db.ExecContext(boundary, `UPDATE domain_storage_usage SET limit_bytes=? WHERE domain='localhost'`, 56*1024); err != nil {
+				t.Fatal(err)
+			}
+			owner := application.db.(interface {
+				WriteTransactionWithFinish(context.Context, func(*sql.Tx) error, func(error)) error
+			})
+			entered := make(chan struct{}, 4)
+			release := make(chan struct{})
+			released := false
+			defer func() {
+				if !released {
+					close(release)
+				}
+			}()
+			application.db = importDraftTestDatabase{sqlExecutor: application.db, write: func(boundary context.Context, write func(*sql.Tx) error, finish func(error)) error {
+				entered <- struct{}{}
+				select {
+				case <-release:
+					return owner.WriteTransactionWithFinish(boundary, write, finish)
+				case <-boundary.Done():
+					return boundary.Err()
+				}
+			}}
+			previousClient := newGrabHTTPClient
+			newGrabHTTPClient = func() *http.Client {
+				return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+					contentType := "text/html"
+					body := `<html><body><img src="/asset-` + strings.TrimPrefix(request.URL.Path, "/") + `.png"><p>` + strings.Repeat("x", 16*1024) + `</p></body></html>`
+					if strings.HasSuffix(request.URL.Path, ".png") {
+						contentType, body = "image/png", request.URL.Path+strings.Repeat("y", 2048)
+					}
+					return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{contentType}}, Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
+				})}
+			}
+			defer func() { newGrabHTTPClient = previousClient }()
+			stop := make(chan struct{})
+			defer close(stop)
+			results := make(chan error, 4)
+			for index := 0; index < 4; index++ {
+				go func(index int) {
+					request := aiimport.Request{Domain: "localhost", Grant: "grant", SourceURL: fmt.Sprintf("https://source.example/page-%d", index), Path: fmt.Sprintf("/import-%d", index), Mode: mode, Done: stop}
+					_, err := application.runAIImport(request, fmt.Sprintf("quota-%d", index), stop, make(chan crawler.ProgressEvent, 64))
+					results <- err
+				}(index)
+			}
+			for range 4 {
+				select {
+				case <-entered:
+				case err := <-results:
+					t.Fatalf("import failed before persistence barrier: %v", err)
+				case <-time.After(10 * time.Second):
+					t.Fatal("concurrent imports did not reach persistence")
+				}
+			}
+			close(release)
+			released = true
+			succeeded := 0
+			for range 4 {
+				select {
+				case err := <-results:
+					if err == nil {
+						succeeded++
+					} else if !strings.Contains(err.Error(), "storage limit reached") {
+						t.Fatalf("unexpected import failure: %v", err)
+					}
+				case <-time.After(10 * time.Second):
+					t.Fatal("import persistence did not finish")
+				}
+			}
+			if succeeded != 1 {
+				t.Fatalf("%d imports committed, want exactly one within the quota", succeeded)
+			}
+			usage := application.domainStorageUsage(boundary, "localhost")
+			if usage.totalBytes() > usage.LimitBytes {
+				t.Fatalf("imports exceeded quota: %+v", usage)
+			}
+			for _, table := range []string{"pages", "revisions", "file_metadata"} {
+				var count int
+				if err := application.db.QueryRowContext(boundary, `SELECT COUNT(*) FROM `+table+` WHERE domain='localhost'`).Scan(&count); err != nil || count != 1 {
+					t.Fatalf("%s committed %d records: %v", table, count, err)
+				}
+			}
+			files, err := listStoredFiles(application.domainFilesDirForDomain("localhost"))
+			if err != nil || len(files) != 1 {
+				t.Fatalf("rejected imports left assets: %d files, %v", len(files), err)
+			}
+		})
+	}
+}
+
+func TestAIImportDraftFailureRestoresAssetsAndQuota(t *testing.T) {
+	for _, canceled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("canceled=%t", canceled), func(t *testing.T) {
+			application := newRouterTestApplication(t)
+			boundary, cancel := context.WithCancel(contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), "localhost")))
+			defer cancel()
+			filename := filepath.Join(application.domainFilesDirForDomain("localhost"), "existing.css")
+			if err := application.writeAtomicStorageFile(filename, []byte("original")); err != nil {
+				t.Fatal(err)
+			}
+			before := application.domainStorageUsage(boundary, "localhost")
+			owner := application.db.(interface {
+				WriteTransactionWithFinish(context.Context, func(*sql.Tx) error, func(error)) error
+			})
+			application.db = importDraftTestDatabase{sqlExecutor: application.db, write: func(boundary context.Context, write func(*sql.Tx) error, finish func(error)) error {
+				return owner.WriteTransactionWithFinish(boundary, func(transaction *sql.Tx) error {
+					if err := write(transaction); err != nil {
+						return err
+					}
+					if canceled {
+						cancel()
+						return nil
+					}
+					return errors.New("fixture transaction failure")
+				}, finish)
+			}}
+			spider := &pageSpider{domain: "localhost", resources: map[string]*mirroredResource{
+				"existing": {assetPath: "/p/existing.css", persist: true, content: []byte("updated")},
+				"new":      {assetPath: "/p/new.css", persist: true, content: []byte("created")},
+			}}
+			err := application.persistImportedDraftPages(boundary, "localhost", "/failed", []wholeSiteImportedPage{{LocalPath: "/failed", HTML: "<h1>Draft</h1>"}}, spider)
+			if err == nil {
+				t.Fatal("failed transaction reported success")
+			}
+			contents, err := application.readFileInsideStorage(filename)
+			if err != nil || string(contents) != "original" {
+				t.Fatalf("existing asset changed after rollback: %q, %v", contents, err)
+			}
+			if _, err := application.statInsideStorage(filepath.Join(application.domainFilesDirForDomain("localhost"), "new.css")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("new asset survived rollback: %v", err)
+			}
+			cleanup := contextWithDomain(context.Background(), "localhost")
+			after := application.storedDomainStorageUsage(cleanup, "localhost")
+			if before != after {
+				t.Fatalf("rollback changed quota: before %+v after %+v", before, after)
+			}
+			for _, table := range []string{"pages", "revisions", "file_metadata"} {
+				var count int
+				if err := application.db.QueryRowContext(cleanup, `SELECT COUNT(*) FROM `+table+` WHERE domain='localhost'`).Scan(&count); err != nil || count != 0 {
+					t.Fatalf("%s survived rollback: %d, %v", table, count, err)
+				}
+			}
+		})
+	}
+}
+
+func TestAISiteToolsMigrationPreservesHistoryAndUnpublishedDrafts(t *testing.T) {
+	application, database := newTestApplication(t)
+	for _, query := range []string{
+		`DELETE FROM application_migration_steps WHERE component='site-schema-v12' AND step_id IN ('page-pending-deletions','whole-site-import-draft-mode')`,
+		`DROP TABLE page_pending_deletions`,
+		`ALTER TABLE whole_site_imports DROP COLUMN draft_only`,
+		`INSERT INTO pages(domain,path,title,html,published) VALUES('localhost','/unpublished','Draft','<p>Draft</p>',1)`,
+	} {
+		if _, err := database.Exec(query); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := application.migrate(context.Background()); err != nil {
+		t.Fatal("upgrade from existing migration history", err)
+	}
+	var count int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM published_pages WHERE path='/unpublished'`).Scan(&count); err != nil || count != 0 {
+		t.Fatal("additive migration published a draft", count, err)
+	}
+	if err := checkSiteMigrationCompletion(database); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.migrate(context.Background()); err != nil {
+		t.Fatal("repeat additive migration", err)
+	}
+}
+
+func TestMCPConnectionAndAIEditorBrowser(t *testing.T) {
+	if os.Getenv("SITEBRUSH_MCP_BROWSER_TEST") != "1" {
+		t.Skip("set SITEBRUSH_MCP_BROWSER_TEST=1 with Playwright installed")
+	}
+	application, database := newTestApplication(t)
+	application.aiCapabilities = aicapability.NewManager()
+	t.Cleanup(application.aiCapabilities.Close)
+	application.aiExecutor = aieditor.NewExecutor(&appAIStore{application: application}, 4)
+	t.Cleanup(application.aiExecutor.Close)
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('localhost','editor@example.org','test',1)`); err != nil {
+		t.Fatal(err)
+	}
+	enableAIIngressForTest(t, application)
+	if err := application.persistFinalPageSave(context.Background(), "localhost", "/", "/", "Fixture", "<!doctype html><html><head><title>Fixture</title></head><body><h1>Original</h1></body></html>"); err != nil {
+		t.Fatal(err)
+	}
+	cookie := newAdminSessionCookie(t, application, "editor@example.org")
+	staticFiles, _ := fs.Sub(embeddedWebFiles, "web/static")
+	router := http.NewServeMux()
+	router.Handle("/p/static/", http.StripPrefix("/p/static/", http.FileServer(http.FS(staticFiles))))
+	router.HandleFunc("/menu-fixture", func(w http.ResponseWriter, r *http.Request) {
+		domain := "example.org"
+		if r.URL.Query().Get("central") == "1" {
+			domain = "sitebrush.com"
+		}
+		script := buildContextMenuScript(true, true, false, false, true, "/", domain, 1, 2, "32.6 GB / 100.0 GB", "fixture-csrf", translationsForLanguageCode("ru"))
+		script = strings.Replace(script, `const runningVersion = "`+CompileVersion+`";`, `const runningVersion = "938";`, 1)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, "<!doctype html><html><body><h1>Menu fixture</h1>"+script+"</body></html>")
+	})
+	router.HandleFunc("/", application.route)
+	server := httptest.NewServer(application.siteHTTPHandler(router))
+	defer server.Close()
+	origin := strings.Replace(server.URL, "127.0.0.1", "localhost", 1)
+	command := exec.Command("node", "pkg/mcp/connection_test.cjs")
+	command.Env = append(os.Environ(), "SITEBRUSH_MCP_FIXTURE_URL="+origin, "SITEBRUSH_MCP_COOKIE="+cookie.Name+"="+cookie.Value)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("connection/editor browser regression: %v\n%s", err, output)
+	} else {
+		t.Log(string(output))
+	}
+	page, err := application.readAIPage(context.Background(), "localhost", "/")
+	if err != nil || !strings.Contains(page.HTML, "Updated by AI") {
+		t.Fatal("browser save did not persist", page, err)
+	}
+	var count int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM revisions WHERE domain='localhost' AND page_path='/'`).Scan(&count); err != nil || count < 2 {
+		t.Fatal("browser save lost revision history", count, err)
+	}
+}
+
+func TestAIImportRevocationCancelsDownloaderAndQueryAccess(t *testing.T) {
+	application, _ := newTestApplication(t)
+	enableAIIngressForTest(t, application)
+	application.aiCapabilities = aicapability.NewManager()
+	t.Cleanup(application.aiCapabilities.Close)
+	application.aiExecutor = aieditor.NewExecutor(&appAIStore{application: application}, 4)
+	t.Cleanup(application.aiExecutor.Close)
+	previousClient := newGrabHTTPClient
+	started := make(chan struct{}, 1)
+	stopped := make(chan struct{}, 1)
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			started <- struct{}{}
+			<-request.Context().Done()
+			stopped <- struct{}{}
+			return nil, request.Context().Err()
+		})}
+	}
+	t.Cleanup(func() { newGrabHTTPClient = previousClient })
+	application.aiImports = aiimport.New(application.runAIImport)
+	t.Cleanup(application.aiImports.Close)
+	token, grant, err := application.aiCapabilities.IssueFor("localhost", "owner@example.org", aicapability.StandardScopes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := application.aiCapabilities.Exchange(token, "localhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestFor := func(method, selector, body string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(method, "http://localhost/?ai="+selector, strings.NewReader(body))
+		request.RemoteAddr = "127.0.0.1:1234"
+		request.Header.Set("X-SiteBrush-Capability", token)
+		request.Header.Set("Authorization", "Bearer "+session.Token)
+		response := httptest.NewRecorder()
+		application.route(response, request)
+		return response
+	}
+	if response := requestFor("GET", "get_site_state", ""); response.Code != 200 {
+		t.Fatalf("query state: %d %s", response.Code, response.Body.String())
+	}
+	response := requestFor("POST", "import_site", `{"source_url":"https://source.example/","path":"/cancelled","mode":"page"}`)
+	var status aiimport.Status
+	if response.Code != 202 || json.Unmarshal(response.Body.Bytes(), &status) != nil || status.ID == "" {
+		t.Fatalf("start: %d %s", response.Code, response.Body.String())
+	}
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("download did not start")
+	}
+	if err := application.aiCapabilities.Revoke(token); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-stopped:
+	case <-time.After(3 * time.Second):
+		t.Fatal("revocation did not interrupt downloader")
+	}
+	if response := requestFor("GET", "get_site_state", ""); response.Code != 401 {
+		t.Fatalf("revoked query access: %d", response.Code)
+	}
+	deadline := time.NewTimer(3 * time.Second)
+	defer deadline.Stop()
+	for {
+		status, err = application.aiImports.Exchange("status", status.ID, aiimport.Request{Domain: "localhost", Grant: grant.ID, Done: make(chan struct{})})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status.State == "canceled" {
+			break
+		}
+		select {
+		case <-deadline.C:
+			t.Fatal("import did not reach canceled state", status)
+		case <-time.After(time.Millisecond):
+		}
 	}
 }

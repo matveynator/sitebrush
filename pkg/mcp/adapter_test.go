@@ -68,12 +68,15 @@ func TestAdapterRealSDKDiscoveryCallsAndSiteBinding(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(tools.Tools) != 19 {
+			if len(tools.Tools) != len(aicapability.Operations())+1 {
 				t.Fatal("missing SiteBrush operations", len(tools.Tools))
 			}
 			for _, tool := range tools.Tools {
 				if tool.Annotations == nil || tool.InputSchema == nil || tool.Description == "" {
 					t.Fatal("missing tool contract", tool.Name)
+				}
+				if tool.Name == "sitebrush_delete_revision" && (!strings.Contains(tool.Description, "ENTIRE PAGE") || !strings.Contains(tool.Description, "later publish removes") || !strings.Contains(tool.Description, "Tell the owner")) {
+					t.Fatal("revision deletion discovery omits the page-deletion fallback")
 				}
 			}
 			access, err := session.CallTool(boundary, &sdk.CallToolParams{Name: "sitebrush_get_access", Arguments: map[string]any{}})

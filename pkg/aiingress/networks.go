@@ -15,7 +15,7 @@ type admission struct {
 
 type replacement struct {
 	source   string
-	document []byte
+	snapshot Snapshot
 	response chan error
 	done     <-chan struct{}
 }
@@ -70,23 +70,16 @@ func (networks *Networks) run(snapshots map[string]Snapshot) {
 				continue
 			default:
 			}
-			var selected Source
-			for _, source := range sources {
-				if source.ID == request.source {
-					selected = source
-					break
-				}
-			}
-			snapshot, err := selected.Snapshot(request.document)
+			var err error
 			previous, known := snapshots[request.source]
 			if !known {
 				err = errors.New("unknown official AI source")
 			}
-			if err == nil && snapshot.Created.Before(previous.Created) {
+			if err == nil && request.snapshot.Created.Before(previous.Created) {
 				err = errors.New("official AI snapshot would move backwards")
 			}
 			if err == nil {
-				snapshots[request.source] = snapshot
+				snapshots[request.source] = request.snapshot
 			}
 			select {
 			case request.response <- err:
@@ -122,7 +115,33 @@ func (networks *Networks) Allows(policy Policy, address string, transport *tls.C
 }
 
 func (networks *Networks) Replace(source string, document []byte, done <-chan struct{}) error {
-	request := replacement{source: source, document: document, response: make(chan error), done: done}
+	select {
+	case <-done:
+		return errors.New("AI range refresh cancelled")
+	case <-networks.stop:
+		return errors.New("AI ranges stopped")
+	default:
+	}
+	// Parse on the refresh caller before transferring ownership. Admission
+	// must not queue behind JSON decoding and prefix validation.
+	var snapshot Snapshot
+	registered := false
+	for _, candidate := range Sources() {
+		if candidate.ID != source {
+			continue
+		}
+		var err error
+		snapshot, err = candidate.Snapshot(document)
+		if err != nil {
+			return err
+		}
+		registered = true
+		break
+	}
+	if !registered {
+		return errors.New("unknown official AI source")
+	}
+	request := replacement{source: source, snapshot: snapshot, response: make(chan error), done: done}
 	select {
 	case <-done:
 		return errors.New("AI range refresh cancelled")

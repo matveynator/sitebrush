@@ -16,6 +16,15 @@ IP, and then OAuth or capability
 authorization. Updates and rollbacks remain drafts; publication is separate and
 version checks remain required.
 
+Deleting the last active revision queues deletion of the entire page; a later
+publication removes its public page and static file. The MCP tool descriptor
+and working guide disclose this fallback and require reporting it to the owner.
+
+Draft imports download concurrently, then commit quota, asset metadata and pages
+through the site's content participant in one transaction. Asset writes never
+reconcile away page reservations between these steps. A rejected or canceled
+batch restores replaced files and removes newly written files before completing.
+
 Provider selection is site local. A missing policy defaults to all listed
 providers enabled; saved exclusions remain effective, and newly added providers
 inherit the default. A corrupt or unavailable policy never grants network access.
@@ -25,9 +34,10 @@ admission grants discovery, not authority to read private content or edit a site
 The browser AI editor uses the existing administrator session at `/?ai`; it
 does not depend on external provider settings or MCP credentials. A valid browser
 session follows the same lifetime and address rules as the rest of the editor.
-Profile includes a direct link. Opening `?mcp` without a bearer token from an
-admitted network returns the OAuth challenge (401); that is the connection's
-authorization step, not a missing endpoint.
+Profile shows the current IP, administrator admission and the shared administrator
+IP list. It links to the editor and MCP instructions. A browser opening `?mcp`
+from an admitted network gets connection instructions; an API client without a
+bearer token gets the OAuth challenge (401).
 
 Embedded verified snapshots bootstrap the global SQL cache and a channel-owned
 range participant. A separate worker refreshes official HTTPS sources daily,
@@ -35,6 +45,19 @@ validates every prefix and commits only complete valid documents. Invalid, older
 or unavailable downloads retain the last valid snapshot. Admission reads parsed
 prefixes from its own participant and does not wait for provider downloads or
 reparse every list per HTTP request. Custom ranges cannot be `/0`.
+
+Requests without a query bypass AI admission SQL and provider-network jobs;
+the path-based OAuth discovery endpoint still requires admission. Requests with
+query parameters retain the ingress check before selectors are interpreted.
+Admitted administrators do not need a provider-network check. Refresh workers
+parse new snapshots before handing them to the range participant, so parsing
+does not stall its admission queue.
+
+`BenchmarkAIIngressHTTP` measures this middleware independently of page delivery.
+On Apple M1 with pure-Go SQLite, a 300 ms local run reduced admission overhead
+for `/` and static assets without queries from about 99 microseconds / 91
+allocations to 0.41 microseconds / 12 allocations. Queries still cost about 99
+microseconds in that fixture. These figures are not production page timings.
 
 The source catalog and snapshots are in `pkg/aiingress`. Sources verified on
 2026-10-22:
@@ -172,3 +195,28 @@ Local acceptance uses the real Go MCP SDK, OAuth/PKCE browser approval handler,
 and the production site subsystem router. Live ChatGPT/Claude provider ingress,
 owner browser approval and end-to-end operations on the production hostname
 require separate external acceptance after deployment.
+
+## Browser editor and MCP connection page
+
+Open `/?ai` for the existing voice/text AI editor. Allowed IPs without an account
+session sign in and return to the editor. Ollama runs beside the SiteBrush process
+on `127.0.0.1:11434`, including when the browser visits a remotely hosted site.
+
+Browser navigation to `/?mcp` (`Accept: text/html`, without MCP credentials or
+protocol headers) shows Claude/Claude Code setup instructions to an admitted
+owner. Instructions do not require sign-in; approval and connection management
+do. Protocol requests retain the OAuth challenge and Streamable HTTP behavior.
+Admission binds the request's domain before reading its site control database.
+
+Additional MCP tools cover publication state, page settings, draft page deletion,
+revision deactivation, password protection, freeze and asynchronous page/site
+import. They share existing scopes and operation pipelines. Page and revision
+mutations remain drafts until publication. Password rules apply immediately to
+subtrees; page-only grants cannot change them. Import jobs belong to one site
+and grant and stop on cancellation/revocation. The content owner persists draft
+deletion markers; the crawler persists draft mode across queue recovery.
+
+The additive schema steps extend the existing migration history without changing
+previous step IDs, order or revisions and without republishing modern drafts.
+Real Claude/Claude Code acceptance on the deployed HTTPS site remains a separate
+check from local SDK and browser regression tests.

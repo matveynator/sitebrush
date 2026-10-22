@@ -25,6 +25,7 @@ type ImportFrontierRun struct {
 	PagePath            string
 	SourceURL           string
 	AutoDetectTemplates bool
+	DraftOnly           bool
 }
 
 type ImportFrontierPage struct {
@@ -39,7 +40,8 @@ type ImportFrontierStats struct {
 	QueueBytes   int64
 }
 
-// ImportFrontierSchema creates the durable, domain-scoped crawl queue.
+// ImportFrontierSchema is frozen in the application migration journal.
+// The application adds draft_only in a separate guarded migration.
 func ImportFrontierSchema() []string {
 	return []string{
 		`CREATE TABLE IF NOT EXISTS whole_site_imports(import_id TEXT PRIMARY KEY,domain TEXT NOT NULL,page_path TEXT NOT NULL,source_url TEXT NOT NULL,auto_templates INTEGER NOT NULL DEFAULT 0,state TEXT NOT NULL DEFAULT 'partial',created_at TEXT NOT NULL,updated_at TEXT NOT NULL);`,
@@ -67,8 +69,8 @@ func CreateImportFrontier(ctx context.Context, database importFrontierDatabase, 
 	if database == nil || strings.TrimSpace(run.ID) == "" || strings.TrimSpace(run.Domain) == "" || strings.TrimSpace(run.SourceURL) == "" {
 		return errors.New("import frontier run identity is required")
 	}
-	_, err := database.ExecContext(ctx, `INSERT INTO whole_site_imports(import_id,domain,page_path,source_url,auto_templates,state,created_at,updated_at) VALUES(?,?,?,?,?,'running',?,?)`,
-		run.ID, run.Domain, run.PagePath, run.SourceURL, boolToInt(run.AutoDetectTemplates), frontierNow(), frontierNow())
+	_, err := database.ExecContext(ctx, `INSERT INTO whole_site_imports(import_id,domain,page_path,source_url,auto_templates,draft_only,state,created_at,updated_at) VALUES(?,?,?,?,?,?,'running',?,?)`,
+		run.ID, run.Domain, run.PagePath, run.SourceURL, boolToInt(run.AutoDetectTemplates), boolToInt(run.DraftOnly), frontierNow(), frontierNow())
 	if err != nil {
 		return fmt.Errorf("create whole-site import: %w", err)
 	}
@@ -77,25 +79,27 @@ func CreateImportFrontier(ctx context.Context, database importFrontierDatabase, 
 
 func FindImportFrontier(ctx context.Context, database importFrontierDatabase, importID, domain string) (ImportFrontierRun, error) {
 	var run ImportFrontierRun
-	var autoTemplates int
-	err := database.QueryRowContext(ctx, `SELECT import_id,domain,page_path,source_url,auto_templates FROM whole_site_imports WHERE import_id=? AND domain=?`, importID, domain).
-		Scan(&run.ID, &run.Domain, &run.PagePath, &run.SourceURL, &autoTemplates)
+	var autoTemplates, draftOnly int
+	err := database.QueryRowContext(ctx, `SELECT import_id,domain,page_path,source_url,auto_templates,draft_only FROM whole_site_imports WHERE import_id=? AND domain=?`, importID, domain).
+		Scan(&run.ID, &run.Domain, &run.PagePath, &run.SourceURL, &autoTemplates, &draftOnly)
 	if err != nil {
 		return ImportFrontierRun{}, err
 	}
 	run.AutoDetectTemplates = autoTemplates != 0
+	run.DraftOnly = draftOnly != 0
 	return run, nil
 }
 
 func FindActiveImportFrontier(ctx context.Context, database importFrontierDatabase, domain, pagePath, sourceURL string) (ImportFrontierRun, error) {
 	var run ImportFrontierRun
-	var autoTemplates int
-	err := database.QueryRowContext(ctx, `SELECT import_id,domain,page_path,source_url,auto_templates FROM whole_site_imports WHERE domain=? AND page_path=? AND source_url=? AND state='partial' ORDER BY updated_at DESC LIMIT 1`, domain, pagePath, sourceURL).
-		Scan(&run.ID, &run.Domain, &run.PagePath, &run.SourceURL, &autoTemplates)
+	var autoTemplates, draftOnly int
+	err := database.QueryRowContext(ctx, `SELECT import_id,domain,page_path,source_url,auto_templates,draft_only FROM whole_site_imports WHERE domain=? AND page_path=? AND source_url=? AND state='partial' ORDER BY updated_at DESC LIMIT 1`, domain, pagePath, sourceURL).
+		Scan(&run.ID, &run.Domain, &run.PagePath, &run.SourceURL, &autoTemplates, &draftOnly)
 	if err != nil {
 		return ImportFrontierRun{}, err
 	}
 	run.AutoDetectTemplates = autoTemplates != 0
+	run.DraftOnly = draftOnly != 0
 	return run, nil
 }
 

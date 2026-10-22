@@ -16,6 +16,7 @@ type SourceOptions struct {
 
 // ImportRequest is the application-facing input for single page and whole site imports.
 type ImportRequest struct {
+	DraftOnly            bool
 	Domain               string
 	PagePath             string
 	SourceURL            string

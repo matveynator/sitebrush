@@ -25,12 +25,12 @@ func TestImportFrontierPersistsOffsetsAndEnforcesStorageQuota(t *testing.T) {
 	if _, err := database.Exec(`INSERT INTO domain_storage_usage(domain,limit_bytes) VALUES('alpha.example',100000)`); err != nil {
 		t.Fatal(err)
 	}
-	for _, schemaStatement := range ImportFrontierSchema() {
+	for _, schemaStatement := range append(ImportFrontierSchema(), `ALTER TABLE whole_site_imports ADD COLUMN draft_only INTEGER NOT NULL DEFAULT 0`) {
 		if _, err := database.Exec(schemaStatement); err != nil {
 			t.Fatalf("create import frontier schema: %v", err)
 		}
 	}
-	run := ImportFrontierRun{ID: "run-one", Domain: "alpha.example", PagePath: "/", SourceURL: "https://source.example/", AutoDetectTemplates: true}
+	run := ImportFrontierRun{ID: "run-one", Domain: "alpha.example", PagePath: "/", SourceURL: "https://source.example/", AutoDetectTemplates: true, DraftOnly: true}
 	if err := CreateImportFrontier(contextValue, database, run); err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestImportFrontierPersistsOffsetsAndEnforcesStorageQuota(t *testing.T) {
 	database.SetMaxOpenConns(1)
 	defer database.Close()
 	storedRun, err := FindImportFrontier(contextValue, database, run.ID, run.Domain)
-	if err != nil || storedRun.SourceURL != run.SourceURL || !storedRun.AutoDetectTemplates {
+	if err != nil || storedRun.SourceURL != run.SourceURL || !storedRun.AutoDetectTemplates || !storedRun.DraftOnly {
 		t.Fatalf("stored run did not survive database reopen: run=%+v err=%v", storedRun, err)
 	}
 	if err := ClaimImportFrontier(contextValue, database, run.ID, run.Domain); err != nil {
@@ -324,7 +324,7 @@ func openFrontierTestDatabase(t *testing.T) *sql.DB {
 		database.Close()
 		t.Fatal(err)
 	}
-	for _, schemaStatement := range ImportFrontierSchema() {
+	for _, schemaStatement := range append(ImportFrontierSchema(), `ALTER TABLE whole_site_imports ADD COLUMN draft_only INTEGER NOT NULL DEFAULT 0`) {
 		if _, err := database.Exec(schemaStatement); err != nil {
 			database.Close()
 			t.Fatal(err)

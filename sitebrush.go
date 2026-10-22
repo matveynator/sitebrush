@@ -61,6 +61,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/accounttotp"
 	"github.com/matveynator/sitebrush/v2/pkg/aicapability"
 	"github.com/matveynator/sitebrush/v2/pkg/aieditor"
+	"github.com/matveynator/sitebrush/v2/pkg/aiimport"
 	"github.com/matveynator/sitebrush/v2/pkg/aiingress"
 	"github.com/matveynator/sitebrush/v2/pkg/aiprovider"
 	browserstats "github.com/matveynator/sitebrush/v2/pkg/analytics"
@@ -261,6 +262,7 @@ type App struct {
 	aiCapabilities            *aicapability.Manager
 	aiProviderNetworks        *aiingress.Networks
 	aiExecutor                *aieditor.Executor
+	aiImports                 *aiimport.Worker
 }
 
 type demoSiteRuntimeRequest struct {
@@ -2046,7 +2048,7 @@ func (router *perSiteDBRouter) relocateSiteContent(root, domain string, database
 
 func siteTableSubsystem(table string) string {
 	switch table {
-	case "pages", "published_pages", "page_redirects", "domain_storage_usage", "revisions", "file_metadata":
+	case "pages", "published_pages", "page_redirects", "domain_storage_usage", "revisions", "file_metadata", "page_pending_deletions":
 		return "content"
 	case "analytics_events", "analytics_reports", "analytics_configuration":
 		return "analytics"
@@ -2065,7 +2067,7 @@ func siteQuerySubsystem(query string) string {
 	for _, word := range words {
 		owner := ""
 		switch word {
-		case "pages", "published_pages", "page_redirects", "domain_storage_usage", "revisions", "file_metadata":
+		case "pages", "published_pages", "page_redirects", "domain_storage_usage", "revisions", "file_metadata", "page_pending_deletions":
 			owner = "content"
 		case "analytics_events", "analytics_reports", "analytics_configuration", "checkpoints":
 			owner = "analytics"
@@ -3425,9 +3427,10 @@ type publishProgressEvent struct {
 }
 
 type publishPageCandidate struct {
-	Path  string
-	Title string
-	HTML  string
+	Delete bool
+	Path   string
+	Title  string
+	HTML   string
 }
 
 type grabResourcePreview = crawler.ResourcePreview
@@ -10036,6 +10039,8 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 
 	application.aiExecutor = aieditor.NewExecutor(&appAIStore{application: application}, 32)
 	defer application.aiExecutor.Close()
+	application.aiImports = aiimport.New(application.runAIImport)
+	defer application.aiImports.Close()
 	application.analyticsMemoryLimit = analyticsConfiguredMemoryLimit()
 	attackGuardPath := filepath.Join(application.storageRootDir(), "security", "attackguard.json")
 	attackGuard, attackGuardErr := httpsecurity.NewAttackGuard(attackGuardPath)
@@ -10095,6 +10100,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 		return bootstrapApplication.migrate(contextWithDomain(migrationCtx, domain))
 	}, config.Debug, controlDatabaseDispatcher)
 	defer func() {
+		application.aiImports.Close()
 		logShutdownStep("closing site database workers")
 		if closeErr := siteDatabaseRouter.Close(); closeErr != nil {
 			log.Printf("%sSHUTDOWN%s site database router close failed: %v", terminalRed(), terminalReset(), closeErr)
@@ -10171,18 +10177,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 
 	address := "localhost:" + strconv.Itoa(listenPort)
 
-	domainContextMiddleware := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestDomain := domainFromRequest(r)
-		nextRequest := r.WithContext(contextWithDomain(r.Context(), requestDomain))
-		// Query endpoints also work on paths otherwise claimed by embedded assets.
-		query := nextRequest.URL.Query()
-		if query.Has("mcp") || query.Has("oauth") || query.Has("ai") || query.Has("ai_token") || query.Has("ai_session") || query.Has("ai_authorize") || isBrowserAnalyticsRequest(nextRequest) {
-			application.route(w, nextRequest)
-			return
-		}
-		router.ServeHTTP(w, nextRequest)
-	})
-	managedHandler := application.securityResponseHeadersMiddleware(application.aiIngressMiddleware(application.analyticsMiddleware(application.accessLogMiddleware(application.authAbuseMiddleware(domainContextMiddleware)))))
+	managedHandler := application.siteHTTPHandler(router)
 	healthNonce, nonceErr := appupdate.Identifier()
 	if nonceErr != nil {
 		return nonceErr
@@ -11121,6 +11116,10 @@ func (a *App) migrate(ctx context.Context) error {
 	if schemaErr != nil {
 		return siteMigrationStepError{step: "verify schema", err: schemaErr}
 	}
+	legacyComplete, legacyErr := siteDatabaseLegacySchemaComplete(ctx, a.db)
+	if legacyErr != nil {
+		return legacyErr
+	}
 	steps := siteSchemaSteps(ctx, !schemaComplete || schemaVersion < currentSiteDatabaseSchemaVersion)
 	migrationDatabase, ownsDatabase := a.db.(*sql.DB)
 	if !ownsDatabase {
@@ -11142,7 +11141,9 @@ func (a *App) migrate(ctx context.Context) error {
 		return err
 	}
 
-	needsDataMigration := schemaVersion < currentSiteDatabaseSchemaVersion || !schemaComplete
+	// Additive feature migrations must not replay legacy publication backfills
+	// over modern drafts on an otherwise complete generation-2 database.
+	needsDataMigration := schemaVersion < currentSiteDatabaseSchemaVersion || !legacyComplete
 	if err := migrations.Run(migrationDatabase, "site-data-v12", []migrations.Step{{ID: "legacy-data-through-12", Revision: "1", Ensure: needsDataMigration, Recoverable: func() error {
 		if !needsDataMigration {
 			return nil
@@ -11285,6 +11286,17 @@ func siteSchemaSteps(ctx context.Context, repair bool) []migrations.Step {
 			return err
 		}})
 	}
+	deletions := migrations.SQL("page-pending-deletions", `CREATE TABLE IF NOT EXISTS page_pending_deletions(domain TEXT NOT NULL,path TEXT NOT NULL,PRIMARY KEY(domain,path))`)
+	deletions.Ensure = repair
+	steps = append(steps, deletions)
+	steps = append(steps, migrations.Step{ID: "whole-site-import-draft-mode", Revision: "1", Ensure: repair, Apply: func(transaction *sql.Tx) error {
+		found, err := siteDatabaseColumnExists(ctx, transaction, "whole_site_imports", "draft_only")
+		if err != nil || found {
+			return err
+		}
+		_, err = transaction.Exec(`ALTER TABLE whole_site_imports ADD COLUMN draft_only INTEGER NOT NULL DEFAULT 0`)
+		return err
+	}})
 	return steps
 }
 
@@ -11400,6 +11412,20 @@ func requiredSiteDatabaseColumns() []siteDatabaseColumnRequirement {
 }
 
 func siteDatabaseSchemaComplete(ctx context.Context, database sqlExecutor) (bool, error) {
+	complete, err := siteDatabaseLegacySchemaComplete(ctx, database)
+	if err != nil || !complete {
+		return complete, err
+	}
+	for _, column := range []struct{ table, name string }{{"page_pending_deletions", "path"}, {"whole_site_imports", "draft_only"}} {
+		found, err := siteDatabaseColumnExists(ctx, database, column.table, column.name)
+		if err != nil || !found {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+func siteDatabaseLegacySchemaComplete(ctx context.Context, database sqlExecutor) (bool, error) {
 	for _, column := range requiredSiteDatabaseColumns() {
 		found, err := siteDatabaseColumnExists(ctx, database, column.tableName, column.columnName)
 		if err != nil || !found {
@@ -11969,8 +11995,23 @@ func (a *App) aiIngressDecisionForRequest(r *http.Request) (machine, owner bool)
 	return a.aiIngressAdmission(r)
 }
 
+func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
+	queryRouter := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		if query.Has("mcp") || query.Has("oauth") || query.Has("ai") || query.Has("ai_token") || query.Has("ai_session") || query.Has("ai_authorize") || isBrowserAnalyticsRequest(r) {
+			a.route(w, r)
+			return
+		}
+		router.ServeHTTP(w, r)
+	})
+	return a.securityResponseHeadersMiddleware(a.aiIngressMiddleware(a.analyticsMiddleware(a.accessLogMiddleware(a.authAbuseMiddleware(queryRouter)))))
+}
+
 func (a *App) aiIngressMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The SQL router needs the requested site before admission reads its
+		// control database. HTTP requests do not arrive with a domain context.
+		r = r.WithContext(contextWithDomain(r.Context(), domainFromRequest(r)))
 		machine, owner := a.aiIngressAdmission(r)
 		// Public logging, abuse detection and referrer cookies must observe the
 		// same request as the public router, without hidden control selectors.
@@ -11980,6 +12021,12 @@ func (a *App) aiIngressMiddleware(next http.Handler) http.Handler {
 }
 
 func (a *App) aiIngressAdmission(r *http.Request) (machine, owner bool) {
+	// Ordinary pages and assets have no query-based control endpoint. Keep
+	// their delivery independent of control SQL and the provider participant.
+	// OAuth discovery is the only control endpoint selected by its path.
+	if r.URL.RawQuery == "" && r.URL.Path != "/.well-known/oauth-authorization-server" {
+		return false, false
+	}
 	if a.db == nil {
 		return false, false
 	}
@@ -12007,6 +12054,9 @@ func (a *App) aiIngressAdmission(r *http.Request) (machine, owner bool) {
 				_, owner = a.currentAdminEmailForDomain(r, domain)
 			}
 		}
+	}
+	if owner {
+		return false, true
 	}
 	policy := a.aiProviderPolicy(r)
 	if !policy.External {
@@ -12869,6 +12919,8 @@ func (store *appAIStore) Execute(request aieditor.Request, done <-chan struct{})
 		return aieditor.Result{Operation: request.Operation, Path: fileName, Payload: map[string]string{"file_name": fileName, "url": "/p/" + fileName, "hash": strings.TrimSuffix(fileName, path.Ext(fileName))}, Err: err}
 	case aieditor.OperationPublish:
 		return aieditor.Result{Operation: request.Operation, Message: "published", Err: store.application.publishAI(ctx, domain)}
+	case aieditor.OperationGetSiteState, aieditor.OperationGetPageSettings, aieditor.OperationDeletePage, aieditor.OperationDeleteRevision, aieditor.OperationSetPagePassword, aieditor.OperationRemovePagePassword, aieditor.OperationFreezeSite:
+		return store.application.executeAISiteOperation(ctx, domain, request)
 	case aieditor.OperationRollback:
 		return aieditor.Result{Operation: request.Operation, Path: cleanPath(request.Path), Message: "rolled back", Err: store.application.rollbackAIPage(ctx, domain, request)}
 	default:
@@ -12877,16 +12929,17 @@ func (store *appAIStore) Execute(request aieditor.Request, done <-chan struct{})
 }
 
 type aiPageView struct {
-	Path      string `json:"path"`
-	Title     string `json:"title"`
-	HTML      string `json:"html,omitempty"`
-	Version   string `json:"version"`
-	Published bool   `json:"published"`
+	Path          string `json:"path"`
+	Title         string `json:"title"`
+	HTML          string `json:"html,omitempty"`
+	Version       string `json:"version"`
+	Published     bool   `json:"published"`
+	PendingDelete bool   `json:"pending_deletion,omitempty"`
 }
 
 func (a *App) readAIPage(ctx context.Context, domain, pagePath string) (aiPageView, error) {
 	var page aiPageView
-	err := a.db.QueryRowContext(ctx, `SELECT path,title,html,published,COALESCE((SELECT MAX(id) FROM revisions WHERE domain=pages.domain AND page_path=pages.path),0) FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&page.Path, &page.Title, &page.HTML, &page.Published, &page.Version)
+	err := a.db.QueryRowContext(ctx, `SELECT path,title,html,published,EXISTS(SELECT 1 FROM page_pending_deletions WHERE domain=pages.domain AND path=pages.path),COALESCE((SELECT MAX(id) FROM revisions WHERE domain=pages.domain AND page_path=pages.path),0) FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&page.Path, &page.Title, &page.HTML, &page.Published, &page.PendingDelete, &page.Version)
 	if err == nil {
 		page.Version = aiPageVersion(page, page.Version)
 	}
@@ -12901,7 +12954,7 @@ func aiPageVersion(page aiPageView, revision string) string {
 }
 
 func (a *App) listAIPages(ctx context.Context, domain string) ([]aiPageView, error) {
-	rows, err := a.db.QueryContext(ctx, `SELECT path,title,html,published,COALESCE((SELECT MAX(id) FROM revisions WHERE domain=pages.domain AND page_path=pages.path),0) FROM pages WHERE domain=? ORDER BY path ASC`, domain)
+	rows, err := a.db.QueryContext(ctx, `SELECT path,title,html,published,EXISTS(SELECT 1 FROM page_pending_deletions WHERE domain=pages.domain AND path=pages.path),COALESCE((SELECT MAX(id) FROM revisions WHERE domain=pages.domain AND page_path=pages.path),0) FROM pages WHERE domain=? ORDER BY path ASC`, domain)
 	if err != nil {
 		return nil, err
 	}
@@ -12909,7 +12962,7 @@ func (a *App) listAIPages(ctx context.Context, domain string) ([]aiPageView, err
 	pages := make([]aiPageView, 0, 32)
 	for rows.Next() {
 		var page aiPageView
-		if err := rows.Scan(&page.Path, &page.Title, &page.HTML, &page.Published, &page.Version); err != nil {
+		if err := rows.Scan(&page.Path, &page.Title, &page.HTML, &page.Published, &page.PendingDelete, &page.Version); err != nil {
 			return nil, err
 		}
 		page.Version = aiPageVersion(page, page.Version)
@@ -13024,6 +13077,533 @@ func (a *App) aiWriteTransaction(ctx context.Context, write func(*sql.Tx) error)
 	return transaction.Commit()
 }
 
+// Site tools reuse the content and control owners. HTTP and MCP enforce the
+// same scopes before a request reaches these participants.
+func isAISiteOperation(operation string) bool {
+	switch operation {
+	case "get_site_state", "get_page_settings", "delete_page", "delete_revision", "set_page_password", "remove_page_password", "freeze_site", "import_site", "get_import_status", "cancel_import":
+		return true
+	}
+	return false
+}
+
+func (a *App) aiSiteOperationEndpoint(w http.ResponseWriter, r *http.Request, domain string, capability aicapability.Capability, session aicapability.Session, operation string) {
+	for _, scope := range sitemcp.RequiredScopes(operation) {
+		if !containsAIScope(session.Scopes, scope) {
+			http.Error(w, "required permission was not granted", http.StatusForbidden)
+			return
+		}
+	}
+	readOnly := operation == "get_site_state" || operation == "get_page_settings" || operation == "get_import_status"
+	if readOnly && r.Method != http.MethodGet || !readOnly && r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if capability.PagePath != "" && operation != "get_page_settings" && operation != "delete_page" && operation != "delete_revision" {
+		http.Error(w, "this operation requires site-wide access", http.StatusForbidden)
+		return
+	}
+	if operation == "import_site" || operation == "get_import_status" || operation == "cancel_import" {
+		a.aiImportEndpoint(w, r, domain, capability, session, operation)
+		return
+	}
+	request := aieditor.Request{Operation: aieditor.Operation(operation), Path: r.URL.Query().Get("path"), DraftOnly: true, StrictVersion: true}
+	if !readOnly {
+		if err := decodeAIRequest(w, r, &request); err != nil {
+			return
+		}
+		request.Operation = aieditor.Operation(operation)
+		request.DraftOnly, request.StrictVersion = true, true
+	}
+	if capability.PagePath != "" && cleanPath(request.Path) != cleanPath(capability.PagePath) {
+		http.Error(w, "this AI link can edit only its current page", http.StatusForbidden)
+		return
+	}
+	result, err := a.executeAITask(request, r)
+	writeAIResult(w, result, err)
+}
+
+func (a *App) executeAISiteOperation(ctx context.Context, domain string, request aieditor.Request) aieditor.Result {
+	result := aieditor.Result{Operation: request.Operation, Path: request.Path}
+	switch request.Operation {
+	case aieditor.OperationGetSiteState:
+		pages, err := a.listAIPages(ctx, domain)
+		if err != nil {
+			result.Err = err
+			return result
+		}
+		var frozen int
+		rows, err := a.db.QueryContext(ctx, `SELECT is_frozen FROM domain_states WHERE domain=?`, domain)
+		if err != nil {
+			result.Err = err
+			return result
+		}
+		if rows.Next() {
+			err = rows.Scan(&frozen)
+		}
+		if err == nil {
+			err = rows.Err()
+		}
+		rows.Close()
+		if err != nil {
+			result.Err = err
+			return result
+		}
+		total, changed, paths := a.countPublishChanges(ctx, domain)
+		result.Payload = map[string]any{"domain": domain, "frozen": frozen == 1, "pages": pages, "total": total, "pending_changes": changed, "pending_paths": paths, "publication": "draft_then_publish"}
+	case aieditor.OperationGetPageSettings:
+		page, err := a.readAIPage(ctx, domain, cleanPath(request.Path))
+		if err != nil {
+			result.Err = err
+			return result
+		}
+		page.HTML = ""
+		rules, err := a.db.QueryContext(ctx, `SELECT path FROM page_password_rules WHERE domain=?`, domain)
+		if err != nil {
+			result.Err = err
+			return result
+		}
+		protectionPath := ""
+		for rules.Next() {
+			var rulePath string
+			if err = rules.Scan(&rulePath); err != nil {
+				break
+			}
+			rulePath = cleanPath(rulePath)
+			if dirprotect.HasProtectedPrefix(page.Path, rulePath) && len(rulePath) > len(protectionPath) {
+				protectionPath = rulePath
+			}
+		}
+		if err == nil {
+			err = rules.Err()
+		}
+		rules.Close()
+		if err != nil {
+			result.Err = err
+			return result
+		}
+		result.Payload = map[string]any{"page": page, "password_protected": protectionPath != "", "protection_path": protectionPath}
+	case aieditor.OperationFreezeSite:
+		result.Err = a.setDomainFrozenState(ctx, domain, 1)
+		result.Payload = map[string]bool{"frozen": true}
+	case aieditor.OperationSetPagePassword:
+		result.Err = a.setPagePasswordRule(ctx, domain, request.Path, request.Password)
+		result.Payload = map[string]bool{"password_protected": true}
+	case aieditor.OperationRemovePagePassword:
+		result.Err = a.accountTransaction(ctx, func(transaction *sql.Tx) error {
+			if _, err := transaction.ExecContext(ctx, `DELETE FROM page_password_rules WHERE domain=? AND path=?`, domain, cleanPath(request.Path)); err != nil {
+				return err
+			}
+			_, err := transaction.ExecContext(ctx, `DELETE FROM page_password_sessions WHERE domain=? AND path=?`, domain, cleanPath(request.Path))
+			return err
+		})
+		if result.Err == nil {
+			a.writePagePasswordPrefixFile(ctx, domain)
+		}
+		result.Payload = map[string]bool{"rule_removed": result.Err == nil}
+	case aieditor.OperationDeletePage, aieditor.OperationDeleteRevision:
+		result.Err = a.stageAIPageDeletion(ctx, domain, request)
+		if result.Err == nil {
+			result.Payload, result.Err = a.readAIPage(ctx, domain, cleanPath(request.Path))
+		}
+	}
+	return result
+}
+
+func (a *App) stageAIPageDeletion(ctx context.Context, domain string, request aieditor.Request) error {
+	return a.siteContentTransaction(ctx, func(transaction *sql.Tx) error {
+		var page aiPageView
+		err := transaction.QueryRowContext(ctx, `SELECT path,title,html,published,EXISTS(SELECT 1 FROM page_pending_deletions WHERE domain=pages.domain AND path=pages.path),COALESCE((SELECT MAX(id) FROM revisions WHERE domain=pages.domain AND page_path=pages.path),0) FROM pages WHERE domain=? AND path=?`, domain, cleanPath(request.Path)).Scan(&page.Path, &page.Title, &page.HTML, &page.Published, &page.PendingDelete, &page.Version)
+		if errors.Is(err, sql.ErrNoRows) {
+			return errors.New("page not found")
+		}
+		if err != nil {
+			return err
+		}
+		if aiPageVersion(page, page.Version) != request.ExpectedVersion {
+			return aieditor.ErrVersionConflict
+		}
+		if request.Operation == aieditor.OperationDeleteRevision {
+			revisionID, err := strconv.Atoi(request.RevisionID)
+			if err != nil || revisionID <= 0 {
+				return aieditor.ErrInvalidRequest
+			}
+			updated, err := transaction.ExecContext(ctx, `UPDATE revisions SET is_active=0 WHERE domain=? AND page_path=? AND id=? AND is_active=1`, domain, page.Path, revisionID)
+			if err != nil {
+				return err
+			}
+			count, err := updated.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if count == 0 {
+				return errors.New("active revision not found")
+			}
+			var restoredHTML string
+			err = transaction.QueryRowContext(ctx, `SELECT html FROM revisions WHERE domain=? AND page_path=? AND is_active=1 ORDER BY id DESC LIMIT 1`, domain, page.Path).Scan(&restoredHTML)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+			if err == nil {
+				if _, err = transaction.ExecContext(ctx, `UPDATE pages SET html=? WHERE domain=? AND path=?`, restoredHTML, domain, page.Path); err != nil {
+					return err
+				}
+				if _, err = transaction.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, domain, page.Path, restoredHTML, time.Now().UTC().Format(time.RFC3339)); err != nil {
+					return err
+				}
+				delta := 2*len(restoredHTML) - len(page.HTML)
+				reserved, reserveErr := transaction.ExecContext(ctx, `UPDATE domain_storage_usage SET page_bytes=page_bytes+?,revision_bytes=revision_bytes+? WHERE domain=? AND (?<=0 OR page_bytes+published_page_bytes+revision_bytes+file_bytes+published_static_bytes+COALESCE(import_queue_bytes,0)+COALESCE(analytics_bytes,0)+COALESCE(analytics_reserved_bytes,0)+?<=limit_bytes)`, len(restoredHTML)-len(page.HTML), len(restoredHTML), domain, delta, delta)
+				if reserveErr != nil {
+					return reserveErr
+				}
+				reservedCount, reserveErr := reserved.RowsAffected()
+				if reserveErr != nil {
+					return reserveErr
+				}
+				if reservedCount != 1 {
+					return errors.New("storage limit reached")
+				}
+				_, err = transaction.ExecContext(ctx, `DELETE FROM page_pending_deletions WHERE domain=? AND path=?`, domain, page.Path)
+				return err
+			}
+		}
+		if page.PendingDelete {
+			return nil
+		}
+		_, err = transaction.ExecContext(ctx, `INSERT INTO page_pending_deletions(domain,path) VALUES(?,?)`, domain, page.Path)
+		return err
+	}, func(error) {})
+}
+
+func (a *App) publishPendingPageDeletion(ctx context.Context, domain string, candidate publishPageCandidate) (bool, error) {
+	pagePath := candidate.Path
+	staticPath := filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath))
+	var previousStatic []byte
+	var existed, removed bool
+	err := a.siteContentTransaction(ctx, func(transaction *sql.Tx) error {
+		var count int
+		if err := transaction.QueryRowContext(ctx, `SELECT COUNT(*) FROM page_pending_deletions WHERE domain=? AND path=?`, domain, pagePath).Scan(&count); err != nil {
+			return err
+		}
+		if count == 0 {
+			return aieditor.ErrVersionConflict
+		}
+		var draft, title, published string
+		if err := transaction.QueryRowContext(ctx, `SELECT html,title FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&draft, &title); err != nil {
+			return err
+		}
+		if draft != candidate.HTML || title != candidate.Title {
+			return aieditor.ErrVersionConflict
+		}
+		if err := transaction.QueryRowContext(ctx, `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&published); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		var err error
+		previousStatic, err = a.readFileInsideStorage(staticPath)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		existed = err == nil
+		for _, table := range []string{"pages", "published_pages", "page_pending_deletions"} {
+			if _, err := transaction.ExecContext(ctx, `DELETE FROM `+table+` WHERE domain=? AND path=?`, domain, pagePath); err != nil {
+				return err
+			}
+		}
+		if _, err := transaction.ExecContext(ctx, `UPDATE domain_storage_usage SET page_bytes=page_bytes-?,published_page_bytes=published_page_bytes-?,published_static_bytes=published_static_bytes-? WHERE domain=?`, len(draft), len(published), len(previousStatic), domain); err != nil {
+			return err
+		}
+		if existed {
+			if err := a.removeInsideStorage(staticPath); err != nil {
+				return err
+			}
+			removed = true
+		}
+		return nil
+	}, func(err error) {
+		if err != nil && removed {
+			_ = a.writeAtomicStorageFile(staticPath, previousStatic)
+		}
+	})
+	return err == nil, err
+}
+
+func (a *App) aiImportEndpoint(w http.ResponseWriter, r *http.Request, domain string, capability aicapability.Capability, session aicapability.Session, operation string) {
+	arguments := sitemcp.Arguments{JobID: r.URL.Query().Get("job_id")}
+	if r.Method == http.MethodPost {
+		r.Body = http.MaxBytesReader(w, r.Body, 16384)
+		if json.NewDecoder(r.Body).Decode(&arguments) != nil {
+			http.Error(w, "invalid import request", 400)
+			return
+		}
+	}
+	request := aiimport.Request{Domain: domain, Grant: capability.ID, Done: session.Done, SourceURL: arguments.SourceURL, Path: arguments.Path, Mode: arguments.Mode}
+	action := "status"
+	if operation == "import_site" {
+		if arguments.Mode != "page" && arguments.Mode != "site" || strings.TrimSpace(arguments.Path) == "" || aieditor.Validate(aieditor.Request{Operation: aieditor.OperationReadPage, Path: arguments.Path}) != nil {
+			http.Error(w, "mode must be page or site and path must be valid", 400)
+			return
+		}
+		if _, err := parseGrabSourceURLForServerIP(arguments.SourceURL, ""); err != nil {
+			http.Error(w, "invalid import source URL", 400)
+			return
+		}
+		action = "start"
+	} else if operation == "cancel_import" {
+		action = "cancel"
+	}
+	status, err := a.aiImports.Exchange(action, arguments.JobID, request)
+	if err != nil {
+		if errors.Is(err, aiimport.ErrBusy) {
+			w.Header().Set("Retry-After", "5")
+			http.Error(w, err.Error(), http.StatusTooManyRequests)
+		} else {
+			writeAIResult(w, aieditor.Result{}, err)
+		}
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if action == "start" {
+		w.WriteHeader(http.StatusAccepted)
+	}
+	_ = json.NewEncoder(w).Encode(status)
+}
+
+// The worker owns job lifetime. Context bridges end at the legacy crawler and
+// database/sql boundaries; revocation closes stop and interrupts those calls.
+func (a *App) runAIImport(request aiimport.Request, id string, stop <-chan struct{}, progress chan<- crawler.ProgressEvent) (crawler.ImportResult, error) {
+	boundary, cancel := context.WithCancel(contextWithDomain(context.Background(), request.Domain))
+	finished := make(chan struct{})
+	defer close(finished)
+	defer cancel()
+	select {
+	case <-stop:
+		return crawler.ImportResult{}, aieditor.ErrTaskCanceled
+	default:
+	}
+	go func() {
+		select {
+		case <-stop:
+			cancel()
+		case <-finished:
+		}
+	}()
+	if a.grabTracker != nil {
+		stream := a.grabTracker.subscribe(id)
+		defer a.grabTracker.unsubscribe(id, stream)
+		go func() {
+			for {
+				select {
+				case update := <-stream:
+					select {
+					case progress <- update:
+					case <-finished:
+						return
+					case <-stop:
+						return
+					}
+				case <-finished:
+					return
+				case <-stop:
+					return
+				}
+			}
+		}()
+	}
+	remote, err := parseGrabSourceURLForServerIP(request.SourceURL, "")
+	if err != nil {
+		return crawler.ImportResult{}, err
+	}
+	htmlBytes, resolved, err := downloadGrabSourceHTMLWithResolvedURLContext(boundary, remote.String(), grabSourceOptions{})
+	if err != nil {
+		return crawler.ImportResult{}, err
+	}
+	importRequest := grabImportRequest{Domain: request.Domain, PagePath: cleanPath(request.Path), SourceURL: resolved.String(), RemoteSourceURL: resolved, HTML: string(htmlBytes), Context: boundary, ProgressToken: id, DraftOnly: true}
+	if request.Mode == "site" {
+		result, err := a.importWholeRemoteSite(boundary, importRequest)
+		// Existing frontiers bound each crawl batch. Continue within the same
+		// grant-scoped job while capacity permits, preserving partial results.
+		for err == nil && result.RemainingPages > 0 {
+			if boundary.Err() != nil {
+				return result, boundary.Err()
+			}
+			previousRemaining := result.RemainingPages
+			importRequest.ImportID = result.ImportID
+			result, err = a.importWholeRemoteSite(boundary, importRequest)
+			if result.RemainingPages >= previousRemaining {
+				break
+			}
+		}
+		return result, err
+	}
+	spider, importedHTML := prepareSinglePageImport(importRequest, a.grabTracker)
+	if boundary.Err() != nil {
+		return crawler.ImportResult{}, boundary.Err()
+	}
+	pages := []wholeSiteImportedPage{{SourceURL: resolved.String(), LocalPath: importRequest.PagePath, HTML: importedHTML}}
+	if err := a.persistImportedDraftPages(boundary, request.Domain, importRequest.PagePath, pages, spider); err != nil {
+		return crawler.ImportResult{}, err
+	}
+	return crawler.ImportResult{RedirectPath: importRequest.PagePath, FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap()}, nil
+}
+
+func (a *App) storeImportedDraftPages(ctx context.Context, domain string, pages []wholeSiteImportedPage) error {
+	return a.persistImportedDraftPages(ctx, domain, "/", pages, nil)
+}
+
+// The content participant owns quota, assets and drafts in one turn. No
+// reservation is exposed between jobs or lost to an asset usage reconciliation.
+func (a *App) persistImportedDraftPages(ctx context.Context, domain, ownerPath string, pages []wholeSiteImportedPage, spider *pageSpider) error {
+	a.ensureDomainStorageUsageRow(ctx, domain)
+	type assetWrite struct {
+		filename, name, contentType string
+		content, previous           []byte
+		existed                     bool
+	}
+	written := []assetWrite{}
+	started := make(chan struct{})
+	completed := make(chan error, 1)
+	err := a.siteContentTransaction(ctx, func(transaction *sql.Tx) error {
+		close(started)
+		usage := domainStorageUsage{}
+		if err := transaction.QueryRowContext(ctx, `SELECT page_bytes,published_page_bytes,revision_bytes,file_bytes,published_static_bytes,COALESCE(import_queue_bytes,0),COALESCE(analytics_bytes,0),COALESCE(analytics_reserved_bytes,0),limit_bytes FROM domain_storage_usage WHERE domain=?`, domain).Scan(&usage.PageBytes, &usage.PublishedPageBytes, &usage.RevisionBytes, &usage.FileBytes, &usage.PublishedStaticBytes, &usage.ImportQueueBytes, &usage.AnalyticsBytes, &usage.AnalyticsReservedBytes, &usage.LimitBytes); err != nil {
+			return err
+		}
+		// A legacy reconciliation may have measured before another commit.
+		// Re-read committed content here without releasing other reservations.
+		for _, component := range []struct {
+			query string
+			bytes *int64
+		}{
+			{`SELECT html FROM pages WHERE domain=?`, &usage.PageBytes},
+			{`SELECT html FROM published_pages WHERE domain=?`, &usage.PublishedPageBytes},
+			{`SELECT html FROM revisions WHERE domain=?`, &usage.RevisionBytes},
+		} {
+			rows, err := transaction.QueryContext(ctx, component.query, domain)
+			if err != nil {
+				return err
+			}
+			var measured int64
+			for rows.Next() {
+				var html string
+				if err = rows.Scan(&html); err != nil {
+					break
+				}
+				measured += int64(len(html))
+			}
+			if err == nil {
+				err = rows.Err()
+			}
+			rows.Close()
+			if err != nil {
+				return err
+			}
+			*component.bytes = max(*component.bytes, measured)
+		}
+		usage.FileBytes = max(usage.FileBytes, a.directorySizeInsideStorage(a.domainFilesDirForDomain(domain))+a.directorySizeInsideStorage(a.domainChrootRootDir(domain)))
+		usage.PublishedStaticBytes = max(usage.PublishedStaticBytes, a.directorySizeInsideStorage(a.domainStaticDir(domain)))
+		var pageDelta, revisionDelta, fileDelta int64
+		for _, page := range pages {
+			pagePath := cleanPath(page.LocalPath)
+			var count int
+			if err := transaction.QueryRowContext(ctx, `SELECT COUNT(*) FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&count); err != nil {
+				return err
+			}
+			if count != 0 {
+				var existingHTML string
+				if err := transaction.QueryRowContext(ctx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&existingHTML); err != nil {
+					return err
+				}
+				if existingHTML == page.HTML {
+					continue
+				}
+				return fmt.Errorf("%w: import destination already exists: %s", aieditor.ErrVersionConflict, pagePath)
+			}
+			if _, err := transaction.ExecContext(ctx, `INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, pagePath, page.HTML); err != nil {
+				return err
+			}
+			if _, err := transaction.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, domain, pagePath, page.HTML, time.Now().UTC().Format(time.RFC3339)); err != nil {
+				return err
+			}
+			pageDelta += int64(len(page.HTML))
+			revisionDelta += int64(len(page.HTML))
+		}
+		assets := []assetWrite{}
+		if spider != nil {
+			references := make(map[string]bool)
+			for _, resource := range spider.resources {
+				if resource == nil || !resource.persist || strings.TrimSpace(resource.assetPath) == "" {
+					continue
+				}
+				name := publicAssetReferenceFromPath(resource.assetPath)
+				if name == "" || references[name] {
+					continue
+				}
+				references[name] = true
+				asset := assetWrite{filename: filepath.Join(a.domainFilesDirForDomain(domain), filepath.FromSlash(name)), name: name, content: resource.content, contentType: resource.contentType}
+				previous, err := a.readFileInsideStorage(asset.filename)
+				if err != nil && !errors.Is(err, os.ErrNotExist) {
+					return err
+				}
+				asset.existed, asset.previous = err == nil, previous
+				if asset.contentType == "" {
+					asset.contentType = mime.TypeByExtension(path.Ext(name))
+				}
+				fileDelta += int64(len(asset.content) - len(previous))
+				assets = append(assets, asset)
+			}
+		}
+		usage.PageBytes += pageDelta
+		usage.RevisionBytes += revisionDelta
+		usage.FileBytes += fileDelta
+		reserved, err := transaction.ExecContext(ctx, `UPDATE domain_storage_usage SET page_bytes=?,published_page_bytes=?,revision_bytes=?,file_bytes=?,published_static_bytes=?,updated_at=? WHERE domain=? AND ?<=limit_bytes`, usage.PageBytes, usage.PublishedPageBytes, usage.RevisionBytes, usage.FileBytes, usage.PublishedStaticBytes, time.Now().UTC().Format(time.RFC3339), domain, usage.totalBytes()+usage.AnalyticsReservedBytes)
+		if err != nil {
+			return err
+		}
+		count, err := reserved.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if count != 1 {
+			return errors.New("storage limit reached")
+		}
+		for _, asset := range assets {
+			if !asset.existed || !bytes.Equal(asset.previous, asset.content) {
+				if err := a.writeAtomicStorageFile(asset.filename, asset.content); err != nil {
+					return err
+				}
+				written = append(written, asset)
+			}
+			if err := updateOrInsertFileMetadata(ctx, transaction, domainStorageName(domain), asset.name, cleanPath(ownerPath), len(asset.content), asset.contentType, time.Now().UTC().Format(time.RFC3339), "import"); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, func(storeErr error) {
+		var recoveryErr error
+		if storeErr != nil {
+			for _, asset := range written {
+				if asset.existed {
+					recoveryErr = errors.Join(recoveryErr, a.writeAtomicStorageFile(asset.filename, asset.previous))
+				} else {
+					recoveryErr = errors.Join(recoveryErr, a.removeInsideStorage(asset.filename))
+				}
+			}
+		}
+		completed <- errors.Join(storeErr, recoveryErr)
+	})
+	// Cancellation can end the SQL adapter's wait before compensation ends.
+	// A started batch retains its response channel until its files are settled.
+	select {
+	case <-started:
+		err = <-completed
+	default:
+	}
+	if err == nil {
+		a.reportHostingSnapshotAsync(ctx)
+	}
+	return err
+}
+
 func (a *App) saveAIPage(ctx context.Context, domain string, request aieditor.Request) (Page, error) {
 	pagePath := cleanPath(request.Path)
 	if strings.TrimSpace(request.Path) == "" {
@@ -13105,6 +13685,9 @@ func (a *App) publishAI(ctx context.Context, domain string) error {
 // Both the administrator and capability adapters publish through the database
 // owner's transaction, including quota, static-file rollback and impact events.
 func (a *App) publishPageCandidate(ctx context.Context, domain string, candidate publishPageCandidate) (bool, error) {
+	if candidate.Delete {
+		return a.publishPendingPageDeletion(ctx, domain, candidate)
+	}
 	if !a.shouldUpdatePublishedPage(ctx, domain, candidate.Path, candidate.HTML) {
 		return false, nil
 	}
@@ -14753,6 +15336,18 @@ func (a *App) siteMCPRoute(w http.ResponseWriter, r *http.Request) bool {
 	origin := requestScheme(r) + "://" + r.Host
 	resource := origin + sitemcp.Path
 	domain := a.siteDomain(r.Context(), r)
+	if endpoint == sitemcp.Path {
+		w.Header().Add("Vary", "Accept")
+		if owner && (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
+			strings.Contains(r.Header.Get("Accept"), "text/html") &&
+			r.Header.Get("Authorization") == "" && r.Header.Get("MCP-Protocol-Version") == "" && r.Header.Get("Mcp-Session-Id") == "" {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			if r.Method == http.MethodGet {
+				a.render(w, r, "mcp.html", map[string]any{"MCPURL": resource, "SignedIn": a.isAdminRequest(r), "LoginURL": loginURLForRequest(r)})
+			}
+			return true
+		}
+	}
 	writeJSON := func(status int, result any) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
@@ -15025,6 +15620,9 @@ func (a *App) invokeMCPAIContent(r *http.Request, domain string, invocation site
 	case "publish", "rollback":
 		method = http.MethodPost
 	}
+	if isAISiteOperation(operation) && operation != "get_site_state" && operation != "get_page_settings" && operation != "get_import_status" {
+		method = http.MethodPost
+	}
 	request := r.Clone(r.Context())
 	request.Method = method
 	requestURL := *request.URL
@@ -15046,6 +15644,13 @@ func (a *App) invokeMCPAIContent(r *http.Request, domain string, invocation site
 	editorRequest := arguments.EditorRequest()
 	editorRequest.Operation = aieditor.Operation(operation)
 	encoded, err := json.Marshal(editorRequest)
+	if operation == "import_site" || operation == "get_import_status" || operation == "cancel_import" {
+		encoded, err = json.Marshal(arguments)
+	}
+	if arguments.JobID != "" {
+		query.Set("job_id", arguments.JobID)
+		request.URL.RawQuery = query.Encode()
+	}
 	if err != nil {
 		return sitemcp.Result{}, err
 	}
@@ -15255,7 +15860,7 @@ func (a *App) aiCapabilityRequest(w http.ResponseWriter, r *http.Request, domain
 		http.NotFound(w, r)
 		return
 	}
-	if operation == "pages" || operation == "page" || operation == "file" || operation == "files" || operation == "revisions" || operation == "publish" || operation == "rollback" || isAIAnalyticsOperation(operation) {
+	if operation == "pages" || operation == "page" || operation == "file" || operation == "files" || operation == "revisions" || operation == "publish" || operation == "rollback" || isAIAnalyticsOperation(operation) || isAISiteOperation(operation) {
 		a.aiContentEndpoint(w, r, domain, token, operation)
 		return
 	}
@@ -15619,6 +16224,10 @@ func (a *App) aiContentEndpoint(w http.ResponseWriter, r *http.Request, domain, 
 func (a *App) serveAuthorizedAIContent(w http.ResponseWriter, r *http.Request, domain string, capability aicapability.Capability, session aicapability.Session, operation string, draftOnly bool) {
 	r, finishSession := aiSessionRequest(r, session)
 	defer finishSession()
+	if isAISiteOperation(operation) {
+		a.aiSiteOperationEndpoint(w, r, domain, capability, session, operation)
+		return
+	}
 	scopedPagePath := ""
 	if strings.TrimSpace(capability.PagePath) != "" {
 		scopedPagePath = cleanPath(capability.PagePath)
@@ -19208,6 +19817,10 @@ func (a *App) persistPageSave(ctx context.Context, domain, previousPath, pagePat
 		if options.operation == aieditor.OperationUpdatePage && !pageExists {
 			return errors.New("page not found")
 		}
+		var pendingDeletion int
+		if err := transaction.QueryRowContext(ctx, `SELECT COUNT(*) FROM page_pending_deletions WHERE domain=? AND path=?`, domain, pagePath).Scan(&pendingDeletion); err != nil {
+			return err
+		}
 		if options.expectedVersion != "" {
 			var currentRevision int
 			if err := transaction.QueryRowContext(ctx, `SELECT COALESCE(MAX(id),0) FROM revisions WHERE domain=? AND page_path=?`, domain, pagePath).Scan(&currentRevision); err != nil {
@@ -19217,7 +19830,7 @@ func (a *App) persistPageSave(ctx context.Context, domain, previousPath, pagePat
 			if options.strictVersion || strings.Contains(options.expectedVersion, ":") {
 				for _, previousPage := range previousPages {
 					if previousPage.path == pagePath {
-						currentVersion = aiPageVersion(aiPageView{Path: pagePath, Title: previousPage.title, HTML: previousPage.html, Published: previousPage.published}, currentVersion)
+						currentVersion = aiPageVersion(aiPageView{Path: pagePath, Title: previousPage.title, HTML: previousPage.html, Published: previousPage.published, PendingDelete: pendingDeletion != 0}, currentVersion)
 						break
 					}
 				}
@@ -19229,6 +19842,9 @@ func (a *App) persistPageSave(ctx context.Context, domain, previousPath, pagePat
 			}
 		}
 
+		if _, err := transaction.ExecContext(ctx, `DELETE FROM page_pending_deletions WHERE domain=? AND path=?`, domain, pagePath); err != nil {
+			return err
+		}
 		changedBlocks := map[string]string{}
 		classActions := sitebrushtemplate.ClassActionSet{}
 		if pageContentKind(pagePath, savedHTML) == "html" {
@@ -19262,7 +19878,7 @@ func (a *App) persistPageSave(ctx context.Context, domain, previousPath, pagePat
 				nextPage.html, _ = sitebrushtemplate.SynchronizeClasses(nextPage.html, classActions)
 				nextPage.html, _ = sitebrushtemplate.ReplaceBlocks(nextPage.html, changedBlocks)
 			}
-			if nextPage.html == previousPage.html && nextPage.title == previousPage.title && nextPage.published == previousPage.published {
+			if nextPage.html == previousPage.html && nextPage.title == previousPage.title && nextPage.published == previousPage.published && !(previousPage.path == pagePath && pendingDeletion != 0) {
 				continue
 			}
 			pageDelta += int64(len(nextPage.html) - len(previousPage.html))
@@ -22095,6 +22711,7 @@ func (a *App) importWholeRemoteSite(ctx context.Context, importRequest grabImpor
 		if activeRunErr == nil {
 			importRequest.ImportID = activeRun.ID
 			importRequest.AutoDetectTemplates = activeRun.AutoDetectTemplates
+			importRequest.DraftOnly = importRequest.DraftOnly || activeRun.DraftOnly
 			if claimErr := crawler.ClaimImportFrontier(ctx, a.db, importRequest.ImportID, importRequest.Domain); claimErr != nil {
 				return grabImportResult{}, claimErr
 			}
@@ -22106,7 +22723,7 @@ func (a *App) importWholeRemoteSite(ctx context.Context, importRequest grabImpor
 			}
 			importRequest.ImportID = randomAccessToken()
 			a.ensureDomainStorageUsageRow(ctx, importRequest.Domain)
-			run := crawler.ImportFrontierRun{ID: importRequest.ImportID, Domain: importRequest.Domain, PagePath: importRequest.PagePath, SourceURL: importRequest.RemoteSourceURL.String(), AutoDetectTemplates: importRequest.AutoDetectTemplates}
+			run := crawler.ImportFrontierRun{ID: importRequest.ImportID, Domain: importRequest.Domain, PagePath: importRequest.PagePath, SourceURL: importRequest.RemoteSourceURL.String(), AutoDetectTemplates: importRequest.AutoDetectTemplates, DraftOnly: importRequest.DraftOnly}
 			if createErr := crawler.CreateImportFrontier(ctx, a.db, run); createErr != nil {
 				return grabImportResult{}, createErr
 			}
@@ -22131,6 +22748,7 @@ func (a *App) importWholeRemoteSite(ctx context.Context, importRequest grabImpor
 		importRequest.RemoteSourceURL = storedSourceURL
 		importRequest.SourceURL = storedSourceURL.String()
 		importRequest.AutoDetectTemplates = run.AutoDetectTemplates
+		importRequest.DraftOnly = importRequest.DraftOnly || run.DraftOnly
 		if claimErr := crawler.ClaimImportFrontier(ctx, a.db, importRequest.ImportID, importRequest.Domain); claimErr != nil {
 			return grabImportResult{}, claimErr
 		}
@@ -22163,19 +22781,7 @@ func (a *App) importWholeRemoteSite(ctx context.Context, importRequest grabImpor
 		}
 		return result, nil
 	}
-	pageDelta, publishedPageDelta, revisionDelta, publishedStaticDelta := a.estimateImportedPagesStorageDelta(ctx, importRequest.Domain, importedPages)
-	fileDelta := a.estimateImportedFileDelta(importRequest.Domain, spider)
-	if storageErr := a.applyDomainStorageDelta(ctx, importRequest.Domain, pageDelta, publishedPageDelta, revisionDelta, fileDelta, publishedStaticDelta); storageErr != nil {
-		_ = crawler.SetImportFrontierRunState(ctx, a.db, importRequest.ImportID, importRequest.Domain, "partial")
-		return grabImportResult{FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap()}, storageErr
-	}
-	if persistErr := a.persistSpiderAssets(ctx, spider, importRequest.PagePath); persistErr != nil {
-		_ = a.applyDomainStorageDelta(ctx, importRequest.Domain, -pageDelta, -publishedPageDelta, -revisionDelta, -fileDelta, -publishedStaticDelta)
-		_ = crawler.SetImportFrontierRunState(ctx, a.db, importRequest.ImportID, importRequest.Domain, "partial")
-		return grabImportResult{FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap()}, persistErr
-	}
-	if storeErr := a.storeWholeSiteImportedPages(ctx, importRequest.Domain, importedPages); storeErr != nil {
-		_ = a.applyDomainStorageDelta(ctx, importRequest.Domain, -pageDelta, -publishedPageDelta, -revisionDelta, -fileDelta, -publishedStaticDelta)
+	if storeErr := a.persistWholeSiteImportBatch(ctx, importRequest, importedPages, spider); storeErr != nil {
 		_ = crawler.SetImportFrontierRunState(ctx, a.db, importRequest.ImportID, importRequest.Domain, "partial")
 		return grabImportResult{FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap()}, storeErr
 	}
@@ -22204,13 +22810,7 @@ func (a *App) importWholeRemoteSite(ctx context.Context, importRequest grabImpor
 				a.preserveWholeSiteImportForResume(ctx, importRequest.Domain, importRequest.ImportID, completedPageKeys)
 				return grabImportResult{}, detectErr
 			}
-			templatePageDelta, templatePublishedPageDelta, templateRevisionDelta, templateStaticDelta := a.estimateImportedPagesStorageDelta(ctx, importRequest.Domain, detectedPages)
-			if storageErr := a.applyDomainStorageDelta(ctx, importRequest.Domain, templatePageDelta, templatePublishedPageDelta, templateRevisionDelta, 0, templateStaticDelta); storageErr != nil {
-				a.preserveWholeSiteImportForResume(ctx, importRequest.Domain, importRequest.ImportID, completedPageKeys)
-				return grabImportResult{}, storageErr
-			}
-			if storeErr := a.storeWholeSiteImportedPages(ctx, importRequest.Domain, detectedPages); storeErr != nil {
-				_ = a.applyDomainStorageDelta(ctx, importRequest.Domain, -templatePageDelta, -templatePublishedPageDelta, -templateRevisionDelta, 0, -templateStaticDelta)
+			if storeErr := a.persistWholeSiteImportBatch(ctx, importRequest, detectedPages, nil); storeErr != nil {
 				a.preserveWholeSiteImportForResume(ctx, importRequest.Domain, importRequest.ImportID, completedPageKeys)
 				return grabImportResult{}, storeErr
 			}
@@ -22512,7 +23112,30 @@ func downloadWholeSitePageHTMLWithRetries(ctx context.Context, client *http.Clie
 	return "", false, lastErr
 }
 
-func (a *App) storeWholeSiteImportedPages(ctx context.Context, domain string, importedPages []wholeSiteImportedPage) error {
+func (a *App) persistWholeSiteImportBatch(ctx context.Context, request grabImportRequest, pages []wholeSiteImportedPage, spider *pageSpider) error {
+	if request.DraftOnly {
+		return a.persistImportedDraftPages(ctx, request.Domain, request.PagePath, pages, spider)
+	}
+	pageDelta, publishedDelta, revisionDelta, staticDelta := a.estimateImportedPagesStorageDelta(ctx, request.Domain, pages)
+	fileDelta := a.estimateImportedFileDelta(request.Domain, spider)
+	if err := a.applyDomainStorageDelta(ctx, request.Domain, pageDelta, publishedDelta, revisionDelta, fileDelta, staticDelta); err != nil {
+		return err
+	}
+	if err := a.persistSpiderAssets(ctx, spider, request.PagePath); err != nil {
+		_ = a.applyDomainStorageDelta(ctx, request.Domain, -pageDelta, -publishedDelta, -revisionDelta, -fileDelta, -staticDelta)
+		return err
+	}
+	if err := a.storeWholeSiteImportedPages(ctx, request.Domain, pages); err != nil {
+		_ = a.applyDomainStorageDelta(ctx, request.Domain, -pageDelta, -publishedDelta, -revisionDelta, -fileDelta, -staticDelta)
+		return err
+	}
+	return nil
+}
+
+func (a *App) storeWholeSiteImportedPages(ctx context.Context, domain string, importedPages []wholeSiteImportedPage, draftOnly ...bool) error {
+	if len(draftOnly) != 0 && draftOnly[0] {
+		return a.storeImportedDraftPages(ctx, domain, importedPages)
+	}
 	frozenDomain := a.isDomainFrozen(ctx, domain)
 	for _, importedPage := range importedPages {
 		pagePath := cleanPath(importedPage.LocalPath)
@@ -22538,8 +23161,8 @@ func (a *App) storeWholeSiteImportedPages(ctx context.Context, domain string, im
 	return nil
 }
 
-func (a *App) estimateImportedPagesStorageDelta(ctx context.Context, domain string, importedPages []wholeSiteImportedPage) (int64, int64, int64, int64) {
-	frozenDomain := a.isDomainFrozen(ctx, domain)
+func (a *App) estimateImportedPagesStorageDelta(ctx context.Context, domain string, importedPages []wholeSiteImportedPage, draftOnly ...bool) (int64, int64, int64, int64) {
+	frozenDomain := a.isDomainFrozen(ctx, domain) || len(draftOnly) != 0 && draftOnly[0]
 	var pageDelta int64
 	var publishedPageDelta int64
 	var revisionDelta int64
@@ -24174,9 +24797,9 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 	if trialAvailability.Enabled {
 		publicTrialEmbedHTML = publicTrialSignupEmbedHTML(r, translations)
 	}
-	expensesTitle := translationOrDefault(translations, "expenses_title", "Сервер и расходы")
+	expensesTitle := translationOrDefault(translations, "expenses_title", "Server settings")
 	if normalizeDomainName(snapshot.MainDomain) == "sitebrush.com" {
-		expensesTitle = translationOrDefault(translations, "expenses_central_title", "Серверы и расходы")
+		expensesTitle = translationOrDefault(translations, "expenses_central_title", "Server settings")
 	}
 	return map[string]any{
 		"T":                        translations,
@@ -27135,6 +27758,7 @@ func (a *App) applyLatestActiveRevision(ctx context.Context, domain string, page
 			diagnosticlog.SafeLogValue(domain), diagnosticlog.SafeLogValue(pagePath), diagnosticlog.SafeLogValue(storageErr.Error()))
 		return
 	}
+	_, _ = a.db.ExecContext(ctx, `DELETE FROM page_pending_deletions WHERE domain=? AND path=?`, domain, pagePath)
 	a.clearPageRedirectSource(ctx, domain, pagePath)
 	_, _ = a.db.ExecContext(ctx, `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, pageTitle, latestActiveHTML)
 	if !a.isDomainFrozen(ctx, domain) {
@@ -27144,6 +27768,7 @@ func (a *App) applyLatestActiveRevision(ctx context.Context, domain string, page
 }
 
 func (a *App) removeManagedPage(ctx context.Context, domain string, pagePath string) {
+	_, _ = a.db.ExecContext(ctx, `DELETE FROM page_pending_deletions WHERE domain=? AND path=?`, domain, pagePath)
 	var storedHTML string
 	_ = a.db.QueryRowContext(ctx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&storedHTML)
 	var publishedHTML string
@@ -28055,78 +28680,81 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 			}
 		}
 	}
+	_, aiOwnerAdmitted := a.aiIngressDecisionForRequest(r)
 	a.render(w, r, "profile.html", map[string]any{
-		"ProfileSessions":            profileSessions,
-		"ProfileSessionsMore":        profileSessionsMore,
-		"ProfileSessionCount":        profileSessionCount,
-		"AIEditorCapabilities":       aiEditorCapabilities,
-		"AIEditorSessions":           aiEditorSessions,
-		"AdminAllowedIPs":            adminAllowedIPs,
-		"AdminAllowedIPMore":         adminAllowedIPMore,
-		"AdminAllowedIPCount":        adminAllowedIPCount,
-		"AdminIPCandidates":          adminIPCandidates,
-		"AdminIPProtectionEnabled":   adminIPProtectionEnabled,
-		"AdminStealthEnabled":        adminStealthEnabled,
-		"CurrentAdminIP":             canonicalAccountIP(accountClientIP(r)),
-		"Passkeys":                   passkeys,
-		"ProfileFormAction":          profileFormAction(r),
-		"AdminIPStatus":              adminIPStatus,
-		"AdminIPDraft":               adminIPDraft,
-		"PasskeyPagination":          passkeyPagination,
-		"SessionPagination":          sessionPagination,
-		"IPPagination":               ipPagination,
-		"AIAccessPagination":         aiAccessPagination,
-		"AISessionPagination":        aiSessionPagination,
-		"HasAIAccess":                aiAccessPagination.Count+aiSessionPagination.Count > 0,
-		"AIIngressPolicy":            a.aiProviderPolicy(r),
-		"AIIngressProviders":         aiingress.Providers(),
-		"PasskeyOffer":               passkeyOffer,
-		"PasskeyContinuePath":        passkeyContinuePath,
-		"TOTPEnabled":                totpEnabled,
-		"TOTPSetupSecret":            totpSetupSecret,
-		"TOTPSetupURI":               totpSetupURI,
-		"TOTPSetupQRCode":            totpSetupQRCode,
-		"AccountCSRF":                accountCSRF(r),
-		"CodeWebmail":                webmailProviderForAddress(email),
-		"EmailChange":                emailChange,
-		"ProfileCodeAction":          "?profile&profile_resume=" + url.QueryEscape(r.URL.Query().Get("profile_resume")),
-		"Email":                      strings.TrimSpace(email),
-		"Status":                     status,
-		"StatusClass":                statusClass,
-		"ShowPasswordCodeForm":       showPasswordCodeForm,
-		"ShowPasswordForm":           emailChange.Step != 2 && !showPasswordCodeForm && !hardLocked && blockedUntil.IsZero(),
-		"PasswordConfirmationToken":  passwordConfirmationToken,
-		"PasswordWebmailProvider":    passwordWebmailProvider,
-		"BlockedUntilUnix":           blockedUntil.Unix(),
-		"BlockedUntilISO":            blockedUntil.UTC().Format(time.RFC3339),
-		"IsHardLocked":               hardLocked,
-		"EmailDelivery":              emailDeliveryView,
-		"Title":                      translationOrDefault(translations, "profile_title", "Account"),
-		"EmailLabel":                 translationOrDefault(translations, "profile_email", "Email"),
-		"EmailFormTitle":             translationOrDefault(translations, "profile_email_form_title", "Change email"),
-		"EmailFormHint":              translationOrDefault(translations, "profile_email_form_hint", "A one-time code will be sent to your current email address."),
-		"EmailSubmitLabel":           translationOrDefault(translations, "profile_email_submit", "Send email change code"),
-		"PasswordFormTitle":          translationOrDefault(translations, "profile_password_form_title", "Change password"),
-		"PasswordFormHint":           translationOrDefault(translations, "profile_password_form_hint", "A one-time code will be sent to your current email address."),
-		"PasswordLabel":              translationOrDefault(translations, "profile_new_password", "New password"),
-		"PasswordConfirmLabel":       translationOrDefault(translations, "profile_confirm_password", "Confirm password"),
-		"PasswordSubmitLabel":        translationOrDefault(translations, "profile_password_submit", "Send password change code"),
-		"SaveLabel":                  translationOrDefault(translations, "profile_save", "Save"),
-		"PasswordCodeLabel":          translationOrDefault(translations, "profile_password_code", "6-digit code"),
-		"PasswordCodeHelp":           translationOrDefault(translations, "profile_password_code_help", "Enter the code sent to your current email address to confirm the change."),
-		"PasswordCodeSubmit":         translationOrDefault(translations, "profile_password_code_submit", "Confirm change"),
-		"CountdownLabel":             translationOrDefault(translations, "login_retry_in", "You can try again in:"),
-		"RetryAtLabel":               translationOrDefault(translations, "login_retry_at", "You can try again at:"),
-		"TryAgainNowText":            translationOrDefault(translations, "login_try_again_now", "You can try again now."),
-		"RecoveryRequiredText":       translationOrDefault(translations, "login_recovery_required", "Use account recovery to continue."),
-		"EmailSendProgressTitle":     translationOrDefault(translations, "profile_email_send_progress_title", "Sending email and waiting for SMTP confirmation..."),
-		"EmailSendProgressStepOne":   translationOrDefault(translations, "profile_email_send_progress_step_one", "Preparing the confirmation code"),
-		"EmailSendProgressStepTwo":   translationOrDefault(translations, "profile_email_send_progress_step_two", "Looking up the recipient mail server"),
-		"EmailSendProgressStepThree": translationOrDefault(translations, "profile_email_send_progress_step_three", "Opening the SMTP connection"),
-		"EmailSendProgressStepFour":  translationOrDefault(translations, "profile_email_send_progress_step_four", "Sending the message body"),
-		"EmailSendProgressStepFive":  translationOrDefault(translations, "profile_email_send_progress_step_five", "Waiting for the recipient server response"),
-		"EmailSendProgressTimeout":   translationOrDefault(translations, "profile_email_send_progress_timeout", "Still waiting for the mail server. The final result will appear here as soon as it responds."),
-		"EmailSendProgressPrefix":    translationOrDefault(translations, "profile_email_send_progress_prefix", "SMTP timeout countdown:"),
+		"ProfileSessions":              profileSessions,
+		"ProfileSessionsMore":          profileSessionsMore,
+		"ProfileSessionCount":          profileSessionCount,
+		"AIEditorCapabilities":         aiEditorCapabilities,
+		"AIEditorSessions":             aiEditorSessions,
+		"AdminAllowedIPs":              adminAllowedIPs,
+		"AdminAllowedIPMore":           adminAllowedIPMore,
+		"AdminAllowedIPCount":          adminAllowedIPCount,
+		"AdminIPCandidates":            adminIPCandidates,
+		"AdminIPProtectionEnabled":     adminIPProtectionEnabled,
+		"AdminStealthEnabled":          adminStealthEnabled,
+		"CurrentAdminIP":               canonicalAccountIP(accountClientIP(r)),
+		"Passkeys":                     passkeys,
+		"ProfileFormAction":            profileFormAction(r),
+		"AdminIPStatus":                adminIPStatus,
+		"AdminIPDraft":                 adminIPDraft,
+		"PasskeyPagination":            passkeyPagination,
+		"SessionPagination":            sessionPagination,
+		"IPPagination":                 ipPagination,
+		"AIAccessPagination":           aiAccessPagination,
+		"AISessionPagination":          aiSessionPagination,
+		"HasAIAccess":                  aiAccessPagination.Count+aiSessionPagination.Count > 0,
+		"AIIngressPolicy":              a.aiProviderPolicy(r),
+		"AIIngressProviders":           aiingress.Providers(),
+		"AICurrentIPAdmitted":          aiOwnerAdmitted,
+		"AIAdministratorAuthenticated": authenticated,
+		"PasskeyOffer":                 passkeyOffer,
+		"PasskeyContinuePath":          passkeyContinuePath,
+		"TOTPEnabled":                  totpEnabled,
+		"TOTPSetupSecret":              totpSetupSecret,
+		"TOTPSetupURI":                 totpSetupURI,
+		"TOTPSetupQRCode":              totpSetupQRCode,
+		"AccountCSRF":                  accountCSRF(r),
+		"CodeWebmail":                  webmailProviderForAddress(email),
+		"EmailChange":                  emailChange,
+		"ProfileCodeAction":            "?profile&profile_resume=" + url.QueryEscape(r.URL.Query().Get("profile_resume")),
+		"Email":                        strings.TrimSpace(email),
+		"Status":                       status,
+		"StatusClass":                  statusClass,
+		"ShowPasswordCodeForm":         showPasswordCodeForm,
+		"ShowPasswordForm":             emailChange.Step != 2 && !showPasswordCodeForm && !hardLocked && blockedUntil.IsZero(),
+		"PasswordConfirmationToken":    passwordConfirmationToken,
+		"PasswordWebmailProvider":      passwordWebmailProvider,
+		"BlockedUntilUnix":             blockedUntil.Unix(),
+		"BlockedUntilISO":              blockedUntil.UTC().Format(time.RFC3339),
+		"IsHardLocked":                 hardLocked,
+		"EmailDelivery":                emailDeliveryView,
+		"Title":                        translationOrDefault(translations, "profile_title", "Account"),
+		"EmailLabel":                   translationOrDefault(translations, "profile_email", "Email"),
+		"EmailFormTitle":               translationOrDefault(translations, "profile_email_form_title", "Change email"),
+		"EmailFormHint":                translationOrDefault(translations, "profile_email_form_hint", "A one-time code will be sent to your current email address."),
+		"EmailSubmitLabel":             translationOrDefault(translations, "profile_email_submit", "Send email change code"),
+		"PasswordFormTitle":            translationOrDefault(translations, "profile_password_form_title", "Change password"),
+		"PasswordFormHint":             translationOrDefault(translations, "profile_password_form_hint", "A one-time code will be sent to your current email address."),
+		"PasswordLabel":                translationOrDefault(translations, "profile_new_password", "New password"),
+		"PasswordConfirmLabel":         translationOrDefault(translations, "profile_confirm_password", "Confirm password"),
+		"PasswordSubmitLabel":          translationOrDefault(translations, "profile_password_submit", "Send password change code"),
+		"SaveLabel":                    translationOrDefault(translations, "profile_save", "Save"),
+		"PasswordCodeLabel":            translationOrDefault(translations, "profile_password_code", "6-digit code"),
+		"PasswordCodeHelp":             translationOrDefault(translations, "profile_password_code_help", "Enter the code sent to your current email address to confirm the change."),
+		"PasswordCodeSubmit":           translationOrDefault(translations, "profile_password_code_submit", "Confirm change"),
+		"CountdownLabel":               translationOrDefault(translations, "login_retry_in", "You can try again in:"),
+		"RetryAtLabel":                 translationOrDefault(translations, "login_retry_at", "You can try again at:"),
+		"TryAgainNowText":              translationOrDefault(translations, "login_try_again_now", "You can try again now."),
+		"RecoveryRequiredText":         translationOrDefault(translations, "login_recovery_required", "Use account recovery to continue."),
+		"EmailSendProgressTitle":       translationOrDefault(translations, "profile_email_send_progress_title", "Sending email and waiting for SMTP confirmation..."),
+		"EmailSendProgressStepOne":     translationOrDefault(translations, "profile_email_send_progress_step_one", "Preparing the confirmation code"),
+		"EmailSendProgressStepTwo":     translationOrDefault(translations, "profile_email_send_progress_step_two", "Looking up the recipient mail server"),
+		"EmailSendProgressStepThree":   translationOrDefault(translations, "profile_email_send_progress_step_three", "Opening the SMTP connection"),
+		"EmailSendProgressStepFour":    translationOrDefault(translations, "profile_email_send_progress_step_four", "Sending the message body"),
+		"EmailSendProgressStepFive":    translationOrDefault(translations, "profile_email_send_progress_step_five", "Waiting for the recipient server response"),
+		"EmailSendProgressTimeout":     translationOrDefault(translations, "profile_email_send_progress_timeout", "Still waiting for the mail server. The final result will appear here as soon as it responds."),
+		"EmailSendProgressPrefix":      translationOrDefault(translations, "profile_email_send_progress_prefix", "SMTP timeout countdown:"),
 	})
 }
 
@@ -36287,16 +36915,16 @@ func (a *App) storePreparedImageReplacement(r *http.Request, currentPath string,
 	return a.storePreparedFiles(r.Context(), a.siteDomain(r.Context(), r), currentPath, prepared)
 }
 
-func updateOrInsertUploadedFileMetadata(ctx context.Context, database sqlExecutor, domain, filename, pagePath string, size int, mime, now string) error {
+func updateOrInsertFileMetadata(ctx context.Context, database sqlExecutor, domain, filename, pagePath string, size int, mime, now, source string) error {
 	var existing int
 	if err := database.QueryRowContext(ctx, `SELECT COUNT(1) FROM file_metadata WHERE domain=? AND file_name=?`, domain, filename).Scan(&existing); err != nil {
 		return err
 	}
 	if existing != 0 {
-		_, err := database.ExecContext(ctx, `UPDATE file_metadata SET page_path=?,size=?,mime_type=?,updated_at=?,source=? WHERE domain=? AND file_name=?`, pagePath, size, mime, now, "upload", domain, filename)
+		_, err := database.ExecContext(ctx, `UPDATE file_metadata SET page_path=?,size=?,mime_type=?,updated_at=?,source=? WHERE domain=? AND file_name=?`, pagePath, size, mime, now, source, domain, filename)
 		return err
 	}
-	_, err := database.ExecContext(ctx, `INSERT INTO file_metadata(domain,file_name,page_path,size,mime_type,created_at,updated_at,source,download_count) VALUES(?,?,?,?,?,?,?,?,0)`, domain, filename, pagePath, size, mime, now, now, "upload")
+	_, err := database.ExecContext(ctx, `INSERT INTO file_metadata(domain,file_name,page_path,size,mime_type,created_at,updated_at,source,download_count) VALUES(?,?,?,?,?,?,?,?,0)`, domain, filename, pagePath, size, mime, now, now, source)
 	return err
 }
 
@@ -36359,7 +36987,7 @@ func (a *App) storePreparedFiles(ctx context.Context, domain, currentPath string
 				}
 				created = append(created, target)
 			}
-			if err := updateOrInsertUploadedFileMetadata(ctx, transaction, domainStorageName(domain), write.name, currentPath, len(write.file.Content), write.file.MIME, now); err != nil {
+			if err := updateOrInsertFileMetadata(ctx, transaction, domainStorageName(domain), write.name, currentPath, len(write.file.Content), write.file.MIME, now, "upload"); err != nil {
 				return err
 			}
 		}
@@ -39721,9 +40349,9 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
 	publishLabel := template.JSEscapeString(translationOrDefault(translations, "menu_publish", "Publish"))
 	settingsLabel := template.JSEscapeString(translationOrDefault(translations, "menu_domain_settings", "Settings"))
 	analyticsLabel := template.JSEscapeString(translationOrDefault(translations, "menu_analytics", "Analytics"))
-	hostingAndSupportLabel := translationOrDefault(translations, "menu_expenses", "Сервер и расходы")
+	hostingAndSupportLabel := translationOrDefault(translations, "menu_expenses", "Server settings")
 	if normalizeDomainName(domain) == "sitebrush.com" {
-		hostingAndSupportLabel = translationOrDefault(translations, "menu_expenses_central", "Серверы и расходы")
+		hostingAndSupportLabel = translationOrDefault(translations, "menu_expenses_central", "Server settings")
 	}
 	hostingAndSupportLabel = template.JSEscapeString(hostingAndSupportLabel)
 	profileLabel := template.JSEscapeString(translationOrDefault(translations, "menu_profile", "Account"))
@@ -39743,7 +40371,11 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
 	if strings.TrimSpace(storageUsageLabel) != "" {
 		storageUsageHTML = "<span class='SiteBrushMenuStorageUsage'>" + template.HTMLEscapeString(storageUsageLabel) + "</span>"
 	}
-	copyrightMenuEntry := fmt.Sprintf("<li class='SiteBrushContextMenu ContextMenuCopyright'><div class='SiteBrushContextMenuFooter'><a href='%s' class='SiteBrushContextMenuFooterLink' target='_blank' rel='noopener noreferrer'>sitebrush</a>%s<a href='%s' class='SiteBrushContextMenuVersion' download>%s</a></div></li>", sitebrushHomeURL, storageUsageHTML, serverBinaryDownloadURL, compiledVersionLabel)
+	updateMenuLink := ""
+	if isServerManager {
+		updateMenuLink = "<a href='/?server_update' class='SiteBrushContextMenuUpdate' hidden>" + template.HTMLEscapeString(translationOrDefault(translations, "update_title", "SiteBrush updates")) + "</a>"
+	}
+	copyrightMenuEntry := fmt.Sprintf("<li class='SiteBrushContextMenu ContextMenuCopyright'><div class='SiteBrushContextMenuFooter'><a href='%s' class='SiteBrushContextMenuFooterLink' target='_blank' rel='noopener noreferrer'>sitebrush</a>%s<a href='%s' class='SiteBrushContextMenuVersion' download>%s</a></div>%s</li>", sitebrushHomeURL, storageUsageHTML, serverBinaryDownloadURL, compiledVersionLabel, updateMenuLink)
 	if isAdmin {
 		deleteActionEntry := ""
 		if revisionID > 0 {
@@ -39760,7 +40392,6 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
 		hostingAndSupportEntry := ""
 		if isServerManager {
 			hostingAndSupportEntry = "<li class='SiteBrushContextMenu SiteBrushSeparatedMenuItem SiteBrushPrivilegedMenuItem'><a href='?expenses' class='SiteBrushContextMenuLink'><img src='/p/static/sitebrush-app-icon.png' class='SiteBrushMenuIcon' alt=''>" + hostingAndSupportLabel + "</a></li>"
-			hostingAndSupportEntry += "<li class='SiteBrushContextMenu SiteBrushPrivilegedMenuItem'><a href='/?server_update' class='SiteBrushContextMenuLink'>" + template.HTMLEscapeString(translationOrDefault(translations, "update_title", "SiteBrush updates")) + "</a></li>"
 		}
 		logoutEntry := ""
 		if showLogout {
@@ -39776,6 +40407,49 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
   const currentDomainName = "` + escapedDomain + `";
   const isDomainFrozen = ` + strconv.FormatBool(isFrozen) + `;
   const mutationCSRFToken = "` + escapedMutationCSRFToken + `";
+  const serverUpdateModel = {requested: false, available: false};
+  function renderSitebrushUpdateLink() {
+    const menuHostElement = document.getElementById("SiteBrushMenuBox");
+    if (!menuHostElement) {
+      return;
+    }
+    const menuRoot = menuHostElement.shadowRoot || menuHostElement;
+    const updateLinkElement = menuRoot.querySelector(".SiteBrushContextMenuUpdate");
+    if (updateLinkElement) {
+      updateLinkElement.hidden = !serverUpdateModel.available;
+      const menuBoxElement = menuRoot.querySelector(".SiteBrushMenuBox");
+      positionSitebrushMenuBox(menuBoxElement, {clientX: parseFloat(menuBoxElement.style.left), clientY: parseFloat(menuBoxElement.style.top)});
+    }
+  }
+  function requestSitebrushUpdateStatus() {
+    renderSitebrushUpdateLink();
+    if (!` + strconv.FormatBool(isServerManager) + ` || serverUpdateModel.requested) {
+      return;
+    }
+    serverUpdateModel.requested = true;
+    const statusURL = new URL("/?server_update&server_update_ws", window.location.href);
+    statusURL.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const statusSocket = new WebSocket(statusURL.href);
+    const statusDeadline = window.setTimeout(function closeSlowUpdateStatus() { statusSocket.close(); }, 5000);
+    statusSocket.onopen = function sendUpdateStatusRequest() {
+      statusSocket.send(JSON.stringify({action: "status", csrf: mutationCSRFToken}));
+    };
+    statusSocket.onmessage = function receiveUpdateStatus(statusEvent) {
+      try {
+        const statusResponse = JSON.parse(statusEvent.data);
+        const releaseVersion = statusResponse.State && statusResponse.State.available && statusResponse.State.available.version;
+        const runningVersion = "` + template.JSEscapeString(CompileVersion) + `";
+        serverUpdateModel.available = !statusResponse.Error && /^\d+$/.test(runningVersion) && /^\d+$/.test(releaseVersion) && BigInt(releaseVersion) > BigInt(runningVersion);
+        renderSitebrushUpdateLink();
+      } catch (statusError) {
+        console.error("SiteBrush update status:", statusError);
+      } finally {
+        statusSocket.close();
+      }
+    };
+    statusSocket.onerror = function reportUpdateStatusFailure() { console.error("SiteBrush update status is unavailable"); };
+    statusSocket.onclose = function clearUpdateStatusDeadline() { window.clearTimeout(statusDeadline); };
+  }
   const siteCopyConfig = JSON.parse(new TextDecoder().decode(Uint8Array.from([` + siteCopyMenuConfigByteList(pagePath, translations) + `])));
   siteCopyConfig.csrfToken = mutationCSRFToken;
   const actionConfigByName = {
@@ -40153,9 +40827,8 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
       "` + freezeActionEntry + `",
       "<li class='SiteBrushContextMenu SiteBrushSeparatedMenuItem'><button type='button' data-sitebrush-action='tree' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/tree.png' class='SiteBrushMenuIcon' alt=''>" + "` + treeLabel + `" + "</button></li>",
       "<li class='SiteBrushContextMenu'><a href='?files' class='SiteBrushContextMenuLink'><img src='/p/static/upload.png' class='SiteBrushMenuIcon' alt=''>" + "` + filesLabel + `" + "</a></li>",
-      "<li class='SiteBrushContextMenu SiteBrushSeparatedMenuItem'><a href='?settings' class='SiteBrushContextMenuLink'><img src='/p/static/settings.png' class='SiteBrushMenuIcon' alt=''>" + "` + settingsLabel + `" + "</a></li>",
-      "<li class='SiteBrushContextMenu'><a href='?analytics' class='SiteBrushContextMenuLink'><img src='/p/static/analytics.svg' class='SiteBrushMenuIcon' alt=''>" + "` + analyticsLabel + `" + "</a></li>",
-      "<li class='SiteBrushContextMenu'><a href='/?profile#ai-access' class='SiteBrushContextMenuLink'><img src='/p/static/pencil.png' class='SiteBrushMenuIcon' alt=''>AI · SiteBrush</a></li>",
+      "<li class='SiteBrushContextMenu SiteBrushSeparatedMenuItem'><a href='?analytics' class='SiteBrushContextMenuLink'><img src='/p/static/analytics.svg' class='SiteBrushMenuIcon' alt=''>" + "` + analyticsLabel + `" + "</a></li>",
+      "<li class='SiteBrushContextMenu'><a href='?settings' class='SiteBrushContextMenuLink'><img src='/p/static/settings.png' class='SiteBrushMenuIcon' alt=''>" + "` + settingsLabel + `" + "</a></li>",
       "` + hostingAndSupportEntry + `",
       "<li class='SiteBrushContextMenu SiteBrushSeparatedMenuItem'><a href='?profile' class='SiteBrushContextMenuLink'><img src='/p/static/profile.png' class='SiteBrushMenuIcon' alt=''>" + "` + profileLabel + `" + "</a></li>",
       "` + logoutEntry + `",
@@ -40185,11 +40858,13 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
     browserEvent.preventDefault();
     browserEvent.stopPropagation();
     showSitebrushMenu(browserEvent, buildSitebrushAdminMenuEntries(sitebrushContextMenuWasOpenedByMouse(browserEvent)), currentPagePath, isDomainFrozen);
+    requestSitebrushUpdateStatus();
   }
   window.addEventListener("contextmenu", onContextMenuOpen, {capture: true, passive: false});
   document.addEventListener("contextmenu", onContextMenuOpen, {capture: true, passive: false});
   installSitebrushLongPressMenu(function openAdminMenuFromLongPress(menuPoint) {
     showSitebrushMenu(menuPoint, buildSitebrushAdminMenuEntries(false), currentPagePath, isDomainFrozen);
+    requestSitebrushUpdateStatus();
   });
   function openSiteTreeDialog() {
     closeSitebrushMenu();
@@ -40466,9 +41141,12 @@ function positionSitebrushMenuBox(menuBoxElement, menuPoint) {
   const viewportWidth = sitebrushMenuViewportNumber(window.innerWidth, document.documentElement.clientWidth || 320);
   const viewportHeight = sitebrushMenuViewportNumber(window.innerHeight, document.documentElement.clientHeight || 480);
   const viewportGap = 8;
+  menuBoxElement.style.transform = "none";
   const menuRect = menuBoxElement.getBoundingClientRect();
-  const menuWidth = Math.min(menuRect.width || 0, viewportWidth - viewportGap * 2);
-  const menuHeight = Math.min(menuRect.height || 0, viewportHeight - viewportGap * 2);
+  const menuScale = Math.min(.75, Math.max(1, viewportWidth - viewportGap * 2) / Math.max(1, menuRect.width), Math.max(1, viewportHeight - viewportGap * 2) / Math.max(1, menuRect.height));
+  menuBoxElement.style.transform = "scale(" + menuScale + ")";
+  const menuWidth = menuRect.width * menuScale;
+  const menuHeight = menuRect.height * menuScale;
   const boundedLeft = Math.max(viewportGap, Math.min(menuPoint.clientX, viewportWidth - menuWidth - viewportGap));
   const boundedTop = Math.max(viewportGap, Math.min(menuPoint.clientY, viewportHeight - menuHeight - viewportGap));
   menuBoxElement.style.left = boundedLeft + "px";
@@ -40640,7 +41318,9 @@ function showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath, froze
 // Keep guest and administrator menus at the same scale, including their shadow roots.
 func sitebrushMenuMeridianStyles() string {
 	return `
-.SiteBrushMenuBox{transform:scale(.75);transform-origin:top left;border-radius:13.333px;background:#fff;border-color:#c9cfd8;box-shadow:0 12px 36px rgba(0,0,0,.16);padding:6px}
+.SiteBrushMenuBox{transform:scale(.75);transform-origin:top left;max-height:none;overflow:visible;border-radius:13.333px;background:#fff;border-color:#c9cfd8;box-shadow:0 12px 36px rgba(0,0,0,.16);padding:6px}
+.SiteBrushContextMenuUpdate,.SiteBrushContextMenuUpdate:link,.SiteBrushContextMenuUpdate:visited,.SiteBrushContextMenuUpdate:hover,.SiteBrushContextMenuUpdate:active{display:block;text-align:center;padding:0 10px 8px;font:11px Arial,Helvetica,sans-serif;color:#5b6f8b;text-decoration:none;cursor:pointer}
+.SiteBrushContextMenuUpdate[hidden]{display:none}
 .SiteBrushContextMenuLink{border-radius:8px}
 .SiteBrushConfirmOverlay,.SiteBrushTreeOverlay{padding:16px!important;box-sizing:border-box!important}
 .SiteBrushConfirmModal,.SiteBrushTreeModal{box-sizing:border-box!important;min-width:0!important;width:min(100%,420px);max-width:100%!important;max-height:calc(100dvh - 32px)!important;overflow:auto!important;border:1px solid #c9cfd8!important;border-radius:10px!important;padding:24px!important;background:#fff!important;color:#181b21!important;box-shadow:0 20px 60px rgba(0,0,0,.2);font-family:Geist,ui-sans-serif,system-ui,sans-serif!important;font-size:14px!important;line-height:1.5!important}
@@ -40656,6 +41336,7 @@ func sitebrushMenuMeridianStyles() string {
 .SiteBrushTreeCloseButton{margin:24px 0 0!important}
 @media(prefers-color-scheme:dark){
  .SiteBrushMenuBox{background:#1c2027;border-color:#353c48}
+ .SiteBrushContextMenuUpdate,.SiteBrushContextMenuUpdate:link,.SiteBrushContextMenuUpdate:visited,.SiteBrushContextMenuUpdate:hover,.SiteBrushContextMenuUpdate:active{color:#a7bbd8}
  .SiteBrushConfirmModal,.SiteBrushTreeModal{background:#1c2027!important;color:#e6e9ef!important;border-color:#353c48!important;border-radius:8px!important;font-family:Outfit,Geist,ui-sans-serif,system-ui,sans-serif!important}
  .SiteBrushConfirmButton,.SiteBrushCancelButton,.SiteBrushTreeCloseButton,.SiteBrushPasswordInput{background:#232831!important;color:#e6e9ef!important;border-color:#353c48!important}
 }
@@ -40810,9 +41491,12 @@ function positionSitebrushMenuBox(menuBoxElement, menuPoint) {
   const viewportWidth = sitebrushMenuViewportNumber(window.innerWidth, document.documentElement.clientWidth || 320);
   const viewportHeight = sitebrushMenuViewportNumber(window.innerHeight, document.documentElement.clientHeight || 480);
   const viewportGap = 8;
+  menuBoxElement.style.transform = "none";
   const menuRect = menuBoxElement.getBoundingClientRect();
-  const menuWidth = Math.min(menuRect.width || 0, viewportWidth - viewportGap * 2);
-  const menuHeight = Math.min(menuRect.height || 0, viewportHeight - viewportGap * 2);
+  const menuScale = Math.min(.75, Math.max(1, viewportWidth - viewportGap * 2) / Math.max(1, menuRect.width), Math.max(1, viewportHeight - viewportGap * 2) / Math.max(1, menuRect.height));
+  menuBoxElement.style.transform = "scale(" + menuScale + ")";
+  const menuWidth = menuRect.width * menuScale;
+  const menuHeight = menuRect.height * menuScale;
   const boundedLeft = Math.max(viewportGap, Math.min(menuPoint.clientX, viewportWidth - menuWidth - viewportGap));
   const boundedTop = Math.max(viewportGap, Math.min(menuPoint.clientY, viewportHeight - menuHeight - viewportGap));
   menuBoxElement.style.left = boundedLeft + "px";
@@ -46221,7 +46905,7 @@ func (a *App) countPublishChanges(ctx context.Context, domain string) (int, int,
 		return 0, 0, changedPagePaths
 	}
 	for _, pageCandidate := range pageList {
-		if a.shouldUpdatePublishedPage(ctx, domain, pageCandidate.Path, pageCandidate.HTML) {
+		if pageCandidate.Delete || a.shouldUpdatePublishedPage(ctx, domain, pageCandidate.Path, pageCandidate.HTML) {
 			changedPagesCount++
 			changedPagePaths = append(changedPagePaths, pageCandidate.Path)
 		}
@@ -46251,7 +46935,7 @@ func (a *App) collectPublishPageCandidates(ctx context.Context, domain string) (
 			return nil, rowsErr
 		}
 	}
-	pageRows, pageQueryErr := a.db.QueryContext(ctx, `SELECT path,title,html FROM pages WHERE domain=? ORDER BY path ASC`, domain)
+	pageRows, pageQueryErr := a.db.QueryContext(ctx, `SELECT path,title,html,EXISTS(SELECT 1 FROM page_pending_deletions WHERE domain=pages.domain AND path=pages.path) FROM pages WHERE domain=? ORDER BY path ASC`, domain)
 	if pageQueryErr != nil {
 		return nil, pageQueryErr
 	}
@@ -46259,14 +46943,15 @@ func (a *App) collectPublishPageCandidates(ctx context.Context, domain string) (
 	pageList := make([]publishPageCandidate, 0)
 	for pageRows.Next() {
 		var pagePath, pageTitle, draftHTML string
-		if scanErr := pageRows.Scan(&pagePath, &pageTitle, &draftHTML); scanErr != nil {
+		var deleting bool
+		if scanErr := pageRows.Scan(&pagePath, &pageTitle, &draftHTML, &deleting); scanErr != nil {
 			continue
 		}
 		pageHTMLToPublish := draftHTML
 		if latestActiveHTML, foundLatestActiveRevision := latestRevisionByPath[pagePath]; foundLatestActiveRevision {
 			pageHTMLToPublish = latestActiveHTML
 		}
-		pageList = append(pageList, publishPageCandidate{Path: pagePath, Title: pageTitle, HTML: pageHTMLToPublish})
+		pageList = append(pageList, publishPageCandidate{Path: pagePath, Title: pageTitle, HTML: pageHTMLToPublish, Delete: deleting})
 	}
 	if rowsErr := pageRows.Err(); rowsErr != nil {
 		return nil, rowsErr
