@@ -259,6 +259,7 @@ type App struct {
 	demoSiteRuntime           chan demoSiteRuntimeRequest
 	demoSessionEvents         chan demoSessionEvent
 	aiCapabilities            *aicapability.Manager
+	aiProviderNetworks        *aiingress.Networks
 	aiExecutor                *aieditor.Executor
 }
 
@@ -10107,6 +10108,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	if err := application.migrateLegacyAIState(aiCapabilityStatePath); err != nil {
 		return fmt.Errorf("migrate AI security state: %w", err)
 	}
+	application.startAIProviderNetworks(ctx.Done())
 	go application.refreshAIProviderRanges(ctx.Done())
 	application.ensureAutoCertGuard()
 	defer func() {
@@ -11978,7 +11980,7 @@ func (a *App) aiIngressMiddleware(next http.Handler) http.Handler {
 }
 
 func (a *App) aiIngressAdmission(r *http.Request) (machine, owner bool) {
-	if a.db == nil || a.aiCapabilities == nil {
+	if a.db == nil {
 		return false, false
 	}
 	domain := a.siteDomain(r.Context(), r)
@@ -12001,52 +12003,34 @@ func (a *App) aiIngressAdmission(r *http.Request) (machine, owner bool) {
 			rows.Close()
 		}
 		if !owner {
-			if cookie, err := r.Cookie("sitebrush_session"); err == nil {
-				var sessionIP string
-				var lastUsed int64
-				err := a.db.QueryRowContext(r.Context(), `SELECT s.client_ip,s.last_used_at FROM sessions s JOIN users u ON (u.domain||'|'||u.email)=s.user_email WHERE s.token=? AND u.domain=? AND u.is_admin=1`, cookie.Value, domain).Scan(&sessionIP, &lastUsed)
-				owner = err == nil && sessionIP == clientIP && accountauth.SessionActive(lastUsed, time.Now())
+			if _, err := r.Cookie("sitebrush_session"); err == nil {
+				_, owner = a.currentAdminEmailForDomain(r, domain)
 			}
 		}
 	}
-	var encodedPolicy string
-	if err := a.db.QueryRowContext(r.Context(), `SELECT policy FROM ai_provider_policy WHERE id=1`).Scan(&encodedPolicy); err != nil {
+	policy := a.aiProviderPolicy(r)
+	if !policy.External {
 		return false, owner
 	}
-	var policy aiingress.Policy
-	if json.Unmarshal([]byte(encodedPolicy), &policy) != nil || !policy.External {
-		return false, owner
+	if a.aiProviderNetworks != nil {
+		return a.aiProviderNetworks.Allows(policy, clientIP, r.TLS, r.Context().Done()), owner
 	}
-	snapshot := aiingress.OfficialSnapshot()
-	if a.controlDatabase != nil {
-		_ = a.controlDatabase.execute(r.Context(), serverControlDatabaseRead, "AI ingress range snapshot", func(database *sql.DB) error {
-			var cached []byte
-			if err := database.QueryRow(`SELECT document FROM ai_provider_ranges WHERE provider='openai'`).Scan(&cached); err != nil {
-				return err
-			}
-			if _, err := aiingress.ParseOpenAI(cached); err == nil {
-				snapshot = cached
-			}
-			return nil
-		})
-	}
-	ranges, err := aiingress.ParseOpenAI(snapshot)
-	return err == nil && ranges.Allows(policy, clientIP, r.TLS), owner
+	return aiingress.AllowsOfficial(policy, clientIP, r.TLS), owner
 }
 
 func aiRequestAfterAdmission(r *http.Request, machine, owner bool) *http.Request {
-	if machine && owner {
+	if owner {
 		return r
 	}
 	query := r.URL.Query()
 	changed := false
 	for selector := range query {
-		hidden := !machine && (selector == "mcp" || selector == "ai" && (!owner || query.Get("ai") != "") || selector == "ai_token" || selector == "ai_session")
+		hidden := !machine && (selector == "mcp" || selector == "ai" || selector == "ai_token" || selector == "ai_session")
 		if selector == "oauth" {
-			hidden = !machine && (!owner || query.Get(selector) != "authorize")
+			hidden = !machine
 		}
 		if selector == "ai_authorize" {
-			hidden = !owner
+			hidden = true
 		}
 		if hidden {
 			query.Del(selector)
@@ -12197,72 +12181,39 @@ func (a *App) migrateLegacyAIState(filename string) error {
 	return cleanup()
 }
 
-func (a *App) refreshAIProviderRanges(stop <-chan struct{}) {
-	refresh := func() {
-		boundary, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		go func() {
-			select {
-			case <-stop:
-				cancel()
-			case <-boundary.Done():
-			}
-		}()
-		finished := make(chan struct{})
-		go func() {
-			select {
-			case <-stop:
-				cancel()
-			case <-finished:
-			}
-		}()
-		defer close(finished)
-		defer cancel()
-		request, err := http.NewRequestWithContext(boundary, http.MethodGet, "https://openai.com/chatgpt-connectors.json", nil)
-		if err != nil {
-			return
-		}
-		client := &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-		response, err := client.Do(request)
-		if err != nil {
-			return
-		}
-		defer response.Body.Close()
-		if response.StatusCode != http.StatusOK {
-			return
-		}
-		encoded, err := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
-		if err != nil {
-			return
-		}
-		if _, err := aiingress.ParseOpenAI(encoded); err != nil {
-			return
-		}
-		_ = a.controlDatabase.execute(boundary, serverControlDatabaseWrite, "refresh official AI provider ranges", func(database *sql.DB) error {
-			if _, err := database.Exec(`CREATE TABLE IF NOT EXISTS ai_provider_ranges(provider TEXT PRIMARY KEY,document TEXT NOT NULL)`); err != nil {
-				return err
-			}
-			var previous []byte
-			if err := database.QueryRow(`SELECT document FROM ai_provider_ranges WHERE provider='openai'`).Scan(&previous); err == nil {
-				current, currentErr := aiingress.ParseOpenAI(previous)
-				next, nextErr := aiingress.ParseOpenAI(encoded)
-				if currentErr == nil && nextErr == nil && next.Created.Before(current.Created) {
-					return errors.New("official AI range snapshot would move backwards")
-				}
-			}
-
-			transaction, err := database.Begin()
+func (a *App) startAIProviderNetworks(stop <-chan struct{}) {
+	cached := make(map[string][]byte)
+	if a.controlDatabase != nil {
+		_ = a.controlDatabase.execute(context.Background(), serverControlDatabaseRead, "load official AI provider ranges", func(database *sql.DB) error {
+			rows, err := database.Query(`SELECT provider,document FROM ai_provider_ranges`)
 			if err != nil {
 				return err
 			}
-			defer transaction.Rollback()
-			if _, err := transaction.Exec(`DELETE FROM ai_provider_ranges WHERE provider='openai'`); err != nil {
-				return err
+			defer rows.Close()
+			for rows.Next() {
+				var provider string
+				var document []byte
+				if err := rows.Scan(&provider, &document); err != nil {
+					return err
+				}
+				cached[provider] = document
 			}
-			if _, err := transaction.Exec(`INSERT INTO ai_provider_ranges(provider,document) VALUES('openai',?)`, string(encoded)); err != nil {
-				return err
-			}
-			return transaction.Commit()
+			return rows.Err()
 		})
+	}
+	a.aiProviderNetworks = aiingress.NewNetworks(stop, cached)
+}
+
+func (a *App) refreshAIProviderRanges(stop <-chan struct{}) {
+	refresh := func() {
+		for _, source := range aiingress.Sources() {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			a.refreshAIProviderRange(source, stop)
+		}
 	}
 	refresh()
 	clock := time.NewTicker(24 * time.Hour)
@@ -12274,6 +12225,83 @@ func (a *App) refreshAIProviderRanges(stop <-chan struct{}) {
 		case <-clock.C:
 			refresh()
 		}
+	}
+}
+
+// HTTP cancellation stays at the external boundary; the range participant
+// continues answering admission jobs while this independent worker refreshes.
+func (a *App) refreshAIProviderRange(source aiingress.Source, stop <-chan struct{}) {
+	if a.controlDatabase == nil || a.aiProviderNetworks == nil {
+		return
+	}
+	boundary, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	finished := make(chan struct{})
+	go func() {
+		select {
+		case <-stop:
+			cancel()
+		case <-finished:
+		}
+	}()
+	defer close(finished)
+	defer cancel()
+	request, err := http.NewRequestWithContext(boundary, http.MethodGet, source.URL, nil)
+	if err != nil {
+		return
+	}
+	client := &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	response, err := client.Do(request)
+	if err != nil {
+		return
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return
+	}
+	encoded, err := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
+	if err != nil {
+		return
+	}
+	document, err := source.Document(encoded)
+	if err != nil {
+		return
+	}
+	next, err := source.Snapshot(document)
+	if err != nil {
+		return
+	}
+	bundled, err := source.Snapshot(aiingress.OfficialSourceSnapshot(source.ID))
+	if err != nil || next.Created.Before(bundled.Created) {
+		return
+	}
+	err = a.controlDatabase.execute(boundary, serverControlDatabaseWrite, "refresh official AI provider ranges", func(database *sql.DB) error {
+		if _, err := database.Exec(`CREATE TABLE IF NOT EXISTS ai_provider_ranges(provider TEXT PRIMARY KEY,document TEXT NOT NULL)`); err != nil {
+			return err
+		}
+		var previous []byte
+		if cacheErr := database.QueryRow(`SELECT document FROM ai_provider_ranges WHERE provider=?`, source.ID).Scan(&previous); cacheErr == nil {
+			current, currentErr := source.Snapshot(previous)
+			if currentErr == nil && next.Created.Before(current.Created) {
+				return errors.New("official AI range snapshot would move backwards")
+			}
+		} else if !errors.Is(cacheErr, sql.ErrNoRows) {
+			return cacheErr
+		}
+		transaction, err := database.Begin()
+		if err != nil {
+			return err
+		}
+		defer transaction.Rollback()
+		if _, err := transaction.Exec(`DELETE FROM ai_provider_ranges WHERE provider=?`, source.ID); err != nil {
+			return err
+		}
+		if _, err := transaction.Exec(`INSERT INTO ai_provider_ranges(provider,document) VALUES(?,?)`, source.ID, string(document)); err != nil {
+			return err
+		}
+		return transaction.Commit()
+	})
+	if err == nil {
+		_ = a.aiProviderNetworks.Replace(source.ID, document, stop)
 	}
 }
 
@@ -14703,13 +14731,13 @@ func (a *App) siteMCPRoute(w http.ResponseWriter, r *http.Request) bool {
 	}
 	endpoint := ""
 	query := r.URL.Query()
-	if machine && query.Has("mcp") {
+	if query.Has("mcp") {
 		endpoint = sitemcp.Path
 	}
-	if operation := query.Get("oauth"); operation != "" && (machine && operation != "authorize" || owner && operation == "authorize") {
+	if operation := query.Get("oauth"); operation != "" && (operation != "authorize" || owner) {
 		endpoint = sitemcp.OAuthPath + operation
 	}
-	if machine && r.URL.Path == "/.well-known/oauth-authorization-server" {
+	if r.URL.Path == "/.well-known/oauth-authorization-server" {
 		endpoint = sitemcp.OAuthPath + "server"
 	}
 	if endpoint == "" {
@@ -27290,11 +27318,15 @@ func (a *App) finishAccountPasskeyRegistration(w http.ResponseWriter, r *http.Re
 
 func (a *App) aiProviderPolicy(r *http.Request) aiingress.Policy {
 	var encoded string
-	if a.db.QueryRowContext(r.Context(), `SELECT policy FROM ai_provider_policy WHERE id=1`).Scan(&encoded) != nil {
+	err := a.db.QueryRowContext(r.Context(), `SELECT policy FROM ai_provider_policy WHERE id=1`).Scan(&encoded)
+	if errors.Is(err, sql.ErrNoRows) {
+		return aiingress.DefaultPolicy()
+	}
+	if err != nil {
 		return aiingress.Policy{}
 	}
-	var policy aiingress.Policy
-	if json.Unmarshal([]byte(encoded), &policy) != nil {
+	policy, err := aiingress.DecodePolicy([]byte(encoded))
+	if err != nil {
 		return aiingress.Policy{}
 	}
 	return policy
@@ -27306,7 +27338,17 @@ func (a *App) saveAIIngressPolicy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	policy := aiingress.Policy{External: r.FormValue("ai_external") == "on", OpenAI: r.FormValue("ai_openai") == "on", Anthropic: r.FormValue("ai_anthropic") == "on", XAI: r.FormValue("ai_xai") == "on", RequireOpenAIMTLS: r.FormValue("ai_openai_mtls") == "on"}
+	policy := aiingress.Policy{
+		External:   r.FormValue("ai_external") == "on",
+		OpenAI:     r.FormValue("ai_openai") == "on",
+		Anthropic:  r.FormValue("ai_anthropic") == "on",
+		Perplexity: r.FormValue("ai_perplexity") == "on",
+		Google:     r.FormValue("ai_google") == "on",
+		Microsoft:  r.FormValue("ai_microsoft") == "on",
+		Apple:      r.FormValue("ai_apple") == "on",
+		Amazon:     r.FormValue("ai_amazon") == "on",
+		XAI:        r.FormValue("ai_xai") == "on",
+	}
 	parseCIDRs := func(configured string) ([]string, error) {
 		prefixes := []string{}
 		for _, text := range strings.Fields(strings.ReplaceAll(configured, ",", " ")) {
@@ -27324,18 +27366,10 @@ func (a *App) saveAIIngressPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 	var parseErr error
 	policy.CustomCIDRs, parseErr = parseCIDRs(r.FormValue("ai_custom_cidrs"))
-	if parseErr == nil {
-		policy.XAICIDRs, parseErr = parseCIDRs(r.FormValue("ai_xai_cidrs"))
-	}
 	if parseErr != nil {
 		http.Error(w, parseErr.Error(), http.StatusBadRequest)
 		return
 	}
-	if policy.XAI && len(policy.XAICIDRs) == 0 {
-		http.Error(w, "xAI requires explicitly configured outbound CIDRs", http.StatusBadRequest)
-		return
-	}
-
 	encoded, err := json.Marshal(policy)
 	if err == nil {
 		err = a.accountTransaction(r.Context(), func(transaction *sql.Tx) error {
@@ -28045,6 +28079,7 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 		"AISessionPagination":        aiSessionPagination,
 		"HasAIAccess":                aiAccessPagination.Count+aiSessionPagination.Count > 0,
 		"AIIngressPolicy":            a.aiProviderPolicy(r),
+		"AIIngressProviders":         aiingress.Providers(),
 		"PasskeyOffer":               passkeyOffer,
 		"PasskeyContinuePath":        passkeyContinuePath,
 		"TOTPEnabled":                totpEnabled,

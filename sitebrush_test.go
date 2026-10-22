@@ -25790,6 +25790,93 @@ func TestAIIngressDecisionIsRetainedAcrossHTTPAdapters(t *testing.T) {
 	}
 }
 
+func TestAIIngressDefaultsAndAdministratorMCP(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	application.startAIProviderNetworks(stop)
+	domain := "default-ai.example"
+	boundary := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), domain))
+	if _, err := application.db.ExecContext(boundary, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, "owner@example.org", "test"); err != nil {
+		t.Fatal(err)
+	}
+	requestFor := func(selector, address string) *http.Request {
+		request := httptest.NewRequest(http.MethodGet, "https://"+domain+"/anywhere?"+selector, nil)
+		request.RemoteAddr = net.JoinHostPort(address, "1234")
+		return request.WithContext(contextWithDomain(request.Context(), domain))
+	}
+	policy := application.aiProviderPolicy(requestFor("profile", "198.51.100.8"))
+	for _, provider := range aiingress.Providers() {
+		if !policy.External || !policy.Enabled(provider.ID) {
+			t.Fatalf("default provider disabled: %s", provider.ID)
+		}
+	}
+	for _, source := range aiingress.Sources() {
+		snapshot, err := source.Snapshot(aiingress.OfficialSourceSnapshot(source.ID))
+		if err != nil {
+			t.Fatal(source.ID, err)
+		}
+		if len(snapshot.Prefixes) == 0 {
+			continue
+		}
+		response := httptest.NewRecorder()
+		application.route(response, requestFor("mcp", snapshot.Prefixes[0].Addr().String()))
+		if response.Code != http.StatusUnauthorized || response.Header().Get("WWW-Authenticate") == "" {
+			t.Fatalf("default %s: %d %s", source.ID, response.Code, response.Body.String())
+		}
+	}
+	if _, err := application.db.ExecContext(boundary, `INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES(?,?,1)`, domain, "owner@example.org"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.db.ExecContext(boundary, `INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES(?,?,?,1)`, domain, "owner@example.org", "198.51.100.0/24"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.db.ExecContext(boundary, `INSERT INTO ai_provider_policy(id,policy) VALUES(1,'{"external":false}')`); err != nil {
+		t.Fatal(err)
+	}
+	handler := application.aiIngressMiddleware(http.HandlerFunc(application.route))
+	for _, scenario := range []struct {
+		selector string
+		status   int
+	}{{"mcp", http.StatusUnauthorized}, {"oauth=server", http.StatusOK}, {"oauth=resource", http.StatusOK}} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, requestFor(scenario.selector, "198.51.100.8"))
+		if response.Code != scenario.status {
+			t.Fatalf("administrator %s: %d %s", scenario.selector, response.Code, response.Body.String())
+		}
+	}
+	unknown := httptest.NewRecorder()
+	handler.ServeHTTP(unknown, requestFor("mcp", "203.0.113.8"))
+	if unknown.Header().Get("WWW-Authenticate") != "" || unknown.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatal("unknown source discovered MCP")
+	}
+}
+
+func TestAIIngressBrowserEditorUsesExistingSession(t *testing.T) {
+	application, database := newTestApplication(t)
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "test"); err != nil {
+		t.Fatal(err)
+	}
+	cookie := newAdminSessionCookie(t, application, "admin@example.com")
+	// The browser editor must share the existing legacy-session upgrade and
+	// travel rules, even if the external capability subsystem is unavailable.
+	if _, err := database.Exec(`UPDATE sessions SET last_used_at=0,client_ip='198.51.100.9' WHERE token=?`, cookie.Value); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?ai", nil)
+	request.RemoteAddr = "127.0.0.1:1234"
+	request.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	application.aiIngressMiddleware(http.HandlerFunc(application.route)).ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `id="pageBackgroundFrame"`) || !strings.Contains(response.Body.String(), "ai_execute_ws") {
+		t.Fatalf("AI editor lost: %d %s", response.Code, response.Body.String())
+	}
+	var lastUsed int64
+	if err := database.QueryRow(`SELECT last_used_at FROM sessions WHERE token=?`, cookie.Value).Scan(&lastUsed); err != nil || lastUsed == 0 {
+		t.Fatal("legacy session was not upgraded", err)
+	}
+}
+
 type ingressAdmissionCountingDatabase struct {
 	sqlExecutor
 	admissions chan struct{}

@@ -589,12 +589,15 @@ are always available in the account; access lists appear when grants or sessions
 
 ### AI access to a whole site
 
-External AI access is hidden by default. Enable the required
-provider in the authenticated profile before connecting it. Provider network
+Published AI provider networks are enabled by default. The authenticated profile
+can disable individual providers or external provider access. Administrator IPs
+also reach AI discovery and MCP, independently of provider selections. Network
 admission precedes discovery, OAuth and capability checks; ordinary visitors
 receive the same public response with or without AI selectors. Discovery uses
 `/?ai=manifest`, `/?ai=documentation` and `/?ai=openapi` only after admission.
 The manifest advertises `mcp_url` for clients with native Remote MCP support.
+The browser AI editor remains available at `/?ai` after administrator sign-in,
+including when external providers are disabled. Its link is also in Profile.
 
 #### ChatGPT and Remote MCP
 

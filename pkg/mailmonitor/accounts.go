@@ -53,15 +53,18 @@ func PendingAccountEvents(ctx context.Context, database Database) ([]Event, erro
 // Historical success requires an explicit persisted account outcome. A sent
 // email alone never supplies evidence that an account was recovered.
 func (store Store) BackfillRecovery(ctx context.Context) error {
-	rows, err := store.DB.QueryContext(ctx, `SELECT id,domain,email,created_at FROM support_events WHERE kind=? AND status=? AND message=? AND created_at>=?`, "password_changed", "success", "password recovered", time.Now().UTC().Add(-Retention).Format(time.RFC3339))
+	rows, err := store.DB.QueryContext(ctx, `SELECT id,domain,email,created_at,kind,message FROM support_events WHERE status='success' AND created_at>=?`, time.Now().UTC().Add(-Retention).Format(time.RFC3339))
 	if err != nil {
 		return err
 	}
 	events := []Event{}
 	for rows.Next() {
-		var sourceID, domain, email, created string
-		if err = rows.Scan(&sourceID, &domain, &email, &created); err != nil {
+		var sourceID, domain, email, created, kind, message string
+		if err = rows.Scan(&sourceID, &domain, &email, &created, &kind, &message); err != nil {
 			break
+		}
+		if kind != "password_changed" || message != "password recovered" {
+			continue
 		}
 		events = append(events, Event{ID: digestID("legacy recovery/" + sourceID), FlowID: digestID("legacy recovery/" + sourceID), Kind: "recovery", Stage: "recovery_complete", Domain: domain, Recipient: email, CreatedAt: created, Detail: "restored from a saved password recovery outcome"})
 	}
