@@ -831,7 +831,7 @@ The legacy `site-schema-v12` and `billing-schema-v27` chains are frozen compatib
 
 ## Build toolchain and macOS desktop
 
-The project pins Go **1.27.2** in `go.mod`. CI and every Docker builder read that same directive. Server binaries and ordinary tests use `CGO_ENABLED=0`; CGO is confined to desktop compilation inside Docker. macOS binaries require **macOS 13 Ventura or newer** on both Intel and Apple Silicon.
+The project pins Go **1.27.3** in `go.mod`. CI and every Docker builder read that same directive. Server binaries and ordinary tests use `CGO_ENABLED=0`; CGO is confined to desktop compilation inside Docker. macOS binaries require **macOS 13 Ventura or newer** on both Intel and Apple Silicon.
 
 NetChan uses `github.com/matveynator/netchan/v2 v2.1.0`. External hosting/mail/security, announcement and release contacts prefer **QUIC over UDP**, then **TCP with TLS 1.3**. Both listeners use the same port number: allow UDP and TCP **9876**, **9877** and **9878** on the central server. Existing `host:port` addresses and application message schemas remain valid. A QUIC handshake gets 750 ms before TCP/TLS is attempted with a three-second limit. Transport selection precedes application delivery and does not replay an operation. Existing HTTPS adapters remain the last fallback for hosting/mail and signed release delivery. Security synchronization and announcement sessions retain their authenticated outbound channels and reconnect; they do not expose new HTTP endpoints. Local supervisor contacts remain on loopback TCP/TLS.
 

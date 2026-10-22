@@ -1,6 +1,6 @@
 module github.com/matveynator/sitebrush/v2
 
-go 1.27.2
+go 1.27.3
 
 require (
 	github.com/gen2brain/vpx v0.2.1

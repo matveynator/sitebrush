@@ -1,6 +1,6 @@
 module github.com/matveynator/sitebrush/v2/scripts/securitytools
 
-go 1.27.2
+go 1.27.3
 
 // The export-data reader must understand the compiler used by the application.
 // Isolating analyzer dependencies keeps them out of the application module graph.

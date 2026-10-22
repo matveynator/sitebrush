@@ -32,9 +32,16 @@ func (diagnostic Diagnostic) String() string {
 		diagnostic.Identifiers = ""
 		payload, _ = json.Marshal(diagnostic)
 	}
-	if len(payload) > 500 {
-		diagnostic.SMTPReply = boundedField(diagnostic.SMTPReply, 32)
-		diagnostic.Failure = boundedField(diagnostic.Failure, 32)
+	// Escaped Unicode and punctuation can exceed the byte budget even when
+	// every field fits its own limit. Shrink whole fields, keeping valid JSON.
+	for len(payload) > 500 {
+		longest := &diagnostic.SMTPServer
+		for _, field := range []*string{&diagnostic.Transport, &diagnostic.ClientIP, &diagnostic.SMTPReply, &diagnostic.Failure} {
+			if len(*field) > len(*longest) {
+				longest = field
+			}
+		}
+		*longest = boundedField(*longest, len(*longest)/2)
 		payload, _ = json.Marshal(diagnostic)
 	}
 	return string(payload)

@@ -25964,6 +25964,29 @@ func TestMailMonitorDurableDeliveryAndAtomicQueue(t *testing.T) {
 	if accepted != 1 || failed != 1 {
 		t.Fatalf("accepted=%d failed=%d", accepted, failed)
 	}
+	if err := application.withServerControlDatabaseRead(context.Background(), "test-delivery-attempt-history", func(database *sql.DB) error {
+		operations, count, err := (mailmonitor.Store{DB: database}).Journal(context.Background(), mailmonitor.Filter{InstallationID: "local", Stage: "attempt"})
+		if err != nil {
+			return err
+		}
+		if count != 2 || len(operations) != 2 {
+			return fmt.Errorf("claimed delivery attempts missing from history: count=%d operations=%d", count, len(operations))
+		}
+		for _, operation := range operations {
+			found := false
+			for _, step := range operation.Steps {
+				if step.Stage == "attempt" && step.Route == mailout.RouteLocal && step.Attempt == 1 && step.CreatedAt != "" {
+					found = true
+				}
+			}
+			if !found {
+				return errors.New("SMTP ownership timestamp missing from journal")
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	// A journal write failure must roll back the queue row, not acknowledge an untracked message.
 	if err := application.withServerControlDatabaseWrite(context.Background(), "test-monitor-failure", func(database *sql.DB) error {
 		_, err := database.Exec(`CREATE TRIGGER reject_mail_monitor BEFORE INSERT ON mail_monitor_events BEGIN SELECT RAISE(ABORT,'monitor unavailable'); END`)

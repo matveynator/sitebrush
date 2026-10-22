@@ -53,7 +53,7 @@ func PendingAccountEvents(ctx context.Context, database Database) ([]Event, erro
 // Historical success requires an explicit persisted account outcome. A sent
 // email alone never supplies evidence that an account was recovered.
 func (store Store) BackfillRecovery(ctx context.Context) error {
-	rows, err := store.DB.QueryContext(ctx, `SELECT id,domain,email,created_at FROM support_events WHERE kind='password_changed' AND status='success' AND message='password recovered' AND created_at>=?`, time.Now().UTC().Add(-Retention).Format(time.RFC3339))
+	rows, err := store.DB.QueryContext(ctx, `SELECT id,domain,email,created_at FROM support_events WHERE kind=? AND status=? AND message=? AND created_at>=?`, "password_changed", "success", "password recovered", time.Now().UTC().Add(-Retention).Format(time.RFC3339))
 	if err != nil {
 		return err
 	}
