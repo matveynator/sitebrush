@@ -55,6 +55,10 @@ func (console *Console) Heading(message string) {
 	fmt.Fprintf(console.Output, "\n%s\n", console.styled("1;36", message))
 }
 
+func (console *Console) Bold(message string) string {
+	return console.styled("1", message)
+}
+
 func (console *Console) Info(format string, arguments ...any) {
 	fmt.Fprintf(console.Output, format+"\n", arguments...)
 }
@@ -102,7 +106,7 @@ func (console *Console) Line(reader *bufio.Reader, label, fallback string) (stri
 	if fallback == "" {
 		fmt.Fprintf(console.Output, "%s: ", label)
 	} else {
-		fmt.Fprintf(console.Output, "%s [%s]: ", label, fallback)
+		fmt.Fprintf(console.Output, "%s [%s]: ", label, console.Bold(fallback))
 	}
 	answer, err := reader.ReadString('\n')
 	if err != nil {
@@ -116,9 +120,9 @@ func (console *Console) Line(reader *bufio.Reader, label, fallback string) (stri
 }
 
 func (console *Console) Confirm(reader *bufio.Reader, label string, fallback bool) (bool, error) {
-	defaultAnswer := "y/N"
+	defaultAnswer := "no"
 	if fallback {
-		defaultAnswer = "Y/n"
+		defaultAnswer = "yes"
 	}
 	for {
 		answer, err := console.Line(reader, label, defaultAnswer)
@@ -126,8 +130,6 @@ func (console *Console) Confirm(reader *bufio.Reader, label string, fallback boo
 			return false, err
 		}
 		switch strings.ToLower(answer) {
-		case "y/n":
-			return fallback, nil
 		case "y", "yes":
 			return true, nil
 		case "n", "no":

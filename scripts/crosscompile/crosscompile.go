@@ -204,28 +204,43 @@ func runCrosscompile() error {
 		if keyFilename == "" {
 			keyFilename = publication.releaseKeyFile
 		}
+		keyFilename, err = resolveReleaseKeyPath(keyFilename)
+		if err != nil {
+			return err
+		}
 	}
-	console.Heading("SiteBrush build and upload")
-	if interactive && strings.TrimSpace(os.Getenv("SITEBRUSH_RELEASE_PRIVATE_KEY")) == "" {
-		keyFilename, err = configureReleaseKeyFile(console, inputReader, keyFilename)
+	if interactive {
+		publication, err = preparePublicationPlan(syncTargets, publication)
 		if err != nil {
 			return err
 		}
 		publication.releaseKeyFile = keyFilename
-	}
-	showSigningGuide(console, keyFilename)
-	console.Info("Version: %s | Go: %s | Program: %s", version, goVersion, *programName)
-	console.Info("Repository: %s\nOutput: %s", repoRoot, outputDir)
-	if commit, err := runOutput(repoRoot, "git", "rev-parse", "HEAD"); err == nil {
-		console.Info("Source commit: %s", strings.TrimSpace(commit))
-	}
-	showBuildMatrix(console, mode, targetFilter, runtime.GOOS, *macOSStage)
-	if interactive {
-		publication, err = configurePublicationPlan(console, inputReader, syncTargets, publication)
+		settings := crosscompileSettings{program: *programName, version: version, outputRoot: artifactsRoot,
+			mode: mode, filter: targetFilter, options: options, signUpdates: *signUpdates}
+		confirmed, edited, plan, err := configureCrosscompile(console, inputReader, repoRoot, settings, publication)
 		if err != nil {
 			return err
 		}
+		if !confirmed {
+			console.Info("Cancelled. No build or upload actions were started.")
+			return nil
+		}
+		publication = plan
+		*programName, version, artifactsRoot = edited.program, edited.version, edited.outputRoot
+		mode, targetFilter, options, *signUpdates = edited.mode, edited.filter, edited.options, edited.signUpdates
+		*macOSStage = options.macOSStage
+		outputDir = filepath.Join(artifactsRoot, version)
+		keyFilename = publication.releaseKeyFile
 		syncTargets = publication.syncDestinations()
+		if err := savePublicationConfig(publication.configPath, publication.saved, keyFilename); err != nil {
+			return fmt.Errorf("save publication settings: %w", err)
+		}
+	} else {
+		console.Heading("SiteBrush build and upload")
+		showSigningGuide(console, keyFilename)
+		console.Info("Version: %s | Go: %s | Program: %s", version, goVersion, *programName)
+		console.Info("Repository: %s\nOutput: %s", repoRoot, outputDir)
+		showBuildMatrix(console, mode, targetFilter, runtime.GOOS, *macOSStage)
 	}
 	// Explicit legacy flags never acquire saved upload destinations.
 	officialPublication := officialReleasePublication(syncTargets)
@@ -235,17 +250,6 @@ func runCrosscompile() error {
 	signServerUpdates := *signUpdates || (mode != modeDesktopApp && officialPublication)
 	if !signServerUpdates {
 		console.Info("Release signing: disabled for this local or desktop-only build.")
-	}
-	if interactive {
-		showPublicationPlan(console, publication.targets)
-		confirmed, err := console.Confirm(inputReader, "Build and upload to the listed destinations?", false)
-		if err != nil {
-			return err
-		}
-		if !confirmed {
-			console.Info("Cancelled. No build or publication actions were started.")
-			return nil
-		}
 	}
 
 	// Key validation precedes output cleanup, compilation, and remote changes.
@@ -265,7 +269,7 @@ func runCrosscompile() error {
 		if number, err := strconv.ParseUint(version, 10, 64); err != nil || number == 0 {
 			return errors.New("signed update version must be numeric")
 		}
-		console.OK("Ed25519 signing key matches the embedded public trust anchor.")
+		console.OK("Release signing key: verified.")
 	}
 
 	// Keep legacy flag-driven builds usable in CI; the wizard adds early host
@@ -276,10 +280,6 @@ func runCrosscompile() error {
 		}); err != nil {
 			return err
 		}
-		if err := savePublicationConfig(publication.configPath, publication.saved, publication.releaseKeyFile); err != nil {
-			return fmt.Errorf("save publication settings: %w", err)
-		}
-		console.OK("Publication settings saved to " + publication.configPath)
 	}
 	step, total := 0, 3
 	if interactive {
@@ -352,6 +352,7 @@ type publicationTarget struct {
 	Domain    string `json:"domain"`
 	Host      string `json:"host"`
 	Directory string `json:"directory"`
+	Disabled  bool   `json:"disabled,omitempty"`
 }
 
 type publicationConfig struct {
@@ -487,15 +488,7 @@ func loadPublicationPlan(filename string) (publicationPlan, error) {
 	return publicationPlan{configPath: filename, saved: configuration.Destinations, releaseKeyFile: configuration.ReleaseKey}, nil
 }
 
-func configurePublicationWithConfig(console *buildconsole.Console, reader *bufio.Reader, explicit []syncDestination, filename string) (publicationPlan, error) {
-	plan, err := loadPublicationPlan(filename)
-	if err != nil {
-		return plan, err
-	}
-	return configurePublicationPlan(console, reader, explicit, plan)
-}
-
-func configurePublicationPlan(console *buildconsole.Console, reader *bufio.Reader, explicit []syncDestination, plan publicationPlan) (publicationPlan, error) {
+func preparePublicationPlan(explicit []syncDestination, plan publicationPlan) (publicationPlan, error) {
 	saved := plan.saved
 	plan.saved = []publicationTarget{defaultPublicationTarget("sitebrush.com"), defaultPublicationTarget("sitebrush.ru")}
 	for _, target := range saved {
@@ -515,48 +508,17 @@ func configurePublicationPlan(console *buildconsole.Console, reader *bufio.Reade
 			plan.saved = rememberPublicationTarget(plan.saved, target)
 		}
 	}
-	console.Heading("Publication destinations")
-	console.Info("Choose upload destinations; SSH uses your existing key/agent.")
-	for index := range plan.saved {
-		target, selected, err := configurePublicationTarget(console, reader, plan.saved[index])
-		if err != nil {
-			return plan, err
-		}
-		plan.saved[index] = target
-		if selected {
+	return selectPublicationTargets(plan), nil
+}
+
+func selectPublicationTargets(plan publicationPlan) publicationPlan {
+	plan.targets = nil
+	for _, target := range plan.saved {
+		if !target.Disabled {
 			plan.targets = append(plan.targets, target)
 		}
 	}
-	for {
-		domain, err := console.Line(reader, "Additional domain (blank to finish)", "")
-		if err != nil {
-			return plan, err
-		}
-		if domain == "" {
-			return plan, nil
-		}
-		domain = strings.TrimSuffix(strings.ToLower(domain), ".")
-		if !validPublicationDomain(domain) {
-			console.Warning("Enter an ASCII domain such as example.com, without https:// or a path.")
-			continue
-		}
-		duplicate := false
-		for _, existing := range plan.saved {
-			duplicate = duplicate || existing.Domain == domain
-		}
-		if duplicate || len(plan.saved) >= 64 {
-			console.Warning("Domain is already listed, or the 64-destination limit has been reached.")
-			continue
-		}
-		target, selected, err := configurePublicationTarget(console, reader, defaultPublicationTarget(domain))
-		if err != nil {
-			return plan, err
-		}
-		plan.saved = append(plan.saved, target)
-		if selected {
-			plan.targets = append(plan.targets, target)
-		}
-	}
+	return plan
 }
 
 func rememberPublicationTarget(targets []publicationTarget, replacement publicationTarget) []publicationTarget {
@@ -571,26 +533,22 @@ func rememberPublicationTarget(targets []publicationTarget, replacement publicat
 
 func configurePublicationTarget(console *buildconsole.Console, reader *bufio.Reader, target publicationTarget) (publicationTarget, bool, error) {
 	console.Info("\n%s -> %s:%s", target.Domain, target.Host, target.Directory)
-	selected, err := console.Confirm(reader, "Upload to "+target.Domain+"?", true)
+	selected, err := console.Confirm(reader, "Upload to "+target.Domain+"?", !target.Disabled)
 	if err != nil || !selected {
+		target.Disabled = !selected
 		return target, false, err
 	}
+	target.Disabled = false
 	for {
-		edit, err := console.Confirm(reader, "Edit SSH address or upload directory?", false)
-		if err != nil {
-			return target, false, err
-		}
-		if edit {
-			for _, field := range []struct {
-				label string
-				text  *string
-			}{{"SSH address", &target.Host}, {"Remote download directory", &target.Directory}} {
-				answer, err := console.Line(reader, field.label, *field.text)
-				if err != nil {
-					return target, false, err
-				}
-				*field.text = answer
+		for _, field := range []struct {
+			label string
+			text  *string
+		}{{"SSH address", &target.Host}, {"Remote download directory", &target.Directory}} {
+			answer, err := console.Line(reader, field.label, *field.text)
+			if err != nil {
+				return target, false, err
 			}
+			*field.text = answer
 		}
 		if err := validatePublicationTarget(target); err != nil {
 			console.Warning(err.Error())
@@ -606,8 +564,248 @@ func showPublicationPlan(console *buildconsole.Console, targets []publicationTar
 		console.Info("Local build only.")
 		return
 	}
-	for _, target := range targets {
-		console.Info("  %s -> %s:%s", target.Domain, target.Host, target.Directory)
+	for index, target := range targets {
+		selected := "on"
+		if target.Disabled {
+			selected = "off"
+		}
+		console.Info("  %d [%s] %s -> %s:%s", index+1, selected, target.Domain, target.Host, target.Directory)
+	}
+}
+
+// The review screen owns mutable choices until Enter accepts them. Editing
+// always returns to that screen, so starting the build needs no extra prompts.
+type crosscompileSettings struct {
+	program     string
+	version     string
+	outputRoot  string
+	mode        buildMode
+	filter      buildTargetFilter
+	options     desktopBuildOptions
+	signUpdates bool
+}
+
+func configureCrosscompile(console *buildconsole.Console, reader *bufio.Reader, repoRoot string, settings crosscompileSettings, plan publicationPlan) (bool, crosscompileSettings, publicationPlan, error) {
+	commit, _ := runOutput(repoRoot, "git", "rev-parse", "HEAD")
+	for {
+		showCrosscompileSettings(console, settings, plan, runtime.GOOS)
+		command, err := chooseCrosscompileAction(console, reader, plan)
+		console.Info("")
+		if err != nil {
+			return false, settings, plan, err
+		}
+		switch strings.ToLower(command) {
+		case "", "enter", "y", "yes":
+			if settings.requiresSigning(plan) && plan.releaseKeyFile == "" && strings.TrimSpace(os.Getenv("SITEBRUSH_RELEASE_PRIVATE_KEY")) == "" {
+				console.Warning("Choose the existing signing key before an official server upload.")
+				showSigningGuide(console, "")
+				plan.releaseKeyFile, err = configureReleaseKeyFile(console, reader, "")
+				break
+			}
+			return true, settings, plan, nil
+		case "q", "n", "no":
+			return false, settings, plan, nil
+		case "k":
+			if strings.TrimSpace(os.Getenv("SITEBRUSH_RELEASE_PRIVATE_KEY")) != "" {
+				console.Warning("Unset SITEBRUSH_RELEASE_PRIVATE_KEY to choose a key file.")
+				continue
+			}
+			showSigningGuide(console, plan.releaseKeyFile)
+			plan.releaseKeyFile, err = configureReleaseKeyFile(console, reader, plan.releaseKeyFile)
+		case "e":
+			showPublicationPlan(console, plan.saved)
+			var selection string
+			selection, err = console.Line(reader, "Destination number (blank to return)", "")
+			if err != nil || selection == "" {
+				break
+			}
+			index, parseErr := strconv.Atoi(selection)
+			if parseErr != nil || index < 1 || index > len(plan.saved) {
+				console.Warning("Choose a destination number from the list.")
+				continue
+			}
+			plan.saved[index-1], _, err = configurePublicationTarget(console, reader, plan.saved[index-1])
+		case "a":
+			plan, err = addPublicationTarget(console, reader, plan)
+		case "b":
+			settings, err = configureBuildSettings(console, reader, repoRoot, settings)
+		case "d":
+			showCrosscompileDetails(console, repoRoot, strings.TrimSpace(commit), settings, plan, runtime.GOOS)
+			_, err = console.Line(reader, "  Press Enter to return to the summary", "")
+		default:
+			console.Warning("Press Enter to start, or choose K, E, A, B, D or Q.")
+		}
+		if err != nil {
+			return false, settings, plan, err
+		}
+		plan = selectPublicationTargets(plan)
+	}
+}
+
+func (settings crosscompileSettings) requiresSigning(plan publicationPlan) bool {
+	return settings.signUpdates || settings.mode != modeDesktopApp && plan.officialReleasePublication()
+}
+
+func showCrosscompileSettings(console *buildconsole.Console, settings crosscompileSettings, plan publicationPlan, hostOS string) {
+	console.Heading("  SiteBrush — release " + settings.version)
+	targets, serverCount := selectedBuildTargets(settings.mode, settings.filter, hostOS)
+	_, architectures := buildTargetNames(targets)
+	console.Heading("  Build")
+	if serverCount > 0 {
+		platforms, _ := buildTargetNames(targets[:serverCount])
+		unit := "builds"
+		if serverCount == 1 {
+			unit = "build"
+		}
+		console.Info("    Server:   %d %s — %s", serverCount, unit, strings.Join(platforms, ", "))
+	}
+	if len(targets) > serverCount {
+		platforms, _ := buildTargetNames(targets[serverCount:])
+		desktopCount := len(targets) - serverCount
+		unit := "packages"
+		if desktopCount == 1 {
+			unit = "package"
+		}
+		console.Info("    Desktop:  %d %s — %s", desktopCount, unit, strings.Join(platforms, ", "))
+	}
+	console.Info("    CPUs:     %d — %s", len(architectures), strings.Join(architectures, ", "))
+	if settings.mode != modeServerApp && settings.filter.matches("darwin", "universal") && !includesMacOSDesktop(settings.filter, hostOS) {
+		console.Info("    macOS desktop needs a Mac; skipped on this machine.")
+	}
+	if settings.options.macOSStage != "all" {
+		console.Info("    macOS step: %s", settings.options.macOSStage)
+	}
+	console.Info("    Save to:  %s", filepath.Join(settings.outputRoot, settings.version))
+	console.Heading("  Release signature")
+	if !settings.requiresSigning(plan) {
+		console.Info("    Not required for this build.")
+	} else if strings.TrimSpace(os.Getenv("SITEBRUSH_RELEASE_PRIVATE_KEY")) != "" {
+		console.Info("    Key: supplied by the environment.")
+	} else if plan.releaseKeyFile == "" {
+		console.Info("    Key: not set — choose K to select the existing release key.")
+	} else {
+		console.Info("    Key: %s", plan.releaseKeyFile)
+	}
+	console.Heading("  Upload to")
+	if len(plan.targets) == 0 {
+		console.Info("    No servers selected; files stay on this machine.")
+	}
+	for index, target := range plan.saved {
+		status := ""
+		if target.Disabled {
+			status = " (disabled)"
+		}
+		console.Info("    %d. %s%s", index+1, target.Domain, status)
+	}
+}
+
+func chooseCrosscompileAction(console *buildconsole.Console, reader *bufio.Reader, plan publicationPlan) (string, error) {
+	action := "Build and upload"
+	if len(plan.targets) == 0 {
+		action = "Build only"
+	}
+	console.Info("\n    K  Choose key       E  Edit servers    A  Add server")
+	console.Info("    B  Build settings   D  Details / help  Q  Quit\n")
+	return console.Line(reader, "  "+console.Bold("[Enter]  "+action+" (default)"), "")
+}
+
+func showCrosscompileDetails(console *buildconsole.Console, repoRoot, commit string, settings crosscompileSettings, plan publicationPlan, hostOS string) {
+	console.Heading("  Build details")
+	console.Info("    Program: %s\n    Go version: %s\n    Build mode: %s", settings.program, settings.options.goVersion, settings.mode)
+	console.Info("    Source: %s\n    Commit: %s", repoRoot, commit)
+	console.Info("    Target filter: %s\n    Rebuild Docker images: %t", settings.filter.label(), settings.options.rebuildDockerImages)
+	console.Info("    Local settings: %s", plan.configPath)
+	showBuildMatrix(console, settings.mode, settings.filter, hostOS, settings.options.macOSStage)
+	if settings.mode != modeServerApp && settings.options.macOSStage != "package" {
+		console.Info("    Docker compiles desktop apps; server builds use CGO=0.")
+	}
+	if settings.mode != modeServerApp && includesMacOSDesktop(settings.filter, hostOS) {
+		sdk := settings.options.macOSSDK
+		if sdk == "" {
+			sdk = "installed Xcode SDK"
+		}
+		console.Info("    macOS SDK: %s", sdk)
+	}
+	console.Heading("  Key and upload details")
+	showSigningGuide(console, plan.releaseKeyFile)
+	showPublicationPlan(console, plan.saved)
+}
+
+func addPublicationTarget(console *buildconsole.Console, reader *bufio.Reader, plan publicationPlan) (publicationPlan, error) {
+	for {
+		domain, err := console.Line(reader, "Additional domain (blank to return)", "")
+		if err != nil || domain == "" {
+			return plan, err
+		}
+		domain = strings.TrimSuffix(strings.ToLower(domain), ".")
+		if !validPublicationDomain(domain) {
+			console.Warning("Enter an ASCII domain such as example.com, without https:// or a path.")
+			continue
+		}
+		duplicate := false
+		for _, existing := range plan.saved {
+			duplicate = duplicate || existing.Domain == domain
+		}
+		if duplicate || len(plan.saved) >= 64 {
+			console.Warning("Domain is already listed, or the 64-destination limit has been reached.")
+			continue
+		}
+		target, _, err := configurePublicationTarget(console, reader, defaultPublicationTarget(domain))
+		if err == nil {
+			plan.saved = append(plan.saved, target)
+		}
+		return plan, err
+	}
+}
+
+func configureBuildSettings(console *buildconsole.Console, reader *bufio.Reader, repoRoot string, settings crosscompileSettings) (crosscompileSettings, error) {
+	for {
+		candidate := settings
+		mode := string(candidate.mode)
+		console.Info("Enter keeps a field; '-' clears an OS/CPU filter or SDK path.")
+		for _, field := range []struct {
+			label     string
+			text      *string
+			clearable bool
+		}{
+			{"Version", &candidate.version, false}, {"Program name", &candidate.program, false},
+			{"Mode (all, server-app, desktop-app)", &mode, false}, {"OS filter", &candidate.filter.goos, true},
+			{"CPU filter", &candidate.filter.goarch, true}, {"Output root", &candidate.outputRoot, false},
+			{"macOS SDK archive", &candidate.options.macOSSDK, true}, {"macOS stage (all, build, package)", &candidate.options.macOSStage, false},
+		} {
+			answer, err := console.Line(reader, field.label, *field.text)
+			if err != nil {
+				return settings, err
+			}
+			if answer == "-" && field.clearable {
+				answer = ""
+			}
+			*field.text = answer
+		}
+		var err error
+		candidate.options.rebuildDockerImages, err = console.Confirm(reader, "Rebuild Docker images?", candidate.options.rebuildDockerImages)
+		if err != nil {
+			return settings, err
+		}
+		candidate.signUpdates, err = console.Confirm(reader, "Force signing for nonofficial server uploads?", candidate.signUpdates)
+		if err != nil {
+			return settings, err
+		}
+		candidate.mode = buildMode(mode)
+		candidate.version = sanitizePathSegment(candidate.version)
+		if candidate.mode != modeAll && candidate.mode != modeServerApp && candidate.mode != modeDesktopApp || candidate.version == "" || candidate.program == "" || sanitizePathSegment(candidate.program) != candidate.program {
+			console.Warning("Use a listed build mode, a nonempty version and a simple program name.")
+			continue
+		}
+		if err := validateMacOSStage(candidate.options.macOSStage, candidate.mode, candidate.filter); err != nil {
+			console.Warning(err.Error())
+			continue
+		}
+		if !filepath.IsAbs(candidate.outputRoot) {
+			candidate.outputRoot = filepath.Join(repoRoot, candidate.outputRoot)
+		}
+		candidate.options.targetFilter = candidate.filter
+		return candidate, nil
 	}
 }
 
@@ -627,8 +825,7 @@ func includesMacOSDesktop(filter buildTargetFilter, hostOS string) bool {
 	return filter.matches("darwin", "universal") && (hostOS == "darwin" || filter.goos == "darwin")
 }
 
-func showBuildMatrix(console *buildconsole.Console, mode buildMode, filter buildTargetFilter, hostOS, macOSStage string) {
-	console.Heading("What will be compiled")
+func selectedBuildTargets(mode buildMode, filter buildTargetFilter, hostOS string) ([]desktopBuildTarget, int) {
 	var targets []desktopBuildTarget
 	serverCount := 0
 	if mode != modeDesktopApp {
@@ -640,8 +837,6 @@ func showBuildMatrix(console *buildconsole.Console, mode buildMode, filter build
 	if mode != modeServerApp {
 		if includesMacOSDesktop(filter, hostOS) {
 			targets = append(targets, desktopBuildTarget{"darwin", "amd64 + arm64", "desktop universal (Docker compilation, macOS DMG packaging)"})
-		} else if filter.matches("darwin", "universal") {
-			console.Warning("macOS desktop is skipped on " + hostOS + "; DMG packaging requires a macOS host.")
 		}
 		for _, target := range linuxDesktopTargets() {
 			if filter.matches(target.goos, target.goarch) {
@@ -654,6 +849,10 @@ func showBuildMatrix(console *buildconsole.Console, mode buildMode, filter build
 			}
 		}
 	}
+	return targets, serverCount
+}
+
+func buildTargetNames(targets []desktopBuildTarget) ([]string, []string) {
 	platforms, architectures := make(map[string]bool), make(map[string]bool)
 	for _, target := range targets {
 		platforms[target.goos] = true
@@ -670,34 +869,54 @@ func showBuildMatrix(console *buildconsole.Console, mode buildMode, filter build
 	}
 	sort.Strings(operatingSystems)
 	sort.Strings(cpuArchitectures)
-	console.Info("%d operating systems, %d CPU architectures; %d server builds, %d desktop packages.", len(platforms), len(architectures), serverCount, len(targets)-serverCount)
-	console.Info("OS: %s | CPU: %s", strings.Join(operatingSystems, ", "), strings.Join(cpuArchitectures, ", "))
+	for index, operatingSystem := range operatingSystems {
+		switch operatingSystem {
+		case "darwin":
+			operatingSystems[index] = "macOS"
+		case "freebsd":
+			operatingSystems[index] = "FreeBSD"
+		case "linux":
+			operatingSystems[index] = "Linux"
+		case "openbsd":
+			operatingSystems[index] = "OpenBSD"
+		case "windows":
+			operatingSystems[index] = "Windows"
+		}
+	}
+	return operatingSystems, cpuArchitectures
+}
+
+func showBuildMatrix(console *buildconsole.Console, mode buildMode, filter buildTargetFilter, hostOS, macOSStage string) {
+	console.Heading("  Build targets")
+	targets, serverCount := selectedBuildTargets(mode, filter, hostOS)
+	operatingSystems, cpuArchitectures := buildTargetNames(targets)
+	if mode != modeServerApp && filter.matches("darwin", "universal") && !includesMacOSDesktop(filter, hostOS) {
+		console.Info("    macOS desktop needs a Mac; skipped on this machine.")
+	}
+	console.Info("    %d operating systems, %d CPU architectures; %d server builds, %d desktop packages.", len(operatingSystems), len(cpuArchitectures), serverCount, len(targets)-serverCount)
+	console.Info("    OS: %s\n    CPU: %s", strings.Join(operatingSystems, ", "), strings.Join(cpuArchitectures, ", "))
 	if macOSStage != "all" {
 		console.Info("macOS stage: %s (build compiles only; package consumes existing compiled binaries).", macOSStage)
 	}
 }
 
-func defaultReleaseKeyFile() (string, error) {
-	configuration, err := os.UserConfigDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(configuration, "sitebrush", "release-ed25519.key"), nil
-}
-
 // Save an absolute local path so later launches can use another working
 // directory. The trusted private key itself is never copied or regenerated.
 func configureReleaseKeyFile(console *buildconsole.Console, reader *bufio.Reader, filename string) (string, error) {
-	if filename == "" {
-		var err error
-		filename, err = defaultReleaseKeyFile()
-		if err != nil {
-			return "", err
-		}
+	label := "Signing key file (blank to return)"
+	if filename != "" {
+		label = "Signing key file (Enter to keep)"
 	}
-	filename, err := console.Line(reader, "Signing key file (Enter to keep)", filename)
+	filename, err := console.Line(reader, label, filename)
 	if err != nil {
 		return "", err
+	}
+	return resolveReleaseKeyPath(filename)
+}
+
+func resolveReleaseKeyPath(filename string) (string, error) {
+	if filename == "" {
+		return "", nil
 	}
 	if filename == "~" || strings.HasPrefix(filename, "~/") || strings.HasPrefix(filename, "~\\") {
 		homeDirectory, err := os.UserHomeDir()
@@ -712,18 +931,11 @@ func configureReleaseKeyFile(console *buildconsole.Console, reader *bufio.Reader
 	return filepath.Abs(filename)
 }
 
-func showSigningGuide(console *buildconsole.Console, explicitFile string) {
-	filename, err := defaultReleaseKeyFile()
-	if err != nil {
-		console.Warning("Cannot resolve default key directory: " + err.Error())
-	}
-	source := filename
-	if explicitFile != "" {
-		source = explicitFile
-	}
+func showSigningGuide(console *buildconsole.Console, source string) {
 	if strings.TrimSpace(os.Getenv("SITEBRUSH_RELEASE_PRIVATE_KEY")) != "" {
 		console.Info("Signing key: SITEBRUSH_RELEASE_PRIVATE_KEY (takes precedence; unset it to choose a file)")
-		console.Info("Default key file: %s", filename)
+	} else if source == "" {
+		console.Info("Signing key: not configured (K in wizard or -release-key <file>).")
 	} else {
 		if absolute, err := filepath.Abs(source); source != "" && err == nil {
 			source = absolute
@@ -768,22 +980,20 @@ func readinessOutput(repoRoot, name string, arguments ...string) (string, error)
 }
 
 func checkBuildReadiness(repoRoot string, console *buildconsole.Console, mode buildMode, options desktopBuildOptions, plan publicationPlan) error {
-	compiler, err := readinessOutput(repoRoot, "go", "version")
-	if err != nil {
+	if _, err := readinessOutput(repoRoot, "go", "version"); err != nil {
 		return fmt.Errorf("Go is required: %w", err)
 	}
-	console.OK(compiler + "; project requires Go " + options.goVersion)
-	commit, err := readinessOutput(repoRoot, "git", "rev-parse", "HEAD")
-	if err != nil {
+	console.OK("Go: ready.")
+	if _, err := readinessOutput(repoRoot, "git", "rev-parse", "HEAD"); err != nil {
 		return fmt.Errorf("Git and a source checkout are required: %w", err)
 	}
-	console.OK("Git: " + commit)
+	console.OK("Source checkout: ready.")
 	if mode != modeServerApp && options.macOSStage != "package" {
-		console.Info("Docker: required for desktop CGO builds; server builds use CGO=0.")
+		console.Info("Checking Docker for desktop builds...")
 		if _, err := readinessOutput(repoRoot, "docker", "info", "--format", "{{.Architecture}}"); err != nil {
 			return fmt.Errorf("Docker is unavailable; install/start Docker and check docker info, or use -interactive=always -mode server-app: %w", err)
 		}
-		console.OK("Docker: ready (cached builders; privileged binfmt setup if cross-CPU emulation is missing).")
+		console.OK("Docker: ready.")
 	}
 	if mode != modeServerApp && includesMacOSDesktop(options.targetFilter, runtime.GOOS) {
 		for _, tool := range []string{"hdiutil", "sips", "iconutil"} {
@@ -799,7 +1009,7 @@ func checkBuildReadiness(repoRoot string, console *buildconsole.Console, mode bu
 				if err := verifyNonEmptyFile(options.macOSSDK); err != nil {
 					return fmt.Errorf("macOS SDK archive: %w", err)
 				}
-				console.OK("macOS SDK archive: " + options.macOSSDK)
+				console.OK("macOS SDK archive: ready.")
 			} else {
 				sdk, err := readinessOutput(repoRoot, "xcrun", "--sdk", "macosx", "--show-sdk-path")
 				if err != nil {
@@ -808,7 +1018,7 @@ func checkBuildReadiness(repoRoot string, console *buildconsole.Console, mode bu
 				if information, err := os.Stat(sdk); err != nil || !information.IsDir() {
 					return fmt.Errorf("macOS SDK directory is unavailable: %s", sdk)
 				}
-				console.OK("macOS SDK: " + sdk)
+				console.OK("macOS SDK: ready.")
 			}
 		}
 	}
@@ -827,11 +1037,11 @@ func checkBuildReadiness(repoRoot string, console *buildconsole.Console, mode bu
 		if err != nil {
 			return err
 		}
-		console.Info("Checking SSH: %s", target.Host)
+		console.Info("Checking upload access to %s...", target.Domain)
 		if _, err := readinessOutput(repoRoot, "ssh", append(publicationSSHArguments(target.Host), script)...); err != nil {
 			return fmt.Errorf("%s: check SSH authentication, host trust, and upload path: %w", target.Host, err)
 		}
-		console.OK("Upload access: " + target.Host)
+		console.OK(target.Domain + ": ready for upload.")
 	}
 	return nil
 }
@@ -2074,11 +2284,7 @@ func officialReleaseDomain(domain string) bool {
 func loadReleaseSigningKey(filename, encoded string, trusted ed25519.PublicKey) (ed25519.PrivateKey, error) {
 	if strings.TrimSpace(encoded) == "" {
 		if filename == "" {
-			var err error
-			filename, err = defaultReleaseKeyFile()
-			if err != nil {
-				return nil, err
-			}
+			return nil, errors.New("choose a signing key file in the wizard, use -release-key <file>, or set SITEBRUSH_RELEASE_PRIVATE_KEY")
 		}
 		file, err := os.Open(filename)
 		if err != nil {

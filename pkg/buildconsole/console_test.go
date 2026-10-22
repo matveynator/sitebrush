@@ -44,8 +44,15 @@ func TestPoliciesAndColorOutput(t *testing.T) {
 		console, _ := New(&output, policy)
 		console.Heading("Build")
 		console.OK("Ready")
+		answer, err := console.Line(bufio.NewReader(strings.NewReader("\n")), "Your choice", "Enter")
+		if err != nil || answer != "Enter" {
+			t.Fatalf("default input changed while styling it: %q, %v", answer, err)
+		}
 		if strings.Contains(output.String(), "\x1b[") != (policy == "always") {
 			t.Errorf("unexpected colors for %s: %q", policy, output.String())
+		}
+		if policy == "always" && !strings.Contains(output.String(), "[\x1b[1mEnter\x1b[0m]") {
+			t.Fatal("the default choice is not bold")
 		}
 	}
 }
