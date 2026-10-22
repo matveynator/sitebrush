@@ -114,7 +114,7 @@
 
     <div class="ai-tabs" role="tablist">
       <button class="ai-tab is-active" type="button" id="pageTabButton" role="tab" aria-selected="true">Редактировать страницу</button>
-      <button class="ai-tab" type="button" id="externalTabButton" role="tab" aria-selected="false">Внешний AI</button>
+      <button class="ai-tab" type="button" id="externalTabButton" role="tab" aria-selected="false">Пригласить внешнего помощника</button>
     </div>
 
     <div class="ai-body">
@@ -174,7 +174,7 @@
 
             <label>Провайдер
               <select class="form-select" id="provider">
-                <option value="ollama" selected>Ollama — локально на этом компьютере</option>
+                <option value="ollama" selected>Ollama — на компьютере с SiteBrush</option>
                 <option value="openai-compatible">OpenAI / ChatGPT API</option>
                 <option value="anthropic">Anthropic / Claude API</option>
                 <option value="deepseek">DeepSeek</option>
@@ -209,6 +209,11 @@
       </section>
 
       <section class="ai-panel external-box" id="externalPanel" role="tabpanel" hidden>
+        <div>
+          <strong>Подключить помощника через MCP</strong>
+          <div class="external-note">Claude и другие MCP-клиенты смогут работать с сайтом в пределах разрешений, которые вы подтвердите при подключении.</div>
+          <div class="external-actions"><a class="btn btn-outline-primary" href="/?mcp">Инструкция подключения</a><a class="btn btn-outline-secondary" href="/?profile#ai-access">AI · SiteBrush — доступ и подключения</a></div>
+        </div>
         <div>
           <strong>Редактирование текущей страницы через внешний AI</strong>
           <div class="external-note">SiteBrush создаст отзывную ссылку с контекстом этой страницы. Скопируйте её вместе с заданием в ChatGPT, Claude или другую AI-систему.</div>
@@ -298,7 +303,7 @@ const providerHelp = {
   },
   'ollama': {
     url:'https://ollama.com/download',
-    text:'Ollama работает локально через 127.0.0.1:11434. API token не нужен. SiteBrush ждёт медленные локальные модели и показывает их ответ в реальном времени.'
+    text:'Ollama работает на компьютере, где запущен SiteBrush, через 127.0.0.1:11434. При открытии удалённого сайта это компьютер сервера. API token не нужен. SiteBrush ждёт медленные локальные модели и показывает их ответ в реальном времени.'
   }
 };
 let speechRecognition = null;

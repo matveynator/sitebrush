@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="{{.LanguageCode}}" dir="{{.TextDirection}}" id="SiteBrush">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{if eq .LanguageCode "ru"}}Подключить AI к SiteBrush{{else}}Connect AI to SiteBrush{{end}}</title>
+  <link rel="stylesheet" href="/p/static/technical_pages.css">
+  <style>
+    body{margin:0;font:16px/1.6 system-ui,sans-serif;background:#f6f8fa;color:#18212b}
+    main{max-width:860px;margin:auto;padding:28px 20px 56px}h1{line-height:1.2}section{background:#fff;border:1px solid #d8dee5;border-radius:12px;padding:20px;margin:20px 0}
+    .connection-address{display:flex;gap:10px;flex-wrap:wrap}input{font:inherit;padding:10px;flex:1;min-width:180px}button,.action{font:inherit;padding:10px 14px;cursor:pointer}pre{overflow:auto;padding:12px;background:#eef1f5;border-radius:6px}a{color:#155fbb}li{margin:8px 0}code{overflow-wrap:anywhere}#copy-status{min-height:1.6em}
+    @media(prefers-color-scheme:dark){body{background:#101820;color:#e8edf2}section{background:#19232e;border-color:#3c4958}input,button,pre{background:#243140;color:#e8edf2;border-color:#526278}a{color:#8fc6ff}}
+  </style>
+</head>
+<body><main>
+  <a href="/">{{.Domain}}</a>
+  {{if eq .LanguageCode "ru"}}
+  <h1>Подключить AI-помощника</h1>
+  <p>Claude и другие системы могут читать и редактировать сайт через MCP. Вы входите в SiteBrush и выбираете разрешения; пароль аккаунта помощнику не передаётся.</p>
+  {{else}}
+  <h1>Connect an AI assistant</h1>
+  <p>Claude and other systems can read and edit your site using MCP. Sign in to SiteBrush to approve permissions; your account password is never shared with the assistant.</p>
+  {{end}}
+  <section>
+    <h2>{{if eq .LanguageCode "ru"}}1. Скопируйте адрес подключения{{else}}1. Copy the connection URL{{end}}</h2>
+    <div class="connection-address"><input id="mcp-url" aria-label="MCP URL" readonly value="{{.MCPURL}}"><button type="button" id="copy-url">{{if eq .LanguageCode "ru"}}Копировать{{else}}Copy{{end}}</button></div>
+    <p id="copy-status" role="status"></p>
+    <p>{{if eq .LanguageCode "ru"}}Этот адрес нужно добавить в настройках MCP вашей AI-системы. На этой странице токен создавать не требуется.{{else}}Add this URL in your AI system's MCP settings. You do not need to create a token on this page.{{end}}</p>
+  </section>
+  <section>
+    <h2>{{if eq .LanguageCode "ru"}}2. Выберите способ подключения{{else}}2. Choose your client{{end}}</h2>
+    <h3>Claude</h3>
+    {{if eq .LanguageCode "ru"}}
+    <ol><li>Откройте Claude → «Настроить» / Customize → «Подключения» / Connectors.</li><li>Добавьте собственное подключение / Add custom connector с названием SiteBrush и адресом выше.</li><li>Выберите вход через OAuth. При необходимости используйте автоматическую регистрацию OAuth-клиента.</li><li>Нажмите «Подключить», войдите в SiteBrush и подтвердите нужные разрешения.</li><li>Включите подключение SiteBrush в разговоре с Claude.</li></ol>
+    {{else}}
+    <ol><li>Open Claude → Customize → Connectors.</li><li>Add a custom connector named SiteBrush using the URL above.</li><li>Choose OAuth sign-in. If needed, select automatic OAuth client registration.</li><li>Connect, sign in to SiteBrush and approve the permissions you want to grant.</li><li>Enable the SiteBrush connector in your conversation.</li></ol>
+    {{end}}
+    <p><a href="https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp" target="_blank" rel="noopener noreferrer">{{if eq .LanguageCode "ru"}}Инструкция Claude{{else}}Claude instructions{{end}}</a></p>
+    <h3>Claude Code</h3>
+    <pre><code>claude mcp add --transport http sitebrush '{{.MCPURL}}'</code></pre>
+    <p>{{if eq .LanguageCode "ru"}}Затем запустите Claude Code, выполните <code>/mcp</code>, выберите SiteBrush и пройдите авторизацию в браузере.{{else}}Then start Claude Code, run <code>/mcp</code>, select SiteBrush and complete browser authorization.{{end}} <a href="https://code.claude.com/docs/en/mcp" target="_blank" rel="noopener noreferrer">Claude Code MCP</a></p>
+    <h3>{{if eq .LanguageCode "ru"}}Другие MCP-клиенты{{else}}Other MCP clients{{end}}</h3>
+    <p>{{if eq .LanguageCode "ru"}}Выберите удалённый сервер HTTP / Streamable HTTP, укажите адрес выше и авторизацию OAuth.{{else}}Choose a remote HTTP / Streamable HTTP server, enter the URL above and use OAuth authorization.{{end}}</p>
+  </section>
+  <section>
+    <h2>{{if eq .LanguageCode "ru"}}3. Дайте помощнику задание{{else}}3. Give your assistant a task{{end}}</h2>
+    <p>{{if eq .LanguageCode "ru"}}Например: «Изучи страницы сайта и посещаемость, предложи улучшения главной страницы и подготовь черновик. Покажи изменения перед публикацией».{{else}}For example: “Read the site's pages and traffic report, suggest homepage improvements and prepare a draft. Show me the changes before publishing.”{{end}}</p>
+    <p>{{if eq .LanguageCode "ru"}}Доступны страницы, файлы, импорт, история изменений, защита паролем, заморозка, публикация и обезличенная аналитика — в пределах выданных прав. Изменения содержимого сохраняются как черновики. Публикация применяет все ожидающие изменения сайта. Защита паролем применяется сразу и распространяется на вложенные страницы.{{else}}Available tools include pages, files, imports, revision history, password protection, freezing, publication and aggregate analytics, according to your granted permissions. Content changes are drafts. Publishing applies all pending site changes. Password protection applies immediately to the page and its descendants.{{end}}</p>
+    {{if .SignedIn}}<p><a class="action" href="/?profile#ai-access">{{if eq .LanguageCode "ru"}}Разрешения и отзыв подключений{{else}}Permissions and connection revocation{{end}}</a></p>{{else}}<p><a class="action" href="{{.LoginURL}}">{{if eq .LanguageCode "ru"}}Войти в SiteBrush{{else}}Sign in to SiteBrush{{end}}</a></p>{{end}}
+  </section>
+  <section>
+    <h2>{{if eq .LanguageCode "ru"}}Если подключение не работает{{else}}If the connection fails{{end}}</h2>
+    <p>{{if eq .LanguageCode "ru"}}Claude подключается из облака Anthropic; его сети должны быть разрешены в настройках AI. Claude Code подключается с компьютера, где он запущен: разрешите этот IP или соответствующий CIDR. Разрешённый IP открывает подключение, а право редактирования выдаётся отдельно через OAuth.{{else}}Claude connects from Anthropic's cloud; enable its networks in the AI settings. Claude Code connects from the computer running it: allow that IP or CIDR. Network admission makes the endpoint reachable; editing permission is granted separately through OAuth.{{end}}</p>
+    <p><a href="/?ai">{{if eq .LanguageCode "ru"}}Открыть встроенный AI-редактор{{else}}Open the built-in AI editor{{end}}</a> · <a href="/?profile#ai-access">{{if eq .LanguageCode "ru"}}Настройки AI{{else}}AI settings{{end}}</a></p>
+  </section>
+</main>
+<script>
+document.getElementById('copy-url').addEventListener('click', async function copyConnectionURL() {
+  const addressInput = document.getElementById('mcp-url');
+  const copyStatus = document.getElementById('copy-status');
+  try {
+    await navigator.clipboard.writeText(addressInput.value);
+    copyStatus.textContent = {{if eq .LanguageCode "ru"}}'Адрес скопирован.'{{else}}'URL copied.'{{end}};
+  } catch (copyError) {
+    addressInput.select();
+    copyStatus.textContent = {{if eq .LanguageCode "ru"}}'Не удалось скопировать автоматически. Скопируйте выделенный адрес вручную.'{{else}}'Automatic copying failed. Copy the selected URL manually.'{{end}};
+  }
+});
+</script>
+</body></html>

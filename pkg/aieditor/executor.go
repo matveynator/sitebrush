@@ -10,13 +10,20 @@ import (
 type Operation string
 
 const (
-	OperationListPages  Operation = "list_pages"
-	OperationReadPage   Operation = "read_page"
-	OperationCreatePage Operation = "create_page"
-	OperationUpdatePage Operation = "update_page"
-	OperationUploadFile Operation = "upload_file"
-	OperationPublish    Operation = "publish"
-	OperationRollback   Operation = "rollback"
+	OperationListPages          Operation = "list_pages"
+	OperationReadPage           Operation = "read_page"
+	OperationCreatePage         Operation = "create_page"
+	OperationUpdatePage         Operation = "update_page"
+	OperationUploadFile         Operation = "upload_file"
+	OperationPublish            Operation = "publish"
+	OperationRollback           Operation = "rollback"
+	OperationGetSiteState       Operation = "get_site_state"
+	OperationGetPageSettings    Operation = "get_page_settings"
+	OperationDeletePage         Operation = "delete_page"
+	OperationDeleteRevision     Operation = "delete_revision"
+	OperationSetPagePassword    Operation = "set_page_password"
+	OperationRemovePagePassword Operation = "remove_page_password"
+	OperationFreezeSite         Operation = "freeze_site"
 )
 
 var (
@@ -30,6 +37,7 @@ type Request struct {
 	DraftOnly       bool      `json:"-"`
 	PageOnly        bool      `json:"-"`
 	StrictVersion   bool      `json:"-"`
+	Password        string    `json:"password,omitempty"`
 	Domain          string    `json:"domain,omitempty"`
 	Operation       Operation `json:"operation"`
 	Path            string    `json:"path,omitempty"`
@@ -170,11 +178,11 @@ func (executor *Executor) Close() {
 
 func Validate(request Request) error {
 	switch request.Operation {
-	case OperationListPages, OperationPublish:
+	case OperationListPages, OperationPublish, OperationGetSiteState, OperationFreezeSite:
 		if request.Path != "" && cleanRequestPath(request.Path) == "" {
 			return ErrInvalidRequest
 		}
-	case OperationReadPage, OperationCreatePage, OperationUpdatePage, OperationRollback:
+	case OperationReadPage, OperationCreatePage, OperationUpdatePage, OperationRollback, OperationGetPageSettings, OperationDeletePage, OperationDeleteRevision, OperationSetPagePassword, OperationRemovePagePassword:
 		if cleanRequestPath(request.Path) == "" {
 			return ErrInvalidRequest
 		}
@@ -184,6 +192,15 @@ func Validate(request Request) error {
 		}
 	default:
 		return ErrUnsupportedOperation
+	}
+	if (request.Operation == OperationDeletePage || request.Operation == OperationDeleteRevision) && request.ExpectedVersion == "" {
+		return ErrInvalidRequest
+	}
+	if request.Operation == OperationDeleteRevision && request.RevisionID == "" {
+		return ErrInvalidRequest
+	}
+	if request.Operation == OperationSetPagePassword && (strings.TrimSpace(request.Password) == "" || len(request.Password) > 1024) {
+		return ErrInvalidRequest
 	}
 	if len(request.HTML) > 32<<20 || len(request.FileContent) > 128<<20 {
 		return ErrInvalidRequest

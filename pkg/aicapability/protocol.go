@@ -5,7 +5,7 @@ import _ "embed"
 const Protocol = "sitebrush-ai-editor/v1"
 
 func Operations() []string {
-	return []string{"list_pages", "read_page", "create_page", "update_page", "list_files", "upload_file", "list_revisions", "publish", "rollback", "get_site_report", "get_analytics_summary", "get_funnels", "get_paths", "get_page_behaviour", "get_forms", "get_sources", "get_page_impacts", "get_insights"}
+	return []string{"list_pages", "read_page", "create_page", "update_page", "list_files", "upload_file", "list_revisions", "publish", "rollback", "get_site_report", "get_analytics_summary", "get_funnels", "get_paths", "get_page_behaviour", "get_forms", "get_sources", "get_page_impacts", "get_insights", "get_site_state", "get_page_settings", "delete_page", "delete_revision", "set_page_password", "remove_page_password", "freeze_site", "import_site", "get_import_status", "cancel_import"}
 }
 
 // Documentation is public and provider-neutral. Secrets are exchanged only in
@@ -24,13 +24,14 @@ func OpenAPI(origin string) map[string]any {
 		"device_code": map[string]string{"type": "string"}, "operation": map[string]any{"type": "string", "enum": []string{"create_page", "update_page"}},
 		"path": map[string]string{"type": "string"}, "title": map[string]string{"type": "string"}, "html": map[string]string{"type": "string"},
 		"expected_version": map[string]string{"type": "string"}, "revision_id": map[string]string{"type": "string"},
+		"password": map[string]string{"type": "string"}, "source_url": map[string]string{"type": "string"}, "mode": map[string]any{"type": "string", "enum": []string{"page", "site"}}, "job_id": map[string]string{"type": "string"},
 		"file_name": map[string]string{"type": "string"}, "file_content": map[string]string{"type": "string", "format": "byte"},
 		"image_width": map[string]string{"type": "integer"}, "image_height": map[string]string{"type": "integer"}, "image_fit": map[string]any{"type": "string", "enum": []string{"cover", "contain", "fill"}},
 	}}
 	parameters := []any{queryAction}
-	for _, name := range []string{"path", "days", "limit", "offset"} {
+	for _, name := range []string{"path", "job_id", "days", "limit", "offset"} {
 		parameterType := "integer"
-		if name == "path" {
+		if name == "path" || name == "job_id" {
 			parameterType = "string"
 		}
 		parameters = append(parameters, map[string]any{"name": name, "in": "query", "schema": map[string]string{"type": parameterType}})

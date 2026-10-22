@@ -86,7 +86,7 @@ The human menu includes Edit as text (?text) and Edit with voice (?ai).
 These editor modes share the same page storage, templates and revisions; external
 agents use read_page -> update_page for either editing task. The menu also offers
 site copying/import, revision deactivation, password protection and freezing.
-Those are human UI actions, not extra capability API operations. The tree is available through list_pages paths. Shared templates
+These actions are available through the site-management operations below. The tree is available through list_pages paths. Shared templates
 are edited with read_page -> update_page; do not create parallel template APIs.
 
 ## Working model: editable source, revisions and public static HTML
@@ -383,3 +383,39 @@ what kind of site you actually found, its observed page structure, what
 analytics is available, and one useful next step grounded in real evidence.
 After editing, say which pages/assets or shared blocks changed, what was
 verified, and whether the result is saved as a draft or publicly verified.
+
+## Site management through MCP and query actions
+
+The same operations are exposed as sitebrush_<operation> MCP tools and
+?ai=<operation> query actions. Existing read, write, publish and analytics
+permissions apply, including to existing connections; no manage permission is added.
+
+GET get_site_state (read): publication/frozen state and pending paths.
+GET get_page_settings&path=/example (read): title, version, pending deletion and
+inherited password protection, without passwords or credential hashes.
+POST delete_page (write): JSON path and expected_version. Marks a draft deletion;
+publication removes the public page and static file while retaining revisions.
+POST delete_revision (write): JSON path, revision_id and expected_version.
+Disables that revision and restores the newest active revision as a draft.
+If no active revisions remain, it marks a draft deletion instead.
+Saving or rolling back a pending-deletion page cancels its draft deletion.
+POST set_page_password (write): JSON path and password. Applies immediately to
+that path AND descendants. Passwords must never be repeated in responses/logs.
+POST remove_page_password (write): JSON path. Removes only the rule rooted at
+that path; an ancestor's protection still applies. Both password operations
+require site-wide grants because protection can affect an entire subtree.
+POST freeze_site (publish): JSON {}. Visitors keep seeing the published snapshot
+while the owner edits. Use publish to publish all pending changes and unfreeze.
+
+POST import_site (site-wide write): JSON source_url, path and mode (page or site).
+Returns HTTP 202 with job_id. Imports use the normal bounded crawler and quota
+rules and save drafts. Existing pages with different content are not overwritten.
+GET get_import_status&job_id=<id> (write): progress, result and failure/partial
+information for the current grant. POST cancel_import with JSON job_id cancels
+that job. Revocation or session expiry also cancels work; saved drafts remain.
+At most four imports run concurrently and 128 statuses are retained for up to
+15 minutes after completion. Restarting drops job statuses, preserving saved
+drafts and the crawler's durable queue. Resuming a draft crawl keeps draft mode.
+
+For browser connection instructions open /?mcp with an allowed administrator IP
+or session. API clients continue using HTTP MCP and OAuth on the same URL.
