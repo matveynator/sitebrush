@@ -354,16 +354,13 @@
 <section id="ai-access" class="authentication-card profile-form profile-account-card profile-ai-connect-card">
   <div class="profile-account-card-header">
     <h2>AI · SiteBrush</h2>
-    <p>{{if eq .LanguageCode "ru"}}Внешний AI-доступ по умолчанию скрыт. Разрешите нужного провайдера и подключите адрес <code>https://{{.Domain}}/?mcp</code>. Каждое подключение требует вашего подтверждения.{{else}}External AI access is hidden by default. Enable a provider and connect <code>https://{{.Domain}}/?mcp</code>. Each connection requires your approval.{{end}}</p>
+    <p>{{if eq .LanguageCode "ru"}}Известные адреса AI-провайдеров разрешены по умолчанию и обновляются автоматически. Также доступны IP из списка администратора сайта. Для подключения используйте <code>https://{{.Domain}}/?mcp</code>; разрешения на работу с сайтом подтверждаете вы.{{else}}Published AI provider networks are enabled by default and updated automatically. Site administrator IPs are also admitted. Connect <code>https://{{.Domain}}/?mcp</code>; you approve access to your site.{{end}}</p>
+    <p><a href="/?ai">{{if eq .LanguageCode "ru"}}Открыть AI-редактор{{else}}Open AI editor{{end}}</a></p>
     <form method="post" action="{{.ProfileFormAction}}">
       <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
       <input type="hidden" name="profile_action" value="ai_ingress_save">
       <label><input type="checkbox" name="ai_external"{{if .AIIngressPolicy.External}} checked{{end}}> {{if eq .LanguageCode "ru"}}Разрешить внешние AI-подключения{{else}}Allow external AI connections{{end}}</label>
-      <label><input type="checkbox" name="ai_openai"{{if .AIIngressPolicy.OpenAI}} checked{{end}}> OpenAI / ChatGPT</label>
-      <label><input type="checkbox" name="ai_anthropic"{{if .AIIngressPolicy.Anthropic}} checked{{end}}> Anthropic / Claude</label>
-      <label><input type="checkbox" name="ai_xai"{{if .AIIngressPolicy.XAI}} checked{{end}}> xAI / Grok ({{if eq .LanguageCode "ru"}}требуются свои CIDR{{else}}requires custom CIDRs{{end}})</label>
-      <label>xAI CIDRs<input name="ai_xai_cidrs" value="{{range $index, $cidr := .AIIngressPolicy.XAICIDRs}}{{if $index}}, {{end}}{{$cidr}}{{end}}" maxlength="2048"></label>
-      <label><input type="checkbox" name="ai_openai_mtls"{{if .AIIngressPolicy.RequireOpenAIMTLS}} checked{{end}}> {{if eq .LanguageCode "ru"}}Требовать сертификат OpenAI mTLS{{else}}Require OpenAI mTLS certificate{{end}}</label>
+      {{range .AIIngressProviders}}<label><input type="checkbox" name="ai_{{.ID}}"{{if $.AIIngressPolicy.Enabled .ID}} checked{{end}}> {{.Name}}</label>{{end}}
       <label>{{if eq .LanguageCode "ru"}}Дополнительные CIDR провайдеров (через запятую){{else}}Custom provider CIDRs (comma separated){{end}}<input name="ai_custom_cidrs" value="{{range $index, $cidr := .AIIngressPolicy.CustomCIDRs}}{{if $index}}, {{end}}{{$cidr}}{{end}}" maxlength="2048"></label>
       <button type="submit">{{.SaveLabel}}</button>
     </form>

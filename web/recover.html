@@ -41,11 +41,18 @@
   </section>{{end}}
   {{if .ShowForm}}<form class="card card-body authentication-card" method="post" action="?recover">
     <input type="hidden" name="recovery_action" value="request">
+    <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
     <input type="hidden" name="return_path" value="{{.ReturnPath}}">
     <p><input type="email" class="form-control" name="email" value="{{.RecoveryEmail}}" placeholder="{{index .T "recover_email_placeholder"}}" autocomplete="email" required></p>
-    <p class="d-flex align-items-center gap-2"><input type="text" class="form-control" name="captcha" placeholder="{{index .T "recover_captcha_placeholder"}}" style="max-width:220px;"/>
-    <img src="?captcha" alt="{{index .T "recover_captcha_alt"}}" title="{{index .T "recover_captcha_placeholder"}}"></p>
-    <input type="submit" class="btn btn-primary" value="{{index .T "recover_submit"}}"/>
+    {{if .CaptchaUnavailable}}<p role="alert">{{index .T "account_mail_unavailable"}}</p>{{else}}
+    <div class="account-captcha">
+      <label>{{index .T "account_captcha_label"}}<input type="text" class="form-control" name="captcha" autocomplete="off" autocapitalize="characters" spellcheck="false" minlength="6" maxlength="6" pattern="[A-Za-z2-9]{6}" required></label>
+      <input type="hidden" name="captcha_id" value="{{.CaptchaID}}">
+      <img src="{{.CaptchaImage}}" width="320" height="100" alt="{{index .T "recover_captcha_alt"}}">
+      <small>{{index .T "account_captcha_help"}}</small>
+    </div>
+    {{end}}
+    <input type="submit" {{if .CaptchaUnavailable}}disabled{{end}} class="btn btn-primary" value="{{index .T "recover_submit"}}"/>
   </form>{{end}}
   {{if .ShowManualPasswordForm}}<form class="profile-form recovery-password-form" method="post" action="?recover">
     <input type="hidden" name="recovery_action" value="manual">

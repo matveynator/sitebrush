@@ -89,6 +89,16 @@ jobs:
           exit 0
       - name: Test packages
         run: go test -count=1 -covermode=atomic -coverprofile=coverage.out ./pkg/... ./scripts/...
+      - name: Test account email abuse boundaries and CAPTCHA
+        run: >-
+          go test -count=1 -timeout=300s .
+          -run '^Test(AccountMailGuard|AccountCaptcha|Register|RegistrationCooldown|Recover|Recovery|SiteRequestStores|LocalhostWithoutSiteDatabase|UnknownAndDeletedHostnames)'
+      - name: Test concise mail journal and transport attribution
+        run: >-
+          go test -count=1 -timeout=180s -covermode=atomic
+          -coverpkg=./pkg/mailmonitor,./pkg/mailout,./pkg/mailguard,./pkg/hostingandsupport
+          -coverprofile=mail-journal-coverage.out .
+          -run '^Test(MailMonitor|MailJournal|MailControl|MailCancellation|MailTransport|HTTPSFallbackLog)'
       - name: Test old and new NetChan peers
         env:
           SITEBRUSH_NETCHAN_INTEROP_TEST: "1"
@@ -173,7 +183,7 @@ jobs:
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6
         with:
           fail_ci_if_error: true
-          files: coverage.out,application-update-coverage.out,application-ai-coverage.out
+          files: coverage.out,application-update-coverage.out,application-ai-coverage.out,mail-journal-coverage.out
           use_oidc: true
       - name: Install editor browser test dependencies
         working-directory: scripts/editor
@@ -184,6 +194,7 @@ jobs:
           node ../../pkg/imageprepare/image_replacement_test.cjs
           node ../../pkg/analytics/browser_test.cjs
           node ../../pkg/accountpasskey/browser_test.cjs
+          node ../../pkg/mailguard/registration_cooldown_test.cjs
           npx playwright install --with-deps chromium
       - name: Test conversion analytics on desktop and narrow mobile
         env:

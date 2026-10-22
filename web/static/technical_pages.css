@@ -3453,3 +3453,7 @@ body.technical-page.analytics-page {
  .technical-page .profile-account-grid > .profile-sessions-card { grid-column: 1; }
  .technical-page .profile-account-grid > .profile-admin-ip-card { grid-column: 2; }
 }
+
+.account-captcha { display: grid; gap: .5rem; margin: 1rem 0; max-width: 100%; }
+.account-captcha input { max-width: 20rem; text-transform: uppercase; letter-spacing: .15em; }
+.account-captcha img { max-width: 100%; height: auto; border: 1px solid var(--theme-border, #aaa); border-radius: .3rem; }

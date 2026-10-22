@@ -717,6 +717,7 @@
     }
   </style>
   <link href="/p/static/technical_pages.css" rel="stylesheet">
+{{if .MailJournalEnabled}}<script defer src="/p/static/mail_journal.js"></script>{{end}}
 </head>
 <body class="technical-page analytics-page bg-body">
 <div class="analytics-page-shell">
@@ -970,6 +971,7 @@ SiteBrushAnalytics.formResult('contact', true);</code></pre><p class="small">{{i
   <div hidden>{{range .SecurityIPSummary.Policies}}<span data-security-policy-name="{{.Label}}">{{with index $.T (print "ax_policy_" .Label)}}{{.}}{{else}}{{.Label}}{{end}}</span>{{end}}</div>
   </div></section>
 
+  {{if .MailJournalEnabled}}{{template "mail-security" .}}{{end}}
   <section id="security" class="card mb-4"><div class="card-body">
     <h2 class="h5">{{index .T "ax_security"}}</h2>
     <p>{{.Security.Suspicious}} · {{index .T "ax_security_independent"}}</p>
@@ -1259,7 +1261,8 @@ SiteBrushAnalytics.formResult('contact', true);</code></pre><p class="small">{{i
     'sitebrush-exploit': '#b91c1c',
     traversal: '#ea580c',
     injection: '#c026d3',
-    'scanner-client': '#475569'
+    'scanner-client': '#475569',
+    'registration-mail-abuse': '#be123c'
   };
 
   function securityTypeColor(category) {
@@ -2130,3 +2133,70 @@ SiteBrushAnalytics.formResult('contact', true);</code></pre><p class="small">{{i
 {{end}}
 </body>
 </html>
+
+{{define "mail-security"}}
+  <script type="application/json" id="mail-journal-labels">{{.MailJournalLabelsJSON}}</script>
+  <div data-mail-settings data-mode="security" data-csrf="{{.AccountCSRF}}" data-language="{{.LanguageCode}}"></div>
+  <section id="mail-security" class="card mb-4" data-mail-security><div class="card-body">
+    <h2 class="h5">{{index .T "mail_journal_security"}}</h2>
+    <p data-mail-feedback role="status">{{if .MailJournalUnavailable}}{{index .T "mail_monitor_unavailable"}}{{end}}</p>
+    <h3 class="h6">{{index .T "mail_journal_blocks"}}</h3><div data-mail-blocks></div>
+    <h3 class="h6">{{index .T "mail_journal_incidents"}}</h3><div data-mail-abuse></div>
+    <h3 class="h6 mt-3">{{index .T "mail_monitor_journal"}}</h3>
+    <form method="get" action="/#mail-security" class="d-flex flex-wrap gap-2 align-items-end mb-3">
+      <input type="hidden" name="analytics" value=""><input type="hidden" name="tab" value="security">
+      <label>{{index .T "mail_journal_server"}} <select class="form-select form-select-sm" name="mail_server">{{range .MailJournalServers}}<option value="{{.Server.ID}}" {{if .MailSelected}}selected{{end}}>{{.Server.Name}}{{if .Server.Local}} · {{index $.T "mail_journal_local_server"}}{{end}}</option>{{end}}</select></label>
+      <button class="btn btn-outline-primary btn-sm">{{index .T "mail_monitor_show"}}</button>
+    </form>
+    {{range $serverIndex, $expenseServer := .MailJournalServers}}{{if $expenseServer.MailSelected}}
+    {{$server := $expenseServer.Server}}
+    <div id="mail-monitor-{{$serverIndex}}">
+      {{if $expenseServer.MailReceivedAt}}<p class="small text-muted">{{index $.T "mail_monitor_received_at"}}: <time datetime="{{$expenseServer.MailReceivedAt}}">{{$expenseServer.MailReceivedAt}}</time></p>{{end}}
+      <p class="small text-muted">{{index $.T "mail_monitor_boundary"}}</p>
+            <form method="get" action="/#mail-monitor-{{$serverIndex}}" class="d-flex flex-wrap gap-2 align-items-end">
+              <input type="hidden" name="analytics" value=""><input type="hidden" name="tab" value="security">
+              <input type="hidden" name="mail_server" value="{{$server.ID}}">
+              <label>{{index $.T "mail_monitor_period"}} <select class="form-select form-select-sm" name="mail_days"><option value="1" {{if eq $expenseServer.MailFilterDays 1}}selected{{end}}>{{index $.T "mail_monitor_day"}}</option><option value="7" {{if eq $expenseServer.MailFilterDays 7}}selected{{end}}>{{index $.T "mail_monitor_week"}}</option><option value="30" {{if eq $expenseServer.MailFilterDays 30}}selected{{end}}>{{index $.T "mail_monitor_month"}}</option><option value="90" {{if eq $expenseServer.MailFilterDays 90}}selected{{end}}>{{index $.T "mail_monitor_quarter"}}</option></select></label>
+              <label>{{index $.T "mail_journal_event_type"}} <select class="form-select form-select-sm" name="mail_stage"><option value="">{{index $.T "mail_monitor_all"}}</option><option value="queued" {{if eq $expenseServer.MailFilterStage "queued"}}selected{{end}}>{{index $.T "mail_monitor_stage_queued"}}</option><option value="accepted" {{if eq $expenseServer.MailFilterStage "accepted"}}selected{{end}}>{{index $.T "mail_monitor_stage_accepted"}}</option><option value="failed" {{if eq $expenseServer.MailFilterStage "failed"}}selected{{end}}>{{index $.T "mail_monitor_stage_failed"}}</option><option value="retry" {{if eq $expenseServer.MailFilterStage "retry"}}selected{{end}}>{{index $.T "mail_monitor_stage_retry"}}</option><option value="cancelled" {{if eq $expenseServer.MailFilterStage "cancelled"}}selected{{end}}>{{index $.T "mail_monitor_stage_cancelled"}}</option><option value="cancel_requested" {{if eq $expenseServer.MailFilterStage "cancel_requested"}}selected{{end}}>{{index $.T "mail_monitor_stage_cancel_requested"}}</option><option value="relay_accepted" {{if eq $expenseServer.MailFilterStage "relay_accepted"}}selected{{end}}>{{index $.T "mail_monitor_stage_relay_accepted"}}</option><option value="registration_complete" {{if eq $expenseServer.MailFilterStage "registration_complete"}}selected{{end}}>{{index $.T "mail_monitor_stage_registration_complete"}}</option><option value="recovery_complete" {{if eq $expenseServer.MailFilterStage "recovery_complete"}}selected{{end}}>{{index $.T "mail_monitor_stage_recovery_complete"}}</option><option value="recovery_skipped" {{if eq $expenseServer.MailFilterStage "recovery_skipped"}}selected{{end}}>{{index $.T "mail_monitor_stage_recovery_skipped"}}</option><option value="attempt" {{if eq $expenseServer.MailFilterStage "attempt"}}selected{{end}}>{{index $.T "mail_monitor_stage_attempt"}}</option><option value="registration_requested" {{if eq $expenseServer.MailFilterStage "registration_requested"}}selected{{end}}>{{index $.T "mail_monitor_stage_registration_requested"}}</option><option value="registration_verified" {{if eq $expenseServer.MailFilterStage "registration_verified"}}selected{{end}}>{{index $.T "mail_monitor_stage_registration_verified"}}</option><option value="registration_failed" {{if eq $expenseServer.MailFilterStage "registration_failed"}}selected{{end}}>{{index $.T "mail_monitor_stage_registration_failed"}}</option><option value="registration_rejected" {{if eq $expenseServer.MailFilterStage "registration_rejected"}}selected{{end}}>{{index $.T "mail_monitor_stage_registration_rejected"}}</option><option value="recovery_requested" {{if eq $expenseServer.MailFilterStage "recovery_requested"}}selected{{end}}>{{index $.T "mail_monitor_stage_recovery_requested"}}</option><option value="recovery_failed" {{if eq $expenseServer.MailFilterStage "recovery_failed"}}selected{{end}}>{{index $.T "mail_monitor_stage_recovery_failed"}}</option><option value="recovery_mail_failed" {{if eq $expenseServer.MailFilterStage "recovery_mail_failed"}}selected{{end}}>{{index $.T "mail_monitor_stage_recovery_mail_failed"}}</option><option value="mail_blocked" {{if eq $expenseServer.MailFilterStage "mail_blocked"}}selected{{end}}>{{index $.T "mail_monitor_stage_mail_blocked"}}</option><option value="mail_unblocked" {{if eq $expenseServer.MailFilterStage "mail_unblocked"}}selected{{end}}>{{index $.T "mail_monitor_stage_mail_unblocked"}}</option><option value="transport_sent" {{if eq $expenseServer.MailFilterStage "transport_sent"}}selected{{end}}>{{index $.T "mail_monitor_stage_transport_sent"}}</option><option value="cancel_too_late" {{if eq $expenseServer.MailFilterStage "cancel_too_late"}}selected{{end}}>{{index $.T "mail_monitor_stage_cancel_too_late"}}</option></select></label>
+              <label>{{index $.T "mail_monitor_kind"}} <input class="form-control form-control-sm" name="mail_kind" value="{{$expenseServer.MailFilterKind}}" maxlength="60" placeholder="login_code, email_confirm..."></label>
+              <label>{{index $.T "mail_monitor_recipient"}} <input class="form-control form-control-sm" name="mail_recipient" value="{{$expenseServer.MailFilterRecipient}}" maxlength="254" autocomplete="off"></label>
+              <button class="btn btn-outline-primary btn-sm" type="submit">{{index $.T "mail_monitor_show"}}</button>
+            </form>
+            <p class="small text-muted">{{index $.T "mail_journal_event_filter_hint"}}</p>
+            <div class="expense-mail-monitor-events" data-mail-journal="{{$server.ID}}">
+              {{range $expenseServer.MailOperations}}
+              <div class="expense-mail-monitor-event text-break">
+                <strong>{{with index $.T (printf "mail_monitor_stage_%s" .Stage)}}{{.}}{{else}}{{.Stage}}{{end}}</strong> · {{.Recipient}}
+                <small><time datetime="{{.UpdatedAt}}">{{.UpdatedAt}}</time> · {{.Domain}}</small>
+                <small>{{index $.T "mail_journal_initiator"}}: {{if .InitiatorIP}}{{.InitiatorIP}}{{with index $.MailJournalIPDetails .InitiatorIP}} · {{.Location}}{{end}}{{else}}{{index $.T "mail_journal_unknown"}}{{end}} · {{index $.T "mail_journal_installation"}}: {{.OriginInstallationID}}{{if .InstallationIP}} ({{.InstallationIP}}){{end}}</small>
+                <details><summary>{{index $.T "mail_journal_steps"}}</summary>{{range .Steps}}
+                  <p class="small mb-1"><time datetime="{{.CreatedAt}}">{{.CreatedAt}}</time> · {{with index $.T (printf "mail_monitor_stage_%s" .Stage)}}{{.}}{{else}}{{.Stage}}{{end}}{{if .AcceptedBy}} · {{.AcceptedBy}}{{end}}{{if .Transport}} · {{.Transport}}{{end}}{{if .SMTPCode}} · SMTP {{.SMTPCode}}{{end}}{{if .Detail}} · {{.Detail}}{{end}}</p>
+                {{end}}</details>
+              </div>
+              {{else}}<div class="text-muted">{{index $.T "mail_monitor_empty"}}</div>{{end}}
+            </div>
+            {{with $expenseServer.MailPagination}}
+            <nav data-mail-pagination="{{$server.ID}}" class="d-flex flex-wrap gap-2 align-items-center" aria-label="{{index $.T "account_pagination"}}">
+              <span>{{index $.T "mail_monitor_page"}} {{.Page}} / {{.Pages}} · {{index $.T "mail_monitor_total"}}: {{.Count}}</span>
+              {{if .FirstURL}}<a class="btn btn-outline-primary btn-sm" href="{{.FirstURL}}">{{index $.T "mail_monitor_first"}}</a>{{end}}
+              {{if .PreviousURL}}<a class="btn btn-outline-primary btn-sm" href="{{.PreviousURL}}">{{index $.T "mail_monitor_previous"}}</a>{{end}}
+              {{if gt .Pages 1}}{{range .Links}}{{if .Current}}<span class="btn btn-primary btn-sm" aria-current="page">{{.Number}}</span>{{else}}<a class="btn btn-outline-primary btn-sm" href="{{.URL}}">{{.Number}}</a>{{end}}{{end}}{{end}}
+              {{if .NextURL}}<a class="btn btn-outline-primary btn-sm" href="{{.NextURL}}">{{index $.T "mail_monitor_next"}}</a>{{end}}
+              {{if .LastURL}}<a class="btn btn-outline-primary btn-sm" href="{{.LastURL}}">{{index $.T "mail_monitor_last"}}</a>{{end}}
+              {{if gt .Pages 1}}<form method="get" action="/#mail-monitor-{{$serverIndex}}" class="d-flex flex-wrap gap-2 align-items-center">
+                <input type="hidden" name="analytics" value=""><input type="hidden" name="tab" value="security">
+                <input type="hidden" name="mail_server" value="{{$server.ID}}">
+                <input type="hidden" name="mail_days" value="{{$expenseServer.MailFilterDays}}">
+                <input type="hidden" name="mail_stage" value="{{$expenseServer.MailFilterStage}}">
+                <input type="hidden" name="mail_kind" value="{{$expenseServer.MailFilterKind}}">
+                <input type="hidden" name="mail_recipient" value="{{$expenseServer.MailFilterRecipient}}">
+                <label class="d-flex gap-2 align-items-center">{{index $.T "mail_monitor_page"}} <input type="number" class="form-control form-control-sm" name="mail_page" min="1" max="{{.Pages}}" value="{{.Page}}" required></label>
+                <button class="btn btn-outline-primary btn-sm" type="submit">{{index $.T "mail_monitor_show"}}</button>
+              </form>{{end}}
+            </nav>
+            {{end}}
+    </div>
+    {{end}}{{end}}
+    <p class="small text-muted mt-3">{{.MailGeoIPAttribution}}</p>
+  </div></section>
+{{end}}

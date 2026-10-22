@@ -4,6 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
+
+	"github.com/matveynator/sitebrush/v2/pkg/migrations"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -114,6 +117,72 @@ func TestRegistrationClaimMigrationReadinessAndSourceValidation(t *testing.T) {
 				if err := Migrate(ctx, db); err == nil {
 					t.Fatal("unavailable claim schema silently migrated")
 				}
+			}
+		})
+	}
+}
+
+func TestStandaloneMailHistoryUpgradesWithoutReorderingRecordedSteps(t *testing.T) {
+	for _, tail := range []string{"mail-monitor-019", "mail-monitor-021"} {
+		t.Run(tail, func(t *testing.T) {
+			boundary := context.Background()
+			database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "standalone.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close()
+			var previous []migrations.Step
+			for _, step := range hostingSchemaSteps(boundary, false) {
+				if strings.HasPrefix(step.ID, "account-mail-guard-") || strings.HasPrefix(step.ID, "registration-mail-cooldown-") || strings.HasPrefix(step.ID, "registration-mail-abuse-") {
+					continue
+				}
+				previous = append(previous, step)
+				if step.ID == tail {
+					break
+				}
+			}
+			if err := migrations.Run(database, "billing-schema-v27", previous); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := database.Exec(`CREATE TABLE schema_migrations(component TEXT PRIMARY KEY,version INTEGER,updated_at TEXT)`); err != nil {
+				t.Fatal(err)
+			}
+			if err := setSchemaMigrationVersion(boundary, database, "billing", 29); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := database.Exec(`INSERT INTO server_settings(name,value,updated_at) VALUES('owner_domain','owner.example','')`); err != nil {
+				t.Fatal(err)
+			}
+			if err := CheckMigrationSource(boundary, database); err != nil {
+				t.Fatal("known standalone history rejected", err)
+			}
+			for range 2 {
+				if err := Migrate(boundary, database); err != nil {
+					t.Fatal("standalone upgrade failed", err)
+				}
+			}
+			if err := CheckMigrations(boundary, database); err != nil {
+				t.Fatal("upgraded readiness rejected", err)
+			}
+			for index, step := range previous {
+				var ordinal int
+				var revision string
+				if err := database.QueryRow(`SELECT ordinal,revision FROM application_migration_steps WHERE component='billing-schema-v27' AND step_id=?`, step.ID).Scan(&ordinal, &revision); err != nil {
+					t.Fatal(err)
+				}
+				if ordinal != index+1 || revision != step.Revision {
+					t.Fatal("upgrade rewrote recorded history", step.ID, ordinal, revision)
+				}
+			}
+			var owner string
+			if err := database.QueryRow(`SELECT value FROM server_settings WHERE name='owner_domain'`).Scan(&owner); err != nil || owner != "owner.example" {
+				t.Fatal("upgrade changed owner configuration", owner, err)
+			}
+			if _, err := database.Exec(`UPDATE application_migration_steps SET revision='unsupported' WHERE component='billing-schema-v27' AND step_id=?`, tail); err != nil {
+				t.Fatal(err)
+			}
+			if err := CheckMigrationSource(boundary, database); err == nil || !strings.Contains(err.Error(), tail) || !strings.Contains(err.Error(), "billing-schema-v27") {
+				t.Fatal("changed history accepted or conflicting step hidden", err)
 			}
 		})
 	}

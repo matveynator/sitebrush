@@ -589,12 +589,15 @@ are always available in the account; access lists appear when grants or sessions
 
 ### AI access to a whole site
 
-External AI access is hidden by default. Enable the required
-provider in the authenticated profile before connecting it. Provider network
+Published AI provider networks are enabled by default. The authenticated profile
+can disable individual providers or external provider access. Administrator IPs
+also reach AI discovery and MCP, independently of provider selections. Network
 admission precedes discovery, OAuth and capability checks; ordinary visitors
 receive the same public response with or without AI selectors. Discovery uses
 `/?ai=manifest`, `/?ai=documentation` and `/?ai=openapi` only after admission.
 The manifest advertises `mcp_url` for clients with native Remote MCP support.
+The browser AI editor remains available at `/?ai` after administrator sign-in,
+including when external providers are disabled. Its link is also in Profile.
 
 #### ChatGPT and Remote MCP
 
@@ -811,7 +814,7 @@ The release signing key must match `pkg/appupdate/release-public-key.txt`. Provi
 
 `pkg/appupdate/compatibility.json` declares the generation of every persistent format, the readable generation range, the oldest migratable generation (`migrates_from`), and whether predecessor writes remain compatible. Review this contract for SQL migrations and filesystem-format changes. Incompatible changes advance the generation and disable predecessor rollback after activation. Unknown contracts cannot be published or installed.
 
-The existing `stable release` commit trigger and manual workflow remain available. The workflow publishes numbered `release-<build>` assets, a signed `update.json`, and `SHA256SUMS`, then updates the persistent `stable-release` entry. Local and GitHub releases use `git rev-list --count HEAD` from the complete history as their numeric version; workflow run counters do not supersede source history. Build a new commit for a new release. For the primary local cross-compilation path, official `-sync` destinations automatically require and generate signed server metadata. Load the private key from `SITEBRUSH_RELEASE_PRIVATE_KEY`, `-release-key <private-file>`, or the default `os.UserConfigDir()/sitebrush/release-ed25519.key` (on macOS, `~/Library/Application Support/sitebrush/release-ed25519.key`). Nonofficial publication can opt in with `-sign-updates`. Signing requires the complete server matrix; the signing helper is also available as `go run ./scripts/releases -directory <server-artifacts> -version <build> -commit <full-sha>`.
+The existing `stable release` commit trigger and manual workflow remain available. When `SITEBRUSH_RELEASE_PRIVATE_KEY` is absent from GitHub Secrets, Actions builds and retains the artifacts, reports that publication was skipped, and leaves signing/publication to the local build machine. It never publishes an unsigned release. The workflow publishes numbered `release-<build>` assets, a signed `update.json`, and `SHA256SUMS`, then updates the persistent `stable-release` entry. Local and GitHub releases use `git rev-list --count HEAD` from the complete history as their numeric version; workflow run counters do not supersede source history. Build a new commit for a new release. For the primary local cross-compilation path, official `-sync` destinations automatically require and generate signed server metadata. Load the private key from `SITEBRUSH_RELEASE_PRIVATE_KEY`, `-release-key <private-file>`, or the default `os.UserConfigDir()/sitebrush/release-ed25519.key` (on macOS, `~/Library/Application Support/sitebrush/release-ed25519.key`). Nonofficial publication can opt in with `-sign-updates`. Signing requires the complete server matrix; the signing helper is also available as `go run ./scripts/releases -directory <server-artifacts> -version <build> -commit <full-sha>`.
 
 ## Cumulative database migrations
 
@@ -831,7 +834,7 @@ The legacy `site-schema-v12` and `billing-schema-v27` chains are frozen compatib
 
 ## Build toolchain and macOS desktop
 
-The project pins Go **1.27.2** in `go.mod`. CI and every Docker builder read that same directive. Server binaries and ordinary tests use `CGO_ENABLED=0`; CGO is confined to desktop compilation inside Docker. macOS binaries require **macOS 13 Ventura or newer** on both Intel and Apple Silicon.
+The project pins Go **1.27.3** in `go.mod`. CI and every Docker builder read that same directive. Server binaries and ordinary tests use `CGO_ENABLED=0`; CGO is confined to desktop compilation inside Docker. macOS binaries require **macOS 13 Ventura or newer** on both Intel and Apple Silicon.
 
 NetChan uses `github.com/matveynator/netchan/v2 v2.1.0`. External hosting/mail/security, announcement and release contacts prefer **QUIC over UDP**, then **TCP with TLS 1.3**. Both listeners use the same port number: allow UDP and TCP **9876**, **9877** and **9878** on the central server. Existing `host:port` addresses and application message schemas remain valid. A QUIC handshake gets 750 ms before TCP/TLS is attempted with a three-second limit. Transport selection precedes application delivery and does not replay an operation. Existing HTTPS adapters remain the last fallback for hosting/mail and signed release delivery. Security synchronization and announcement sessions retain their authenticated outbound channels and reconnect; they do not expose new HTTP endpoints. Local supervisor contacts remain on loopback TCP/TLS.
 
@@ -884,4 +887,4 @@ Browser saves create the main page at the exact address entered in the form and 
 
 ## Mail and account monitoring
 
-Server administrators can inspect delivery attempts, full recipients, safe SMTP diagnostics and registration/recovery outcomes under each server's metrics in Hosting and support. See [Mail and account monitoring](doc/mail-monitoring.md) for counters, remote synchronization and 90-day retention.
+Server administrators can inspect delivery attempts, full recipients, safe SMTP diagnostics and registration/recovery outcomes in Analytics → Security; each server’s metrics in Hosting and support show counters and link to its security journal. Public registration, recovery and site-request forms use a one-use server-validated PNG CAPTCHA plus persistent IP, network and recipient limits. Registration also applies a persistent IP + domain cooldown of 1 hour, 6 hours, 24 hours and then 3 days for successive unsuccessful attempts, with a visible countdown. Changing email cannot bypass it; technical delivery failures do not raise the penalty and successful registration resets it. The journal shows known source IPs and lets local server administrators block or unblock email requests. See [Mail and account monitoring](doc/mail-monitoring.md) for counters, remote synchronization and 90-day retention.

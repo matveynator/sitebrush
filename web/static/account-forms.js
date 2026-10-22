@@ -53,6 +53,9 @@
       statusText.textContent = report.status === 'sent' ? panel.dataset.sent : report.status === 'failed' ? panel.dataset.failed : panel.dataset.pending;
       deliveryLog.textContent = 'status=' + String(report.status) + '\nattempts=' + Number(report.attempts || 0);
       if (report.error) deliveryLog.textContent += '\n' + report.error;
+      if (report.status === 'failed' && panel.dataset.registrationDeliveryProof) {
+        document.dispatchEvent(new Event('registration-delivery-failed'));
+      }
       if (terminal) connection.close();
     } catch (parseError) {
       panel.dataset.deliveryState = 'danger';

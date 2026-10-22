@@ -16,9 +16,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/matveynator/sitebrush/v2/pkg/captcha"
 	"github.com/matveynator/sitebrush/v2/pkg/demo"
 	"github.com/matveynator/sitebrush/v2/pkg/domainregistration"
 	"github.com/matveynator/sitebrush/v2/pkg/expenses"
+	"github.com/matveynator/sitebrush/v2/pkg/mailguard"
 	"github.com/matveynator/sitebrush/v2/pkg/mailmonitor"
 	"github.com/matveynator/sitebrush/v2/pkg/mailout"
 	"github.com/matveynator/sitebrush/v2/pkg/migrations"
@@ -27,7 +29,7 @@ import (
 
 const DefaultStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
 const DefaultDeletionBackupRetentionDays = 365
-const currentBillingSchemaVersion = 28
+const currentBillingSchemaVersion = 32
 
 const InstallationKindServer = "server"
 const InstallationKindDesktop = "desktop"
@@ -663,11 +665,11 @@ func CheckMigrations(ctx context.Context, database *sql.DB) error {
 	if version < currentBillingSchemaVersion || !complete {
 		return fmt.Errorf("required server database migrations are incomplete")
 	}
-	completed, err := migrations.Check(database, "billing-schema-v27", hostingSchemaSteps(ctx, false))
+	steps, completed, err := hostingSchemaHistory(ctx, database, false)
 	if err != nil {
 		return err
 	}
-	if completed != len(hostingSchemaSteps(ctx, false)) {
+	if completed != len(steps) {
 		return fmt.Errorf("required billing migration steps are incomplete")
 	}
 	completed, err = migrations.Check(database, "domain-registration-v1", domainRegistrationSteps(false))
@@ -714,7 +716,7 @@ func CheckMigrationSource(ctx context.Context, database *sql.DB) error {
 	if err != nil || !found {
 		return err
 	}
-	if _, err = migrations.Check(database, "billing-schema-v27", hostingSchemaSteps(ctx, false)); err != nil {
+	if _, _, err = hostingSchemaHistory(ctx, database, false); err != nil {
 		return err
 	}
 	if _, err = migrations.Check(database, "domain-registration-v1", domainRegistrationSteps(false)); err != nil {
@@ -751,8 +753,30 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("verify billing schema: %w", err)
 	}
-	steps := hostingSchemaSteps(ctx, !schemaComplete || schemaVersion < currentBillingSchemaVersion)
+	steps, _, err := hostingSchemaHistory(ctx, database, !schemaComplete || schemaVersion < currentBillingSchemaVersion)
+	if err != nil {
+		return err
+	}
 	if err := migrations.Run(database, "billing-schema-v27", steps); err != nil {
+		return err
+	}
+	if err := migrations.Run(database, "mail-journal-v1", []migrations.Step{{ID: "rebuild", Revision: "1", Ensure: !schemaComplete, Apply: func(transaction *sql.Tx) error {
+		store := mailmonitor.Store{DB: transaction}
+		var localOrigin string
+		identityErr := transaction.QueryRowContext(ctx, `SELECT value FROM server_settings WHERE name='service_mail_installation_id'`).Scan(&localOrigin)
+		if identityErr != nil && identityErr != sql.ErrNoRows {
+			return identityErr
+		}
+		if localOrigin != "" {
+			if err := store.SetState(ctx, "local_origin", localOrigin); err != nil {
+				return err
+			}
+		}
+		if err := store.Rebuild(ctx); err != nil {
+			return err
+		}
+		return store.BackfillRecovery(ctx)
+	}}}); err != nil {
 		return err
 	}
 	if err := migrations.Run(database, "domain-registration-v1", domainRegistrationSteps(!schemaComplete)); err != nil {
@@ -843,6 +867,47 @@ func migrateLegacyBillingData(ctx context.Context, database *sql.DB) error {
 	return nil
 }
 
+// The standalone journal and account protection branches published different
+// append-only tails. Preserve the database's exact known prefix instead of
+// rewriting its history or inserting another branch's steps ahead of it.
+func hostingSchemaHistory(ctx context.Context, database *sql.DB, repair bool) ([]migrations.Step, int, error) {
+	steps := hostingSchemaSteps(ctx, repair)
+	found, err := tableExists(ctx, database, "application_migration_steps")
+	if err != nil || !found {
+		return steps, 0, err
+	}
+	completed, currentErr := migrations.Check(database, "billing-schema-v27", steps)
+	if currentErr == nil {
+		return steps, completed, nil
+	}
+	guardStart, journalStart, journalEnd := -1, -1, -1
+	for index, step := range steps {
+		switch step.ID {
+		case "account-mail-guard-001":
+			guardStart = index
+		case "mail-monitor-006":
+			journalStart = index
+		case "mail-monitor-021":
+			journalEnd = index + 1
+		}
+	}
+	if guardStart < 0 || journalStart <= guardStart || journalEnd <= journalStart {
+		return nil, 0, currentErr
+	}
+	// Pin the historical tail: future journal steps must follow the complete
+	// selected chain, including the account protection appended during this upgrade.
+	legacy := make([]migrations.Step, 0, len(steps))
+	legacy = append(legacy, steps[:guardStart]...)
+	legacy = append(legacy, steps[journalStart:journalEnd]...)
+	legacy = append(legacy, steps[guardStart:journalStart]...)
+	legacy = append(legacy, steps[journalEnd:]...)
+	completed, legacyErr := migrations.Check(database, "billing-schema-v27", legacy)
+	if legacyErr != nil {
+		return nil, 0, fmt.Errorf("%w; standalone mail journal history: %v", currentErr, legacyErr)
+	}
+	return legacy, completed, nil
+}
+
 func hostingSchemaSteps(ctx context.Context, repair bool) []migrations.Step {
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS server_managers(domain TEXT,email TEXT,role TEXT,scope_domain TEXT,created_at TEXT,PRIMARY KEY(domain,email,role,scope_domain));`,
@@ -906,7 +971,8 @@ func hostingSchemaSteps(ctx context.Context, repair bool) []migrations.Step {
 		`CREATE TABLE IF NOT EXISTS account_code_rates(domain TEXT,email TEXT,client_ip TEXT,window_start INTEGER,last_sent INTEGER,sent_count INTEGER,PRIMARY KEY(domain,email,client_ip));`,
 		`CREATE TABLE IF NOT EXISTS registration_confirmations(token TEXT PRIMARY KEY,domain TEXT,action TEXT,email TEXT,password TEXT,current_email TEXT,return_path TEXT,language_code TEXT,created_at TEXT,expires_at TEXT);`,
 	}
-	queries = append(queries, mailout.SchemaQueries()...)
+	// Keep the existing ledger ordinals; new mail tables follow its old tail.
+	queries = append(queries, mailout.SchemaQueries()[:3]...)
 	queries = append(queries, demo.SchemaQueries()...)
 	steps := make([]migrations.Step, 0, len(queries)+len(requiredHostingAndSupportColumns()))
 	for queryIndex, query := range queries {
@@ -926,8 +992,29 @@ func hostingSchemaSteps(ctx context.Context, repair bool) []migrations.Step {
 	}
 	// New steps follow the entire existing ledger, including column migrations.
 	// Inserting table queries before those columns would change recorded ordinals.
-	for index, query := range mailmonitor.SchemaQueries() {
+	for index, query := range mailmonitor.SchemaQueries()[:5] {
 		step := migrations.SQL(fmt.Sprintf("mail-monitor-%03d", index+1), query)
+		step.Ensure = repair
+		steps = append(steps, step)
+	}
+	for index, query := range append(mailguard.SchemaQueries(), captcha.SchemaQueries()...) {
+		step := migrations.SQL(fmt.Sprintf("account-mail-guard-%03d", index+1), query)
+		step.Ensure = repair
+		steps = append(steps, step)
+	}
+	for index, query := range mailguard.RegistrationSchemaQueries() {
+		step := migrations.SQL(fmt.Sprintf("registration-mail-cooldown-%03d", index+1), query)
+		step.Ensure = repair
+		steps = append(steps, step)
+	}
+	for index, query := range mailguard.RegistrationAbuseSchemaQueries() {
+		step := migrations.SQL(fmt.Sprintf("registration-mail-abuse-%03d", index+1), query)
+		step.Ensure = repair
+		steps = append(steps, step)
+	}
+	// Journal extensions follow every previously published billing step.
+	for index, query := range mailmonitor.SchemaQueries()[5:] {
+		step := migrations.SQL(fmt.Sprintf("mail-monitor-%03d", index+6), query)
 		step.Ensure = repair
 		steps = append(steps, step)
 	}
@@ -980,6 +1067,8 @@ func setSchemaMigrationVersion(ctx context.Context, database *sql.DB, component 
 
 func hostingAndSupportSchemaComplete(ctx context.Context, database *sql.DB) (bool, error) {
 	tableNames := []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments", "public_trial_sites", "payment_providers", "billing_invoices", "billing_customers", "billing_customer_emails", "billing_customer_profiles", "billing_customer_tokens", "billing_invoice_lines", "billing_invoice_cycles", "billing_payments", "billing_invoice_deliveries", "hosting_server_cost_policies", "server_expense_policies", "site_registration_requests", "site_deletion_backups", "service_mail_installations", "service_mail_events", "support_events", "service_mail_blocks", "service_mail_recipients", "mail_outbox", "mail_monitor_events", "mail_monitor_sync", "client_hostings", "client_hosting_sites", "client_hosting_domain_checks", "server_resource_checks", "server_network_checks", "site_tls_checks", "registry_accounts", "registry_installation_roles", "registry_installation_plans", "registry_events", "registry_sync_events", "sitebrush_com_keys", "hosting_panel_snapshots", "registration_confirmations", "domain_registration_claims"}
+	tableNames = append(tableNames, "mail_guard_requests", "mail_guard_blocks", "account_captchas", "account_captcha_rates", "registration_mail_cooldowns", "registration_mail_abuse")
+	tableNames = append(tableNames, "mail_outbox_metadata", "mail_monitor_metadata", "mail_journal", "mail_journal_counters", "mail_journal_stages", "mail_ip_blocks", "mail_control_state", "mail_cancel_commands", "mail_abuse", "mail_reject_rates", "mail_account_events")
 	tableNames = append(tableNames, demo.TableNames()...)
 	for _, tableName := range tableNames {
 		found, err := tableExists(ctx, database, tableName)
@@ -3543,7 +3632,8 @@ func (store Store) CountServiceMailEventsSince(ctx context.Context, columnName, 
 	var count int
 	_ = store.DB.QueryRowContext(ctx, `SELECT COUNT(1) FROM service_mail_events WHERE `+columnName+`=? AND created_at>=?`,
 		strings.TrimSpace(value), since.UTC().Format(time.RFC3339)).Scan(&count)
-	return count
+	rejected, _ := (mailmonitor.Store{DB: store.DB}).RejectedCount(ctx, columnName, value, since)
+	return count + rejected
 }
 
 func (store Store) CountServiceMailSubnetEventsSince(ctx context.Context, subnet string, since time.Time) int {
@@ -3558,7 +3648,8 @@ func (store Store) CountServiceMailSubnetEventsSince(ctx context.Context, subnet
 	var count int
 	_ = store.DB.QueryRowContext(ctx, `SELECT COUNT(1) FROM service_mail_events WHERE source_ip LIKE ? AND created_at>=?`,
 		prefix+"%", since.UTC().Format(time.RFC3339)).Scan(&count)
-	return count
+	rejected, _ := (mailmonitor.Store{DB: store.DB}).RejectedCount(ctx, "subnet", subnet, since)
+	return count + rejected
 }
 
 func (store Store) UpsertServiceMailRecipient(ctx context.Context, installationID, recipient, status, purposeScope string) error {

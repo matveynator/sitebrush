@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -13,10 +14,11 @@ import (
 )
 
 const (
-	StatusPending = "pending"
-	StatusSending = "sending"
-	StatusSent    = "sent"
-	StatusFailed  = "failed"
+	StatusPending   = "pending"
+	StatusSending   = "sending"
+	StatusSent      = "sent"
+	StatusFailed    = "failed"
+	StatusCancelled = "cancelled"
 
 	RouteLocal = "local"
 	RouteRelay = "relay"
@@ -71,7 +73,56 @@ func SchemaQueries() []string {
 		`CREATE TABLE IF NOT EXISTS mail_outbox(message_id TEXT PRIMARY KEY,installation_id TEXT,kind TEXT,route TEXT,from_address TEXT,recipient TEXT,subject TEXT,body TEXT,html_body TEXT,status TEXT,attempts INTEGER DEFAULT 0,next_attempt_at TEXT,created_at TEXT,expires_at TEXT,sent_at TEXT,last_error TEXT);`,
 		`CREATE INDEX IF NOT EXISTS idx_mail_outbox_due ON mail_outbox(status,next_attempt_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_mail_outbox_installation ON mail_outbox(installation_id,created_at);`,
+		MetadataSchemaQuery(),
 	}
+}
+
+// Metadata has its own table so existing queue records and migration ordinals
+// remain readable while monitoring fields evolve independently of mail bodies.
+func MetadataSchemaQuery() string {
+	return `CREATE TABLE IF NOT EXISTS mail_outbox_metadata(message_id TEXT PRIMARY KEY,metadata TEXT NOT NULL,origin_id TEXT NOT NULL DEFAULT '',initiator_ip TEXT NOT NULL DEFAULT '');`
+}
+
+type Metadata struct {
+	Domain               string `json:"domain,omitempty"`
+	FlowID               string `json:"flow_id,omitempty"`
+	InitiatorIP          string `json:"initiator_ip,omitempty"`
+	OriginInstallationID string `json:"origin_installation_id,omitempty"`
+	InstallationIP       string `json:"installation_ip,omitempty"`
+	RequestedAt          string `json:"requested_at,omitempty"`
+	RelayTransport       string `json:"relay_transport,omitempty"`
+}
+
+func (message Message) Metadata() Metadata {
+	if message.InitiatorIP == "" {
+		message.InitiatorIP = message.MonitorClientIP
+	}
+	return Metadata{Domain: message.MonitorDomain, FlowID: message.MonitorFlowID, InitiatorIP: message.InitiatorIP, OriginInstallationID: message.OriginInstallationID, InstallationIP: message.InstallationIP, RequestedAt: message.RequestedAt, RelayTransport: message.RelayTransport}
+}
+
+func (message *Message) SetMetadata(metadata Metadata) {
+	message.MonitorDomain, message.MonitorFlowID = metadata.Domain, metadata.FlowID
+	message.InitiatorIP, message.OriginInstallationID = metadata.InitiatorIP, metadata.OriginInstallationID
+	message.MonitorClientIP = metadata.InitiatorIP
+	message.InstallationIP, message.RequestedAt = metadata.InstallationIP, metadata.RequestedAt
+	message.RelayTransport = metadata.RelayTransport
+}
+
+func loadMetadata(ctx context.Context, database Database, record *Record) error {
+	var encoded string
+	err := database.QueryRowContext(ctx, `SELECT metadata FROM mail_outbox_metadata WHERE message_id=?`, record.ID).Scan(&encoded)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var metadata Metadata
+	if err := json.Unmarshal([]byte(encoded), &metadata); err != nil {
+		return err
+	}
+	record.Message.SetMetadata(metadata)
+	return nil
 }
 
 func NewTask(kind, route string, message Message, expiresAt time.Time, reply chan Result) Task {
@@ -157,6 +208,13 @@ func Insert(ctx context.Context, database Database, task Task) (bool, error) {
 		return false, err
 	}
 	rowsAffected, err := result.RowsAffected()
+	if err == nil && rowsAffected > 0 {
+		encoded, encodeErr := json.Marshal(normalizedTask.Message.Metadata())
+		if encodeErr != nil {
+			return false, encodeErr
+		}
+		_, err = database.ExecContext(ctx, `INSERT INTO mail_outbox_metadata(message_id,metadata,origin_id,initiator_ip) VALUES(?,?,?,?)`, normalizedTask.ID, string(encoded), normalizedTask.Message.OriginInstallationID, normalizedTask.Message.InitiatorIP)
+	}
 	return rowsAffected > 0, err
 }
 
@@ -165,6 +223,9 @@ func ByID(ctx context.Context, database Database, messageID string) (Record, boo
 	record, err := scanRecord(row.Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Record{}, false, nil
+	}
+	if err == nil {
+		err = loadMetadata(ctx, database, &record)
 	}
 	return record, err == nil, err
 }
@@ -186,7 +247,29 @@ func Due(ctx context.Context, database Database, now time.Time, limit int) ([]Re
 		}
 		records = append(records, record)
 	}
-	return records, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for index := range records {
+		if err := loadMetadata(ctx, database, &records[index]); err != nil {
+			return nil, err
+		}
+	}
+	return records, nil
+}
+
+// Claim and cancellation compete in SQL under the queue owner's serialized
+// writer. Once SMTP owns a sending record, cancellation cannot promise recall.
+func Cancel(ctx context.Context, database Database, messageID string) (bool, error) {
+	result, err := database.ExecContext(ctx, `UPDATE mail_outbox SET status='cancelled',body='',html_body='',next_attempt_at='',last_error='cancelled by administrator' WHERE message_id=? AND status='pending'`, messageID)
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	return count == 1, err
 }
 
 func MarkPending(ctx context.Context, database Database, messageID string, attempts int, nextAttempt time.Time, deliveryError error) error {
@@ -194,7 +277,7 @@ func MarkPending(ctx context.Context, database Database, messageID string, attem
 	if deliveryError != nil {
 		errorText = deliveryError.Error()
 	}
-	_, err := database.ExecContext(ctx, `UPDATE mail_outbox SET status='pending',attempts=?,next_attempt_at=?,last_error=? WHERE message_id=?`, attempts, nextAttempt.UTC().Format(time.RFC3339Nano), errorText, strings.TrimSpace(messageID))
+	_, err := database.ExecContext(ctx, `UPDATE mail_outbox SET status='pending',attempts=?,next_attempt_at=?,last_error=? WHERE message_id=? AND status<>'cancelled'`, attempts, nextAttempt.UTC().Format(time.RFC3339Nano), errorText, strings.TrimSpace(messageID))
 	return err
 }
 
@@ -227,7 +310,11 @@ func MarkFailed(ctx context.Context, database Database, messageID string, attemp
 }
 
 func PurgeTerminal(ctx context.Context, database Database, before time.Time) error {
-	_, err := database.ExecContext(ctx, `DELETE FROM mail_outbox WHERE status IN ('sent','failed') AND created_at<?`, before.UTC().Format(time.RFC3339Nano))
+	_, err := database.ExecContext(ctx, `DELETE FROM mail_outbox_metadata WHERE message_id IN (SELECT message_id FROM mail_outbox WHERE status IN ('sent','failed','cancelled') AND created_at<?)`, before.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return err
+	}
+	_, err = database.ExecContext(ctx, `DELETE FROM mail_outbox WHERE status IN ('sent','failed','cancelled') AND created_at<?`, before.UTC().Format(time.RFC3339Nano))
 	return err
 }
 

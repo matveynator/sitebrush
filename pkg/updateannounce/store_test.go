@@ -93,8 +93,8 @@ func TestCampaignJournalDomainSurvivesOutboxReload(t *testing.T) {
 	if err := store.Append(ctx, mailmonitor.Event{MessageID: record.ID, Kind: record.Kind, Stage: "attempt", Recipient: record.Message.To, Attempt: 1}); err != nil {
 		t.Fatal(err)
 	}
-	events, err := store.Recent(ctx, "local", time.Time{}, 10, 0)
-	if err != nil || len(events) != 2 {
+	events, err := store.RecentFiltered(ctx, mailmonitor.Filter{InstallationID: "local", Stage: "attempt", Limit: 10})
+	if err != nil || len(events) != 1 {
 		t.Fatalf("campaign journal: %+v, %v", events, err)
 	}
 	for _, event := range events {

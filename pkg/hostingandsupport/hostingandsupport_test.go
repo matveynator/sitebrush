@@ -14,6 +14,40 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+func TestMailEventFilterMigrationRestoresExistingHistory(t *testing.T) {
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "mail-history.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	database.SetMaxOpenConns(1)
+	t.Cleanup(func() { database.Close() })
+	boundary := context.Background()
+	if err := Migrate(boundary, database); err != nil {
+		t.Fatal(err)
+	}
+	store := mailmonitor.Store{DB: database}
+	for _, stage := range []string{"recovery_requested", "recovery_complete"} {
+		if err := store.Append(boundary, mailmonitor.Event{ID: stage, InstallationID: "desktop", FlowID: "flow", Kind: "recovery", Stage: stage}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := database.Exec(`DROP TABLE mail_journal_stages`); err != nil {
+		t.Fatal(err)
+	}
+	// Emulate the previous append-only ledger, which already rebuilt the journal.
+	previousStepCount := len(hostingSchemaSteps(boundary, false)) - 2
+	if _, err := database.Exec(`DELETE FROM application_migration_steps WHERE component='billing-schema-v27' AND ordinal>?`, previousStepCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(boundary, database); err != nil {
+		t.Fatal("existing journal cannot upgrade", err)
+	}
+	operations, count, err := store.Journal(boundary, mailmonitor.Filter{InstallationID: "desktop", Stage: "recovery_requested"})
+	if err != nil || count != 1 || len(operations) != 1 || operations[0].Stage != "recovery_complete" {
+		t.Fatalf("upgrade did not restore historical filtering: %+v count=%d error=%v", operations, count, err)
+	}
+}
+
 func TestServerExpensePolicyRoundTrip(t *testing.T) {
 	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "expenses.db"))
 	if err != nil {
