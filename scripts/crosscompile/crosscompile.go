@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/tar"
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"crypto/ed25519"
@@ -10,6 +11,8 @@ import (
 	"debug/macho"
 	_ "embed"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -22,9 +25,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/matveynator/sitebrush/v2/pkg/appupdate"
+	"github.com/matveynator/sitebrush/v2/pkg/buildconsole"
 )
 
 type buildMode string
@@ -97,6 +102,21 @@ func (flags *syncDestinationFlags) Set(value string) error {
 }
 
 func main() {
+	if err := runCrosscompile(); err != nil {
+		policy := "auto"
+		if parsed := flag.Lookup("color"); parsed != nil {
+			policy = parsed.Value.String()
+		}
+		console, colorErr := buildconsole.New(os.Stderr, policy)
+		if colorErr != nil {
+			console, _ = buildconsole.New(os.Stderr, "never")
+		}
+		console.Error(err.Error())
+		os.Exit(1)
+	}
+}
+
+func runCrosscompile() error {
 	var (
 		programName         = flag.String("program", "sitebrush", "program name used in binary names")
 		versionFlag         = flag.String("version", "", "version folder under binaries/; defaults to git rev-list count, then GITHUB_RUN_NUMBER, then git describe")
@@ -109,15 +129,24 @@ func main() {
 		rebuildDockerImages = flag.Bool("rebuild-docker-images", false, "rebuild cached Docker builder images before Docker-based desktop builds")
 		macOSSDK            = flag.String("macos-sdk", "", "macOS SDK tar archive; defaults to the installed Xcode SDK on macOS")
 		macOSStage          = flag.String("macos-stage", "all", "macOS desktop stage: all, build, or package")
+		interactivePolicy   = flag.String("interactive", "auto", "publication wizard: auto (terminal without options), always, or never")
+		colorPolicy         = flag.String("color", "auto", "terminal colors: auto, always, or never")
 		syncTargets         syncDestinationFlags
 	)
 	flag.Var(&syncTargets, "sync", "optional repeatable publication target in host=/remote/base format, for example root@sitebrush.com=/var/lib/sitebrush/storage/chroot/sitebrush.com/download")
 	flag.Parse()
-
-	targetFilter := buildTargetFilter{
-		goos:   strings.TrimSpace(*targetOS),
-		goarch: strings.TrimSpace(*targetArch),
+	if flag.NArg() != 0 {
+		return errors.New("unexpected positional arguments; use -help for build options")
 	}
+	console, err := buildconsole.New(os.Stdout, *colorPolicy)
+	if err != nil {
+		return err
+	}
+	interactive, err := buildconsole.Interactive(*interactivePolicy, len(os.Args) > 1, os.Stdin, os.Stdout)
+	if err != nil {
+		return err
+	}
+	targetFilter := buildTargetFilter{goos: strings.TrimSpace(*targetOS), goarch: strings.TrimSpace(*targetArch)}
 	mode := buildMode(*modeFlag)
 	if mode == "portable" {
 		mode = modeServerApp
@@ -127,125 +156,862 @@ func main() {
 	}
 	mode = effectiveBuildMode(mode, targetFilter, flagWasSet("mode"))
 	if mode != modeAll && mode != modeServerApp && mode != modeDesktopApp {
-		fatalf("invalid -mode %q", *modeFlag)
+		return fmt.Errorf("invalid -mode %q", *modeFlag)
 	}
-
 	repoRoot, err := findRepoRoot()
 	if err != nil {
-		fatalf("resolve repo root: %v", err)
+		return fmt.Errorf("resolve repo root: %w", err)
 	}
-
 	if err := validateMacOSStage(*macOSStage, mode, targetFilter); err != nil {
-		fatalf("macOS stage: %v", err)
+		return fmt.Errorf("macOS stage: %w", err)
 	}
 	goVersion, err := projectGoVersion(repoRoot)
 	if err != nil {
-		fatalf("resolve Go version: %v", err)
+		return fmt.Errorf("resolve Go version: %w", err)
 	}
 	if keyText := strings.TrimSpace(os.Getenv("SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM")); keyText != "" {
 		publicKey, err := base64.StdEncoding.DecodeString(keyText)
 		if err != nil || len(publicKey) != ed25519.PublicKeySize {
-			fatalf("SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM must be a base64 Ed25519 public key")
+			return errors.New("SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM must be a base64 Ed25519 public key")
 		}
 	}
-
 	version := strings.TrimSpace(*versionFlag)
 	if version == "" {
 		version = defaultVersionLabel(repoRoot)
 	}
 	version = sanitizePathSegment(version)
 	if version == "" {
-		fatalf("resolved empty version label")
+		return errors.New("resolved empty version label")
 	}
-
-	// Official publication is validated before any expensive desktop/Docker work.
-	signServerUpdates := *signUpdates || (mode != modeDesktopApp && officialReleasePublication(syncTargets))
-	var signingKey ed25519.PrivateKey
-	if signServerUpdates {
-		if mode == modeDesktopApp || targetFilter.active() || *programName != "sitebrush" {
-			fatalf("signed updates require the complete SiteBrush server matrix")
-		}
-		trusted, err := appupdate.TrustedKey()
-		if err != nil {
-			fatalf("release trust anchor: %v", err)
-		}
-		signingKey, err = loadReleaseSigningKey(*releaseKeyFile, os.Getenv("SITEBRUSH_RELEASE_PRIVATE_KEY"), trusted)
-		if err != nil {
-			fatalf("release signing key: %v", err)
-		}
-		if number, err := strconv.ParseUint(version, 10, 64); err != nil || number == 0 {
-			fatalf("signed update version must be numeric")
-		}
-	}
-
 	artifactsRoot := *outputRoot
 	if !filepath.IsAbs(artifactsRoot) {
 		artifactsRoot = filepath.Join(repoRoot, artifactsRoot)
 	}
 	outputDir := filepath.Join(artifactsRoot, version)
-	// Packaging consumes the binaries transferred from the Docker build stage.
-	if *macOSStage != "package" {
-		if err := os.RemoveAll(outputDir); err != nil {
-			fatalf("clean output dir: %v", err)
-		}
-	}
-	if err := os.MkdirAll(outputDir, 0o755); err != nil {
-		fatalf("create output dir: %v", err)
-	}
+	options := desktopBuildOptions{goVersion: goVersion, macOSSDK: *macOSSDK, macOSStage: *macOSStage,
+		rebuildDockerImages: *rebuildDockerImages, targetFilter: targetFilter}
 
-	fmt.Printf("repo: %s\n", repoRoot)
-	fmt.Printf("program: %s\n", *programName)
-	fmt.Printf("version: %s\n", version)
-	fmt.Printf("output: %s\n", outputDir)
-	if targetFilter.active() {
-		fmt.Printf("target filter: %s\n", targetFilter.label())
+	console.Heading("SiteBrush build and publication")
+	console.Info("Repository: %s\nProgram: %s\nVersion: %s\nOutput: %s", repoRoot, *programName, version, outputDir)
+	console.Info("Required Go: %s (from go.mod)", goVersion)
+	if commit, err := runOutput(repoRoot, "git", "rev-parse", "HEAD"); err == nil {
+		console.Info("Source commit: %s", strings.TrimSpace(commit))
 	}
-
-	if mode == modeAll || mode == modeServerApp {
-		if err := buildServerAppArtifacts(repoRoot, outputDir, *programName, version, targetFilter); err != nil {
-			fatalf("server-app build: %v", err)
-		}
-	}
-
-	if mode == modeAll || mode == modeDesktopApp {
-		if err := buildDesktopAppArtifacts(repoRoot, outputDir, *programName, version, desktopBuildOptions{
-			goVersion:           goVersion,
-			macOSSDK:            *macOSSDK,
-			macOSStage:          *macOSStage,
-			rebuildDockerImages: *rebuildDockerImages,
-			targetFilter:        targetFilter,
-		}); err != nil {
-			fatalf("desktop-app build: %v", err)
-		}
-	}
-
-	if signServerUpdates {
-		commit, err := runOutput(repoRoot, "git", "rev-parse", "HEAD")
+	showBuildMatrix(console, mode, targetFilter, runtime.GOOS, *macOSStage)
+	var publication publicationPlan
+	inputReader := bufio.NewReader(os.Stdin)
+	if interactive {
+		publication, err = configurePublication(console, inputReader, syncTargets)
 		if err != nil {
-			fatalf("resolve release commit: %v", err)
+			return err
 		}
-		if err := appupdate.Publish(filepath.Join(outputDir, "server-app"), version, strings.TrimSpace(commit), signingKey); err != nil {
-			fatalf("sign update manifest: %v", err)
+		syncTargets = publication.syncDestinations()
+	}
+	// Explicit legacy flags never acquire saved destinations or restart actions.
+	signServerUpdates := *signUpdates || publication.hasRestarts() || (mode != modeDesktopApp && officialReleasePublication(syncTargets))
+	if signServerUpdates {
+		showSigningGuide(console, *releaseKeyFile)
+	} else {
+		console.Info("Release signing: disabled (local or desktop-only build).")
+	}
+	if interactive {
+		showPublicationPlan(console, publication.targets)
+		confirmed, err := console.Confirm(inputReader, "Start this build and the listed publication actions?", false)
+		if err != nil {
+			return err
+		}
+		if !confirmed {
+			console.Info("Cancelled. No build or publication actions were started.")
+			return nil
 		}
 	}
 
-	// Intermediate binaries must never replace the published latest build.
+	// Key validation precedes output cleanup, compilation, and remote changes.
+	var signingKey ed25519.PrivateKey
+	if signServerUpdates {
+		if mode == modeDesktopApp || targetFilter.active() || *programName != "sitebrush" {
+			return errors.New("signed updates require the complete SiteBrush server matrix")
+		}
+		trusted, err := appupdate.TrustedKey()
+		if err != nil {
+			return fmt.Errorf("release trust anchor: %w", err)
+		}
+		signingKey, err = loadReleaseSigningKey(*releaseKeyFile, os.Getenv("SITEBRUSH_RELEASE_PRIVATE_KEY"), trusted)
+		if err != nil {
+			return fmt.Errorf("release signing key: %w", err)
+		}
+		if number, err := strconv.ParseUint(version, 10, 64); err != nil || number == 0 {
+			return errors.New("signed update version must be numeric")
+		}
+		console.OK("Ed25519 signing key matches the embedded public trust anchor.")
+	}
+
+	// Keep legacy flag-driven builds usable in CI; the wizard adds early host
+	// and remote readiness checks before any expensive compilation.
+	if interactive {
+		if err := console.Step(1, 5, "Check build tools and publication access", func() error {
+			return checkBuildReadiness(repoRoot, console, mode, options, &publication, signServerUpdates, *programName)
+		}); err != nil {
+			return err
+		}
+		if err := savePublicationConfig(publication.configPath, publication.saved); err != nil {
+			return fmt.Errorf("save publication settings: %w", err)
+		}
+		console.OK("Publication settings saved to " + publication.configPath)
+	}
+	step, total := 0, 3
+	if interactive {
+		step, total = 1, 5
+	}
+	step++
+	if err := console.Step(step, total, "Compile selected targets", func() error {
+		if *macOSStage != "package" {
+			if err := os.RemoveAll(outputDir); err != nil {
+				return fmt.Errorf("clean output directory: %w", err)
+			}
+		}
+		if err := os.MkdirAll(outputDir, 0o755); err != nil {
+			return err
+		}
+		if mode == modeAll || mode == modeServerApp {
+			if err := buildServerAppArtifacts(repoRoot, outputDir, *programName, version, targetFilter); err != nil {
+				return fmt.Errorf("server-app: %w", err)
+			}
+		}
+		if mode == modeAll || mode == modeDesktopApp {
+			return buildDesktopAppArtifacts(repoRoot, outputDir, *programName, version, options)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
 	if *macOSStage == "build" {
-		fmt.Println("macOS Docker compilation complete; run -macos-stage package on macOS")
+		console.OK("macOS Docker compilation complete; run -macos-stage package on macOS. Nothing was published.")
+		return nil
+	}
+	step++
+	if err := console.Step(step, total, "Prepare release metadata", func() error {
+		if signServerUpdates {
+			commit, err := runOutput(repoRoot, "git", "rev-parse", "HEAD")
+			if err != nil {
+				return err
+			}
+			if err := appupdate.Publish(filepath.Join(outputDir, "server-app"), version, strings.TrimSpace(commit), signingKey); err != nil {
+				return err
+			}
+			console.Info("Signed server-app/update.json and generated server-app/SHA256SUMS.")
+		}
+		return updateLatestSymlink(artifactsRoot, version)
+	}); err != nil {
+		return err
+	}
+	step++
+	if err := console.Step(step, total, "Upload artifacts", func() error {
+		return publishArtifacts(repoRoot, artifactsRoot, version, syncTargets, console)
+	}); err != nil {
+		return err
+	}
+	if interactive {
+		if err := console.Step(5, 5, "Apply selected server updates", func() error {
+			return restartPublishedServers(repoRoot, outputDir, version, publication.targets, console)
+		}); err != nil {
+			return err
+		}
+	}
+	console.Heading("Build complete")
+	console.OK("Artifacts: " + outputDir)
+	for _, destination := range syncTargets {
+		console.Info("Uploaded: %s:%s/latest", destination.host, destination.base)
+	}
+	for _, target := range publication.targets {
+		if strings.HasSuffix(target.Directory, "/chroot/"+target.Domain+"/download") {
+			console.Info("Downloads: https://%s/download/latest/", target.Domain)
+		}
+	}
+	return nil
+}
+
+// Publication settings describe destinations, never credentials or remembered
+// consent. Restart choices belong only to the current confirmed build.
+type publicationTarget struct {
+	Domain    string `json:"domain"`
+	Host      string `json:"host"`
+	Directory string `json:"directory"`
+	Service   string `json:"service"`
+	Binary    string `json:"binary"`
+	Storage   string `json:"storage"`
+	Restart   bool   `json:"-"`
+	GOOS      string `json:"-"`
+	GOARCH    string `json:"-"`
+}
+
+type publicationConfig struct {
+	Version      int                 `json:"version"`
+	Destinations []publicationTarget `json:"destinations"`
+}
+
+type publicationPlan struct {
+	targets    []publicationTarget
+	saved      []publicationTarget
+	configPath string
+}
+
+func (plan publicationPlan) syncDestinations() syncDestinationFlags {
+	var destinations syncDestinationFlags
+	for _, target := range plan.targets {
+		destinations = append(destinations, syncDestination{host: target.Host, base: target.Directory})
+	}
+	return destinations
+}
+
+func (plan publicationPlan) hasRestarts() bool {
+	for _, target := range plan.targets {
+		if target.Restart {
+			return true
+		}
+	}
+	return false
+}
+
+func defaultPublicationTarget(domain string) publicationTarget {
+	return publicationTarget{Domain: domain, Host: "root@" + domain,
+		Directory: "/var/lib/sitebrush/storage/chroot/" + domain + "/download",
+		Service:   "sitebrush-80", Binary: "/usr/local/bin/sitebrush", Storage: "/var/lib/sitebrush"}
+}
+
+func validPublicationDomain(domain string) bool {
+	if len(domain) > 253 || domain == "" || domain != strings.ToLower(domain) {
+		return false
+	}
+	for _, label := range strings.Split(domain, ".") {
+		if label == "" || len(label) > 63 || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+			return false
+		}
+		for _, character := range label {
+			if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '-' {
+				continue
+			}
+			return false
+		}
+	}
+	return true
+}
+
+func safeRemotePath(filename string) bool {
+	return validRemoteSyncBase(filename) && path.Clean(filename) == filename && filename != "/"
+}
+
+func validatePublicationTarget(target publicationTarget) error {
+	if !validPublicationDomain(target.Domain) || !validSyncHost(target.Host) {
+		return errors.New("use an ASCII domain name and a valid SSH address such as root@example.com")
+	}
+	if !safeRemotePath(target.Directory) || !safeRemotePath(target.Binary) || !safeRemotePath(target.Storage) {
+		return errors.New("download, executable, and installation paths must be clean absolute paths below / (no trailing slash or ..)")
+	}
+	if target.Service == "" || strings.HasPrefix(target.Service, "-") {
+		return errors.New("service name must not be empty or start with -")
+	}
+	for _, character := range target.Service {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || strings.ContainsRune("._@-", character) {
+			continue
+		}
+		return errors.New("service name may contain only letters, digits, dot, underscore, @, or hyphen")
+	}
+	return nil
+}
+
+func loadPublicationConfig(filename string) ([]publicationTarget, error) {
+	file, err := os.Open(filename)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	decoder := json.NewDecoder(io.LimitReader(file, 64<<10))
+	decoder.DisallowUnknownFields()
+	var configuration publicationConfig
+	if err := decoder.Decode(&configuration); err != nil {
+		return nil, err
+	}
+	if decoder.Decode(new(any)) != io.EOF {
+		return nil, errors.New("unexpected content after publication settings")
+	}
+	if configuration.Version != 1 || len(configuration.Destinations) > 64 {
+		return nil, errors.New("unsupported publication settings version or more than 64 destinations")
+	}
+	for index, target := range configuration.Destinations {
+		if err := validatePublicationTarget(target); err != nil {
+			return nil, fmt.Errorf("destination %d: %w", index+1, err)
+		}
+		for _, earlier := range configuration.Destinations[:index] {
+			if earlier.Domain == target.Domain {
+				return nil, fmt.Errorf("duplicate domain %s", target.Domain)
+			}
+		}
+	}
+	return configuration.Destinations, nil
+}
+
+func savePublicationConfig(filename string, destinations []publicationTarget) error {
+	if err := os.MkdirAll(filepath.Dir(filename), 0o700); err != nil {
+		return err
+	}
+	encoded, err := json.MarshalIndent(publicationConfig{Version: 1, Destinations: destinations}, "", "  ")
+	if err != nil {
+		return err
+	}
+	file, err := os.CreateTemp(filepath.Dir(filename), ".crosscompile-*.json")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(file.Name())
+	_, writeErr := file.Write(append(encoded, '\n'))
+	syncErr := file.Sync()
+	if err := errors.Join(writeErr, syncErr, file.Close()); err != nil {
+		return err
+	}
+	return os.Rename(file.Name(), filename)
+}
+
+func configurePublication(console *buildconsole.Console, reader *bufio.Reader, explicit []syncDestination) (publicationPlan, error) {
+	configurationDirectory, err := os.UserConfigDir()
+	if err != nil {
+		return publicationPlan{}, err
+	}
+	return configurePublicationWithConfig(console, reader, explicit, filepath.Join(configurationDirectory, "sitebrush", "crosscompile.json"))
+}
+
+func configurePublicationWithConfig(console *buildconsole.Console, reader *bufio.Reader, explicit []syncDestination, filename string) (publicationPlan, error) {
+	plan := publicationPlan{configPath: filename}
+	saved, err := loadPublicationConfig(plan.configPath)
+	if err != nil {
+		return plan, fmt.Errorf("read %s: %w", plan.configPath, err)
+	}
+	plan.saved = []publicationTarget{defaultPublicationTarget("sitebrush.com"), defaultPublicationTarget("sitebrush.ru")}
+	for _, target := range saved {
+		plan.saved = rememberPublicationTarget(plan.saved, target)
+	}
+	if len(explicit) != 0 {
+		// An explicit list replaces default selections, including in forced
+		// interactive mode, so flags never silently broaden publication.
+		plan.saved = nil
+		for _, destination := range explicit {
+			domain := destination.host[strings.LastIndex(destination.host, "@")+1:]
+			target := defaultPublicationTarget(strings.ToLower(domain))
+			target.Host, target.Directory = destination.host, path.Clean(destination.base)
+			if err := validatePublicationTarget(target); err != nil {
+				return plan, fmt.Errorf("interactive destination %s: %w", destination.host, err)
+			}
+			plan.saved = rememberPublicationTarget(plan.saved, target)
+		}
+	}
+	console.Heading("Publication destinations")
+	console.Info("Choose uploads and restarts now. No server will be changed until the complete build and every upload succeed.")
+	console.Info("SSH uses your existing agent/key configuration; the release signing key is a separate credential.")
+	for index := range plan.saved {
+		target, selected, err := configurePublicationTarget(console, reader, plan.saved[index])
+		if err != nil {
+			return plan, err
+		}
+		plan.saved[index] = target
+		if selected {
+			plan.targets = append(plan.targets, target)
+		}
+	}
+	for {
+		domain, err := console.Line(reader, "Additional domain (blank to finish)", "")
+		if err != nil {
+			return plan, err
+		}
+		if domain == "" {
+			return plan, nil
+		}
+		domain = strings.TrimSuffix(strings.ToLower(domain), ".")
+		if !validPublicationDomain(domain) {
+			console.Warning("Enter an ASCII domain such as example.com, without https:// or a path.")
+			continue
+		}
+		duplicate := false
+		for _, existing := range plan.saved {
+			duplicate = duplicate || existing.Domain == domain
+		}
+		if duplicate || len(plan.saved) >= 64 {
+			console.Warning("Domain is already listed, or the 64-destination limit has been reached.")
+			continue
+		}
+		target, selected, err := configurePublicationTarget(console, reader, defaultPublicationTarget(domain))
+		if err != nil {
+			return plan, err
+		}
+		plan.saved = append(plan.saved, target)
+		if selected {
+			plan.targets = append(plan.targets, target)
+		}
+	}
+}
+
+func rememberPublicationTarget(targets []publicationTarget, replacement publicationTarget) []publicationTarget {
+	for index := range targets {
+		if targets[index].Domain == replacement.Domain {
+			targets[index] = replacement
+			return targets
+		}
+	}
+	return append(targets, replacement)
+}
+
+func configurePublicationTarget(console *buildconsole.Console, reader *bufio.Reader, target publicationTarget) (publicationTarget, bool, error) {
+	console.Info("\n%s -> %s:%s", target.Domain, target.Host, target.Directory)
+	selected, err := console.Confirm(reader, "Upload to "+target.Domain+"?", true)
+	if err != nil || !selected {
+		return target, false, err
+	}
+	for {
+		edit, err := console.Confirm(reader, "Edit SSH address, paths, or service name?", false)
+		if err != nil {
+			return target, false, err
+		}
+		if edit {
+			for _, field := range []struct {
+				label string
+				text  *string
+			}{{"SSH address", &target.Host}, {"Remote download directory", &target.Directory},
+				{"Service name (managed with service)", &target.Service}, {"Installed executable", &target.Binary}, {"Installation directory", &target.Storage}} {
+				answer, err := console.Line(reader, field.label, *field.text)
+				if err != nil {
+					return target, false, err
+				}
+				*field.text = answer
+			}
+		}
+		if err := validatePublicationTarget(target); err != nil {
+			console.Warning(err.Error())
+			continue
+		}
+		break
+	}
+	console.Warning("Direct update will replace: " + target.Binary)
+	console.Warning("It will permanently DELETE: " + path.Join(target.Storage, appupdate.Directory))
+	console.Info("Deletion removes the update journal, identities, and backups; no archive.")
+	target.Restart, err = console.Confirm(reader, "Replace executable, delete update state, and restart "+target.Service+" on "+target.Host+" after upload?", false)
+	return target, true, err
+}
+
+func showPublicationPlan(console *buildconsole.Console, targets []publicationTarget) {
+	console.Heading("Actions requiring confirmation")
+	if len(targets) == 0 {
+		console.Info("Local build only. Nothing will be uploaded or restarted.")
 		return
 	}
-	if err := updateLatestSymlink(artifactsRoot, version); err != nil {
-		fatalf("update latest symlink: %v", err)
+	writer := tabwriter.NewWriter(console.Output, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(writer, "DOMAIN\tSSH ADDRESS\tACTION")
+	for _, target := range targets {
+		action := "upload only"
+		if target.Restart {
+			action = "upload + update + restart"
+		}
+		fmt.Fprintf(writer, "%s\t%s\t%s\n", target.Domain, target.Host, action)
 	}
-
-	destinations := syncPublicationDestinations(syncTargets)
-	for _, destination := range destinations {
-		if err := syncArtifacts(repoRoot, artifactsRoot, version, destination.host, destination.base); err != nil {
-			fatalf("sync artifacts to %s: %v", destination.host, err)
+	_ = writer.Flush()
+	for _, target := range targets {
+		console.Heading(target.Domain)
+		console.Info("  Upload: %s", target.Directory)
+		if target.Restart {
+			console.Info("  Service: %s\n  Replace: %s", target.Service, target.Binary)
+			console.Warning("Permanently DELETE: " + path.Join(target.Storage, appupdate.Directory))
 		}
 	}
+	console.Info("Uploads synchronize the binaries directory, including retained version folders and latest. Restarts begin only after every upload succeeds.")
+}
 
-	fmt.Println("done")
+type desktopBuildTarget struct {
+	goos    string
+	goarch  string
+	variant string
+}
+
+func linuxDesktopTargets() []desktopBuildTarget {
+	return []desktopBuildTarget{{"linux", "amd64", "gtk40"}, {"linux", "amd64", "gtk41"}, {"linux", "arm64", "gtk40"}, {"linux", "arm64", "gtk41"}}
+}
+
+func windowsDesktopArchitectures() []string { return []string{"amd64", "arm64"} }
+
+func includesMacOSDesktop(filter buildTargetFilter, hostOS string) bool {
+	return filter.matches("darwin", "universal") && (hostOS == "darwin" || filter.goos == "darwin")
+}
+
+func showBuildMatrix(console *buildconsole.Console, mode buildMode, filter buildTargetFilter, hostOS, macOSStage string) {
+	console.Heading("What will be compiled")
+	var targets []desktopBuildTarget
+	serverCount := 0
+	if mode != modeDesktopApp {
+		for _, target := range filteredServerAppTargets(serverAppTargets(), filter) {
+			targets = append(targets, desktopBuildTarget{target.goos, target.goarch, "server (CGO disabled)"})
+			serverCount++
+		}
+	}
+	if mode != modeServerApp {
+		if includesMacOSDesktop(filter, hostOS) {
+			targets = append(targets, desktopBuildTarget{"darwin", "amd64 + arm64", "desktop universal (Docker compilation, macOS DMG packaging)"})
+		} else if filter.matches("darwin", "universal") {
+			console.Warning("macOS desktop is skipped on " + hostOS + "; DMG packaging requires a macOS host.")
+		}
+		for _, target := range linuxDesktopTargets() {
+			if filter.matches(target.goos, target.goarch) {
+				targets = append(targets, target)
+			}
+		}
+		for _, architecture := range windowsDesktopArchitectures() {
+			if filter.matches("windows", architecture) {
+				targets = append(targets, desktopBuildTarget{"windows", architecture, "desktop"})
+			}
+		}
+	}
+	platforms, architectures := make(map[string]bool), make(map[string]bool)
+	writer := tabwriter.NewWriter(console.Output, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(writer, "OS\tARCHITECTURE\tVARIANT")
+	for _, target := range targets {
+		platforms[target.goos] = true
+		for _, architecture := range strings.Split(target.goarch, " + ") {
+			architectures[architecture] = true
+		}
+		fmt.Fprintf(writer, "%s\t%s\t%s\n", target.goos, target.goarch, target.variant)
+	}
+	_ = writer.Flush()
+	console.Info("%d operating systems, %d CPU architectures; %d server builds, %d desktop packages.", len(platforms), len(architectures), serverCount, len(targets)-serverCount)
+	if macOSStage != "all" {
+		console.Info("macOS stage: %s (build compiles only; package consumes existing compiled binaries).", macOSStage)
+	}
+}
+
+func defaultReleaseKeyFile() (string, error) {
+	configuration, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(configuration, "sitebrush", "release-ed25519.key"), nil
+}
+
+func showSigningGuide(console *buildconsole.Console, explicitFile string) {
+	filename, err := defaultReleaseKeyFile()
+	if err != nil {
+		console.Warning("Cannot resolve default key directory: " + err.Error())
+	}
+	console.Heading("Release signing: Ed25519")
+	source := filename
+	if explicitFile != "" {
+		source = explicitFile
+	}
+	if strings.TrimSpace(os.Getenv("SITEBRUSH_RELEASE_PRIVATE_KEY")) != "" {
+		source = "SITEBRUSH_RELEASE_PRIVATE_KEY environment variable (takes precedence over key files)"
+	} else if information, err := os.Stat(source); err == nil && runtime.GOOS != "windows" && information.Mode().Perm()&0o077 != 0 {
+		console.Warning("Private key permissions allow other users; restrict them with chmod 600 " + shellQuote(source))
+	}
+	console.Info("Selected private key source: %s\nDefault private key file: %s", source, filename)
+	console.Info("The private key signs server-app/update.json. SHA256SUMS covers native 64-bit server updates; Linux/386 is a separate compatibility build. Installations verify releases using pkg/appupdate/release-public-key.txt.")
+	console.Info("On another build machine, obtain the EXISTING trusted private key from the release owner or an encrypted private backup; transfer it over an authenticated encrypted connection.")
+	console.Info("Keep the base64 key outside Git and download directories. Never paste it into issues, logs, or shell command history. Do not generate a replacement: existing installations trust the original public key.")
+	if filename != "" {
+		console.Info("For a newly provisioned Unix machine:\n  mkdir -p %s\n  chmod 700 %s\n  chmod 600 %s", shellQuote(filepath.Dir(filename)), shellQuote(filepath.Dir(filename)), shellQuote(filename))
+	}
+	console.Info("Keep an encrypted offline backup; on Windows restrict the file ACL to the build user. The key stays on the build machine and is not uploaded to deployment servers.")
+}
+
+// Readiness probes are read-only and bounded; compilation remains a streamed,
+// long-lived operation. Probe output is diagnostic, never private key material.
+func readinessOutput(repoRoot, name string, arguments ...string) (string, error) {
+	command := exec.Command(name, arguments...)
+	command.Dir = repoRoot
+	command.Env = releaseCommandEnvironment()
+	command.WaitDelay = time.Second
+	var output bytes.Buffer
+	command.Stdout, command.Stderr = &output, &output
+	if err := command.Start(); err != nil {
+		return "", err
+	}
+	finished := make(chan error, 1)
+	go func() { finished <- command.Wait() }()
+	timer := time.NewTimer(30 * time.Second)
+	defer timer.Stop()
+	select {
+	case err := <-finished:
+		if err != nil {
+			return "", fmt.Errorf("%s: %w: %s", name, err, strings.TrimSpace(output.String()))
+		}
+		return strings.TrimSpace(output.String()), nil
+	case <-timer.C:
+		_ = command.Process.Kill()
+		<-finished
+		return "", fmt.Errorf("%s readiness check did not respond within 30 seconds: %w", name, os.ErrDeadlineExceeded)
+	}
+}
+
+func checkBuildReadiness(repoRoot string, console *buildconsole.Console, mode buildMode, options desktopBuildOptions, plan *publicationPlan, signed bool, program string) error {
+	compiler, err := readinessOutput(repoRoot, "go", "version")
+	if err != nil {
+		return fmt.Errorf("Go is required: %w", err)
+	}
+	console.OK(compiler + "; project requires Go " + options.goVersion)
+	commit, err := readinessOutput(repoRoot, "git", "rev-parse", "HEAD")
+	if err != nil {
+		return fmt.Errorf("Git and a source checkout are required: %w", err)
+	}
+	console.OK("Source commit: " + commit + "; automatic release version comes from the Git commit count.")
+	if mode != modeServerApp && options.macOSStage != "package" {
+		console.Info("Docker is required for desktop CGO compilation and isolated Linux, Windows, and macOS toolchains. Server builds use native Go with CGO disabled.")
+		if _, err := readinessOutput(repoRoot, "docker", "info", "--format", "{{.Architecture}}"); err != nil {
+			return fmt.Errorf("Docker is unavailable; install/start Docker and check docker info, or use -interactive=always -mode server-app: %w", err)
+		}
+		console.OK("Docker: available and responding. Builder images are reused; missing images/toolchains need a first-run download.")
+		console.Info("Cross-architecture desktop builds may register Docker binfmt emulation using a privileged container.")
+	}
+	if mode != modeServerApp && includesMacOSDesktop(options.targetFilter, runtime.GOOS) {
+		for _, tool := range []string{"hdiutil", "sips", "iconutil"} {
+			if options.macOSStage != "build" && !commandExists(tool) {
+				return fmt.Errorf("macOS packaging requires %s on a macOS host", tool)
+			}
+		}
+		if options.macOSStage != "build" {
+			console.Info("macOS bundling/DMG tools: ready. App ad-hoc signing, when codesign is available, is separate from Ed25519 release signing.")
+		}
+		if options.macOSStage != "package" {
+			if options.macOSSDK != "" {
+				if err := verifyNonEmptyFile(options.macOSSDK); err != nil {
+					return fmt.Errorf("macOS SDK archive: %w", err)
+				}
+				console.OK("macOS SDK archive: " + options.macOSSDK)
+			} else {
+				sdk, err := readinessOutput(repoRoot, "xcrun", "--sdk", "macosx", "--show-sdk-path")
+				if err != nil {
+					return fmt.Errorf("install/select Xcode and its macOS SDK, or provide -macos-sdk: %w", err)
+				}
+				if information, err := os.Stat(sdk); err != nil || !information.IsDir() {
+					return fmt.Errorf("macOS SDK directory is unavailable: %s", sdk)
+				}
+				console.OK("macOS SDK: " + sdk)
+			}
+		}
+	}
+	if len(plan.targets) > 0 {
+		if options.macOSStage == "build" {
+			return errors.New("macOS build-only stage cannot publish; decline uploads or use the package stage")
+		}
+		for _, tool := range []string{"ssh", "rsync"} {
+			if !commandExists(tool) {
+				return fmt.Errorf("%s is required for publication", tool)
+			}
+		}
+	}
+	for index := range plan.targets {
+		target := &plan.targets[index]
+		if target.Restart && (!signed || mode == modeDesktopApp || program != "sitebrush") {
+			return errors.New("direct server updates require a signed complete SiteBrush server release")
+		}
+		script, err := publicationProbeScript(*target)
+		if err != nil {
+			return err
+		}
+		console.Info("Checking SSH access: %s (existing SSH key/agent and known_hosts required)", target.Host)
+		output, err := readinessOutput(repoRoot, "ssh", append(publicationSSHArguments(target.Host), script)...)
+		if err != nil {
+			return fmt.Errorf("%s: check SSH authentication, host trust, paths, and service before retrying: %w", target.Host, err)
+		}
+		if target.Restart {
+			target.GOOS, target.GOARCH, err = parsePublicationPlatform(output)
+			if err != nil {
+				return fmt.Errorf("%s: %w", target.Host, err)
+			}
+		}
+		console.OK("Publication access: " + target.Host)
+		if target.Restart {
+			console.Info("  Server platform: %s/%s", target.GOOS, target.GOARCH)
+		}
+	}
+	return nil
+}
+
+func publicationSSHArguments(host string) []string {
+	return []string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3", host}
+}
+
+func publicationProbeScript(target publicationTarget) (string, error) {
+	if err := validatePublicationTarget(target); err != nil {
+		return "", err
+	}
+	script := "set -eu\ncommand -v rsync >/dev/null\npublication=" + shellQuote(target.Directory) + `
+parent="$publication"
+while [ ! -e "$parent" ]; do parent=$(dirname "$parent"); done
+test -d "$parent" && test -w "$parent"
+`
+	if target.Restart {
+		script += "storage=" + shellQuote(target.Storage) + "\nbinary=" + shellQuote(target.Binary) + "\nservice_name=" + shellQuote(target.Service) + `
+test -d "$storage" && test ! -L "$storage"
+test "$(cd "$storage" && pwd -P)" = "$storage"
+test -w "$storage"
+test ! -L "$storage/.sitebrush-update"
+test -f "$binary" && test -x "$binary" && test ! -L "$binary"
+test -w "$(dirname "$binary")"
+command -v service >/dev/null
+command -v mktemp >/dev/null
+command -v sha256sum >/dev/null || command -v sha256 >/dev/null || command -v shasum >/dev/null
+service "$service_name" status
+printf 'SITEBRUSH_PLATFORM=%s/%s\n' "$(uname -s)" "$(uname -m)"
+`
+	}
+	return script, nil
+}
+
+func parsePublicationPlatform(output string) (string, string, error) {
+	for _, line := range strings.Split(output, "\n") {
+		if !strings.HasPrefix(line, "SITEBRUSH_PLATFORM=") {
+			continue
+		}
+		operatingSystem, architecture, _ := strings.Cut(strings.TrimPrefix(line, "SITEBRUSH_PLATFORM="), "/")
+		operatingSystem = strings.ToLower(operatingSystem)
+		switch architecture {
+		case "x86_64", "amd64":
+			architecture = "amd64"
+		case "aarch64", "arm64":
+			architecture = "arm64"
+		default:
+			return "", "", fmt.Errorf("unsupported remote CPU architecture %q", architecture)
+		}
+		if !appupdate.Supported(operatingSystem, architecture) || len(filteredServerAppTargets(serverAppTargets(), buildTargetFilter{goos: operatingSystem, goarch: architecture})) == 0 {
+			return "", "", fmt.Errorf("unsupported remote platform %s/%s", operatingSystem, architecture)
+		}
+		return operatingSystem, architecture, nil
+	}
+	return "", "", errors.New("SSH readiness response did not include the remote platform")
+}
+
+func publishArtifacts(repoRoot, artifactsRoot, version string, destinations []syncDestination, console *buildconsole.Console) error {
+	if len(destinations) == 0 {
+		console.Info("No upload destinations selected.")
+	}
+	for _, destination := range destinations {
+		if err := syncArtifacts(repoRoot, artifactsRoot, version, destination.host, destination.base); err != nil {
+			return fmt.Errorf("upload to %s failed; no server restarts were started (earlier uploads remain): %w", destination.host, err)
+		}
+		console.OK("Uploaded: " + destination.host + ":" + destination.base)
+	}
+	return nil
+}
+
+func restartPublishedServers(repoRoot, outputDir, version string, targets []publicationTarget, console *buildconsole.Console) error {
+	var completed []publicationTarget
+	for _, target := range targets {
+		if !target.Restart {
+			console.Info("%s: uploaded only; executable and service unchanged.", target.Domain)
+			continue
+		}
+		duplicate := false
+		for _, earlier := range completed {
+			duplicate = duplicate || earlier.Host == target.Host && earlier.Service == target.Service && earlier.Binary == target.Binary && earlier.Storage == target.Storage
+		}
+		if duplicate {
+			console.Info("%s: this executable/service was already updated during this run.", target.Domain)
+			continue
+		}
+		artifact, err := verifiedPublicationArtifact(outputDir, version, target)
+		if err != nil {
+			return err
+		}
+		script, err := publicationRestartScript(target, version, artifact)
+		if err != nil {
+			return err
+		}
+		console.Warning("Updating " + target.Host + ": " + target.Service + "; permanently deleting " + path.Join(target.Storage, appupdate.Directory))
+		if err := runCommand(repoRoot, "ssh", append(publicationSSHArguments(target.Host), script)...); err != nil {
+			return fmt.Errorf("update on %s failed; remaining servers were not restarted; inspect the last remote step and service status, update state may already be deleted: %w", target.Host, err)
+		}
+		completed = append(completed, target)
+		console.OK(fmt.Sprintf("%s: installed version %s, service %s reports running (%s/%s).", target.Host, version, target.Service, target.GOOS, target.GOARCH))
+	}
+	return nil
+}
+
+func verifiedPublicationArtifact(outputDir, version string, target publicationTarget) (appupdate.Artifact, error) {
+	payload, err := os.ReadFile(filepath.Join(outputDir, "server-app", "update.json"))
+	if err != nil {
+		return appupdate.Artifact{}, err
+	}
+	trusted, err := appupdate.TrustedKey()
+	if err != nil {
+		return appupdate.Artifact{}, err
+	}
+	manifest, err := appupdate.Verify(payload, trusted)
+	if err != nil {
+		return appupdate.Artifact{}, err
+	}
+	if manifest.Version != version {
+		return appupdate.Artifact{}, errors.New("release metadata does not match the selected version")
+	}
+	for _, artifact := range manifest.Artifacts {
+		if artifact.OS == target.GOOS && artifact.Arch == target.GOARCH {
+			return artifact, nil
+		}
+	}
+	return appupdate.Artifact{}, errors.New("signed release does not contain the remote platform")
+}
+
+// The numbered release path pins deployment to this build even if another
+// publisher moves latest. All candidate checks precede the service stop.
+func publicationRestartScript(target publicationTarget, version string, artifact appupdate.Artifact) (string, error) {
+	if err := validatePublicationTarget(target); err != nil {
+		return "", err
+	}
+	if sequence, err := strconv.ParseUint(version, 10, 64); err != nil || sequence == 0 {
+		return "", errors.New("invalid deployment version")
+	}
+	digest, digestErr := hex.DecodeString(artifact.SHA256)
+	if artifact.Name != appupdate.BinaryName(target.GOOS, target.GOARCH) || artifact.OS != target.GOOS || artifact.Arch != target.GOARCH || artifact.Size < 1 || digestErr != nil || len(digest) != sha256.Size {
+		return "", errors.New("invalid deployment artifact")
+	}
+	return "set -eu\nsource=" + shellQuote(path.Join(target.Directory, version, "server-app", artifact.Name)) +
+		"\nbinary=" + shellQuote(target.Binary) + "\nstorage=" + shellQuote(target.Storage) + "\nservice_name=" + shellQuote(target.Service) +
+		"\nexpected_hash=" + shellQuote(artifact.SHA256) + "\nexpected_size=" + shellQuote(strconv.FormatInt(artifact.Size, 10)) + "\nexpected_version=" + shellQuote(version) + `
+printf '%s\n' 'REMOTE: verify candidate before stopping the service'
+test -f "$source" && test -s "$source"
+test -f "$binary" && test ! -L "$binary"
+test -d "$storage" && test ! -L "$storage"
+test "$(cd "$storage" && pwd -P)" = "$storage"
+test ! -L "$storage/.sitebrush-update"
+temporary=$(mktemp "${binary}.release-XXXXXX")
+trap 'if [ -n "$temporary" ]; then rm -f "$temporary"; fi' 0
+cp -p "$binary" "$temporary"
+cat "$source" > "$temporary"
+chmod 755 "$temporary"
+test "$(wc -c < "$temporary" | tr -d '[:space:]')" = "$expected_size"
+if command -v sha256sum >/dev/null; then
+  checksum=$(sha256sum "$temporary"); checksum=${checksum%% *}
+elif command -v sha256 >/dev/null; then
+  checksum=$(sha256 -q "$temporary")
+else
+  checksum=$(shasum -a 256 "$temporary"); checksum=${checksum%% *}
+fi
+test "$checksum" = "$expected_hash"
+test "$("$temporary" --version)" = "$expected_version"
+printf '%s\n' 'REMOTE: stop service'
+service "$service_name" stop
+printf '%s\n' 'REMOTE: atomically replace executable'
+mv -f "$temporary" "$binary"
+temporary=''
+printf 'REMOTE: permanently delete %s\n' "$storage/.sitebrush-update"
+rm -rf "$storage/.sitebrush-update"
+printf '%s\n' 'REMOTE: start service'
+service "$service_name" start
+printf '%s\n' 'REMOTE: check service status and installed executable version'
+attempt=0
+until service "$service_name" status; do
+  attempt=$((attempt + 1))
+  test "$attempt" -lt 15
+  sleep 2
+done
+test "$("$binary" --version)" = "$expected_version"
+`, nil
 }
 
 func buildServerAppArtifacts(repoRoot, outputDir, programName, version string, targetFilter buildTargetFilter) error {
@@ -284,7 +1050,7 @@ func buildDesktopAppArtifacts(repoRoot, outputDir, programName, version string, 
 	}
 
 	builtAny := false
-	if options.targetFilter.matches("darwin", "universal") && (runtime.GOOS == "darwin" || options.targetFilter.goos == "darwin") {
+	if includesMacOSDesktop(options.targetFilter, runtime.GOOS) {
 		if err := buildMacOSDesktopArtifacts(repoRoot, desktopDir, programName, version, options); err != nil {
 			return err
 		}
@@ -321,19 +1087,8 @@ func buildLinuxDesktopArtifacts(repoRoot, desktopDir, programName, version strin
 	if !options.targetFilter.matchesOS("linux") {
 		return false, nil
 	}
-	targets := []struct {
-		goarch  string
-		variant string
-	}{
-		{goarch: "amd64", variant: "gtk40"},
-		{goarch: "amd64", variant: "gtk41"},
-		{goarch: "arm64", variant: "gtk40"},
-		{goarch: "arm64", variant: "gtk41"},
-	}
-	matchingTargets := make([]struct {
-		goarch  string
-		variant string
-	}, 0, len(targets))
+	targets := linuxDesktopTargets()
+	matchingTargets := make([]desktopBuildTarget, 0, len(targets))
 	for _, target := range targets {
 		if !options.targetFilter.matches("linux", target.goarch) {
 			continue
@@ -373,7 +1128,7 @@ func buildWindowsDesktopArtifacts(repoRoot, desktopDir, programName, version str
 		return false, nil
 	}
 	matchingArchitectures := make([]string, 0, 2)
-	for _, goarch := range []string{"amd64", "arm64"} {
+	for _, goarch := range windowsDesktopArchitectures() {
 		if !options.targetFilter.matches("windows", goarch) {
 			continue
 		}
@@ -458,7 +1213,7 @@ func linuxDesktopDockerfile(goarch, variant, goVersion string) string {
 		webkitPackage = "libwebkit2gtk-4.1-dev"
 	}
 
-	return fmt.Sprintf(`FROM --platform=linux/%s %s
+	return fmt.Sprintf(`FROM %s
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
 RUN set -e; apt-get update; apt-get install -y ca-certificates curl build-essential pkg-config libgtk-3-dev %s zip tar; rm -rf /var/lib/apt/lists/*
@@ -468,7 +1223,7 @@ RUN if ! pkg-config --exists webkit2gtk-4.0 && pkg-config --exists webkit2gtk-4.
   install -d /usr/local/lib/pkgconfig; \
   printf 'prefix=/usr\nexec_prefix=${prefix}\nlibdir=${exec_prefix}/lib\nincludedir=${prefix}/include\n\nName: webkit2gtk-4.0\nDescription: Compatibility shim for webkit2gtk-4.1\nVersion: 4.0\nRequires: webkit2gtk-4.1\nLibs:\nCflags:\n' > /usr/local/lib/pkgconfig/webkit2gtk-4.0.pc; \
 fi
-`, goarch, linuxDesktopBaseImage(variant), webkitPackage, goVersion, goarch)
+`, linuxDesktopBaseImage(variant), webkitPackage, goVersion, goarch)
 }
 
 func linuxDesktopDockerScript(artifactPath, artifactName, goarch, variant, version string) string {
@@ -512,7 +1267,7 @@ func windowsDesktopDockerfile(goarch, goVersion string) string {
 	}
 
 	return fmt.Sprintf(`
-FROM --platform=linux/amd64 ubuntu:22.04
+FROM ubuntu:22.04
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
 RUN set -e; apt-get update; %s; rm -rf /var/lib/apt/lists/*
@@ -589,7 +1344,7 @@ func buildGoBinary(repoRoot, outputPath string, request buildRequest) error {
 	cmd.Dir = repoRoot
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(releaseCommandEnvironment(),
 		"GOOS="+request.goos,
 		"GOARCH="+request.goarch,
 		"CGO_ENABLED="+request.cgoEnabled,
@@ -935,11 +1690,40 @@ func syncArtifacts(repoRoot, outputRoot, version, syncHost, syncBase string) err
 	if err := runCommand(repoRoot, "ssh", syncHost, fmt.Sprintf("mkdir -p %s", shellQuote(remoteDirectory))); err != nil {
 		return err
 	}
-	if err := runCommand(repoRoot, "rsync", "-avP", rsyncSourceDirectory(outputRoot), rsyncRemoteDirectory(syncHost, remoteDirectory)); err != nil {
+	arguments, err := artifactSyncArguments(repoRoot, outputRoot, syncHost, remoteDirectory)
+	if err != nil {
+		return err
+	}
+	if err := runCommand(repoRoot, "rsync", arguments...); err != nil {
 		return err
 	}
 	fmt.Printf("synced latest -> %s via rsync\n", version)
 	return nil
+}
+
+// Modern rsync can transmit paths through its protocol. macOS openrsync uses
+// the remote shell instead, so nontrivial paths need explicit shell quoting.
+func artifactSyncArguments(repoRoot, outputRoot, host, directory string) ([]string, error) {
+	arguments := []string{"-avP"}
+	remote := rsyncRemoteDirectory(host, directory)
+	if strings.IndexFunc(directory, func(character rune) bool {
+		return !(character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || strings.ContainsRune("/._-", character))
+	}) >= 0 {
+		help, err := runOutput(repoRoot, "rsync", "--help")
+		if err != nil {
+			return nil, fmt.Errorf("check rsync path protection: %w", err)
+		}
+		switch {
+		case strings.Contains(help, "--secluded-args"):
+			arguments = append(arguments, "--secluded-args")
+		case strings.Contains(help, "--protect-args"):
+			arguments = append(arguments, "--protect-args")
+		default:
+			remote = host + ":" + shellQuote(strings.TrimRight(directory, "/")+"/")
+		}
+	}
+	return append(arguments, rsyncSourceDirectory(outputRoot), remote), nil
 }
 
 func syncPublicationDestinations(syncTargets []syncDestination) []syncDestination {
@@ -1049,12 +1833,25 @@ func findRepoRoot() (string, error) {
 	return root, nil
 }
 
+// Child tools do not need release authority. In particular, an SSH SendEnv
+// wildcard must never forward the signing secret to a deployment server.
+func releaseCommandEnvironment() []string {
+	var environment []string
+	for _, entry := range os.Environ() {
+		name, _, _ := strings.Cut(entry, "=")
+		if !strings.EqualFold(name, "SITEBRUSH_RELEASE_PRIVATE_KEY") {
+			environment = append(environment, entry)
+		}
+	}
+	return environment
+}
+
 func runCommand(dir, name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Env = os.Environ()
+	cmd.Env = releaseCommandEnvironment()
 	return cmd.Run()
 }
 
@@ -1195,6 +1992,9 @@ func dockerImageExists(repoRoot, image string) (bool, error) {
 // Readiness probes never pull or compile. A stalled daemon must fail before
 // emulation registration or publication; actual builds stream their progress.
 func runDockerProbe(cmd *exec.Cmd, timeout time.Duration) error {
+	if cmd.Env == nil {
+		cmd.Env = releaseCommandEnvironment()
+	}
 	cmd.WaitDelay = time.Second
 	if err := cmd.Start(); err != nil {
 		return err
@@ -1219,7 +2019,7 @@ func runDockerBuild(repoRoot, platform, image, dockerfile string) error {
 	cmd.Stdin = strings.NewReader(dockerfile)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Env = os.Environ()
+	cmd.Env = releaseCommandEnvironment()
 	return cmd.Run()
 }
 
@@ -1362,6 +2162,7 @@ func verifyNonEmptyFile(filePath string) error {
 func runOutput(dir, name string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
+	cmd.Env = releaseCommandEnvironment()
 	out, err := cmd.Output()
 	if err != nil {
 		return "", err
@@ -1401,11 +2202,6 @@ func sanitizePathSegment(input string) string {
 	return strings.Trim(builder.String(), "._")
 }
 
-func fatalf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, format+"\n", args...)
-	os.Exit(1)
-}
-
 // Local and GitHub publication use the same commit-count identity. A new
 // committed release advances the version regardless of the build machine.
 func officialReleasePublication(destinations []syncDestination) bool {
@@ -1424,11 +2220,11 @@ func officialReleasePublication(destinations []syncDestination) bool {
 func loadReleaseSigningKey(filename, encoded string, trusted ed25519.PublicKey) (ed25519.PrivateKey, error) {
 	if strings.TrimSpace(encoded) == "" {
 		if filename == "" {
-			configuration, err := os.UserConfigDir()
+			var err error
+			filename, err = defaultReleaseKeyFile()
 			if err != nil {
 				return nil, err
 			}
-			filename = filepath.Join(configuration, "sitebrush", "release-ed25519.key")
 		}
 		file, err := os.Open(filename)
 		if err != nil {
@@ -1672,7 +2468,7 @@ func archiveMacOSSDK(sdkPath, archivePath string) error {
 }
 
 func macOSDesktopDockerfile(goarch, goVersion string) string {
-	return fmt.Sprintf(`FROM --platform=linux/%s ubuntu:24.04
+	return fmt.Sprintf(`FROM ubuntu:24.04
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y ca-certificates curl git clang llvm lld cmake make g++ patch python3 xz-utils libssl-dev libxml2-dev zlib1g-dev && rm -rf /var/lib/apt/lists/*
@@ -1697,7 +2493,7 @@ RUN curl -fsSL https://raw.githubusercontent.com/llvm/llvm-project/llvmorg-18.1.
     runtime_directory="$(clang -print-resource-dir)/lib/darwin" && mkdir -p "$runtime_directory" && \
     lipo -create /tmp/runtime-x86_64.a /tmp/runtime-arm64.a -output "$runtime_directory/libclang_rt.osx.a" && \
     rm /tmp/version-*.o /tmp/runtime-*.a
-`, goarch, goVersion, goarch, osxcrossCommit)
+`, goVersion, goarch, osxcrossCommit)
 }
 
 func macOSDesktopDockerScript(artifactDirectory, programName, version string) string {
@@ -1755,6 +2551,7 @@ func buildMacOSDockerImage(repoRoot, platform, image, archivePath, dockerfile st
 	}
 	command := exec.Command("docker", "build", "--platform", platform, "-t", image, buildDirectory)
 	command.Dir = repoRoot
+	command.Env = releaseCommandEnvironment()
 	command.Stdout, command.Stderr = os.Stdout, os.Stderr
 	return command.Run()
 }
