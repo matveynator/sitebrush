@@ -864,7 +864,27 @@ The build stage retains intermediate binaries and does not update `binaries/late
 
 ## Local publication and NetChan downloads
 
-The existing publishing command remains valid, including Docker desktop builds:
+Run without options in a terminal:
+
+```sh
+go run scripts/crosscompile/crosscompile.go
+```
+
+The short English wizard first asks for the signing-key file: press Enter to keep the proposed path or enter another one. The confirmed path is remembered locally with upload settings; paths with spaces, relative paths and `~/` are supported. On another platform, replace an unavailable saved path at this prompt. It then shows the build version, platform counts and output directory, offers uploads to `sitebrush.com` and `sitebrush.ru`, and allows additional domains and editable SSH addresses/upload paths. After final confirmation it builds, signs and synchronizes artifacts only. Server executable replacement, `.sitebrush-update` cleanup and service restarts remain manual administrator actions. Decline all uploads for a local build.
+
+Destinations are remembered outside Git in `os.UserConfigDir()/sitebrush/crosscompile.json` (macOS: `~/Library/Application Support/sitebrush/crosscompile.json`). New domains default to `root@<domain>` and `/var/lib/sitebrush/storage/chroot/<domain>/download`. Old saved service settings are ignored and dropped on the next save. SSH uses your existing key/agent and trusted `known_hosts` entry.
+
+Official server publication always requires signing based on the selected **domain**, even when its SSH address has been changed to an alias or IP. The wizard proposes `-release-key <file>`, then its remembered path, then `os.UserConfigDir()/sitebrush/release-ed25519.key`. On macOS the default is `~/Library/Application Support/sitebrush/release-ed25519.key`; other platforms use their own configuration directory. Only the path is remembered, never the key contents. `SITEBRUSH_RELEASE_PRIVATE_KEY` takes precedence over files and skips the file prompt; unset it to choose a file. Noninteractive commands keep their existing environment/flag/default priority and do not load the remembered path. Missing or mismatched keys stop the operation before compilation.
+
+On another build machine, copy the existing base64 key from the release owner or an encrypted private backup through an authenticated encrypted connection. Keep it outside Git and download directories; use `0700` for its private directory and `0600` for the key file on Unix, or a private file ACL on Windows. Never print the key or generate a replacement for the existing trust anchor. Child Go, Docker, rsync and SSH commands do not inherit the private signing environment variable.
+
+The wizard checks Go, Git, Docker/SDK tools when needed, and SSH/rsync upload access before compilation. Server builds use `CGO_ENABLED=0`; desktop CGO compilation runs in Docker, with macOS DMG packaging on a macOS host. Missing cross-CPU emulation may require a privileged Docker binfmt setup. Readiness probes stop after 30 seconds; long builds keep streaming output and elapsed time.
+
+Use `-color=auto|always|never` for terminal colors (`auto` respects `NO_COLOR`, `TERM=dumb` and redirected output). Use `-interactive=always` with other flags, or `-interactive=never` to disable questions. Existing flag-driven/CI commands remain noninteractive and never acquire saved destinations.
+
+### Existing flag-driven publication
+
+The existing publishing command remains valid, including Docker desktop builds, and only uploads artifacts:
 
 ```sh
 go run scripts/crosscompile/crosscompile.go \
@@ -874,7 +894,7 @@ go run scripts/crosscompile/crosscompile.go \
 
 Docker readiness checks print their current step and stop after 30 seconds if the daemon or a cached-platform probe does not respond. Check that `docker info` returns normally before retrying; build and image-download output remains streamed, without a short compilation timeout. Publishing with `-sync` does not require stopping the running service. Avoid appending unconditional SSH replacement commands with `;`: they would execute even if compilation or signing failed. Subsequent installed updates use the protected panel or `sitebrush -upgrade`.
 
-The command builds and publishes artifacts; it does not replace the running executable. Signed `update.json` and `SHA256SUMS` accompany the complete server matrix before publication. Missing or mismatched signing keys fail before compilation. The private key stays on the build machine. Desktop compilation uses Docker for Linux, Windows, and macOS. Only macOS app bundling, ad-hoc signing, and DMG packaging run on a macOS host.
+With explicit `-sync` flags and no forced wizard, the command builds and publishes artifacts without replacing the running executable. Signed `update.json` and `SHA256SUMS` accompany the complete server matrix before publication. Missing or mismatched signing keys fail before compilation. The private key stays on the build machine. Desktop compilation uses Docker for Linux, Windows, and macOS. Only macOS app bundling, ad-hoc signing, and DMG packaging run on a macOS host.
 
 After the first updater-enabled installation has been started on sitebrush.com, its pinned central identity serves the published `storage/chroot/sitebrush.com/download` tree over UDP and TCP **9878**. Allow inbound access on that central server and outbound access from installations. Public release reads need no installation registration, email or administrative token. Channel/session delivery, bounded backpressure, verified resume and HTTPS fallback are documented in [pkg/appupdate/netchan.md](pkg/appupdate/netchan.md). Updating an installation still requires its protected confirmation page or `sitebrush -upgrade`.
 

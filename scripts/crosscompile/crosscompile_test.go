@@ -179,7 +179,7 @@ func TestLinuxDesktopDockerfile(t *testing.T) {
 	t.Parallel()
 
 	dockerfile := linuxDesktopDockerfile("amd64", "gtk40", "1.27.2")
-	if !strings.Contains(dockerfile, "FROM --platform=linux/amd64 ubuntu:22.04") {
+	if !strings.Contains(dockerfile, "FROM ubuntu:22.04") || strings.Contains(dockerfile, "FROM --platform=") {
 		t.Fatalf("linuxDesktopDockerfile() missing base image")
 	}
 	if !strings.Contains(dockerfile, `SHELL ["/bin/bash", "-o", "pipefail", "-c"]`) {
