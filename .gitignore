@@ -3,6 +3,8 @@ storage
 binaries
 coverage*.out
 node_modules/
+crosscompile.json
+.crosscompile-*.json
 */*/*/.DS_Store
 */*/.DS_Store
 */.DS_Store

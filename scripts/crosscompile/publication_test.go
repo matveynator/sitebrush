@@ -16,65 +16,102 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/buildconsole"
 )
 
+func publicationWizardSettings(t *testing.T) crosscompileSettings {
+	t.Helper()
+	return crosscompileSettings{program: "sitebrush", version: "123", outputRoot: t.TempDir(), mode: modeAll,
+		options: desktopBuildOptions{goVersion: "1.27.3", macOSStage: "all"}}
+}
+
+func TestPublicationWizardStartsWithReviewAndEnterAccepts(t *testing.T) {
+	t.Setenv("SITEBRUSH_RELEASE_PRIVATE_KEY", "")
+	var output bytes.Buffer
+	console, _ := buildconsole.New(&output, "never")
+	plan, err := preparePublicationPlan(nil, publicationPlan{releaseKeyFile: "chosen.key"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := publicationWizardSettings(t)
+	confirmed, _, plan, err := configureCrosscompile(console, bufio.NewReader(strings.NewReader("\n")), t.TempDir(), settings, plan)
+	if err != nil || !confirmed || len(plan.targets) != 2 {
+		t.Fatalf("Enter did not start with default destinations: %+v, %v", plan, err)
+	}
+	prompt := strings.Index(output.String(), "Enter: build and upload")
+	for _, parameter := range []string{"Version:", "Mode:", "Output:", "CPU:", "Signing key:", "sitebrush.com ->", "sitebrush.ru ->", "Local settings:"} {
+		if index := strings.Index(output.String(), parameter); index < 0 || index > prompt {
+			t.Fatalf("parameter %q was not shown before input: %s", parameter, output.String())
+		}
+	}
+	if strings.Contains(output.String(), "Upload to sitebrush") || strings.Contains(output.String(), "Edit SSH") {
+		t.Fatal("unchanged settings still required individual confirmations")
+	}
+	confirmed, _, _, err = configureCrosscompile(console, bufio.NewReader(strings.NewReader("")), t.TempDir(), settings, plan)
+	if err == nil || confirmed {
+		t.Fatal("closed input started a build")
+	}
+}
+
 func TestPublicationWizardRemembersUploadDestinations(t *testing.T) {
 	filename := filepath.Join(t.TempDir(), "sitebrush", "crosscompile.json")
 	console, _ := buildconsole.New(io.Discard, "never")
-	// Skip both defaults, add one upload destination, and confirm the plan.
-	reader := bufio.NewReader(strings.NewReader("no\nno\nEXAMPLE.COM\nyes\nno\n\nyes\n"))
-	plan, err := configurePublicationWithConfig(console, reader, nil, filename)
-	if err != nil || len(plan.targets) != 1 || plan.targets[0].Host != "root@example.com" {
-		t.Fatalf("wizard: %+v, %v", plan, err)
+	plan, err := preparePublicationPlan(nil, publicationPlan{configPath: filename})
+	if err != nil {
+		t.Fatal(err)
 	}
-	confirmed, err := console.Confirm(reader, "Start?", false)
-	if err != nil || !confirmed {
-		t.Fatalf("wizard consumed the final confirmation: %v", err)
+	// Edit only on request, disable the defaults, then add another domain.
+	reader := bufio.NewReader(strings.NewReader("e\n1\nno\ne\n2\nno\na\nEXAMPLE.COM\n\n\n\n\n"))
+	confirmed, _, plan, err := configureCrosscompile(console, reader, t.TempDir(), publicationWizardSettings(t), plan)
+	if err != nil || !confirmed || len(plan.targets) != 1 || plan.targets[0].Host != "root@example.com" {
+		t.Fatalf("wizard: %+v, %v", plan, err)
 	}
 	if err := savePublicationConfig(filename, plan.saved, plan.releaseKeyFile); err != nil {
 		t.Fatal(err)
 	}
 	configuration, err := loadPublicationConfig(filename)
 	saved := configuration.Destinations
-	if err != nil || len(saved) != 3 || saved[2].Domain != "example.com" {
-		t.Fatalf("saved settings or consent: %+v, %v", saved, err)
+	if err != nil || len(saved) != 3 || saved[2].Domain != "example.com" || !saved[0].Disabled || !saved[1].Disabled {
+		t.Fatalf("saved settings: %+v, %v", saved, err)
 	}
 	contents, _ := os.ReadFile(filename)
 	if strings.Contains(string(contents), "restart") || strings.Contains(string(contents), "private_key") {
-		t.Fatal("settings persisted consent or secrets")
+		t.Fatal("settings persisted service operations or secrets")
 	}
 	if information, _ := os.Stat(filename); runtime.GOOS != "windows" && information.Mode().Perm() != 0o600 {
 		t.Fatal("settings are not private")
 	}
-	// Defaults and the remembered extra destination are all offered next time.
-	reader = bufio.NewReader(strings.NewReader("no\nno\n\nno\n\n"))
-	plan, err = configurePublicationWithConfig(console, reader, nil, filename)
+	if information, _ := os.Stat(filepath.Dir(filename)); runtime.GOOS != "windows" && information.Mode().Perm() != 0o700 {
+		t.Fatal("settings directory is not private")
+	}
+	plan, err = loadPublicationPlan(filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err = preparePublicationPlan(nil, plan)
 	if err != nil || len(plan.targets) != 1 || plan.targets[0].Domain != "example.com" {
-		t.Fatalf("remembered destination: %+v, %v", plan, err)
+		t.Fatalf("remembered destination selection: %+v, %v", plan, err)
 	}
 }
 
 func TestWizardExplicitTargetsDoNotAcquireOfficialDestinations(t *testing.T) {
-	console, _ := buildconsole.New(io.Discard, "never")
 	explicit := []syncDestination{{"deploy@example.com", "/srv/releases"}}
-	reader := bufio.NewReader(strings.NewReader("\nno\n\n"))
-	plan, err := configurePublicationWithConfig(console, reader, explicit, filepath.Join(t.TempDir(), "settings.json"))
+	plan, err := preparePublicationPlan(explicit, publicationPlan{saved: []publicationTarget{defaultPublicationTarget("sitebrush.com")}})
 	if err != nil || len(plan.targets) != 1 || plan.targets[0].Host != "deploy@example.com" || plan.targets[0].Directory != "/srv/releases" {
 		t.Fatalf("explicit targets changed: %+v, %v", plan, err)
 	}
 }
 
 func TestWizardRemembersCustomSigningKeyPath(t *testing.T) {
+	t.Setenv("SITEBRUSH_RELEASE_PRIVATE_KEY", "")
 	console, _ := buildconsole.New(io.Discard, "never")
 	filename := filepath.Join(t.TempDir(), "crosscompile.json")
 	customKey := filepath.Join(t.TempDir(), "private keys", "release.key")
-	chosen, err := configureReleaseKeyFile(console, bufio.NewReader(strings.NewReader(customKey+"\n")), "previous-platform-path")
-	if err != nil || chosen != customKey {
-		t.Fatalf("custom key choice: %q, %v", chosen, err)
-	}
-	plan := publicationPlan{releaseKeyFile: chosen}
-	reader := bufio.NewReader(strings.NewReader("no\nno\n\n"))
-	plan, err = configurePublicationPlan(console, reader, nil, plan)
+	plan, err := preparePublicationPlan(nil, publicationPlan{configPath: filename, releaseKeyFile: "previous-platform-path"})
 	if err != nil {
 		t.Fatal(err)
+	}
+	reader := bufio.NewReader(strings.NewReader("k\n" + customKey + "\n\n"))
+	confirmed, _, plan, err := configureCrosscompile(console, reader, t.TempDir(), publicationWizardSettings(t), plan)
+	if err != nil || !confirmed || plan.releaseKeyFile != customKey {
+		t.Fatalf("custom key choice: %+v, %v", plan, err)
 	}
 	if err := savePublicationConfig(filename, plan.saved, plan.releaseKeyFile); err != nil {
 		t.Fatal(err)
@@ -89,6 +126,32 @@ func TestWizardRemembersCustomSigningKeyPath(t *testing.T) {
 	}
 	if _, err := os.Stat(customKey); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("selecting a path created or replaced the private key")
+	}
+}
+
+func TestWizardHasNoDefaultSigningKeyLocation(t *testing.T) {
+	t.Setenv("SITEBRUSH_RELEASE_PRIVATE_KEY", "")
+	var output bytes.Buffer
+	console, _ := buildconsole.New(&output, "never")
+	chosen, err := configureReleaseKeyFile(console, bufio.NewReader(strings.NewReader("\n")), "")
+	if err != nil || chosen != "" {
+		t.Fatalf("an unconfigured path acquired a default: %q, %v", chosen, err)
+	}
+	showSigningGuide(console, "")
+	if !strings.Contains(output.String(), "not configured") || strings.Contains(output.String(), "release-ed25519.key") {
+		t.Fatal(output.String())
+	}
+	if _, err := loadReleaseSigningKey("", "", nil); err == nil || !strings.Contains(err.Error(), "-release-key") {
+		t.Fatalf("missing signing configuration did not fail explicitly: %v", err)
+	}
+	plan, err := preparePublicationPlan(nil, publicationPlan{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := filepath.Join(t.TempDir(), "chosen.key")
+	confirmed, _, plan, err := configureCrosscompile(console, bufio.NewReader(strings.NewReader("\n"+key+"\n\n")), t.TempDir(), publicationWizardSettings(t), plan)
+	if err != nil || !confirmed || plan.releaseKeyFile != key {
+		t.Fatalf("missing key was not requested before accepting: %+v, %v", plan, err)
 	}
 }
 
@@ -117,12 +180,42 @@ func TestWizardSigningKeyPathSupportsRelativeAndHomePaths(t *testing.T) {
 	}
 }
 
+func TestWizardEditsBuildOptionsAndReturnsToReview(t *testing.T) {
+	consoleOutput := new(bytes.Buffer)
+	console, _ := buildconsole.New(consoleOutput, "never")
+	repoRoot := t.TempDir()
+	plan, err := preparePublicationPlan([]syncDestination{{"root@example.com", "/srv/download"}}, publicationPlan{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := publicationWizardSettings(t)
+	reader := bufio.NewReader(strings.NewReader("b\n456\ncustombrush\nserver-app\nlinux\narm64\nnew artifacts\n\n\nyes\nno\n\n"))
+	confirmed, edited, _, err := configureCrosscompile(console, reader, repoRoot, settings, plan)
+	if err != nil || !confirmed {
+		t.Fatalf("editing failed: %v", err)
+	}
+	if edited.version != "456" || edited.program != "custombrush" || edited.mode != modeServerApp || edited.filter != (buildTargetFilter{goos: "linux", goarch: "arm64"}) || edited.options.targetFilter != edited.filter || !edited.options.rebuildDockerImages || edited.outputRoot != filepath.Join(repoRoot, "new artifacts") {
+		t.Fatalf("edited options did not reach the build configuration: %+v", edited)
+	}
+	if !strings.Contains(consoleOutput.String(), "1 server builds, 0 desktop packages") || strings.Count(consoleOutput.String(), "Build and upload settings") != 2 {
+		t.Fatalf("edited build was not reviewed: %s", consoleOutput.String())
+	}
+	confirmed, _, _, err = configureCrosscompile(console, bufio.NewReader(strings.NewReader("b\n")), repoRoot, settings, plan)
+	if err == nil || confirmed {
+		t.Fatal("closed input during editing started a build")
+	}
+	confirmed, _, _, err = configureCrosscompile(console, bufio.NewReader(strings.NewReader("unknown\nq\n")), repoRoot, settings, plan)
+	if err != nil || confirmed {
+		t.Fatalf("explicit cancellation failed: %v", err)
+	}
+}
+
 func TestOfficialWizardDomainRequiresSigningAfterSSHAddressEdit(t *testing.T) {
 	for _, domain := range []string{"sitebrush.com", "sitebrush.ru"} {
 		for _, host := range []string{"root@release-primary", "root@192.0.2.10"} {
 			t.Run(domain+"/"+host, func(t *testing.T) {
 				console, _ := buildconsole.New(io.Discard, "never")
-				reader := bufio.NewReader(strings.NewReader("yes\nyes\n" + host + "\n\n"))
+				reader := bufio.NewReader(strings.NewReader("yes\n" + host + "\n\n"))
 				target, selected, err := configurePublicationTarget(console, reader, defaultPublicationTarget(domain))
 				if err != nil || !selected || target.Domain != domain || target.Host != host {
 					t.Fatalf("edited destination: %+v, selected=%t, err=%v", target, selected, err)
