@@ -209,7 +209,6 @@ func runCrosscompile() error {
 			return err
 		}
 	}
-	console.Heading("SiteBrush build and upload")
 	if interactive {
 		publication, err = preparePublicationPlan(syncTargets, publication)
 		if err != nil {
@@ -237,6 +236,7 @@ func runCrosscompile() error {
 			return fmt.Errorf("save publication settings: %w", err)
 		}
 	} else {
+		console.Heading("SiteBrush build and upload")
 		showSigningGuide(console, keyFilename)
 		console.Info("Version: %s | Go: %s | Program: %s", version, goVersion, *programName)
 		console.Info("Repository: %s\nOutput: %s", repoRoot, outputDir)
@@ -269,7 +269,7 @@ func runCrosscompile() error {
 		if number, err := strconv.ParseUint(version, 10, 64); err != nil || number == 0 {
 			return errors.New("signed update version must be numeric")
 		}
-		console.OK("Ed25519 signing key matches the embedded public trust anchor.")
+		console.OK("Release signing key: verified.")
 	}
 
 	// Keep legacy flag-driven builds usable in CI; the wizard adds early host
@@ -588,15 +588,18 @@ type crosscompileSettings struct {
 func configureCrosscompile(console *buildconsole.Console, reader *bufio.Reader, repoRoot string, settings crosscompileSettings, plan publicationPlan) (bool, crosscompileSettings, publicationPlan, error) {
 	commit, _ := runOutput(repoRoot, "git", "rev-parse", "HEAD")
 	for {
-		showCrosscompileSettings(console, repoRoot, strings.TrimSpace(commit), settings, plan)
-		command, err := console.Line(reader, "Enter: build and upload | K: key | E: edit destinations | A: add domain | B: build options | Q: cancel", "")
+		showCrosscompileSettings(console, settings, plan, runtime.GOOS)
+		showCrosscompileActions(console, plan)
+		command, err := console.Line(reader, "  Your choice", "Enter")
+		console.Info("")
 		if err != nil {
 			return false, settings, plan, err
 		}
 		switch strings.ToLower(command) {
-		case "", "y", "yes":
+		case "enter", "y", "yes":
 			if settings.requiresSigning(plan) && plan.releaseKeyFile == "" && strings.TrimSpace(os.Getenv("SITEBRUSH_RELEASE_PRIVATE_KEY")) == "" {
 				console.Warning("Choose the existing signing key before an official server upload.")
+				showSigningGuide(console, "")
 				plan.releaseKeyFile, err = configureReleaseKeyFile(console, reader, "")
 				break
 			}
@@ -608,8 +611,10 @@ func configureCrosscompile(console *buildconsole.Console, reader *bufio.Reader, 
 				console.Warning("Unset SITEBRUSH_RELEASE_PRIVATE_KEY to choose a key file.")
 				continue
 			}
+			showSigningGuide(console, plan.releaseKeyFile)
 			plan.releaseKeyFile, err = configureReleaseKeyFile(console, reader, plan.releaseKeyFile)
 		case "e":
+			showPublicationPlan(console, plan.saved)
 			var selection string
 			selection, err = console.Line(reader, "Destination number (blank to return)", "")
 			if err != nil || selection == "" {
@@ -625,8 +630,11 @@ func configureCrosscompile(console *buildconsole.Console, reader *bufio.Reader, 
 			plan, err = addPublicationTarget(console, reader, plan)
 		case "b":
 			settings, err = configureBuildSettings(console, reader, repoRoot, settings)
+		case "d":
+			showCrosscompileDetails(console, repoRoot, strings.TrimSpace(commit), settings, plan, runtime.GOOS)
+			_, err = console.Line(reader, "  Press Enter to return to the summary", "")
 		default:
-			console.Warning("Press Enter to start, or choose K, E, A, B or Q.")
+			console.Warning("Press Enter to start, or choose K, E, A, B, D or Q.")
 		}
 		if err != nil {
 			return false, settings, plan, err
@@ -639,23 +647,89 @@ func (settings crosscompileSettings) requiresSigning(plan publicationPlan) bool 
 	return settings.signUpdates || settings.mode != modeDesktopApp && plan.officialReleasePublication()
 }
 
-func showCrosscompileSettings(console *buildconsole.Console, repoRoot, commit string, settings crosscompileSettings, plan publicationPlan) {
-	console.Heading("Build and upload settings")
-	console.Info("Version: %s | Go: %s | Program: %s | Mode: %s", settings.version, settings.options.goVersion, settings.program, settings.mode)
-	console.Info("Repository: %s\nSource commit: %s\nOutput: %s", repoRoot, commit, filepath.Join(settings.outputRoot, settings.version))
-	console.Info("Target filter: %s | macOS stage: %s | Rebuild Docker images: %t", settings.filter.label(), settings.options.macOSStage, settings.options.rebuildDockerImages)
-	showBuildMatrix(console, settings.mode, settings.filter, runtime.GOOS, settings.options.macOSStage)
-	if settings.mode != modeServerApp {
+func showCrosscompileSettings(console *buildconsole.Console, settings crosscompileSettings, plan publicationPlan, hostOS string) {
+	console.Heading("  SiteBrush — release " + settings.version)
+	targets, serverCount := selectedBuildTargets(settings.mode, settings.filter, hostOS)
+	_, architectures := buildTargetNames(targets)
+	console.Heading("  Build")
+	if serverCount > 0 {
+		platforms, _ := buildTargetNames(targets[:serverCount])
+		unit := "builds"
+		if serverCount == 1 {
+			unit = "build"
+		}
+		console.Info("    Server:   %d %s — %s", serverCount, unit, strings.Join(platforms, ", "))
+	}
+	if len(targets) > serverCount {
+		platforms, _ := buildTargetNames(targets[serverCount:])
+		desktopCount := len(targets) - serverCount
+		unit := "packages"
+		if desktopCount == 1 {
+			unit = "package"
+		}
+		console.Info("    Desktop:  %d %s — %s", desktopCount, unit, strings.Join(platforms, ", "))
+	}
+	console.Info("    CPUs:     %d — %s", len(architectures), strings.Join(architectures, ", "))
+	if settings.mode != modeServerApp && settings.filter.matches("darwin", "universal") && !includesMacOSDesktop(settings.filter, hostOS) {
+		console.Info("    macOS desktop needs a Mac; skipped on this machine.")
+	}
+	if settings.options.macOSStage != "all" {
+		console.Info("    macOS step: %s", settings.options.macOSStage)
+	}
+	console.Info("    Save to:  %s", filepath.Join(settings.outputRoot, settings.version))
+	console.Heading("  Release signature")
+	if !settings.requiresSigning(plan) {
+		console.Info("    Not required for this build.")
+	} else if strings.TrimSpace(os.Getenv("SITEBRUSH_RELEASE_PRIVATE_KEY")) != "" {
+		console.Info("    Key: supplied by the environment.")
+	} else if plan.releaseKeyFile == "" {
+		console.Info("    Key: not set — choose K to select the existing release key.")
+	} else {
+		console.Info("    Key: %s", plan.releaseKeyFile)
+	}
+	console.Heading("  Upload to")
+	if len(plan.targets) == 0 {
+		console.Info("    No servers selected; files stay on this machine.")
+	}
+	for index, target := range plan.saved {
+		status := ""
+		if target.Disabled {
+			status = " (disabled)"
+		}
+		console.Info("    %d. %s%s", index+1, target.Domain, status)
+	}
+}
+
+func showCrosscompileActions(console *buildconsole.Console, plan publicationPlan) {
+	action := "Build and upload"
+	if len(plan.targets) == 0 {
+		action = "Build only"
+	}
+	console.Info("\n  %s\n", console.Bold("[Enter]  "+action+" (default)"))
+	console.Info("    K  Choose key       E  Edit servers    A  Add server")
+	console.Info("    B  Build settings   D  Details / help  Q  Quit\n")
+}
+
+func showCrosscompileDetails(console *buildconsole.Console, repoRoot, commit string, settings crosscompileSettings, plan publicationPlan, hostOS string) {
+	console.Heading("  Build details")
+	console.Info("    Program: %s\n    Go version: %s\n    Build mode: %s", settings.program, settings.options.goVersion, settings.mode)
+	console.Info("    Source: %s\n    Commit: %s", repoRoot, commit)
+	console.Info("    Target filter: %s\n    Rebuild Docker images: %t", settings.filter.label(), settings.options.rebuildDockerImages)
+	console.Info("    Local settings: %s", plan.configPath)
+	showBuildMatrix(console, settings.mode, settings.filter, hostOS, settings.options.macOSStage)
+	if settings.mode != modeServerApp && settings.options.macOSStage != "package" {
+		console.Info("    Docker compiles desktop apps; server builds use CGO=0.")
+	}
+	if settings.mode != modeServerApp && includesMacOSDesktop(settings.filter, hostOS) {
 		sdk := settings.options.macOSSDK
 		if sdk == "" {
-			sdk = "installed Xcode SDK (macOS desktop)"
+			sdk = "installed Xcode SDK"
 		}
-		console.Info("Docker: desktop CGO compilation | macOS SDK: %s", sdk)
+		console.Info("    macOS SDK: %s", sdk)
 	}
-	console.Info("Sign server updates: %t (official domains require signing)", settings.requiresSigning(plan))
+	console.Heading("  Key and upload details")
 	showSigningGuide(console, plan.releaseKeyFile)
 	showPublicationPlan(console, plan.saved)
-	console.Info("Local settings: %s", plan.configPath)
 }
 
 func addPublicationTarget(console *buildconsole.Console, reader *bufio.Reader, plan publicationPlan) (publicationPlan, error) {
@@ -752,8 +826,7 @@ func includesMacOSDesktop(filter buildTargetFilter, hostOS string) bool {
 	return filter.matches("darwin", "universal") && (hostOS == "darwin" || filter.goos == "darwin")
 }
 
-func showBuildMatrix(console *buildconsole.Console, mode buildMode, filter buildTargetFilter, hostOS, macOSStage string) {
-	console.Heading("What will be compiled")
+func selectedBuildTargets(mode buildMode, filter buildTargetFilter, hostOS string) ([]desktopBuildTarget, int) {
 	var targets []desktopBuildTarget
 	serverCount := 0
 	if mode != modeDesktopApp {
@@ -765,8 +838,6 @@ func showBuildMatrix(console *buildconsole.Console, mode buildMode, filter build
 	if mode != modeServerApp {
 		if includesMacOSDesktop(filter, hostOS) {
 			targets = append(targets, desktopBuildTarget{"darwin", "amd64 + arm64", "desktop universal (Docker compilation, macOS DMG packaging)"})
-		} else if filter.matches("darwin", "universal") {
-			console.Warning("macOS desktop is skipped on " + hostOS + "; DMG packaging requires a macOS host.")
 		}
 		for _, target := range linuxDesktopTargets() {
 			if filter.matches(target.goos, target.goarch) {
@@ -779,6 +850,10 @@ func showBuildMatrix(console *buildconsole.Console, mode buildMode, filter build
 			}
 		}
 	}
+	return targets, serverCount
+}
+
+func buildTargetNames(targets []desktopBuildTarget) ([]string, []string) {
 	platforms, architectures := make(map[string]bool), make(map[string]bool)
 	for _, target := range targets {
 		platforms[target.goos] = true
@@ -795,8 +870,32 @@ func showBuildMatrix(console *buildconsole.Console, mode buildMode, filter build
 	}
 	sort.Strings(operatingSystems)
 	sort.Strings(cpuArchitectures)
-	console.Info("%d operating systems, %d CPU architectures; %d server builds, %d desktop packages.", len(platforms), len(architectures), serverCount, len(targets)-serverCount)
-	console.Info("OS: %s | CPU: %s", strings.Join(operatingSystems, ", "), strings.Join(cpuArchitectures, ", "))
+	for index, operatingSystem := range operatingSystems {
+		switch operatingSystem {
+		case "darwin":
+			operatingSystems[index] = "macOS"
+		case "freebsd":
+			operatingSystems[index] = "FreeBSD"
+		case "linux":
+			operatingSystems[index] = "Linux"
+		case "openbsd":
+			operatingSystems[index] = "OpenBSD"
+		case "windows":
+			operatingSystems[index] = "Windows"
+		}
+	}
+	return operatingSystems, cpuArchitectures
+}
+
+func showBuildMatrix(console *buildconsole.Console, mode buildMode, filter buildTargetFilter, hostOS, macOSStage string) {
+	console.Heading("  Build targets")
+	targets, serverCount := selectedBuildTargets(mode, filter, hostOS)
+	operatingSystems, cpuArchitectures := buildTargetNames(targets)
+	if mode != modeServerApp && filter.matches("darwin", "universal") && !includesMacOSDesktop(filter, hostOS) {
+		console.Info("    macOS desktop needs a Mac; skipped on this machine.")
+	}
+	console.Info("    %d operating systems, %d CPU architectures; %d server builds, %d desktop packages.", len(operatingSystems), len(cpuArchitectures), serverCount, len(targets)-serverCount)
+	console.Info("    OS: %s\n    CPU: %s", strings.Join(operatingSystems, ", "), strings.Join(cpuArchitectures, ", "))
 	if macOSStage != "all" {
 		console.Info("macOS stage: %s (build compiles only; package consumes existing compiled binaries).", macOSStage)
 	}
@@ -882,22 +981,20 @@ func readinessOutput(repoRoot, name string, arguments ...string) (string, error)
 }
 
 func checkBuildReadiness(repoRoot string, console *buildconsole.Console, mode buildMode, options desktopBuildOptions, plan publicationPlan) error {
-	compiler, err := readinessOutput(repoRoot, "go", "version")
-	if err != nil {
+	if _, err := readinessOutput(repoRoot, "go", "version"); err != nil {
 		return fmt.Errorf("Go is required: %w", err)
 	}
-	console.OK(compiler + "; project requires Go " + options.goVersion)
-	commit, err := readinessOutput(repoRoot, "git", "rev-parse", "HEAD")
-	if err != nil {
+	console.OK("Go: ready.")
+	if _, err := readinessOutput(repoRoot, "git", "rev-parse", "HEAD"); err != nil {
 		return fmt.Errorf("Git and a source checkout are required: %w", err)
 	}
-	console.OK("Git: " + commit)
+	console.OK("Source checkout: ready.")
 	if mode != modeServerApp && options.macOSStage != "package" {
-		console.Info("Docker: required for desktop CGO builds; server builds use CGO=0.")
+		console.Info("Checking Docker for desktop builds...")
 		if _, err := readinessOutput(repoRoot, "docker", "info", "--format", "{{.Architecture}}"); err != nil {
 			return fmt.Errorf("Docker is unavailable; install/start Docker and check docker info, or use -interactive=always -mode server-app: %w", err)
 		}
-		console.OK("Docker: ready (cached builders; privileged binfmt setup if cross-CPU emulation is missing).")
+		console.OK("Docker: ready.")
 	}
 	if mode != modeServerApp && includesMacOSDesktop(options.targetFilter, runtime.GOOS) {
 		for _, tool := range []string{"hdiutil", "sips", "iconutil"} {
@@ -913,7 +1010,7 @@ func checkBuildReadiness(repoRoot string, console *buildconsole.Console, mode bu
 				if err := verifyNonEmptyFile(options.macOSSDK); err != nil {
 					return fmt.Errorf("macOS SDK archive: %w", err)
 				}
-				console.OK("macOS SDK archive: " + options.macOSSDK)
+				console.OK("macOS SDK archive: ready.")
 			} else {
 				sdk, err := readinessOutput(repoRoot, "xcrun", "--sdk", "macosx", "--show-sdk-path")
 				if err != nil {
@@ -922,7 +1019,7 @@ func checkBuildReadiness(repoRoot string, console *buildconsole.Console, mode bu
 				if information, err := os.Stat(sdk); err != nil || !information.IsDir() {
 					return fmt.Errorf("macOS SDK directory is unavailable: %s", sdk)
 				}
-				console.OK("macOS SDK: " + sdk)
+				console.OK("macOS SDK: ready.")
 			}
 		}
 	}
@@ -941,11 +1038,11 @@ func checkBuildReadiness(repoRoot string, console *buildconsole.Console, mode bu
 		if err != nil {
 			return err
 		}
-		console.Info("Checking SSH: %s", target.Host)
+		console.Info("Checking upload access to %s...", target.Domain)
 		if _, err := readinessOutput(repoRoot, "ssh", append(publicationSSHArguments(target.Host), script)...); err != nil {
 			return fmt.Errorf("%s: check SSH authentication, host trust, and upload path: %w", target.Host, err)
 		}
-		console.OK("Upload access: " + target.Host)
+		console.OK(target.Domain + ": ready for upload.")
 	}
 	return nil
 }

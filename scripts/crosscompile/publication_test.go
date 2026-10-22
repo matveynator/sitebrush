@@ -35,14 +35,19 @@ func TestPublicationWizardStartsWithReviewAndEnterAccepts(t *testing.T) {
 	if err != nil || !confirmed || len(plan.targets) != 2 {
 		t.Fatalf("Enter did not start with default destinations: %+v, %v", plan, err)
 	}
-	prompt := strings.Index(output.String(), "Enter: build and upload")
-	for _, parameter := range []string{"Version:", "Mode:", "Output:", "CPU:", "Signing key:", "sitebrush.com ->", "sitebrush.ru ->", "Local settings:"} {
+	prompt := strings.Index(output.String(), "Your choice [Enter]")
+	for _, parameter := range []string{"SiteBrush — release 123", "Server:", "Desktop:", "CPUs:", "Save to:", "Key:", "1. sitebrush.com", "2. sitebrush.ru", "[Enter]  Build and upload (default)"} {
 		if index := strings.Index(output.String(), parameter); index < 0 || index > prompt {
 			t.Fatalf("parameter %q was not shown before input: %s", parameter, output.String())
 		}
 	}
 	if strings.Contains(output.String(), "Upload to sitebrush") || strings.Contains(output.String(), "Edit SSH") {
 		t.Fatal("unchanged settings still required individual confirmations")
+	}
+	for _, detail := range []string{"Source commit:", "Go version:", "Local settings:", "SSH", "/var/lib/", "chmod"} {
+		if strings.Contains(output.String(), detail) {
+			t.Fatalf("the summary contains technical detail %q: %s", detail, output.String())
+		}
 	}
 	confirmed, _, _, err = configureCrosscompile(console, bufio.NewReader(strings.NewReader("")), t.TempDir(), settings, plan)
 	if err == nil || confirmed {
@@ -197,7 +202,7 @@ func TestWizardEditsBuildOptionsAndReturnsToReview(t *testing.T) {
 	if edited.version != "456" || edited.program != "custombrush" || edited.mode != modeServerApp || edited.filter != (buildTargetFilter{goos: "linux", goarch: "arm64"}) || edited.options.targetFilter != edited.filter || !edited.options.rebuildDockerImages || edited.outputRoot != filepath.Join(repoRoot, "new artifacts") {
 		t.Fatalf("edited options did not reach the build configuration: %+v", edited)
 	}
-	if !strings.Contains(consoleOutput.String(), "1 server builds, 0 desktop packages") || strings.Count(consoleOutput.String(), "Build and upload settings") != 2 {
+	if !strings.Contains(consoleOutput.String(), "Server:   1 build — Linux") || strings.Count(consoleOutput.String(), "SiteBrush — release") != 2 {
 		t.Fatalf("edited build was not reviewed: %s", consoleOutput.String())
 	}
 	confirmed, _, _, err = configureCrosscompile(console, bufio.NewReader(strings.NewReader("b\n")), repoRoot, settings, plan)
@@ -207,6 +212,29 @@ func TestWizardEditsBuildOptionsAndReturnsToReview(t *testing.T) {
 	confirmed, _, _, err = configureCrosscompile(console, bufio.NewReader(strings.NewReader("unknown\nq\n")), repoRoot, settings, plan)
 	if err != nil || confirmed {
 		t.Fatalf("explicit cancellation failed: %v", err)
+	}
+}
+
+func TestWizardDetailsReturnToSummaryWithoutStarting(t *testing.T) {
+	var output bytes.Buffer
+	console, _ := buildconsole.New(&output, "never")
+	plan, err := preparePublicationPlan(nil, publicationPlan{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := publicationWizardSettings(t)
+	confirmed, _, _, err := configureCrosscompile(console, bufio.NewReader(strings.NewReader("d\n\nq\n")), t.TempDir(), settings, plan)
+	if err != nil || confirmed || !strings.Contains(output.String(), "Go version:") || !strings.Contains(output.String(), "/var/lib/sitebrush/") {
+		t.Fatalf("details navigation: confirmed=%t, error=%v, output=%s", confirmed, err, output.String())
+	}
+	if strings.Count(output.String(), "SiteBrush — release") != 2 {
+		t.Fatal("details did not return to the summary")
+	}
+	output.Reset()
+	showCrosscompileSettings(console, settings, plan, "linux")
+	showCrosscompileDetails(console, "/source", "commit", settings, plan, "linux")
+	if strings.Contains(output.String(), "macOS SDK:") || !strings.Contains(output.String(), "Desktop:  6 packages — Linux, Windows") || !strings.Contains(output.String(), "macOS desktop needs a Mac") {
+		t.Fatalf("Linux display claims macOS tooling is needed: %s", output.String())
 	}
 }
 
