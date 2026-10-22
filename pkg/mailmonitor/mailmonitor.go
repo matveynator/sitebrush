@@ -6,33 +6,40 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"regexp"
 	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/matveynator/sitebrush/v2/pkg/mailout"
 )
 
 const Retention = 90 * 24 * time.Hour
 const timestampLayout = "2006-01-02T15:04:05.000000000Z"
 
 type Event struct {
-	ID             string `json:"id"`
-	InstallationID string `json:"installation_id"`
-	FlowID         string `json:"flow_id,omitempty"`
-	MessageID      string `json:"message_id,omitempty"`
-	Kind           string `json:"kind"`
-	Stage          string `json:"stage"`
-	Domain         string `json:"domain,omitempty"`
-	Recipient      string `json:"recipient,omitempty"`
-	Route          string `json:"route,omitempty"`
-	AcceptedBy     string `json:"accepted_by,omitempty"`
-	Attempt        int    `json:"attempt,omitempty"`
-	SMTPCode       string `json:"smtp_code,omitempty"`
-	Detail         string `json:"detail,omitempty"`
-	CreatedAt      string `json:"created_at"`
+	ClientIP       string            `json:"-"`
+	ID             string            `json:"id"`
+	InstallationID string            `json:"installation_id"`
+	FlowID         string            `json:"flow_id,omitempty"`
+	MessageID      string            `json:"message_id,omitempty"`
+	Kind           string            `json:"kind"`
+	Stage          string            `json:"stage"`
+	Domain         string            `json:"domain,omitempty"`
+	Recipient      string            `json:"recipient,omitempty"`
+	Route          string            `json:"route,omitempty"`
+	AcceptedBy     string            `json:"accepted_by,omitempty"`
+	Attempt        int               `json:"attempt,omitempty"`
+	SMTPCode       string            `json:"smtp_code,omitempty"`
+	Detail         string            `json:"detail,omitempty"`
+	CreatedAt      string            `json:"created_at"`
+	Metadata       *mailout.Metadata `json:"metadata,omitempty"`
+	Transport      string            `json:"transport,omitempty"`
 }
 
 type Counts struct {
@@ -43,6 +50,8 @@ type Counts struct {
 	RegistrationComplete  int
 	RecoveryRequested     int
 	RecoveryComplete      int
+	RelayAccepted         int
+	Cancelled             int
 }
 
 type Filter struct {
@@ -63,13 +72,14 @@ type Database interface {
 type Store struct{ DB Database }
 
 func SchemaQueries() []string {
-	return []string{
+	queries := []string{
 		`CREATE TABLE IF NOT EXISTS mail_monitor_sync(installation_id TEXT PRIMARY KEY,received_at TEXT NOT NULL);`,
 		`CREATE TABLE IF NOT EXISTS mail_monitor_events(id TEXT NOT NULL,installation_id TEXT NOT NULL,flow_id TEXT NOT NULL DEFAULT '',message_id TEXT NOT NULL DEFAULT '',kind TEXT NOT NULL,stage TEXT NOT NULL,domain TEXT NOT NULL DEFAULT '',recipient TEXT NOT NULL DEFAULT '',route TEXT NOT NULL DEFAULT '',accepted_by TEXT NOT NULL DEFAULT '',attempt INTEGER NOT NULL DEFAULT 0,smtp_code TEXT NOT NULL DEFAULT '',detail TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL,synced_at TEXT NOT NULL DEFAULT '',PRIMARY KEY(installation_id,id));`,
 		`CREATE INDEX IF NOT EXISTS idx_mail_monitor_installation_created ON mail_monitor_events(installation_id,created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_mail_monitor_unsynced ON mail_monitor_events(installation_id,synced_at,created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_mail_monitor_message ON mail_monitor_events(message_id,created_at);`,
 	}
+	return append(queries, JournalSchemaQueries()...)
 }
 
 func NewID() string {
@@ -119,24 +129,62 @@ func (store Store) Append(ctx context.Context, event Event) error {
 	}
 	event.Domain = boundedField(event.Domain, 253)
 	event.Recipient = boundedField(event.Recipient, 320)
+	// Older peers keep the authenticated source in structured diagnostics.
+	if event.Metadata == nil {
+		clientIP := event.ClientIP
+		if clientIP == "" {
+			clientIP = event.Diagnostic().ClientIP
+		}
+		if address, err := netip.ParseAddr(clientIP); err == nil {
+			event.Metadata = &mailout.Metadata{InitiatorIP: address.Unmap().String()}
+		}
+	}
+	if event.Metadata != nil {
+		metadata := *event.Metadata
+		if err := ValidateMetadata(metadata); err != nil {
+			return err
+		}
+		if metadata.InitiatorIP != "" {
+			address, _ := netip.ParseAddr(metadata.InitiatorIP)
+			metadata.InitiatorIP = address.Unmap().String()
+		}
+		metadata.RelayTransport = SafeError(errors.New(metadata.RelayTransport))
+		event.Metadata = &metadata
+	}
+	if event.Transport != "" {
+		event.Transport = SafeError(errors.New(event.Transport))
+	}
+
+	if event.ClientIP != "" {
+		diagnostic := event.Diagnostic()
+		diagnostic.ClientIP = event.ClientIP
+		event.Detail = diagnostic.String()
+	}
 	if event.Detail != "" {
 		event.Detail = SafeError(errors.New(event.Detail))
 	}
 	// Later attempts are reconstructed from the outbox; inherit non-secret flow
 	// metadata from the first event so it survives process restarts.
-	if event.MessageID != "" && (event.FlowID == "" || event.Domain == "") {
-		rows, queryErr := store.DB.QueryContext(ctx, `SELECT flow_id,domain FROM mail_monitor_events WHERE installation_id=? AND message_id=? AND stage='queued' LIMIT 1`, event.InstallationID, event.MessageID)
+	if event.MessageID != "" && (event.FlowID == "" || event.Domain == "" || event.Diagnostic().ClientIP == "") {
+		rows, queryErr := store.DB.QueryContext(ctx, `SELECT flow_id,domain,detail FROM mail_monitor_events WHERE installation_id=? AND message_id=? AND stage='queued' LIMIT 1`, event.InstallationID, event.MessageID)
 		if queryErr != nil {
 			return queryErr
 		}
 		if rows.Next() {
-			var queuedFlowID, queuedDomain string
-			queryErr = rows.Scan(&queuedFlowID, &queuedDomain)
+			var queuedFlowID, queuedDomain, queuedDetail string
+			queryErr = rows.Scan(&queuedFlowID, &queuedDomain, &queuedDetail)
 			if event.FlowID == "" {
 				event.FlowID = queuedFlowID
 			}
 			if event.Domain == "" {
 				event.Domain = queuedDomain
+			}
+			diagnostic := event.Diagnostic()
+			if diagnostic.ClientIP == "" {
+				diagnostic.ClientIP = (Event{Detail: queuedDetail}).Diagnostic().ClientIP
+				if diagnostic.ClientIP != "" {
+					event.Detail = diagnostic.String()
+				}
 			}
 		}
 		if queryErr == nil {
@@ -147,9 +195,58 @@ func (store Store) Append(ctx context.Context, event Event) error {
 			return queryErr
 		}
 	}
-	_, err = store.DB.ExecContext(ctx, `INSERT INTO mail_monitor_events(id,installation_id,flow_id,message_id,kind,stage,domain,recipient,route,accepted_by,attempt,smtp_code,detail,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(installation_id,id) DO NOTHING`,
+	result, err := store.DB.ExecContext(ctx, `INSERT INTO mail_monitor_events(id,installation_id,flow_id,message_id,kind,stage,domain,recipient,route,accepted_by,attempt,smtp_code,detail,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(installation_id,id) DO NOTHING`,
 		event.ID, event.InstallationID, event.FlowID, event.MessageID, event.Kind, event.Stage, event.Domain, event.Recipient, event.Route, event.AcceptedBy, event.Attempt, event.SMTPCode, event.Detail, event.CreatedAt)
-	return err
+	if err != nil {
+		return err
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if inserted == 0 {
+		if event.Metadata == nil && event.Transport == "" {
+			return nil
+		}
+		// A rolling upgrade may have acknowledged only the old event schema.
+		// Enrich that event once without changing its immutable audit fields.
+		rows, err := store.DB.QueryContext(ctx, `SELECT id,installation_id,flow_id,message_id,kind,stage,domain,recipient,route,accepted_by,attempt,smtp_code,detail,created_at FROM mail_monitor_events WHERE installation_id=? AND id=?`, event.InstallationID, event.ID)
+		if err != nil {
+			return err
+		}
+		persistedEvents, err := scanEvents(rows)
+		rows.Close()
+		if err != nil {
+			return err
+		}
+		persistedEvents, err = store.withMetadata(ctx, persistedEvents)
+		if err != nil {
+			return err
+		}
+		if len(persistedEvents) == 1 && (persistedEvents[0].Metadata != nil || persistedEvents[0].Transport != "") {
+			return nil
+		}
+		canonicalEvent := event
+		canonicalEvent.Metadata, canonicalEvent.Transport = nil, ""
+		if len(persistedEvents) != 1 || canonicalEvent != persistedEvents[0] {
+			return errors.New("mail monitor replay changed immutable event fields")
+		}
+	}
+	if event.Metadata != nil || event.Transport != "" {
+		extra, encodeErr := json.Marshal(event)
+		if encodeErr != nil {
+			return encodeErr
+		}
+		metadataResult, err := store.DB.ExecContext(ctx, `INSERT INTO mail_monitor_metadata(installation_id,event_id,payload) VALUES(?,?,?) ON CONFLICT(installation_id,event_id) DO NOTHING`, event.InstallationID, event.ID, string(extra))
+		if err != nil {
+			return err
+		}
+		metadataInserted, err := metadataResult.RowsAffected()
+		if err != nil || inserted == 0 && metadataInserted == 0 {
+			return err
+		}
+	}
+	return store.project(ctx, event)
 }
 
 // Validate the complete batch before writing so malformed events cannot cause
@@ -178,6 +275,14 @@ func ValidateBatch(events []Event) error {
 		if len(event.Detail) > 500 || event.Attempt < 0 {
 			return errors.New("mail monitor diagnostic is invalid")
 		}
+		if len(event.Transport) > 500 {
+			return errors.New("mail transport is too long")
+		}
+		if event.Metadata != nil {
+			if err := ValidateMetadata(*event.Metadata); err != nil {
+				return err
+			}
+		}
 		createdAt, err := time.Parse(time.RFC3339Nano, event.CreatedAt)
 		if err != nil || createdAt.After(time.Now().Add(5*time.Minute)) {
 			return errors.New("mail monitor timestamp is invalid")
@@ -198,6 +303,9 @@ func (store Store) Import(ctx context.Context, installationID string, events []E
 			return errors.New("mail monitor event is incomplete")
 		}
 		event.InstallationID = installationID
+		if event.Metadata != nil && event.Metadata.OriginInstallationID != "" && event.Metadata.OriginInstallationID != installationID {
+			return errors.New("mail origin does not belong to reporting installation")
+		}
 		event.Detail = SafeError(errors.New(event.Detail))
 		if err := store.Append(ctx, event); err != nil {
 			return err
@@ -215,7 +323,12 @@ func (store Store) Unsynced(ctx context.Context, limit int) ([]Event, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	return scanEvents(rows)
+	events, err := scanEvents(rows)
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	return store.withMetadata(ctx, events)
 }
 
 func (store Store) MarkSynced(ctx context.Context, events []Event) error {
@@ -246,7 +359,12 @@ func (store Store) RecentFiltered(ctx context.Context, filter Filter) ([]Event, 
 		return nil, err
 	}
 	defer rows.Close()
-	return scanEvents(rows)
+	events, err := scanEvents(rows)
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	return store.withMetadata(ctx, events)
 }
 
 func (store Store) CountFiltered(ctx context.Context, filter Filter) (int, error) {
@@ -272,6 +390,10 @@ func eventFilterSQL(filter Filter) (string, []any) {
 	if filter.Stage != "" {
 		query += ` AND stage=?`
 		arguments = append(arguments, filter.Stage)
+	} else {
+		// Hide historical attempt rows and repeated recovery errors before paging,
+		// so the count and page contents describe the same concise journal.
+		query += ` AND stage NOT IN ('attempt','smtp_attempt','transport_received') AND (stage<>'recovery_mail_failed' OR message_id='' OR NOT EXISTS(SELECT 1 FROM mail_monitor_events outcome WHERE outcome.installation_id=mail_monitor_events.installation_id AND outcome.message_id=mail_monitor_events.message_id AND outcome.stage IN ('failed','retry')))`
 	}
 	if filter.Kind != "" {
 		query += ` AND kind=?`
@@ -339,6 +461,21 @@ func (store Store) LastReceived(ctx context.Context, installationID string) (str
 }
 
 func (store Store) Purge(ctx context.Context, before time.Time) error {
+	for _, query := range []string{
+		`DELETE FROM mail_monitor_metadata WHERE event_id IN (SELECT id FROM mail_monitor_events WHERE created_at<?)`,
+		`DELETE FROM mail_journal_counters WHERE operation_id IN (SELECT operation_id FROM mail_journal WHERE updated_at<?)`,
+		`DELETE FROM mail_journal_stages WHERE last_at<?`,
+		`DELETE FROM mail_journal WHERE updated_at<?`,
+		`DELETE FROM mail_abuse WHERE last_at<?`,
+		`DELETE FROM mail_cancel_commands WHERE created_at<?`,
+	} {
+		if _, err := store.DB.ExecContext(ctx, query, before.UTC().Format(timestampLayout)); err != nil {
+			return err
+		}
+	}
+	if _, err := store.DB.ExecContext(ctx, `DELETE FROM mail_reject_rates WHERE bucket<?`, time.Now().UTC().Add(-2*time.Hour).Format("2006-01-02T15:04:05Z")); err != nil {
+		return err
+	}
 	_, err := store.DB.ExecContext(ctx, `DELETE FROM mail_monitor_events WHERE created_at<?`, before.UTC().Format(timestampLayout))
 	return err
 }

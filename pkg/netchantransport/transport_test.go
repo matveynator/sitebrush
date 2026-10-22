@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"io"
 	"net"
+	"strconv"
 	"testing"
 	"time"
 
@@ -78,7 +79,8 @@ func TestQUICPriorityTCPCompatibilityAndPinnedIdentity(t *testing.T) {
 				t.Fatal(err)
 			}
 			reports := make(chan string, 1)
-			connection, err := (priorityDriver{stop: stop, reports: reports}).Dial(bound, transport.Options{TLS: clientTLS, Done: stop, OwnerDone: stop})
+			connections := make(chan ConnectionReport, 2)
+			connection, err := (priorityDriver{stop: stop, reports: reports, connections: connections}).Dial(bound, transport.Options{TLS: clientTLS, Done: stop, OwnerDone: stop})
 			if fixture.network == "" {
 				if err == nil {
 					connection.Close()
@@ -105,6 +107,11 @@ func TestQUICPriorityTCPCompatibilityAndPinnedIdentity(t *testing.T) {
 				}
 			default:
 				t.Fatal("selected transport was not reported")
+			}
+			report := <-connections
+			_, connectedPort, splitErr := net.SplitHostPort(connection.RemoteAddr().String())
+			if splitErr != nil || report.Protocol != wantProtocol || strconv.Itoa(report.Port) != connectedPort {
+				t.Fatalf("reported endpoint differs from the actual socket: %+v %v", report, connection.RemoteAddr())
 			}
 			defer connection.Close()
 			if network := connection.RemoteAddr().Network(); network != fixture.network {

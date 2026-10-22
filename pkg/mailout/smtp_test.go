@@ -44,6 +44,7 @@ func TestSMTPCompatibility(t *testing.T) {
 		t.Run(scenario.name, func(t *testing.T) {
 			connections := make(chan net.Conn)
 			sender := pipeSMTPSender(connections)
+			sender.reports = make(chan SMTPReport, 1)
 			result := make(chan int, 1)
 			go func() {
 				messages := 0
@@ -124,6 +125,17 @@ func TestSMTPCompatibility(t *testing.T) {
 			close(connections)
 			if (err != nil) != scenario.rejectRecipient {
 				t.Fatalf("delivery: %v", err)
+			}
+			report := <-sender.reports
+			if report.Server != "localhost" {
+				t.Fatalf("SMTP endpoint should omit an unavailable pipe port: %+v", report)
+			}
+			if scenario.rejectRecipient {
+				if report.Code != "550" || report.Reply != "User unknown" {
+					t.Fatalf("SMTP rejection was not retained: %+v", report)
+				}
+			} else if report.Code != "250" || report.Reply != "OK" {
+				t.Fatalf("final DATA acceptance was not retained: %+v", report)
 			}
 			count := <-result
 			if (!scenario.rejectRecipient && count != 1) || (scenario.rejectRecipient && count != 0) {

@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/mail"
 	"net/smtp"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -19,15 +20,22 @@ import (
 
 type Message struct {
 	// Monitoring metadata is recorded when queued and never included in the email.
-	MonitorDomain string
-	MonitorFlowID string
-	MessageID     string
-	Kind          string
-	From          string
-	To            string
-	Subject       string
-	Body          string
-	HTMLBody      string
+	MonitorDomain        string
+	InitiatorIP          string
+	OriginInstallationID string
+	InstallationIP       string
+	RequestedAt          string
+	RelayTransport       string
+	MonitorClientIP      string
+	MonitorFlowID        string
+	Reports              chan<- SMTPReport `json:"-"`
+	MessageID            string
+	Kind                 string
+	From                 string
+	To                   string
+	Subject              string
+	Body                 string
+	HTMLBody             string
 }
 
 const DeliveryQueueSize = 256
@@ -49,9 +57,18 @@ type DirectSender struct {
 	DialTimeout time.Duration
 	dialContext func(context.Context, string, string) (net.Conn, error)
 	lookupHosts func(context.Context, string) ([]string, error)
+	reports     chan SMTPReport
 }
 
 func (sender DirectSender) Send(ctx context.Context, message Message) error {
+	sender.reports = make(chan SMTPReport, 1)
+	defer func() {
+		select {
+		case report := <-sender.reports:
+			report.publish(message.Reports)
+		default:
+		}
+	}()
 	fromAddress, err := parseSingleAddress(message.From)
 	if err != nil {
 		return fmt.Errorf("from address: %w", err)
@@ -129,7 +146,7 @@ func (sender DirectSender) sendToEndpoint(ctx context.Context, targetHost, endpo
 		if !errors.As(err, &negotiationError) || mode == "plaintext" {
 			return err
 		}
-		log.Printf("MAIL TLS negotiation failed host=%q mode=%s fallback=true error_type=%T", targetHost, mode, err)
+		smtpDiagnosticLog("MAIL TLS negotiation failed host=%q mode=%s fallback=true error_type=%T", targetHost, mode, err)
 	}
 	return errors.New("SMTP transport attempts exhausted")
 }
@@ -148,7 +165,21 @@ func legacySMTPConfig(targetHost string) *tls.Config {
 	return config
 }
 
-func (sender DirectSender) sendSMTP(ctx context.Context, targetHost, endpoint, fromAddress, toAddress string, payload []byte, mode string) error {
+func (sender DirectSender) sendSMTP(ctx context.Context, targetHost, endpoint, fromAddress, toAddress string, payload []byte, mode string) (deliveryErr error) {
+	report := SMTPReport{Failure: "SMTP connection failed"}
+	defer func() {
+		if deliveryErr != nil {
+			report = smtpFailure(report, deliveryErr)
+			deliveryErr = smtpDeliveryError{report: report, cause: deliveryErr}
+		}
+		// This sender owns the attempt buffer until Send returns. Retaining only
+		// its final attempt avoids stale MX/TLS results and unbounded queues.
+		select {
+		case <-sender.reports:
+		default:
+		}
+		report.publish(sender.reports)
+	}()
 	timeout := sender.DialTimeout
 	if timeout <= 0 {
 		timeout = 12 * time.Second
@@ -167,6 +198,12 @@ func (sender DirectSender) sendSMTP(ctx context.Context, targetHost, endpoint, f
 		return fmt.Errorf("%s: %w", targetHost, err)
 	}
 	defer connection.Close()
+	report.Server = smtpServer(connection, targetHost)
+	report.MX = targetHost
+	report.Source = connection.LocalAddr().String()
+	report.Destination = connection.RemoteAddr().String()
+	report.Protocol = "plaintext"
+	report.Failure = "SMTP greeting failed"
 	deadline := time.Now().Add(timeout)
 	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
 		deadline = contextDeadline
@@ -190,6 +227,7 @@ func (sender DirectSender) sendSMTP(ctx context.Context, targetHost, endpoint, f
 		return fmt.Errorf("%s hello: %w", targetHost, err)
 	}
 	if ok, _ := client.Extension("STARTTLS"); ok && mode != "plaintext" {
+		report.Failure = "SMTP TLS negotiation failed"
 		tlsConfig := &tls.Config{ServerName: targetHost, MinVersion: tls.VersionTLS12}
 		if mode == "legacy" {
 			tlsConfig = legacySMTPConfig(targetHost)
@@ -198,31 +236,54 @@ func (sender DirectSender) sendSMTP(ctx context.Context, targetHost, endpoint, f
 			return fmt.Errorf("%s: %w", targetHost, startTLSError{cause: err})
 		}
 	} else {
-		log.Printf("MAIL transport host=%q mode=plaintext encrypted=false", targetHost)
+		smtpDiagnosticLog("MAIL transport host=%q mode=plaintext encrypted=false", targetHost)
 	}
 	if state, encrypted := client.TLSConnectionState(); encrypted {
-		log.Printf("MAIL transport host=%q mode=%s tls_version=%x certificate_verified=%t", targetHost, mode, state.Version, len(state.VerifiedChains) > 0)
+		smtpDiagnosticLog("MAIL transport host=%q mode=%s tls_version=%x certificate_verified=%t", targetHost, mode, state.Version, len(state.VerifiedChains) > 0)
 	}
+	if mode != "plaintext" {
+		if state, ok := client.TLSConnectionState(); ok && state.HandshakeComplete {
+			report.Protocol = "starttls"
+		}
+	}
+	report.Failure = "SMTP sender rejected"
 	if err := client.Mail(fromAddress); err != nil {
 		return fmt.Errorf("%s mail from: %w", targetHost, err)
 	}
+	report.Failure = "SMTP recipient rejected"
 	if err := client.Rcpt(toAddress); err != nil {
 		return fmt.Errorf("%s rcpt to: %w", targetHost, err)
 	}
-	writer, err := client.Data()
+	report.Failure = "SMTP DATA failed"
+	// smtp.Client.Data discards the final successful reply. Use its public text
+	// connection for the same DATA exchange so the actual acceptance is retained.
+	commandID, err := client.Text.Cmd("DATA")
 	if err != nil {
 		return fmt.Errorf("%s data: %w", targetHost, err)
 	}
+	client.Text.StartResponse(commandID)
+	_, _, err = client.Text.ReadResponse(354)
+	client.Text.EndResponse(commandID)
+	if err != nil {
+		return fmt.Errorf("%s data: %w", targetHost, err)
+	}
+	writer := client.Text.DotWriter()
 	if _, err := writer.Write(payload); err != nil {
-		_ = writer.Close()
 		return fmt.Errorf("%s write: %w", targetHost, err)
 	}
 	if err := writer.Close(); err != nil {
 		return fmt.Errorf("%s close data: %w", targetHost, err)
 	}
+	code, reply, err := client.Text.ReadResponse(250)
+	if err != nil {
+		return fmt.Errorf("%s acceptance: %w", targetHost, err)
+	}
+	report.Code = fmt.Sprint(code)
+	report.Reply = smtpReply(code, reply)
+	report.Failure = ""
 	// DATA acceptance is final; a broken goodbye must not queue a duplicate code.
 	if err := client.Quit(); err != nil {
-		log.Printf("MAIL accepted host=%q quit_error_type=%T", targetHost, err)
+		smtpDiagnosticLog("MAIL accepted host=%q quit_error_type=%T", targetHost, err)
 	}
 	return nil
 }
@@ -334,4 +395,10 @@ func messageIDDomain(fromAddress *mail.Address) string {
 		return "sitebrush.local"
 	}
 	return domain
+}
+
+func smtpDiagnosticLog(format string, arguments ...any) {
+	if os.Getenv("SITEBRUSH_MAIL_DEBUG") == "1" {
+		log.Printf(format, arguments...)
+	}
 }

@@ -58,15 +58,18 @@ import (
 	browserstats "github.com/matveynator/sitebrush/v2/pkg/analytics"
 	"github.com/matveynator/sitebrush/v2/pkg/appupdate"
 	"github.com/matveynator/sitebrush/v2/pkg/authmail"
+	"github.com/matveynator/sitebrush/v2/pkg/captcha"
 	"github.com/matveynator/sitebrush/v2/pkg/channelacme"
 	"github.com/matveynator/sitebrush/v2/pkg/crawler"
 	"github.com/matveynator/sitebrush/v2/pkg/demo"
 	"github.com/matveynator/sitebrush/v2/pkg/diagnosticlog"
 	"github.com/matveynator/sitebrush/v2/pkg/dirprotect"
 	"github.com/matveynator/sitebrush/v2/pkg/expenses"
+	"github.com/matveynator/sitebrush/v2/pkg/geoip"
 	"github.com/matveynator/sitebrush/v2/pkg/hostingandsupport"
 	"github.com/matveynator/sitebrush/v2/pkg/httpsecurity"
 	"github.com/matveynator/sitebrush/v2/pkg/imageprepare"
+	"github.com/matveynator/sitebrush/v2/pkg/mailguard"
 	"github.com/matveynator/sitebrush/v2/pkg/mailmonitor"
 	"github.com/matveynator/sitebrush/v2/pkg/mailout"
 	sitemcp "github.com/matveynator/sitebrush/v2/pkg/mcp"
@@ -2743,7 +2746,7 @@ func TestSecurityAnalyticsChartsRenderDailyActivityAndVisibleCategoryBars(t *tes
 	for _, category := range []string{
 		"rapid-crawl", "enumeration", "secret", "cms", "admin-discovery",
 		"authentication-failures", "repository", "source-backup", "sitebrush-exploit",
-		"traversal", "injection", "scanner-client",
+		"traversal", "injection", "scanner-client", "registration-mail-abuse",
 	} {
 		quotedCategoryColor := "'" + category + "': '#"
 		plainCategoryColor := category + ": '#"
@@ -4664,6 +4667,8 @@ func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
 	request.Header.Set("Accept-Language", "ru")
 	response := httptest.NewRecorder()
 
+	prepareAccountMailCaptchaForTest(t, application, request)
+
 	application.route(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
@@ -4715,6 +4720,7 @@ func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
 	confirmRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?register", strings.NewReader(codeForm.Encode()))
 	confirmRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	confirmResponse := httptest.NewRecorder()
+	prepareAccountMailCaptchaForTest(t, application, confirmRequest)
 	application.route(confirmResponse, confirmRequest)
 	if confirmResponse.Code != http.StatusOK || !strings.Contains(confirmResponse.Body.String(), `autocomplete="new-password"`) {
 		t.Fatal("verified email should open password setup")
@@ -4722,7 +4728,9 @@ func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
 	passwordForm := url.Values{"password": {"secret"}, "password_confirm": {"secret"}}
 	passwordRequest := httptest.NewRequest(http.MethodPost, "https://localhost/?email_confirm="+url.QueryEscape(pendingToken), strings.NewReader(passwordForm.Encode()))
 	passwordRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	passwordRequest.RemoteAddr = "198.51.100.45:4567"
 	confirmResponse = httptest.NewRecorder()
+	prepareAccountMailCaptchaForTest(t, application, passwordRequest)
 	application.route(confirmResponse, passwordRequest)
 	if confirmResponse.Code != http.StatusFound {
 		t.Fatalf("confirm status = %d, body=%q", confirmResponse.Code, confirmResponse.Body.String())
@@ -4730,6 +4738,10 @@ func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
 	_ = rawDB.QueryRow(`SELECT COUNT(1) FROM users WHERE domain=? AND email=? AND password=? AND is_admin=1`, "localhost", "admin@example.com", "secret").Scan(&userCount)
 	if userCount != 1 {
 		t.Fatalf("confirmed admin count = %d, want 1", userCount)
+	}
+	registration, cooldownErr := application.readRegistrationCooldown(request)
+	if cooldownErr != nil || registration.AttemptID != "" || registration.Failures != 0 || registration.Blocked(time.Now()) {
+		t.Fatal("successful registration from another IP did not reset its original cooldown", registration, cooldownErr)
 	}
 	if _, valid := application.registrationConfirmationForCode(context.Background(), "localhost", pending.FormToken, pending.Code); valid {
 		t.Fatal("registration code reused")
@@ -4740,7 +4752,7 @@ func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
 }
 
 func TestSetupConfirmationOffersKnownWebmailWithoutRegistrationForm(t *testing.T) {
-	application := &App{}
+	application, _ := newTestApplication(t)
 	request := httptest.NewRequest(http.MethodGet, "https://example.com/?register", nil)
 	request = request.WithContext(contextWithDomain(request.Context(), "example.com"))
 	request.Header.Set("Accept-Language", "ru")
@@ -4899,6 +4911,8 @@ func TestRegisterRejectsUnverifiedDomainBeforeCreatingSiteDatabase(t *testing.T)
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	response := httptest.NewRecorder()
 
+	prepareAccountMailCaptchaForTest(t, application, request)
+
 	application.route(response, request)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
@@ -4939,6 +4953,7 @@ func TestLocalhostWithoutSiteDatabaseOpensRegistration(t *testing.T) {
 			request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "stale"})
 		}
 		response := httptest.NewRecorder()
+		prepareAccountMailCaptchaForTest(t, application, request)
 		application.route(response, request)
 		if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/?register" {
 			t.Fatalf("missing local database stale_session=%t status=%d location=%q body=%q", staleSession, response.Code, response.Header().Get("Location"), response.Body.String())
@@ -4952,6 +4967,7 @@ func TestLocalhostWithoutSiteDatabaseOpensRegistration(t *testing.T) {
 	setupRequest.RemoteAddr = "[::1]:1234"
 	setupRequest.AddCookie(staleCookie)
 	setupResponse := httptest.NewRecorder()
+	prepareAccountMailCaptchaForTest(t, application, setupRequest)
 	application.route(setupResponse, setupRequest)
 	csrfToken := accountCSRF(setupRequest)
 	if setupResponse.Code != http.StatusOK || !strings.Contains(setupResponse.Body.String(), `name="account_csrf" value="`+csrfToken+`"`) {
@@ -4964,6 +4980,7 @@ func TestLocalhostWithoutSiteDatabaseOpensRegistration(t *testing.T) {
 	registerRequest.Header.Set("Origin", "null")
 	registerRequest.AddCookie(staleCookie)
 	registerResponse := httptest.NewRecorder()
+	prepareAccountMailCaptchaForTest(t, application, registerRequest)
 	application.route(registerResponse, registerRequest)
 	if registerResponse.Code != http.StatusSeeOther {
 		t.Fatalf("local registration with stale cookie status=%d body=%q", registerResponse.Code, registerResponse.Body.String())
@@ -5008,6 +5025,7 @@ func TestRegisterCreatesSiteDatabaseOnlyAfterConfirmedVerifiedDomain(t *testing.
 	}
 	loginRequest := httptest.NewRequest(http.MethodGet, "https://"+domain+"/?login", nil)
 	loginResponse := httptest.NewRecorder()
+	prepareAccountMailCaptchaForTest(t, application, loginRequest)
 	application.route(loginResponse, loginRequest)
 	if loginResponse.Code != http.StatusSeeOther || loginResponse.Header().Get("Location") != "/?register" {
 		t.Fatalf("missing site must offer registration: status=%d location=%q body=%q", loginResponse.Code, loginResponse.Header().Get("Location"), loginResponse.Body.String())
@@ -5018,6 +5036,8 @@ func TestRegisterCreatesSiteDatabaseOnlyAfterConfirmedVerifiedDomain(t *testing.
 	request := httptest.NewRequest(http.MethodPost, "https://"+domain+"/?register", strings.NewReader(form.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	response := httptest.NewRecorder()
+
+	prepareAccountMailCaptchaForTest(t, application, request)
 
 	application.route(response, request)
 	if response.Code != http.StatusOK {
@@ -5037,6 +5057,7 @@ func TestRegisterCreatesSiteDatabaseOnlyAfterConfirmedVerifiedDomain(t *testing.
 
 	confirmationPageRequest := httptest.NewRequest(http.MethodGet, "https://"+domain+"/?email_confirm="+url.QueryEscape(pendingToken), nil)
 	confirmationPageResponse := httptest.NewRecorder()
+	prepareAccountMailCaptchaForTest(t, application, confirmationPageRequest)
 	application.route(confirmationPageResponse, confirmationPageRequest)
 	if confirmationPageResponse.Code != http.StatusOK {
 		t.Fatalf("confirmation page status = %d, body=%q", confirmationPageResponse.Code, confirmationPageResponse.Body.String())
@@ -5056,6 +5077,7 @@ func TestRegisterCreatesSiteDatabaseOnlyAfterConfirmedVerifiedDomain(t *testing.
 	confirmRequest := httptest.NewRequest(http.MethodPost, "https://"+domain+"/?email_confirm="+url.QueryEscape(pendingToken), strings.NewReader("password=secret&password_confirm=secret"))
 	confirmRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	confirmResponse := httptest.NewRecorder()
+	prepareAccountMailCaptchaForTest(t, application, confirmRequest)
 	application.route(confirmResponse, confirmRequest)
 	if confirmResponse.Code != http.StatusFound {
 		t.Fatalf("confirm status = %d, body=%q", confirmResponse.Code, confirmResponse.Body.String())
@@ -5125,6 +5147,7 @@ func TestSiteRequestStoresApplicantWithoutCreatingAdmin(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "http://customer.example/?site_request", strings.NewReader(form.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	response := httptest.NewRecorder()
+	prepareAccountMailCaptchaForTest(t, application, request)
 	application.route(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
@@ -5899,7 +5922,7 @@ func TestRecoverPageShowsSPFSetupBeforeEmailForm(t *testing.T) {
 			t.Fatalf("recover page missing %q in %s", expectedFragment, getBody)
 		}
 	}
-	for _, hiddenFragment := range []string{`name="email"`, `name="captcha"`, `?captcha`} {
+	for _, hiddenFragment := range []string{`name="email"`, `name="captcha"`, `name="captcha_id"`, `data:image/png;base64,`} {
 		if strings.Contains(getBody, hiddenFragment) {
 			t.Fatalf("recover page showed form fragment %q before SPF setup: %s", hiddenFragment, getBody)
 		}
@@ -5911,7 +5934,7 @@ func TestRecoverPageShowsSPFSetupBeforeEmailForm(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?recover", strings.NewReader(form.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.Header.Set("Accept-Language", "ru")
-	request.AddCookie(&http.Cookie{Name: "sitebrush_captcha", Value: "1234"})
+	prepareAccountMailCaptchaForTest(t, application, request)
 	response := httptest.NewRecorder()
 
 	application.route(response, request)
@@ -5944,7 +5967,7 @@ func TestRecoverPageShowsEmailFormAfterSPFSetup(t *testing.T) {
 		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
 	}
 	body := response.Body.String()
-	for _, expectedFragment := range []string{`name="email"`, `name="captcha"`, `?captcha`} {
+	for _, expectedFragment := range []string{`name="email"`, `name="captcha"`, `name="captcha_id"`, `data:image/png;base64,`} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("recover page missing form fragment %q in %s", expectedFragment, body)
 		}
@@ -5985,7 +6008,7 @@ func TestRecoveryUnknownAddressDoesNotClaimDelivery(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?recover", strings.NewReader(form.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.Header.Set("Accept-Language", "ru")
-	request.AddCookie(&http.Cookie{Name: "sitebrush_captcha", Value: "1234"})
+	prepareAccountMailCaptchaForTest(t, application, request)
 	response := httptest.NewRecorder()
 	application.route(response, request)
 	if response.Code != http.StatusOK {
@@ -6003,9 +6026,17 @@ func TestRecoveryUnknownAddressDoesNotClaimDelivery(t *testing.T) {
 	if err := rawDB.QueryRow(`SELECT COUNT(1) FROM email_confirmations WHERE domain=? AND action='recover'`, "localhost").Scan(&confirmations); err != nil || confirmations != 0 {
 		t.Fatalf("unknown address created %d confirmations: %v", confirmations, err)
 	}
-	events := mailMonitorEventsForTest(t, application, "local")
-	if len(events) != 1 || events[0].Stage != "recovery_skipped" || events[0].Recipient != "wrong@example.com" {
-		t.Fatalf("skipped recovery absent: %+v", events)
+	if events := mailMonitorEventsForTest(t, application, "local"); len(events) != 0 {
+		t.Fatalf("unknown-address spam created individual events: %+v", events)
+	}
+	if err := application.withServerControlDatabaseRead(context.Background(), "test-skipped-summary", func(database *sql.DB) error {
+		summaries, err := (mailmonitor.Store{DB: database}).Abuse(context.Background(), time.Time{})
+		if len(summaries) != 1 || summaries[0].Attempts != 1 {
+			t.Fatalf("skipped recovery summary absent: %+v", summaries)
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
 	}
 
 }
@@ -6031,7 +6062,7 @@ func TestRecoverPasswordThroughEmailLink(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "https://localhost/?recover", strings.NewReader(requestForm.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.Header.Set("Accept-Language", "ru")
-	request.AddCookie(&http.Cookie{Name: "sitebrush_captcha", Value: "1234"})
+	prepareAccountMailCaptchaForTest(t, application, request)
 	response := httptest.NewRecorder()
 	application.route(response, request)
 	if response.Code != http.StatusOK {
@@ -6123,7 +6154,7 @@ func TestRecoverPasswordThroughManualCode(t *testing.T) {
 	requestForm := url.Values{"recovery_action": {"request"}, "email": {"admin@example.com"}, "captcha": {"1234"}}
 	request := httptest.NewRequest(http.MethodPost, "https://localhost/?recover", strings.NewReader(requestForm.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	request.AddCookie(&http.Cookie{Name: "sitebrush_captcha", Value: "1234"})
+	prepareAccountMailCaptchaForTest(t, application, request)
 	application.route(httptest.NewRecorder(), request)
 	select {
 	case <-application.emailDelivery:
@@ -6192,7 +6223,7 @@ func TestRecoveryUsesBrowserLanguageForInterfaceAndQueuedEmail(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "https://localhost/?recover", strings.NewReader(requestForm.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.Header.Set("Accept-Language", "de-DE,de;q=0.9,en;q=0.8")
-	request.AddCookie(&http.Cookie{Name: "sitebrush_captcha", Value: "1234"})
+	prepareAccountMailCaptchaForTest(t, application, request)
 	response := httptest.NewRecorder()
 	application.route(response, request)
 	if response.Code != http.StatusOK {
@@ -6234,7 +6265,7 @@ func TestRecoveryShowsKnownWebmailProvider(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "https://localhost/?recover", strings.NewReader(form.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.Header.Set("Accept-Language", "en")
-	request.AddCookie(&http.Cookie{Name: "sitebrush_captcha", Value: "1234"})
+	prepareAccountMailCaptchaForTest(t, application, request)
 	response := httptest.NewRecorder()
 	application.route(response, request)
 	if response.Code != http.StatusOK {
@@ -21857,6 +21888,7 @@ func TestUnknownAndDeletedHostnamesOfferRegistrationOrRequest(t *testing.T) {
 					request := httptest.NewRequest(http.MethodGet, "https://"+domain+path, nil)
 					request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "stale-session"})
 					response := httptest.NewRecorder()
+					prepareAccountMailCaptchaForTest(t, application, request)
 					application.route(response, request)
 					if response.Code != http.StatusSeeOther || !strings.HasSuffix(response.Header().Get("Location"), "?register") {
 						t.Fatalf("status=%d location=%q body=%s", response.Code, response.Header().Get("Location"), response.Body.String())
@@ -21864,6 +21896,7 @@ func TestUnknownAndDeletedHostnamesOfferRegistrationOrRequest(t *testing.T) {
 				}
 				request := httptest.NewRequest(http.MethodGet, "https://"+domain+"/?register", nil)
 				response := httptest.NewRecorder()
+				prepareAccountMailCaptchaForTest(t, application, request)
 				application.route(response, request)
 				expected := `action="?register"`
 				if !automatic {
@@ -21876,12 +21909,29 @@ func TestUnknownAndDeletedHostnamesOfferRegistrationOrRequest(t *testing.T) {
 				if _, err := os.Stat(databasePath); !errors.Is(err, os.ErrNotExist) {
 					t.Fatalf("opening registration created DB: %v", err)
 				}
+				purpose := "register"
+				if !automatic {
+					purpose = "site_request"
+				}
+				imageRequest := httptest.NewRequest(http.MethodGet, "http://"+domain+"/?captcha&purpose="+purpose, nil)
+				imageResponse := httptest.NewRecorder()
+				application.route(imageResponse, imageRequest)
+				if imageResponse.Code != http.StatusOK || imageResponse.Header().Get("Content-Type") != "image/png" {
+					t.Fatalf("password-free onboarding CAPTCHA unavailable: %d %s", imageResponse.Code, imageResponse.Body.String())
+				}
+				if cookies := imageResponse.Result().Cookies(); len(cookies) != 1 || !cookies[0].Secure {
+					t.Fatal("CAPTCHA endpoint cookies must remain HTTPS-only")
+				}
+				if _, err := os.Stat(databasePath); !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("CAPTCHA created an unconfirmed site database")
+				}
 				if !automatic {
 					plan, _ := (hostingandsupport.Store{DB: control}).DefaultPlan(context.Background())
 					form := url.Values{"name": {"New owner"}, "email": {"new@example.com"}, "phone": {"123"}, "plan_id": {fmt.Sprint(plan.ID)}}
 					request = httptest.NewRequest(http.MethodPost, "https://"+domain+"/?site_request", strings.NewReader(form.Encode()))
 					request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 					response = httptest.NewRecorder()
+					prepareAccountMailCaptchaForTest(t, application, request)
 					application.route(response, request)
 					var count int
 					if err := control.QueryRow(`SELECT COUNT(1) FROM site_registration_requests WHERE domain=?`, domain).Scan(&count); err != nil || count != 1 {
@@ -25460,6 +25510,71 @@ func TestHiddenAISelectorsMatchPublicMiddlewareResponses(t *testing.T) {
 	}
 }
 
+func TestPartitionedPasswordRecoveryRepairsMissingAccountOutbox(t *testing.T) {
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
+	application := newPartitionedTestApplication(t)
+	const domain, email, token = "localhost", "admin@example.com", "pending-recovery-token"
+	boundary := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), domain))
+	if _, err := application.db.ExecContext(boundary, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, email, "old-password"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.db.ExecContext(boundary, `INSERT INTO email_confirmations(token,domain,action,email,verification_code,expires_at) VALUES(?,?,'recover',?,?,?)`, token, domain, email, "123456", time.Now().Add(time.Hour).UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.db.ExecContext(boundary, `INSERT INTO sessions(token,user_email,created_at) VALUES(?,?,?)`, "old-session", domain+"|"+email, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	database, err := application.siteDatabaseRouter.databaseForContext(boundary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Existing partition imports do not copy tables introduced by later migrations.
+	if err := database.control.Migrate(boundary, domain, func(_ context.Context, raw *sql.DB, _ string) error {
+		_, err := raw.Exec(`DROP TABLE mail_account_events`)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	restartPartitionedApplication(t, application)
+
+	form := url.Values{"recovery_action": {"manual"}, "email": {email}, "recovery_code": {"123456"}, "password": {"new-password"}, "password_confirm": {"new-password"}}
+	request := httptest.NewRequest(http.MethodPost, "http://localhost/?recover", strings.NewReader(form.Encode())).WithContext(contextWithDomain(context.Background(), domain))
+	request.RemoteAddr = "127.0.0.1:12345"
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	application.completeManualRecovery(response, request, domain)
+	if response.Code != http.StatusFound {
+		t.Fatalf("password recovery status=%d body=%q", response.Code, response.Body.String())
+	}
+	var password string
+	if err := application.db.QueryRowContext(boundary, `SELECT password FROM users WHERE domain=? AND email=?`, domain, email).Scan(&password); err != nil || password != "new-password" {
+		t.Fatalf("recovered password was not saved: %v", err)
+	}
+	var confirmations, oldSessions int
+	if err := application.db.QueryRowContext(boundary, `SELECT COUNT(*) FROM email_confirmations WHERE token=?`, token).Scan(&confirmations); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.db.QueryRowContext(boundary, `SELECT COUNT(*) FROM sessions WHERE token='old-session'`).Scan(&oldSessions); err != nil {
+		t.Fatal(err)
+	}
+	if confirmations != 0 || oldSessions != 0 || len(response.Result().Cookies()) == 0 {
+		t.Fatalf("recovery did not replace the old credentials: confirmations=%d old sessions=%d", confirmations, oldSessions)
+	}
+
+	restartPartitionedApplication(t, application)
+	var outcomes []mailmonitor.Event
+	if err := application.accountTransaction(boundary, func(transaction *sql.Tx) error {
+		var err error
+		outcomes, err = mailmonitor.PendingAccountEvents(boundary, transaction)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(outcomes) != 1 || outcomes[0].Stage != "recovery_complete" || outcomes[0].FlowID != mailMonitorFlowID(token) || outcomes[0].Domain != domain || outcomes[0].Recipient != email {
+		t.Fatalf("recovery outcome did not survive restart in the account database: %+v", outcomes)
+	}
+}
+
 func TestPartitionedSiteManagementAndAdministratorRecovery(t *testing.T) {
 	application := newPartitionedTestApplication(t)
 	domain := "managed.example"
@@ -25809,7 +25924,7 @@ func TestMailMonitorDurableDeliveryAndAtomicQueue(t *testing.T) {
 	t.Cleanup(func() { close(stop); <-done })
 	replies := make(chan mailout.Result, 2)
 	for _, recipient := range []string{"ok@example.com", "failed@example.com"} {
-		task := mailout.NewTask("email_confirm", mailout.RouteLocal, mailout.Message{From: "sender@example.com", To: recipient, Subject: "Account", Body: "123456", MonitorDomain: "customer.example", MonitorFlowID: "safe-flow-" + recipient}, time.Now().Add(time.Hour), replies)
+		task := mailout.NewTask("email_confirm", mailout.RouteLocal, mailout.Message{From: "sender@example.com", To: recipient, Subject: "Account", Body: "123456", MonitorDomain: "customer.example", MonitorClientIP: "192.0.2.77", MonitorFlowID: "safe-flow-" + recipient}, time.Now().Add(time.Hour), replies)
 		if err := application.submitDurableMailTask(stop, task); err != nil {
 			t.Fatal(err)
 		}
@@ -25822,16 +25937,16 @@ func TestMailMonitorDurableDeliveryAndAtomicQueue(t *testing.T) {
 		}
 	}
 	events := mailMonitorEventsForTest(t, application, "local")
-	if len(events) != 6 {
+	if len(events) != 4 {
 		t.Fatalf("missing durable events: %+v", events)
 	}
 	accepted, failed := 0, 0
 	for _, event := range events {
-		if event.Domain != "customer.example" || event.FlowID != "safe-flow-"+event.Recipient {
+		if event.Domain != "customer.example" || event.FlowID != "safe-flow-"+event.Recipient || event.Diagnostic().ClientIP != "192.0.2.77" {
 			t.Fatalf("restart metadata lost: %+v", event)
 		}
 		if event.Stage == "accepted" {
-			if !strings.Contains(event.Detail, "transport=smtp") {
+			if !strings.Contains(event.Transport, "transport=smtp") {
 				t.Fatal("journal lost SMTP transport", event)
 			}
 			accepted++
@@ -25841,7 +25956,7 @@ func TestMailMonitorDurableDeliveryAndAtomicQueue(t *testing.T) {
 		}
 		if event.Stage == "failed" {
 			failed++
-			if event.SMTPCode != "550" || !strings.Contains(event.Detail, "mx.example") || strings.Contains(event.Detail, "secret") || strings.Contains(event.Detail, "123456") {
+			if event.SMTPCode != "550" || event.Diagnostic().SMTPReply != "Message rejected" || strings.Contains(event.Detail, "secret") || strings.Contains(event.Detail, "123456") {
 				t.Fatal(event)
 			}
 		}
@@ -25963,6 +26078,138 @@ func TestMailMonitorSyncAcknowledgmentReplayAndIsolation(t *testing.T) {
 	}
 }
 
+func TestMailMonitorRollingUpgradeRetainsAndReplaysDetails(t *testing.T) {
+	for _, transport := range []string{"netchan", "https"} {
+		t.Run(transport, func(t *testing.T) {
+			application, _ := newTestApplication(t)
+			enableMailMonitorForTest(t, application)
+			boundary := context.Background()
+			registration := serviceMailRequest{CodeKind: "installation_register"}
+			if err := application.signServiceMailRequest(boundary, &registration); err != nil {
+				t.Fatal(err)
+			}
+			if status, code := application.handleServiceMailRelayRequest(boundary, nil, registration, "netchan"); code != http.StatusOK {
+				t.Fatal(code, status)
+			}
+			original := mailmonitor.Event{ID: "rolling-event", FlowID: "rolling-flow", MessageID: "rolling-message", Kind: "login_code", Stage: "queued", Recipient: "owner@example.com", Transport: "transport=netchan protocol=quic destination=203.0.113.8:9876", Metadata: &mailout.Metadata{OriginInstallationID: registration.InstallationID, InitiatorIP: "127.0.0.1"}}
+			if err := application.withServerControlDatabaseWrite(boundary, "test-rolling-backlog", func(database *sql.DB) error {
+				return (mailmonitor.Store{DB: database}).Append(boundary, original)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			upgraded, attempts := false, 0
+			deliver := func(payload []byte) error {
+				attempts++
+				var received serviceMailRequest
+				if err := json.Unmarshal(payload, &received); err != nil {
+					return err
+				}
+				if !upgraded {
+					for index := range received.MailEvents {
+						received.MailEvents[index].Metadata, received.MailEvents[index].Transport = nil, ""
+					}
+				}
+				status, code := application.handleMailMonitorSync(boundary, received)
+				if code != http.StatusOK {
+					return serviceMailRelayRejection{Transport: transport, StatusCode: code, Message: status}
+				}
+				return nil
+			}
+			if err := application.syncMailMonitor(boundary, deliver); !errors.Is(err, errMailMonitorLegacyPeer) || attempts != 2 {
+				t.Fatalf("legacy acknowledgment: attempts=%d error=%v", attempts, err)
+			}
+			if err := application.withServerControlDatabaseRead(boundary, "test-rolling-pending", func(database *sql.DB) error {
+				pending, err := (mailmonitor.Store{DB: database}).Unsynced(boundary, 80)
+				if err == nil && (len(pending) != 1 || pending[0].Metadata == nil || pending[0].Metadata.InitiatorIP != "127.0.0.1" || pending[0].Transport != original.Transport) {
+					t.Errorf("legacy acknowledgment discarded detailed backlog: %+v", pending)
+				}
+				return err
+			}); err != nil {
+				t.Fatal(err)
+			}
+			upgraded = true
+			if err := application.syncMailMonitor(boundary, deliver); err != nil || attempts != 3 {
+				t.Fatalf("updated peer replay: attempts=%d error=%v", attempts, err)
+			}
+			if err := application.withServerControlDatabaseRead(boundary, "test-rolling-replayed", func(database *sql.DB) error {
+				store := mailmonitor.Store{DB: database}
+				pending, err := store.Unsynced(boundary, 80)
+				if err != nil || len(pending) != 0 {
+					t.Errorf("updated peer did not acknowledge details: %+v %v", pending, err)
+					return err
+				}
+				received, err := store.Recent(boundary, registration.InstallationID, time.Time{}, 50, 0)
+				if err == nil && (len(received) != 1 || received[0].Metadata == nil || received[0].Metadata.InitiatorIP != "127.0.0.1" || received[0].Transport != original.Transport) {
+					t.Errorf("updated central journal did not enrich the existing event: %+v", received)
+				}
+				return err
+			}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestMailMonitorCompatibilityDoesNotBypassAuthorization(t *testing.T) {
+	application, _ := newTestApplication(t)
+	enableMailMonitorForTest(t, application)
+	request := serviceMailRequest{CodeKind: "mail_monitor_sync", MailEvents: []mailmonitor.Event{{ID: "unauthorized", Kind: "recovery", Stage: "recovery_complete", Metadata: &mailout.Metadata{InitiatorIP: "127.0.0.1"}}}}
+	attempts := 0
+	legacyAccepted, err := application.sendSignedRequestWithCompatibility(context.Background(), request, func(payload []byte) error {
+		attempts++
+		var received serviceMailRequest
+		if err := json.Unmarshal(payload, &received); err != nil {
+			return err
+		}
+		status, code := application.handleMailMonitorSync(context.Background(), received)
+		return serviceMailRelayRejection{StatusCode: code, Message: status}
+	})
+	var rejection serviceMailRelayRejection
+	if attempts != 2 || legacyAccepted || !errors.As(err, &rejection) || rejection.StatusCode != http.StatusForbidden {
+		t.Fatalf("unregistered peer bypassed authorization: attempts=%d legacy=%t error=%v", attempts, legacyAccepted, err)
+	}
+}
+
+func TestMailJournalBrowserReceivesSerializedEvents(t *testing.T) {
+	steps := []mailmonitor.Event{
+		{Stage: "recovery_complete", CreatedAt: "2026-10-21T12:01:00Z"},
+		{Stage: "accepted", AcceptedBy: "recipient_smtp", CreatedAt: "2026-10-21T12:00:30Z", SMTPCode: "250", Transport: "transport=netchan netchan_sender=v2.1.0 protocol=quic network=udp destination=203.0.113.8:9876; transport=smtp mx=mx.example.com destination=203.0.113.9:25 protocol=starttls smtp_code=250"},
+	}
+	payload, err := json.Marshal(steps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("node", "pkg/mailmonitor/journal_test.cjs", string(payload))
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("browser journal rejected serialized Go events: %v\n%s", err, output)
+	}
+}
+
+func TestHostingSnapshotReportLogAggregatesRetriesAndRecovery(t *testing.T) {
+	var reportLog hostingSnapshotReportLog
+	now := time.Date(2026, 10, 22, 0, 30, 0, 0, time.UTC)
+	if message := reportLog.record(now, nil); message != "" {
+		t.Fatal("routine successful synchronization was logged", message)
+	}
+	if message := reportLog.record(now, errMailMonitorLegacyPeer); !strings.Contains(message, "sync pending") {
+		t.Fatal("first pending synchronization was not reported", message)
+	}
+	for retry := 1; retry <= 100; retry++ {
+		if message := reportLog.record(now.Add(time.Duration(retry)*time.Second), errMailMonitorLegacyPeer); message != "" {
+			t.Fatal("identical synchronization failure was logged again", message)
+		}
+	}
+	if message := reportLog.record(now.Add(5*time.Minute), errMailMonitorLegacyPeer); !strings.Contains(message, "failed_attempts=102") {
+		t.Fatal("retry summary did not retain the exact count", message)
+	}
+	if message := reportLog.record(now.Add(6*time.Minute), nil); !strings.Contains(message, "sync restored") {
+		t.Fatal("restored synchronization was not reported", message)
+	}
+	if message := reportLog.record(now.Add(7*time.Minute), nil); message != "" {
+		t.Fatal("restored synchronization was reported twice", message)
+	}
+}
+
 func TestMailMonitorPanelMergedLocalServerAndRemoteScope(t *testing.T) {
 	application, _ := newTestApplication(t)
 	enableMailMonitorForTest(t, application)
@@ -25971,21 +26218,117 @@ func TestMailMonitorPanelMergedLocalServerAndRemoteScope(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "http://localhost/?expenses&mail_server=merged-local", nil)
 	view := application.hostingAndSupportPanelView(request, snapshot)
 	servers := view["ExpenseServers"].([]simplifiedExpenseServerView)
-	if !servers[0].MailSelected || !servers[0].MailAvailable || servers[0].MailLastDay.Queued != 1 || len(servers[0].MailEvents) != 1 {
+	if servers[0].MailLastDay.Queued != 1 || len(servers[0].MailOperations) != 0 || servers[0].MailExpanded || !strings.Contains(servers[0].MailSecurityURL, "tab=security") {
+		t.Fatalf("server page must show statistics and a security link: %+v", servers[0])
+	}
+	view["T"] = translationsForLanguageCode("ru")
+	expensesTemplate, err := template.ParseFS(embeddedWebFiles, "web/expenses.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var statisticsHTML bytes.Buffer
+	if err := expensesTemplate.Execute(&statisticsHTML, view); err != nil {
+		t.Fatal(err)
+	}
+	for _, removedDetail := range []string{"data-mail-security", "data-mail-blocks", "data-mail-abuse", "data-mail-journal=", "local@example.com"} {
+		if strings.Contains(statisticsHTML.String(), removedDetail) {
+			t.Fatal("server statistics still expose mail incident details", removedDetail)
+		}
+	}
+	request = httptest.NewRequest(http.MethodGet, "http://localhost/?analytics&tab=security&mail_server=merged-local", nil)
+	servers = application.hostingAndSupportPanelView(request, snapshot)["ExpenseServers"].([]simplifiedExpenseServerView)
+	if !servers[0].MailSelected || !servers[0].MailAvailable || servers[0].MailLastDay.Queued != 1 || len(servers[0].MailOperations) != 1 {
 		t.Fatalf("merged local journal lost: %+v", servers[0])
 	}
 	if servers[1].MailAvailable {
 		t.Fatal("remote with no heartbeat presented as synchronized")
 	}
-	request = httptest.NewRequest(http.MethodGet, "http://localhost/?expenses&mail_server=remote", nil)
+	request = httptest.NewRequest(http.MethodGet, "http://localhost/?analytics&tab=security&mail_server=remote", nil)
 	servers = application.hostingAndSupportPanelView(request, snapshot)["ExpenseServers"].([]simplifiedExpenseServerView)
-	if !servers[1].MailSelected || len(servers[1].MailEvents) != 0 {
+	if !servers[1].MailSelected || len(servers[1].MailOperations) != 0 {
 		t.Fatal("remote journal leaked local messages")
 	}
 	request = httptest.NewRequest(http.MethodGet, "http://localhost/?expenses&mail_server=unknown", nil)
 	servers = application.hostingAndSupportPanelView(request, snapshot)["ExpenseServers"].([]simplifiedExpenseServerView)
 	if !servers[0].MailSelected || servers[0].MailExpanded {
 		t.Fatal("unknown server selected an unrestricted journal")
+	}
+}
+
+func TestMailJournalIPGeographyUsesLocalDatabase(t *testing.T) {
+	directory := t.TempDir()
+	database, err := sql.Open("sqlite", filepath.Join(directory, "geoip.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	statements := []string{
+		`CREATE TABLE geoip_metadata(key TEXT PRIMARY KEY,value TEXT)`,
+		`CREATE TABLE geoip_ranges(ip_start INTEGER NOT NULL,ip_end INTEGER NOT NULL,country_code TEXT,region TEXT,city TEXT,latitude REAL,longitude REAL)`,
+		`INSERT INTO geoip_ranges VALUES(134744072,134744072,'US','California','Mountain View',37.4,-122.1)`,
+	}
+	for _, statement := range statements {
+		if _, err := database.Exec(statement); err != nil {
+			database.Close()
+			t.Fatal(err)
+		}
+	}
+	if _, err := database.Exec(`INSERT INTO geoip_metadata VALUES('imported_release',?)`, time.Now().UTC().Format("2006-01")); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	resolver := geoip.NewResolver(directory)
+	t.Cleanup(resolver.Close)
+	if _, found := resolver.Lookup(context.Background(), "8.8.8.8"); !found {
+		t.Fatal("local geography fixture was not loaded")
+	}
+	application := &App{geoIP: resolver}
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/?analytics&tab=security", nil)
+	request.Header.Set("Accept-Language", "ru")
+	snapshot := map[string]any{
+		"Servers": []simplifiedExpenseServerView{{MailOperations: []mailmonitor.Operation{{InitiatorIP: "127.0.0.1", InstallationIP: "192.168.1.2"}}}},
+		"Blocks":  []mailmonitor.IPBlock{{IP: "8.8.8.8"}},
+		"Abuse":   []mailmonitor.Abuse{{IP: "::1"}, {IP: "::ffff:127.0.0.1"}, {IP: "203.0.113.9"}},
+	}
+	locations := application.mailJournalIPDetails(request, snapshot)
+	if locations["127.0.0.1"].CanBlock || locations["::1"].CanBlock || locations["::ffff:127.0.0.1"].CanBlock || locations["127.0.0.1"].Location != "Локальный доступ" {
+		t.Fatalf("local access is not protected or labeled: %+v", locations)
+	}
+	if locations["192.168.1.2"].Location != "Локальная сеть" || !strings.Contains(locations["8.8.8.8"].Location, "Mountain View") || !locations["8.8.8.8"].CanBlock || locations["203.0.113.9"].Location == "" {
+		t.Fatalf("IP geography is incomplete: %+v", locations)
+	}
+}
+
+func TestMailJournalSnapshotKeepsIncidentsInSecurityAnalytics(t *testing.T) {
+	application, _ := newTestApplication(t)
+	enableMailMonitorForTest(t, application)
+	boundary := context.Background()
+	if err := application.withServerControlDatabaseWrite(boundary, "test-mail-security-only", func(database *sql.DB) error {
+		store := mailmonitor.Store{DB: database}
+		if err := store.Reject(boundary, "desktop", "203.0.113.9", "login_code", "spam report", time.Now()); err != nil {
+			return err
+		}
+		return store.SetBlock(boundary, mailmonitor.IPBlock{Scope: "installation", OriginInstallationID: "desktop", IP: "203.0.113.9"}, true)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	statistics, err := application.mailJournalSnapshot(httptest.NewRequest(http.MethodGet, "http://localhost/?expenses&mail_server=local", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, section := range []string{"Blocks", "Abuse", "IPDetails"} {
+		if _, found := statistics[section]; found {
+			t.Fatal("server statistics include security details", section)
+		}
+	}
+	security, err := application.mailJournalSnapshot(httptest.NewRequest(http.MethodGet, "http://localhost/?analytics&tab=security", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(security["Blocks"].([]mailmonitor.IPBlock)) != 1 || len(security["Abuse"].([]mailmonitor.Abuse)) != 1 || len(security["IPDetails"].(map[string]mailJournalIPView)) == 0 {
+		t.Fatal("security analytics lost mail incidents or geography", security)
 	}
 }
 
@@ -26183,13 +26526,13 @@ func TestMailMonitorPaginationKeepsFiltersAndClampsPages(t *testing.T) {
 		requested  string
 		page, rows int
 	}{{"2", 2, 50}, {"999999999", 3, 23}, {"0", 1, 50}, {"invalid", 1, 50}} {
-		parameters := url.Values{"expenses": {""}, "mail_server": {"merged-local"}, "mail_days": {"7"}, "mail_stage": {"failed"}, "mail_kind": {"invoice"}, "mail_recipient": {recipient}, "mail_page": {scenario.requested}}
+		parameters := url.Values{"analytics": {""}, "tab": {"security"}, "mail_server": {"merged-local"}, "mail_days": {"7"}, "mail_stage": {"failed"}, "mail_kind": {"invoice"}, "mail_recipient": {recipient}, "mail_page": {scenario.requested}}
 		request := httptest.NewRequest(http.MethodGet, "https://localhost/?"+parameters.Encode(), nil)
 		view := application.hostingAndSupportPanelView(request, snapshot)
 		server := view["ExpenseServers"].([]simplifiedExpenseServerView)[0]
 		pagination := server.MailPagination
-		if pagination.Count != 123 || pagination.Pages != 3 || pagination.Page != scenario.page || len(server.MailEvents) != scenario.rows {
-			t.Fatalf("page %s: %+v, rows=%d", scenario.requested, pagination, len(server.MailEvents))
+		if pagination.Count != 123 || pagination.Pages != 3 || pagination.Page != scenario.page || len(server.MailOperations) != scenario.rows {
+			t.Fatalf("page %s: %+v, rows=%d", scenario.requested, pagination, len(server.MailOperations))
 		}
 		for _, link := range pagination.Links {
 			parsed, err := url.Parse(link.URL)
@@ -26201,7 +26544,7 @@ func TestMailMonitorPaginationKeepsFiltersAndClampsPages(t *testing.T) {
 					t.Errorf("page link lost %s: %s", name, link.URL)
 				}
 			}
-			if parsed.Fragment != "mail-monitor-0" || link.Current != (link.Number == scenario.page) {
+			if parsed.Fragment != "mail-monitor-0" || !parsed.Query().Has("analytics") || parsed.Query().Get("tab") != "security" || parsed.Query().Has("expenses") || link.Current != (link.Number == scenario.page) {
 				t.Fatal("page link lost selected journal")
 			}
 		}
@@ -26209,22 +26552,34 @@ func TestMailMonitorPaginationKeepsFiltersAndClampsPages(t *testing.T) {
 			if pagination.FirstURL == "" || pagination.PreviousURL == "" || pagination.NextURL == "" || pagination.LastURL == "" {
 				t.Fatal("middle page lost navigation")
 			}
-			templateBytes, err := embeddedWebFiles.ReadFile("web/expenses.html")
+			templateBytes, err := embeddedWebFiles.ReadFile("web/analytics.html")
 			if err != nil {
 				t.Fatal(err)
 			}
-			parsed, err := template.New("expenses.html").Parse(string(templateBytes))
+			parsed, err := template.New("analytics.html").Parse(string(templateBytes))
 			if err != nil {
 				t.Fatal(err)
 			}
 			view["T"] = translationsForLanguageCode("ru")
+			view["MailJournalServers"] = view["ExpenseServers"]
 			var rendered bytes.Buffer
-			if err := parsed.Execute(&rendered, view); err != nil {
+			if err := parsed.ExecuteTemplate(&rendered, "mail-security", view); err != nil {
 				t.Fatal(err)
 			}
-			for _, fragment := range []string{`aria-current="page">2`, `name="mail_page" min="1" max="3" value="2"`, `Событий: 123`, `В начало`, `В конец`} {
+			for _, fragment := range []string{`aria-current="page">2`, `name="mail_page" min="1" max="3" value="2"`, `action="/#mail-monitor-0"`, `action="/#mail-security"`, `Событий: 123`, `В начало`, `В конец`} {
 				if !strings.Contains(rendered.String(), fragment) {
 					t.Fatalf("paginator missing %q", fragment)
+				}
+			}
+			for _, stage := range []string{"cancelled", "cancel_requested", "relay_accepted"} {
+				server.MailFilterStage = stage
+				view["MailJournalServers"] = []simplifiedExpenseServerView{server}
+				rendered.Reset()
+				if err := parsed.ExecuteTemplate(&rendered, "mail-security", view); err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(rendered.String(), `value="`+stage+`" selected`) {
+					t.Fatal("event selector lost the selected filter", stage)
 				}
 			}
 		}
@@ -26283,7 +26638,7 @@ func TestMailMonitorStoresActualNetChanTransport(t *testing.T) {
 		}
 		found = true
 		for _, fragment := range []string{"transport=netchan", "netchan_sender=" + netchantransport.LibraryVersion(), "netchan_receiver=v2.0.7", "wire_version=2", "protocol=tcp+tls", "network=tcp", "fallback=true"} {
-			if !strings.Contains(event.Detail, fragment) {
+			if !strings.Contains(event.Transport, fragment) {
 				t.Fatalf("journal missing %q: %+v", fragment, event)
 			}
 		}
@@ -26294,6 +26649,7 @@ func TestMailMonitorStoresActualNetChanTransport(t *testing.T) {
 }
 
 func TestHTTPSFallbackLogReportsHTTPProtocolWithoutMailContent(t *testing.T) {
+	t.Setenv("SITEBRUSH_MAIL_DEBUG", "1")
 	actualProtocol := make(chan string, 1)
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		actualProtocol <- r.Proto
@@ -26346,5 +26702,509 @@ func TestMailTransportVersionMetadataRetriesOldSignedSchema(t *testing.T) {
 		if netChanPeerVersion(payload) != "unknown" {
 			t.Fatal("missing or invalid receiver version was inferred")
 		}
+	}
+}
+
+func TestMailJournalDesktopRecoveryThroughCentralRelay(t *testing.T) {
+	boundary := context.Background()
+	desktop, _ := newTestApplication(t)
+	central, _ := newTestApplication(t)
+	enableMailMonitorForTest(t, desktop)
+	enableMailMonitorForTest(t, central)
+	desktopID, _, _, err := desktop.serviceMailLocalKeyPair(boundary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := &mailout.Metadata{OriginInstallationID: desktopID, FlowID: "recovery-flow", Domain: "localhost", InitiatorIP: "127.0.0.1", RelayTransport: "transport=netchan protocol=quic network=udp destination=203.0.113.10:9876"}
+	request := signedServiceMailRequestForTest(t, desktop, serviceMailRequest{Version: 2, MessageID: "desktop-recovery-message", MailMetadata: metadata, RequestIP: "127.0.0.1", CodeKind: "invoice", SourceDomain: "localhost", Recipient: "owner@example.com", Subject: "Recovery", Body: "One-time message", ExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano), CreatedAt: time.Now().UTC().Format(time.RFC3339)})
+	registerServiceMailInstallationForTest(t, central, request)
+	sent := make(chan mailout.Message, 1)
+	central.sendEmail = func(_ context.Context, message mailout.Message) error {
+		if message.Reports != nil {
+			message.Reports <- mailout.SMTPReport{Server: "mx.example.com:25", MX: "mx.example.com", Destination: "203.0.113.20:25", Protocol: "starttls", Code: "250", Reply: "OK"}
+		}
+		sent <- message
+		return nil
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	central.durableMailTasks = make(chan mailout.Task)
+	go func() { defer close(done); central.runDurableMailProcess(stop, central.durableMailTasks) }()
+	t.Cleanup(func() { close(stop); <-done })
+	status, code := central.handleServiceMailRelayRequest(boundary, nil, request, "203.0.113.4")
+	if code != http.StatusOK {
+		t.Fatalf("relay returned %d %s", code, status)
+	}
+	message := <-sent
+	if message.InitiatorIP != "127.0.0.1" || message.MonitorFlowID != "recovery-flow" || message.OriginInstallationID != desktopID {
+		t.Fatalf("relay lost origin: %+v", message.Metadata())
+	}
+	events := []mailmonitor.Event{
+		{ID: "desktop-start", FlowID: "recovery-flow", MessageID: request.MessageID, Kind: "recovery", Stage: "recovery_requested", Domain: "localhost", Recipient: request.Recipient, Metadata: metadata, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)},
+		{ID: "desktop-complete", FlowID: "recovery-flow", Kind: "recovery", Stage: "recovery_complete", Domain: "localhost", Recipient: request.Recipient, Metadata: metadata, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)},
+	}
+	syncRequest := serviceMailRequest{CodeKind: "mail_monitor_sync", MailEvents: events, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
+	if err = desktop.signServiceMailRequest(boundary, &syncRequest); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if status, code = central.handleMailMonitorSync(boundary, syncRequest); code != http.StatusOK {
+			t.Fatal(status, code)
+		}
+	}
+	if err = central.withServerControlDatabaseRead(boundary, "test-central-full-path", func(database *sql.DB) error {
+		store := mailmonitor.Store{DB: database}
+		operations, count, err := store.Journal(boundary, mailmonitor.Filter{InstallationID: "local"})
+		if err != nil {
+			return err
+		}
+		if count != 1 || len(operations) != 1 || operations[0].Stage != "recovery_complete" {
+			t.Fatalf("fragmented path: %+v %d", operations, count)
+		}
+		counts, err := store.JournalCounts(boundary, "local", time.Now().Add(-24*time.Hour))
+		if counts.Queued != 1 || counts.Accepted != 1 || counts.RecoveryRequested != 1 || counts.RecoveryComplete != 1 {
+			t.Fatalf("central path not counted once: %+v", counts)
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A valid signature cannot claim another installation's flow or a different initiator IP.
+	for _, tamper := range []func(*serviceMailRequest){func(candidate *serviceMailRequest) {
+		candidate.MailMetadata.OriginInstallationID = "another-installation"
+	}, func(candidate *serviceMailRequest) { candidate.RequestIP = "203.0.113.99" }} {
+		candidate := request
+		copiedMetadata := *metadata
+		candidate.MailMetadata = &copiedMetadata
+		tamper(&candidate)
+		candidate = signedServiceMailRequestForTest(t, desktop, candidate)
+		if _, code = central.handleServiceMailRelayRequest(boundary, nil, candidate, "203.0.113.4"); code != http.StatusForbidden {
+			t.Fatal("forged metadata was accepted", code)
+		}
+	}
+}
+
+func TestMailCancellationTombstoneAndSMTPStartBoundary(t *testing.T) {
+	application, _ := newTestApplication(t)
+	enableMailMonitorForTest(t, application)
+	boundary := context.Background()
+	for _, fixture := range []struct {
+		id      string
+		sending bool
+		want    string
+	}{{"queued", false, "cancelled"}, {"sending", true, "too_late"}} {
+		if err := application.withMailOutboxTransaction(boundary, "test-cancel-race", func(database *sql.Tx) error {
+			task := mailout.NewTask("login_code", mailout.RouteLocal, mailout.Message{From: "sender@example.com", To: "owner@example.com", Body: "secret", OriginInstallationID: "desktop", InitiatorIP: "127.0.0.1", MonitorFlowID: fixture.id}, time.Now().Add(time.Hour), nil)
+			task.ID = fixture.id
+			if _, err := mailout.Insert(boundary, database, task); err != nil {
+				return err
+			}
+			if fixture.sending {
+				if _, err := mailout.Claim(boundary, database, task.ID); err != nil {
+					return err
+				}
+			}
+			status, err := cancelStoredMail(boundary, database, "desktop", task.ID)
+			if status != fixture.want {
+				t.Errorf("%s status=%s want=%s", task.ID, status, fixture.want)
+			}
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := application.withMailOutboxTransaction(boundary, "test-pre-arrival-cancel", func(database *sql.Tx) error {
+		status, err := cancelStoredMail(boundary, database, "desktop", "not-arrived")
+		if err != nil {
+			return err
+		}
+		if status != "requested" {
+			t.Fatal(status)
+		}
+		saved, err := (mailmonitor.Store{DB: database}).CancelStatus(boundary, "desktop", "not-arrived")
+		if err != nil || saved != "requested" {
+			t.Fatalf("tombstone lost %s %v", saved, err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.withMailOutboxTransaction(boundary, "test-ignore-legacy-loopback-block", func(database *sql.Tx) error {
+		task := mailout.NewTask("login_code", mailout.RouteLocal, mailout.Message{From: "sender@example.com", To: "owner@example.com", OriginInstallationID: "desktop", InitiatorIP: "127.0.0.1"}, time.Now().Add(time.Hour), nil)
+		if _, err := mailout.Insert(boundary, database, task); err != nil {
+			return err
+		}
+		if _, err := database.Exec(`INSERT INTO mail_ip_blocks(scope,origin_id,ip,reason,created_at) VALUES('installation','desktop','127.0.0.1','legacy','')`); err != nil {
+			return err
+		}
+		if err := cancelBlockedMail(boundary, database); err != nil {
+			return err
+		}
+		record, found, err := mailout.ByID(boundary, database, task.ID)
+		if err != nil || !found || record.Status != mailout.StatusPending {
+			return fmt.Errorf("legacy loopback block cancelled local mail: found=%t status=%s error=%v", found, record.Status, err)
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMailJournalWebSocketRejectsUnauthenticatedRequests(t *testing.T) {
+	application, _ := newTestApplication(t)
+	request := httptest.NewRequest(http.MethodGet, "https://localhost/?expenses&mail_monitor_ws", nil)
+	response := httptest.NewRecorder()
+	application.mailJournalWebSocket(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("journal exposed without manager session: %d", response.Code)
+	}
+	if _, err := application.applyMailJournalCommand(request, mailJournalCommand{Action: "block", IP: "203.0.113.2", Scope: "global", CSRF: "forged"}); err == nil {
+		t.Fatal("unauthorized global mail block accepted")
+	}
+}
+
+func TestMailControlRequiresCentralAuthorityAndOwnsCancellation(t *testing.T) {
+	boundary := context.Background()
+	central, centralDB := newTestApplication(t)
+	enableMailMonitorForTest(t, central)
+	desktop, _ := newTestApplication(t)
+	enableMailMonitorForTest(t, desktop)
+	if _, err := centralDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('sitebrush.com','owner@example.com','password',1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := centralDB.Exec(`INSERT INTO sessions(token,user_email,created_at,client_ip,last_used_at) VALUES('mail-owner','sitebrush.com|owner@example.com',?,'192.0.2.1',?)`, time.Now().UTC().Format(time.RFC3339), time.Now().Unix()); err != nil {
+		t.Fatal(err)
+	}
+	if err := central.withServerControlDatabaseWrite(boundary, "test-central-mail-owner", func(database *sql.DB) error {
+		_, err := database.Exec(`INSERT INTO server_managers(domain,email,role,scope_domain,created_at) VALUES('sitebrush.com','owner@example.com','owner','*',?)`, time.Now().UTC().Format(time.RFC3339))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	manager := httptest.NewRequest(http.MethodGet, "https://sitebrush.com/?expenses", nil)
+	manager.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "mail-owner"})
+	if !central.isServerManagerRequest(manager) {
+		t.Fatal("test owner session unavailable")
+	}
+	command := mailJournalCommand{Action: "block", IP: "203.0.113.66", OriginInstallationID: "desktop", CSRF: accountCSRF(manager)}
+	if _, err := central.applyMailJournalCommand(manager, command); err != nil {
+		t.Fatal(err)
+	}
+	request := serviceMailRequest{CodeKind: "mail_control_sync", MailControl: &mailmonitor.ControlRequest{}, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
+	if err := desktop.signServiceMailRequest(boundary, &request); err != nil {
+		t.Fatal(err)
+	}
+	registerServiceMailInstallationForTest(t, central, request)
+	status, code, payload := central.handleMailControlSync(boundary, request)
+	if code != http.StatusOK {
+		t.Fatal(code, status)
+	}
+	var response mailmonitor.ControlResponse
+	if err := json.Unmarshal(payload, &response); err != nil {
+		t.Fatal(err)
+	}
+	signature, err := base64.StdEncoding.DecodeString(response.Signature)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Signature = ""
+	unsigned, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, publicKey, _, err := central.serviceMailLocalKeyPair(boundary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ed25519.Verify(publicKey, unsigned, signature) {
+		t.Fatal("central mail policy signature failed")
+	}
+	if len(response.Blocks) != 1 || response.Blocks[0].Scope != "global" {
+		t.Fatalf("global policy missing: %+v", response)
+	}
+	command.Action = "unblock"
+	if _, err := central.applyMailJournalCommand(manager, command); err != nil {
+		t.Fatal(err)
+	}
+	_, code, payload = central.handleMailControlSync(boundary, request)
+	if code != http.StatusOK {
+		t.Fatal(code)
+	}
+	var unblocked mailmonitor.ControlResponse
+	if err = json.Unmarshal(payload, &unblocked); err != nil {
+		t.Fatal(err)
+	}
+	if unblocked.Revision <= response.Revision || len(unblocked.Blocks) != 0 {
+		t.Fatalf("unblock not versioned: %+v", unblocked)
+	}
+	// An installation with a valid signing key still cannot cancel another installation's mail.
+	if err = central.withMailOutboxTransaction(boundary, "test-foreign-cancellation", func(database *sql.Tx) error {
+		task := mailout.NewTask("invoice", mailout.RouteLocal, mailout.Message{From: "sender@example.com", To: "owner@example.com", OriginInstallationID: "another-installation"}, time.Now().Add(time.Hour), nil)
+		task.ID = "foreign-message"
+		_, err := mailout.Insert(boundary, database, task)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	request.MailControl.Cancel = []string{"foreign-message"}
+	if err = desktop.signServiceMailRequest(boundary, &request); err != nil {
+		t.Fatal(err)
+	}
+	if _, code, _ = central.handleMailControlSync(boundary, request); code == http.StatusOK {
+		t.Fatal("foreign cancellation accepted")
+	}
+}
+
+func TestMailTransportProcessLogsAreQuietByDefault(t *testing.T) {
+	t.Setenv("SITEBRUSH_MAIL_DEBUG", "")
+	previousOutput := log.Writer()
+	defer log.SetOutput(previousOutput)
+	var captured bytes.Buffer
+	log.SetOutput(&captured)
+	logMailTransportPayload([]byte(`{"message_id":"message","code_kind":"mail_monitor_sync"}`), 100, "transport=netchan protocol=quic", 200, nil)
+	if captured.Len() != 0 {
+		t.Fatalf("routine sync emitted a process log: %s", captured.String())
+	}
+}
+
+func prepareAccountMailCaptchaForTest(t *testing.T, application *App, request *http.Request) {
+	t.Helper()
+	if request.Method != http.MethodPost {
+		return
+	}
+	purpose := ""
+	for _, candidate := range []string{"register", "recover", "site_request"} {
+		if hasQueryFlag(request, candidate) {
+			purpose = candidate
+		}
+	}
+	if purpose == "" || (purpose == "register" && (localAccountRequest(request) || request.FormValue("registration_form_token") != "")) || (purpose == "recover" && request.FormValue("recovery_action") != "request" && request.FormValue("recovery_action") != "") {
+		return
+	}
+	challenge, err := captcha.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = application.withAccountMailTransaction(request, "test-captcha", func(transaction *sql.Tx) error {
+		issued, saveErr := captcha.Save(transaction, challenge, accountClientIP(request), application.siteDomain(request.Context(), request), purpose, time.Now().UTC().Add(-3*time.Second))
+		if saveErr == nil && !issued {
+			saveErr = errors.New("test challenge issuance limited")
+		}
+		return saveErr
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := request.ParseForm(); err != nil {
+		t.Fatal(err)
+	}
+	request.Form.Set("captcha", challenge.Answer)
+	request.PostForm.Set("captcha", challenge.Answer)
+	request.Form.Set("captcha_id", challenge.Token)
+	request.PostForm.Set("captcha_id", challenge.Token)
+}
+
+func TestAccountMailGuardBlocksForgedCaptchaAndRecipientSpray(t *testing.T) {
+	withEmailSPFAllowed(t)
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
+	application, _ := newTestApplication(t)
+	enableMailMonitorForTest(t, application)
+	for attempt := 0; attempt < 4; attempt++ {
+		form := url.Values{"email": {fmt.Sprintf("victim%d@example.com", attempt)}, "captcha": {"1234"}}
+		request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?register", strings.NewReader(form.Encode()))
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		request.RemoteAddr = "192.0.2.80:1234"
+		request.Header.Set("X-Forwarded-For", fmt.Sprintf("198.51.100.%d", attempt+1))
+		request.AddCookie(&http.Cookie{Name: "sitebrush_captcha", Value: "1234"})
+		response := httptest.NewRecorder()
+		application.route(response, request)
+		expected := http.StatusBadRequest
+		if attempt == 3 {
+			expected = http.StatusTooManyRequests
+		}
+		if response.Code != expected {
+			t.Fatalf("attempt %d status=%d body=%s", attempt, response.Code, response.Body.String())
+		}
+	}
+	if len(application.emailDelivery) != 0 {
+		t.Fatal("forged CAPTCHA queued spam")
+	}
+	found := false
+	for _, event := range mailMonitorEventsForTest(t, application, "local") {
+		if event.Stage == "mail_blocked" && event.Diagnostic().ClientIP == "192.0.2.80" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("source IP block missing from mail journal")
+	}
+	if err := application.withServerControlDatabaseRead(context.Background(), "test-mail-block", func(database *sql.DB) error {
+		blocked, err := mailguard.Blocked(database, "192.0.2.80", time.Now())
+		if err == nil && !blocked {
+			err = errors.New("source IP block was not persisted")
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAccountCaptchaEndpointReturnsOpaqueCookieAndRaster(t *testing.T) {
+	application, _ := newTestApplication(t)
+	request := httptest.NewRequest(http.MethodGet, "https://localhost/?captcha&purpose=recover", nil)
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "image/png" || !strings.Contains(response.Header().Get("Cache-Control"), "no-store") {
+		t.Fatalf("CAPTCHA response: %d %v", response.Code, response.Header())
+	}
+	if _, err := png.Decode(bytes.NewReader(response.Body.Bytes())); err != nil {
+		t.Fatal("CAPTCHA is not a PNG", err)
+	}
+	cookies := response.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Name != "sitebrush_captcha_recover" || len(cookies[0].Value) != 64 || !cookies[0].HttpOnly || !cookies[0].Secure {
+		t.Fatal("CAPTCHA cookie must contain only a protected opaque challenge identifier")
+	}
+}
+
+func TestAccountMailGuardPreventsQueuedDeliveryAfterSourceBlock(t *testing.T) {
+	application, _ := newTestApplication(t)
+	request := httptest.NewRequest(http.MethodPost, "https://localhost/?recover", nil)
+	if err := application.withAccountMailTransaction(request, "test-block-queued", func(transaction *sql.Tx) error {
+		return mailguard.SetBlock(transaction, "192.0.2.81", "mail abuse", time.Now().Add(time.Hour))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	delivered := make(chan struct{}, 1)
+	application.sendEmail = func(context.Context, mailout.Message) error { delivered <- struct{}{}; return nil }
+	task := mailout.NewTask("login_code", mailout.RouteLocal, mailout.Message{To: "owner@example.com", MonitorClientIP: "192.0.2.81"}, time.Now().Add(time.Hour), nil)
+	err := application.deliverMailRecord(nil, mailout.Record{Task: task})
+	if !mailout.IsPermanentFailure(err) || len(delivered) != 0 {
+		t.Fatal("blocked source reached SMTP", err)
+	}
+}
+
+func TestRegistrationCooldownRejectsChangedEmailAndReleasesTechnicalFailure(t *testing.T) {
+	withEmailSPFAllowed(t)
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
+	application, _ := newTestApplication(t)
+	enableMailMonitorForTest(t, application)
+	submit := func(email string, solveCaptcha bool) (*httptest.ResponseRecorder, *http.Request) {
+		form := url.Values{"email": {email}}
+		request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?register", strings.NewReader(form.Encode()))
+		request.RemoteAddr = "192.0.2.90:1234"
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		if solveCaptcha {
+			prepareAccountMailCaptchaForTest(t, application, request)
+		}
+		response := httptest.NewRecorder()
+		application.route(response, request)
+		return response, request
+	}
+	first, request := submit("first@example.com", true)
+	if first.Code != http.StatusOK || len(application.emailDelivery) != 1 {
+		t.Fatal("first registration was not queued", first.Code, first.Body.String())
+	}
+	message := (<-application.emailDelivery).Message
+	blocked, _ := submit("different@example.com", false)
+	if blocked.Code != http.StatusTooManyRequests || len(application.emailDelivery) != 0 || blocked.Header().Get("Retry-After") == "" {
+		t.Fatal("email change bypassed server cooldown", blocked.Code, blocked.Body.String())
+	}
+	for _, fragment := range []string{"data-registration-countdown", "data-registration-retry disabled", "registration-cooldown.js"} {
+		if !strings.Contains(blocked.Body.String(), fragment) {
+			t.Fatal("cooldown UI missing", fragment)
+		}
+	}
+	application.sendEmail = func(context.Context, mailout.Message) error { return errors.New("SMTP connection unavailable") }
+	if err := application.defaultEmailSender()(context.Background(), message); err == nil {
+		t.Fatal("expected technical delivery failure")
+	}
+	state, err := application.readRegistrationCooldown(request)
+	if err != nil || state.Blocked(time.Now()) || state.Failures != 0 {
+		t.Fatal("delivery failure increased penalty", state, err)
+	}
+	second, _ := submit("second@example.com", true)
+	if second.Code != http.StatusOK || len(application.emailDelivery) != 1 {
+		t.Fatal("technical failure did not release registration", second.Code, second.Body.String())
+	}
+	message = (<-application.emailDelivery).Message
+	if err := application.finishRegistrationAttempt(message.MonitorFlowID, "delivered"); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.withAccountMailTransaction(request, "test-expire-registration", func(transaction *sql.Tx) error {
+		_, err := transaction.Exec(`UPDATE registration_mail_cooldowns SET expires_at=?,retry_at=? WHERE attempt_id=?`, time.Now().Add(-time.Minute).Unix(), time.Now().Add(-time.Second).Unix(), message.MonitorFlowID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	third, _ := submit("third@example.com", true)
+	if third.Code != http.StatusOK || len(application.emailDelivery) != 1 {
+		t.Fatal("allowed retry was not queued", third.Code, third.Body.String())
+	}
+	state, err = application.readRegistrationCooldown(request)
+	if err != nil || state.Failures != 1 || time.Until(state.RetryAt) < 5*time.Hour || time.Until(state.RetryAt) > 6*time.Hour {
+		t.Fatal("unconfirmed attempt did not advance to six hours", state, err)
+	}
+}
+
+func TestRegistrationCooldownSpamReachesSecurityAnalytics(t *testing.T) {
+	application, _ := newTestApplication(t)
+	enableMailMonitorForTest(t, application)
+	application.securityAnalytics = make(chan siteAnalyticsEvent, 2)
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?register", nil)
+	request.RemoteAddr = "192.0.2.99:1234"
+	err := application.withAccountMailTransaction(request, "test-registration-spam", func(transaction *sql.Tx) error {
+		now := time.Now().UTC().Add(-48 * time.Hour)
+		for index := 0; index < 4; index++ {
+			attemptID := fmt.Sprint(index)
+			registration, allowed, err := mailguard.BeginRegistration(transaction, "192.0.2.99", "localhost", attemptID, now.Add(15*time.Minute), now)
+			if err != nil {
+				return err
+			}
+			if !allowed {
+				return errors.New("test registration unexpectedly blocked")
+			}
+			if err := mailguard.TrackRegistrationRecipient(transaction, attemptID, fmt.Sprintf("victim%d@example.com", index)); err != nil {
+				return err
+			}
+			if err := mailguard.RegistrationDelivered(transaction, attemptID, now); err != nil {
+				return err
+			}
+			if index < 3 {
+				if err := mailguard.FailRegistration(transaction, attemptID); err != nil {
+					return err
+				}
+			}
+			now = registration.RetryAt
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	select {
+	case event := <-application.securityAnalytics:
+		if event.SecurityCategory != mailguard.RegistrationMailAbuse || event.RemoteAddress != "192.0.2.99:0" || !event.SecurityBlocked {
+			t.Fatal("wrong security evidence", event)
+		}
+	default:
+		t.Fatal("registration spam missing from security analytics")
+	}
+	if _, err := application.readRegistrationCooldown(request); err != nil {
+		t.Fatal(err)
+	}
+	if len(application.securityAnalytics) != 0 {
+		t.Fatal("page refresh duplicated the spam incident")
+	}
+	err = application.withServerControlDatabaseRead(context.Background(), "test-registration-source-block", func(database *sql.DB) error {
+		blocked, err := mailguard.Blocked(database, "192.0.2.99", time.Now().Add(71*time.Hour))
+		if err == nil && !blocked {
+			return errors.New("three-day account-mail IP block missing")
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
