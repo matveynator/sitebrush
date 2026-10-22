@@ -35,7 +35,7 @@ func TestPublicationWizardStartsWithReviewAndEnterAccepts(t *testing.T) {
 	if err != nil || !confirmed || len(plan.targets) != 2 {
 		t.Fatalf("Enter did not start with default destinations: %+v, %v", plan, err)
 	}
-	prompt := strings.Index(output.String(), "Your choice [Enter]")
+	prompt := strings.Index(output.String(), "[Enter]  Build and upload (default)")
 	for _, parameter := range []string{"SiteBrush — release 123", "Server:", "Desktop:", "CPUs:", "Save to:", "Key:", "1. sitebrush.com", "2. sitebrush.ru", "[Enter]  Build and upload (default)"} {
 		if index := strings.Index(output.String(), parameter); index < 0 || index > prompt {
 			t.Fatalf("parameter %q was not shown before input: %s", parameter, output.String())

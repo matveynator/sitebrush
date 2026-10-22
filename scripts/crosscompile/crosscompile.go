@@ -589,14 +589,13 @@ func configureCrosscompile(console *buildconsole.Console, reader *bufio.Reader, 
 	commit, _ := runOutput(repoRoot, "git", "rev-parse", "HEAD")
 	for {
 		showCrosscompileSettings(console, settings, plan, runtime.GOOS)
-		showCrosscompileActions(console, plan)
-		command, err := console.Line(reader, "  Your choice", "Enter")
+		command, err := chooseCrosscompileAction(console, reader, plan)
 		console.Info("")
 		if err != nil {
 			return false, settings, plan, err
 		}
 		switch strings.ToLower(command) {
-		case "enter", "y", "yes":
+		case "", "enter", "y", "yes":
 			if settings.requiresSigning(plan) && plan.releaseKeyFile == "" && strings.TrimSpace(os.Getenv("SITEBRUSH_RELEASE_PRIVATE_KEY")) == "" {
 				console.Warning("Choose the existing signing key before an official server upload.")
 				showSigningGuide(console, "")
@@ -700,14 +699,14 @@ func showCrosscompileSettings(console *buildconsole.Console, settings crosscompi
 	}
 }
 
-func showCrosscompileActions(console *buildconsole.Console, plan publicationPlan) {
+func chooseCrosscompileAction(console *buildconsole.Console, reader *bufio.Reader, plan publicationPlan) (string, error) {
 	action := "Build and upload"
 	if len(plan.targets) == 0 {
 		action = "Build only"
 	}
-	console.Info("\n  %s\n", console.Bold("[Enter]  "+action+" (default)"))
-	console.Info("    K  Choose key       E  Edit servers    A  Add server")
+	console.Info("\n    K  Choose key       E  Edit servers    A  Add server")
 	console.Info("    B  Build settings   D  Details / help  Q  Quit\n")
+	return console.Line(reader, "  "+console.Bold("[Enter]  "+action+" (default)"), "")
 }
 
 func showCrosscompileDetails(console *buildconsole.Console, repoRoot, commit string, settings crosscompileSettings, plan publicationPlan, hostOS string) {
