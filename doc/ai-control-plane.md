@@ -12,7 +12,9 @@ clients have the same immediate public editing permission from every IP. Its
 exception never follows a `demo.*` naming pattern or a domain alias. The demo
 has all four existing scopes, saves drafts and permits publication within the
 requested task. During a reset it rejects new AI work; replacing its content
-revokes old grants and closes job/session channels. Nothing private belongs on
+revokes old grants and closes job/session channels. Moving or disabling the
+public demo also revokes the former domain before committing its loss of public
+status, including persisted OAuth grants and refresh access. Nothing private belongs on
 a shared, automatically reset demo. OAuth-only clients can still register and
 complete PKCE automatically, without a login or consent screen.
 
@@ -252,7 +254,9 @@ form data is serialized. Complete blocked-request totals are currently unavailab
 `get_file_settings` and `set_file_access` expose safe file access metadata.
 Site-wide write can bind a file to `protected_page_path` using an existing
 section password, or explicitly make it public. `upload_file` accepts the same
-path and optional `image_full` for prepared images. Preview/full files receive
+path and optional `image_full` for prepared images. Upload responses return
+`preview` and optional `full` descriptors (URL, MIME, dimensions and bytes),
+preserving the preview's legacy top-level filename/URL/hash. Preview/full files receive
 rules together. A new private upload is stored in a fail-closed namespace before
 the control transaction commits its ACL; failure removes files and quota.
 Removing a referenced section rule denies the file until explicit reconfiguration.

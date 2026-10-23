@@ -24078,13 +24078,13 @@ func TestAIUploadsAreImmutableAndUseSharedImageStorage(t *testing.T) {
 	}
 	duplicate, err := application.saveAIFile(context.Background(), "localhost", aieditor.Request{FileName: "photo.png", FileContent: firstContent, Path: "/one"}, done)
 	if err != nil || duplicate != first {
-		t.Fatalf("duplicate: %q %v", duplicate, err)
+		t.Fatalf("duplicate: %+v %v", duplicate, err)
 	}
 	second, err := application.saveAIFile(context.Background(), "localhost", aieditor.Request{FileName: "photo.png", FileContent: []byte("new picture"), Path: "/one"}, done)
-	if err != nil || first == second || len(first) != 64+len(".png") {
-		t.Fatalf("content identity: %q %q %v", first, second, err)
+	if err != nil || first == second || len(strings.TrimPrefix(first.Preview.URL, "/p/")) != 64+len(".png") {
+		t.Fatalf("content identity: %+v %+v %v", first, second, err)
 	}
-	stored, err := application.readFileInsideStorage(filepath.Join(application.domainFilesDirForDomain("localhost"), first))
+	stored, err := application.readFileInsideStorage(filepath.Join(application.domainFilesDirForDomain("localhost"), strings.TrimPrefix(first.Preview.URL, "/p/")))
 	if err != nil || string(stored) != string(firstContent) {
 		t.Fatalf("old file overwritten: %q %v", stored, err)
 	}
@@ -24100,7 +24100,7 @@ func TestAIUploadsAreImmutableAndUseSharedImageStorage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	preparedBytes, err := application.readFileInsideStorage(filepath.Join(application.domainFilesDirForDomain("localhost"), prepared))
+	preparedBytes, err := application.readFileInsideStorage(filepath.Join(application.domainFilesDirForDomain("localhost"), strings.TrimPrefix(prepared.Preview.URL, "/p/")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28187,32 +28187,25 @@ func TestMCPPublicDemoEditsWithoutAuthorization(t *testing.T) {
 	if err := png.Encode(&imageSource, image.NewNRGBA(image.Rect(0, 0, 64, 64))); err != nil {
 		t.Fatal(err)
 	}
-	call("upload_file", map[string]any{"file_name": "photo.png", "file_content": base64.StdEncoding.EncodeToString(imageSource.Bytes()), "image_width": 4, "image_height": 4, "image_full": true, "protected_page_path": "/private"})
-	rows, err := application.db.QueryContext(boundary, `SELECT file_name FROM file_metadata WHERE domain=?`, domainStorageName(domain))
-	if err != nil {
-		t.Fatal(err)
+	imageUpload := call("upload_file", map[string]any{"file_name": "photo.png", "file_content": base64.StdEncoding.EncodeToString(imageSource.Bytes()), "image_width": 4, "image_height": 4, "image_full": true, "protected_page_path": "/private"})["result"].(map[string]any)["payload"].(map[string]any)
+	preview := imageUpload["preview"].(map[string]any)
+	full := imageUpload["full"].(map[string]any)
+	if imageUpload["url"] != preview["url"] || imageUpload["file_name"] != strings.TrimPrefix(preview["url"].(string), "/p/") || imageUpload["hash"] == "" {
+		t.Fatal("legacy upload fields changed", imageUpload)
 	}
-	var imageNames []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			t.Fatal(err)
+	if preview["width"] != float64(8) || preview["height"] != float64(8) || full["width"] != float64(64) || full["height"] != float64(64) || full["url"] == preview["url"] {
+		t.Fatal("requested image variants missing", imageUpload)
+	}
+	for _, variant := range []map[string]any{preview, full} {
+		if variant["mime"] == "" || variant["bytes"].(float64) <= 0 {
+			t.Fatal("incomplete image descriptor", variant)
 		}
-		if strings.HasPrefix(name, privateAssetPrefix) && name != originalFilename {
-			imageNames = append(imageNames, name)
-		}
-	}
-	rows.Close()
-	if len(imageNames) != 2 {
-		t.Fatal("missing prepared image variants", imageNames)
-	}
-	for _, name := range imageNames {
-		filename = name
+		filename = strings.TrimPrefix(variant["url"].(string), "/p/")
 		if status, _ := download(); status != 401 {
-			t.Fatal("image variant exposed", status, name)
+			t.Fatal("image variant exposed", status, filename)
 		}
-		if status, _ := download(cookies...); status != 200 {
-			t.Fatal("image variant password failed", status, name)
+		if status, body := download(cookies...); status != 200 || len(body) != int(variant["bytes"].(float64)) {
+			t.Fatal("returned variant URL is unusable", status, filename)
 		}
 	}
 	filename = originalFilename
@@ -28272,16 +28265,121 @@ func TestMCPPublicDemoEditsWithoutAuthorization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	io.Copy(io.Discard, tokens.Body)
+	var issuedTokens aicapability.OAuthTokens
+	if err := json.NewDecoder(tokens.Body).Decode(&issuedTokens); err != nil {
+		t.Fatal(err)
+	}
 	tokens.Body.Close()
 	if tokens.StatusCode != 200 {
 		t.Fatal("public OAuth PKCE exchange failed", tokens.StatusCode)
 	}
-	// Settings changes are checked on each call, even on an existing connection.
-	state.Settings.Enabled = false
-	application.updateRuntimeDemoSiteState(boundary, state)
+	// Moving an enabled demo revokes persisted OAuth grants before the old site
+	// returns to ordinary authorization, including after manager reload.
+	oldSession, _, err := application.aiCapabilities.ValidateOAuth(domain, resource, issuedTokens.AccessToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := application.withServerControlDatabaseWrite(boundary, "fixture-demo-settings", func(database *sql.DB) error {
+		return (demo.Store{DB: database}).SaveSettings(boundary, domain, "", false, true)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	nextDomain := "next-demo.example"
+	nextBoundary := contextWithSiteDatabaseCreation(contextWithDomain(boundary, nextDomain))
+	if _, err := application.db.ExecContext(nextBoundary, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, nextDomain, "demo@next-demo.example", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.persistFinalPageSave(nextBoundary, nextDomain, "/", "/", "Next demo", original); err != nil {
+		t.Fatal(err)
+	}
+	// A pre-existing ordinary grant on the destination site must survive the move.
+	unrelatedToken, _, err := application.aiCapabilities.Issue(nextDomain, aicapability.StandardScopes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	unrelatedSession, err := application.aiCapabilities.Exchange(unrelatedToken, nextDomain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{"demo_site_domain": {nextDomain}, "demo_site_enabled": {"1"}}
+	settingsRequest := httptest.NewRequest("POST", "https://owner.example/?billing", strings.NewReader(form.Encode()))
+	settingsRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	status := application.saveHostingAndSupportDemoSettings(settingsRequest)
+	currentSettings, enabled := application.demoSiteSettings(boundary)
+	if !enabled || currentSettings.Domain != nextDomain {
+		t.Fatal("demo move failed", status, currentSettings)
+	}
+	select {
+	case <-oldSession.Done:
+	default:
+		t.Fatal("demo move left OAuth work alive")
+	}
+	select {
+	case <-unrelatedSession.Done:
+		t.Fatal("move revoked the destination site's ordinary grant")
+	default:
+	}
+	if _, _, err := application.aiCapabilities.ValidateOAuth(domain, resource, issuedTokens.AccessToken); err == nil {
+		t.Fatal("former demo accepted its old bearer")
+	}
+	if _, err := application.aiCapabilities.RefreshOAuth(domain, registration["client_id"].(string), resource, issuedTokens.RefreshToken); err == nil {
+		t.Fatal("former demo refreshed its old grant")
+	}
+	oldDatabase, err := application.siteDatabaseRouter.databaseForContext(boundary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := oldDatabase.ai.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.aiCapabilities.RefreshOAuth(domain, registration["client_id"].(string), resource, issuedTokens.RefreshToken); err == nil {
+		t.Fatal("manager reload revived a public-demo grant")
+	}
+	if _, err := application.findPage(boundary, domain, "/"); err != nil {
+		t.Fatal("moving demo unexpectedly removed its former site", err)
+	}
+	if _, err := application.db.ExecContext(boundary, `INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES(?,?,?,?)`, domain, "demo@demo.example", "203.0.113.12", time.Now().Unix()); err != nil {
+		t.Fatal(err)
+	}
+	blockedRequest, _ := http.NewRequestWithContext(boundary, "POST", server.URL+"/?mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"sitebrush_publish","arguments":{}}}`))
+	blockedRequest.Header.Set("Authorization", "Bearer "+issuedTokens.AccessToken)
+	blockedRequest.Header.Set("X-Forwarded-For", "203.0.113.12")
+	blocked, err := client.Do(blockedRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked.Body.Close()
+	if blocked.StatusCode != 401 {
+		t.Fatal("admitted client retained publishing access on former demo", blocked.StatusCode)
+	}
+	// Disabling the new demo also closes its grants; another site's grant survives.
+	ordinaryToken, _, err := application.aiCapabilities.Issue(domain, aicapability.StandardScopes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordinarySession, err := application.aiCapabilities.Exchange(ordinaryToken, domain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	form.Del("demo_site_enabled")
+	disableRequest := httptest.NewRequest("POST", "https://owner.example/?billing", strings.NewReader(form.Encode()))
+	disableRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	status = application.saveHostingAndSupportDemoSettings(disableRequest)
+	if _, enabled := application.demoSiteSettings(boundary); enabled {
+		t.Fatal("demo disable failed", status)
+	}
+	select {
+	case <-unrelatedSession.Done:
+	default:
+		t.Fatal("disabling demo retained its old grant")
+	}
+	select {
+	case <-ordinarySession.Done:
+		t.Fatal("disabling demo revoked another site")
+	default:
+	}
 	result, err := connection.CallTool(boundary, &mcpsdk.CallToolParams{Name: "sitebrush_get_access", Arguments: map[string]any{}})
 	if err == nil && result != nil && !result.IsError {
-		t.Fatal("disabled demo retained public access")
+		t.Fatal("former demo retained public access")
 	}
 }

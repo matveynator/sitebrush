@@ -282,7 +282,7 @@ func toolDescriptor(operation string) *sdk.Tool {
 		"create_page":           "Create a draft page through the normal editor and shared-template pipeline. Does not publish.",
 		"update_page":           "Update a draft page using the last read expected_version. May propagate shared templates. Re-read on revision_conflict. Does not publish.",
 		"list_files":            "List existing managed site files and their permanent URLs.",
-		"upload_file":           "Upload an immutable file through SiteBrush's normal uploader. Change an image by uploading then updating its page. Accepts base64 bytes or a ChatGPT file attachment.",
+		"upload_file":           "Upload an immutable file through SiteBrush's normal uploader. Change an image by uploading then updating its page. Accepts base64 bytes or a ChatGPT file attachment. Returns preview and requested full-size descriptors; the top-level URL identifies the preview.",
 		"list_revisions":        "List existing revisions for a page so the owner can choose a rollback target.",
 		"publish":               "Publish ALL pending changes for this site using normal SiteBrush publication, including existing pending drafts. Call only within the owner's authorized task.",
 		"rollback":              "Restore a chosen revision as a draft, guarded by the current expected_version. Publish separately when requested.",
@@ -353,7 +353,7 @@ func toolDescriptor(operation string) *sdk.Tool {
 		for _, name := range []string{"image_width", "image_height"} {
 			add(name, "integer")
 		}
-		add("image_full", "boolean")
+		properties["image_full"] = map[string]any{"type": "boolean", "description": "Keep the full-size variant when resizing. The upload response returns preview and full descriptors with their URLs, MIME types, dimensions and byte sizes."}
 		properties["file"] = map[string]any{"type": "object", "properties": map[string]any{"download_url": map[string]string{"type": "string"}, "file_id": map[string]string{"type": "string"}, "mime_type": map[string]string{"type": "string"}, "file_name": map[string]string{"type": "string"}}, "required": []string{"download_url", "file_id"}, "additionalProperties": false}
 	default:
 		if strings.HasPrefix(operation, "get_") && operation != "get_access" {

@@ -50,7 +50,11 @@ expected_version. Treat version as opaque: read it before updating and send expe
 409 means re-read and reconcile newer edits. create_page rejects existing paths.
 GET /?ai=files&path=/example: existing files and /p/ URLs. Omit path for site files.
 POST /?ai=file: JSON file_name, base64 file_content, optional path; response
-includes the stored name, URL and hash. Files are content-addressed and immutable.
+includes the stored name, URL and hash, plus a preview descriptor (url, mime,
+width, height, bytes). With image_full=true and resize dimensions it also returns
+the requested full descriptor. Use its URL directly for full-size links; the
+legacy top-level name/URL/hash still identify the preview. Files are
+content-addressed and immutable.
 For raster image preparation optionally send image_width, image_height and
 image_fit (cover, contain or fill), and image_full=true to keep a full-size copy; these are logical display dimensions.
 The normal editor pipeline produces a bounded 2x-density preview when possible.

@@ -12955,8 +12955,16 @@ func (store *appAIStore) Execute(request aieditor.Request, done <-chan struct{})
 		stored, err := store.application.readAIPage(ctx, domain, page.Path)
 		return aieditor.Result{Operation: request.Operation, Path: page.Path, Payload: stored, Err: err}
 	case aieditor.OperationUploadFile:
-		fileName, err := store.application.saveAIFile(ctx, domain, request, done)
-		return aieditor.Result{Operation: request.Operation, Path: fileName, Payload: map[string]string{"file_name": fileName, "url": "/p/" + fileName, "hash": strings.TrimSuffix(path.Base(fileName), path.Ext(fileName))}, Err: err}
+		stored, err := store.application.saveAIFile(ctx, domain, request, done)
+		if err != nil {
+			return aieditor.Result{Operation: request.Operation, Err: err}
+		}
+		fileName := strings.TrimPrefix(stored.Preview.URL, "/p/")
+		payload := map[string]any{"file_name": fileName, "url": stored.Preview.URL, "hash": strings.TrimSuffix(path.Base(fileName), path.Ext(fileName)), "preview": stored.Preview}
+		if stored.Full != nil {
+			payload["full"] = *stored.Full
+		}
+		return aieditor.Result{Operation: request.Operation, Path: fileName, Payload: payload}
 	case aieditor.OperationPublish:
 		return aieditor.Result{Operation: request.Operation, Message: "published", Err: store.application.publishAI(ctx, domain)}
 	case aieditor.OperationGetSiteState, aieditor.OperationGetPageSettings, aieditor.OperationDeletePage, aieditor.OperationDeleteRevision, aieditor.OperationSetRevisionActive, aieditor.OperationGetFileSettings, aieditor.OperationSetFileAccess, aieditor.OperationSetPagePassword, aieditor.OperationRemovePagePassword, aieditor.OperationFreezeSite:
@@ -13740,10 +13748,10 @@ func (a *App) saveAIPage(ctx context.Context, domain string, request aieditor.Re
 	return a.findPage(ctx, domain, pagePath)
 }
 
-func (a *App) saveAIFile(ctx context.Context, domain string, request aieditor.Request, done <-chan struct{}) (string, error) {
+func (a *App) saveAIFile(ctx context.Context, domain string, request aieditor.Request, done <-chan struct{}) (preparedImageReplacementView, error) {
 	fileName := safeRelativeAssetPath(request.FileName)
 	if fileName == "" || strings.Contains(fileName, "..") {
-		return "", errors.New("file name is invalid")
+		return preparedImageReplacementView{}, errors.New("file name is invalid")
 	}
 	extension := strings.ToLower(path.Ext(fileName))
 	mimeType := http.DetectContentType(request.FileContent)
@@ -13761,22 +13769,22 @@ func (a *App) saveAIFile(ctx context.Context, domain string, request aieditor.Re
 		select {
 		case jobs <- imageprepare.Job{Source: request.FileContent, MIME: mimeType, Options: imageprepare.Options{Width: request.ImageWidth, Height: request.ImageHeight, Fit: fit, PositionX: 0.5, PositionY: 0.5, Full: request.ImageFull}, Reply: reply, Session: done}:
 		case <-done:
-			return "", aieditor.ErrTaskCanceled
+			return preparedImageReplacementView{}, aieditor.ErrTaskCanceled
 		default:
-			return "", imageprepare.ErrBusy
+			return preparedImageReplacementView{}, imageprepare.ErrBusy
 		}
 		select {
 		case prepared = <-reply:
 		case <-done:
-			return "", aieditor.ErrTaskCanceled
+			return preparedImageReplacementView{}, aieditor.ErrTaskCanceled
 		}
 		if prepared.Err != nil {
-			return "", prepared.Err
+			return preparedImageReplacementView{}, prepared.Err
 		}
 	}
 	select {
 	case <-done:
-		return "", aieditor.ErrTaskCanceled
+		return preparedImageReplacementView{}, aieditor.ErrTaskCanceled
 	default:
 	}
 	prefix := ""
@@ -13785,7 +13793,7 @@ func (a *App) saveAIFile(ctx context.Context, domain string, request aieditor.Re
 	}
 	stored, err := a.storePreparedFilesWithPrefix(ctx, domain, request.Path, prepared, prefix)
 	if err != nil {
-		return "", err
+		return preparedImageReplacementView{}, err
 	}
 	if prefix != "" {
 		names := []string{strings.TrimPrefix(stored.Preview.URL, "/p/")}
@@ -13797,12 +13805,12 @@ func (a *App) saveAIFile(ctx context.Context, domain string, request aieditor.Re
 			// Cleanup must survive the cancelled caller's SQL boundary.
 			cleanupErr := a.removePrivateUpload(contextWithDomain(context.Background(), domain), domain, names)
 			if cleanupErr != nil {
-				return "", fmt.Errorf("%w; private upload cleanup: %v", err, cleanupErr)
+				return preparedImageReplacementView{}, fmt.Errorf("%w; private upload cleanup: %v", err, cleanupErr)
 			}
-			return "", err
+			return preparedImageReplacementView{}, err
 		}
 	}
-	return strings.TrimPrefix(stored.Preview.URL, "/p/"), nil
+	return stored, nil
 }
 
 func (a *App) publishAI(ctx context.Context, domain string) error {
@@ -26489,7 +26497,7 @@ func (a *App) saveHostingAndSupportDemoSettings(r *http.Request) string {
 	demoCopyWholeSite := demoCopyWholeSiteFromRequest(r)
 	var previousDemoSettings demo.Settings
 	var demoLimitBytes int64
-	err := a.withServerControlDatabaseWrite(r.Context(), "save-demo-settings", func(database *sql.DB) error {
+	err := a.withServerControlDatabaseRead(r.Context(), "validate-demo-settings", func(database *sql.DB) error {
 		store := hostingandsupport.Store{DB: database}
 		previousDemoSettings = (demo.Store{DB: database}).Settings(r.Context())
 		if demoDomain != "" {
@@ -26502,12 +26510,51 @@ func (a *App) saveHostingAndSupportDemoSettings(r *http.Request) string {
 		if parseErr != nil {
 			return parseErr
 		}
-		return (demo.Store{DB: database}).SaveSettingsWithLimit(r.Context(), demoDomain, demoSourceURL, demoCopyWholeSite, demoEnabled, demoLimitBytes)
+		return nil
 	})
 	if err != nil {
 		return err.Error()
 	}
 	settings := demo.Settings{Domain: demoDomain, SourceURL: demoSourceURL, CopyWholeSite: demoCopyWholeSite, Enabled: demoEnabled, MaxSiteBytes: demoLimitBytes}
+	losesPublicAccess := previousDemoSettings.Enabled && (!demoEnabled || normalizeDomainName(previousDemoSettings.Domain) != demoDomain)
+	settingsSaved := false
+	if losesPublicAccess {
+		// Stop new public grants before revoking persisted OAuth capabilities.
+		// Keep the former domain gated until the configuration change commits.
+		previousRuntime, found := a.runtimeDemoSiteState(r.Context())
+		if found && normalizeDomainName(previousRuntime.Settings.Domain) == normalizeDomainName(previousDemoSettings.Domain) {
+			previousRuntime.Status, previousRuntime.Refreshing = "preparing", true
+			a.updateRuntimeDemoSiteState(r.Context(), previousRuntime)
+		}
+		defer func() {
+			if !settingsSaved {
+				boundary := context.Background()
+				a.updateRuntimeDemoSiteState(boundary, a.loadDemoSiteRuntimeState(boundary))
+			}
+		}()
+		if a.aiCapabilities != nil {
+			if err := a.aiCapabilities.RevokeDomain(previousDemoSettings.Domain); err != nil {
+				return err.Error()
+			}
+		}
+	}
+	err = a.withServerControlDatabaseWrite(r.Context(), "save-demo-settings", func(database *sql.DB) error {
+		store := demo.Store{DB: database}
+		if !sameDemoSiteSettings(store.Settings(r.Context()), previousDemoSettings) {
+			return errors.New("demo settings changed; reload and retry")
+		}
+		// Owner assignment can change while the site participant revokes grants.
+		if demoDomain != "" {
+			if ownerDomain, found := (hostingandsupport.Store{DB: database}).OwnerDomain(r.Context()); found && normalizeDomainName(ownerDomain) == demoDomain {
+				return errors.New(translationOrDefault(translations, "billing_status_demo_owner_blocked", "The owner site cannot be used as the public demo site."))
+			}
+		}
+		return store.SaveSettingsWithLimit(r.Context(), demoDomain, demoSourceURL, demoCopyWholeSite, demoEnabled, demoLimitBytes)
+	})
+	if err != nil {
+		return err.Error()
+	}
+	settingsSaved = true
 	if !demoEnabled {
 		a.updateRuntimeDemoSiteState(r.Context(), demoSiteRuntimeState{Settings: settings, Status: "disabled"})
 		for _, disabledDemoDomain := range demo.UniqueDomains(previousDemoSettings.Domain, demoDomain) {
