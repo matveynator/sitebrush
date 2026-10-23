@@ -58,6 +58,28 @@ async function checkConnectionAndEditor() {
           assert.ok(menuLayout.fits && !menuLayout.scrolls, 'Menu fits the viewport without scrolling');
         }
       }
+      let publicMenuPaused = false;
+      await page.routeWebSocket(/sitebrush_menu_ws/, function routePublicMenu(socket) {
+        if (publicMenuPaused) {
+          socket.onMessage(function showUpdatingMenu() { socket.send(JSON.stringify({updating: true, message: 'Идёт обновление сайта, подождите.'})); });
+        } else {
+          socket.connectToServer();
+        }
+      });
+      await page.goto(fixtureURL + '/public-fixture');
+      await page.locator('h1').click({button: 'right'});
+      await page.locator('#SiteBrushMenuBox a[href*="profile"]').waitFor({state: 'visible'});
+      const lazyMenuStyle = await page.locator('#SiteBrushMenuBox .SiteBrushMenuBox').evaluate(menu => getComputedStyle(menu).position);
+      assert.equal(lazyMenuStyle, 'fixed', 'Lazy administrator menu retains its shadow-root styles');
+      publicMenuPaused = true;
+      await page.mouse.click(viewport.width - 4, viewport.height - 4);
+      await page.locator('h1').click({button: 'right'});
+      await page.locator('#SiteBrushMenuBox').getByText('Идёт обновление сайта, подождите.').waitFor({state: 'visible'});
+      assert.equal(await page.locator('#SiteBrushMenuBox a, #SiteBrushMenuBox button').count(), 0, 'Maintenance menu exposes no edit or sign-in actions');
+      publicMenuPaused = false;
+      await page.mouse.click(viewport.width - 4, viewport.height - 4);
+      await page.locator('h1').click({button: 'right'});
+      await page.locator('#SiteBrushMenuBox a[href*="profile"]').waitFor({state: 'visible'});
       await page.route('**/*', async function routeProviderFixture(route) {
         const address = new URL(route.request().url());
         if (address.searchParams.has('ai_provider_status')) {

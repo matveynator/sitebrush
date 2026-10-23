@@ -1599,7 +1599,10 @@
     "mail_monitor_stage_mail_blocked": "Email request IP blocked",
     "mail_monitor_stage_mail_unblocked": "Email request IP unblocked",
     "mail_journal_until": "until",
-    "mail_monitor_stage_transport_sent": "Forwarded to relay"
+    "mail_monitor_stage_transport_sent": "Forwarded to relay",
+    "menu_updating": "The site is updating. Please wait.",
+    "update_stage_stopping": "Stopping the editor; public pages remain available",
+    "update_launcher_version": "Launcher: v.%s"
   },
   "fr": {
     "edit_saving": "Enregistrement de la page…",
@@ -2990,7 +2993,10 @@
     "mail_monitor_stage_mail_blocked": "Email request IP blocked",
     "mail_monitor_stage_mail_unblocked": "Email request IP unblocked",
     "mail_journal_until": "until",
-    "mail_monitor_stage_transport_sent": "Forwarded to relay"
+    "mail_monitor_stage_transport_sent": "Forwarded to relay",
+    "menu_updating": "Mise à jour du site. Veuillez patienter.",
+    "update_stage_stopping": "Stopping the editor; public pages remain available",
+    "update_launcher_version": "Launcher: v.%s"
   },
   "ru": {
     "mail_monitor_title": "Почта и аккаунты · 24 часа / 90 дней",
@@ -4592,7 +4598,10 @@
     "mail_monitor_stage_mail_blocked": "Запросы писем с IP заблокированы",
     "mail_monitor_stage_mail_unblocked": "Запросы писем с IP разрешены",
     "mail_journal_until": "до",
-    "mail_monitor_stage_transport_sent": "Передано серверу пересылки"
+    "mail_monitor_stage_transport_sent": "Передано серверу пересылки",
+    "menu_updating": "Идёт обновление сайта, подождите.",
+    "update_stage_stopping": "Остановка редактора; статические страницы доступны",
+    "update_launcher_version": "Запускающий процесс: v.%s"
   },
   "ja": {
     "edit_saving": "ページを保存中…",
@@ -5979,7 +5988,10 @@
     "mail_monitor_stage_mail_blocked": "Email request IP blocked",
     "mail_monitor_stage_mail_unblocked": "Email request IP unblocked",
     "mail_journal_until": "until",
-    "mail_monitor_stage_transport_sent": "Forwarded to relay"
+    "mail_monitor_stage_transport_sent": "Forwarded to relay",
+    "menu_updating": "サイトを更新しています。お待ちください。",
+    "update_stage_stopping": "Stopping the editor; public pages remain available",
+    "update_launcher_version": "Launcher: v.%s"
   },
   "it": {
     "edit_saving": "Salvataggio della pagina…",
@@ -7366,7 +7378,10 @@
     "mail_monitor_stage_mail_blocked": "Email request IP blocked",
     "mail_monitor_stage_mail_unblocked": "Email request IP unblocked",
     "mail_journal_until": "until",
-    "mail_monitor_stage_transport_sent": "Forwarded to relay"
+    "mail_monitor_stage_transport_sent": "Forwarded to relay",
+    "menu_updating": "Aggiornamento del sito in corso. Attendi.",
+    "update_stage_stopping": "Stopping the editor; public pages remain available",
+    "update_launcher_version": "Launcher: v.%s"
   },
   "sv": {
     "edit_saving": "Sparar sidan…",
@@ -8753,7 +8768,10 @@
     "mail_monitor_stage_mail_blocked": "Email request IP blocked",
     "mail_monitor_stage_mail_unblocked": "Email request IP unblocked",
     "mail_journal_until": "until",
-    "mail_monitor_stage_transport_sent": "Forwarded to relay"
+    "mail_monitor_stage_transport_sent": "Forwarded to relay",
+    "menu_updating": "Webbplatsen uppdateras. Vänta.",
+    "update_stage_stopping": "Stopping the editor; public pages remain available",
+    "update_launcher_version": "Launcher: v.%s"
   },
   "fi": {
     "edit_saving": "Tallennetaan sivua…",
@@ -10140,7 +10158,10 @@
     "mail_monitor_stage_mail_blocked": "Email request IP blocked",
     "mail_monitor_stage_mail_unblocked": "Email request IP unblocked",
     "mail_journal_until": "until",
-    "mail_monitor_stage_transport_sent": "Forwarded to relay"
+    "mail_monitor_stage_transport_sent": "Forwarded to relay",
+    "menu_updating": "Sivustoa päivitetään. Odota.",
+    "update_stage_stopping": "Stopping the editor; public pages remain available",
+    "update_launcher_version": "Launcher: v.%s"
   },
   "mn": {
     "edit_saving": "Хуудсыг хадгалж байна…",
@@ -11527,7 +11548,10 @@
     "mail_monitor_stage_mail_blocked": "Email request IP blocked",
     "mail_monitor_stage_mail_unblocked": "Email request IP unblocked",
     "mail_journal_until": "until",
-    "mail_monitor_stage_transport_sent": "Forwarded to relay"
+    "mail_monitor_stage_transport_sent": "Forwarded to relay",
+    "menu_updating": "Сайтыг шинэчилж байна. Түр хүлээнэ үү.",
+    "update_stage_stopping": "Stopping the editor; public pages remain available",
+    "update_launcher_version": "Launcher: v.%s"
   },
   "zh": {
     "edit_saving": "正在保存页面…",
@@ -12914,7 +12938,10 @@
     "mail_monitor_stage_mail_blocked": "Email request IP blocked",
     "mail_monitor_stage_mail_unblocked": "Email request IP unblocked",
     "mail_journal_until": "until",
-    "mail_monitor_stage_transport_sent": "Forwarded to relay"
+    "mail_monitor_stage_transport_sent": "Forwarded to relay",
+    "menu_updating": "网站正在更新，请稍候。",
+    "update_stage_stopping": "Stopping the editor; public pages remain available",
+    "update_launcher_version": "Launcher: v.%s"
   },
   "he": {
     "edit_saving": "שמירת הדף…",
@@ -14301,7 +14328,10 @@
     "mail_monitor_stage_mail_blocked": "Email request IP blocked",
     "mail_monitor_stage_mail_unblocked": "Email request IP unblocked",
     "mail_journal_until": "until",
-    "mail_monitor_stage_transport_sent": "Forwarded to relay"
+    "mail_monitor_stage_transport_sent": "Forwarded to relay",
+    "menu_updating": "האתר מתעדכן. נא להמתין.",
+    "update_stage_stopping": "Stopping the editor; public pages remain available",
+    "update_launcher_version": "Launcher: v.%s"
   },
   "fa": {
     "edit_saving": "در حال ذخیره صفحه…",
@@ -15688,7 +15718,10 @@
     "mail_monitor_stage_mail_blocked": "Email request IP blocked",
     "mail_monitor_stage_mail_unblocked": "Email request IP unblocked",
     "mail_journal_until": "until",
-    "mail_monitor_stage_transport_sent": "Forwarded to relay"
+    "mail_monitor_stage_transport_sent": "Forwarded to relay",
+    "menu_updating": "سایت در حال به‌روزرسانی است. لطفاً صبر کنید.",
+    "update_stage_stopping": "Stopping the editor; public pages remain available",
+    "update_launcher_version": "Launcher: v.%s"
   },
   "de": {
     "edit_saving": "Seite wird gespeichert…",
@@ -17075,7 +17108,10 @@
     "mail_monitor_stage_mail_blocked": "Email request IP blocked",
     "mail_monitor_stage_mail_unblocked": "Email request IP unblocked",
     "mail_journal_until": "until",
-    "mail_monitor_stage_transport_sent": "Forwarded to relay"
+    "mail_monitor_stage_transport_sent": "Forwarded to relay",
+    "menu_updating": "Die Website wird aktualisiert. Bitte warten.",
+    "update_stage_stopping": "Stopping the editor; public pages remain available",
+    "update_launcher_version": "Launcher: v.%s"
   },
   "tr": {
     "edit_saving": "Sayfa kaydediliyor…",
@@ -18462,7 +18498,10 @@
     "mail_monitor_stage_mail_blocked": "Email request IP blocked",
     "mail_monitor_stage_mail_unblocked": "Email request IP unblocked",
     "mail_journal_until": "until",
-    "mail_monitor_stage_transport_sent": "Forwarded to relay"
+    "mail_monitor_stage_transport_sent": "Forwarded to relay",
+    "menu_updating": "Site güncelleniyor. Lütfen bekleyin.",
+    "update_stage_stopping": "Stopping the editor; public pages remain available",
+    "update_launcher_version": "Launcher: v.%s"
   },
   "kk": {
     "edit_saving": "Бет сақталуда…",
@@ -19849,7 +19888,10 @@
     "mail_monitor_stage_mail_blocked": "Email request IP blocked",
     "mail_monitor_stage_mail_unblocked": "Email request IP unblocked",
     "mail_journal_until": "until",
-    "mail_monitor_stage_transport_sent": "Forwarded to relay"
+    "mail_monitor_stage_transport_sent": "Forwarded to relay",
+    "menu_updating": "Сайт жаңартылып жатыр. Күте тұрыңыз.",
+    "update_stage_stopping": "Stopping the editor; public pages remain available",
+    "update_launcher_version": "Launcher: v.%s"
   },
   "es": {
     "edit_saving": "Guardando la página…",
@@ -21236,7 +21278,10 @@
     "mail_monitor_stage_mail_blocked": "Email request IP blocked",
     "mail_monitor_stage_mail_unblocked": "Email request IP unblocked",
     "mail_journal_until": "until",
-    "mail_monitor_stage_transport_sent": "Forwarded to relay"
+    "mail_monitor_stage_transport_sent": "Forwarded to relay",
+    "menu_updating": "El sitio se está actualizando. Espera.",
+    "update_stage_stopping": "Stopping the editor; public pages remain available",
+    "update_launcher_version": "Launcher: v.%s"
   },
   "pt": {
     "edit_saving": "A guardar a página…",
@@ -22623,6 +22668,9 @@
     "mail_monitor_stage_mail_blocked": "Email request IP blocked",
     "mail_monitor_stage_mail_unblocked": "Email request IP unblocked",
     "mail_journal_until": "until",
-    "mail_monitor_stage_transport_sent": "Forwarded to relay"
+    "mail_monitor_stage_transport_sent": "Forwarded to relay",
+    "menu_updating": "O site está sendo atualizado. Aguarde.",
+    "update_stage_stopping": "Stopping the editor; public pages remain available",
+    "update_launcher_version": "Launcher: v.%s"
   }
 }

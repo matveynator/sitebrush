@@ -144,8 +144,9 @@ func ChildContact(storagePath string, tasks chan ChildTask, stop <-chan struct{}
 }
 
 type Response struct {
-	State State
-	Error string
+	Detail string `json:"detail,omitempty"`
+	State  State
+	Error  string
 }
 
 type identity struct {

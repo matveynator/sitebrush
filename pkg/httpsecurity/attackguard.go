@@ -122,7 +122,7 @@ type attackGuardRequest struct {
 	Settings    SecuritySettings
 	Comment     string
 	Success     bool
-	Reply       chan attackGuardResult
+	Reply       chan attackGuardResult `json:"-"`
 }
 
 type attackGuardResult struct {
@@ -135,10 +135,11 @@ type attackGuardResult struct {
 	Allowlist      []SecurityAllow
 	Settings       SecuritySettings
 	Changed        bool
-	Err            error
+	Err            error `json:"-"`
 }
 
 type AttackGuard struct {
+	remote   func(attackGuardRequest) (attackGuardResult, bool)
 	shards   []chan attackGuardRequest
 	save     chan struct{}
 	shutdown chan struct{}
@@ -1110,6 +1111,9 @@ func (guard *AttackGuard) persistenceSnapshot(now time.Time) ([]SecurityBlock, e
 }
 
 func (guard *AttackGuard) exchangeFast(request attackGuardRequest) (attackGuardResult, bool) {
+	if guard.remote != nil {
+		return guard.remote(request)
+	}
 	ip := normalizeSecurityIP(request.IP)
 	if ip == "" {
 		return attackGuardResult{}, true
@@ -1144,6 +1148,9 @@ func (guard *AttackGuard) exchangeAdmin(request attackGuardRequest) (attackGuard
 }
 
 func (guard *AttackGuard) exchangeShardAdmin(index int, request attackGuardRequest) (attackGuardResult, bool) {
+	if guard.remote != nil {
+		return guard.remote(request)
+	}
 	reply := make(chan attackGuardResult, 1)
 	request.Reply = reply
 	select {
@@ -1171,6 +1178,9 @@ func attackGuardShardIndex(ip string) int {
 }
 
 func (guard *AttackGuard) signalSave() {
+	if guard.remote != nil {
+		return
+	}
 	select {
 	case guard.save <- struct{}{}:
 	default:
@@ -1244,6 +1254,9 @@ func (guard *AttackGuard) saveSnapshot() error {
 }
 
 func (guard *AttackGuard) Close() {
+	if guard.remote != nil {
+		return
+	}
 	_ = guard.saveSnapshot()
 	close(guard.shutdown)
 	<-guard.done

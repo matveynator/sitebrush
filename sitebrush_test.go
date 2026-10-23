@@ -78,6 +78,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/netchantransport"
 	"github.com/matveynator/sitebrush/v2/pkg/outboundhttp"
 	"github.com/matveynator/sitebrush/v2/pkg/pagearchive"
+	"github.com/matveynator/sitebrush/v2/pkg/publicsite"
 	"github.com/matveynator/sitebrush/v2/pkg/securitysync"
 	"github.com/matveynator/sitebrush/v2/pkg/sitebrushtemplate"
 	"github.com/matveynator/sitebrush/v2/pkg/updateannounce"
@@ -7634,7 +7635,28 @@ func TestProfilePageChangesAdminEmailThroughSixDigitCode(t *testing.T) {
 	if err := rawDB.QueryRow(`SELECT token FROM email_confirmations WHERE domain=? AND action='profile' AND email=?`, "localhost", "new@outlook.com").Scan(&emailToken); err != nil {
 		t.Fatalf("read new-address confirmation: %v", err)
 	}
-	confirmRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?email_confirm="+url.QueryEscape(emailToken), nil)
+	confirmURL := "http://localhost:8080/?email_confirm=" + url.QueryEscape(emailToken)
+	confirmPreviewRequest := httptest.NewRequest(http.MethodGet, confirmURL, nil)
+	confirmPreviewRequest.AddCookie(request.Cookies()[0])
+	confirmPreviewResponse := httptest.NewRecorder()
+	application.route(confirmPreviewResponse, confirmPreviewRequest)
+	csrfMatch := regexp.MustCompile(`name="account_csrf" value="([^"]+)"`).FindStringSubmatch(confirmPreviewResponse.Body.String())
+	if len(csrfMatch) != 2 {
+		t.Fatal("confirmation form lacks browser session CSRF")
+	}
+	badConfirmation := httptest.NewRequest(http.MethodPost, confirmURL, nil)
+	badConfirmation.AddCookie(request.Cookies()[0])
+	badConfirmation.Header.Set("Origin", "null")
+	badResponse := httptest.NewRecorder()
+	application.route(badResponse, badConfirmation)
+	if badResponse.Code != http.StatusForbidden {
+		t.Fatal("missing confirmation CSRF was accepted")
+	}
+	confirmRequest := httptest.NewRequest(http.MethodPost, confirmURL, strings.NewReader(url.Values{"account_csrf": {csrfMatch[1]}}.Encode()))
+	confirmRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	confirmRequest.Header.Set("Origin", "null")
+	confirmRequest.Header.Set("Sec-Fetch-Site", "same-origin")
+	confirmRequest.AddCookie(request.Cookies()[0])
 	confirmResponse := httptest.NewRecorder()
 	application.route(confirmResponse, confirmRequest)
 	if confirmResponse.Code != http.StatusOK || !strings.Contains(confirmResponse.Body.String(), "Адрес электронной почты изменён") {
@@ -7657,7 +7679,16 @@ func TestProfilePageChangesAdminEmailThroughSixDigitCode(t *testing.T) {
 		t.Fatal("profile update did not refresh the session cookie")
 	}
 	authenticatedRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/", nil)
-	authenticatedRequest.AddCookie(profileCookies[0])
+	var renewedCookie *http.Cookie
+	for _, profileCookie := range profileCookies {
+		if profileCookie.Name == "sitebrush_session" && profileCookie.Value != "" {
+			renewedCookie = profileCookie
+		}
+	}
+	if renewedCookie == nil {
+		t.Fatal("confirmed account did not receive a session")
+	}
+	authenticatedRequest.AddCookie(renewedCookie)
 	if !application.isAdminRequest(authenticatedRequest) {
 		t.Fatal("refreshed profile session is not authenticated")
 	}
@@ -27846,6 +27877,10 @@ func TestMCPConnectionAndAIEditorBrowser(t *testing.T) {
 	staticFiles, _ := fs.Sub(embeddedWebFiles, "web/static")
 	router := http.NewServeMux()
 	router.Handle("/p/static/", http.StripPrefix("/p/static/", http.FileServer(http.FS(staticFiles))))
+	router.HandleFunc("/public-fixture", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		io.WriteString(w, "<!doctype html><html><body><h1>Public fixture</h1>"+buildGuestContextMenuScriptForLanguage("/public-fixture", "localhost", "ru")+"</body></html>")
+	})
 	router.HandleFunc("/menu-fixture", func(w http.ResponseWriter, r *http.Request) {
 		domain := "example.org"
 		if r.URL.Query().Get("central") == "1" {
@@ -28382,4 +28417,79 @@ func TestMCPPublicDemoEditsWithoutAuthorization(t *testing.T) {
 	if err == nil && result != nil && !result.IsError {
 		t.Fatal("former demo retained public access")
 	}
+}
+
+func TestPublishedBoundaryAvoidsSQLAndPreservesPrivateFiles(t *testing.T) {
+	application, database := newTestApplication(t)
+	stop := make(chan struct{})
+	defer close(stop)
+	application.publicCatalog = publicsite.NewCatalog(application.storagePath, stop)
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','owner@example.org','old',1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO file_access_rules(domain,file_name,access_mode) VALUES('example.org','secret.pdf','token')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO file_access_rules(domain,file_name,access_mode,protected_page_path) VALUES('example.org','section.pdf','page_password','/private')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO page_password_rules(domain,path,password_hash) VALUES('example.org','/private','fixture-hash')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.writePublicPolicy("example.org"); err != nil {
+		t.Fatal(err)
+	}
+	filename := filepath.Join(application.domainStaticDir("example.org"), "index.html")
+	os.MkdirAll(filepath.Dir(filename), 0755)
+	os.WriteFile(filename, []byte("<html><body>Published boundary</body></html>"), 0644)
+	application.db = panicSQLExecutor{t: t}
+	for _, query := range []string{"", "?utm_source=mail"} {
+		response := httptest.NewRecorder()
+		application.siteHTTPHandler(http.HandlerFunc(application.route)).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "https://example.org/"+query, nil))
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "Published boundary") {
+			t.Fatalf("%s: %d %s", query, response.Code, response.Body.String())
+		}
+	}
+	response := httptest.NewRecorder()
+	if application.servePublicPublished(response, httptest.NewRequest(http.MethodGet, "https://example.org/p/secret.pdf", nil), true) {
+		t.Fatal("stateful private file entered static delivery")
+	}
+	protectedFileRequest := httptest.NewRequest(http.MethodGet, "https://example.org/p/section.pdf", nil)
+	protectedFileRequest.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "unverified-session"})
+	if application.servePublicPublished(httptest.NewRecorder(), protectedFileRequest, false) {
+		t.Fatal("administrator file access must be checked by the active session owner")
+	}
+	protectedResponse := httptest.NewRecorder()
+	if !application.servePublicPublished(protectedResponse, protectedFileRequest, true) || protectedResponse.Code != http.StatusUnauthorized {
+		t.Fatal("paused public delivery bypassed section protection")
+	}
+	request := httptest.NewRequest(http.MethodGet, "https://example.org/?mcp", nil)
+	if application.servePublicPublished(httptest.NewRecorder(), request, false) {
+		t.Fatal("public handler swallowed a control request")
+	}
+}
+func BenchmarkPublicPublished(b *testing.B) {
+	stop, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	application := &App{storagePath: b.TempDir()}
+	application.publicCatalog = publicsite.NewCatalog(application.storagePath, stop.Done())
+	application.guestStaticHTMLCache = startGuestStaticHTMLCacheWorker(stop, 8<<20)
+	if err := publicsite.Write(application.storagePath, publicsite.Policy{Domain: "example.org"}); err != nil {
+		b.Fatal(err)
+	}
+	filename := filepath.Join(application.domainStaticDir("example.org"), "index.html")
+	os.MkdirAll(filepath.Dir(filename), 0755)
+	os.WriteFile(filename, []byte("<html><body>"+strings.Repeat("static ", 16000)+"</body></html>"), 0644)
+	request := httptest.NewRequest(http.MethodGet, "https://example.org/", nil)
+	application.servePublicPublished(&analyticsBenchmarkWriter{headers: make(http.Header)}, request, false)
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(worker *testing.PB) {
+		writer := &analyticsBenchmarkWriter{headers: make(http.Header)}
+		for worker.Next() {
+			if !application.servePublicPublished(writer, request, false) {
+				b.Fatal("published file missing")
+			}
+		}
+	})
 }

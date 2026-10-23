@@ -268,6 +268,12 @@ func TestSupervisorExplicitNoBackupAndCapabilities(t *testing.T) {
 	if state.Stage != "completed" || state.Backup != "" || state.BackupPolicy == nil || *state.BackupPolicy != (BackupPolicy{}) {
 		t.Fatal(state)
 	}
+	for _, event := range state.Progress.Events {
+		if event.Stage == "inspecting" || event.Stage == "preparing_backup" || event.Stage == "backing_up" {
+			t.Fatalf("disabled backup entered %s", event.Stage)
+		}
+	}
+
 }
 
 func waitMigrationFixture(t *testing.T, root string) {

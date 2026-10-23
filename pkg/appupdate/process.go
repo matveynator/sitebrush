@@ -30,6 +30,7 @@ type process struct {
 }
 
 type processOptions struct {
+	environment []string
 	directory   string
 	storagePath string
 	arguments   []string
@@ -105,11 +106,11 @@ func startProcess(options processOptions) process {
 					} else {
 						child = task.child
 					}
-				case "probe", "commit", "address":
+				case "probe", "commit", "address", "pause", "resume", "public_snapshot":
 					result := ChildResult{Error: "server is starting"}
 					if command != nil && child != nil {
 						replyTimeout := 5 * time.Second
-						if task.action == "commit" {
+						if task.action == "commit" || task.action == "pause" || task.action == "public_snapshot" {
 							replyTimeout = 35 * time.Second
 						}
 						reply := make(chan ChildResult, 1)
@@ -165,7 +166,7 @@ func startProcess(options processOptions) process {
 					}
 					command = exec.Command(filepath.Join(options.storagePath, Directory, task.version.Binary), arguments...)
 					command.Dir = options.directory
-					command.Env = childEnvironment(os.Environ())
+					command.Env = append(childEnvironment(os.Environ()), options.environment...)
 					command.Stdout = options.output
 					command.Stderr = options.output
 					lifeline, err = command.StdinPipe()

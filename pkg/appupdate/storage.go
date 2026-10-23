@@ -26,6 +26,7 @@ type Version struct {
 
 type State struct {
 	Launcher          string            `json:"launcher"`
+	LauncherVersion   string            `json:"launcher_version,omitempty"`
 	Arguments         []string          `json:"arguments"`
 	WorkingDirectory  string            `json:"working_directory"`
 	Stage             string            `json:"stage"`
@@ -768,4 +769,47 @@ func readLimitedFile(root *os.Root, name string, limit int64) ([]byte, error) {
 		return nil, errors.New("update metadata exceeds its size limit")
 	}
 	return payload, nil
+}
+
+// Old selected children do not understand the private-backend flag. A launcher
+// may enable persistent listeners only after that child's capability is known.
+func PublicBoundarySupported(storagePath, version string) bool {
+	store, err := os.OpenRoot(filepath.Join(storagePath, Directory))
+	if os.IsNotExist(err) {
+		return true
+	}
+	if err != nil {
+		return false
+	}
+	defer store.Close()
+	state, err := loadState(store)
+	if os.IsNotExist(err) {
+		return true
+	}
+	if err != nil {
+		return false
+	}
+	if state.Current.Version == version {
+		return true
+	}
+	_, err = store.Stat(filepath.Join("public-capabilities", state.Current.Version))
+	return err == nil
+}
+func ReportPublicBoundary(storagePath, version string) error {
+	if strings.ContainsAny(version, "/\\") || version == "" || version == "." || version == ".." {
+		return errors.New("invalid public boundary version")
+	}
+	store, err := os.OpenRoot(filepath.Join(storagePath, Directory))
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	if err = store.MkdirAll("public-capabilities", 0700); err != nil {
+		return err
+	}
+	file, err := store.OpenFile(filepath.Join("public-capabilities", version), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return err
+	}
+	return file.Close()
 }
