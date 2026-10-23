@@ -14,7 +14,7 @@
   <header class="page-header"><h1>{{index .T "update_title"}}</h1><a href="/?expenses">{{index .T "menu_expenses"}}</a></header>
   <p class="update-introduction">{{index .T "update_maintenance_notice"}}</p>
   <section class="update-versions" aria-label="{{index .T "update_versions"}}">
-    <div class="update-card"><span>{{index .T "update_running_version"}}</span><strong data-update-current>—</strong><small data-update-selected hidden></small></div>
+    <div class="update-card"><span>{{index .T "update_running_version"}}</span><strong data-update-current>—</strong><small data-update-selected hidden></small><small data-update-launcher-version></small></div>
     <div class="update-card"><span>{{index .T "update_available_version"}}</span><strong data-update-available>—</strong></div>
     <div class="update-card"><span>{{index .T "update_previous_version"}}</span><strong data-update-previous>—</strong><small data-update-rollback-reason hidden>{{index .T "update_rollback_unavailable"}}</small></div>
   </section>
@@ -88,6 +88,7 @@
     <span data-label="backup_analytics">{{index .T "update_backup_analytics"}}</span>
     <span data-label="backup_files">{{index .T "update_backup_files"}}</span>
     <span data-label="backup_settings">{{index .T "update_backup_settings"}}</span>
+    <span data-label="launcher_version">{{index .T "update_launcher_version"}}</span>
     <span data-label="backup_progress">{{index .T "update_backup_progress"}}</span>
     <span data-label="restarting_notice">{{index .T "update_restarting_notice"}}</span>
     <span data-label="log_truncated">{{index .T "update_log_truncated"}}</span>
@@ -130,6 +131,7 @@
     <span data-stage="downloading">{{index .T "update_stage_downloading"}}</span>
     <span data-stage="verifying">{{index .T "update_stage_verifying"}}</span>
     <span data-stage="inspecting">{{index .T "update_stage_inspecting"}}</span>
+    <span data-stage="stopping">{{index .T "update_stage_stopping"}}</span>
     <span data-stage="backing_up">{{index .T "update_stage_backing_up"}}</span>
     <span data-stage="preparing_backup">{{index .T "update_stage_preparing_backup"}}</span>
     <span data-stage="interrupted">{{index .T "update_ui_interrupted"}}</span>

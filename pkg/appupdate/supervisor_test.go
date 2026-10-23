@@ -3,6 +3,7 @@ package appupdate
 import (
 	"bytes"
 	"crypto/tls"
+	"github.com/matveynator/sitebrush/v2/pkg/publicsite"
 	"io"
 	"net"
 	"net/http"
@@ -127,6 +128,12 @@ func runUpdateFixture() int {
 	}()
 	for task := range tasks {
 		result := ChildResult{Address: listener.Addr().String(), Nonce: "fixture-nonce"}
+		if task.Action == "pause" {
+			response, relayErr := Exchange(root, Request{Action: "public_security", Detail: "callback"}, stop)
+			if relayErr != nil || response.Detail != "acknowledged" {
+				result.Error = "public owner did not service the child callback"
+			}
+		}
 		if task.Action == "probe" && candidate && exists("reject-health") {
 			result.Error = "fixture database cannot open"
 		}
@@ -191,7 +198,7 @@ func newFixtureInstallation(t *testing.T) string {
 	return ""
 }
 
-func startFixtureSupervisor(t *testing.T, root string, scenario string) (Options, <-chan struct{}, chan struct{}) {
+func startFixtureSupervisor(t *testing.T, root string, scenario string, configure ...func(*Options)) (Options, <-chan struct{}, chan struct{}) {
 	t.Helper()
 	binary, err := os.Executable()
 	if err != nil {
@@ -201,10 +208,10 @@ func startFixtureSupervisor(t *testing.T, root string, scenario string) (Options
 	if err != nil {
 		t.Fatal(err)
 	}
-	return startFixtureSupervisorWithPayload(t, root, scenario, payload)
+	return startFixtureSupervisorWithPayload(t, root, scenario, payload, configure...)
 }
 
-func startFixtureSupervisorWithPayload(t *testing.T, root, scenario string, payload []byte) (Options, <-chan struct{}, chan struct{}) {
+func startFixtureSupervisorWithPayload(t *testing.T, root, scenario string, payload []byte, configure ...func(*Options)) (Options, <-chan struct{}, chan struct{}) {
 	t.Helper()
 	binary, err := os.Executable()
 	if err != nil {
@@ -239,6 +246,9 @@ func startFixtureSupervisorWithPayload(t *testing.T, root, scenario string, payl
 	catalog.manifestURL = origin.URL + "/manifest"
 	catalog.artifactBase = origin.URL + "/"
 	options := Options{StoragePath: root, Executable: binary, Version: "1", Compatibility: Compatibility{Generation: 1, ReadsFrom: 1, ReadsThrough: 1, WritesCompatible: true}, Arguments: []string{"--update-fixture", "-path", root}, PublicKey: publicKey, Catalog: &catalog, Output: io.Discard, Stopped: scenario == "stopped", HealthWindow: 10 * time.Millisecond, HealthTimeout: 4 * time.Second}
+	for _, apply := range configure {
+		apply(&options)
+	}
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	result := make(chan error, 1)
@@ -721,5 +731,72 @@ func TestRestartFinishesInterruptedCleanupWithoutRestoringOldData(t *testing.T) 
 	}
 	if _, err := os.Stat(filepath.Join(root, Directory, orphan)); !os.IsNotExist(err) {
 		t.Fatal("interrupted cleanup was not retried", err)
+	}
+}
+
+func TestSupervisorPublicBoundarySurvivesUpdateAndRollback(t *testing.T) {
+	for _, scenario := range []string{"success", "reject-migration"} {
+		t.Run(scenario, func(t *testing.T) {
+			root := newFixtureInstallation(t)
+			if scenario == "reject-migration" {
+				if err := os.WriteFile(filepath.Join(root, "reject-migration"), []byte("fixture"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stop := make(chan struct{})
+			defer close(stop)
+			front := publicsite.NewFront("fixture", func(w http.ResponseWriter, r *http.Request, paused bool) bool {
+				io.WriteString(w, "published fixture")
+				return true
+			}, stop)
+			server := httptest.NewTLSServer(front)
+			defer server.Close()
+			transitions := make(chan bool, 16)
+			startFixtureSupervisor(t, root, scenario, func(options *Options) {
+				options.PublicState = func(address string, paused bool) error { transitions <- paused; return front.Set(address, paused) }
+				options.PublicSecurity = func(request []byte) ([]byte, error) { return []byte("acknowledged"), nil }
+			})
+			checked := checkedFixture(t, root)
+			fixtureExchange(t, root, "upgrade", checked.ManifestHash)
+			deadline := time.Now().Add(15 * time.Second)
+			var state State
+			for {
+				response, err := server.Client().Get(server.URL)
+				if err != nil {
+					t.Fatal(err)
+				}
+				body, _ := io.ReadAll(response.Body)
+				response.Body.Close()
+				if response.StatusCode != 200 || string(body) != "published fixture" {
+					t.Fatalf("public response: %d %s", response.StatusCode, body)
+				}
+				state = fixtureExchange(t, root, "status", "").State
+				if !state.Busy {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("public update did not finish", state.Stage)
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			expected := "completed"
+			if scenario != "success" {
+				expected = "rolled_back"
+			}
+			if state.Stage != expected {
+				t.Fatalf("stage=%s error=%s", state.Stage, state.Error)
+			}
+			paused, resumed := false, false
+			for len(transitions) > 0 {
+				if <-transitions {
+					paused = true
+				} else if paused {
+					resumed = true
+				}
+			}
+			if !paused || !resumed {
+				t.Fatal("public boundary did not pause and resume the editor")
+			}
+		})
 	}
 }

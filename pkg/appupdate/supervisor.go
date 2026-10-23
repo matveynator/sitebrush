@@ -32,8 +32,13 @@ type Options struct {
 	HealthWindow     time.Duration
 	HealthTimeout    time.Duration
 	// Catalog is only injectable by Go callers; remote requests cannot select it.
-	Catalog  *Catalog
-	shutdown <-chan struct{}
+	Catalog *Catalog
+	// PublicState updates the independent HTTP boundary before a writer stops.
+	PublicState       func(address string, paused bool) error
+	PublicSecurity    func([]byte) ([]byte, error)
+	PublicCertificate func(string) error
+	Environment       []string
+	shutdown          <-chan struct{}
 }
 
 type transition struct {
@@ -113,6 +118,8 @@ func Run(options Options, stop <-chan struct{}) error {
 		}
 	}
 	state.BackupOptions = true
+	state.LauncherVersion = options.Version
+	restrictPublicRollback(store, options, &state)
 	if options.Stopped && state.WorkingDirectory != "" {
 		options.WorkingDirectory = state.WorkingDirectory
 	}
@@ -126,7 +133,7 @@ func Run(options Options, stop <-chan struct{}) error {
 		return err
 	}
 	controllerStop := make(chan struct{})
-	worker := startProcess(processOptions{storagePath: options.StoragePath, arguments: options.Arguments, directory: options.WorkingDirectory, output: options.Output, stop: controllerStop})
+	worker := startProcess(processOptions{storagePath: options.StoragePath, arguments: options.Arguments, environment: options.Environment, directory: options.WorkingDirectory, output: options.Output, stop: controllerStop})
 	defer func() { close(controllerStop); <-worker.done }()
 	if !options.Stopped {
 		if err := verifiedStart(store, worker, state.Current, false); err != nil {
@@ -161,14 +168,16 @@ func Run(options Options, stop <-chan struct{}) error {
 	}
 	initial := time.NewTimer(10 * time.Second)
 	defer initial.Stop()
-	jitter := time.Duration(time.Now().UnixNano() % int64(15*time.Minute))
-	ticker := time.NewTicker(6*time.Hour + jitter)
+	jitter := time.Duration(time.Now().UnixNano() % int64(time.Minute))
+	ticker := time.NewTicker(15*time.Minute + jitter)
 	defer ticker.Stop()
 	idle := time.NewTicker(time.Minute)
 	defer idle.Stop()
 	lastContact := time.Now()
 	var loggedSequence uint64
 	var operationCancel chan struct{}
+	starting := true
+	initialAddress := ""
 	logOperation := func() {
 		sequence, _ := WriteOperationEvents(options.Output, state.Progress, loggedSequence)
 		loggedSequence = sequence
@@ -177,6 +186,16 @@ func Run(options Options, stop <-chan struct{}) error {
 		select {
 		case err := <-worker.failures:
 			if !state.Busy && !options.Stopped {
+				if options.PublicState != nil {
+					options.PublicState("", true)
+					state.RecoveryRequired = true
+					state.Error = fmt.Sprintf("server process failed: %v", err)
+					state.Stage = "failed"
+					if saveErr := atomicJSON(store, "state.json", state); saveErr != nil {
+						return saveErr
+					}
+					continue
+				}
 				return fmt.Errorf("server process failed: %w", err)
 			}
 		case <-stop:
@@ -243,6 +262,15 @@ func Run(options Options, stop <-chan struct{}) error {
 			completed.NotificationCode = state.NotificationCode
 			completed.NotificationError = state.NotificationError
 			state = completed
+			restrictPublicRollback(store, options, &state)
+			if starting {
+				starting = false
+				if initialAddress != "" && options.PublicState != nil {
+					if publicErr := options.PublicState(initialAddress, false); publicErr != nil {
+						return publicErr
+					}
+				}
+			}
 			if err := atomicJSON(store, "state.json", state); err != nil {
 				return err
 			}
@@ -258,8 +286,36 @@ func Run(options Options, stop <-chan struct{}) error {
 			response.State.Busy = state.Busy || checking
 			response.State.Checking = checking
 			switch request.Action {
+			case "public_certificate":
+				response = Response{}
+				if options.PublicCertificate == nil {
+					response.Error = "public certificate contact unavailable"
+					break
+				}
+				if certificateErr := options.PublicCertificate(request.Detail); certificateErr != nil {
+					response.Error = certificateErr.Error()
+				}
+			case "public_security":
+				response = Response{}
+				if options.PublicSecurity == nil {
+					response.Error = "public security contact unavailable"
+					break
+				}
+				encoded, relayErr := options.PublicSecurity([]byte(request.Detail))
+				if relayErr != nil {
+					response.Error = relayErr.Error()
+				} else {
+					response.Detail = string(encoded)
+				}
 			case "status":
+				checkedAt, _ := time.Parse(time.RFC3339Nano, state.CheckedAt)
+				if time.Since(checkedAt) >= 15*time.Minute {
+					startCheck()
+				}
 			case "server_ready":
+				if starting {
+					initialAddress = request.Detail
+				}
 				if !state.Busy {
 					arguments, err := argumentsForAddress(state.Arguments, request.Detail)
 					if err != nil {
@@ -271,6 +327,12 @@ func Run(options Options, stop <-chan struct{}) error {
 						break
 					}
 					state.Arguments = arguments
+					if options.PublicState != nil {
+						if publicErr := options.PublicState(request.Detail, false); publicErr != nil {
+							response.Error = publicErr.Error()
+							break
+						}
+					}
 					if err := atomicJSON(store, "state.json", state); err != nil {
 						response.Error = err.Error()
 					}
@@ -360,6 +422,13 @@ func Run(options Options, stop <-chan struct{}) error {
 					response.Error = err.Error()
 					break
 				}
+				if options.PublicState != nil {
+					if publicErr := options.PublicState("", true); publicErr != nil {
+						response.Error = publicErr.Error()
+						break
+					}
+				}
+
 				state.Busy = true
 				state.Operation = identifier
 				state.Error = ""
@@ -576,7 +645,27 @@ func verifiedStart(store *os.Root, worker process, version Version, probation bo
 	return worker.exchange("start", version, probation)
 }
 
-func perform(options Options, store *os.Root, catalog Catalog, worker process, state State, action string, progress chan<- transition, stop <-chan struct{}) State {
+func perform(options Options, store *os.Root, catalog Catalog, worker process, state State, action string, progress chan<- transition, stop <-chan struct{}) (result State) {
+	defer func() {
+		if options.PublicState == nil || result.RecoveryRequired || sessionStopped(options.shutdown) {
+			return
+		}
+		contact, err := worker.control("address")
+		if err == nil {
+			_, err = worker.control("resume")
+		}
+		if err == nil {
+			_, err = worker.control("public_snapshot")
+		}
+		if err == nil {
+			err = options.PublicState(contact.Address, false)
+		}
+		if err != nil {
+			result.RecoveryRequired = true
+			result.Error += "; public activation: " + err.Error()
+			result.Stage = "failed"
+		}
+	}()
 	old := state.Current
 	previousBefore := state.Previous
 	recoveryVersion := old
@@ -728,6 +817,14 @@ func perform(options Options, store *os.Root, catalog Catalog, worker process, s
 		state.Busy = false
 		return state
 	}
+	if options.PublicState != nil {
+		if _, err := waitForAddress(worker, stop); err != nil {
+			return fail(err)
+		}
+		if _, err := worker.control("pause"); err != nil {
+			return fail(err)
+		}
+	}
 	if len(state.Arguments) > 0 {
 		options.Arguments = append([]string(nil), state.Arguments...)
 	}
@@ -812,28 +909,46 @@ func perform(options Options, store *os.Root, catalog Catalog, worker process, s
 		}
 	}
 	state.Candidate = &candidate
-	if err := emit("inspecting"); err != nil {
-		return fail(err)
-	}
 	selected := backupScope{Policy: *state.BackupPolicy, Control: scope}
-	inspection, err := runMeasured(stop, func(updates chan<- WorkProgress, session <-chan struct{}) (backupInspection, error) {
-		return inspectSelectedSpace(options.StoragePath, selected, 0, updates, session)
-	}, report)
-	if err != nil {
+	staged := &stagedBackup{Scope: selected}
+	var inspection backupInspection
+	if selected.Policy != (BackupPolicy{}) {
+		if err := emit("inspecting"); err != nil {
+			return fail(err)
+		}
+		inspection, err = runMeasured(stop, func(updates chan<- WorkProgress, session <-chan struct{}) (backupInspection, error) {
+			return inspectSelectedSpace(options.StoragePath, selected, 0, updates, session)
+		}, report)
+		if err != nil {
+			return fail(err)
+		}
+		state.BackupGroups = inspection.Groups
+		if err := emit("preparing_backup"); err != nil {
+			return fail(err)
+		}
+		staged, err = runMeasured(stop, func(updates chan<- WorkProgress, session <-chan struct{}) (*stagedBackup, error) {
+			return prepareSelectedBackup(options.StoragePath, store, state.Operation, selected, inspection.Work, updates, session)
+		}, report)
+		if err != nil {
+			return fail(err)
+		}
+	} else {
+		state.Progress.event(state.Stage, "backup_skipped", "No backup groups selected")
+	}
+	if err := emit("stopping"); err != nil {
 		return fail(err)
 	}
-	state.BackupGroups = inspection.Groups
-	if err := emit("preparing_backup"); err != nil {
-		return fail(err)
-	}
-	staged, err := runMeasured(stop, func(updates chan<- WorkProgress, session <-chan struct{}) (*stagedBackup, error) {
-		return prepareSelectedBackup(options.StoragePath, store, state.Operation, selected, inspection.Work, updates, session)
-	}, report)
-	if err != nil {
-		return fail(err)
-	}
-	if err := emit("backing_up"); err != nil {
-		return fail(err)
+	if options.PublicState != nil {
+		if _, err := worker.control("public_snapshot"); err != nil {
+			return fail(err)
+		}
+		contact, contactErr := worker.control("address")
+		if contactErr != nil {
+			return fail(contactErr)
+		}
+		if publicErr := options.PublicState(contact.Address, true); publicErr != nil {
+			return fail(publicErr)
+		}
 	}
 	if err := worker.exchange("stop", Version{}, false); err != nil {
 		return fail(err)
@@ -843,20 +958,24 @@ func perform(options Options, store *os.Root, catalog Catalog, worker process, s
 	if err := persist(); err != nil {
 		return fail(err)
 	}
-	inspection, err = runMeasured(stop, func(updates chan<- WorkProgress, session <-chan struct{}) (backupInspection, error) {
-		return inspectSelectedSpace(options.StoragePath, selected, staged.Bytes, updates, session)
-	}, report)
-	if err != nil {
-		return fail(err)
+	if selected.Policy != (BackupPolicy{}) {
+		if err := emit("backing_up"); err != nil {
+			return fail(err)
+		}
+		inspection, err = runMeasured(stop, func(updates chan<- WorkProgress, session <-chan struct{}) (backupInspection, error) {
+			return inspectSelectedSpace(options.StoragePath, selected, staged.Bytes, updates, session)
+		}, report)
+		if err != nil {
+			return fail(err)
+		}
+		state.BackupGroups = inspection.Groups
+		state.Backup, err = runMeasured(stop, func(updates chan<- WorkProgress, session <-chan struct{}) (string, error) {
+			return staged.finish(options.StoragePath, store, inspection.Work, updates, session)
+		}, report)
+		if err != nil {
+			return fail(err)
+		}
 	}
-	state.BackupGroups = inspection.Groups
-	backup, err := runMeasured(stop, func(updates chan<- WorkProgress, session <-chan struct{}) (string, error) {
-		return staged.finish(options.StoragePath, store, inspection.Work, updates, session)
-	}, report)
-	if err != nil {
-		return fail(err)
-	}
-	state.Backup = backup
 	changed = true
 	state.DataChanged = true
 	if err := emit("installing"); err != nil {
@@ -945,6 +1064,11 @@ func argumentsForAddress(arguments []string, address string) ([]string, error) {
 		return nil, errors.New("invalid server HTTP contact")
 	}
 	result := append([]string(nil), arguments...)
+	for _, argument := range result {
+		if argument == "-public-proxy" {
+			return result, nil
+		}
+	}
 	for index, argument := range result {
 		if argument == "-port" && index+1 < len(result) {
 			if strings.Split(result[index+1], ",")[0] != port {
@@ -1058,4 +1182,17 @@ func inspectBackupSpace(storagePath string, updates chan<- WorkProgress, stop <-
 		return work, fmt.Errorf("database backup and recovery require %d free bytes for %d database files (%d bytes), have %d", required, work.TotalFiles, work.TotalBytes, available)
 	}
 	return work, nil
+}
+
+// Public listeners cannot be handed to a release that lacks the private adapter.
+// Such versions remain startable with their own compatible launcher.
+func restrictPublicRollback(store *os.Root, options Options, state *State) {
+	if options.PublicState == nil || state.Previous == nil || state.Previous.Version == options.Version {
+		return
+	}
+	if _, err := store.Stat(filepath.Join("public-capabilities", state.Previous.Version)); err == nil {
+		return
+	}
+	state.RollbackAvailable = false
+	state.RollbackReason = "Previous application requires its compatible launcher; persistent public serving is unavailable in that version"
 }

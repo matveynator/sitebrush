@@ -236,6 +236,14 @@ The result remains ordinary static HTML.
 
 ---
 
+## Server updates
+
+The launcher keeps the public HTTP and HTTPS listeners open while the editor process stops, migrates its databases, starts, or rolls back. Published pages and public files continue to load. Editing pauses, and the right-click menu displays an update notice. Password protection and file access restrictions still apply; downloads requiring a database transaction wait until the editor is available.
+
+The server owner sees a newer signed release at the bottom of the SiteBrush menu. The launcher checks at startup and every 15 minutes. Unchecking every backup group skips backup scanning and copying; shutdown and migration have separate progress stages. The update panel shows the running launcher version as well as the application version.
+
+Existing installations need the new application and launcher, followed by one service restart, to enable persistent public listeners. Updating only a child process leaves the old launcher running. A newer launcher continues to support an older selected application until that application has also been updated.
+
 ## Best suited for
 
 SiteBrush works especially well for:

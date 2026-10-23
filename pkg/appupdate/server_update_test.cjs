@@ -170,6 +170,10 @@ assert.equal(campaignList.children[0].textContent, '21: 1 sent; 2 waiting; 3 ski
 campaignList.children[0].children[0].dispatch('click');
 assert.equal(central.socket.commands.at(-1).action, 'campaign_cancel');
 assert.equal(central.socket.commands.at(-1).version, '21');
+const noBackupPanel = installationPanel(false);
+noBackupPanel.socket.reply({State: {stage: 'stopping', current: {version: '1'}, launcher_version: '1', busy: true, backup_policy: {databases: false, analytics: false, files: false, settings: false}, progress: {action: 'upgrade', stage: 'stopping', from_version: '1', target_version: '2', events: [], work: {}}}});
+assert.equal(noBackupPanel.element('[data-update-steps]').children.length, 8, 'disabled backup stages must not appear as pending work');
+assert.equal(noBackupPanel.element('[data-update-launcher-version]').textContent, 'Launcher: v.1');
 const progressPanel = installationPanel(false);
 const progress = {
   action: 'upgrade', from_version: '919', target_version: '920', stage: 'downloading',
@@ -180,8 +184,8 @@ const progress = {
 };
 const downloading = {stage: 'downloading', current: {version: '919'}, busy: true, operation: 'operation-one', progress};
 progressPanel.socket.reply({ServerVersion: '919', State: downloading});
-assert.equal(progressPanel.element('[data-update-percent]').textContent, '15%');
-assert.equal(progressPanel.element('[data-update-progress]').attributes.get('aria-valuenow'), '15');
+assert.equal(progressPanel.element('[data-update-percent]').textContent, '13%');
+assert.equal(progressPanel.element('[data-update-progress]').attributes.get('aria-valuenow'), '13');
 assert.equal(progressPanel.element('[data-update-elapsed]').textContent, '00:00:10');
 assert.equal(progressPanel.element('[data-update-stage-elapsed]').textContent, '00:00:05');
 assert.equal(progressPanel.element('[data-update-remaining]').textContent, 'This step: about 00:00:05');
@@ -189,7 +193,7 @@ const logBefore = progressPanel.element('[data-update-log]').textContent;
 assert.match(logBefore, /<img src=x onerror=alert\(1\)>/);
 assert.equal(progressPanel.element('[data-update-log]').children.length, 0, 'diagnostics must be rendered as text');
 progressPanel.socket.close();
-assert.equal(progressPanel.element('[data-update-percent]').textContent, '15%', 'disconnect must preserve confirmed progress');
+assert.equal(progressPanel.element('[data-update-percent]').textContent, '13%', 'disconnect must preserve confirmed progress');
 assert.match(progressPanel.element('[data-update-connection]').textContent, /reconnecting automatically/i);
 progressPanel.advance(5000);
 progressPanel.tick();
@@ -235,7 +239,7 @@ assert.equal(restoredPanel.element('[data-update-error]').hidden, true, 'notific
 const manualProgress = {...completed, action: 'rollback', from_version: '920', target_version: '919', stage: 'preparing', finished_at: '', work: {}, events: []};
 restoredPanel.socket.reply({ServerVersion: '920', State: {...downloading, progress: manualProgress}});
 assert.equal(restoredPanel.element('[data-update-percent]').textContent, '0%');
-assert.equal(restoredPanel.element('[data-update-steps]').children.length, 8, 'manual rollback must omit download and preflight stages');
+assert.equal(restoredPanel.element('[data-update-steps]').children.length, 9, 'manual rollback must omit download and preflight stages');
 assert.equal(restoredPanel.element('[data-update-log]').textContent.includes('<img'), false, 'new operation cannot retain the previous journal');
 const waitingPanel = installationPanel(false);
 waitingPanel.poll();

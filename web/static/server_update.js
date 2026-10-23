@@ -11,8 +11,8 @@
   const interfaceLabels = Object.fromEntries(Array.from(updateRoot.querySelectorAll('[data-label]'), function readInterfaceLabel(labelElement) {
     return [labelElement.dataset.label, labelElement.textContent];
   }));
-  const upgradeStages = ['preparing', 'downloading', 'verifying', 'inspecting', 'preparing_backup', 'backing_up', 'installing', 'restarting', 'checking', 'activating'];
-  const rollbackStages = ['preparing', 'inspecting', 'preparing_backup', 'backing_up', 'installing', 'restarting', 'checking', 'activating'];
+  const upgradeStages = ['preparing', 'downloading', 'verifying', 'inspecting', 'preparing_backup', 'stopping', 'backing_up', 'installing', 'restarting', 'checking', 'activating'];
+  const rollbackStages = ['preparing', 'inspecting', 'preparing_backup', 'stopping', 'backing_up', 'installing', 'restarting', 'checking', 'activating'];
 
   function label(labelName) { return interfaceLabels[labelName] || labelName; }
   function stageLabel(stageName) { return stageLabels[stageName] || label(stageName); }
@@ -36,6 +36,7 @@
     const updateState = updateModel.state;
     const operationBusy = Boolean(updateModel.queuedCommand) || (updateModel.pending && updateModel.pendingAction !== 'status') || Boolean(updateState && updateState.busy);
     putText('[data-update-current]', updateModel.serverVersion || (updateState ? updateState.current.version : '—'));
+    putText('[data-update-launcher-version]', updateState && updateState.launcher_version ? label('launcher_version').replace('%s', updateState.launcher_version) : '');
     putText('[data-update-available]', updateState && updateState.available ? updateState.available.version : '—');
     putText('[data-update-previous]', updateState && updateState.previous ? updateState.previous.version : '—');
     const selectedVersion = updateRoot.querySelector('[data-update-selected]');
@@ -88,12 +89,19 @@
     putText('[data-update-last-contact]', updateModel.lastContact ? ' · ' + label('last_contact') + ' ' + new Date(updateModel.lastContact).toLocaleTimeString() : '');
   }
 
+  function operationStages(progress) {
+    const stages = progress && progress.action === 'rollback' ? rollbackStages : upgradeStages;
+    const backupPolicy = updateModel.state && updateModel.state.backup_policy;
+    if (!backupPolicy || Object.values(backupPolicy).some(Boolean)) return stages;
+    return stages.filter(function omitDisabledBackupStage(stageName) { return !['inspecting', 'preparing_backup', 'backing_up'].includes(stageName); });
+  }
+
   function renderOperation(progress) {
     const events = progress && progress.events ? progress.events : [];
     const recovering = events.some(function rollbackStarted(operationEvent) { return operationEvent.stage === 'rolling_back'; });
     putText('[data-update-operation]', progress ? label(recovering ? 'auto_rollback' : progress.action) : label('no_telemetry'));
     putText('[data-update-route]', progress ? (recovering ? progress.target_version + ' → ' + progress.from_version : progress.from_version + ' → ' + progress.target_version) : '');
-    const stages = progress && progress.action === 'rollback' ? rollbackStages : upgradeStages;
+    const stages = operationStages(progress);
     const effectiveStage = progress && progress.stage === 'failed' ? progress.failed_stage : progress && progress.stage;
     const stageIndex = stages.indexOf(effectiveStage);
     const work = progress && progress.work ? progress.work : {};

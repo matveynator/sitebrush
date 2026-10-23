@@ -268,6 +268,12 @@ func TestSupervisorExplicitNoBackupAndCapabilities(t *testing.T) {
 	if state.Stage != "completed" || state.Backup != "" || state.BackupPolicy == nil || *state.BackupPolicy != (BackupPolicy{}) {
 		t.Fatal(state)
 	}
+	for _, event := range state.Progress.Events {
+		if event.Stage == "inspecting" || event.Stage == "preparing_backup" || event.Stage == "backing_up" {
+			t.Fatalf("disabled backup entered %s", event.Stage)
+		}
+	}
+
 }
 
 func waitMigrationFixture(t *testing.T, root string) {
@@ -410,5 +416,18 @@ func TestAnalyticsGroupIncludesLiveArchivesAndPreservesTransientFiles(t *testing
 	}
 	if contents, err := os.ReadFile(filepath.Join(root, "storage/analytics/new/archives/.summary-live")); err != nil || string(contents) != "new temporary" {
 		t.Fatal("unselected transient file was lost", string(contents), err)
+	}
+}
+
+func TestPersistentPublicBoundaryRejectsAnIncompatibleRollback(t *testing.T) {
+	store, err := openStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	state := State{Previous: &Version{Version: "0"}, RollbackAvailable: true}
+	restrictPublicRollback(store, Options{Version: "1", PublicState: func(string, bool) error { return nil }}, &state)
+	if state.RollbackAvailable || !strings.Contains(state.RollbackReason, "launcher") {
+		t.Fatal("legacy release was advertised as compatible with persistent listeners", state.RollbackReason)
 	}
 }
