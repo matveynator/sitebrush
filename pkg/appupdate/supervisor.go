@@ -34,11 +34,13 @@ type Options struct {
 	// Catalog is only injectable by Go callers; remote requests cannot select it.
 	Catalog *Catalog
 	// PublicState updates the independent HTTP boundary before a writer stops.
-	PublicState       func(address string, paused bool) error
-	PublicSecurity    func([]byte) ([]byte, error)
-	PublicCertificate func(string) error
-	Environment       []string
-	shutdown          <-chan struct{}
+	PublicState        func(address string, paused bool) error
+	PublicSecurity     func([]byte) ([]byte, error)
+	PublicObservations func([]byte) ([]byte, error)
+	PublicPolicy       func([]byte) ([]byte, error)
+	PublicCertificate  func(string) error
+	Environment        []string
+	shutdown           <-chan struct{}
 }
 
 type transition struct {
@@ -294,6 +296,30 @@ func Run(options Options, stop <-chan struct{}) error {
 				}
 				if certificateErr := options.PublicCertificate(request.Detail); certificateErr != nil {
 					response.Error = certificateErr.Error()
+				}
+			case "public_observations":
+				response = Response{}
+				if options.PublicObservations == nil {
+					response.Error = "public observation contact unavailable"
+					break
+				}
+				encoded, observationErr := options.PublicObservations([]byte(request.Detail))
+				if observationErr != nil {
+					response.Error = observationErr.Error()
+				} else {
+					response.Detail = string(encoded)
+				}
+			case "public_policy":
+				response = Response{}
+				if options.PublicPolicy == nil {
+					response.Error = "public policy contact unavailable"
+					break
+				}
+				encoded, policyErr := options.PublicPolicy([]byte(request.Detail))
+				if policyErr != nil {
+					response.Error = policyErr.Error()
+				} else {
+					response.Detail = string(encoded)
 				}
 			case "public_security":
 				response = Response{}
@@ -593,7 +619,7 @@ func acceptContacts(listener *netchan.Listener[wireRequest], requests chan<- Req
 								if err := connection.Deliver(result); err != nil {
 									return
 								}
-								if request.Action != "attach" {
+								if request.Action != "attach" && request.Action != "public_observations" {
 									graceful = true
 									return
 								}

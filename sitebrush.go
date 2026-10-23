@@ -194,10 +194,13 @@ var sitebrushComNetChanTLSPublicKey = ""
 
 // App keeps only explicit dependencies to stay readable and easy to swap.
 type App struct {
+	publicStreamer        *publicsite.Streamer
 	publicCatalog         *publicsite.Catalog
 	publicPublication     chan publicPublicationTask
 	publicPublicationDone <-chan struct{}
 	publicBoundary        bool
+	publicPolicyContact   bool
+	publicPolicyAddress   string
 
 	centralNetChanIdentity         *centralNetChanIdentityProcess
 	updateActivation               <-chan struct{}
@@ -3926,6 +3929,10 @@ func (a *App) accessLogMiddleware(next http.Handler) http.Handler {
 			colorYellow = "\033[33m"
 			colorReset  = "\033[0m"
 		)
+		if !a.debug && publicOrdinaryRequest(r) && !hasSitebrushSessionCookie(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		startedAt := time.Now()
 		requestDomain := diagnosticlog.SafeLogValue(requestLogDomain(r))
 		requestMethod := diagnosticlog.SafeLogValue(r.Method)
@@ -4420,7 +4427,7 @@ func (a *App) analyticsMiddleware(next http.Handler) http.Handler {
 			}
 		}
 		if a.securityAnalytics != nil && !isBrowserAnalyticsRequest(r) && len(a.securityAnalytics) < cap(a.securityAnalytics) {
-			securityEvent := siteAnalyticsEvent{Bytes: writer.bytesWritten, Domain: a.analyticsEventDomain(r, ""), Path: analyticsBoundedString(r.URL.EscapedPath(), 512), Query: analyticsBoundedString(accountauth.SafeQuery(r.URL.RawQuery), 2048), Method: r.Method, StatusCode: writer.statusCode, OccurredAt: startedAt.UTC(), RemoteAddress: analyticsBoundedString(r.RemoteAddr, 64), Forwarded: analyticsBoundedString(r.Header.Get("Forwarded"), 256), ForwardedFor: analyticsBoundedString(r.Header.Get("X-Forwarded-For"), 256), UserAgent: analyticsBoundedString(r.UserAgent(), 256), AcceptLanguage: analyticsBoundedString(r.Header.Get("Accept-Language"), 64), TrustedPeer: a.sitebrushPeerRequestTrusted(r, startedAt.UTC()), IndexingCrawler: httpsecurity.IsIndexingCrawlerRequest(r), SecurityBlocked: writer.Header().Get("X-Sitebrush-Security-Incident") != "" || writer.statusCode == http.StatusTooManyRequests || writer.statusCode == http.StatusForbidden}
+			securityEvent := siteAnalyticsEvent{Bytes: writer.bytesWritten, Domain: a.analyticsEventDomain(r, ""), Path: analyticsBoundedString(r.URL.EscapedPath(), 512), Query: analyticsBoundedString(accountauth.SafeQuery(r.URL.RawQuery), 2048), Method: r.Method, StatusCode: writer.statusCode, OccurredAt: startedAt.UTC(), RemoteAddress: analyticsBoundedString(r.RemoteAddr, 64), Forwarded: analyticsBoundedString(r.Header.Get("Forwarded"), 256), ForwardedFor: analyticsBoundedString(r.Header.Get("X-Forwarded-For"), 256), UserAgent: analyticsBoundedString(r.UserAgent(), 256), AcceptLanguage: analyticsBoundedString(r.Header.Get("Accept-Language"), 64), TrustedPeer: !publicOrdinaryRequest(r) && a.sitebrushPeerRequestTrusted(r, startedAt.UTC()), IndexingCrawler: httpsecurity.IsIndexingCrawlerRequest(r), SecurityBlocked: writer.Header().Get("X-Sitebrush-Security-Incident") != "" || writer.statusCode == http.StatusTooManyRequests || writer.statusCode == http.StatusForbidden}
 			securityEvent.SecurityAlreadyBlocked = writer.Header().Get("X-Sitebrush-Security-Already-Blocked") == "1"
 			select {
 			case a.securityAnalytics <- securityEvent:
@@ -9094,8 +9101,12 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		now := time.Now().UTC()
 		clientIP := clientIPAddress(r)
-		domain := normalizeDomainName(a.siteDomain(r.Context(), r))
-		trusted := httpsecurity.IsLocalRequest(r) || (!a.publicBoundary && a.sitebrushPeerRequestTrusted(r, now))
+		decision := a.publicRequestDecision(r)
+		domain := decision.Domain
+		if domain == "" {
+			domain = normalizeDomainName(domainFromRequest(r))
+		}
+		trusted := decision.LoadTrusted || httpsecurity.IsLocalRequest(r) || (!decision.Found && !a.publicBoundary && a.sitebrushPeerRequestTrusted(r, now))
 		crawlerRead := httpsecurity.IsIndexingCrawlerRequest(r)
 		if !trusted && a.attackGuard != nil {
 			trusted = a.trustRecordedAdminIP(r, domain, clientIP, now)
@@ -9108,8 +9119,16 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 			responseWriter := &statusCapturingResponseWriter{ResponseWriter: w}
 			next.ServeHTTP(responseWriter, r)
 			if responseWriter.statusCode == http.StatusNotFound && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
-				_, _, _ = a.attackGuard.ObserveSiteNotFoundFastDisposition(domain, clientIP, r.URL.EscapedPath(), now)
+				if decision.Found {
+					_, _, _, _ = a.attackGuard.ObservePublicRequest(domain, clientIP, r.URL.EscapedPath(), r.Method, http.StatusNotFound, now)
+				} else {
+					_, _, _ = a.attackGuard.ObserveSiteNotFoundFastDisposition(domain, clientIP, r.URL.EscapedPath(), now)
+				}
 			}
+		}
+		if trusted {
+			serveNext()
+			return
 		}
 		if a.attackGuard != nil {
 			var block httpsecurity.SecurityBlock
@@ -9122,7 +9141,11 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 				description := securityIncidentDescription(category, r.URL.EscapedPath(), 0)
 				block, blocked, alreadyBlocked = a.attackGuard.ObserveSiteIncidentEvidence(domain, clientIP, category, description, now)
 			} else {
-				block, blocked, allowed, alreadyBlocked = a.attackGuard.ObserveSiteRequestFastEvidence(domain, clientIP, r.URL.EscapedPath(), r.Method, trusted || crawlerRead, now)
+				if decision.Found && !crawlerRead {
+					block, blocked, allowed, alreadyBlocked = a.attackGuard.ObservePublicRequest(domain, clientIP, r.URL.EscapedPath(), r.Method, 0, now)
+				} else {
+					block, blocked, allowed, alreadyBlocked = a.attackGuard.ObserveSiteRequestFastEvidence(domain, clientIP, r.URL.EscapedPath(), r.Method, trusted || crawlerRead, now)
+				}
 			}
 			if allowed {
 				serveNext()
@@ -9242,8 +9265,8 @@ func adminResponseIsolationRequired(r *http.Request) bool {
 }
 
 func (a *App) trustRecordedAdminIP(r *http.Request, domain, clientIP string, now time.Time) bool {
-	if a.publicBoundary {
-		return a.publicAdminIPAllowed(domain, clientIP)
+	if a.publicCatalog != nil && publicOrdinaryRequest(r) {
+		return a.publicRequestDecision(r).LoadTrusted
 	}
 	if a.attackGuard == nil || a.db == nil || domain == "" || clientIP == "" {
 		return false
@@ -10221,8 +10244,17 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 
 	address := "localhost:" + strconv.Itoa(listenPort)
 
+	application.publicStreamer = publicsite.NewStreamer()
 	application.publicCatalog = publicsite.NewCatalog(effectiveStoragePath, ctx.Done())
 	application.startPublicPublication(ctx.Done())
+	application.publicPolicyContact = config.PublicProxy && os.Getenv("SITEBRUSH_PUBLIC_POLICY_CHANNEL") == "1"
+	application.publicPolicyAddress = listener.Addr().String()
+	if !config.PublicProxy {
+		if policyErr := application.publicCatalog.SetMemory(true); policyErr != nil {
+			log.Printf("PUBLIC using disk policy compatibility: %v", policyErr)
+		}
+	}
+
 	managedHandler := application.siteHTTPHandler(router)
 	healthNonce, nonceErr := appupdate.Identifier()
 	if nonceErr != nil {
@@ -10425,6 +10457,29 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 		log.Printf("Sitebrush secure registration is available on https://localhost:%d with a self-signed certificate", application.selfSignedTLSPort)
 	}
 
+	if application.publicPolicyContact {
+		go application.pullPublicObservations(ctx.Done())
+		go func() {
+			delay := time.Second
+			for {
+				encoded, _ := json.Marshal(publicsite.Change{Action: "enable", Address: application.publicPolicyAddress})
+				_, enableErr := appupdate.Exchange(effectiveStoragePath, appupdate.Request{Action: "public_policy", Detail: string(encoded)}, ctx.Done())
+				if enableErr != nil {
+					delay = min(time.Minute, delay*2)
+				} else {
+					delay = 5 * time.Second
+				}
+				timer := time.NewTimer(delay)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
+			}
+		}()
+	}
+
 	if config.DesktopMode {
 		if err := desktop.RunWebviewWindow(address, CompileVersion); err != nil {
 			return err
@@ -10498,6 +10553,42 @@ func buildEmbeddedStaticAssetCache(staticFiles fs.FS) (map[string]embeddedStatic
 	if err != nil {
 		return nil, err
 	}
+	refreshScript, readErr := fs.ReadFile(staticFiles, "public_menu.js")
+	if readErr != nil {
+		return nil, readErr
+	}
+	for language := range guestContextMenuTemplates {
+		markup := buildGuestContextMenuScriptForLanguage(guestContextMenuPagePathPlaceholder, guestContextMenuDomainPlaceholder, language)
+		var script strings.Builder
+		script.Write(refreshScript)
+		tokenizer := html.NewTokenizer(strings.NewReader(markup))
+		tag := ""
+		for {
+			tokenType := tokenizer.Next()
+			if tokenType == html.ErrorToken {
+				break
+			}
+			if tokenType == html.StartTagToken {
+				token := tokenizer.Token()
+				tag = token.Data
+				continue
+			}
+			if tokenType != html.TextToken {
+				continue
+			}
+			content := string(tokenizer.Text())
+			if tag == "style" {
+				encoded, _ := json.Marshal(content)
+				script.WriteString("(function(){const menuStyles=document.createElement('style');menuStyles.textContent=" + string(encoded) + ";menuStyles.dataset.sitebrushOwned='true';document.head.appendChild(menuStyles);})();")
+			}
+			if tag == "script" {
+				content = strings.ReplaceAll(content, `"`+guestContextMenuPagePathPlaceholder+`"`, "window.location.pathname")
+				content = strings.ReplaceAll(content, `"`+guestContextMenuDomainPlaceholder+`"`, "window.location.hostname")
+				script.WriteString(content)
+			}
+		}
+		assets["guest_menu."+language+".js"] = embeddedStaticAsset{body: []byte(script.String()), contentType: "text/javascript; charset=utf-8"}
+	}
 	log.Printf("%sPRELOAD%s embedded static assets=%d", terminalGreen(), terminalReset(), len(assets))
 	return assets, nil
 }
@@ -10544,7 +10635,10 @@ func (a *App) runStartupPreload(ctx context.Context, siteDatabaseRootDir string)
 		a.siteDatabaseRouter.Preload(ctx)
 	}
 	a.refreshAllPublicPolicies()
-	staticStats := a.preloadPublishedStaticFiles(ctx)
+	staticStats := startupStaticPreloadStats{}
+	if a.publicStreamer == nil {
+		staticStats = a.preloadPublishedStaticFiles(ctx)
+	}
 	chrootStats := a.preloadChrootStorage(ctx)
 	log.Printf("%sPRELOAD%s startup complete duration=%s site_db_root=%s static_files=%d static_html=%d chroot_entries=%d",
 		terminalGreen(), terminalReset(), time.Since(startedAt).String(), siteDatabaseRootDir, staticStats.files, staticStats.htmlFiles, chrootStats.entries)
@@ -10950,7 +11044,7 @@ func listenOnAvailablePort(requestedPort int) (net.Listener, int, error) {
 	// otherwise receive HTML and helpers from different running processes.
 	listener, err := net.Listen("tcp", ":"+strconv.Itoa(requestedPort))
 	if err == nil {
-		return listener, requestedPort, nil
+		return listener, listener.Addr().(*net.TCPAddr).Port, nil
 	}
 	for fallbackPort := 9898; fallbackPort < 65536; fallbackPort++ {
 		listener, err = net.Listen("tcp", ":"+strconv.Itoa(fallbackPort))
@@ -12141,6 +12235,39 @@ func (a *App) aiIngressDecisionForRequest(r *http.Request) (machine, owner bool)
 }
 
 func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
+	dynamic := a.siteDynamicHTTPHandler(router)
+	public := a.securityResponseHeadersMiddleware(a.analyticsMiddleware(a.accessLogMiddleware(a.authAbuseMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !a.servePublicPublished(w, r, false) {
+			dynamic.ServeHTTP(w, r)
+		}
+	})))))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if a.publicCatalog != nil && publicOrdinaryRequest(r) {
+			decision := a.publicRequestDecision(r)
+			if decision.Found {
+				public.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), publicDecisionContextKey{}, decision)))
+				return
+			}
+			if strings.HasPrefix(r.URL.Path, "/p/static/") && a.publicVisitorAsset(r.URL.Path) {
+				a.serveEmbeddedStaticAsset(w, r)
+				return
+			}
+			if !decision.Known && r.URL.Path == "/" && httpsecurity.IsLocalRequest(r) {
+				httpsecurity.RedirectLocal(w, r, "/?register", http.StatusSeeOther)
+				return
+			}
+			if decision.Known {
+				http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+			} else {
+				http.NotFound(w, r)
+			}
+			return
+		}
+		dynamic.ServeHTTP(w, r)
+	})
+}
+
+func (a *App) siteDynamicHTTPHandler(router http.Handler) http.Handler {
 	queryRouter := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if hasQueryFlag(r, "sitebrush_menu_ws") {
 			a.publicMenuSocket(w, r)
@@ -48921,56 +49048,69 @@ func hasSitebrushSessionCookie(r *http.Request) bool {
 	return err == nil
 }
 
+// The published tree is opened beneath its own site root. Read-only delivery
+// never prepares storage directories or repeats the writer's jail setup.
+func (a *App) openPublishedStaticFile(domain, pagePath string) (*os.File, error) {
+	return a.openPublicSiteFile(domain, "static", staticRelativePathForPage(cleanPath(pagePath)))
+}
+func (a *App) openPublicSiteFile(domain, directory, relative string) (*os.File, error) {
+	rootPath, err := a.storageJailRootPath()
+	if err != nil {
+		return nil, err
+	}
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	site, err := root.OpenRoot(filepath.Join("storage", directory, domainStorageName(domain)))
+	if err != nil {
+		return nil, err
+	}
+	defer site.Close()
+	return site.Open(relative)
+}
 func (a *App) servePublishedStaticFileFromDisk(w http.ResponseWriter, r *http.Request, domain, pagePath string, injectPublicMenu bool) bool {
 	pagePath = cleanPath(pagePath)
-	staticRoot := a.domainStaticDir(domain)
-	staticFilePath := filepath.Join(staticRoot, staticRelativePathForPage(pagePath))
-	fileInfo, statErr := a.statInsideStorage(staticFilePath)
-	if statErr != nil || fileInfo.IsDir() {
+	file, err := a.openPublishedStaticFile(domain, pagePath)
+	if err != nil {
 		return false
 	}
-	staticContentKind, staticContent, kindErr := a.publishedStaticContentKind(staticFilePath, pagePath)
-	if kindErr != nil {
-		return false
+	defer file.Close()
+	kind := pageContentKind(pagePath, "")
+	if kind == "file" {
+		prefix := make([]byte, 512)
+		count, _ := file.ReadAt(prefix, 0)
+		kind = pageContentKind(pagePath, string(prefix[:count]))
 	}
-	if staticContentKind != "html" {
-		staticFile, openErr := a.openFileInsideStorage(staticFilePath)
-		if openErr != nil {
+	if kind != "html" {
+		info, statErr := file.Stat()
+		if statErr != nil || info.IsDir() {
 			return false
 		}
-		defer staticFile.Close()
 		a.logContentDelivery(w, "static-file")
-		http.ServeContent(w, r, filepath.Base(staticFilePath), fileInfo.ModTime(), staticFile)
+		http.ServeContent(w, r, info.Name(), info.ModTime(), file)
 		return true
 	}
 	a.logContentDelivery(w, "static-file")
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	language := preferredLanguageCode(r.Header.Get("Accept-Language"))
+	menuAttribute := ""
 	if injectPublicMenu {
-		var readErr error
-		if staticContent == nil {
-			staticContent, readErr = a.guestStaticHTML(staticFilePath, pagePath, domain, preferredLanguageCode(r.Header.Get("Accept-Language")), fileInfo)
-		} else {
-			staticContent, readErr = a.guestStaticHTMLFromContent(staticFilePath, staticContent, pagePath, domain, preferredLanguageCode(r.Header.Get("Accept-Language")), fileInfo)
-		}
-		if readErr != nil {
-			return false
-		}
-		_, _ = w.Write(staticContent)
-		return true
+		menuAttribute = ` data-menu="guest_menu.` + template.HTMLEscapeString(language) + `.js"`
 	}
-	if staticContent == nil {
-		var readErr error
-		staticContent, readErr = a.readFileInsideStorage(staticFilePath)
-		if readErr != nil {
-			return false
-		}
+	bootstrap := `<script defer src="/p/static/visitor.js?v=` + url.QueryEscape(CompileVersion) + `" data-sitebrush-owned="true"` + menuAttribute + `></script>`
+	w.Header().Add("Vary", "Accept-Language")
+	if !injectPublicMenu && w.Header().Get("Cache-Control") == "" {
+		w.Header().Set("Cache-Control", "private, no-cache")
 	}
-	// Stealth hides the editor menu, not public visitor observations.
-	visitorHTML, cacheErr := a.cachedVisitorHTMLFromContent(staticFilePath, staticContent, pagePath, domain, "", fileInfo, true)
-	if cacheErr != nil {
+	redirect := ""
+	if decision, found := r.Context().Value(publicDecisionContextKey{}).(publicsite.Decision); found && decision.Password.Path == "" && requestCanUseCanonicalTrailingSlash(r, pagePath) {
+		redirect = canonicalTrailingSlashURL(r, pagePath)
+	}
+	if streamErr := a.publicStreamer.HTML(w, r, file, bootstrap, CompileVersion+"-"+language+"-"+strconv.FormatBool(injectPublicMenu), redirect); streamErr != nil {
 		return false
 	}
-	_, _ = w.Write(visitorHTML)
+
 	return true
 }
 
@@ -49447,7 +49587,7 @@ func runSupervisedSitebrush(ctx context.Context, config serverRunConfig) error {
 	if err != nil {
 		return err
 	}
-	return appupdate.Run(appupdate.Options{Catalog: &catalog, PublicState: front.Set, PublicSecurity: front.Security, PublicCertificate: front.Certificate, Environment: []string{"SITEBRUSH_PUBLIC_CONTACT=" + secret, "SITEBRUSH_PUBLIC_HTTP_PORT=" + strconv.Itoa(front.HTTPPort), "SITEBRUSH_PUBLIC_HTTPS_PORT=" + strconv.Itoa(front.HTTPSPort)}, StoragePath: storagePath, Executable: executable, Version: CompileVersion, Compatibility: appupdate.CurrentCompatibility(), Arguments: arguments, PublicKey: publicKey, Output: os.Stdout}, ctx.Done())
+	return appupdate.Run(appupdate.Options{Catalog: &catalog, PublicState: front.Set, PublicSecurity: front.Security, PublicPolicy: front.Policy, PublicObservations: front.PullObservations, PublicCertificate: front.Certificate, Environment: []string{"SITEBRUSH_PUBLIC_POLICY_CHANNEL=1", "SITEBRUSH_PUBLIC_CONTACT=" + secret, "SITEBRUSH_PUBLIC_HTTP_PORT=" + strconv.Itoa(front.HTTPPort), "SITEBRUSH_PUBLIC_HTTPS_PORT=" + strconv.Itoa(front.HTTPSPort)}, StoragePath: storagePath, Executable: executable, Version: CompileVersion, Compatibility: appupdate.CurrentCompatibility(), Arguments: arguments, PublicKey: publicKey, Output: os.Stdout}, ctx.Done())
 }
 
 func runManualUpgrade(storagePath, databasePath, port string, debug bool, policies ...appupdate.BackupPolicy) error {
@@ -51536,6 +51676,9 @@ func (a *App) startPublicPublication(stop <-chan struct{}) {
 					}
 					if task.action == "protect" && protected[task.domain] == 0 {
 						err = publicsite.SetBlocked(a.storagePath, task.domain, true)
+						if err == nil {
+							err = a.notifyPublicPolicy("block", task.domain)
+						}
 					}
 
 					if err == nil {
@@ -51661,7 +51804,7 @@ func (a *App) writePublicPolicy(domain string) error {
 	}); err != nil {
 		return err
 	}
-	if err = read(`SELECT client_ip FROM admin_allowed_ips WHERE domain=?`, func(rows *sql.Rows) error {
+	if err = read(`SELECT allowed.client_ip FROM admin_allowed_ips allowed JOIN users administrator ON administrator.domain=allowed.domain AND administrator.email=allowed.email WHERE allowed.domain=? AND administrator.is_admin=1`, func(rows *sql.Rows) error {
 		var address string
 		if scanErr := rows.Scan(&address); scanErr != nil {
 			return scanErr
@@ -51670,6 +51813,40 @@ func (a *App) writePublicPolicy(domain string) error {
 		return nil
 	}); err != nil {
 		return err
+	}
+	type trustRecord struct {
+		address, email string
+		expires        int64
+	}
+	var trustRecords []trustRecord
+	if err = read(`SELECT trusted.client_ip,trusted.last_login,administrator.email FROM account_trusted_ips trusted JOIN users administrator ON administrator.domain=trusted.domain AND administrator.email=trusted.email WHERE trusted.domain=? AND administrator.is_admin=1`, func(rows *sql.Rows) error {
+		var record trustRecord
+		var lastLogin int64
+		if scanErr := rows.Scan(&record.address, &lastLogin, &record.email); scanErr != nil {
+			return scanErr
+		}
+		record.expires = lastLogin + int64(accountauth.TrustTTL/time.Second)
+		trustRecords = append(trustRecords, record)
+		return nil
+	}); err != nil {
+		return err
+	}
+	if err = read(`SELECT allowed.client_ip,administrator.email FROM admin_allowed_ips allowed JOIN users administrator ON administrator.domain=allowed.domain AND administrator.email=allowed.email WHERE allowed.domain=? AND administrator.is_admin=1`, func(rows *sql.Rows) error {
+		var record trustRecord
+		if scanErr := rows.Scan(&record.address, &record.email); scanErr != nil {
+			return scanErr
+		}
+		trustRecords = append(trustRecords, record)
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, record := range trustRecords {
+		rule := publicsite.TrustedIP{Address: record.address, Expires: record.expires}
+		policy.TrustedIPs = append(policy.TrustedIPs, rule)
+		if a.isServerManagerEmail(ctx, domain, record.email) {
+			policy.ServerIPs = append(policy.ServerIPs, rule)
+		}
 	}
 	if err = read(`SELECT file_name,COALESCE(access_mode,'public'),COALESCE(expires_at,''),COALESCE(protected_page_path,'') FROM file_access_rules WHERE domain=?`, func(rows *sql.Rows) error {
 		var rule publicsite.FileRule
@@ -51737,26 +51914,72 @@ func (a *App) writePublicPolicy(domain string) error {
 	if err = publicsite.Write(a.storagePath, policy); err != nil {
 		return err
 	}
+	// A launcher installing its initial snapshot must see the barrier until
+	// it has acknowledged this version; otherwise it could read an older policy
+	// immediately before a writer removes the barrier.
+	if err = a.notifyPublicPolicy("refresh", domain); err != nil {
+		return err
+	}
 	if err = publicsite.SetBlocked(a.storagePath, domain, false); err != nil {
 		return err
 	}
-	return nil
+	return a.notifyPublicPolicy("open", domain)
 }
-func (a *App) publicAdminIPAllowed(domain, clientIP string) bool {
-	decision := a.publicCatalog.Lookup(publicsite.Lookup{Host: domain})
-	for _, rule := range decision.AllowedIPs {
-		if adminIPRuleContains(rule, clientIP) {
-			return true
+
+type publicDecisionContextKey struct{}
+
+func (a *App) publicRequestDecision(r *http.Request) publicsite.Decision {
+	if decision, found := r.Context().Value(publicDecisionContextKey{}).(publicsite.Decision); found {
+		return decision
+	}
+	if a.publicCatalog == nil {
+		return publicsite.Decision{}
+	}
+	host := domainFromRequest(r)
+	return a.publicCatalog.LookupRequest(publicsite.Lookup{Host: host, Path: cleanPath(r.URL.Path), File: publicAssetFileNameFromPath(r.URL.Path, host), ClientIP: accountClientIP(r)}, r.Context().Done())
+}
+func (a *App) notifyPublicPolicy(action, domain string) error {
+	if a.publicCatalog != nil {
+		var err error
+		if action == "block" {
+			err = a.publicCatalog.Block(domain)
+		} else if action == "open" {
+			err = a.publicCatalog.Open(domain)
+		} else {
+			err = a.publicCatalog.Reload(domain)
+		}
+		if err != nil {
+			return err
 		}
 	}
-	return false
+	if !a.publicPolicyContact {
+		return nil
+	}
+	encoded, err := json.Marshal(publicsite.Change{Action: action, Domain: domain})
+	if err != nil {
+		return err
+	}
+	_, err = appupdate.Exchange(a.storagePath, appupdate.Request{Action: "public_policy", Detail: string(encoded)}, a.publicPublicationDone)
+	return err
+}
+
+func (a *App) publicAdminIPAllowed(domain, clientIP string) bool {
+	return a.publicCatalog.Lookup(publicsite.Lookup{Host: domain, ClientIP: clientIP}).AdminAllowed
 }
 func publicOrdinaryRequest(r *http.Request) bool {
+	if r.Header.Get("Upgrade") != "" || isBrowserAnalyticsRequest(r) || r.URL.Path == "/.well-known/oauth-authorization-server" || strings.HasPrefix(r.URL.Path, "/.well-known/acme-challenge/") {
+		return false
+	}
+
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		return false
 	}
-	for flag := range r.URL.Query() {
-		if isSitebrushControllerQuery(r.URL.Query()) || sitebrushControlQueryFlag(flag) || flag == "sitebrush_menu_ws" || flag == "token" {
+	query := r.URL.Query()
+	if isSitebrushControllerQuery(query) {
+		return false
+	}
+	for flag := range query {
+		if sitebrushControlQueryFlag(flag) || flag == "sitebrush_menu_ws" || flag == "token" {
 			return false
 		}
 	}
@@ -51783,15 +52006,25 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 	if strings.HasPrefix(r.URL.Path, "/p/") {
 		fileName = publicAssetFileNameFromPath(r.URL.Path, host)
 	}
-	decision := a.publicCatalog.Lookup(publicsite.Lookup{Host: host, Path: pagePath, File: fileName})
+	decision := a.publicRequestDecision(r)
 	if !decision.Found {
+		if strings.HasPrefix(r.URL.Path, "/p/static/") && a.publicVisitorAsset(r.URL.Path) {
+			a.serveEmbeddedStaticAsset(w, r)
+			return true
+		}
 		return false
 	}
 	if !paused && hasSitebrushSessionCookie(r) && (decision.Frozen || decision.File.Mode == "page_password" || fileName == "" && decision.Password.Path != "") {
 		return false
 	}
+	if _, found := r.Context().Value(publicDecisionContextKey{}).(publicsite.Decision); !found {
+		r = r.WithContext(context.WithValue(r.Context(), publicDecisionContextKey{}, decision))
+	}
 	domain := decision.Domain
-	hideMenu := decision.Stealth && !a.publicAdminIPAllowed(domain, accountClientIP(r))
+	hideMenu := decision.Stealth && !decision.AdminAllowed
+	if decision.Stealth && w.Header().Get("Cache-Control") == "" {
+		w.Header().Set("Cache-Control", "private, no-cache")
+	}
 	if strings.HasPrefix(r.URL.Path, "/p/static/") {
 		a.serveEmbeddedStaticAsset(w, r)
 		return true
@@ -51825,10 +52058,18 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 		default:
 			return false
 		}
-		filePath := filepath.Join(a.domainFilesDirForDomain(domain), filepath.FromSlash(fileName))
-		if !a.serveFileInsideStorage(w, r, filePath) {
+		file, openErr := a.openPublicSiteFile(domain, "files", filepath.FromSlash(fileName))
+		if openErr != nil {
 			http.NotFound(w, r)
+			return true
 		}
+		defer file.Close()
+		info, statErr := file.Stat()
+		if statErr != nil || info.IsDir() {
+			http.NotFound(w, r)
+			return true
+		}
+		http.ServeContent(w, r, info.Name(), info.ModTime(), file)
 		return true
 	}
 	if decision.Password.Path != "" {
@@ -51843,10 +52084,6 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 		httpsecurity.RedirectLocal(w, r, decision.Redirect, http.StatusMovedPermanently)
 		return true
 	}
-	if redirect := a.canonicalTrailingSlashStaticRedirectTarget(r, domain, pagePath); redirect != "" {
-		httpsecurity.RedirectLocal(w, r, redirect, http.StatusMovedPermanently)
-		return true
-	}
 	if a.servePublishedStaticFileFromDisk(w, r, domain, pagePath, !hideMenu) {
 		return true
 	}
@@ -51854,17 +52091,27 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 		location := DomainChrootLocation{URLPath: decision.Chroot.Path, DirectoryPath: decision.Chroot.Directory}
 		return a.serveKnownChrootLocation(w, r, domain, pagePath, location, strings.TrimPrefix(pagePath, decision.Chroot.Path))
 	}
-	return false
+	// Generated discovery documents remain with their database owner when no
+	// published file exists. Ordinary missing pages never enter that adapter.
+	if r.URL.RawQuery == "" && (pagePath == "/robots.txt" || pagePath == "/sitemap.xml") {
+		return false
+	}
+	http.NotFound(w, r)
+	return true
 }
 
 func startPublicSiteBoundary(ctx context.Context, storagePath string, config serverRunConfig) (*publicsite.Front, func(), string, error) {
+	storageRoot, err := prepareStorageJailRoot(storagePath)
+	if err != nil {
+		return nil, nil, "", err
+	}
 	secret, err := appupdate.Identifier()
 	if err != nil {
 		return nil, nil, "", err
 	}
-	application := &App{storagePath: storagePath, storageRealRoot: storagePath, publicBoundary: true}
+	application := &App{storagePath: storagePath, storageRealRoot: storageRoot, publicBoundary: true}
+	application.publicStreamer = publicsite.NewStreamer()
 	application.publicCatalog = publicsite.NewCatalog(storagePath, ctx.Done())
-	application.guestStaticHTMLCache = startGuestStaticHTMLCacheWorker(ctx, defaultGuestStaticHTMLCacheLimitBytes)
 	application.autoCertCertificateCache = startAutoCertCertificateMemoryCache(ctx, filepath.Join(application.storageRootDir(), "letsencrypt"))
 	application.startDomainLogWorker(ctx)
 	staticFiles, err := fs.Sub(embeddedWebFiles, "web/static")
@@ -51916,7 +52163,8 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 		if !publicOrdinaryRequest(r) || !paused && strings.HasPrefix(r.URL.Path, "/p/static/") && !application.publicVisitorAsset(r.URL.Path) {
 			return false
 		}
-		lookup := application.publicCatalog.Lookup(publicsite.Lookup{Host: domainFromRequest(r), Path: cleanPath(r.URL.Path), File: publicAssetFileNameFromPath(r.URL.Path, domainFromRequest(r))})
+		lookup := application.publicRequestDecision(r)
+		r = r.WithContext(context.WithValue(r.Context(), publicDecisionContextKey{}, lookup))
 		if !lookup.Found || !paused && hasSitebrushSessionCookie(r) && (lookup.Frozen || lookup.File.Mode == "page_password" || !strings.HasPrefix(r.URL.Path, "/p/") && lookup.Password.Path != "") || lookup.File.Mode == "token" {
 			return false
 		}
@@ -51927,19 +52175,57 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 		captured := &statusCapturingResponseWriter{ResponseWriter: w}
 		handler.ServeHTTP(captured, r)
 		delivered := handled || captured.statusCode != 0
-		if delivered {
+		if delivered && front.ObservationAvailable(lookup.Domain) {
 			status := captured.statusCode
 			if status == 0 {
 				status = http.StatusOK
 			}
 			event := siteAnalyticsEvent{Domain: lookup.Domain, Path: analyticsBoundedString(r.URL.EscapedPath(), 512), Query: analyticsBoundedString(accountauth.SafeQuery(r.URL.RawQuery), 2048), Method: r.Method, StatusCode: status, Bytes: captured.bytesWritten, OccurredAt: time.Now().UTC(), RemoteAddress: analyticsBoundedString(r.RemoteAddr, 64), Forwarded: analyticsBoundedString(r.Header.Get("Forwarded"), 256), ForwardedFor: analyticsBoundedString(r.Header.Get("X-Forwarded-For"), 256), UserAgent: analyticsBoundedString(r.UserAgent(), 256), AcceptLanguage: analyticsBoundedString(r.Header.Get("Accept-Language"), 64), IndexingCrawler: httpsecurity.IsIndexingCrawlerRequest(r), SecurityBlocked: status == http.StatusForbidden || status == http.StatusTooManyRequests, SecurityAlreadyBlocked: captured.Header().Get("X-Sitebrush-Security-Already-Blocked") == "1"}
-			if encoded, marshalErr := json.Marshal(event); marshalErr == nil {
-				front.Observe(lookup.Domain, encoded)
-			}
+			front.Observe(lookup.Domain, event)
 		}
 		return delivered
 	}
 	front = publicsite.NewFront(secret, publicHandler, ctx.Done())
+	front.Guest = func(w http.ResponseWriter, r *http.Request) bool {
+		if hasSitebrushSessionCookie(r) || !publicOrdinaryRequest(r) {
+			return false
+		}
+		return publicHandler(w, r, false)
+	}
+	front.ResetPolicy = func() error { return application.publicCatalog.SetMemory(false) }
+	front.Policy = func(encoded []byte) ([]byte, error) {
+		var change publicsite.Change
+		if len(encoded) > 4096 || json.Unmarshal(encoded, &change) != nil {
+			return nil, errors.New("invalid public policy change")
+		}
+		switch change.Action {
+		case "enable":
+			state, stateErr := front.Current()
+			if stateErr != nil {
+				return nil, stateErr
+			}
+			if state.Address != change.Address || state.Paused {
+				return nil, errors.New("policy publisher is not serving")
+			}
+			if !state.PolicyReady {
+				if policyErr := application.publicCatalog.SetMemory(true); policyErr != nil {
+					return nil, policyErr
+				}
+				if policyErr := front.PolicyEnabled(); policyErr != nil {
+					return nil, policyErr
+				}
+			}
+			return nil, nil
+		case "block":
+			return nil, application.publicCatalog.Block(change.Domain)
+		case "open":
+			return nil, application.publicCatalog.Open(change.Domain)
+		case "refresh":
+			return nil, application.publicCatalog.Reload(change.Domain)
+		default:
+			return nil, errors.New("unknown public policy operation")
+		}
+	}
 	front.Security = application.attackGuard.Relay
 	front.Certificate = func(domain string) error {
 		normalized := normalizeDomainName(domain)
@@ -52142,7 +52428,7 @@ func (a *App) publicVisitorAsset(requestPath string) bool {
 	if _, found := a.embeddedStaticAssets[relative]; !found {
 		return false
 	}
-	if relative == "public_menu.js" || relative == "analytics.js" || relative == "site_copy.js" {
+	if relative == "visitor.js" || strings.HasPrefix(relative, "guest_menu.") || relative == "public_menu.js" || relative == "analytics.js" || relative == "site_copy.js" {
 		return true
 	}
 	switch strings.ToLower(path.Ext(relative)) {
@@ -52171,4 +52457,62 @@ func listenPublicHTTPS(httpPort int) (net.Listener, int, error) {
 		return listener, 443, err
 	}
 	return listenOnAvailablePort(httpPort + 1)
+}
+
+// The observation consumer owns backpressure and its acknowledgement cursor.
+// Database or analytics stalls stop this consumer, never public file delivery.
+func (a *App) pullPublicObservations(stop <-chan struct{}) {
+	requests := make(chan appupdate.Request, 1)
+	replies := make(chan appupdate.Response, 1)
+	finished := make(chan struct{})
+	go func() { defer close(finished); appupdate.ObservationContact(a.storagePath, requests, stop) }()
+	defer func() { <-finished }()
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	var acknowledged uint64
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+		}
+		encoded, _ := json.Marshal(publicsite.ObservationRequest{Address: a.publicPolicyAddress, Ack: acknowledged})
+		select {
+		case requests <- appupdate.Request{Action: "public_observations", Detail: string(encoded), Reply: replies}:
+		case <-stop:
+			return
+		}
+		var response appupdate.Response
+		select {
+		case response = <-replies:
+		case <-stop:
+			return
+		}
+		if response.Error != "" {
+			continue
+		}
+		var envelope publicsite.Observations
+		if json.Unmarshal([]byte(response.Detail), &envelope) != nil || envelope.Batch == acknowledged {
+			continue
+		}
+		for _, encodedEvent := range envelope.Events {
+			var event siteAnalyticsEvent
+			if json.Unmarshal(encodedEvent, &event) != nil {
+				continue
+			}
+			select {
+			case a.securityAnalytics <- event:
+			case <-stop:
+				return
+			}
+		}
+		for _, domain := range envelope.LostDomains {
+			select {
+			case a.securityLosses <- domain:
+			case <-stop:
+				return
+			}
+		}
+		acknowledged = envelope.Batch
+	}
 }

@@ -67,6 +67,13 @@ async function checkConnectionAndEditor() {
         }
       });
       await page.goto(fixtureURL + '/public-fixture');
+      assert.equal(await page.evaluate(() => performance.getEntriesByType('resource').some(resource => resource.name.includes('/guest_menu.'))), false, 'Guest menu is not downloaded with the page');
+      await page.waitForFunction(() => performance.getEntriesByType('resource').some(resource => resource.name.includes('/analytics.js')));
+      assert.ok(await page.evaluate(() => {
+        const navigation = performance.getEntriesByType('navigation')[0];
+        const analytics = performance.getEntriesByType('resource').find(resource => resource.name.includes('/analytics.js'));
+        return analytics.startTime >= navigation.loadEventEnd;
+      }), 'Analytics download starts after the page load');
       await page.locator('h1').click({button: 'right'});
       await page.locator('#SiteBrushMenuBox a[href*="profile"]').waitFor({state: 'visible'});
       const lazyMenuStyle = await page.locator('#SiteBrushMenuBox .SiteBrushMenuBox').evaluate(menu => getComputedStyle(menu).position);

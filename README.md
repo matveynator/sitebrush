@@ -236,6 +236,15 @@ The result remains ordinary static HTML.
 
 ---
 
+## Public response speed
+
+Published guest pages and public assets bypass SQL. Menu code loads when opened;
+analytics starts after the page load and can skip new observations under pressure.
+Confirmed server-owner IPs can run load tests across the installation; site-admin
+IPs are exempt from automatic load limits only on their own site, without cookies.
+
+See [load-test commands, measured results, and manual checks](doc/static-load-checks.md).
+
 ## Server updates
 
 The launcher keeps the public HTTP and HTTPS listeners open while the editor process stops, migrates its databases, starts, or rolls back. Published pages and public files continue to load. Editing pauses, and the right-click menu displays an update notice. Password protection and file access restrictions still apply; downloads requiring a database transaction wait until the editor is available.

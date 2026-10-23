@@ -46,21 +46,32 @@ func proxyMetadata(r *http.Request) string {
 	return base64.StdEncoding.EncodeToString(encoded)
 }
 
+type Change struct {
+	Action  string
+	Domain  string
+	Address string
+}
+
 type State struct {
-	Address  string
-	Paused   bool
-	Draining bool
+	PolicyReady bool
+	Address     string
+	Paused      bool
+	Draining    bool
 }
 type stateTask struct {
 	next  *State
 	reply chan State
 }
 type Front struct {
+	Guest        func(http.ResponseWriter, *http.Request) bool
 	HTTPPort     int
 	HTTPSPort    int
 	Security     func([]byte) ([]byte, error)
+	Policy       func([]byte) ([]byte, error)
+	ResetPolicy  func() error
 	Certificate  func(string) error
 	observations chan string
+	pulls        chan observationPull
 	events       chan publicObservation
 	losses       chan string
 	tasks        chan stateTask
@@ -70,7 +81,7 @@ type Front struct {
 }
 
 func NewFront(secret string, public func(http.ResponseWriter, *http.Request, bool) bool, stop <-chan struct{}) *Front {
-	front := &Front{events: make(chan publicObservation, 1024), losses: make(chan string, 64), observations: make(chan string, 64), tasks: make(chan stateTask, 128), stop: stop, secret: secret, public: public}
+	front := &Front{pulls: make(chan observationPull, 1), events: make(chan publicObservation, 1024), losses: make(chan string, 64), observations: make(chan string, 64), tasks: make(chan stateTask, 128), stop: stop, secret: secret, public: public}
 	go func() {
 		state := State{Paused: true}
 		for {
@@ -107,11 +118,29 @@ func (front *Front) exchange(next *State) (State, error) {
 		return State{}, errors.New("public server stopped")
 	}
 }
+func (front *Front) Current() (State, error) { return front.exchange(nil) }
+func (front *Front) PolicyEnabled() error {
+	state, err := front.exchange(nil)
+	if err != nil {
+		return err
+	}
+	state.PolicyReady = true
+	_, err = front.exchange(&state)
+	return err
+}
 func (front *Front) Set(address string, paused bool) error {
+	if !paused && front.ResetPolicy != nil {
+		if err := front.ResetPolicy(); err != nil {
+			return err
+		}
+	}
 	_, err := front.exchange(&State{Address: address, Paused: paused, Draining: paused && address == ""})
 	return err
 }
 func (front *Front) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if front.Guest != nil && front.Guest(w, r) {
+		return
+	}
 	state, err := front.exchange(nil)
 	if err != nil {
 		http.Error(w, "server unavailable", http.StatusServiceUnavailable)

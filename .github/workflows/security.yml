@@ -179,11 +179,17 @@ jobs:
         run: >-
           go test -count=1 .
           -run '^Test(PublishedStaticHTMLUsesBrowserContentType|PagePasswordProtection|AIEditorPageEmbedsSessionCSRF|AIEditorRendersCompletedDraft|AIEditorTemplateTreatsClarification|BlockedAdminIPSeesStaticSite|BrowserAnalyticsQuery)'
+      - name: Cover public static delivery and trusted load
+        run: >-
+          go test -count=1 -timeout=120s -covermode=atomic
+          -coverpkg=./pkg/publicsite,./pkg/httpsecurity
+          -coverprofile=application-public-coverage.out .
+          -run '^Test(PublicStaticTrustedLoadWithoutCookiesOrSQL|PublicBoundaryPolicyHandoffKeepsGuestsIndependent|PublishedBoundaryAvoidsSQLAndPreservesPrivateFiles|PublicHTTPSPreservesPortFallback|PublishedStaticRejectsSymlinkToNeighborSite)$'
       - name: Upload coverage
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6
         with:
           fail_ci_if_error: true
-          files: coverage.out,application-update-coverage.out,application-ai-coverage.out,mail-journal-coverage.out
+          files: coverage.out,application-update-coverage.out,application-ai-coverage.out,mail-journal-coverage.out,application-public-coverage.out
           use_oidc: true
       - name: Install editor browser test dependencies
         working-directory: scripts/editor
