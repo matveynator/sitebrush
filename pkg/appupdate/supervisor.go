@@ -119,6 +119,7 @@ func Run(options Options, stop <-chan struct{}) error {
 	}
 	state.BackupOptions = true
 	state.LauncherVersion = options.Version
+	restrictPublicRollback(store, options, &state)
 	if options.Stopped && state.WorkingDirectory != "" {
 		options.WorkingDirectory = state.WorkingDirectory
 	}
@@ -261,6 +262,7 @@ func Run(options Options, stop <-chan struct{}) error {
 			completed.NotificationCode = state.NotificationCode
 			completed.NotificationError = state.NotificationError
 			state = completed
+			restrictPublicRollback(store, options, &state)
 			if starting {
 				starting = false
 				if initialAddress != "" && options.PublicState != nil {
@@ -940,6 +942,13 @@ func perform(options Options, store *os.Root, catalog Catalog, worker process, s
 		if _, err := worker.control("public_snapshot"); err != nil {
 			return fail(err)
 		}
+		contact, contactErr := worker.control("address")
+		if contactErr != nil {
+			return fail(contactErr)
+		}
+		if publicErr := options.PublicState(contact.Address, true); publicErr != nil {
+			return fail(publicErr)
+		}
 	}
 	if err := worker.exchange("stop", Version{}, false); err != nil {
 		return fail(err)
@@ -1173,4 +1182,17 @@ func inspectBackupSpace(storagePath string, updates chan<- WorkProgress, stop <-
 		return work, fmt.Errorf("database backup and recovery require %d free bytes for %d database files (%d bytes), have %d", required, work.TotalFiles, work.TotalBytes, available)
 	}
 	return work, nil
+}
+
+// Public listeners cannot be handed to a release that lacks the private adapter.
+// Such versions remain startable with their own compatible launcher.
+func restrictPublicRollback(store *os.Root, options Options, state *State) {
+	if options.PublicState == nil || state.Previous == nil || state.Previous.Version == options.Version {
+		return
+	}
+	if _, err := store.Stat(filepath.Join("public-capabilities", state.Previous.Version)); err == nil {
+		return
+	}
+	state.RollbackAvailable = false
+	state.RollbackReason = "Previous application requires its compatible launcher; persistent public serving is unavailable in that version"
 }

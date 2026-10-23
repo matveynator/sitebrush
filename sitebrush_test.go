@@ -28493,3 +28493,22 @@ func BenchmarkPublicPublished(b *testing.B) {
 		}
 	})
 }
+
+func TestPublicHTTPSPreservesPortFallback(t *testing.T) {
+	occupied, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupied.Close()
+	occupiedPort := occupied.Addr().(*net.TCPAddr).Port
+	for _, httpPort := range []int{occupiedPort - 1, 65535} {
+		listener, selected, listenErr := listenPublicHTTPS(httpPort)
+		if listenErr != nil {
+			t.Fatal(listenErr)
+		}
+		listener.Close()
+		if selected < 1 || selected > 65535 || selected == occupiedPort {
+			t.Fatalf("invalid HTTPS fallback %d for HTTP %d", selected, httpPort)
+		}
+	}
+}

@@ -21,7 +21,7 @@ func TestFrontKeepsPublicHTTPAndHTTPSWhileBackendIsReplaced(t *testing.T) {
 	}), "private-contact"))
 	backendURL, _ := url.Parse(backend.URL)
 	front := NewFront("private-contact", func(w http.ResponseWriter, r *http.Request, paused bool) bool {
-		if r.Method == http.MethodGet && r.URL.RawQuery == "" {
+		if r.Method == http.MethodGet && r.URL.RawQuery == "" && r.URL.Path == "/" {
 			io.WriteString(w, "published")
 			return true
 		}
@@ -37,6 +37,16 @@ func TestFrontKeepsPublicHTTPAndHTTPSWhileBackendIsReplaced(t *testing.T) {
 	for _, phase := range []string{"running", "replacing", "recovered"} {
 		if phase == "replacing" {
 			front.Set("", true)
+			draining, drainingErr := http.Get(httpServer.URL + "/pending-policy")
+			if drainingErr != nil {
+				t.Fatal(drainingErr)
+			}
+			drainingBody, _ := io.ReadAll(draining.Body)
+			draining.Body.Close()
+			if string(drainingBody) != "editor" {
+				t.Fatal("public read was interrupted before policy drain completed")
+			}
+			front.Set(backendURL.Host, true)
 			backend.Close()
 		}
 		if phase == "recovered" {

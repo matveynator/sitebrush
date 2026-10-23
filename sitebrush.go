@@ -10318,7 +10318,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	}
 	if application.autoCertCertificateCache == nil {
 		// The startup path already logged the filesystem problem. Leave HTTP available.
-	} else if parsedPorts.TLSEnabled && listenPort == 80 {
+	} else if parsedPorts.TLSEnabled && listenPort == 80 && (!config.PublicProxy || os.Getenv("SITEBRUSH_PUBLIC_HTTPS_PORT") == "443") {
 		certificateManager, managerErr := channelacme.Start(channelacme.Config{
 			CacheDir: certificateCacheDir,
 			OnStored: func(domain string, certificate *tls.Certificate, expiresAt time.Time) error {
@@ -10370,7 +10370,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 		}
 	}
 
-	if config.UpdateProbation && parsedPorts.TLSEnabled && listenPort == 80 && !application.automaticSSLAvailable {
+	if config.UpdateProbation && parsedPorts.TLSEnabled && listenPort == 80 && (!config.PublicProxy || os.Getenv("SITEBRUSH_PUBLIC_HTTPS_PORT") == "443") && !application.automaticSSLAvailable {
 		return errors.New("update candidate could not initialize configured HTTPS")
 	}
 	backgroundStartupFinished := make(chan struct{})
@@ -12149,7 +12149,7 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 		if a.publicPublication != nil && a.publicMutationRequest(r) {
 			mutationDomain := a.siteDomain(r.Context(), r)
 			beginAction, endAction := "begin", "end"
-			for _, selector := range []string{"profile", "email_confirm", "login", "logout", "register", "recover", "settings", "properties"} {
+			for _, selector := range []string{"profile", "email_confirm", "login", "logout", "register", "recover", "settings", "properties", "files", "backup_import"} {
 				if hasQueryFlag(r, selector) {
 					beginAction, endAction = "protect", "unprotect"
 					break
@@ -49267,7 +49267,7 @@ func (a *App) writePublishedStaticHTML(domain, pagePath, html string) {
 	if a.browserAnalytics != nil {
 		previous, _ = a.analyticsPublishedPage(domain, pagePath)
 	}
-	if err := a.writeFileInsideStorage(staticFilePath, []byte(html), 0o644); err != nil {
+	if err := a.replacePublishedStaticHTML(staticFilePath, []byte(html)); err != nil {
 		log.Printf("published page write failed domain=%q page=%q: %v", domain, pagePath, err)
 		return
 	}
@@ -51895,7 +51895,10 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 				http.NotFound(w, r)
 				return true
 			}
-			application.render(w, r, "server_update.html", map[string]any{"Domain": decision.Domain, "AccountCSRF": accountCSRF(r), "ServerVersion": CompileVersion, "CentralAnnouncements": false})
+			application.securityResponseHeadersMiddleware(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				writer.Header().Set("Referrer-Policy", "no-referrer")
+				application.render(writer, request, "server_update.html", map[string]any{"Domain": decision.Domain, "AccountCSRF": accountCSRF(request), "ServerVersion": CompileVersion, "CentralAnnouncements": false})
+			})).ServeHTTP(w, r)
 			return true
 		}
 		if paused && !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
@@ -51971,35 +51974,35 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 	} else if port != 80 {
 		tlsPort = port + 1
 	}
-	front.HTTPSPort = tlsPort
 	if tlsPort > 0 {
-		tlsListener, listenErr := net.Listen("tcp", net.JoinHostPort("", strconv.Itoa(tlsPort)))
+		tlsListener, selectedPort, listenErr := listenPublicHTTPS(port)
 		if listenErr != nil {
-			server.Close()
-			application.attackGuard.Close()
-			return nil, nil, "", listenErr
-		}
-		fallback, certificateErr := application.loadOrCreateAutomaticSSLFallbackCertificate(time.Now())
-		if certificateErr != nil {
-			tlsListener.Close()
-			server.Close()
-			application.attackGuard.Close()
-			return nil, nil, "", certificateErr
-		}
-		tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, ClientAuth: tls.RequestClientCert, GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-			if certificate, _, found := application.autoCertCachedCertificate(hello.ServerName, time.Now(), 0); found {
-				return certificate, nil
+			application.logProblemEvent("HTTPS listener unavailable; public HTTP remains active: %v", listenErr)
+		} else {
+			front.HTTPSPort = selectedPort
+
+			fallback, certificateErr := application.loadOrCreateAutomaticSSLFallbackCertificate(time.Now())
+			if certificateErr != nil {
+				tlsListener.Close()
+				front.HTTPSPort = 0
+				application.logProblemEvent("HTTPS certificate unavailable; public HTTP remains active: %v", certificateErr)
+				return front, func() { server.Close(); application.attackGuard.Close() }, secret, nil
 			}
-			front.ObserveTLS(normalizeDomainName(hello.ServerName))
-			return fallback, nil
-		}}
-		tlsServer = newSitebrushHTTPServer(front)
-		tlsServer.TLSConfig = tlsConfig
-		go func() {
-			if serveErr := tlsServer.ServeTLS(tlsListener, "", ""); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
-				log.Printf("PUBLIC HTTPS: %v", serveErr)
-			}
-		}()
+			tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, ClientAuth: tls.RequestClientCert, GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+				if certificate, _, found := application.autoCertCachedCertificate(hello.ServerName, time.Now(), 0); found {
+					return certificate, nil
+				}
+				front.ObserveTLS(normalizeDomainName(hello.ServerName))
+				return fallback, nil
+			}}
+			tlsServer = newSitebrushHTTPServer(front)
+			tlsServer.TLSConfig = tlsConfig
+			go func() {
+				if serveErr := tlsServer.ServeTLS(tlsListener, "", ""); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+					log.Printf("PUBLIC HTTPS: %v", serveErr)
+				}
+			}()
+		}
 	}
 	closeBoundary := func() {
 		server.Close()
@@ -52023,6 +52026,14 @@ func (a *App) publicUpdatingMenuSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	websocket.Handler(func(connection *websocket.Conn) {
 		defer connection.Close()
+		connection.MaxPayloadBytes = 2048
+		connection.SetReadDeadline(time.Now().Add(3 * time.Second))
+		var command struct {
+			Path string `json:"path"`
+		}
+		if websocket.JSON.Receive(connection, &command) != nil {
+			return
+		}
 		connection.SetWriteDeadline(time.Now().Add(3 * time.Second))
 		websocket.JSON.Send(connection, map[string]any{"updating": true, "message": translationsForRequest(r)["menu_updating"]})
 	}).ServeHTTP(w, r)
@@ -52139,4 +52150,25 @@ func (a *App) publicVisitorAsset(requestPath string) bool {
 		return true
 	}
 	return false
+}
+
+func (a *App) replacePublishedStaticHTML(filename string, html []byte) error {
+	jail, relative, err := a.storageJailForPath(filename)
+	if err != nil {
+		return err
+	}
+	temporary := relative + ".sitebrush-" + randomAccessToken()
+	if err = jail.WriteFile(temporary, html, 0644); err != nil {
+		return err
+	}
+	defer jail.Remove(temporary)
+	return jail.Rename(temporary, relative)
+}
+
+func listenPublicHTTPS(httpPort int) (net.Listener, int, error) {
+	if httpPort == 80 {
+		listener, err := listenTLSForAutoCert()
+		return listener, 443, err
+	}
+	return listenOnAvailablePort(httpPort + 1)
 }

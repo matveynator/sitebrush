@@ -47,8 +47,9 @@ func proxyMetadata(r *http.Request) string {
 }
 
 type State struct {
-	Address string
-	Paused  bool
+	Address  string
+	Paused   bool
+	Draining bool
 }
 type stateTask struct {
 	next  *State
@@ -78,7 +79,11 @@ func NewFront(secret string, public func(http.ResponseWriter, *http.Request, boo
 				return
 			case task := <-front.tasks:
 				if task.next != nil {
+					previousAddress := state.Address
 					state = *task.next
+					if state.Paused && state.Address == "" {
+						state.Address = previousAddress
+					}
 				}
 				task.reply <- state
 			}
@@ -103,7 +108,7 @@ func (front *Front) exchange(next *State) (State, error) {
 	}
 }
 func (front *Front) Set(address string, paused bool) error {
-	_, err := front.exchange(&State{Address: address, Paused: paused})
+	_, err := front.exchange(&State{Address: address, Paused: paused, Draining: paused && address == ""})
 	return err
 }
 func (front *Front) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -115,8 +120,10 @@ func (front *Front) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if front.public(w, r, state.Paused) {
 		return
 	}
-	// Only the read-only status boundary remains connected during replacement.
-	if state.Address == "" || state.Paused {
+	// While accepted writes finish, reads may still need their current policy
+	// owner. After its snapshot is durable, replacement needs no database contact.
+	readDuringDrain := state.Draining && (r.Method == http.MethodGet || r.Method == http.MethodHead) && r.URL.RawQuery == "" && r.Header.Get("Upgrade") == ""
+	if state.Address == "" || state.Paused && !readDuringDrain {
 		w.Header().Set("Retry-After", "2")
 		http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
 		return

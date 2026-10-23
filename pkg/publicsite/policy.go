@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -85,7 +86,10 @@ func SetBlocked(root, domain string, blocked bool) error {
 		if os.IsNotExist(err) {
 			return nil
 		}
-		return err
+		if err != nil {
+			return err
+		}
+		return syncPolicyDirectory(storage, name)
 	}
 	if err = storage.MkdirAll(filepath.Dir(name), 0700); err != nil {
 		return err
@@ -94,7 +98,15 @@ func SetBlocked(root, domain string, blocked bool) error {
 	if err != nil {
 		return err
 	}
-	return file.Close()
+	syncErr := file.Sync()
+	closeErr := file.Close()
+	if syncErr != nil {
+		return syncErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return syncPolicyDirectory(storage, name)
 }
 func Write(root string, policy Policy) error {
 	storage, err := os.OpenRoot(root)
@@ -163,7 +175,10 @@ func atomicPolicy(root *os.Root, name string, policy Policy) error {
 	if closeErr != nil {
 		return closeErr
 	}
-	return root.Rename(temporary, name)
+	if err = root.Rename(temporary, name); err != nil {
+		return err
+	}
+	return syncPolicyDirectory(root, name)
 }
 
 type lookupTask struct {
@@ -321,4 +336,18 @@ func (catalog *Catalog) Lookup(query Lookup) Decision {
 	case <-catalog.stop:
 		return Decision{}
 	}
+}
+
+// The barrier must survive before a SQL change can make older public metadata
+// unsafe. Losing an unremoved barrier is harmless: startup rebuilds the policy.
+func syncPolicyDirectory(root *os.Root, name string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	directory, err := root.Open(filepath.Dir(name))
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
 }
