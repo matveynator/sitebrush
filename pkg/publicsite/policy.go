@@ -41,6 +41,7 @@ type TrustedIP struct {
 }
 
 type Policy struct {
+	Layouts       map[string]string
 	TrustedIPs    []TrustedIP
 	ServerIPs     []TrustedIP
 	Chroots       []Chroot
@@ -62,6 +63,7 @@ type Lookup struct {
 	SessionHash string
 }
 type Decision struct {
+	Layout       string
 	AdminAllowed bool
 	LoadTrusted  bool
 	Known        bool
@@ -367,7 +369,7 @@ func NewCatalog(root string, stop <-chan struct{}) *Catalog {
 					}
 				}
 				if found {
-					decision = Decision{Known: true, Domain: policy.Domain, Frozen: policy.Frozen, Stealth: policy.Stealth, Found: true}
+					decision = Decision{Layout: policy.Layouts[task.query.Path], Known: true, Domain: policy.Domain, Frozen: policy.Frozen, Stealth: policy.Stealth, Found: true}
 
 					if task.query.ClientIP == "" {
 						decision.AllowedIPs = append([]string(nil), policy.AllowedIPs...)

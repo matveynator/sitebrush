@@ -13224,8 +13224,8 @@ func TestGuestStaticAnalyticsAvoidsDatabaseAndUsesBrowserCollector(t *testing.T)
 	if len(application.analyticsEvents) != 0 {
 		t.Fatal("guest delivery collected a technical HTTP event")
 	}
-	if !strings.Contains(response.Body.String(), "/p/static/analytics.js") || !strings.Contains(response.Body.String(), "data-analytics-layout") {
-		t.Fatal("guest page lacks the batched browser collector or published version")
+	if !strings.Contains(response.Body.String(), "/p/static/visitor.js") {
+		t.Fatal("guest page lacks the deferred browser collector")
 	}
 }
 
@@ -21304,7 +21304,7 @@ func TestConversionStealthCollectsPublicVisitsAndProtectsConfiguration(t *testin
 	visit.RemoteAddr = "192.0.2.2:1234"
 	response := httptest.NewRecorder()
 	application.route(response, visit)
-	if response.Code != 200 || strings.Count(response.Body.String(), `src="/p/static/analytics.js?v=`) != 1 || strings.Contains(response.Body.String(), "SiteBrushContextMenu") {
+	if response.Code != 200 || strings.Count(response.Body.String(), `src="/p/static/visitor.js?v=`) != 1 || strings.Contains(response.Body.String(), "data-menu=") {
 		t.Fatal("stealth must retain only the visitor collector", response.Body.String())
 	}
 	application.browserAnalytics = make(chan browserAnalyticsEnvelope, 16)
@@ -21557,6 +21557,9 @@ func TestConversionBrowserRegressions(t *testing.T) {
 		if strings.HasPrefix(request.URL.Path, "/p/static/") {
 			application.serveEmbeddedStaticAsset(writer, request)
 			return
+		}
+		if request.URL.Path == "/" {
+			request = request.WithContext(context.WithValue(request.Context(), publicDecisionContextKey{}, publicsite.Decision{Layout: layout}))
 		}
 		application.route(writer, request)
 	}))
@@ -28442,12 +28445,20 @@ func TestPublishedBoundaryAvoidsSQLAndPreservesPrivateFiles(t *testing.T) {
 	if _, err := database.Exec(`INSERT INTO page_password_rules(domain,path,password_hash) VALUES('example.org','/private','fixture-hash')`); err != nil {
 		t.Fatal(err)
 	}
+	publishedHTML := "<html><body>Published boundary</body></html>"
+	if _, err := database.Exec(`INSERT INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, "example.org", "/", "Fixture", publishedHTML); err != nil {
+		t.Fatal(err)
+	}
 	if err := application.writePublicPolicy("example.org"); err != nil {
 		t.Fatal(err)
 	}
 	filename := filepath.Join(application.domainStaticDir("example.org"), "index.html")
 	os.MkdirAll(filepath.Dir(filename), 0755)
 	os.WriteFile(filename, []byte("<html><body>Published boundary</body></html>"), 0644)
+	expectedLayout := sha256.Sum256([]byte(publishedHTML))
+	if decision := application.publicCatalog.Lookup(publicsite.Lookup{Host: "example.org", Path: "/"}); decision.Layout != hex.EncodeToString(expectedLayout[:8]) {
+		t.Fatal("snapshot lost publication layout", decision.Layout)
+	}
 	application.db = panicSQLExecutor{t: t}
 	for _, query := range []string{"", "?utm_source=mail"} {
 		response := httptest.NewRecorder()
@@ -28743,8 +28754,12 @@ func TestPublicBoundaryPolicyHandoffKeepsGuestsIndependent(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	read := func(expected int) {
-		request, _ := http.NewRequest("GET", fmt.Sprintf("http://127.0.0.1:%d/", front.HTTPPort), nil)
+	read := func(expected int, paths ...string) {
+		requestPath := "/"
+		if len(paths) > 0 {
+			requestPath = paths[0]
+		}
+		request, _ := http.NewRequest("GET", fmt.Sprintf("http://127.0.0.1:%d%s", front.HTTPPort, requestPath), nil)
 		request.Host = "example.org"
 		response, err := http.DefaultClient.Do(request)
 		if err != nil {
@@ -28765,6 +28780,7 @@ func TestPublicBoundaryPolicyHandoffKeepsGuestsIndependent(t *testing.T) {
 		t.Fatal(err)
 	}
 	read(200)
+	read(200, "/p/"+legacyPublicTrialWidgetAssetName)
 	change("block")
 	read(503)
 	if err := os.Rename(directory+".held", directory); err != nil {

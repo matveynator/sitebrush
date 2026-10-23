@@ -42,6 +42,7 @@
     analyticsScript.src = '/p/static/analytics.js' + (loaderScript ? new URL(loaderScript.src).search : '');
     analyticsScript.async = true;
     analyticsScript.dataset.sitebrushOwned = 'true';
+    analyticsScript.dataset.analyticsLayout = loaderScript ? loaderScript.dataset.analyticsLayout || '' : '';
     analyticsScript.onerror = function reportAnalyticsFailure() { console.debug('SiteBrush analytics is unavailable'); };
     document.head.appendChild(analyticsScript);
   }

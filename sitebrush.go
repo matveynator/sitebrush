@@ -10579,7 +10579,9 @@ func buildEmbeddedStaticAssetCache(staticFiles fs.FS) (map[string]embeddedStatic
 			content := string(tokenizer.Text())
 			if tag == "style" {
 				encoded, _ := json.Marshal(content)
-				script.WriteString("(function(){const menuStyles=document.createElement('style');menuStyles.textContent=" + string(encoded) + ";menuStyles.dataset.sitebrushOwned='true';document.head.appendChild(menuStyles);})();")
+				script.WriteString(`(function(){const menuStyles=document.createElement("style");menuStyles.textContent=`)
+				script.Write(encoded)
+				script.WriteString(`;menuStyles.dataset.sitebrushOwned="true";document.head.appendChild(menuStyles);})();`)
 			}
 			if tag == "script" {
 				content = strings.ReplaceAll(content, `"`+guestContextMenuPagePathPlaceholder+`"`, "window.location.pathname")
@@ -49098,7 +49100,11 @@ func (a *App) servePublishedStaticFileFromDisk(w http.ResponseWriter, r *http.Re
 	if injectPublicMenu {
 		menuAttribute = ` data-menu="guest_menu.` + template.HTMLEscapeString(language) + `.js"`
 	}
-	bootstrap := `<script defer src="/p/static/visitor.js?v=` + url.QueryEscape(CompileVersion) + `" data-sitebrush-owned="true"` + menuAttribute + `></script>`
+	layoutAttribute := ""
+	if decision, found := r.Context().Value(publicDecisionContextKey{}).(publicsite.Decision); found && decision.Layout != "" {
+		layoutAttribute = ` data-analytics-layout="` + template.HTMLEscapeString(decision.Layout) + `"`
+	}
+	bootstrap := `<script defer src="/p/static/visitor.js?v=` + url.QueryEscape(CompileVersion) + `" data-sitebrush-owned="true"` + menuAttribute + layoutAttribute + `></script>`
 	w.Header().Add("Vary", "Accept-Language")
 	if !injectPublicMenu && w.Header().Get("Cache-Control") == "" {
 		w.Header().Set("Cache-Control", "private, no-cache")
@@ -51911,6 +51917,18 @@ func (a *App) writePublicPolicy(domain string) error {
 		}
 	}
 
+	policy.Layouts = make(map[string]string)
+	if err = read(`SELECT path,html FROM published_pages WHERE domain=?`, func(rows *sql.Rows) error {
+		var pagePath, pageHTML string
+		if scanErr := rows.Scan(&pagePath, &pageHTML); scanErr != nil {
+			return scanErr
+		}
+		digest := sha256.Sum256([]byte(pageHTML))
+		policy.Layouts[cleanPath(pagePath)] = hex.EncodeToString(digest[:8])
+		return nil
+	}); err != nil {
+		return err
+	}
 	if err = publicsite.Write(a.storagePath, policy); err != nil {
 		return err
 	}
@@ -52027,6 +52045,13 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 	}
 	if strings.HasPrefix(r.URL.Path, "/p/static/") {
 		a.serveEmbeddedStaticAsset(w, r)
+		return true
+	}
+	if fileName == legacyPublicTrialWidgetAssetName {
+		assetRequest := r.Clone(r.Context())
+		assetRequest.URL.Path = "/p/static/site_copy.js"
+		assetRequest.URL.RawPath = ""
+		a.serveEmbeddedStaticAsset(w, assetRequest)
 		return true
 	}
 	if fileName != "" {
