@@ -1602,7 +1602,9 @@
     "mail_monitor_stage_transport_sent": "Forwarded to relay",
     "menu_updating": "The site is updating. Please wait.",
     "update_stage_stopping": "Stopping the editor; public pages remain available",
-    "update_launcher_version": "Launcher: v.%s"
+    "update_launcher_version": "Launcher: v.%s",
+    "menu_checking_account": "Checking sign-in…",
+    "menu_account_unavailable": "Unable to check sign-in. Open the menu to retry."
   },
   "fr": {
     "edit_saving": "Enregistrement de la page…",
@@ -2996,7 +2998,9 @@
     "mail_monitor_stage_transport_sent": "Forwarded to relay",
     "menu_updating": "Mise à jour du site. Veuillez patienter.",
     "update_stage_stopping": "Stopping the editor; public pages remain available",
-    "update_launcher_version": "Launcher: v.%s"
+    "update_launcher_version": "Launcher: v.%s",
+    "menu_checking_account": "Vérification de la connexion…",
+    "menu_account_unavailable": "Impossible de vérifier la connexion. Rouvrez le menu pour réessayer."
   },
   "ru": {
     "mail_monitor_title": "Почта и аккаунты · 24 часа / 90 дней",
@@ -4601,7 +4605,9 @@
     "mail_monitor_stage_transport_sent": "Передано серверу пересылки",
     "menu_updating": "Идёт обновление сайта, подождите.",
     "update_stage_stopping": "Остановка редактора; статические страницы доступны",
-    "update_launcher_version": "Запускающий процесс: v.%s"
+    "update_launcher_version": "Запускающий процесс: v.%s",
+    "menu_checking_account": "Проверяем вход…",
+    "menu_account_unavailable": "Не удалось проверить вход. Откройте меню ещё раз."
   },
   "ja": {
     "edit_saving": "ページを保存中…",
@@ -5991,7 +5997,9 @@
     "mail_monitor_stage_transport_sent": "Forwarded to relay",
     "menu_updating": "サイトを更新しています。お待ちください。",
     "update_stage_stopping": "Stopping the editor; public pages remain available",
-    "update_launcher_version": "Launcher: v.%s"
+    "update_launcher_version": "Launcher: v.%s",
+    "menu_checking_account": "ログイン状態を確認しています…",
+    "menu_account_unavailable": "ログイン状態を確認できません。メニューを開き直してください。"
   },
   "it": {
     "edit_saving": "Salvataggio della pagina…",
@@ -7381,7 +7389,9 @@
     "mail_monitor_stage_transport_sent": "Forwarded to relay",
     "menu_updating": "Aggiornamento del sito in corso. Attendi.",
     "update_stage_stopping": "Stopping the editor; public pages remain available",
-    "update_launcher_version": "Launcher: v.%s"
+    "update_launcher_version": "Launcher: v.%s",
+    "menu_checking_account": "Verifica dell’accesso…",
+    "menu_account_unavailable": "Impossibile verificare l’accesso. Riapri il menu per riprovare."
   },
   "sv": {
     "edit_saving": "Sparar sidan…",
@@ -8771,7 +8781,9 @@
     "mail_monitor_stage_transport_sent": "Forwarded to relay",
     "menu_updating": "Webbplatsen uppdateras. Vänta.",
     "update_stage_stopping": "Stopping the editor; public pages remain available",
-    "update_launcher_version": "Launcher: v.%s"
+    "update_launcher_version": "Launcher: v.%s",
+    "menu_checking_account": "Kontrollerar inloggningen…",
+    "menu_account_unavailable": "Det gick inte att kontrollera inloggningen. Öppna menyn igen."
   },
   "fi": {
     "edit_saving": "Tallennetaan sivua…",
@@ -10161,7 +10173,9 @@
     "mail_monitor_stage_transport_sent": "Forwarded to relay",
     "menu_updating": "Sivustoa päivitetään. Odota.",
     "update_stage_stopping": "Stopping the editor; public pages remain available",
-    "update_launcher_version": "Launcher: v.%s"
+    "update_launcher_version": "Launcher: v.%s",
+    "menu_checking_account": "Tarkistetaan kirjautumista…",
+    "menu_account_unavailable": "Kirjautumista ei voitu tarkistaa. Avaa valikko uudelleen."
   },
   "mn": {
     "edit_saving": "Хуудсыг хадгалж байна…",
@@ -11551,7 +11565,9 @@
     "mail_monitor_stage_transport_sent": "Forwarded to relay",
     "menu_updating": "Сайтыг шинэчилж байна. Түр хүлээнэ үү.",
     "update_stage_stopping": "Stopping the editor; public pages remain available",
-    "update_launcher_version": "Launcher: v.%s"
+    "update_launcher_version": "Launcher: v.%s",
+    "menu_checking_account": "Нэвтэрсэн эсэхийг шалгаж байна…",
+    "menu_account_unavailable": "Нэвтэрсэн эсэхийг шалгаж чадсангүй. Цэсийг дахин нээнэ үү."
   },
   "zh": {
     "edit_saving": "正在保存页面…",
@@ -12941,7 +12957,9 @@
     "mail_monitor_stage_transport_sent": "Forwarded to relay",
     "menu_updating": "网站正在更新，请稍候。",
     "update_stage_stopping": "Stopping the editor; public pages remain available",
-    "update_launcher_version": "Launcher: v.%s"
+    "update_launcher_version": "Launcher: v.%s",
+    "menu_checking_account": "正在检查登录状态…",
+    "menu_account_unavailable": "无法检查登录状态。请重新打开菜单。"
   },
   "he": {
     "edit_saving": "שמירת הדף…",
@@ -14331,7 +14349,9 @@
     "mail_monitor_stage_transport_sent": "Forwarded to relay",
     "menu_updating": "האתר מתעדכן. נא להמתין.",
     "update_stage_stopping": "Stopping the editor; public pages remain available",
-    "update_launcher_version": "Launcher: v.%s"
+    "update_launcher_version": "Launcher: v.%s",
+    "menu_checking_account": "בודקים את מצב ההתחברות…",
+    "menu_account_unavailable": "לא ניתן לבדוק את מצב ההתחברות. יש לפתוח שוב את התפריט."
   },
   "fa": {
     "edit_saving": "در حال ذخیره صفحه…",
@@ -15721,7 +15741,9 @@
     "mail_monitor_stage_transport_sent": "Forwarded to relay",
     "menu_updating": "سایت در حال به‌روزرسانی است. لطفاً صبر کنید.",
     "update_stage_stopping": "Stopping the editor; public pages remain available",
-    "update_launcher_version": "Launcher: v.%s"
+    "update_launcher_version": "Launcher: v.%s",
+    "menu_checking_account": "در حال بررسی ورود…",
+    "menu_account_unavailable": "بررسی ورود ممکن نشد. منو را دوباره باز کنید."
   },
   "de": {
     "edit_saving": "Seite wird gespeichert…",
@@ -17111,7 +17133,9 @@
     "mail_monitor_stage_transport_sent": "Forwarded to relay",
     "menu_updating": "Die Website wird aktualisiert. Bitte warten.",
     "update_stage_stopping": "Stopping the editor; public pages remain available",
-    "update_launcher_version": "Launcher: v.%s"
+    "update_launcher_version": "Launcher: v.%s",
+    "menu_checking_account": "Anmeldung wird geprüft…",
+    "menu_account_unavailable": "Anmeldung konnte nicht geprüft werden. Öffnen Sie das Menü erneut."
   },
   "tr": {
     "edit_saving": "Sayfa kaydediliyor…",
@@ -18501,7 +18525,9 @@
     "mail_monitor_stage_transport_sent": "Forwarded to relay",
     "menu_updating": "Site güncelleniyor. Lütfen bekleyin.",
     "update_stage_stopping": "Stopping the editor; public pages remain available",
-    "update_launcher_version": "Launcher: v.%s"
+    "update_launcher_version": "Launcher: v.%s",
+    "menu_checking_account": "Oturum durumu kontrol ediliyor…",
+    "menu_account_unavailable": "Oturum durumu kontrol edilemedi. Menüyü yeniden açın."
   },
   "kk": {
     "edit_saving": "Бет сақталуда…",
@@ -19891,7 +19917,9 @@
     "mail_monitor_stage_transport_sent": "Forwarded to relay",
     "menu_updating": "Сайт жаңартылып жатыр. Күте тұрыңыз.",
     "update_stage_stopping": "Stopping the editor; public pages remain available",
-    "update_launcher_version": "Launcher: v.%s"
+    "update_launcher_version": "Launcher: v.%s",
+    "menu_checking_account": "Кіру күйі тексерілуде…",
+    "menu_account_unavailable": "Кіру күйін тексеру мүмкін болмады. Мәзірді қайта ашыңыз."
   },
   "es": {
     "edit_saving": "Guardando la página…",
@@ -21281,7 +21309,9 @@
     "mail_monitor_stage_transport_sent": "Forwarded to relay",
     "menu_updating": "El sitio se está actualizando. Espera.",
     "update_stage_stopping": "Stopping the editor; public pages remain available",
-    "update_launcher_version": "Launcher: v.%s"
+    "update_launcher_version": "Launcher: v.%s",
+    "menu_checking_account": "Comprobando la sesión…",
+    "menu_account_unavailable": "No se pudo comprobar la sesión. Vuelve a abrir el menú."
   },
   "pt": {
     "edit_saving": "A guardar a página…",
@@ -22671,6 +22701,8 @@
     "mail_monitor_stage_transport_sent": "Forwarded to relay",
     "menu_updating": "O site está sendo atualizado. Aguarde.",
     "update_stage_stopping": "Stopping the editor; public pages remain available",
-    "update_launcher_version": "Launcher: v.%s"
+    "update_launcher_version": "Launcher: v.%s",
+    "menu_checking_account": "A verificar a sessão…",
+    "menu_account_unavailable": "Não foi possível verificar a sessão. Abra o menu novamente."
   }
 }

@@ -10581,7 +10581,7 @@ func buildEmbeddedStaticAssetCache(staticFiles fs.FS) (map[string]embeddedStatic
 				encoded, _ := json.Marshal(content)
 				script.WriteString(`(function(){const menuStyles=document.createElement("style");menuStyles.textContent=`)
 				script.Write(encoded)
-				script.WriteString(`;menuStyles.dataset.sitebrushOwned="true";document.head.appendChild(menuStyles);})();`)
+				script.WriteString(`;menuStyles.dataset.sitebrushOwned="true";document.currentScript.parentNode.insertBefore(menuStyles,document.currentScript);})();`)
 			}
 			if tag == "script" {
 				content = strings.ReplaceAll(content, `"`+guestContextMenuPagePathPlaceholder+`"`, "window.location.pathname")
@@ -12237,10 +12237,18 @@ func (a *App) aiIngressDecisionForRequest(r *http.Request) (machine, owner bool)
 }
 
 func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
-	dynamic := a.siteDynamicHTTPHandler(router)
+	core := a.siteDynamicHTTPCore(router)
+	fallback := a.aiIngressMiddleware(core)
+	content := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if a.publicCatalog != nil && a.servePublicPublished(w, r, false) {
+			return
+		}
+		core.ServeHTTP(w, r)
+	})
+	dynamic := a.securityResponseHeadersMiddleware(a.aiIngressMiddleware(a.analyticsMiddleware(a.accessLogMiddleware(a.authAbuseMiddleware(content)))))
 	public := a.securityResponseHeadersMiddleware(a.analyticsMiddleware(a.accessLogMiddleware(a.authAbuseMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !a.servePublicPublished(w, r, false) {
-			dynamic.ServeHTTP(w, r)
+			fallback.ServeHTTP(w, r)
 		}
 	})))))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -12269,7 +12277,7 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 	})
 }
 
-func (a *App) siteDynamicHTTPHandler(router http.Handler) http.Handler {
+func (a *App) siteDynamicHTTPCore(router http.Handler) http.Handler {
 	queryRouter := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if hasQueryFlag(r, "sitebrush_menu_ws") {
 			a.publicMenuSocket(w, r)
@@ -12290,9 +12298,6 @@ func (a *App) siteDynamicHTTPHandler(router http.Handler) http.Handler {
 			}
 			defer a.publicPublicationRequest(endAction, mutationDomain)
 		}
-		if a.publicCatalog != nil && a.servePublicPublished(w, r, false) {
-			return
-		}
 		query := r.URL.Query()
 		if query.Has("mcp") || query.Has("oauth") || query.Has("ai") || query.Has("ai_token") || query.Has("ai_session") || query.Has("ai_authorize") || isBrowserAnalyticsRequest(r) {
 			a.route(w, r)
@@ -12300,7 +12305,7 @@ func (a *App) siteDynamicHTTPHandler(router http.Handler) http.Handler {
 		}
 		router.ServeHTTP(w, r)
 	})
-	return a.securityResponseHeadersMiddleware(a.aiIngressMiddleware(a.analyticsMiddleware(a.accessLogMiddleware(a.authAbuseMiddleware(queryRouter)))))
+	return queryRouter
 }
 
 func (a *App) aiIngressMiddleware(next http.Handler) http.Handler {
@@ -15865,8 +15870,12 @@ func (a *App) siteMCPRoute(w http.ResponseWriter, r *http.Request) bool {
 		}
 		clientID := query.Get("client_id")
 		if _, err := a.aiCapabilities.OAuthClient(domain, clientID); err != nil {
+			if err.Error() != "invalid_client" {
+				oauthFailure(err)
+				return true
+			}
 			if err := a.registerMCPOAuthMetadataClient(r, domain, clientID); err != nil {
-				oauthError(400, "invalid_client")
+				oauthFailure(err)
 				return true
 			}
 		}
@@ -15977,7 +15986,13 @@ func (a *App) siteMCPRoute(w http.ResponseWriter, r *http.Request) bool {
 func (a *App) registerMCPOAuthMetadataClient(r *http.Request, domain, clientID string) error {
 	parsed, err := url.Parse(clientID)
 	if err != nil || parsed.Scheme != "https" || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return errors.New("invalid client metadata URI")
+		return errors.New("invalid_client")
+	}
+	// ChatGPT's public client is pre-registered with its exact HTTPS callback.
+	// Owner approval and PKCE remain mandatory; initial connection must not
+	// depend on an outbound metadata fetch from the hosting network.
+	if clientID == "https://chatgpt.com/oauth/client.json" {
+		return a.registerMCPOAuthClient(domain, aicapability.OAuthClient{ID: clientID, Name: "ChatGPT", RedirectURIs: []string{"https://chatgpt.com/connector_platform_oauth_redirect"}})
 	}
 	encoded, err := downloadAIMCPFile(r.Context(), clientID, 65536)
 	if err != nil {
@@ -15991,7 +16006,7 @@ func (a *App) registerMCPOAuthMetadataClient(r *http.Request, domain, clientID s
 		AuthMethods  []string `json:"token_endpoint_auth_methods_supported"`
 	}
 	if json.Unmarshal(encoded, &metadata) != nil || metadata.ID != clientID {
-		return errors.New("invalid client metadata")
+		return errors.New("invalid_client_metadata")
 	}
 	allowsPublic := metadata.AuthMethod == "none" || metadata.AuthMethod == "" && len(metadata.AuthMethods) == 0
 	for _, method := range metadata.AuthMethods {
@@ -16000,9 +16015,17 @@ func (a *App) registerMCPOAuthMetadataClient(r *http.Request, domain, clientID s
 		}
 	}
 	if !allowsPublic {
-		return errors.New("unsupported client authentication")
+		return errors.New("invalid_client_metadata")
 	}
-	_, err = a.aiCapabilities.RegisterOAuthClient(domain, aicapability.OAuthClient{ID: clientID, Name: metadata.Name, RedirectURIs: metadata.RedirectURIs})
+	return a.registerMCPOAuthClient(domain, aicapability.OAuthClient{ID: clientID, Name: metadata.Name, RedirectURIs: metadata.RedirectURIs})
+}
+
+func (a *App) registerMCPOAuthClient(domain string, client aicapability.OAuthClient) error {
+	_, err := a.aiCapabilities.RegisterOAuthClient(domain, client)
+	if err != nil && err.Error() == "client_already_registered" {
+		// Concurrent authorization tabs can discover the same client together.
+		_, err = a.aiCapabilities.OAuthClient(domain, client.ID)
+	}
 	return err
 }
 
@@ -28507,8 +28530,7 @@ func (a *App) aiProviderPolicy(r *http.Request) aiingress.Policy {
 }
 
 func (a *App) saveAIIngressPolicy(w http.ResponseWriter, r *http.Request) {
-	_, owner := a.aiIngressAdmission(r)
-	if !owner || !sessionCSRFMutationAllowed(r) || !adminMutationSourceAllowed(r) {
+	if !a.isAdminRequest(r) || !sessionCSRFMutationAllowed(r) || !adminMutationSourceAllowed(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -41679,6 +41701,8 @@ func buildGuestContextMenuScriptForLanguage(pagePath, domain, languageCode strin
 
 func buildGuestContextMenuScriptTemplate(translations map[string]string) string {
 	loginLabel := template.JSEscapeString(translationOrDefault(translations, "menu_login", "Sign in to edit"))
+	checkingLabel := template.JSEscapeString(template.HTMLEscapeString(translationOrDefault(translations, "menu_checking_account", "Checking sign-in…")))
+	unavailableLabel := template.JSEscapeString(template.HTMLEscapeString(translationOrDefault(translations, "menu_account_unavailable", "Unable to check sign-in. Open the menu to retry.")))
 	standardMenuHint := template.JSEscapeString(template.HTMLEscapeString(translationOrDefault(translations, "menu_standard_context_hint", "Browser standard menu: Ctrl + right mouse click.")))
 	compiledVersionLabel := template.JSEscapeString("v." + CompileVersion)
 	sitebrushHomeURL := "https://sitebrush.com"
@@ -41692,11 +41716,28 @@ func buildGuestContextMenuScriptTemplate(translations map[string]string) string 
   window.__sitebrushContextMenuInitialized = true;
   const currentPagePath = "` + guestContextMenuPagePathPlaceholder + `";
   const currentDomainName = "` + guestContextMenuDomainPlaceholder + `";
+  const guestMenuModel = {accountStatus: "pending"};
+  function guestAccountContents() {
+    if (guestMenuModel.accountStatus === "guest") {
+      return "<a href='?login' class='SiteBrushContextMenuLink'><img src='/p/static/login.png' class='SiteBrushMenuIcon' alt=''>" + "` + loginLabel + `" + "</a>";
+    }
+    const statusLabel = guestMenuModel.accountStatus === "unavailable" ? "` + unavailableLabel + `" : "` + checkingLabel + `";
+    return "<span class='SiteBrushContextMenuLink'>" + statusLabel + "</span>";
+  }
+  document.addEventListener("sitebrush-account-state", function receiveGuestAccountState(accountEvent) {
+    const accountStatus = accountEvent.detail && accountEvent.detail.status;
+    if (!["pending", "guest", "unavailable"].includes(accountStatus)) return;
+    guestMenuModel.accountStatus = accountStatus;
+    const menuHost = document.getElementById("SiteBrushMenuBox");
+    const menuRoot = menuHost && (menuHost.shadowRoot || menuHost);
+    const accountRow = menuRoot && menuRoot.querySelector("[data-sitebrush-account]");
+    if (accountRow) accountRow.innerHTML = guestAccountContents();
+  });
   function buildSitebrushGuestMenuEntries(showStandardMenuHint) {
     const menuEntries = [
       "<ul class='SiteBrushMenuList'>",
       "<li class='SiteBrushContextMenu SiteBrushDomainMenuItem'><a href='/' class='SiteBrushContextMenuLink'>" + currentDomainName + "</a></li>",
-      "<li class='SiteBrushContextMenu'><a href='?login' class='SiteBrushContextMenuLink'><img src='/p/static/login.png' class='SiteBrushMenuIcon' alt=''>" + "` + loginLabel + `" + "</a></li>",
+      "<li class='SiteBrushContextMenu' data-sitebrush-account>" + guestAccountContents() + "</li>",
       "` + copyrightMenuEntry + `"
     ];
     if (showStandardMenuHint) {
@@ -41726,12 +41767,14 @@ func buildGuestContextMenuScriptTemplate(translations map[string]string) string 
     browserEvent.__sitebrushContextMenuHandled = true;
     browserEvent.preventDefault();
     browserEvent.stopPropagation();
+    guestMenuModel.accountStatus = "pending";
     showSitebrushMenu(browserEvent, buildSitebrushGuestMenuEntries(sitebrushContextMenuWasOpenedByMouse(browserEvent)), currentPagePath, false);
   }
   window.addEventListener("contextmenu", onContextMenuOpen, {capture: true, passive: false});
   document.addEventListener("contextmenu", onContextMenuOpen, {capture: true, passive: false});
   installSitebrushLongPressMenu(function openGuestMenuFromLongPress(menuPoint) {
     if (window.__sitebrushAdminMenuLoaded) return;
+    guestMenuModel.accountStatus = "pending";
     showSitebrushMenu(menuPoint, buildSitebrushGuestMenuEntries(false), currentPagePath, false);
   });
 })();

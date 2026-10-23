@@ -167,7 +167,7 @@ func Write(root string, policy Policy) error {
 			return err
 		}
 	}
-	return nil
+	return writeServerPolicyIndex(storage, policy)
 }
 func atomicPolicy(root *os.Root, name string, policy Policy) error {
 	encoded, err := json.Marshal(policy)
@@ -229,11 +229,14 @@ func NewCatalog(root string, stop <-chan struct{}) *Catalog {
 		policies := make(map[string]cachedPolicy)
 		var usedBytes int64
 		memory := false
-		var serverIPs []TrustedIP
+		serverTrust := serverTrustCache{}
 		blocked := make(map[string]bool)
 		storage, rootErr := os.OpenRoot(root)
 		if rootErr == nil {
 			defer storage.Close()
+		}
+		if rootErr == nil {
+			serverTrust.refresh(storage, true, stop)
 		}
 		read := func(host string) (cachedPolicy, bool) {
 			if memory {
@@ -323,11 +326,8 @@ func NewCatalog(root string, stop <-chan struct{}) *Catalog {
 					policies = make(map[string]cachedPolicy)
 					usedBytes = 0
 				}
-				serverIPs = nil
-				for host, candidate := range policies {
-					if host == candidate.policy.Domain && !blocked[host] {
-						serverIPs = append(serverIPs, candidate.policy.ServerIPs...)
-					}
+				if rootErr == nil {
+					serverTrust.refresh(storage, true, stop)
 				}
 				update.reply <- nil
 			case task := <-catalog.tasks:
@@ -382,7 +382,10 @@ func NewCatalog(root string, stop <-chan struct{}) *Catalog {
 					}
 					decision.LoadTrusted = decision.AdminAllowed || trustedIP(policy.TrustedIPs, task.query.ClientIP)
 					if !decision.LoadTrusted {
-						decision.LoadTrusted = trustedIP(serverIPs, task.query.ClientIP)
+						if !memory && rootErr == nil {
+							serverTrust.refresh(storage, false, stop)
+						}
+						decision.LoadTrusted = !serverTrust.blocked && !blocked[serverTrust.domain] && trustedIP(serverTrust.rules, task.query.ClientIP)
 					}
 					for _, rule := range policy.Passwords {
 						if dirprotect.HasProtectedPrefix(task.query.Path, rule.Path) && len(rule.Path) >= len(decision.Password.Path) {
@@ -524,17 +527,23 @@ func loadPolicies(root, domain string) (map[string]cachedPolicy, error) {
 		if openErr != nil {
 			return nil, openErr
 		}
-		entries, readErr := directory.ReadDir(4097)
-		directory.Close()
-		if readErr != nil && readErr != io.EOF {
-			return nil, readErr
-		}
-		if len(entries) > 4096 {
-			return nil, errors.New("public policy cache is full")
-		}
-		for _, entry := range entries {
-			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
-				names = append(names, entry.Name())
+		for {
+			entries, readErr := directory.ReadDir(128)
+			for _, entry := range entries {
+				if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
+					names = append(names, entry.Name())
+				}
+			}
+			if len(names) > 4096 {
+				directory.Close()
+				return nil, errors.New("public policy cache is full")
+			}
+			if readErr != nil {
+				directory.Close()
+				if readErr != io.EOF {
+					return nil, readErr
+				}
+				break
 			}
 		}
 	}

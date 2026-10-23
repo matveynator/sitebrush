@@ -184,7 +184,7 @@ jobs:
           go test -count=1 -timeout=120s -covermode=atomic
           -coverpkg=./pkg/publicsite,./pkg/httpsecurity
           -coverprofile=application-public-coverage.out .
-          -run '^Test(PublicStaticTrustedLoadWithoutCookiesOrSQL|PublicBoundaryPolicyHandoffKeepsGuestsIndependent|PublishedBoundaryAvoidsSQLAndPreservesPrivateFiles|PublicHTTPSPreservesPortFallback|PublishedStaticRejectsSymlinkToNeighborSite)$'
+          -run '^Test(PublicStaticTrustedLoadWithoutCookiesOrSQL|PublicBoundaryPolicyHandoffKeepsGuestsIndependent|PublishedBoundaryAvoidsSQLAndPreservesPrivateFiles|PublicHTTPSPreservesPortFallback|PublishedStaticRejectsSymlinkToNeighborSite|PublicFallbackObservesEachRequestOnce|ProfileAIIngressSaveUsesAuthenticatedAccount)$'
       - name: Upload coverage
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6
         with:

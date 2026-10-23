@@ -28802,3 +28802,163 @@ func TestPublicBoundaryPolicyHandoffKeepsGuestsIndependent(t *testing.T) {
 	}
 	read(200)
 }
+
+func TestPublicFallbackObservesEachRequestOnce(t *testing.T) {
+	for _, target := range []string{"/protected/page", "/p/token.pdf", "/robots.txt", "/sitemap.xml"} {
+		t.Run(target, func(t *testing.T) {
+			application, _ := newTestApplication(t)
+			stop := make(chan struct{})
+			defer close(stop)
+			application.publicCatalog = publicsite.NewCatalog(application.storagePath, stop)
+			policy := publicsite.Policy{Domain: "example.org", Passwords: []dirprotect.Rule{{Domain: "example.org", Path: "/protected", PasswordHash: "fixture"}}, Files: []publicsite.FileRule{{Name: "token.pdf", Mode: "token"}}}
+			if err := publicsite.Write(application.storagePath, policy); err != nil {
+				t.Fatal(err)
+			}
+			if err := application.publicCatalog.SetMemory(true); err != nil {
+				t.Fatal(err)
+			}
+			guard, err := httpsecurity.NewAttackGuard("")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer guard.Close()
+			application.attackGuard = guard
+			application.securityAnalytics = make(chan siteAnalyticsEvent, 8)
+			application.db = panicSQLExecutor{t: t}
+			calls := 0
+			handler := application.siteHTTPHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++; http.NotFound(w, r) }))
+			request := httptest.NewRequest("GET", "https://example.org"+target, nil)
+			request.RemoteAddr = "198.51.100.55:1234"
+			request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "unverified"})
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != 404 || calls != 1 || len(application.securityAnalytics) != 1 {
+				t.Fatalf("status=%d core calls=%d observations=%d", response.Code, calls, len(application.securityAnalytics))
+			}
+		})
+	}
+}
+
+func TestProfileAIIngressSaveUsesAuthenticatedAccount(t *testing.T) {
+	application, database := newTestApplication(t)
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('localhost','owner@example.org','fixture',1)`); err != nil {
+		t.Fatal(err)
+	}
+	cookie := newAdminSessionCookie(t, application, "owner@example.org")
+	handler := application.siteHTTPHandler(http.HandlerFunc(application.route))
+	request := httptest.NewRequest("GET", "http://localhost:8080/?profile", nil)
+	request.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != 200 {
+		t.Fatalf("profile GET: %d %s", response.Code, response.Body.String())
+	}
+	csrf := ""
+	for _, form := range regexp.MustCompile(`(?s)<form\b[^>]*>.*?</form>`).FindAllString(response.Body.String(), -1) {
+		if !strings.Contains(form, `value="ai_ingress_save"`) {
+			continue
+		}
+		match := regexp.MustCompile(`name="account_csrf" value="([^"]+)"`).FindStringSubmatch(form)
+		if len(match) == 2 {
+			csrf = match[1]
+		}
+	}
+	if csrf == "" {
+		t.Fatal("AI settings form has no session CSRF")
+	}
+	for _, updated := range response.Result().Cookies() {
+		if updated.Name == cookie.Name {
+			cookie = updated
+		}
+	}
+	form := url.Values{"profile_action": {"ai_ingress_save"}, "account_csrf": {csrf}}
+	for _, provider := range []string{"external", "openai", "anthropic", "perplexity", "google", "microsoft", "apple", "amazon", "xai"} {
+		form.Set("ai_"+provider, "on")
+	}
+	post := func() *httptest.ResponseRecorder {
+		submission := httptest.NewRequest("POST", "http://localhost:8080/?profile", strings.NewReader(form.Encode()))
+		submission.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		submission.Header.Set("Origin", "null")
+		submission.AddCookie(cookie)
+		result := httptest.NewRecorder()
+		handler.ServeHTTP(result, submission)
+		return result
+	}
+	saved := post()
+	if saved.Code != 303 {
+		t.Fatalf("AI settings POST: %d %s", saved.Code, saved.Body.String())
+	}
+	policy := application.aiProviderPolicy(request)
+	if !policy.External || !policy.OpenAI || !policy.Anthropic || !policy.XAI {
+		t.Fatal("AI settings were not saved", policy)
+	}
+	form.Set("account_csrf", "")
+	form.Set("ai_external", "")
+	if rejected := post(); rejected.Code != 403 {
+		t.Fatalf("missing CSRF accepted: %d", rejected.Code)
+	}
+	if !application.aiProviderPolicy(request).External {
+		t.Fatal("rejected request changed AI access")
+	}
+}
+
+func TestMCPOAuthChatGPTConnectUsesPinnedPublicClient(t *testing.T) {
+	application, database := newTestApplication(t)
+	application.aiCapabilities = aicapability.NewManager()
+	defer application.aiCapabilities.Close()
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('localhost','owner@example.org','fixture',1)`); err != nil {
+		t.Fatal(err)
+	}
+	cookie := newAdminSessionCookie(t, application, "owner@example.org")
+	verifier := strings.Repeat("v", 43)
+	digest := sha256.Sum256([]byte(verifier))
+	const clientID = "https://chatgpt.com/oauth/client.json"
+	const callback = "https://chatgpt.com/connector_platform_oauth_redirect"
+	const resource = "https://localhost/?mcp"
+	query := url.Values{"oauth": {"authorize"}, "response_type": {"code"}, "client_id": {clientID}, "redirect_uri": {callback}, "resource": {resource}, "scope": {"read write publish analytics"}, "state": {"connector-state"}, "code_challenge_method": {"S256"}, "code_challenge": {base64.RawURLEncoding.EncodeToString(digest[:])}}
+	handler := application.siteHTTPHandler(http.HandlerFunc(application.route))
+	authorize := func() *httptest.ResponseRecorder {
+		request := httptest.NewRequest("GET", "https://localhost/?"+query.Encode(), nil)
+		request.AddCookie(cookie)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+	response := authorize()
+	if response.Code != 303 {
+		t.Fatalf("ChatGPT authorize: %d %s", response.Code, response.Body.String())
+	}
+	approval, err := url.Parse(response.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	verification := approval.Query().Get("ai_authorize")
+	if verification == "" {
+		t.Fatal("owner consent was not requested", approval)
+	}
+	if err := application.registerMCPOAuthMetadataClient(httptest.NewRequest("GET", "https://localhost/", nil), "localhost", clientID); err != nil {
+		t.Fatal("concurrent/repeated client registration", err)
+	}
+	query.Set("redirect_uri", "https://other.example/callback")
+	if rejected := authorize(); rejected.Code != 400 || !strings.Contains(rejected.Body.String(), "invalid_request") {
+		t.Fatal("unregistered callback accepted", rejected.Code, rejected.Body.String())
+	}
+	if err := application.aiCapabilities.DecidePairing("localhost", "owner@example.org", verification, true, aicapability.StandardScopes()); err != nil {
+		t.Fatal(err)
+	}
+	redirect, err := application.aiCapabilities.OAuthApprovalRedirect("localhost", verification)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination, err := url.Parse(redirect)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if destination.Scheme+"://"+destination.Host+destination.Path != callback || destination.Query().Get("state") != "connector-state" {
+		t.Fatal("wrong ChatGPT callback", destination)
+	}
+	tokens, err := application.aiCapabilities.ExchangeOAuthCode("localhost", clientID, resource, callback, destination.Query().Get("code"), verifier)
+	if err != nil || tokens.AccessToken == "" {
+		t.Fatal("ChatGPT PKCE exchange failed", err)
+	}
+}
