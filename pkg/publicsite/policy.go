@@ -5,8 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"github.com/matveynator/sitebrush/v2/pkg/dirprotect"
 	"io"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -33,7 +35,15 @@ type Session struct {
 	Hash    string
 	Expires int64
 }
+type TrustedIP struct {
+	Address string
+	Expires int64
+}
+
 type Policy struct {
+	Layouts       map[string]string
+	TrustedIPs    []TrustedIP
+	ServerIPs     []TrustedIP
 	Chroots       []Chroot
 	Domain        string
 	Frozen        bool
@@ -46,22 +56,27 @@ type Policy struct {
 	OwnerSessions []Session
 }
 type Lookup struct {
+	ClientIP    string
 	Host        string
 	Path        string
 	File        string
 	SessionHash string
 }
 type Decision struct {
-	Chroot     Chroot
-	Domain     string
-	Frozen     bool
-	Stealth    bool
-	AllowedIPs []string
-	Password   dirprotect.Rule
-	File       FileRule
-	Redirect   string
-	Owner      bool
-	Found      bool
+	Layout       string
+	AdminAllowed bool
+	LoadTrusted  bool
+	Known        bool
+	Chroot       Chroot
+	Domain       string
+	Frozen       bool
+	Stealth      bool
+	AllowedIPs   []string
+	Password     dirprotect.Rule
+	File         FileRule
+	Redirect     string
+	Owner        bool
+	Found        bool
 }
 
 func policyName(domain string) string {
@@ -152,7 +167,7 @@ func Write(root string, policy Policy) error {
 			return err
 		}
 	}
-	return nil
+	return writeServerPolicyIndex(storage, policy)
 }
 func atomicPolicy(root *os.Root, name string, policy Policy) error {
 	encoded, err := json.Marshal(policy)
@@ -182,14 +197,25 @@ func atomicPolicy(root *os.Root, name string, policy Policy) error {
 }
 
 type lookupTask struct {
+	done  <-chan struct{}
 	query Lookup
 	reply chan Decision
 }
+type catalogUpdate struct {
+	policies map[string]cachedPolicy
+	domain   string
+	blocked  bool
+	memory   *bool
+	reply    chan error
+}
 type Catalog struct {
-	tasks chan lookupTask
-	stop  <-chan struct{}
+	root    string
+	updates chan catalogUpdate
+	tasks   chan lookupTask
+	stop    <-chan struct{}
 }
 type cachedPolicy struct {
+	blocked   bool
 	files     map[string]FileRule
 	redirects map[string]string
 	policy    Policy
@@ -198,15 +224,25 @@ type cachedPolicy struct {
 }
 
 func NewCatalog(root string, stop <-chan struct{}) *Catalog {
-	catalog := &Catalog{tasks: make(chan lookupTask, 1024), stop: stop}
+	catalog := &Catalog{root: root, updates: make(chan catalogUpdate, 16), tasks: make(chan lookupTask, 1024), stop: stop}
 	go func() {
 		policies := make(map[string]cachedPolicy)
 		var usedBytes int64
+		memory := false
+		serverTrust := serverTrustCache{}
+		blocked := make(map[string]bool)
 		storage, rootErr := os.OpenRoot(root)
 		if rootErr == nil {
 			defer storage.Close()
 		}
+		if rootErr == nil {
+			serverTrust.refresh(storage, true, stop)
+		}
 		read := func(host string) (cachedPolicy, bool) {
+			if memory {
+				cached, found := policies[host]
+				return cached, found
+			}
 			if rootErr != nil {
 				return cachedPolicy{}, false
 			}
@@ -257,7 +293,49 @@ func NewCatalog(root string, stop <-chan struct{}) *Catalog {
 			select {
 			case <-stop:
 				return
+			case update := <-catalog.updates:
+				if update.memory != nil {
+					memory = *update.memory
+					policies = update.policies
+					if policies == nil {
+						policies = make(map[string]cachedPolicy)
+					}
+					blocked = make(map[string]bool)
+					usedBytes = 0
+					for host, policy := range policies {
+						blocked[host] = policy.blocked
+						usedBytes += policy.size
+					}
+				} else if update.policies != nil {
+					for host, previous := range policies {
+						if previous.policy.Domain == update.domain {
+							usedBytes -= previous.size
+							delete(policies, host)
+						}
+					}
+					for host, policy := range update.policies {
+						policies[host] = policy
+						usedBytes += policy.size
+					}
+					blocked[update.domain] = update.blocked
+				} else {
+					blocked[update.domain] = update.blocked
+				}
+				if usedBytes > 32<<20 || len(policies) > 4096 {
+					memory = false
+					policies = make(map[string]cachedPolicy)
+					usedBytes = 0
+				}
+				if rootErr == nil {
+					serverTrust.refresh(storage, true, stop)
+				}
+				update.reply <- nil
 			case task := <-catalog.tasks:
+				select {
+				case <-task.done:
+					continue
+				default:
+				}
 				decision := Decision{}
 				cached, found := read(task.query.Host)
 				policy := cached.policy
@@ -275,12 +353,40 @@ func NewCatalog(root string, stop <-chan struct{}) *Catalog {
 				}
 
 				if found {
-					blockName, _ := filepath.Rel(root, BlockPath(root, policy.Domain))
-					_, blockErr := storage.Stat(blockName)
-					found = os.IsNotExist(blockErr)
+					decision.Known = true
+					decision.Domain = policy.Domain
+					if memory {
+						found = !blocked[policy.Domain]
+					} else {
+						blockName, _ := filepath.Rel(root, BlockPath(root, policy.Domain))
+						_, blockErr := storage.Stat(blockName)
+						found = os.IsNotExist(blockErr)
+						if found {
+							primaryName, _ := filepath.Rel(root, PolicyPath(root, policy.Domain))
+							current, statErr := storage.Stat(primaryName)
+							found = statErr == nil && current.ModTime().Equal(cached.modified) && current.Size() == cached.size
+						}
+					}
 				}
 				if found {
-					decision = Decision{Domain: policy.Domain, Frozen: policy.Frozen, Stealth: policy.Stealth, AllowedIPs: append([]string(nil), policy.AllowedIPs...), Found: true}
+					decision = Decision{Layout: policy.Layouts[task.query.Path], Known: true, Domain: policy.Domain, Frozen: policy.Frozen, Stealth: policy.Stealth, Found: true}
+
+					if task.query.ClientIP == "" {
+						decision.AllowedIPs = append([]string(nil), policy.AllowedIPs...)
+					}
+					for _, rule := range policy.AllowedIPs {
+						if containsIP(rule, task.query.ClientIP) {
+							decision.AdminAllowed = true
+							break
+						}
+					}
+					decision.LoadTrusted = decision.AdminAllowed || trustedIP(policy.TrustedIPs, task.query.ClientIP)
+					if !decision.LoadTrusted {
+						if !memory && rootErr == nil {
+							serverTrust.refresh(storage, false, stop)
+						}
+						decision.LoadTrusted = !serverTrust.blocked && !blocked[serverTrust.domain] && trustedIP(serverTrust.rules, task.query.ClientIP)
+					}
 					for _, rule := range policy.Passwords {
 						if dirprotect.HasProtectedPrefix(task.query.Path, rule.Path) && len(rule.Path) >= len(decision.Password.Path) {
 							decision.Password = rule
@@ -317,22 +423,34 @@ func NewCatalog(root string, stop <-chan struct{}) *Catalog {
 						}
 					}
 				}
-				task.reply <- decision
+				select {
+				case task.reply <- decision:
+				case <-task.done:
+				case <-stop:
+					return
+				}
 			}
 		}
 	}()
 	return catalog
 }
 func (catalog *Catalog) Lookup(query Lookup) Decision {
+	return catalog.LookupRequest(query, nil)
+}
+func (catalog *Catalog) LookupRequest(query Lookup, done <-chan struct{}) Decision {
 	reply := make(chan Decision, 1)
 	select {
-	case catalog.tasks <- lookupTask{query: query, reply: reply}:
+	case catalog.tasks <- lookupTask{query: query, reply: reply, done: done}:
+	case <-done:
+		return Decision{}
 	case <-catalog.stop:
 		return Decision{}
 	}
 	select {
 	case result := <-reply:
 		return result
+	case <-done:
+		return Decision{}
 	case <-catalog.stop:
 		return Decision{}
 	}
@@ -350,4 +468,146 @@ func syncPolicyDirectory(root *os.Root, name string) error {
 	}
 	defer directory.Close()
 	return directory.Sync()
+}
+
+// Disk compatibility remains available until both processes use acknowledged
+// policy updates. Only the catalog participant owns its in-memory snapshot.
+func (catalog *Catalog) SetMemory(enabled bool) error {
+	var policies map[string]cachedPolicy
+	if enabled {
+		var err error
+		policies, err = loadPolicies(catalog.root, "")
+		if err != nil {
+			return err
+		}
+	}
+	return catalog.update(catalogUpdate{policies: policies, memory: &enabled})
+}
+func (catalog *Catalog) Reload(domain string) error {
+	policies, err := loadPolicies(catalog.root, domain)
+	if err != nil {
+		return err
+	}
+	return catalog.update(catalogUpdate{policies: policies, domain: domain, blocked: policies[domain].blocked})
+}
+func (catalog *Catalog) Open(domain string) error {
+	return catalog.update(catalogUpdate{domain: domain})
+}
+func (catalog *Catalog) Block(domain string) error {
+	return catalog.update(catalogUpdate{domain: domain, blocked: true})
+}
+func (catalog *Catalog) update(update catalogUpdate) error {
+	update.reply = make(chan error, 1)
+	select {
+	case catalog.updates <- update:
+	case <-catalog.stop:
+		return errors.New("public catalog stopped")
+	}
+	select {
+	case err := <-update.reply:
+		return err
+	case <-catalog.stop:
+		return errors.New("public catalog stopped")
+	}
+}
+func loadPolicies(root, domain string) (map[string]cachedPolicy, error) {
+	storage, err := os.OpenRoot(root)
+	if err != nil {
+		return nil, err
+	}
+	defer storage.Close()
+	names := []string{}
+	if domain != "" {
+		names = append(names, policyName(domain))
+	} else {
+		directory, openErr := storage.Open(filepath.Join("storage", "public-sites"))
+		if os.IsNotExist(openErr) {
+			return make(map[string]cachedPolicy), nil
+		}
+		if openErr != nil {
+			return nil, openErr
+		}
+		for {
+			entries, readErr := directory.ReadDir(128)
+			for _, entry := range entries {
+				if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
+					names = append(names, entry.Name())
+				}
+			}
+			if len(names) > 4096 {
+				directory.Close()
+				return nil, errors.New("public policy cache is full")
+			}
+			if readErr != nil {
+				directory.Close()
+				if readErr != io.EOF {
+					return nil, readErr
+				}
+				break
+			}
+		}
+	}
+	policies := make(map[string]cachedPolicy)
+	var used int64
+	for _, name := range names {
+		filename := filepath.Join("storage", "public-sites", name)
+		file, openErr := storage.Open(filename)
+		if openErr != nil {
+			return nil, openErr
+		}
+		encoded, readErr := io.ReadAll(io.LimitReader(file, (8<<20)+1))
+		file.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		if len(encoded) > 8<<20 {
+			return nil, errors.New("public policy is too large")
+		}
+		var policy Policy
+		if json.Unmarshal(encoded, &policy) != nil || policy.Domain == "" {
+			return nil, errors.New("invalid public policy")
+		}
+		if name != policyName(policy.Domain) {
+			continue
+		}
+		used += int64(len(encoded))
+		if used > 32<<20 || len(policies)+len(policy.Aliases) >= 4096 {
+			return nil, errors.New("public policy cache is full")
+		}
+		cached := cachedPolicy{policy: policy, size: int64(len(encoded)), files: make(map[string]FileRule), redirects: make(map[string]string)}
+		for _, rule := range policy.Files {
+			cached.files[rule.Name] = rule
+		}
+		for _, redirect := range policy.Redirects {
+			cached.redirects[redirect.From] = redirect.To
+		}
+		blockName, _ := filepath.Rel(root, BlockPath(root, policy.Domain))
+		_, blockErr := storage.Stat(blockName)
+		cached.blocked = !os.IsNotExist(blockErr)
+		policies[policy.Domain] = cached
+		for _, alias := range policy.Aliases {
+			policies[alias] = cachedPolicy{policy: Policy{Domain: policy.Domain}}
+		}
+	}
+	return policies, nil
+}
+func containsIP(rule, address string) bool {
+	ip, err := netip.ParseAddr(address)
+	if err != nil {
+		return false
+	}
+	if prefix, prefixErr := netip.ParsePrefix(rule); prefixErr == nil {
+		return prefix.Contains(ip.Unmap())
+	}
+	allowed, allowedErr := netip.ParseAddr(rule)
+	return allowedErr == nil && allowed.Unmap() == ip.Unmap()
+}
+func trustedIP(rules []TrustedIP, address string) bool {
+	now := time.Now().Unix()
+	for _, rule := range rules {
+		if (rule.Expires == 0 || rule.Expires > now) && containsIP(rule.Address, address) {
+			return true
+		}
+	}
+	return false
 }

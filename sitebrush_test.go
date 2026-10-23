@@ -33,6 +33,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"net/textproto"
 	"net/url"
 	"os"
@@ -13142,7 +13143,7 @@ func TestGuestStaticRouteServesPublishedFileWithoutDatabase(t *testing.T) {
 		t.Fatalf("status = %d, want 200, body=%q", response.Code, response.Body.String())
 	}
 	body := response.Body.String()
-	for _, expectedFragment := range []string{"<html><body>fast", "initializeSitebrushContextMenuForGuests", "href='?login'", "/p/static/login.png"} {
+	for _, expectedFragment := range []string{"<html><body>fast", "/p/static/visitor.js", "guest_menu.ru.js"} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("guest static body missing %q in %s", expectedFragment, body)
 		}
@@ -13223,8 +13224,8 @@ func TestGuestStaticAnalyticsAvoidsDatabaseAndUsesBrowserCollector(t *testing.T)
 	if len(application.analyticsEvents) != 0 {
 		t.Fatal("guest delivery collected a technical HTTP event")
 	}
-	if !strings.Contains(response.Body.String(), "/p/static/analytics.js") || !strings.Contains(response.Body.String(), "data-analytics-layout") {
-		t.Fatal("guest page lacks the batched browser collector or published version")
+	if !strings.Contains(response.Body.String(), "/p/static/visitor.js") {
+		t.Fatal("guest page lacks the deferred browser collector")
 	}
 }
 
@@ -21303,7 +21304,7 @@ func TestConversionStealthCollectsPublicVisitsAndProtectsConfiguration(t *testin
 	visit.RemoteAddr = "192.0.2.2:1234"
 	response := httptest.NewRecorder()
 	application.route(response, visit)
-	if response.Code != 200 || strings.Count(response.Body.String(), `src="/p/static/analytics.js?v=`) != 1 || strings.Contains(response.Body.String(), "SiteBrushContextMenu") {
+	if response.Code != 200 || strings.Count(response.Body.String(), `src="/p/static/visitor.js?v=`) != 1 || strings.Contains(response.Body.String(), "data-menu=") {
 		t.Fatal("stealth must retain only the visitor collector", response.Body.String())
 	}
 	application.browserAnalytics = make(chan browserAnalyticsEnvelope, 16)
@@ -21556,6 +21557,9 @@ func TestConversionBrowserRegressions(t *testing.T) {
 		if strings.HasPrefix(request.URL.Path, "/p/static/") {
 			application.serveEmbeddedStaticAsset(writer, request)
 			return
+		}
+		if request.URL.Path == "/" {
+			request = request.WithContext(context.WithValue(request.Context(), publicDecisionContextKey{}, publicsite.Decision{Layout: layout}))
 		}
 		application.route(writer, request)
 	}))
@@ -27876,10 +27880,15 @@ func TestMCPConnectionAndAIEditorBrowser(t *testing.T) {
 	cookie := newAdminSessionCookie(t, application, "editor@example.org")
 	staticFiles, _ := fs.Sub(embeddedWebFiles, "web/static")
 	router := http.NewServeMux()
-	router.Handle("/p/static/", http.StripPrefix("/p/static/", http.FileServer(http.FS(staticFiles))))
+	var assetErr error
+	application.embeddedStaticAssets, assetErr = buildEmbeddedStaticAssetCache(staticFiles)
+	if assetErr != nil {
+		t.Fatal(assetErr)
+	}
+	router.HandleFunc("/p/static/", application.serveEmbeddedStaticAsset)
 	router.HandleFunc("/public-fixture", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		io.WriteString(w, "<!doctype html><html><body><h1>Public fixture</h1>"+buildGuestContextMenuScriptForLanguage("/public-fixture", "localhost", "ru")+"</body></html>")
+		io.WriteString(w, "<!doctype html><html><body><h1>Public fixture</h1><script defer src='/p/static/visitor.js' data-menu='guest_menu.ru.js'></script></body></html>")
 	})
 	router.HandleFunc("/menu-fixture", func(w http.ResponseWriter, r *http.Request) {
 		domain := "example.org"
@@ -28436,12 +28445,20 @@ func TestPublishedBoundaryAvoidsSQLAndPreservesPrivateFiles(t *testing.T) {
 	if _, err := database.Exec(`INSERT INTO page_password_rules(domain,path,password_hash) VALUES('example.org','/private','fixture-hash')`); err != nil {
 		t.Fatal(err)
 	}
+	publishedHTML := "<html><body>Published boundary</body></html>"
+	if _, err := database.Exec(`INSERT INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, "example.org", "/", "Fixture", publishedHTML); err != nil {
+		t.Fatal(err)
+	}
 	if err := application.writePublicPolicy("example.org"); err != nil {
 		t.Fatal(err)
 	}
 	filename := filepath.Join(application.domainStaticDir("example.org"), "index.html")
 	os.MkdirAll(filepath.Dir(filename), 0755)
 	os.WriteFile(filename, []byte("<html><body>Published boundary</body></html>"), 0644)
+	expectedLayout := sha256.Sum256([]byte(publishedHTML))
+	if decision := application.publicCatalog.Lookup(publicsite.Lookup{Host: "example.org", Path: "/"}); decision.Layout != hex.EncodeToString(expectedLayout[:8]) {
+		t.Fatal("snapshot lost publication layout", decision.Layout)
+	}
 	application.db = panicSQLExecutor{t: t}
 	for _, query := range []string{"", "?utm_source=mail"} {
 		response := httptest.NewRecorder()
@@ -28467,14 +28484,33 @@ func TestPublishedBoundaryAvoidsSQLAndPreservesPrivateFiles(t *testing.T) {
 	if application.servePublicPublished(httptest.NewRecorder(), request, false) {
 		t.Fatal("public handler swallowed a control request")
 	}
+	for _, target := range []string{"https://example.org/?request=analytics", "https://example.org/.well-known/oauth-authorization-server", "https://example.org/.well-known/acme-challenge/token"} {
+		serviceRequest := httptest.NewRequest("GET", target, nil)
+		if strings.Contains(target, "?request=analytics") {
+			serviceRequest.Header.Set("Upgrade", "websocket")
+		}
+		if application.servePublicPublished(httptest.NewRecorder(), serviceRequest, false) {
+			t.Fatal("public file path swallowed a service endpoint", target)
+		}
+	}
+	socketRequest := httptest.NewRequest("GET", "https://example.org/", nil)
+	socketRequest.Header.Set("Upgrade", "websocket")
+	if publicOrdinaryRequest(socketRequest) {
+		t.Fatal("WebSocket entered ordinary page delivery")
+	}
+
 }
 func BenchmarkPublicPublished(b *testing.B) {
 	stop, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	application := &App{storagePath: b.TempDir()}
+	application := &App{storagePath: b.TempDir(), publicStreamer: publicsite.NewStreamer()}
+	application.storageRealRoot = application.storagePath
 	application.publicCatalog = publicsite.NewCatalog(application.storagePath, stop.Done())
 	application.guestStaticHTMLCache = startGuestStaticHTMLCacheWorker(stop, 8<<20)
 	if err := publicsite.Write(application.storagePath, publicsite.Policy{Domain: "example.org"}); err != nil {
+		b.Fatal(err)
+	}
+	if err := application.publicCatalog.SetMemory(true); err != nil {
 		b.Fatal(err)
 	}
 	filename := filepath.Join(application.domainStaticDir("example.org"), "index.html")
@@ -28510,5 +28546,419 @@ func TestPublicHTTPSPreservesPortFallback(t *testing.T) {
 		if selected < 1 || selected > 65535 || selected == occupiedPort {
 			t.Fatalf("invalid HTTPS fallback %d for HTTP %d", selected, httpPort)
 		}
+	}
+}
+
+func TestPublicStaticTrustedLoadWithoutCookiesOrSQL(t *testing.T) {
+	application, _ := newTestApplication(t)
+	stop := make(chan struct{})
+	defer close(stop)
+	application.publicStreamer = publicsite.NewStreamer()
+	application.publicCatalog = publicsite.NewCatalog(application.storagePath, stop)
+	guard, err := httpsecurity.NewAttackGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Close()
+	application.attackGuard = guard
+	const clientIP = "198.51.100.50"
+	now := time.Now()
+	guard.ObserveIncident(clientIP, "injection", "fixture", now)
+	guard.ObserveIncident(clientIP, "injection", "fixture", now.Add(time.Second))
+	policy := publicsite.Policy{Domain: "example.org", Aliases: []string{"alias.example.org"}, AllowedIPs: []string{clientIP}}
+	if err := publicsite.Write(application.storagePath, policy); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.publicCatalog.SetMemory(true); err != nil {
+		t.Fatal(err)
+	}
+	filename := filepath.Join(application.domainStaticDir("example.org"), "index.html")
+	if err := os.MkdirAll(filepath.Dir(filename), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filename, []byte("<html><body>Published</body></html>"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	application.db = panicSQLExecutor{t: t}
+	// A stalled optional renderer must not be contacted by a public request.
+	application.guestStaticHTMLCache = make(chan guestStaticHTMLCacheRequest)
+	application.securityAnalytics = make(chan siteAnalyticsEvent, 1)
+	application.securityAnalytics <- siteAnalyticsEvent{}
+	handler := application.siteHTTPHandler(http.HandlerFunc(application.route))
+	results := make(chan int, 600)
+	for worker := 0; worker < 600; worker++ {
+		go func() {
+			request := httptest.NewRequest("GET", "https://alias.example.org/?utm_source=load", nil)
+			request.RemoteAddr = clientIP + ":12345"
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			results <- response.Code
+		}()
+	}
+	for worker := 0; worker < 600; worker++ {
+		if status := <-results; status != 200 {
+			t.Fatalf("trusted load returned %d", status)
+		}
+	}
+	for _, target := range []string{"https://example.org/missing", "https://unknown.example/missing"} {
+		request := httptest.NewRequest("GET", target, nil)
+		request.RemoteAddr = clientIP + ":12345"
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != 404 {
+			t.Fatalf("%s: %d", target, response.Code)
+		}
+	}
+	about := filepath.Join(application.domainStaticDir("example.org"), "about.html")
+	if err := os.WriteFile(about, []byte("<html><body>About</body></html>"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	redirectRequest := httptest.NewRequest("GET", "https://example.org/about", nil)
+	redirectRequest.RemoteAddr = clientIP + ":12345"
+	redirectResponse := httptest.NewRecorder()
+	handler.ServeHTTP(redirectResponse, redirectRequest)
+	if redirectResponse.Code != 301 || redirectResponse.Header().Get("Location") != "/about/" {
+		t.Fatal("canonical public redirect", redirectResponse.Code, redirectResponse.Header())
+	}
+	policy.AllowedIPs = nil
+	if err := publicsite.Write(application.storagePath, policy); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.publicCatalog.Reload(policy.Domain); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest("GET", "https://example.org/", nil)
+	request.RemoteAddr = clientIP + ":12345"
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != 429 {
+		t.Fatalf("revoked IP bypassed protection: %d", response.Code)
+	}
+}
+
+func BenchmarkPublicHTTP(b *testing.B) {
+	for _, concurrency := range []int{300, 600} {
+		for _, stalled := range []bool{false, true} {
+			b.Run(fmt.Sprintf("connections=%d/stalled=%t", concurrency, stalled), func(b *testing.B) {
+				stop := make(chan struct{})
+				defer close(stop)
+				application := &App{storagePath: b.TempDir(), publicStreamer: publicsite.NewStreamer()}
+				application.storageRealRoot = application.storagePath
+				application.publicCatalog = publicsite.NewCatalog(application.storagePath, stop)
+				if err := publicsite.Write(application.storagePath, publicsite.Policy{Domain: "example.org", AllowedIPs: []string{"198.51.100.50"}}); err != nil {
+					b.Fatal(err)
+				}
+				if err := application.publicCatalog.SetMemory(true); err != nil {
+					b.Fatal(err)
+				}
+				filename := filepath.Join(application.domainStaticDir("example.org"), "index.html")
+				if err := os.MkdirAll(filepath.Dir(filename), 0755); err != nil {
+					b.Fatal(err)
+				}
+				if err := os.WriteFile(filename, []byte("<html><body>"+strings.Repeat("static ", 16000)+"</body></html>"), 0644); err != nil {
+					b.Fatal(err)
+				}
+				if stalled {
+					application.guestStaticHTMLCache = make(chan guestStaticHTMLCacheRequest)
+					application.securityAnalytics = make(chan siteAnalyticsEvent, 1)
+					application.securityAnalytics <- siteAnalyticsEvent{}
+				}
+				guard, err := httpsecurity.NewAttackGuard("")
+				if err != nil {
+					b.Fatal(err)
+				}
+				defer guard.Close()
+				application.attackGuard = guard
+				handler := application.siteHTTPHandler(http.HandlerFunc(application.route))
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					r.Host = "example.org"
+					r.RemoteAddr = "198.51.100.50:12345"
+					handler.ServeHTTP(w, r)
+				}))
+				defer server.Close()
+				transport := &http.Transport{MaxIdleConns: concurrency, MaxIdleConnsPerHost: concurrency, MaxConnsPerHost: concurrency, DisableCompression: true}
+				defer transport.CloseIdleConnections()
+				client := &http.Client{Transport: transport, Timeout: 10 * time.Second}
+				samples := make(chan []int64, concurrency+runtime.GOMAXPROCS(0))
+				b.SetParallelism((concurrency + runtime.GOMAXPROCS(0) - 1) / runtime.GOMAXPROCS(0))
+				b.ReportAllocs()
+				b.ResetTimer()
+				b.RunParallel(func(worker *testing.PB) {
+					firstByte := make(chan int64, 1)
+					latencies := make([]int64, 0, 64)
+					for worker.Next() {
+						request, _ := http.NewRequest("GET", server.URL+"/", nil)
+						started := time.Now()
+						request = request.WithContext(httptrace.WithClientTrace(request.Context(), &httptrace.ClientTrace{GotFirstResponseByte: func() { firstByte <- time.Since(started).Microseconds() }}))
+						response, requestErr := client.Do(request)
+						if requestErr != nil {
+							b.Error(requestErr)
+							break
+						}
+						io.Copy(io.Discard, response.Body)
+						response.Body.Close()
+						if response.StatusCode != 200 {
+							b.Errorf("status=%d", response.StatusCode)
+							break
+						}
+						elapsed := <-firstByte
+						if len(latencies) < cap(latencies) {
+							latencies = append(latencies, elapsed)
+						}
+					}
+					samples <- latencies
+				})
+				b.StopTimer()
+				close(samples)
+				var latencies []int64
+				for workerSamples := range samples {
+					latencies = append(latencies, workerSamples...)
+				}
+				sort.Slice(latencies, func(left, right int) bool { return latencies[left] < latencies[right] })
+				if len(latencies) > 0 {
+					for _, percentile := range []int{50, 95, 99} {
+						b.ReportMetric(float64(latencies[(len(latencies)-1)*percentile/100]), fmt.Sprintf("TTFB-p%d-us", percentile))
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestPublicBoundaryPolicyHandoffKeepsGuestsIndependent(t *testing.T) {
+	root := t.TempDir()
+	policy := publicsite.Policy{Domain: "example.org"}
+	if err := publicsite.Write(root, policy); err != nil {
+		t.Fatal(err)
+	}
+	filename := filepath.Join(root, "storage", "static", "example.org", "index.html")
+	if err := os.MkdirAll(filepath.Dir(filename), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filename, []byte("<html><body>Published handoff</body></html>"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	boundary, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	front, closeFront, _, err := startPublicSiteBoundary(boundary, root, serverRunConfig{ParsedPorts: listenPorts{HTTPPort: 0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeFront()
+	if err := front.Set("127.0.0.1:1", false); err != nil {
+		t.Fatal(err)
+	}
+	change := func(action string) {
+		encoded, _ := json.Marshal(publicsite.Change{Action: action, Domain: policy.Domain, Address: "127.0.0.1:1"})
+		if _, err := front.Policy(encoded); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read := func(expected int, paths ...string) {
+		requestPath := "/"
+		if len(paths) > 0 {
+			requestPath = paths[0]
+		}
+		request, _ := http.NewRequest("GET", fmt.Sprintf("http://127.0.0.1:%d%s", front.HTTPPort, requestPath), nil)
+		request.Host = "example.org"
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(response.Body)
+		response.Body.Close()
+		if response.StatusCode != expected {
+			t.Fatalf("handoff response=%d expected=%d body=%s", response.StatusCode, expected, body)
+		}
+		if expected != 200 && strings.Contains(string(body), "Published handoff") {
+			t.Fatal("closed policy exposed published bytes")
+		}
+	}
+	change("enable")
+	directory := filepath.Dir(publicsite.PolicyPath(root, policy.Domain))
+	if err := os.Rename(directory, directory+".held"); err != nil {
+		t.Fatal(err)
+	}
+	read(200)
+	read(200, "/p/"+legacyPublicTrialWidgetAssetName)
+	change("block")
+	read(503)
+	if err := os.Rename(directory+".held", directory); err != nil {
+		t.Fatal(err)
+	}
+	policy.Passwords = []dirprotect.Rule{{Domain: policy.Domain, Path: "/", PasswordHash: "fixture"}}
+	if err := publicsite.Write(root, policy); err != nil {
+		t.Fatal(err)
+	}
+	change("refresh")
+	read(401)
+	policy.Passwords = nil
+	if err := publicsite.Write(root, policy); err != nil {
+		t.Fatal(err)
+	}
+	change("refresh")
+	if err := front.Set("127.0.0.1:1", true); err != nil {
+		t.Fatal(err)
+	}
+	read(200)
+}
+
+func TestPublicFallbackObservesEachRequestOnce(t *testing.T) {
+	for _, target := range []string{"/protected/page", "/p/token.pdf", "/robots.txt", "/sitemap.xml"} {
+		t.Run(target, func(t *testing.T) {
+			application, _ := newTestApplication(t)
+			stop := make(chan struct{})
+			defer close(stop)
+			application.publicCatalog = publicsite.NewCatalog(application.storagePath, stop)
+			policy := publicsite.Policy{Domain: "example.org", Passwords: []dirprotect.Rule{{Domain: "example.org", Path: "/protected", PasswordHash: "fixture"}}, Files: []publicsite.FileRule{{Name: "token.pdf", Mode: "token"}}}
+			if err := publicsite.Write(application.storagePath, policy); err != nil {
+				t.Fatal(err)
+			}
+			if err := application.publicCatalog.SetMemory(true); err != nil {
+				t.Fatal(err)
+			}
+			guard, err := httpsecurity.NewAttackGuard("")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer guard.Close()
+			application.attackGuard = guard
+			application.securityAnalytics = make(chan siteAnalyticsEvent, 8)
+			application.db = panicSQLExecutor{t: t}
+			calls := 0
+			handler := application.siteHTTPHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++; http.NotFound(w, r) }))
+			request := httptest.NewRequest("GET", "https://example.org"+target, nil)
+			request.RemoteAddr = "198.51.100.55:1234"
+			request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "unverified"})
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != 404 || calls != 1 || len(application.securityAnalytics) != 1 {
+				t.Fatalf("status=%d core calls=%d observations=%d", response.Code, calls, len(application.securityAnalytics))
+			}
+		})
+	}
+}
+
+func TestProfileAIIngressSaveUsesAuthenticatedAccount(t *testing.T) {
+	application, database := newTestApplication(t)
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('localhost','owner@example.org','fixture',1)`); err != nil {
+		t.Fatal(err)
+	}
+	cookie := newAdminSessionCookie(t, application, "owner@example.org")
+	handler := application.siteHTTPHandler(http.HandlerFunc(application.route))
+	request := httptest.NewRequest("GET", "http://localhost:8080/?profile", nil)
+	request.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != 200 {
+		t.Fatalf("profile GET: %d %s", response.Code, response.Body.String())
+	}
+	csrf := ""
+	for _, form := range regexp.MustCompile(`(?s)<form\b[^>]*>.*?</form>`).FindAllString(response.Body.String(), -1) {
+		if !strings.Contains(form, `value="ai_ingress_save"`) {
+			continue
+		}
+		match := regexp.MustCompile(`name="account_csrf" value="([^"]+)"`).FindStringSubmatch(form)
+		if len(match) == 2 {
+			csrf = match[1]
+		}
+	}
+	if csrf == "" {
+		t.Fatal("AI settings form has no session CSRF")
+	}
+	for _, updated := range response.Result().Cookies() {
+		if updated.Name == cookie.Name {
+			cookie = updated
+		}
+	}
+	form := url.Values{"profile_action": {"ai_ingress_save"}, "account_csrf": {csrf}}
+	for _, provider := range []string{"external", "openai", "anthropic", "perplexity", "google", "microsoft", "apple", "amazon", "xai"} {
+		form.Set("ai_"+provider, "on")
+	}
+	post := func() *httptest.ResponseRecorder {
+		submission := httptest.NewRequest("POST", "http://localhost:8080/?profile", strings.NewReader(form.Encode()))
+		submission.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		submission.Header.Set("Origin", "null")
+		submission.AddCookie(cookie)
+		result := httptest.NewRecorder()
+		handler.ServeHTTP(result, submission)
+		return result
+	}
+	saved := post()
+	if saved.Code != 303 {
+		t.Fatalf("AI settings POST: %d %s", saved.Code, saved.Body.String())
+	}
+	policy := application.aiProviderPolicy(request)
+	if !policy.External || !policy.OpenAI || !policy.Anthropic || !policy.XAI {
+		t.Fatal("AI settings were not saved", policy)
+	}
+	form.Set("account_csrf", "")
+	form.Set("ai_external", "")
+	if rejected := post(); rejected.Code != 403 {
+		t.Fatalf("missing CSRF accepted: %d", rejected.Code)
+	}
+	if !application.aiProviderPolicy(request).External {
+		t.Fatal("rejected request changed AI access")
+	}
+}
+
+func TestMCPOAuthChatGPTConnectUsesPinnedPublicClient(t *testing.T) {
+	application, database := newTestApplication(t)
+	application.aiCapabilities = aicapability.NewManager()
+	defer application.aiCapabilities.Close()
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('localhost','owner@example.org','fixture',1)`); err != nil {
+		t.Fatal(err)
+	}
+	cookie := newAdminSessionCookie(t, application, "owner@example.org")
+	verifier := strings.Repeat("v", 43)
+	digest := sha256.Sum256([]byte(verifier))
+	const clientID = "https://chatgpt.com/oauth/client.json"
+	const callback = "https://chatgpt.com/connector_platform_oauth_redirect"
+	const resource = "https://localhost/?mcp"
+	query := url.Values{"oauth": {"authorize"}, "response_type": {"code"}, "client_id": {clientID}, "redirect_uri": {callback}, "resource": {resource}, "scope": {"read write publish analytics"}, "state": {"connector-state"}, "code_challenge_method": {"S256"}, "code_challenge": {base64.RawURLEncoding.EncodeToString(digest[:])}}
+	handler := application.siteHTTPHandler(http.HandlerFunc(application.route))
+	authorize := func() *httptest.ResponseRecorder {
+		request := httptest.NewRequest("GET", "https://localhost/?"+query.Encode(), nil)
+		request.AddCookie(cookie)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+	response := authorize()
+	if response.Code != 303 {
+		t.Fatalf("ChatGPT authorize: %d %s", response.Code, response.Body.String())
+	}
+	approval, err := url.Parse(response.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	verification := approval.Query().Get("ai_authorize")
+	if verification == "" {
+		t.Fatal("owner consent was not requested", approval)
+	}
+	if err := application.registerMCPOAuthMetadataClient(httptest.NewRequest("GET", "https://localhost/", nil), "localhost", clientID); err != nil {
+		t.Fatal("concurrent/repeated client registration", err)
+	}
+	query.Set("redirect_uri", "https://other.example/callback")
+	if rejected := authorize(); rejected.Code != 400 || !strings.Contains(rejected.Body.String(), "invalid_request") {
+		t.Fatal("unregistered callback accepted", rejected.Code, rejected.Body.String())
+	}
+	if err := application.aiCapabilities.DecidePairing("localhost", "owner@example.org", verification, true, aicapability.StandardScopes()); err != nil {
+		t.Fatal(err)
+	}
+	redirect, err := application.aiCapabilities.OAuthApprovalRedirect("localhost", verification)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination, err := url.Parse(redirect)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if destination.Scheme+"://"+destination.Host+destination.Path != callback || destination.Query().Get("state") != "connector-state" {
+		t.Fatal("wrong ChatGPT callback", destination)
+	}
+	tokens, err := application.aiCapabilities.ExchangeOAuthCode("localhost", clientID, resource, callback, destination.Query().Get("code"), verifier)
+	if err != nil || tokens.AccessToken == "" {
+		t.Fatal("ChatGPT PKCE exchange failed", err)
 	}
 }

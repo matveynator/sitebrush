@@ -117,6 +117,7 @@ type attackGuardRequest struct {
 	Description string
 	Source      string
 	Trusted     bool
+	PolicyTrust bool
 	Now         time.Time
 	ExpiresAt   time.Time
 	Settings    SecuritySettings
@@ -269,7 +270,7 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 		block, blocked := activeSecurityBlock(blocks, ip, request.Domain, now)
 		return block, blocked && (block.Source != "global" || settings.GlobalSync)
 	}
-	if request.Domain != "" && (request.Operation == attackGuardObserveFast || request.Operation == attackGuardObserveIncident) {
+	if !request.PolicyTrust && request.Domain != "" && (request.Operation == attackGuardObserveFast || request.Operation == attackGuardObserveIncident) {
 		trustedAt, trusted := trustedAdminIPs[adminIPTrustKey(request.Domain, ip)]
 		if trusted && now.Sub(trustedAt) <= trustedAdminIPCacheTTL {
 			return attackGuardResult{Allowed: true, AdminTrusted: true}
@@ -843,6 +844,19 @@ func (guard *AttackGuard) ObserveRequestFastDisposition(ip, path, method string,
 func (guard *AttackGuard) ObserveSiteRequestFastDisposition(domain, ip, path, method string, trusted bool, now time.Time) (SecurityBlock, bool, bool) {
 	block, blocked, allowed, _ := guard.ObserveSiteRequestFastEvidence(domain, ip, path, method, trusted, now)
 	return block, blocked, allowed
+}
+
+// ObservePublicRequest uses the current publication policy instead of a cached
+// administrator grant, so removing an address takes effect on the next request.
+func (guard *AttackGuard) ObservePublicRequest(domain, ip, path, method string, status int, now time.Time) (SecurityBlock, bool, bool, bool) {
+	result, ok := guard.exchangeFast(attackGuardRequest{Operation: attackGuardObserveFast, Domain: normalizeSecurityDomain(domain), IP: ip, Path: path, Method: method, StatusCode: status, PolicyTrust: true, Now: now})
+	if !ok {
+		return SecurityBlock{}, false, false, false
+	}
+	if result.Changed {
+		guard.signalSave()
+	}
+	return result.Block, result.Blocked, result.Allowed, result.AlreadyBlocked
 }
 
 func (guard *AttackGuard) ObserveSiteRequestFastEvidence(domain, ip, path, method string, trusted bool, now time.Time) (SecurityBlock, bool, bool, bool) {
