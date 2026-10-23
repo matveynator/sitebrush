@@ -180,7 +180,7 @@
           <tr data-file-row data-name="{{.Name}}" data-uri="{{.PagePath}}" data-size="{{.Size}}" data-date="{{.CreatedUnix}}" id="file-{{printf "%x" .Name}}">
             <td>
               {{if .IsImage}}
-              <button class="file-preview-trigger" type="button" data-preview-image data-preview-src="{{.AssetPath}}" data-preview-name="{{.Name}}" data-preview-size="{{.SizeLabel}}" data-preview-date="{{.CreatedAt}}" data-preview-access="{{if eq .AccessMode "timer"}}{{index $.T "files_access_timer"}}{{else if eq .AccessMode "token"}}{{index $.T "files_access_token"}}{{else}}{{index $.T "files_access_public"}}{{end}}" data-preview-page-path="{{.PagePath}}" aria-label="{{index $.T "files_preview_title"}} {{.Name}}"><img class="file-thumb" src="{{.AssetPath}}" alt="" loading="lazy"></button>
+              <button class="file-preview-trigger" type="button" data-preview-image data-preview-src="{{.AssetPath}}" data-preview-name="{{.Name}}" data-preview-size="{{.SizeLabel}}" data-preview-date="{{.CreatedAt}}" data-preview-access="{{if eq .AccessMode "timer"}}{{index $.T "files_access_timer"}}{{else if eq .AccessMode "token"}}{{index $.T "files_access_token"}}{{else if eq .AccessMode "page_password"}}{{index $.T "files_access_page_password"}}{{else}}{{index $.T "files_access_public"}}{{end}}" data-preview-page-path="{{.PagePath}}" aria-label="{{index $.T "files_preview_title"}} {{.Name}}"><img class="file-thumb" src="{{.AssetPath}}" alt="" loading="lazy"></button>
               {{else}}
               <div class="file-icon">{{.Extension}}</div>
               {{end}}
@@ -198,16 +198,18 @@
             <td data-label="{{index $.T "files_col_date"}}"><span class="text-muted">{{.CreatedAt}}</span></td>
             <td class="access-cell" data-label="{{index $.T "files_col_access"}}">
               <details class="file-access-details" data-file-access-details>
-                <summary><span>{{index $.T "files_col_access"}}</span><strong>{{if eq .AccessMode "timer"}}{{index $.T "files_access_timer"}}{{else if eq .AccessMode "token"}}{{index $.T "files_access_token"}}{{else}}{{index $.T "files_access_public"}}{{end}}</strong></summary>
+                <summary><span>{{index $.T "files_col_access"}}</span><strong>{{if eq .AccessMode "timer"}}{{index $.T "files_access_timer"}}{{else if eq .AccessMode "token"}}{{index $.T "files_access_token"}}{{else if eq .AccessMode "page_password"}}{{index $.T "files_access_page_password"}}{{else}}{{index $.T "files_access_public"}}{{end}}</strong></summary>
                 <div class="file-access-body">
                   <form method="post" action="{{$.Path}}?files" class="access-grid" data-access-form><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
                     <input type="hidden" name="action" value="save_access">
                     <input type="hidden" name="name" value="{{.Name}}">
                     <select name="access_mode" class="form-select form-select-sm" data-access-mode>
+                      <option value="page_password" {{if eq .AccessMode "page_password"}}selected{{end}}>{{index $.T "files_access_page_password"}}</option>
                       <option value="public" {{if eq .AccessMode "public"}}selected{{end}}>{{index $.T "files_access_public"}}</option>
                       <option value="timer" {{if eq .AccessMode "timer"}}selected{{end}}>{{index $.T "files_access_timer"}}</option>
                       <option value="token" {{if eq .AccessMode "token"}}selected{{end}}>{{index $.T "files_access_token"}}</option>
                     </select>
+                    <input name="protected_page_path" class="form-control form-control-sm" placeholder="{{index $.T "files_protected_page_path"}}" aria-label="{{index $.T "files_protected_page_path"}}" value="{{.ProtectedPagePath}}" data-password-control>
                     <input name="access_token" class="form-control form-control-sm copy-field" placeholder="{{index $.T "files_access_token_placeholder"}}" value="{{.Token}}" data-access-token data-token-control>
                     <input name="access_days" class="form-control form-control-sm" type="number" min="0" placeholder="{{index $.T "files_access_days_placeholder"}}" data-timer-control>
                     <button class="btn btn-sm btn-outline-primary file-icon-button d-none" type="submit" data-save-access title="{{index $.T "files_access_save"}}" aria-label="{{index $.T "files_access_save"}}"><img src="/p/static/save-page.png" alt=""></button>
@@ -437,6 +439,8 @@
     const fileRowElement = formElement.closest('[data-file-row]');
     const previewTriggerElement = fileRowElement ? fileRowElement.querySelector('[data-preview-image]') : null;
     if (previewTriggerElement && selectedModeOption) { previewTriggerElement.dataset.previewAccess = selectedModeOption.textContent; }
+    const passwordControlElement = formElement.querySelector('[data-password-control]');
+    if (passwordControlElement) { passwordControlElement.classList.toggle('d-none', modeElement.value !== 'page_password'); }
     const isTokenMode = modeElement.value === 'token';
     const isTimerMode = modeElement.value === 'timer';
     if (tokenControlElement) { tokenControlElement.classList.toggle('d-none', !isTokenMode); }
@@ -453,7 +457,8 @@
     return [
       modeElement ? modeElement.value : '',
       tokenInputElement ? tokenInputElement.value.trim() : '',
-      timerControlElement ? timerControlElement.value.trim() : ''
+      timerControlElement ? timerControlElement.value.trim() : '',
+      formElement.querySelector('[data-password-control]')?.value.trim() || ''
     ].join('\n');
   }
 

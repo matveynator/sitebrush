@@ -29,6 +29,7 @@ import (
 	"flag"
 	"fmt"
 	"github.com/matveynator/netchan/v2"
+	"hash"
 	"html/template"
 	"io"
 	"io/fs"
@@ -2237,6 +2238,13 @@ func (router *perSiteDBRouter) startSiteSubsystems(root, domain string, content 
 		if err := migrations.Run(database, "mail-account-events-v1", siteMailAccountEventSteps()); err != nil {
 			return err
 		}
+		foundAccessColumn, err := siteDatabaseColumnExists(context.Background(), database, "file_access_rules", "protected_page_path")
+		if err != nil {
+			return err
+		}
+		if err := migrations.Run(database, "site-file-access-v1", siteFileAccessSteps(context.Background(), !foundAccessColumn)); err != nil {
+			return err
+		}
 		if err := aicapability.InitSQL(database); err != nil {
 			return err
 		}
@@ -3595,22 +3603,23 @@ type revisionPageText struct {
 }
 
 type ManagedFile struct {
-	Name          string
-	Size          int64
-	SizeLabel     string
-	AssetPath     string
-	PagePath      string
-	MimeType      string
-	Extension     string
-	CreatedAt     string
-	CreatedUnix   int64
-	IsImage       bool
-	AccessMode    string
-	Token         string
-	ExpiresAt     string
-	SingleUseLeft int
-	DownloadCount int64
-	TokenUseCount int64
+	ProtectedPagePath string
+	Name              string
+	Size              int64
+	SizeLabel         string
+	AssetPath         string
+	PagePath          string
+	MimeType          string
+	Extension         string
+	CreatedAt         string
+	CreatedUnix       int64
+	IsImage           bool
+	AccessMode        string
+	Token             string
+	ExpiresAt         string
+	SingleUseLeft     int
+	DownloadCount     int64
+	TokenUseCount     int64
 }
 
 type DomainAlias struct {
@@ -3667,11 +3676,12 @@ type DomainAutomaticSSLStatus struct {
 }
 
 type ManagedFileAccess struct {
-	AccessMode    string
-	Token         string
-	ExpiresAt     string
-	SingleUseLeft int
-	TokenUseCount int64
+	ProtectedPagePath string
+	AccessMode        string
+	Token             string
+	ExpiresAt         string
+	SingleUseLeft     int
+	TokenUseCount     int64
 }
 
 type EmailConfirmation struct {
@@ -3726,12 +3736,13 @@ type backupFileMetadata struct {
 }
 
 type backupFileAccessRule struct {
-	FileName      string `json:"file_name"`
-	AccessMode    string `json:"access_mode"`
-	Token         string `json:"token"`
-	ExpiresAt     string `json:"expires_at"`
-	SingleUseLeft int    `json:"single_use_left"`
-	TokenUseCount int64  `json:"token_use_count"`
+	ProtectedPagePath string `json:"protected_page_path,omitempty"`
+	FileName          string `json:"file_name"`
+	AccessMode        string `json:"access_mode"`
+	Token             string `json:"token"`
+	ExpiresAt         string `json:"expires_at"`
+	SingleUseLeft     int    `json:"single_use_left"`
+	TokenUseCount     int64  `json:"token_use_count"`
 }
 
 type backupRedirect struct {
@@ -11297,7 +11308,19 @@ func siteSchemaSteps(ctx context.Context, repair bool) []migrations.Step {
 		_, err = transaction.Exec(`ALTER TABLE whole_site_imports ADD COLUMN draft_only INTEGER NOT NULL DEFAULT 0`)
 		return err
 	}})
+	steps = append(steps, siteFileAccessSteps(ctx, repair)...)
 	return steps
+}
+
+func siteFileAccessSteps(ctx context.Context, repair bool) []migrations.Step {
+	return []migrations.Step{{ID: "file-access-page-password", Revision: "1", Ensure: repair, Apply: func(transaction *sql.Tx) error {
+		found, err := siteDatabaseColumnExists(ctx, transaction, "file_access_rules", "protected_page_path")
+		if err != nil || found {
+			return err
+		}
+		_, err = transaction.Exec(`ALTER TABLE file_access_rules ADD COLUMN protected_page_path TEXT NOT NULL DEFAULT ''`)
+		return err
+	}}}
 }
 
 func (a *App) ensureSiteDatabaseSchemaColumns(ctx context.Context) error {
@@ -11416,7 +11439,7 @@ func siteDatabaseSchemaComplete(ctx context.Context, database sqlExecutor) (bool
 	if err != nil || !complete {
 		return complete, err
 	}
-	for _, column := range []struct{ table, name string }{{"page_pending_deletions", "path"}, {"whole_site_imports", "draft_only"}} {
+	for _, column := range []struct{ table, name string }{{"page_pending_deletions", "path"}, {"whole_site_imports", "draft_only"}, {"file_access_rules", "protected_page_path"}} {
 		found, err := siteDatabaseColumnExists(ctx, database, column.table, column.name)
 		if err != nil || !found {
 			return false, err
@@ -12027,10 +12050,27 @@ func (a *App) aiIngressAdmission(r *http.Request) (machine, owner bool) {
 	if r.URL.RawQuery == "" && r.URL.Path != "/.well-known/oauth-authorization-server" {
 		return false, false
 	}
+	if r.URL.Path != "/.well-known/oauth-authorization-server" {
+		query := r.URL.Query()
+		control := false
+		for _, selector := range []string{"mcp", "oauth", "ai", "ai_token", "ai_session", "ai_authorize"} {
+			if query.Has(selector) {
+				control = true
+				break
+			}
+		}
+		if !control {
+			return false, false
+		}
+	}
 	if a.db == nil {
 		return false, false
 	}
 	domain := a.siteDomain(r.Context(), r)
+	if _, public := a.publicDemoState(r, domain); public {
+		// Public demo permission is independent of provider networks and cookies.
+		return true, true
+	}
 	clientIP := accountClientIP(r)
 	if clientIP == "" {
 		return false, false
@@ -12916,10 +12956,10 @@ func (store *appAIStore) Execute(request aieditor.Request, done <-chan struct{})
 		return aieditor.Result{Operation: request.Operation, Path: page.Path, Payload: stored, Err: err}
 	case aieditor.OperationUploadFile:
 		fileName, err := store.application.saveAIFile(ctx, domain, request, done)
-		return aieditor.Result{Operation: request.Operation, Path: fileName, Payload: map[string]string{"file_name": fileName, "url": "/p/" + fileName, "hash": strings.TrimSuffix(fileName, path.Ext(fileName))}, Err: err}
+		return aieditor.Result{Operation: request.Operation, Path: fileName, Payload: map[string]string{"file_name": fileName, "url": "/p/" + fileName, "hash": strings.TrimSuffix(path.Base(fileName), path.Ext(fileName))}, Err: err}
 	case aieditor.OperationPublish:
 		return aieditor.Result{Operation: request.Operation, Message: "published", Err: store.application.publishAI(ctx, domain)}
-	case aieditor.OperationGetSiteState, aieditor.OperationGetPageSettings, aieditor.OperationDeletePage, aieditor.OperationDeleteRevision, aieditor.OperationSetPagePassword, aieditor.OperationRemovePagePassword, aieditor.OperationFreezeSite:
+	case aieditor.OperationGetSiteState, aieditor.OperationGetPageSettings, aieditor.OperationDeletePage, aieditor.OperationDeleteRevision, aieditor.OperationSetRevisionActive, aieditor.OperationGetFileSettings, aieditor.OperationSetFileAccess, aieditor.OperationSetPagePassword, aieditor.OperationRemovePagePassword, aieditor.OperationFreezeSite:
 		return store.application.executeAISiteOperation(ctx, domain, request)
 	case aieditor.OperationRollback:
 		return aieditor.Result{Operation: request.Operation, Path: cleanPath(request.Path), Message: "rolled back", Err: store.application.rollbackAIPage(ctx, domain, request)}
@@ -12929,6 +12969,7 @@ func (store *appAIStore) Execute(request aieditor.Request, done <-chan struct{})
 }
 
 type aiPageView struct {
+	RevisionState string `json:"-"`
 	Path          string `json:"path"`
 	Title         string `json:"title"`
 	HTML          string `json:"html,omitempty"`
@@ -12941,6 +12982,7 @@ func (a *App) readAIPage(ctx context.Context, domain, pagePath string) (aiPageVi
 	var page aiPageView
 	err := a.db.QueryRowContext(ctx, `SELECT path,title,html,published,EXISTS(SELECT 1 FROM page_pending_deletions WHERE domain=pages.domain AND path=pages.path),COALESCE((SELECT MAX(id) FROM revisions WHERE domain=pages.domain AND page_path=pages.path),0) FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&page.Path, &page.Title, &page.HTML, &page.Published, &page.PendingDelete, &page.Version)
 	if err == nil {
+		page.RevisionState, err = aiRevisionState(ctx, a.db, domain, pagePath)
 		page.Version = aiPageVersion(page, page.Version)
 	}
 	return page, err
@@ -12948,12 +12990,56 @@ func (a *App) readAIPage(ctx context.Context, domain, pagePath string) (aiPageVi
 
 func aiPageVersion(page aiPageView, revision string) string {
 	page.Version = revision
-	encoded, _ := json.Marshal(page)
+	encoded, _ := json.Marshal(struct {
+		Page          aiPageView
+		RevisionState string
+	}{page, page.RevisionState})
 	digest := sha256.Sum256(encoded)
 	return revision + ":" + hex.EncodeToString(digest[:16])
 }
 
+// Revision flags are part of optimistic concurrency, even when HTML is unchanged.
+func aiRevisionState(ctx context.Context, database sqlExecutor, domain, pagePath string) (string, error) {
+	rows, err := database.QueryContext(ctx, `SELECT id,is_active FROM revisions WHERE domain=? AND page_path=? ORDER BY id`, domain, pagePath)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	state := sha256.New()
+	for rows.Next() {
+		var id, active int
+		if err := rows.Scan(&id, &active); err != nil {
+			return "", err
+		}
+		fmt.Fprintf(state, "%d=%d;", id, active)
+	}
+	return hex.EncodeToString(state.Sum(nil)), rows.Err()
+}
+
 func (a *App) listAIPages(ctx context.Context, domain string) ([]aiPageView, error) {
+	revisionRows, err := a.db.QueryContext(ctx, `SELECT page_path,id,is_active FROM revisions WHERE domain=? ORDER BY id`, domain)
+	if err != nil {
+		return nil, err
+	}
+	states := map[string]hash.Hash{}
+	for revisionRows.Next() {
+		var pagePath string
+		var id, active int
+		if err = revisionRows.Scan(&pagePath, &id, &active); err != nil {
+			break
+		}
+		if states[pagePath] == nil {
+			states[pagePath] = sha256.New()
+		}
+		fmt.Fprintf(states[pagePath], "%d=%d;", id, active)
+	}
+	if err == nil {
+		err = revisionRows.Err()
+	}
+	revisionRows.Close()
+	if err != nil {
+		return nil, err
+	}
 	rows, err := a.db.QueryContext(ctx, `SELECT path,title,html,published,EXISTS(SELECT 1 FROM page_pending_deletions WHERE domain=pages.domain AND path=pages.path),COALESCE((SELECT MAX(id) FROM revisions WHERE domain=pages.domain AND page_path=pages.path),0) FROM pages WHERE domain=? ORDER BY path ASC`, domain)
 	if err != nil {
 		return nil, err
@@ -12965,6 +13051,11 @@ func (a *App) listAIPages(ctx context.Context, domain string) ([]aiPageView, err
 		if err := rows.Scan(&page.Path, &page.Title, &page.HTML, &page.Published, &page.PendingDelete, &page.Version); err != nil {
 			return nil, err
 		}
+		state := states[page.Path]
+		if state == nil {
+			state = sha256.New()
+		}
+		page.RevisionState = hex.EncodeToString(state.Sum(nil))
 		page.Version = aiPageVersion(page, page.Version)
 		page.HTML = ""
 		pages = append(pages, page)
@@ -13081,7 +13172,7 @@ func (a *App) aiWriteTransaction(ctx context.Context, write func(*sql.Tx) error)
 // same scopes before a request reaches these participants.
 func isAISiteOperation(operation string) bool {
 	switch operation {
-	case "get_site_state", "get_page_settings", "delete_page", "delete_revision", "set_page_password", "remove_page_password", "freeze_site", "import_site", "get_import_status", "cancel_import":
+	case "get_site_state", "get_page_settings", "delete_page", "delete_revision", "set_page_password", "remove_page_password", "freeze_site", "import_site", "get_import_status", "cancel_import", "set_revision_active", "get_file_settings", "set_file_access":
 		return true
 	}
 	return false
@@ -13094,12 +13185,12 @@ func (a *App) aiSiteOperationEndpoint(w http.ResponseWriter, r *http.Request, do
 			return
 		}
 	}
-	readOnly := operation == "get_site_state" || operation == "get_page_settings" || operation == "get_import_status"
+	readOnly := operation == "get_site_state" || operation == "get_page_settings" || operation == "get_file_settings" || operation == "get_import_status"
 	if readOnly && r.Method != http.MethodGet || !readOnly && r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if capability.PagePath != "" && operation != "get_page_settings" && operation != "delete_page" && operation != "delete_revision" {
+	if capability.PagePath != "" && operation != "get_page_settings" && operation != "delete_page" && operation != "delete_revision" && operation != "set_revision_active" {
 		http.Error(w, "this operation requires site-wide access", http.StatusForbidden)
 		return
 	}
@@ -13107,7 +13198,7 @@ func (a *App) aiSiteOperationEndpoint(w http.ResponseWriter, r *http.Request, do
 		a.aiImportEndpoint(w, r, domain, capability, session, operation)
 		return
 	}
-	request := aieditor.Request{Operation: aieditor.Operation(operation), Path: r.URL.Query().Get("path"), DraftOnly: true, StrictVersion: true}
+	request := aieditor.Request{Operation: aieditor.Operation(operation), Path: r.URL.Query().Get("path"), FileName: r.URL.Query().Get("file_name"), DraftOnly: true, StrictVersion: true}
 	if !readOnly {
 		if err := decodeAIRequest(w, r, &request); err != nil {
 			return
@@ -13119,6 +13210,7 @@ func (a *App) aiSiteOperationEndpoint(w http.ResponseWriter, r *http.Request, do
 		http.Error(w, "this AI link can edit only its current page", http.StatusForbidden)
 		return
 	}
+	request.PageOnly = capability.PagePath != ""
 	result, err := a.executeAITask(request, r)
 	writeAIResult(w, result, err)
 }
@@ -13183,6 +13275,27 @@ func (a *App) executeAISiteOperation(ctx context.Context, domain string, request
 			return result
 		}
 		result.Payload = map[string]any{"page": page, "password_protected": protectionPath != "", "protection_path": protectionPath}
+	case aieditor.OperationGetFileSettings, aieditor.OperationSetFileAccess:
+		fileName := safeRelativeAssetPath(request.FileName)
+		if fileName == "" || !a.publicAssetExists(domainStorageName(domain), fileName) {
+			result.Err = aieditor.ErrInvalidRequest
+			return result
+		}
+		if request.Operation == aieditor.OperationSetFileAccess {
+			result.Err = a.setFilePasswordAccess(ctx, domain, []string{fileName}, request.AccessMode, request.ProtectedPagePath)
+			if result.Err != nil {
+				return result
+			}
+		}
+		var mode, protectedPath string
+		result.Err = a.db.QueryRowContext(ctx, `SELECT access_mode,protected_page_path FROM file_access_rules WHERE domain=? AND file_name=?`, domainStorageName(domain), fileName).Scan(&mode, &protectedPath)
+		if errors.Is(result.Err, sql.ErrNoRows) {
+			mode, result.Err = "public", nil
+			if isPrivateAssetName(fileName) {
+				mode = "denied"
+			}
+		}
+		result.Payload = map[string]any{"file_name": fileName, "access_mode": mode, "protected_page_path": protectedPath, "url": "/p/" + fileName}
 	case aieditor.OperationFreezeSite:
 		result.Err = a.setDomainFrozenState(ctx, domain, 1)
 		result.Payload = map[string]bool{"frozen": true}
@@ -13201,7 +13314,7 @@ func (a *App) executeAISiteOperation(ctx context.Context, domain string, request
 			a.writePagePasswordPrefixFile(ctx, domain)
 		}
 		result.Payload = map[string]bool{"rule_removed": result.Err == nil}
-	case aieditor.OperationDeletePage, aieditor.OperationDeleteRevision:
+	case aieditor.OperationDeletePage, aieditor.OperationDeleteRevision, aieditor.OperationSetRevisionActive:
 		result.Err = a.stageAIPageDeletion(ctx, domain, request)
 		if result.Err == nil {
 			result.Payload, result.Err = a.readAIPage(ctx, domain, cleanPath(request.Path))
@@ -13211,6 +13324,25 @@ func (a *App) executeAISiteOperation(ctx context.Context, domain string, request
 }
 
 func (a *App) stageAIPageDeletion(ctx context.Context, domain string, request aieditor.Request) error {
+	if request.Operation == aieditor.OperationDeleteRevision || request.Operation == aieditor.OperationSetRevisionActive {
+		revisionID, err := strconv.Atoi(request.RevisionID)
+		if err != nil || revisionID <= 0 {
+			return aieditor.ErrInvalidRequest
+		}
+		active := request.Active
+		if request.Operation == aieditor.OperationDeleteRevision {
+			disabled := false
+			active = &disabled
+		}
+		if active == nil {
+			return aieditor.ErrInvalidRequest
+		}
+		page, err := a.findPage(ctx, domain, cleanPath(request.Path))
+		if err != nil {
+			return err
+		}
+		return a.persistPageSave(ctx, domain, page.Path, page.Path, page.Title, page.HTML, pageSaveOptions{expectedVersion: request.ExpectedVersion, operation: aieditor.OperationUpdatePage, draftOnly: true, strictVersion: true, pageOnly: request.PageOnly, revisionID: revisionID, revisionActive: active})
+	}
 	return a.siteContentTransaction(ctx, func(transaction *sql.Tx) error {
 		var page aiPageView
 		err := transaction.QueryRowContext(ctx, `SELECT path,title,html,published,EXISTS(SELECT 1 FROM page_pending_deletions WHERE domain=pages.domain AND path=pages.path),COALESCE((SELECT MAX(id) FROM revisions WHERE domain=pages.domain AND page_path=pages.path),0) FROM pages WHERE domain=? AND path=?`, domain, cleanPath(request.Path)).Scan(&page.Path, &page.Title, &page.HTML, &page.Published, &page.PendingDelete, &page.Version)
@@ -13220,52 +13352,12 @@ func (a *App) stageAIPageDeletion(ctx context.Context, domain string, request ai
 		if err != nil {
 			return err
 		}
+		page.RevisionState, err = aiRevisionState(ctx, transaction, domain, page.Path)
+		if err != nil {
+			return err
+		}
 		if aiPageVersion(page, page.Version) != request.ExpectedVersion {
 			return aieditor.ErrVersionConflict
-		}
-		if request.Operation == aieditor.OperationDeleteRevision {
-			revisionID, err := strconv.Atoi(request.RevisionID)
-			if err != nil || revisionID <= 0 {
-				return aieditor.ErrInvalidRequest
-			}
-			updated, err := transaction.ExecContext(ctx, `UPDATE revisions SET is_active=0 WHERE domain=? AND page_path=? AND id=? AND is_active=1`, domain, page.Path, revisionID)
-			if err != nil {
-				return err
-			}
-			count, err := updated.RowsAffected()
-			if err != nil {
-				return err
-			}
-			if count == 0 {
-				return errors.New("active revision not found")
-			}
-			var restoredHTML string
-			err = transaction.QueryRowContext(ctx, `SELECT html FROM revisions WHERE domain=? AND page_path=? AND is_active=1 ORDER BY id DESC LIMIT 1`, domain, page.Path).Scan(&restoredHTML)
-			if err != nil && !errors.Is(err, sql.ErrNoRows) {
-				return err
-			}
-			if err == nil {
-				if _, err = transaction.ExecContext(ctx, `UPDATE pages SET html=? WHERE domain=? AND path=?`, restoredHTML, domain, page.Path); err != nil {
-					return err
-				}
-				if _, err = transaction.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, domain, page.Path, restoredHTML, time.Now().UTC().Format(time.RFC3339)); err != nil {
-					return err
-				}
-				delta := 2*len(restoredHTML) - len(page.HTML)
-				reserved, reserveErr := transaction.ExecContext(ctx, `UPDATE domain_storage_usage SET page_bytes=page_bytes+?,revision_bytes=revision_bytes+? WHERE domain=? AND (?<=0 OR page_bytes+published_page_bytes+revision_bytes+file_bytes+published_static_bytes+COALESCE(import_queue_bytes,0)+COALESCE(analytics_bytes,0)+COALESCE(analytics_reserved_bytes,0)+?<=limit_bytes)`, len(restoredHTML)-len(page.HTML), len(restoredHTML), domain, delta, delta)
-				if reserveErr != nil {
-					return reserveErr
-				}
-				reservedCount, reserveErr := reserved.RowsAffected()
-				if reserveErr != nil {
-					return reserveErr
-				}
-				if reservedCount != 1 {
-					return errors.New("storage limit reached")
-				}
-				_, err = transaction.ExecContext(ctx, `DELETE FROM page_pending_deletions WHERE domain=? AND path=?`, domain, page.Path)
-				return err
-			}
 		}
 		if page.PendingDelete {
 			return nil
@@ -13453,6 +13545,11 @@ func (a *App) storeImportedDraftPages(ctx context.Context, domain string, pages 
 // The content participant owns quota, assets and drafts in one turn. No
 // reservation is exposed between jobs or lost to an asset usage reconciliation.
 func (a *App) persistImportedDraftPages(ctx context.Context, domain, ownerPath string, pages []wholeSiteImportedPage, spider *pageSpider) error {
+	return a.persistImportedPages(ctx, domain, ownerPath, pages, spider, true)
+}
+
+func (a *App) persistImportedPages(ctx context.Context, domain, ownerPath string, pages []wholeSiteImportedPage, spider *pageSpider, draftOnly bool) error {
+	frozen := draftOnly || a.isDomainFrozen(ctx, domain)
 	a.ensureDomainStorageUsageRow(ctx, domain)
 	type assetWrite struct {
 		filename, name, contentType string
@@ -13502,32 +13599,52 @@ func (a *App) persistImportedDraftPages(ctx context.Context, domain, ownerPath s
 		usage.FileBytes = max(usage.FileBytes, a.directorySizeInsideStorage(a.domainFilesDirForDomain(domain))+a.directorySizeInsideStorage(a.domainChrootRootDir(domain)))
 		usage.PublishedStaticBytes = max(usage.PublishedStaticBytes, a.directorySizeInsideStorage(a.domainStaticDir(domain)))
 		var pageDelta, revisionDelta, fileDelta int64
+		assets := []assetWrite{}
 		for _, page := range pages {
 			pagePath := cleanPath(page.LocalPath)
-			var count int
-			if err := transaction.QueryRowContext(ctx, `SELECT COUNT(*) FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&count); err != nil {
+			var existingHTML string
+			err := transaction.QueryRowContext(ctx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&existingHTML)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return err
 			}
-			if count != 0 {
-				var existingHTML string
-				if err := transaction.QueryRowContext(ctx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&existingHTML); err != nil {
-					return err
-				}
-				if existingHTML == page.HTML {
-					continue
-				}
+			exists := err == nil
+			if exists && draftOnly && existingHTML != page.HTML {
 				return fmt.Errorf("%w: import destination already exists: %s", aieditor.ErrVersionConflict, pagePath)
 			}
-			if _, err := transaction.ExecContext(ctx, `INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, pagePath, page.HTML); err != nil {
-				return err
+			if !exists || existingHTML != page.HTML {
+				if err := updateOrInsertPage(ctx, transaction, domain, pagePath, pagePath, page.HTML, true); err != nil {
+					return err
+				}
+				if _, err := transaction.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, domain, pagePath, page.HTML, time.Now().UTC().Format(time.RFC3339)); err != nil {
+					return err
+				}
+				pageDelta += int64(len(page.HTML) - len(existingHTML))
+				revisionDelta += int64(len(page.HTML))
 			}
-			if _, err := transaction.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, domain, pagePath, page.HTML, time.Now().UTC().Format(time.RFC3339)); err != nil {
-				return err
+			if !draftOnly {
+				if _, err := transaction.ExecContext(ctx, `DELETE FROM page_redirects WHERE domain=? AND old_path=?`, domain, pagePath); err != nil {
+					return err
+				}
 			}
-			pageDelta += int64(len(page.HTML))
-			revisionDelta += int64(len(page.HTML))
+			if !frozen {
+				var previousPublished string
+				if err := transaction.QueryRowContext(ctx, `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousPublished); err != nil && !errors.Is(err, sql.ErrNoRows) {
+					return err
+				}
+				if err := updateOrInsertPublishedPage(ctx, transaction, domain, pagePath, pagePath, page.HTML); err != nil {
+					return err
+				}
+				static := assetWrite{filename: filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath)), content: []byte(page.HTML)}
+				previous, err := a.readFileInsideStorage(static.filename)
+				if err != nil && !errors.Is(err, os.ErrNotExist) {
+					return err
+				}
+				static.previous, static.existed = previous, err == nil
+				usage.PublishedPageBytes += int64(len(page.HTML) - len(previousPublished))
+				usage.PublishedStaticBytes += int64(len(static.content) - len(previous))
+				assets = append(assets, static)
+			}
 		}
-		assets := []assetWrite{}
 		if spider != nil {
 			references := make(map[string]bool)
 			for _, resource := range spider.resources {
@@ -13572,6 +13689,9 @@ func (a *App) persistImportedDraftPages(ctx context.Context, domain, ownerPath s
 					return err
 				}
 				written = append(written, asset)
+			}
+			if asset.name == "" {
+				continue
 			}
 			if err := updateOrInsertFileMetadata(ctx, transaction, domainStorageName(domain), asset.name, cleanPath(ownerPath), len(asset.content), asset.contentType, time.Now().UTC().Format(time.RFC3339), "import"); err != nil {
 				return err
@@ -13639,7 +13759,7 @@ func (a *App) saveAIFile(ctx context.Context, domain string, request aieditor.Re
 		}
 		reply := make(chan imageprepare.Result, 1)
 		select {
-		case jobs <- imageprepare.Job{Source: request.FileContent, MIME: mimeType, Options: imageprepare.Options{Width: request.ImageWidth, Height: request.ImageHeight, Fit: fit, PositionX: 0.5, PositionY: 0.5}, Reply: reply, Session: done}:
+		case jobs <- imageprepare.Job{Source: request.FileContent, MIME: mimeType, Options: imageprepare.Options{Width: request.ImageWidth, Height: request.ImageHeight, Fit: fit, PositionX: 0.5, PositionY: 0.5, Full: request.ImageFull}, Reply: reply, Session: done}:
 		case <-done:
 			return "", aieditor.ErrTaskCanceled
 		default:
@@ -13659,9 +13779,28 @@ func (a *App) saveAIFile(ctx context.Context, domain string, request aieditor.Re
 		return "", aieditor.ErrTaskCanceled
 	default:
 	}
-	stored, err := a.storePreparedFiles(ctx, domain, request.Path, prepared)
+	prefix := ""
+	if request.ProtectedPagePath != "" {
+		prefix = privateAssetPrefix + randomAccessToken() + "/"
+	}
+	stored, err := a.storePreparedFilesWithPrefix(ctx, domain, request.Path, prepared, prefix)
 	if err != nil {
 		return "", err
+	}
+	if prefix != "" {
+		names := []string{strings.TrimPrefix(stored.Preview.URL, "/p/")}
+		if stored.Full != nil && stored.Full.URL != stored.Preview.URL {
+			names = append(names, strings.TrimPrefix(stored.Full.URL, "/p/"))
+		}
+		if err := a.setFilePasswordAccess(ctx, domain, names, "page_password", request.ProtectedPagePath); err != nil {
+			// Private namespace entries without committed rules remain inaccessible.
+			// Cleanup must survive the cancelled caller's SQL boundary.
+			cleanupErr := a.removePrivateUpload(contextWithDomain(context.Background(), domain), domain, names)
+			if cleanupErr != nil {
+				return "", fmt.Errorf("%w; private upload cleanup: %v", err, cleanupErr)
+			}
+			return "", err
+		}
 	}
 	return strings.TrimPrefix(stored.Preview.URL, "/p/"), nil
 }
@@ -15336,14 +15475,15 @@ func (a *App) siteMCPRoute(w http.ResponseWriter, r *http.Request) bool {
 	origin := requestScheme(r) + "://" + r.Host
 	resource := origin + sitemcp.Path
 	domain := a.siteDomain(r.Context(), r)
+	_, publicDemo := a.publicDemoState(r, domain)
 	if endpoint == sitemcp.Path {
 		w.Header().Add("Vary", "Accept")
-		if owner && (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
-			strings.Contains(r.Header.Get("Accept"), "text/html") &&
+		if (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
+			(strings.Contains(r.Header.Get("Accept"), "text/html") || publicDemo && !strings.Contains(r.Header.Get("Accept"), "text/event-stream") && !strings.Contains(r.Header.Get("Accept"), "application/json")) &&
 			r.Header.Get("Authorization") == "" && r.Header.Get("MCP-Protocol-Version") == "" && r.Header.Get("Mcp-Session-Id") == "" {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			if r.Method == http.MethodGet {
-				a.render(w, r, "mcp.html", map[string]any{"MCPURL": resource, "SignedIn": a.isAdminRequest(r), "LoginURL": loginURLForRequest(r)})
+				a.render(w, r, "mcp.html", map[string]any{"MCPURL": resource, "SignedIn": a.isAdminRequest(r), "LoginURL": loginURLForRequest(r), "PublicDemo": publicDemo})
 			}
 			return true
 		}
@@ -15400,17 +15540,26 @@ func (a *App) siteMCPRoute(w http.ResponseWriter, r *http.Request) bool {
 		if len(authorizationFields) == 2 && strings.EqualFold(authorizationFields[0], "Bearer") {
 			bearer = authorizationFields[1]
 		}
-		if _, _, err := a.aiCapabilities.ValidateOAuth(domain, resource, bearer); err != nil {
+		options := sitemcp.Options{Domain: domain, Resource: resource, Version: CompileVersion, Bearer: bearer, Manager: a.aiCapabilities, PublicDemo: publicDemo, Download: downloadAIMCPFile, Invoke: func(boundary context.Context, invocation sitemcp.Invocation) (sitemcp.Result, error) {
+			return a.invokeMCPAIContent(r.WithContext(boundary), domain, invocation)
+		}}
+		if publicDemo {
+			options.Authorize = func() (aicapability.Session, aicapability.Capability, error) {
+				return a.publicDemoAISession(r, domain)
+			}
+			if _, _, err := options.Authorize(); err != nil {
+				http.Error(w, "demo site is preparing", http.StatusServiceUnavailable)
+				return true
+			}
+		} else if _, _, err := a.aiCapabilities.ValidateOAuth(domain, resource, bearer); err != nil {
 			sitemcp.Challenge(w, origin, 401, aicapability.StandardScopes())
 			return true
 		}
-		sitemcp.NewHandler(sitemcp.Options{Domain: domain, Resource: resource, Version: CompileVersion, Bearer: bearer, Manager: a.aiCapabilities, Download: downloadAIMCPFile, Invoke: func(boundary context.Context, invocation sitemcp.Invocation) (sitemcp.Result, error) {
-			return a.invokeMCPAIContent(r.WithContext(boundary), domain, invocation)
-		}}).ServeHTTP(w, r)
+		sitemcp.NewHandler(options).ServeHTTP(w, r)
 		return true
 	}
 	if endpoint == sitemcp.OAuthPath+"authorize" {
-		if !a.isAdminRequest(r) {
+		if !publicDemo && !a.isAdminRequest(r) {
 			httpsecurity.RedirectLocal(w, r, loginURLForRequest(r), http.StatusSeeOther)
 			return true
 		}
@@ -15433,6 +15582,26 @@ func (a *App) siteMCPRoute(w http.ResponseWriter, r *http.Request) bool {
 		pairing, err := a.aiCapabilities.BeginOAuth(domain, aicapability.OAuthAuthorization{ClientID: clientID, RedirectURI: query.Get("redirect_uri"), Resource: resource, State: query.Get("state"), Challenge: query.Get("code_challenge"), Scopes: strings.Fields(query.Get("scope"))})
 		if err != nil {
 			oauthFailure(err)
+			return true
+		}
+		if publicDemo {
+			// OAuth-only clients inherit the same public permission without a
+			// consent screen. PKCE, client and callback validation still apply.
+			session, _, err := a.publicDemoAISession(r, domain)
+			if err != nil {
+				oauthError(503, "temporarily_unavailable")
+				return true
+			}
+			if err := a.aiCapabilities.DecidePairing(domain, session.Owner, pairing.VerificationCode, true, pairing.RequestedScopes); err != nil {
+				oauthFailure(err)
+				return true
+			}
+			callback, err := a.aiCapabilities.OAuthApprovalRedirect(domain, pairing.VerificationCode)
+			if err != nil {
+				oauthFailure(err)
+				return true
+			}
+			http.Redirect(w, r, callback, http.StatusSeeOther)
 			return true
 		}
 		httpsecurity.RedirectLocal(w, r, "/?ai_authorize="+url.QueryEscape(pairing.VerificationCode), http.StatusSeeOther)
@@ -15620,7 +15789,7 @@ func (a *App) invokeMCPAIContent(r *http.Request, domain string, invocation site
 	case "publish", "rollback":
 		method = http.MethodPost
 	}
-	if isAISiteOperation(operation) && operation != "get_site_state" && operation != "get_page_settings" && operation != "get_import_status" {
+	if isAISiteOperation(operation) && operation != "get_site_state" && operation != "get_page_settings" && operation != "get_file_settings" && operation != "get_import_status" {
 		method = http.MethodPost
 	}
 	request := r.Clone(r.Context())
@@ -15628,6 +15797,9 @@ func (a *App) invokeMCPAIContent(r *http.Request, domain string, invocation site
 	requestURL := *request.URL
 	query := url.Values{"ai": []string{action}}
 	arguments := invocation.Arguments
+	if arguments.FileName != "" {
+		query.Set("file_name", arguments.FileName)
+	}
 	if arguments.Path != "" {
 		query.Set("path", arguments.Path)
 	}
@@ -16128,7 +16300,7 @@ func (a *App) issueAICapability(w http.ResponseWriter, r *http.Request) {
 
 func isAIAnalyticsOperation(operation string) bool {
 	switch operation {
-	case "get_site_report", "get_analytics_summary", "get_funnels", "get_paths", "get_page_behaviour", "get_forms", "get_sources", "get_page_impacts", "get_insights":
+	case "get_site_report", "get_analytics_summary", "get_funnels", "get_paths", "get_page_behaviour", "get_forms", "get_sources", "get_page_impacts", "get_insights", "get_security_summary":
 		return true
 	default:
 		return false
@@ -16157,6 +16329,24 @@ func (a *App) aiAnalyticsEndpoint(w http.ResponseWriter, r *http.Request, domain
 	}
 	if days != 1 && days != 7 && days != 30 && days != 90 || limit < 1 || limit > 50 || offset < 0 || offset > 100000 {
 		http.Error(w, "invalid analytics period or pagination", http.StatusBadRequest)
+		return
+	}
+	if operation == "get_security_summary" {
+		response := a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.ReadSecurity, Domain: domain, Limit: 2 << 20, Stop: r.Context().Done()})
+		if response.Err != nil && !errors.Is(response.Err, sql.ErrNoRows) {
+			http.Error(w, "security analytics temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		state := browserstats.SecurityState{}
+		available := response.Err == nil && response.Text != ""
+		if available && json.Unmarshal([]byte(response.Text), &state) != nil {
+			http.Error(w, "security analytics temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		now := time.Now().UTC()
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_ = json.NewEncoder(w).Encode(browserstats.AISecurityView(state.Report(now, days), domain, now, days, available, limit, offset))
 		return
 	}
 	response := a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.ReadBrowserReport, Domain: domain, Stop: r.Context().Done()})
@@ -16216,7 +16406,7 @@ func (a *App) aiContentEndpoint(w http.ResponseWriter, r *http.Request, domain, 
 		http.Error(w, "editor session is invalid", http.StatusUnauthorized)
 		return
 	}
-	a.serveAuthorizedAIContent(w, r, domain, capability, session, operation, false)
+	a.serveAuthorizedAIContent(w, r, domain, capability, session, operation, r.URL.Query().Get("ai") != "")
 }
 
 // Both transports enter the same authorization and content pipeline. Transport
@@ -16425,6 +16615,10 @@ func (a *App) serveAuthorizedAIContent(w http.ResponseWriter, r *http.Request, d
 	}
 	if r.URL.Query().Get("ai") != "" && operation == "rollback" && (request.RevisionID == "" || request.ExpectedVersion == "") {
 		http.Error(w, "revision_id and expected_version are required for rollback", http.StatusBadRequest)
+		return
+	}
+	if operation == "file" && request.ProtectedPagePath != "" && scopedPagePath != "" {
+		http.Error(w, "private upload requires site-wide access", http.StatusForbidden)
 		return
 	}
 	request.DraftOnly = draftOnly || !containsAIScope(session.Scopes, aicapability.ScopePublish)
@@ -18060,6 +18254,28 @@ func (a *App) renderLoginPage(w http.ResponseWriter, r *http.Request, returnPath
 
 // === Demo site sessions ===
 
+// Only the exact domain enabled by the server operator is publicly editable.
+// A demo-looking hostname alone never grants access to another installation.
+func (a *App) publicDemoState(r *http.Request, domain string) (demoSiteRuntimeState, bool) {
+	state, found := a.runtimeDemoSiteState(r.Context())
+	return state, found && state.Settings.Enabled && normalizeDomainName(state.Settings.Domain) == normalizeDomainName(domain) && normalizeDomainName(domainFromRequest(r)) == normalizeDomainName(domain)
+}
+
+func (a *App) publicDemoAISession(r *http.Request, domain string) (aicapability.Session, aicapability.Capability, error) {
+	state, public := a.publicDemoState(r, domain)
+	if !public || state.Status != "ready" || state.Refreshing || state.AdminEmail == "" {
+		return aicapability.Session{}, aicapability.Capability{}, errors.New("demo is unavailable")
+	}
+	session, capability, created, err := a.aiCapabilities.PublicDemoSession(domain, state.AdminEmail, demo.ResetDelay)
+	if err == nil && created {
+		err = a.enqueueDemoSessionEvent(r.Context(), demoSessionEvent{kind: "create", domain: domain, sessionToken: session.CapabilityID, userEmail: state.AdminEmail, resetAfter: session.Expires})
+		if err != nil {
+			_ = a.aiCapabilities.RevokeDomain(domain)
+		}
+	}
+	return session, capability, err
+}
+
 func (a *App) maybeStartDemoSite(w http.ResponseWriter, r *http.Request, requestDomain string) bool {
 	if !demo.CanStartFromRequest(r) {
 		return false
@@ -18086,13 +18302,12 @@ func (a *App) maybeStartDemoSite(w http.ResponseWriter, r *http.Request, request
 		http.Error(w, "demo site is preparing", http.StatusServiceUnavailable)
 		return true
 	}
-	redirectPath, err := a.startDemoSiteSession(w, r, state)
+	_, err := a.startDemoSiteSession(w, r, state)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return true
 	}
-	httpsecurity.RedirectLocal(w, r, redirectPath, http.StatusFound)
-	return true
+	return false
 }
 
 func (a *App) startDemoSiteRuntimeProcess(stop <-chan struct{}) chan demoSiteRuntimeRequest {
@@ -18301,6 +18516,15 @@ func (a *App) startDemoSiteSession(w http.ResponseWriter, r *http.Request, state
 		return "", fmt.Errorf("demo site has no usable pages")
 	}
 	sessionToken := a.createSessionForDomainWithIPTrust(w, r, r.Context(), domain, adminEmail, false)
+	requestCookies := r.Cookies()
+	r.Header = r.Header.Clone()
+	r.Header.Del("Cookie")
+	for _, cookie := range requestCookies {
+		if cookie.Name != "sitebrush_session" {
+			r.AddCookie(cookie)
+		}
+	}
+	r.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: sessionToken})
 	if err := a.enqueueDemoSessionEvent(r.Context(), demoSessionEvent{
 		kind: "create", domain: domain, sessionToken: sessionToken, userEmail: adminEmail, resetAfter: time.Now().Add(demo.ResetDelay),
 	}); err != nil {
@@ -18565,6 +18789,11 @@ func (a *App) withStagedDemoContent(ctx context.Context, domain string, limitByt
 	if staged.domainStorageUsage(domainContext, domain).totalBytes() > limitBytes {
 		return errors.New("storage limit reached: demo content exceeds quota")
 	}
+	if a.aiCapabilities != nil {
+		if err := a.aiCapabilities.RevokeDomain(domain); err != nil {
+			return err
+		}
+	}
 	return a.replaceDemoContent(domainContext, domain, staged)
 }
 
@@ -18579,7 +18808,7 @@ func (a *App) replaceDemoContent(ctx context.Context, domain string, staged *App
 		{name: "revisions", columns: "domain,page_path,html,created_at,is_active"},
 		{name: "page_redirects", columns: "domain,old_path,new_path,created_at"},
 		{name: "file_metadata", columns: "domain,file_name,page_path,size,mime_type,created_at,updated_at,source,download_count"},
-		{name: "file_access_rules", columns: "domain,file_name,access_mode,token,expires_at,single_use_left,token_use_count"},
+		{name: "file_access_rules", columns: "domain,file_name,access_mode,token,expires_at,single_use_left,token_use_count,protected_page_path"},
 	}
 	for tableIndex := range tables {
 		table := &tables[tableIndex]
@@ -19139,6 +19368,7 @@ func (a *App) createDemoSiteSnapshot(ctx context.Context, domain string) error {
 
 func (a *App) restoreDemoSiteFromSnapshot(ctx context.Context, domain string) error {
 	domain = normalizeDomainName(domain)
+
 	snapshotPath := a.demoSiteSnapshotPath(domain)
 	snapshotFile, err := a.openFileInsideStorage(snapshotPath)
 	if err != nil {
@@ -19741,6 +19971,8 @@ func (a *App) savePage(w http.ResponseWriter, r *http.Request) {
 // Page saves build one final document per page inside the database owner's
 // transaction. Template normalization never becomes a separate revision.
 type pageSaveOptions struct {
+	revisionID      int
+	revisionActive  *bool
 	expectedVersion string
 	operation       aieditor.Operation
 	draftOnly       bool
@@ -19828,9 +20060,13 @@ func (a *App) persistPageSave(ctx context.Context, domain, previousPath, pagePat
 			}
 			currentVersion := strconv.Itoa(currentRevision)
 			if options.strictVersion || strings.Contains(options.expectedVersion, ":") {
+				revisionState, stateErr := aiRevisionState(ctx, transaction, domain, pagePath)
+				if stateErr != nil {
+					return stateErr
+				}
 				for _, previousPage := range previousPages {
 					if previousPage.path == pagePath {
-						currentVersion = aiPageVersion(aiPageView{Path: pagePath, Title: previousPage.title, HTML: previousPage.html, Published: previousPage.published, PendingDelete: pendingDeletion != 0}, currentVersion)
+						currentVersion = aiPageVersion(aiPageView{Path: pagePath, Title: previousPage.title, HTML: previousPage.html, Published: previousPage.published, PendingDelete: pendingDeletion != 0, RevisionState: revisionState}, currentVersion)
 						break
 					}
 				}
@@ -19839,6 +20075,27 @@ func (a *App) persistPageSave(ctx context.Context, domain, previousPath, pagePat
 			}
 			if currentVersion != options.expectedVersion {
 				return fmt.Errorf("%w: re-read the current page version", aieditor.ErrVersionConflict)
+			}
+		}
+
+		if options.revisionActive != nil {
+			var previousActive int
+			if err := transaction.QueryRowContext(ctx, `SELECT is_active FROM revisions WHERE domain=? AND page_path=? AND id=?`, domain, pagePath, options.revisionID).Scan(&previousActive); err != nil {
+				return err
+			}
+			if _, err := transaction.ExecContext(ctx, `UPDATE revisions SET is_active=? WHERE domain=? AND page_path=? AND id=?`, *options.revisionActive, domain, pagePath, options.revisionID); err != nil {
+				return err
+			}
+			err := transaction.QueryRowContext(ctx, `SELECT html FROM revisions WHERE domain=? AND page_path=? AND is_active=1 ORDER BY id DESC LIMIT 1`, domain, pagePath).Scan(&savedHTML)
+			if errors.Is(err, sql.ErrNoRows) {
+				if pendingDeletion != 0 {
+					return nil
+				}
+				_, err = transaction.ExecContext(ctx, `INSERT INTO page_pending_deletions(domain,path) VALUES(?,?)`, domain, pagePath)
+				return err
+			}
+			if err != nil {
+				return err
 			}
 		}
 
@@ -20058,23 +20315,15 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 	}
 	spider, html := prepareSinglePageImport(importRequest, a.grabTracker)
 	importedPages := []wholeSiteImportedPage{{SourceURL: sourceURL, LocalPath: pagePath, HTML: html}}
-	pageDelta, publishedPageDelta, revisionDelta, publishedStaticDelta := a.estimateImportedPagesStorageDelta(importContext, domain, importedPages)
-	fileDelta := a.estimateImportedFileDelta(domain, spider)
-	if storageErr := a.applyDomainStorageDelta(importContext, domain, pageDelta, publishedPageDelta, revisionDelta, fileDelta, publishedStaticDelta); storageErr != nil {
-		http.Error(w, storageErr.Error(), http.StatusInsufficientStorage)
+	if err := a.persistWholeSiteImportBatch(importContext, importRequest, importedPages, spider); err != nil {
+		status := http.StatusBadGateway
+		if strings.Contains(err.Error(), "storage limit") {
+			status = http.StatusInsufficientStorage
+		}
+		http.Error(w, err.Error(), status)
 		return
 	}
-	if persistErr := a.persistSpiderAssets(importContext, spider, pagePath); persistErr != nil {
-		_ = a.applyDomainStorageDelta(importContext, domain, -pageDelta, -publishedPageDelta, -revisionDelta, -fileDelta, -publishedStaticDelta)
-		http.Error(w, persistErr.Error(), http.StatusBadGateway)
-		return
-	}
-	if storeErr := a.storeWholeSiteImportedPages(importContext, domain, importedPages); storeErr != nil {
-		a.rebuildDomainStorageUsage(importContext, domain)
-		http.Error(w, storeErr.Error(), http.StatusInternalServerError)
-		return
-	}
-	a.rebuildDomainStorageUsage(importContext, domain)
+
 	if a.grabTracker != nil && importRequest.ProgressToken != "" {
 		stage := "done"
 		if spider.unresolvedFailedTotal() > 0 {
@@ -21704,21 +21953,7 @@ func (a *App) persistPublicTrialPreview(ctx context.Context, domain string, prev
 	if detectionErr != nil {
 		return detectionErr
 	}
-	pageDelta, publishedPageDelta, revisionDelta, publishedStaticDelta := a.estimateImportedPagesStorageDelta(ctx, domain, preview.ImportedPages)
-	fileDelta := a.estimateImportedFileDelta(domain, preview.Spider)
-	if storageErr := a.applyDomainStorageDelta(ctx, domain, pageDelta, publishedPageDelta, revisionDelta, fileDelta, publishedStaticDelta); storageErr != nil {
-		return storageErr
-	}
-	if persistErr := a.persistSpiderAssets(ctx, preview.Spider, "/"); persistErr != nil {
-		_ = a.applyDomainStorageDelta(ctx, domain, -pageDelta, -publishedPageDelta, -revisionDelta, -fileDelta, -publishedStaticDelta)
-		return persistErr
-	}
-	if storeErr := a.storeWholeSiteImportedPages(ctx, domain, preview.ImportedPages); storeErr != nil {
-		_ = a.applyDomainStorageDelta(ctx, domain, -pageDelta, -publishedPageDelta, -revisionDelta, -fileDelta, -publishedStaticDelta)
-		return storeErr
-	}
-	a.rebuildDomainStorageUsage(ctx, domain)
-	return nil
+	return a.persistImportedPages(ctx, domain, "/", preview.ImportedPages, preview.Spider, false)
 }
 
 func (a *App) retryImportedPageResources(ctx context.Context, importRequest grabImportRequest) (grabImportResult, error) {
@@ -23113,23 +23348,7 @@ func downloadWholeSitePageHTMLWithRetries(ctx context.Context, client *http.Clie
 }
 
 func (a *App) persistWholeSiteImportBatch(ctx context.Context, request grabImportRequest, pages []wholeSiteImportedPage, spider *pageSpider) error {
-	if request.DraftOnly {
-		return a.persistImportedDraftPages(ctx, request.Domain, request.PagePath, pages, spider)
-	}
-	pageDelta, publishedDelta, revisionDelta, staticDelta := a.estimateImportedPagesStorageDelta(ctx, request.Domain, pages)
-	fileDelta := a.estimateImportedFileDelta(request.Domain, spider)
-	if err := a.applyDomainStorageDelta(ctx, request.Domain, pageDelta, publishedDelta, revisionDelta, fileDelta, staticDelta); err != nil {
-		return err
-	}
-	if err := a.persistSpiderAssets(ctx, spider, request.PagePath); err != nil {
-		_ = a.applyDomainStorageDelta(ctx, request.Domain, -pageDelta, -publishedDelta, -revisionDelta, -fileDelta, -staticDelta)
-		return err
-	}
-	if err := a.storeWholeSiteImportedPages(ctx, request.Domain, pages); err != nil {
-		_ = a.applyDomainStorageDelta(ctx, request.Domain, -pageDelta, -publishedDelta, -revisionDelta, -fileDelta, -staticDelta)
-		return err
-	}
-	return nil
+	return a.persistImportedPages(ctx, request.Domain, request.PagePath, pages, spider, request.DraftOnly)
 }
 
 func (a *App) storeWholeSiteImportedPages(ctx context.Context, domain string, importedPages []wholeSiteImportedPage, draftOnly ...bool) error {
@@ -36544,7 +36763,10 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if action == "save_access" && fileName != "" {
-			a.saveFileAccessRule(r.Context(), r, fileName)
+			if err := a.saveFileAccessRule(r.Context(), r, fileName); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 		} else if action == "delete_selected" || action == "delete_uri" || fileName != "" {
 			fileList, listErr := a.listManagedFiles(r.Context(), r, currentPath)
 			if listErr != nil {
@@ -36583,6 +36805,7 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 			accessRule.AccessMode = "public"
 		}
 		fileList[index].AssetPath = "/p/" + fileList[index].Name
+		fileList[index].ProtectedPagePath = accessRule.ProtectedPagePath
 		fileList[index].AccessMode = accessRule.AccessMode
 		fileList[index].Token = accessRule.Token
 		fileList[index].ExpiresAt = accessRule.ExpiresAt
@@ -36929,6 +37152,10 @@ func updateOrInsertFileMetadata(ctx context.Context, database sqlExecutor, domai
 }
 
 func (a *App) storePreparedFiles(ctx context.Context, domain, currentPath string, prepared imageprepare.Result) (preparedImageReplacementView, error) {
+	return a.storePreparedFilesWithPrefix(ctx, domain, currentPath, prepared, "")
+}
+
+func (a *App) storePreparedFilesWithPrefix(ctx context.Context, domain, currentPath string, prepared imageprepare.Result, prefix string) (preparedImageReplacementView, error) {
 	files := []imageprepare.File{prepared.Preview}
 	if prepared.Full != nil {
 		files = append(files, *prepared.Full)
@@ -36943,7 +37170,7 @@ func (a *App) storePreparedFiles(ctx context.Context, domain, currentPath string
 	views := make([]preparedImageFileView, len(files))
 	for index, file := range files {
 		digest := sha256.Sum256(file.Content)
-		name := hex.EncodeToString(digest[:]) + file.Extension
+		name := prefix + hex.EncodeToString(digest[:]) + file.Extension
 		if !names[name] {
 			writes = append(writes, preparedFileWrite{name: name, file: file})
 			names[name] = true
@@ -39062,9 +39289,102 @@ func opaqueAccessTokensEqual(leftToken, rightToken string) bool {
 	return subtle.ConstantTimeCompare([]byte(leftToken), []byte(rightToken)) == 1
 }
 
+const privateAssetPrefix = "_sitebrush_private/"
+
+func isPrivateAssetName(name string) bool {
+	return strings.Contains("/"+name, "/"+privateAssetPrefix)
+}
+
+// Private files are stored under a fail-closed namespace before control rules
+// commit. Content and control keep their own transactions and channel owners.
+func (a *App) setFilePasswordAccess(ctx context.Context, domain string, names []string, mode, protectedPath string) error {
+	if mode != "public" && mode != "page_password" {
+		return aieditor.ErrInvalidRequest
+	}
+	if mode == "page_password" {
+		if strings.TrimSpace(protectedPath) == "" || aieditor.Validate(aieditor.Request{Operation: aieditor.OperationReadPage, Path: protectedPath}) != nil {
+			return aieditor.ErrInvalidRequest
+		}
+		protectedPath = cleanPath(protectedPath)
+	} else {
+		protectedPath = ""
+	}
+	return a.accountTransaction(ctx, func(transaction *sql.Tx) error {
+		if mode == "page_password" {
+			rows, err := transaction.QueryContext(ctx, `SELECT path FROM page_password_rules WHERE domain=?`, domain)
+			if err != nil {
+				return err
+			}
+			found := false
+			for rows.Next() {
+				var rulePath string
+				if err = rows.Scan(&rulePath); err != nil {
+					break
+				}
+				if dirprotect.HasProtectedPrefix(protectedPath, cleanPath(rulePath)) {
+					found = true
+				}
+			}
+			if err == nil {
+				err = rows.Err()
+			}
+			rows.Close()
+			if err != nil {
+				return err
+			}
+			if !found {
+				return errors.New("protected_page_path requires an existing section password")
+			}
+		}
+		for _, name := range names {
+			if safeRelativeAssetPath(name) == "" {
+				return aieditor.ErrInvalidRequest
+			}
+			var existing int
+			if err := transaction.QueryRowContext(ctx, `SELECT COUNT(*) FROM file_access_rules WHERE domain=? AND file_name=?`, domainStorageName(domain), name).Scan(&existing); err != nil {
+				return err
+			}
+			if existing != 0 {
+				if _, err := transaction.ExecContext(ctx, `UPDATE file_access_rules SET access_mode=?,protected_page_path=?,token='',expires_at='',single_use_left=0,token_use_count=0 WHERE domain=? AND file_name=?`, mode, protectedPath, domainStorageName(domain), name); err != nil {
+					return err
+				}
+			} else if _, err := transaction.ExecContext(ctx, `INSERT INTO file_access_rules(domain,file_name,access_mode,protected_page_path,token,expires_at,single_use_left,token_use_count) VALUES(?,?,?,?,'','',0,0)`, domainStorageName(domain), name, mode, protectedPath); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (a *App) removePrivateUpload(ctx context.Context, domain string, names []string) error {
+	return a.siteContentTransaction(ctx, func(transaction *sql.Tx) error {
+		var removed int64
+		for _, name := range names {
+			if !strings.HasPrefix(name, privateAssetPrefix) {
+				return aieditor.ErrInvalidRequest
+			}
+			filename := filepath.Join(a.domainFilesDirForDomain(domain), filepath.FromSlash(name))
+			info, err := a.statInsideStorage(filename)
+			if err == nil {
+				if err = a.removeInsideStorage(filename); err != nil {
+					return err
+				}
+				removed += info.Size()
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			if _, err = transaction.ExecContext(ctx, `DELETE FROM file_metadata WHERE domain=? AND file_name=?`, domainStorageName(domain), name); err != nil {
+				return err
+			}
+		}
+		_, err := transaction.ExecContext(ctx, `UPDATE domain_storage_usage SET file_bytes=file_bytes-? WHERE domain=?`, removed, domain)
+		return err
+	}, func(error) {})
+}
+
 func (a *App) fileAccessRulesByName(ctx context.Context, r *http.Request) map[string]ManagedFileAccess {
 	accessRulesByName := make(map[string]ManagedFileAccess)
-	rows, err := a.db.QueryContext(ctx, `SELECT file_name,access_mode,token,expires_at,single_use_left,token_use_count FROM file_access_rules WHERE domain=?`, domainStorageName(a.siteDomain(ctx, r)))
+	rows, err := a.db.QueryContext(ctx, `SELECT file_name,access_mode,token,expires_at,single_use_left,token_use_count,protected_page_path FROM file_access_rules WHERE domain=?`, domainStorageName(a.siteDomain(ctx, r)))
 	if err != nil {
 		return accessRulesByName
 	}
@@ -39072,7 +39392,7 @@ func (a *App) fileAccessRulesByName(ctx context.Context, r *http.Request) map[st
 	for rows.Next() {
 		var fileName string
 		var accessRule ManagedFileAccess
-		if scanErr := rows.Scan(&fileName, &accessRule.AccessMode, &accessRule.Token, &accessRule.ExpiresAt, &accessRule.SingleUseLeft, &accessRule.TokenUseCount); scanErr != nil {
+		if scanErr := rows.Scan(&fileName, &accessRule.AccessMode, &accessRule.Token, &accessRule.ExpiresAt, &accessRule.SingleUseLeft, &accessRule.TokenUseCount, &accessRule.ProtectedPagePath); scanErr != nil {
 			continue
 		}
 		if safeRelativeAssetPath(fileName) == "" {
@@ -39088,15 +39408,18 @@ func (a *App) fileAccessRulesByName(ctx context.Context, r *http.Request) map[st
 
 func (a *App) fileAccessRule(ctx context.Context, r *http.Request, fileName string) ManagedFileAccess {
 	rule := ManagedFileAccess{AccessMode: "public"}
-	_ = a.db.QueryRowContext(ctx, `SELECT access_mode,token,expires_at,single_use_left,token_use_count FROM file_access_rules WHERE domain=? AND file_name=?`, domainStorageName(a.siteDomain(ctx, r)), fileName).Scan(&rule.AccessMode, &rule.Token, &rule.ExpiresAt, &rule.SingleUseLeft, &rule.TokenUseCount)
+	_ = a.db.QueryRowContext(ctx, `SELECT access_mode,token,expires_at,single_use_left,token_use_count,protected_page_path FROM file_access_rules WHERE domain=? AND file_name=?`, domainStorageName(a.siteDomain(ctx, r)), fileName).Scan(&rule.AccessMode, &rule.Token, &rule.ExpiresAt, &rule.SingleUseLeft, &rule.TokenUseCount, &rule.ProtectedPagePath)
 	if strings.TrimSpace(rule.AccessMode) == "" {
 		rule.AccessMode = "public"
 	}
 	return rule
 }
 
-func (a *App) saveFileAccessRule(ctx context.Context, r *http.Request, fileName string) {
+func (a *App) saveFileAccessRule(ctx context.Context, r *http.Request, fileName string) error {
 	accessMode := r.FormValue("access_mode")
+	if accessMode == "page_password" {
+		return a.setFilePasswordAccess(ctx, a.siteDomain(ctx, r), []string{fileName}, accessMode, r.FormValue("protected_page_path"))
+	}
 	if accessMode != "token" && accessMode != "timer" {
 		accessMode = "public"
 	}
@@ -39131,10 +39454,11 @@ func (a *App) saveFileAccessRule(ctx context.Context, r *http.Request, fileName 
 	} else if accessMode == "token" && days > 0 {
 		expiresAt = time.Now().Add(time.Duration(days) * 24 * time.Hour).UTC().Format(time.RFC3339)
 	}
-	_, _ = a.db.ExecContext(ctx, `INSERT INTO file_access_rules(domain,file_name,access_mode,token,expires_at,single_use_left,token_use_count)
+	_, err := a.db.ExecContext(ctx, `INSERT INTO file_access_rules(domain,file_name,access_mode,token,expires_at,single_use_left,token_use_count)
 VALUES(?,?,?,?,?,?,0)
-ON CONFLICT(domain,file_name) DO UPDATE SET access_mode=excluded.access_mode,token=excluded.token,expires_at=excluded.expires_at,single_use_left=excluded.single_use_left,token_use_count=CASE WHEN file_access_rules.token=excluded.token THEN file_access_rules.token_use_count ELSE 0 END`,
+ON CONFLICT(domain,file_name) DO UPDATE SET access_mode=excluded.access_mode,token=excluded.token,expires_at=excluded.expires_at,single_use_left=excluded.single_use_left,protected_page_path='',token_use_count=CASE WHEN file_access_rules.token=excluded.token THEN file_access_rules.token_use_count ELSE 0 END`,
 		domainStorageName(a.siteDomain(ctx, r)), fileName, accessMode, token, expiresAt, singleUseLeft)
+	return err
 }
 
 func (a *App) serveAssetFile(w http.ResponseWriter, r *http.Request, domain, fileName string) {
@@ -39144,7 +39468,29 @@ func (a *App) serveAssetFile(w http.ResponseWriter, r *http.Request, domain, fil
 		return
 	}
 	rule := ManagedFileAccess{AccessMode: "public"}
-	_ = a.db.QueryRowContext(r.Context(), `SELECT access_mode,token,expires_at,single_use_left,token_use_count FROM file_access_rules WHERE domain=? AND file_name=?`, domain, fileName).Scan(&rule.AccessMode, &rule.Token, &rule.ExpiresAt, &rule.SingleUseLeft, &rule.TokenUseCount)
+	ruleErr := a.db.QueryRowContext(r.Context(), `SELECT access_mode,token,expires_at,single_use_left,token_use_count,protected_page_path FROM file_access_rules WHERE domain=? AND file_name=?`, domain, fileName).Scan(&rule.AccessMode, &rule.Token, &rule.ExpiresAt, &rule.SingleUseLeft, &rule.TokenUseCount, &rule.ProtectedPagePath)
+	if ruleErr != nil && !errors.Is(ruleErr, sql.ErrNoRows) {
+		http.Error(w, "file access temporarily unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if errors.Is(ruleErr, sql.ErrNoRows) && isPrivateAssetName(fileName) {
+		http.NotFound(w, r)
+		return
+	}
+	if rule.AccessMode == "page_password" {
+		w.Header().Set("Cache-Control", "private, no-store")
+		w.Header().Add("Vary", "Cookie")
+		protection, found := a.pagePasswordRuleForPath(r.Context(), a.siteDomain(r.Context(), r), rule.ProtectedPagePath)
+		if rule.ProtectedPagePath == "" || !found {
+			http.Error(w, "file password protection is unavailable", http.StatusForbidden)
+			return
+		}
+		if !a.isAdminRequest(r) && !a.pagePasswordSessionValid(r, protection) {
+			http.Error(w, "unlock the protected section first: "+rule.ProtectedPagePath, http.StatusUnauthorized)
+			return
+		}
+	}
+
 	if strings.TrimSpace(rule.AccessMode) == "timer" {
 		if strings.TrimSpace(rule.ExpiresAt) != "" {
 			expiresAt, parseErr := time.Parse(time.RFC3339, rule.ExpiresAt)
@@ -42307,7 +42653,6 @@ func (a *App) persistSpiderAssets(ctx context.Context, spider *pageSpider, pageP
 		return err
 	}
 	ownerPath := cleanPath(pagePath)
-	wroteFile := false
 	writtenAssetReferences := make(map[string]struct{})
 	for _, resource := range spider.resources {
 		if !resource.persist || strings.TrimSpace(resource.assetPath) == "" {
@@ -42332,15 +42677,11 @@ func (a *App) persistSpiderAssets(ctx context.Context, spider *pageSpider, pageP
 		if err := os.WriteFile(realTargetFilePath, resource.content, 0o644); err != nil {
 			return err
 		}
-		wroteFile = true
 		resourceContentType := resource.contentType
 		if strings.TrimSpace(resourceContentType) == "" {
 			resourceContentType = mime.TypeByExtension(path.Ext(assetReference))
 		}
 		a.upsertFileMetadata(ctx, domainStorageName(domain), assetReference, ownerPath, int64(len(resource.content)), resourceContentType, "import")
-	}
-	if wroteFile && a != nil && a.db != nil {
-		a.rebuildDomainStorageUsage(ctx, domain)
 	}
 	return nil
 }
@@ -47459,11 +47800,11 @@ func (a *App) collectDomainBackup(ctx context.Context, domain string) (domainBac
 		_ = metadataRows.Close()
 	}
 
-	accessRows, accessErr := a.db.QueryContext(ctx, `SELECT file_name,access_mode,token,expires_at,single_use_left,token_use_count FROM file_access_rules WHERE domain=? ORDER BY file_name ASC`, domainStorageName(domain))
+	accessRows, accessErr := a.db.QueryContext(ctx, `SELECT file_name,access_mode,token,expires_at,single_use_left,token_use_count,protected_page_path FROM file_access_rules WHERE domain=? ORDER BY file_name ASC`, domainStorageName(domain))
 	if accessErr == nil {
 		for accessRows.Next() {
 			var currentRule backupFileAccessRule
-			if scanErr := accessRows.Scan(&currentRule.FileName, &currentRule.AccessMode, &currentRule.Token, &currentRule.ExpiresAt, &currentRule.SingleUseLeft, &currentRule.TokenUseCount); scanErr != nil {
+			if scanErr := accessRows.Scan(&currentRule.FileName, &currentRule.AccessMode, &currentRule.Token, &currentRule.ExpiresAt, &currentRule.SingleUseLeft, &currentRule.TokenUseCount, &currentRule.ProtectedPagePath); scanErr != nil {
 				continue
 			}
 			currentRule.FileName = safeRelativeAssetPath(currentRule.FileName)
@@ -47914,6 +48255,28 @@ func (a *App) importDomainBackupZIP(ctx context.Context, domain string, importBa
 		}
 	}
 
+	// Commit access rules before writing restored assets, including legacy public filenames.
+	for _, accessRule := range backup.FileAccessRules {
+		nextFileName := applyImportFilePrefix(filePrefix, accessRule.FileName)
+		if nextFileName == "" {
+			continue
+		}
+		nextAccessMode := strings.TrimSpace(accessRule.AccessMode)
+		if nextAccessMode == "" {
+			nextAccessMode = "public"
+		}
+		protectedPath := accessRule.ProtectedPagePath
+		if protectedPath != "" {
+			protectedPath = applyImportBasePath(basePath, protectedPath)
+		}
+		if _, err := a.db.ExecContext(ctx, `INSERT INTO file_access_rules(domain,file_name,access_mode,token,expires_at,single_use_left,token_use_count,protected_page_path)
+VALUES(?,?,?,?,?,?,?,?)
+ON CONFLICT(domain,file_name) DO UPDATE SET access_mode=excluded.access_mode,token=excluded.token,expires_at=excluded.expires_at,single_use_left=excluded.single_use_left,token_use_count=excluded.token_use_count,protected_page_path=excluded.protected_page_path`,
+			domainStorageName(domain), nextFileName, nextAccessMode, accessRule.Token, accessRule.ExpiresAt, accessRule.SingleUseLeft, accessRule.TokenUseCount, protectedPath); err != nil {
+			return rootRedirectPath, err
+		}
+	}
+
 	for sourceFileName, zipEntry := range filesByName {
 		nextFileName := applyImportFilePrefix(filePrefix, sourceFileName)
 		if nextFileName == "" {
@@ -47969,22 +48332,6 @@ func (a *App) importDomainBackupZIP(ctx context.Context, domain string, importBa
 		_, _ = a.db.ExecContext(ctx, `UPDATE file_metadata SET download_count=? WHERE domain=? AND file_name=?`, metadata.DownloadCount, domainStorageName(domain), nextFileName)
 	}
 
-	for _, accessRule := range backup.FileAccessRules {
-		nextFileName := applyImportFilePrefix(filePrefix, accessRule.FileName)
-		if nextFileName == "" {
-			continue
-		}
-		nextAccessMode := strings.TrimSpace(accessRule.AccessMode)
-		if nextAccessMode == "" {
-			nextAccessMode = "public"
-		}
-		if _, err := a.db.ExecContext(ctx, `INSERT INTO file_access_rules(domain,file_name,access_mode,token,expires_at,single_use_left,token_use_count)
-VALUES(?,?,?,?,?,?,?)
-ON CONFLICT(domain,file_name) DO UPDATE SET access_mode=excluded.access_mode,token=excluded.token,expires_at=excluded.expires_at,single_use_left=excluded.single_use_left,token_use_count=excluded.token_use_count`,
-			domainStorageName(domain), nextFileName, nextAccessMode, accessRule.Token, accessRule.ExpiresAt, accessRule.SingleUseLeft, accessRule.TokenUseCount); err != nil {
-			return rootRedirectPath, err
-		}
-	}
 	a.rebuildDomainStorageUsage(ctx, domain)
 	return rootRedirectPath, nil
 }

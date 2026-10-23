@@ -215,6 +215,48 @@ func (manager *Manager) run() {
 				request.reply <- managerResponse{ok: true}
 				close(manager.stop)
 				return
+			case "public-demo-session":
+				key := "public-demo:" + request.domain
+				session, found := sessions[key]
+				if !found {
+					token, err := randomToken()
+					if err != nil {
+						request.reply <- managerResponse{err: err}
+						continue
+					}
+					stop := make(chan struct{})
+					now := time.Now().UTC()
+					session = Session{Domain: request.domain, Owner: request.owner, CapabilityID: "demo:" + tokenHash(token), Scopes: StandardScopes(), Created: now, Expires: now.Add(request.duration), Done: stop}
+					sessions[key], sessionStops[key] = session, stop
+				}
+				request.reply <- managerResponse{session: session, ok: !found, capability: Capability{ID: session.CapabilityID, Domain: session.Domain, Owner: session.Owner, Scopes: append([]string(nil), session.Scopes...), Created: session.Created}}
+			case "revoke-domain":
+				previous := map[string]Capability{}
+				for id, capability := range capabilities {
+					if capability.Domain == request.domain {
+						previous[id] = capability
+						capability.Revoked = true
+						capabilities[id] = capability
+					}
+				}
+				if err := manager.saveCapabilities(capabilities); err != nil {
+					for id, capability := range previous {
+						capabilities[id] = capability
+					}
+					request.reply <- managerResponse{err: err}
+					continue
+				}
+				for key, session := range sessions {
+					if session.Domain == request.domain {
+						stopSession(sessions, sessionStops, key)
+					}
+				}
+				for key, pairing := range pairings {
+					if pairing.Domain == request.domain {
+						delete(pairings, key)
+					}
+				}
+				request.reply <- managerResponse{ok: true}
 			case "issue":
 				token, err := randomToken()
 				if err != nil {
@@ -446,6 +488,17 @@ func (manager *Manager) request(request managerRequest) managerResponse {
 	case <-manager.stop:
 		return managerResponse{err: errors.New("capability manager is stopped")}
 	}
+}
+
+// PublicDemoSession is an explicitly public boundary grant, never an OAuth
+// credential. The caller must verify the configured demo domain on every call.
+func (manager *Manager) PublicDemoSession(domain, owner string, lifetime time.Duration) (Session, Capability, bool, error) {
+	response := manager.request(managerRequest{kind: "public-demo-session", domain: normalizeDomain(domain), owner: owner, duration: lifetime, reply: make(chan managerResponse, 1)})
+	return response.session, response.capability, response.ok, response.err
+}
+
+func (manager *Manager) RevokeDomain(domain string) error {
+	return manager.request(managerRequest{kind: "revoke-domain", domain: normalizeDomain(domain), reply: make(chan managerResponse, 1)}).err
 }
 
 func (manager *Manager) Issue(domain string, scopes []string) (string, Capability, error) {

@@ -5421,11 +5421,11 @@ func TestDemoSiteVisitorGetsEditorSessionAndCleanupDeletesSite(t *testing.T) {
 	request = request.WithContext(contextWithDomain(request.Context(), "demo.example"))
 	response := httptest.NewRecorder()
 	application.route(response, request)
-	if response.Code != http.StatusFound {
+	if response.Code != http.StatusOK {
 		t.Fatalf("demo start status = %d, body=%q", response.Code, response.Body.String())
 	}
-	if location := response.Header().Get("Location"); location != "/" {
-		t.Fatalf("demo redirect = %q, want /", location)
+	if location := response.Header().Get("Location"); location != "" {
+		t.Fatalf("demo redirect = %q, want no redirect", location)
 	}
 	cookies := response.Result().Cookies()
 	if len(cookies) == 0 {
@@ -25908,7 +25908,7 @@ func TestAIIngressPublicPagesSkipControlSQL(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
-	for _, target := range []string{"/", "/about", "/p/static/technical_pages.css"} {
+	for _, target := range []string{"/", "/about", "/p/static/technical_pages.css", "/?utm_source=example", "/p/image.png?v=2"} {
 		request := httptest.NewRequest(http.MethodGet, "https://localhost"+target, nil)
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, request)
@@ -27637,12 +27637,16 @@ func (database importDraftTestDatabase) WriteTransactionWithFinish(boundary cont
 }
 
 func TestAIImportConcurrentAssetsKeepPageQuota(t *testing.T) {
-	for _, mode := range []string{"page", "site"} {
+	for _, mode := range []string{"page", "site", "published"} {
 		t.Run(mode, func(t *testing.T) {
 			application := newRouterTestApplication(t)
 			boundary := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), "localhost"))
+			quotaLimit := 56 * 1024
+			if mode == "published" {
+				quotaLimit = 96 * 1024
+			}
 			application.ensureDomainStorageUsageRow(boundary, "localhost")
-			if _, err := application.db.ExecContext(boundary, `UPDATE domain_storage_usage SET limit_bytes=? WHERE domain='localhost'`, 56*1024); err != nil {
+			if _, err := application.db.ExecContext(boundary, `UPDATE domain_storage_usage SET limit_bytes=? WHERE domain='localhost'`, quotaLimit); err != nil {
 				t.Fatal(err)
 			}
 			owner := application.db.(interface {
@@ -27682,6 +27686,12 @@ func TestAIImportConcurrentAssetsKeepPageQuota(t *testing.T) {
 			results := make(chan error, 4)
 			for index := 0; index < 4; index++ {
 				go func(index int) {
+					if mode == "published" {
+						spider := &pageSpider{domain: "localhost", resources: map[string]*mirroredResource{"asset": {assetPath: fmt.Sprintf("/p/asset-%d.png", index), persist: true, content: []byte(strings.Repeat("y", 2048))}}}
+						pages := []wholeSiteImportedPage{{LocalPath: fmt.Sprintf("/import-%d", index), HTML: strings.Repeat("x", 16*1024)}}
+						results <- application.persistWholeSiteImportBatch(boundary, grabImportRequest{Domain: "localhost", PagePath: "/"}, pages, spider)
+						return
+					}
 					request := aiimport.Request{Domain: "localhost", Grant: "grant", SourceURL: fmt.Sprintf("https://source.example/page-%d", index), Path: fmt.Sprintf("/import-%d", index), Mode: mode, Done: stop}
 					_, err := application.runAIImport(request, fmt.Sprintf("quota-%d", index), stop, make(chan crawler.ProgressEvent, 64))
 					results <- err
@@ -27791,9 +27801,10 @@ func TestAIImportDraftFailureRestoresAssetsAndQuota(t *testing.T) {
 func TestAISiteToolsMigrationPreservesHistoryAndUnpublishedDrafts(t *testing.T) {
 	application, database := newTestApplication(t)
 	for _, query := range []string{
-		`DELETE FROM application_migration_steps WHERE component='site-schema-v12' AND step_id IN ('page-pending-deletions','whole-site-import-draft-mode')`,
+		`DELETE FROM application_migration_steps WHERE component='site-schema-v12' AND step_id IN ('page-pending-deletions','whole-site-import-draft-mode','file-access-page-password')`,
 		`DROP TABLE page_pending_deletions`,
 		`ALTER TABLE whole_site_imports DROP COLUMN draft_only`,
+		`ALTER TABLE file_access_rules DROP COLUMN protected_page_path`,
 		`INSERT INTO pages(domain,path,title,html,published) VALUES('localhost','/unpublished','Draft','<p>Draft</p>',1)`,
 	} {
 		if _, err := database.Exec(query); err != nil {
@@ -27943,5 +27954,334 @@ func TestAIImportRevocationCancelsDownloaderAndQueryAccess(t *testing.T) {
 			t.Fatal("import did not reach canceled state", status)
 		case <-time.After(time.Millisecond):
 		}
+	}
+}
+
+// The production router and real SDK exercise the public demo boundary without
+// cookies, bearer tokens, provider-network admission or owner approval.
+func TestMCPPublicDemoEditsWithoutAuthorization(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	application.analyticsStorage = siteAnalyticsRepository{application: application}
+	application.aiExecutor = aieditor.NewExecutor(&appAIStore{application: application}, 4)
+	t.Cleanup(application.aiExecutor.Close)
+	domain := "demo.example"
+	boundary, cancel := context.WithTimeout(contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), domain)), 30*time.Second)
+	defer cancel()
+	if _, err := application.db.ExecContext(boundary, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, "demo@demo.example", "test"); err != nil {
+		t.Fatal(err)
+	}
+	original := `<html><body><header class="SiteBrush-Template shared">Old</header><p>Page</p></body></html>`
+	for _, pagePath := range []string{"/", "/about"} {
+		if err := application.persistFinalPageSave(boundary, domain, pagePath, pagePath, pagePath, original); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	application.demoSiteRuntime = application.startDemoSiteRuntimeProcess(stop)
+	state := demoSiteRuntimeState{Settings: demo.Settings{Domain: domain, Enabled: true}, Status: "ready", AdminEmail: "demo@demo.example"}
+	application.updateRuntimeDemoSiteState(boundary, state)
+	router := http.NewServeMux()
+	router.HandleFunc("/p/", application.servePublicAsset)
+	router.HandleFunc("/", application.route)
+	server := httptest.NewTLSServer(application.siteHTTPHandler(router))
+	defer server.Close()
+	originalTransport := server.Client().Transport
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		clone := request.Clone(request.Context())
+		clone.Host = domain
+		return originalTransport.RoundTrip(clone)
+	}), Timeout: 10 * time.Second}
+	for attempt := 0; attempt < 2; attempt++ {
+		request, _ := http.NewRequestWithContext(boundary, "GET", server.URL+"/", nil)
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, response.Body)
+		response.Body.Close()
+		if response.StatusCode != 200 || response.Request.URL.Path != "/" {
+			t.Fatalf("cookie-less demo response: %d %s", response.StatusCode, response.Request.URL)
+		}
+	}
+	request, _ := http.NewRequestWithContext(boundary, "GET", server.URL+"/?mcp", nil)
+	request.Header.Set("Accept", "text/html")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	instructions, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != 200 || !strings.Contains(string(instructions), "sitebrush_get_guide") || response.Header.Get("WWW-Authenticate") != "" {
+		t.Fatalf("demo instructions: %d %s", response.StatusCode, instructions)
+	}
+	sdkClient := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "Public demo assistant", Version: "test"}, nil)
+	connection, err := sdkClient.Connect(boundary, &mcpsdk.StreamableClientTransport{Endpoint: server.URL + "/?mcp", HTTPClient: client}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	call := func(operation string, arguments map[string]any) map[string]any {
+		t.Helper()
+		result, err := connection.CallTool(boundary, &mcpsdk.CallToolParams{Name: "sitebrush_" + operation, Arguments: arguments})
+		if err != nil {
+			t.Fatal(operation, err)
+		}
+		encoded, _ := json.Marshal(result.StructuredContent)
+		if result.IsError {
+			t.Fatalf("%s: %s", operation, encoded)
+		}
+		var decoded map[string]any
+		if err := json.Unmarshal(encoded, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		return decoded
+	}
+	access := call("get_access", map[string]any{})
+	if access["public_demo"] != true || access["domain"] != domain {
+		t.Fatal(access)
+	}
+	for _, section := range aicapability.GuideSections() {
+		guide := call("get_guide", map[string]any{"section": section})
+		if guide["guide"] == "" {
+			t.Fatal("empty guide", section)
+		}
+	}
+	call("freeze_site", map[string]any{})
+	read := func(pagePath string) aiPageView {
+		t.Helper()
+		page, err := application.readAIPage(boundary, domain, pagePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return page
+	}
+	first := read("/")
+	call("update_page", map[string]any{"path": "/", "title": "Home", "html": strings.ReplaceAll(first.HTML, "Old", "New"), "expected_version": first.Version})
+	if !strings.Contains(read("/about").HTML, "New") {
+		t.Fatal("template did not propagate")
+	}
+	var published string
+	if err := application.db.QueryRowContext(boundary, `SELECT html FROM published_pages WHERE domain=? AND path='/'`, domain).Scan(&published); err != nil || strings.Contains(published, "New") {
+		t.Fatal("draft leaked into public page", err)
+	}
+	var oldRevision string
+	if err := application.db.QueryRowContext(boundary, `SELECT MIN(id) FROM revisions WHERE domain=? AND page_path='/'`, domain).Scan(&oldRevision); err != nil {
+		t.Fatal(err)
+	}
+	current := read("/")
+	call("rollback", map[string]any{"path": "/", "revision_id": oldRevision, "expected_version": current.Version})
+	if !strings.Contains(read("/about").HTML, "Old") {
+		t.Fatal("rollback did not restore shared template")
+	}
+	// Toggling an older revision changes the opaque guard even if HTML stays equal.
+	current = read("/")
+	call("set_revision_active", map[string]any{"path": "/", "revision_id": oldRevision, "active": false, "expected_version": current.Version})
+	toggled := read("/")
+	if toggled.Version == current.Version {
+		t.Fatal("revision flags missing from version")
+	}
+	stale, err := connection.CallTool(boundary, &mcpsdk.CallToolParams{Name: "sitebrush_set_revision_active", Arguments: map[string]any{"path": "/", "revision_id": oldRevision, "active": true, "expected_version": current.Version}})
+	if err != nil || !stale.IsError {
+		t.Fatal("stale revision toggle accepted", err)
+	}
+	call("set_revision_active", map[string]any{"path": "/", "revision_id": oldRevision, "active": true, "expected_version": toggled.Version})
+	call("publish", map[string]any{})
+	call("create_page", map[string]any{"path": "/single", "title": "Single", "html": "<p>Single revision</p>"})
+	var singleRevision string
+	if err := application.db.QueryRowContext(boundary, `SELECT MAX(id) FROM revisions WHERE domain=? AND page_path='/single'`, domain).Scan(&singleRevision); err != nil {
+		t.Fatal(err)
+	}
+	single := read("/single")
+	call("set_revision_active", map[string]any{"path": "/single", "revision_id": singleRevision, "active": false, "expected_version": single.Version})
+	if !read("/single").PendingDelete {
+		t.Fatal("last revision did not queue page deletion")
+	}
+	single = read("/single")
+	call("set_revision_active", map[string]any{"path": "/single", "revision_id": singleRevision, "active": true, "expected_version": single.Version})
+	if read("/single").PendingDelete {
+		t.Fatal("reactivation did not restore page")
+	}
+	call("set_page_password", map[string]any{"path": "/private", "password": "test-section-password"})
+	uploaded := call("upload_file", map[string]any{"file_name": "report.txt", "file_content": base64.StdEncoding.EncodeToString([]byte("private report")), "protected_page_path": "/private"})
+	payload := uploaded["result"].(map[string]any)["payload"].(map[string]any)
+	filename := payload["file_name"].(string)
+	call("get_file_settings", map[string]any{"file_name": filename})
+	download := func(cookies ...*http.Cookie) (int, string) {
+		t.Helper()
+		request, _ := http.NewRequestWithContext(boundary, "GET", server.URL+"/p/"+filename, nil)
+		for _, cookie := range cookies {
+			request.AddCookie(cookie)
+		}
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(response.Body)
+		response.Body.Close()
+		return response.StatusCode, string(body)
+	}
+	if status, _ := download(); status != 401 {
+		t.Fatal("private direct URL exposed", status)
+	}
+	protection, found := application.pagePasswordRuleForPath(boundary, domain, "/private")
+	if !found {
+		t.Fatal("missing password rule")
+	}
+	// The HTTP unlock path issues a client-bound cookie used by the asset gate.
+	unlock := url.Values{"password": {"test-section-password"}}
+	unlockRequest, _ := http.NewRequestWithContext(boundary, "POST", server.URL+"/private?page_password_unlock", strings.NewReader(unlock.Encode()))
+	unlockRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	noRedirect := *client
+	noRedirect.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	unlocked, err := noRedirect.Do(unlockRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlocked.Body.Close()
+	cookies := unlocked.Cookies()
+	if len(cookies) == 0 {
+		t.Fatalf("unlock status %d rule %s", unlocked.StatusCode, protection.Path)
+	}
+	if status, body := download(cookies...); status != 200 || body != "private report" {
+		t.Fatal("password cookie did not unlock file", status, body)
+	}
+	backup, err := application.collectDomainBackup(boundary, domain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backup.FileAccessRules) != 1 || backup.FileAccessRules[0].ProtectedPagePath != "/private" {
+		t.Fatal("backup lost file protection", backup.FileAccessRules)
+	}
+	var archive bytes.Buffer
+	if err := application.writeDomainBackupZIP(boundary, domain, &archive); err != nil {
+		t.Fatal(err)
+	}
+	archiveReader, err := zip.NewReader(bytes.NewReader(archive.Bytes()), int64(archive.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.importDomainBackupZIP(boundary, domain, "/copy", archiveReader); err != nil {
+		t.Fatal(err)
+	}
+	originalFilename := filename
+	filename = applyImportFilePrefix(importFilePrefix("/copy"), filename)
+	if status, _ := download(); status != 403 {
+		t.Fatal("restored private file became public", status)
+	}
+	settings := call("get_file_settings", map[string]any{"file_name": filename})["result"].(map[string]any)["payload"].(map[string]any)
+	if settings["protected_page_path"] != "/copy/private" {
+		t.Fatal("restore did not remap protection", settings)
+	}
+	filename = originalFilename
+	before := application.domainStorageUsage(boundary, domain)
+	failed, err := connection.CallTool(boundary, &mcpsdk.CallToolParams{Name: "sitebrush_upload_file", Arguments: map[string]any{"file_name": "denied.txt", "file_content": base64.StdEncoding.EncodeToString([]byte("never public")), "protected_page_path": "/missing-rule"}})
+	if err != nil || !failed.IsError {
+		t.Fatal("missing protection accepted", err)
+	}
+	after := application.domainStorageUsage(boundary, domain)
+	if after.FileBytes != before.FileBytes {
+		t.Fatal("failed private upload leaked quota", before.FileBytes, after.FileBytes)
+	}
+	var imageSource bytes.Buffer
+	if err := png.Encode(&imageSource, image.NewNRGBA(image.Rect(0, 0, 64, 64))); err != nil {
+		t.Fatal(err)
+	}
+	call("upload_file", map[string]any{"file_name": "photo.png", "file_content": base64.StdEncoding.EncodeToString(imageSource.Bytes()), "image_width": 4, "image_height": 4, "image_full": true, "protected_page_path": "/private"})
+	rows, err := application.db.QueryContext(boundary, `SELECT file_name FROM file_metadata WHERE domain=?`, domainStorageName(domain))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var imageNames []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		if strings.HasPrefix(name, privateAssetPrefix) && name != originalFilename {
+			imageNames = append(imageNames, name)
+		}
+	}
+	rows.Close()
+	if len(imageNames) != 2 {
+		t.Fatal("missing prepared image variants", imageNames)
+	}
+	for _, name := range imageNames {
+		filename = name
+		if status, _ := download(); status != 401 {
+			t.Fatal("image variant exposed", status, name)
+		}
+		if status, _ := download(cookies...); status != 200 {
+			t.Fatal("image variant password failed", status, name)
+		}
+	}
+	filename = originalFilename
+	securityState := browserstats.SecurityState{}
+	securityState.Record(browserstats.RequestObservation{Time: time.Now().UTC(), IP: "192.0.2.12", Path: "/.git/config", Status: 404, Agent: "private-agent"})
+	securityJSON, _ := json.Marshal(securityState)
+	if saved := application.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.SaveSecurity, Domain: domain, State: string(securityJSON)}); saved.Err != nil {
+		t.Fatal(saved.Err)
+	}
+	summary := call("get_security_summary", map[string]any{"days": 7})
+	securityJSON, _ = json.Marshal(summary)
+	if strings.Contains(string(securityJSON), "192.0.2.12") || strings.Contains(string(securityJSON), "private-agent") {
+		t.Fatal("private security detail exposed")
+	}
+	call("remove_page_password", map[string]any{"path": "/private"})
+	if status, _ := download(cookies...); status != 403 {
+		t.Fatal("removing password made file public", status)
+	}
+	call("set_file_access", map[string]any{"file_name": filename, "access_mode": "public"})
+	if status, body := download(); status != 200 || body != "private report" {
+		t.Fatal("explicit public file access failed", status)
+	}
+	// OAuth-only connectors also finish without a login or consent screen.
+	registrationRequest, _ := http.NewRequestWithContext(boundary, "POST", server.URL+"/?oauth=register", strings.NewReader(`{"client_name":"Demo OAuth connector","redirect_uris":["https://client.example/callback"]}`))
+	registrationRequest.Header.Set("Content-Type", "application/json")
+	registered, err := client.Do(registrationRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var registration map[string]any
+	json.NewDecoder(registered.Body).Decode(&registration)
+	registered.Body.Close()
+	if registered.StatusCode != 201 {
+		t.Fatal("public registration failed", registration)
+	}
+	verifier := strings.Repeat("v", 43)
+	challenge := sha256.Sum256([]byte(verifier))
+	resource := "https://" + domain + "/?mcp"
+	authorization := url.Values{"oauth": {"authorize"}, "response_type": {"code"}, "client_id": {registration["client_id"].(string)}, "redirect_uri": {"https://client.example/callback"}, "resource": {resource}, "code_challenge_method": {"S256"}, "code_challenge": {base64.RawURLEncoding.EncodeToString(challenge[:])}, "scope": {"read write publish analytics"}, "state": {"demo-state"}}
+	authorizationRequest, _ := http.NewRequestWithContext(boundary, "GET", server.URL+"/?"+authorization.Encode(), nil)
+	authorized, err := noRedirect.Do(authorizationRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorized.Body.Close()
+	callback, err := url.Parse(authorized.Header.Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authorized.StatusCode != 303 || callback.Host != "client.example" || callback.Query().Get("code") == "" || callback.Query().Get("state") != "demo-state" {
+		t.Fatal("demo OAuth required consent", authorized.StatusCode, callback)
+	}
+	exchange := url.Values{"grant_type": {"authorization_code"}, "client_id": {registration["client_id"].(string)}, "resource": {resource}, "redirect_uri": {"https://client.example/callback"}, "code": {callback.Query().Get("code")}, "code_verifier": {verifier}}
+	tokenRequest, _ := http.NewRequestWithContext(boundary, "POST", server.URL+"/?oauth=token", strings.NewReader(exchange.Encode()))
+	tokenRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokens, err := client.Do(tokenRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, tokens.Body)
+	tokens.Body.Close()
+	if tokens.StatusCode != 200 {
+		t.Fatal("public OAuth PKCE exchange failed", tokens.StatusCode)
+	}
+	// Settings changes are checked on each call, even on an existing connection.
+	state.Settings.Enabled = false
+	application.updateRuntimeDemoSiteState(boundary, state)
+	result, err := connection.CallTool(boundary, &mcpsdk.CallToolParams{Name: "sitebrush_get_access", Arguments: map[string]any{}})
+	if err == nil && result != nil && !result.IsError {
+		t.Fatal("disabled demo retained public access")
 	}
 }

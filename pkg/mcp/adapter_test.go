@@ -68,7 +68,7 @@ func TestAdapterRealSDKDiscoveryCallsAndSiteBinding(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(tools.Tools) != len(aicapability.Operations())+1 {
+			if len(tools.Tools) != len(aicapability.Operations())+2 {
 				t.Fatal("missing SiteBrush operations", len(tools.Tools))
 			}
 			for _, tool := range tools.Tools {

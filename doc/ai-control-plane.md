@@ -6,6 +6,16 @@ site router when its source has not been admitted. The router does not add AI
 discovery links, OAuth challenges, CORS responses or protocol errors for that
 visitor. This also applies to the authorization-server compatibility route.
 
+The exact enabled public demo domain is an explicit exception: humans and AI
+clients have the same immediate public editing permission from every IP. Its
+`?mcp` endpoint requires no OAuth, bearer token, cookie or consent screen. This
+exception never follows a `demo.*` naming pattern or a domain alias. The demo
+has all four existing scopes, saves drafts and permits publication within the
+requested task. During a reset it rejects new AI work; replacing its content
+revokes old grants and closes job/session channels. Nothing private belongs on
+a shared, automatically reset demo. OAuth-only clients can still register and
+complete PKCE automatically, without a login or consent screen.
+
 ## Connecting a provider
 
 Connect `https://example.com/?mcp` in the
@@ -20,7 +30,7 @@ Deleting the last active revision queues deletion of the entire page; a later
 publication removes its public page and static file. The MCP tool descriptor
 and working guide disclose this fallback and require reporting it to the owner.
 
-Draft imports download concurrently, then commit quota, asset metadata and pages
+Page and site imports download concurrently, then commit quota, asset metadata and pages
 through the site's content participant in one transaction. Asset writes never
 reconcile away page reservations between these steps. A rejected or canceled
 batch restores replaced files and removes newly written files before completing.
@@ -46,18 +56,18 @@ or unavailable downloads retain the last valid snapshot. Admission reads parsed
 prefixes from its own participant and does not wait for provider downloads or
 reparse every list per HTTP request. Custom ranges cannot be `/0`.
 
-Requests without a query bypass AI admission SQL and provider-network jobs;
-the path-based OAuth discovery endpoint still requires admission. Requests with
-query parameters retain the ingress check before selectors are interpreted.
+Requests without control selectors bypass AI admission SQL and provider-network
+jobs, including tracking and asset cache queries. The path-based OAuth discovery
+endpoint still requires admission.
 Admitted administrators do not need a provider-network check. Refresh workers
 parse new snapshots before handing them to the range participant, so parsing
 does not stall its admission queue.
 
 `BenchmarkAIIngressHTTP` measures this middleware independently of page delivery.
-On Apple M1 with pure-Go SQLite, a 300 ms local run reduced admission overhead
-for `/` and static assets without queries from about 99 microseconds / 91
-allocations to 0.41 microseconds / 12 allocations. Queries still cost about 99
-microseconds in that fixture. These figures are not production page timings.
+On Apple M1 with pure-Go SQLite, a 200 ms local run measured 0.40 microseconds /
+12 allocations for `/` and static assets, and 0.79 microseconds / 17 allocations
+for `?utm_source=example`. Control requests still perform authorization work.
+These figures measure middleware overhead, not production page timings.
 
 The source catalog and snapshots are in `pkg/aiingress`. Sources verified on
 2026-10-22:
@@ -220,3 +230,33 @@ The additive schema steps extend the existing migration history without changing
 previous step IDs, order or revisions and without republishing modern drafts.
 Real Claude/Claude Code acceptance on the deployed HTTPS site remains a separate
 check from local SDK and browser regression tests.
+
+
+## Assistant feature guide and protected files
+
+`sitebrush_get_access` reports the actual site, grants, demo status and concise
+workflow. `sitebrush_get_guide(section)` returns sections of the same canonical
+HTTP guide: overview, editing, templates, files, publishing, revisions, analytics,
+security and imports. Reading static help requires no extra content scope.
+
+`set_revision_active` takes an explicit boolean and the opaque current version.
+Version guards include revision flags. Restoring active source uses the same
+transaction and shared-template propagation as page saves. Turning off the last
+active revision queues page deletion; reactivation cancels that draft deletion.
+
+`get_security_summary` returns a separate allowlist DTO under analytics scope.
+It bounds requests, errors and suspicious events to the requested 1/7/30/90-day
+period and includes coverage. No raw incident, address, user-agent, path/query or
+form data is serialized. Complete blocked-request totals are currently unavailable.
+
+`get_file_settings` and `set_file_access` expose safe file access metadata.
+Site-wide write can bind a file to `protected_page_path` using an existing
+section password, or explicitly make it public. `upload_file` accepts the same
+path and optional `image_full` for prepared images. Preview/full files receive
+rules together. A new private upload is stored in a fail-closed namespace before
+the control transaction commits its ACL; failure removes files and quota.
+Removing a referenced section rule denies the file until explicit reconfiguration.
+Restored ACLs are committed before archive files become reachable, and section
+paths follow the copy destination. Backups never need a plaintext password.
+
+Manual acceptance after deployment is listed in [MCP demo checks](mcp-demo-checks.md).
