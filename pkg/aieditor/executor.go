@@ -21,6 +21,9 @@ const (
 	OperationGetPageSettings    Operation = "get_page_settings"
 	OperationDeletePage         Operation = "delete_page"
 	OperationDeleteRevision     Operation = "delete_revision"
+	OperationSetRevisionActive  Operation = "set_revision_active"
+	OperationGetFileSettings    Operation = "get_file_settings"
+	OperationSetFileAccess      Operation = "set_file_access"
 	OperationSetPagePassword    Operation = "set_page_password"
 	OperationRemovePagePassword Operation = "remove_page_password"
 	OperationFreezeSite         Operation = "freeze_site"
@@ -34,22 +37,26 @@ var (
 )
 
 type Request struct {
-	DraftOnly       bool      `json:"-"`
-	PageOnly        bool      `json:"-"`
-	StrictVersion   bool      `json:"-"`
-	Password        string    `json:"password,omitempty"`
-	Domain          string    `json:"domain,omitempty"`
-	Operation       Operation `json:"operation"`
-	Path            string    `json:"path,omitempty"`
-	Title           string    `json:"title,omitempty"`
-	HTML            string    `json:"html,omitempty"`
-	FileName        string    `json:"file_name,omitempty"`
-	FileContent     []byte    `json:"file_content,omitempty"`
-	RevisionID      string    `json:"revision_id,omitempty"`
-	ImageWidth      int       `json:"image_width,omitempty"`
-	ImageHeight     int       `json:"image_height,omitempty"`
-	ImageFit        string    `json:"image_fit,omitempty"`
-	ExpectedVersion string    `json:"expected_version,omitempty"`
+	DraftOnly         bool      `json:"-"`
+	PageOnly          bool      `json:"-"`
+	StrictVersion     bool      `json:"-"`
+	Active            *bool     `json:"active,omitempty"`
+	AccessMode        string    `json:"access_mode,omitempty"`
+	ProtectedPagePath string    `json:"protected_page_path,omitempty"`
+	Password          string    `json:"password,omitempty"`
+	Domain            string    `json:"domain,omitempty"`
+	Operation         Operation `json:"operation"`
+	Path              string    `json:"path,omitempty"`
+	Title             string    `json:"title,omitempty"`
+	HTML              string    `json:"html,omitempty"`
+	FileName          string    `json:"file_name,omitempty"`
+	FileContent       []byte    `json:"file_content,omitempty"`
+	RevisionID        string    `json:"revision_id,omitempty"`
+	ImageFull         bool      `json:"image_full,omitempty"`
+	ImageWidth        int       `json:"image_width,omitempty"`
+	ImageHeight       int       `json:"image_height,omitempty"`
+	ImageFit          string    `json:"image_fit,omitempty"`
+	ExpectedVersion   string    `json:"expected_version,omitempty"`
 }
 
 type Result struct {
@@ -182,8 +189,15 @@ func Validate(request Request) error {
 		if request.Path != "" && cleanRequestPath(request.Path) == "" {
 			return ErrInvalidRequest
 		}
-	case OperationReadPage, OperationCreatePage, OperationUpdatePage, OperationRollback, OperationGetPageSettings, OperationDeletePage, OperationDeleteRevision, OperationSetPagePassword, OperationRemovePagePassword:
+	case OperationReadPage, OperationCreatePage, OperationUpdatePage, OperationRollback, OperationGetPageSettings, OperationDeletePage, OperationDeleteRevision, OperationSetRevisionActive, OperationSetPagePassword, OperationRemovePagePassword:
 		if cleanRequestPath(request.Path) == "" {
+			return ErrInvalidRequest
+		}
+	case OperationGetFileSettings, OperationSetFileAccess:
+		if cleanRequestFileName(request.FileName) == "" {
+			return ErrInvalidRequest
+		}
+		if request.Operation == OperationSetFileAccess && request.AccessMode != "public" && request.AccessMode != "page_password" {
 			return ErrInvalidRequest
 		}
 	case OperationUploadFile:
@@ -193,10 +207,16 @@ func Validate(request Request) error {
 	default:
 		return ErrUnsupportedOperation
 	}
-	if (request.Operation == OperationDeletePage || request.Operation == OperationDeleteRevision) && request.ExpectedVersion == "" {
+	if (request.Operation == OperationDeletePage || request.Operation == OperationDeleteRevision || request.Operation == OperationSetRevisionActive) && request.ExpectedVersion == "" {
 		return ErrInvalidRequest
 	}
-	if request.Operation == OperationDeleteRevision && request.RevisionID == "" {
+	if (request.Operation == OperationDeleteRevision || request.Operation == OperationSetRevisionActive) && request.RevisionID == "" {
+		return ErrInvalidRequest
+	}
+	if request.Operation == OperationSetRevisionActive && request.Active == nil {
+		return ErrInvalidRequest
+	}
+	if request.ProtectedPagePath != "" && cleanRequestPath(request.ProtectedPagePath) == "" {
 		return ErrInvalidRequest
 	}
 	if request.Operation == OperationSetPagePassword && (strings.TrimSpace(request.Password) == "" || len(request.Password) > 1024) {

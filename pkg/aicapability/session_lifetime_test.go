@@ -80,3 +80,41 @@ func TestExpiredSessionContactIsClosedByOwner(t *testing.T) {
 		t.Fatal("expired session retained")
 	}
 }
+
+func TestPublicDemoSessionResetIsDomainBound(t *testing.T) {
+	manager := NewManager()
+	defer manager.Close()
+	demo, _, created, err := manager.PublicDemoSession("demo.example", "demo@example.org", time.Minute)
+	if err != nil || !created {
+		t.Fatal(err)
+	}
+	same, _, created, err := manager.PublicDemoSession("demo.example", "demo@example.org", time.Minute)
+	if err != nil || created || same.Done != demo.Done {
+		t.Fatal("demo request created another grant", err)
+	}
+	token, _, err := manager.Issue("ordinary.example", StandardScopes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordinary, err := manager.Exchange(token, "ordinary.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.RevokeDomain("demo.example"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-demo.Done:
+	default:
+		t.Fatal("reset did not cancel demo jobs")
+	}
+	select {
+	case <-ordinary.Done:
+		t.Fatal("demo reset revoked another site")
+	default:
+	}
+	next, _, created, err := manager.PublicDemoSession("demo.example", "demo@example.org", time.Minute)
+	if err != nil || !created || next.CapabilityID == demo.CapabilityID {
+		t.Fatal("reset reused an obsolete demo grant", err)
+	}
+}
