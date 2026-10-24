@@ -29,8 +29,20 @@ func TestExclusiveLeaseCancellationAndGenerationFence(t *testing.T) {
 		t.Fatal(err)
 	}
 	canceled := make(chan struct{})
-	admitted := make(chan admitted, 1)
-	gate.requests <- admission{domain: "example.org", expected: 1, exclusive: true, done: canceled, reply: admitted}
+	queued := make(chan struct{})
+	admitted := make(chan error, 1)
+	go func() {
+		lease, enterErr := gate.Enter("example.org", 1, true, canceled, queued)
+		if lease != nil {
+			lease.Close(false)
+		}
+		admitted <- enterErr
+	}()
+	select {
+	case <-queued:
+	case <-time.After(2 * time.Second):
+		t.Fatal("exclusive admission was not queued")
+	}
 	if lease, enterErr := gate.Enter("example.org", 1, false, nil); !errors.Is(enterErr, ErrBusy) {
 		if lease != nil {
 			lease.Close(false)
@@ -39,8 +51,8 @@ func TestExclusiveLeaseCancellationAndGenerationFence(t *testing.T) {
 	}
 	close(canceled)
 	select {
-	case result := <-admitted:
-		if result.err == nil || result.lease != nil {
+	case enterErr := <-admitted:
+		if enterErr == nil {
 			t.Fatal("canceled operation admitted")
 		}
 	case <-time.After(2 * time.Second):

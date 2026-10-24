@@ -70,23 +70,30 @@ func (gate *Gate) run() {
 		case <-gate.stop:
 			return
 		case request := <-gate.generations:
-			request.reply <- lookup(request.domain).epoch
+			epoch := uint64(1)
+			if state := sites[request.domain]; state != nil {
+				epoch = state.epoch
+			}
+			request.reply <- epoch
 		case request := <-gate.abandoned:
-			state := lookup(request.domain)
-			if state.waiting == request {
+			state := sites[request.domain]
+			if state != nil && state.waiting == request {
 				state.waiting = nil
 				close(request.resolved)
 				request.reply <- admitted{err: errors.New("site operation canceled")}
 			}
 		case request := <-gate.requests:
-			state := lookup(request.domain)
 			select {
 			case <-request.done:
 				request.reply <- admitted{err: errors.New("site operation canceled")}
 				continue
 			default:
 			}
+			state := lookup(request.domain)
 			if request.expected != 0 && request.expected != state.epoch {
+				if state.epoch == 1 && state.active == 0 && state.waiting == nil {
+					delete(sites, request.domain)
+				}
 				request.reply <- admitted{err: ErrStale}
 				continue
 			}
@@ -137,6 +144,9 @@ func (gate *Gate) run() {
 					waiting.reply <- admitted{lease: &Lease{gate: gate, domain: waiting.domain, exclusive: true}}
 				}
 			}
+			if state.active == 0 && state.waiting == nil && state.epoch == 1 {
+				delete(sites, finished.domain)
+			}
 			close(finished.reply)
 		}
 	}
@@ -158,16 +168,25 @@ func (gate *Gate) Generation(domain string) uint64 {
 		return 0
 	}
 }
-func (gate *Gate) Enter(domain string, expected uint64, exclusive bool, done <-chan struct{}) (*Lease, error) {
+func (gate *Gate) Enter(domain string, expected uint64, exclusive bool, done <-chan struct{}, queued ...chan<- struct{}) (*Lease, error) {
+	notifyQueued := func() {
+		if len(queued) > 0 && queued[0] != nil {
+			close(queued[0])
+		}
+	}
 	if gate == nil {
+		notifyQueued()
 		return &Lease{}, nil
 	}
 	reply := make(chan admitted, 1)
 	select {
 	case gate.requests <- admission{domain: domain, expected: expected, exclusive: exclusive, done: done, reply: reply}:
+		notifyQueued()
 	case <-done:
+		notifyQueued()
 		return nil, errors.New("site operation canceled")
 	case <-gate.stop:
+		notifyQueued()
 		return nil, errors.New("site editing stopped")
 	}
 	// Once queued, the admission reply transfers ownership even if the HTTP

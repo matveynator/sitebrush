@@ -48310,17 +48310,28 @@ func (a *App) restoreFreezeCheckpoint(ctx context.Context, domain, id, digest st
 	} else if stage == "publishing" {
 		return sitefreeze.ErrBusy
 	}
-	if a.aiImports != nil {
-		if err := a.aiImports.CancelDomain(domain); err != nil {
-			return err
+	// Queue the exclusive turn before cancelling imports. New admissions are
+	// now behind that turn and cannot slip into the cancellation/drain gap.
+	queued := make(chan struct{})
+	cancellation := make(chan error, 1)
+	go func() {
+		<-queued
+		var cancelErr error
+		if a.aiImports != nil {
+			cancelErr = a.aiImports.CancelDomain(domain)
 		}
-	}
-	lease, err := a.workspace.Enter(domain, 0, true, ctx.Done())
+		cancellation <- cancelErr
+	}()
+	lease, err := a.workspace.Enter(domain, 0, true, ctx.Done(), queued)
+	cancelErr := <-cancellation
 	if err != nil {
 		return err
 	}
 	advanced := false
 	defer func() { lease.Close(advanced) }()
+	if cancelErr != nil {
+		return cancelErr
+	}
 	point, stage, err := a.loadFreezeCheckpoint(ctx, domain)
 	if err != nil {
 		return err
@@ -48548,11 +48559,9 @@ func (a *App) recoverFreezeCheckpoints(ctx context.Context) {
 }
 
 func (a *App) checkpointPreview(ctx context.Context, domain string) (sitefreeze.Preview, error) {
-	lease, err := a.workspace.Enter(domain, 0, true, ctx.Done())
-	if err != nil {
-		return sitefreeze.Preview{}, err
-	}
-	defer lease.Close(false)
+	// Preview is optimistic so an active import cannot prevent its owner
+	// from opening cancellation. Confirmation drains writers and checks this
+	// exact digest again before changing any current view.
 	point, stage, err := a.loadFreezeCheckpoint(ctx, domain)
 	if err != nil {
 		return sitefreeze.Preview{}, err
@@ -48643,7 +48652,11 @@ func (a *App) unfreezeSocket(w http.ResponseWriter, r *http.Request) {
 		err := a.restoreFreezeCheckpoint(contextWithDomain(context.Background(), domain), domain, command.ID, command.Digest)
 		if err != nil {
 			a.logDomainEvent(domain, "FREEZE restore failed: %v", err)
-			websocket.JSON.Send(connection, map[string]any{"error": err.Error()})
+			message := err.Error()
+			if errors.Is(err, sitefreeze.ErrStale) {
+				message = translationOrDefault(translationsForRequest(r), "unfreeze_stale", "Changes have arrived. Refresh the list and confirm cancellation again.")
+			}
+			websocket.JSON.Send(connection, map[string]any{"error": message})
 			return
 		}
 		returnPath := cleanPath(r.URL.Path)

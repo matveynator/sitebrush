@@ -1640,7 +1640,8 @@
     "unfreeze_state_restored": "Restored checkpoint",
     "menu_publish_changes": "Publish changes",
     "unfreeze_home": "Back to site",
-    "unfreeze_publication": "Published page"
+    "unfreeze_publication": "Published page",
+    "unfreeze_stale": "Changes have arrived. Refresh the list and confirm cancellation again."
   },
   "fr": {
     "edit_saving": "Enregistrement de la page…",
@@ -3072,7 +3073,8 @@
     "unfreeze_state_restored": "Restored checkpoint",
     "menu_publish_changes": "Publish changes",
     "unfreeze_home": "Back to site",
-    "unfreeze_publication": "Published page"
+    "unfreeze_publication": "Published page",
+    "unfreeze_stale": "Changes have arrived. Refresh the list and confirm cancellation again."
   },
   "ru": {
     "mail_monitor_title": "Почта и аккаунты · 24 часа / 90 дней",
@@ -4715,7 +4717,8 @@
     "unfreeze_state_restored": "Восстановленная контрольная точка",
     "menu_publish_changes": "Опубликовать изменения",
     "unfreeze_home": "На сайт",
-    "unfreeze_publication": "Опубликованная страница"
+    "unfreeze_publication": "Опубликованная страница",
+    "unfreeze_stale": "Список изменений обновился. Обновите его и подтвердите отмену ещё раз."
   },
   "ja": {
     "edit_saving": "ページを保存中…",
@@ -6143,7 +6146,8 @@
     "unfreeze_state_restored": "Restored checkpoint",
     "menu_publish_changes": "Publish changes",
     "unfreeze_home": "Back to site",
-    "unfreeze_publication": "Published page"
+    "unfreeze_publication": "Published page",
+    "unfreeze_stale": "Changes have arrived. Refresh the list and confirm cancellation again."
   },
   "it": {
     "edit_saving": "Salvataggio della pagina…",
@@ -7571,7 +7575,8 @@
     "unfreeze_state_restored": "Restored checkpoint",
     "menu_publish_changes": "Publish changes",
     "unfreeze_home": "Back to site",
-    "unfreeze_publication": "Published page"
+    "unfreeze_publication": "Published page",
+    "unfreeze_stale": "Changes have arrived. Refresh the list and confirm cancellation again."
   },
   "sv": {
     "edit_saving": "Sparar sidan…",
@@ -8999,7 +9004,8 @@
     "unfreeze_state_restored": "Restored checkpoint",
     "menu_publish_changes": "Publish changes",
     "unfreeze_home": "Back to site",
-    "unfreeze_publication": "Published page"
+    "unfreeze_publication": "Published page",
+    "unfreeze_stale": "Changes have arrived. Refresh the list and confirm cancellation again."
   },
   "fi": {
     "edit_saving": "Tallennetaan sivua…",
@@ -10427,7 +10433,8 @@
     "unfreeze_state_restored": "Restored checkpoint",
     "menu_publish_changes": "Publish changes",
     "unfreeze_home": "Back to site",
-    "unfreeze_publication": "Published page"
+    "unfreeze_publication": "Published page",
+    "unfreeze_stale": "Changes have arrived. Refresh the list and confirm cancellation again."
   },
   "mn": {
     "edit_saving": "Хуудсыг хадгалж байна…",
@@ -11855,7 +11862,8 @@
     "unfreeze_state_restored": "Restored checkpoint",
     "menu_publish_changes": "Publish changes",
     "unfreeze_home": "Back to site",
-    "unfreeze_publication": "Published page"
+    "unfreeze_publication": "Published page",
+    "unfreeze_stale": "Changes have arrived. Refresh the list and confirm cancellation again."
   },
   "zh": {
     "edit_saving": "正在保存页面…",
@@ -13283,7 +13291,8 @@
     "unfreeze_state_restored": "Restored checkpoint",
     "menu_publish_changes": "Publish changes",
     "unfreeze_home": "Back to site",
-    "unfreeze_publication": "Published page"
+    "unfreeze_publication": "Published page",
+    "unfreeze_stale": "Changes have arrived. Refresh the list and confirm cancellation again."
   },
   "he": {
     "edit_saving": "שמירת הדף…",
@@ -14711,7 +14720,8 @@
     "unfreeze_state_restored": "Restored checkpoint",
     "menu_publish_changes": "Publish changes",
     "unfreeze_home": "Back to site",
-    "unfreeze_publication": "Published page"
+    "unfreeze_publication": "Published page",
+    "unfreeze_stale": "Changes have arrived. Refresh the list and confirm cancellation again."
   },
   "fa": {
     "edit_saving": "در حال ذخیره صفحه…",
@@ -16139,7 +16149,8 @@
     "unfreeze_state_restored": "Restored checkpoint",
     "menu_publish_changes": "Publish changes",
     "unfreeze_home": "Back to site",
-    "unfreeze_publication": "Published page"
+    "unfreeze_publication": "Published page",
+    "unfreeze_stale": "Changes have arrived. Refresh the list and confirm cancellation again."
   },
   "de": {
     "edit_saving": "Seite wird gespeichert…",
@@ -17567,7 +17578,8 @@
     "unfreeze_state_restored": "Restored checkpoint",
     "menu_publish_changes": "Publish changes",
     "unfreeze_home": "Back to site",
-    "unfreeze_publication": "Published page"
+    "unfreeze_publication": "Published page",
+    "unfreeze_stale": "Changes have arrived. Refresh the list and confirm cancellation again."
   },
   "tr": {
     "edit_saving": "Sayfa kaydediliyor…",
@@ -18995,7 +19007,8 @@
     "unfreeze_state_restored": "Restored checkpoint",
     "menu_publish_changes": "Publish changes",
     "unfreeze_home": "Back to site",
-    "unfreeze_publication": "Published page"
+    "unfreeze_publication": "Published page",
+    "unfreeze_stale": "Changes have arrived. Refresh the list and confirm cancellation again."
   },
   "kk": {
     "edit_saving": "Бет сақталуда…",
@@ -20423,7 +20436,8 @@
     "unfreeze_state_restored": "Restored checkpoint",
     "menu_publish_changes": "Publish changes",
     "unfreeze_home": "Back to site",
-    "unfreeze_publication": "Published page"
+    "unfreeze_publication": "Published page",
+    "unfreeze_stale": "Changes have arrived. Refresh the list and confirm cancellation again."
   },
   "es": {
     "edit_saving": "Guardando la página…",
@@ -21851,7 +21865,8 @@
     "unfreeze_state_restored": "Restored checkpoint",
     "menu_publish_changes": "Publish changes",
     "unfreeze_home": "Back to site",
-    "unfreeze_publication": "Published page"
+    "unfreeze_publication": "Published page",
+    "unfreeze_stale": "Changes have arrived. Refresh the list and confirm cancellation again."
   },
   "pt": {
     "edit_saving": "A guardar a página…",
@@ -23279,6 +23294,7 @@
     "unfreeze_state_restored": "Restored checkpoint",
     "menu_publish_changes": "Publish changes",
     "unfreeze_home": "Back to site",
-    "unfreeze_publication": "Published page"
+    "unfreeze_publication": "Published page",
+    "unfreeze_stale": "Changes have arrived. Refresh the list and confirm cancellation again."
   }
 }
