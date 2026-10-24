@@ -74,6 +74,7 @@ type Lookup struct {
 	SessionHash string
 }
 type Decision struct {
+	PageHidden      bool
 	ChrootEntries   []string
 	ChrootDirectory bool
 	ChrootName      string
@@ -388,7 +389,7 @@ func NewCatalog(root string, stop <-chan struct{}) *Catalog {
 				}
 				if found {
 					decision = Decision{Layout: policy.Layouts[task.query.Path], Known: true, Domain: policy.Domain, Frozen: policy.Frozen, Stealth: policy.Stealth, Found: true}
-					decision.Hidden = policy.Hidden["page\x00"+task.query.Path]
+					decision.PageHidden = policy.Hidden["page\x00"+task.query.Path]
 					decision.PageVersion = policy.PublishedVersions[task.query.Path]
 					decision.Versioned = policy.Versioned
 

@@ -47,6 +47,8 @@ type validatedFinding struct {
 }
 
 var validatedBaseline = []validatedFinding{
+	{RuleID: "go/weak-sensitive-data-hashing", URI: "pkg/sitefreeze/assets.go", FunctionDeclaration: "func ObjectPath(domain, digest string) string {", RelativeLine: 1, Justification: "The hashed bytes are only a canonical site domain used to name an isolated file-version directory. SQL row-level taint incorrectly labels the domain column as a password; no password, password hash or authentication decision enters this digest."},
+	{RuleID: "go/weak-sensitive-data-hashing", URI: "pkg/sitefreeze/assets.go", FunctionDeclaration: "func recordOrigin(root *os.Root, object, name string) error {", RelativeLine: 13, Justification: "The hashed bytes are only a storage-relative file path used as a deterministic origin record filename. SQL row-level taint reaches this path through the domain column; credential hashing and verification do not use this digest."},
 	{RuleID: "go/bad-redirect-check", URI: "pkg/crawler/whole_site.go", FunctionDeclaration: "func CleanPath(rawPath string) string {", RelativeLine: 9, Justification: "Crawler paths are local-only and pass through LocalRedirectTarget, which rejects network-path, host, credential, backslash, and control-character forms."},
 	{RuleID: "go/bad-redirect-check", URI: "sitebrush.go", FunctionDeclaration: "func cleanPath(rawPath string) string {", RelativeLine: 10, Justification: "Application paths are local-only and pass through LocalRedirectTarget, which independently enforces same-origin redirect syntax."},
 	{RuleID: "go/path-injection", URI: "sitebrush.go", LineHash: "a2e340fc87446ad4:1", Justification: "Path starts under the site storage root and is revalidated after symlink resolution."},

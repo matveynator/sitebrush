@@ -13437,6 +13437,32 @@ func updateOrInsertPublishedPage(ctx context.Context, database sqlExecutor, doma
 // The database owner serializes each transaction, so portable existence checks
 // do not need engine-specific upsert syntax or application locks.
 func updateOrInsertPage(ctx context.Context, database sqlExecutor, domain, pagePath, title, html string, published bool) error {
+	rows, err := database.QueryContext(ctx, `SELECT path FROM site_hidden_assets WHERE domain=? AND tree='page'`, domain)
+	if err != nil {
+		return err
+	}
+	hidden := []string{}
+	for rows.Next() {
+		var candidate string
+		if err = rows.Scan(&candidate); err != nil {
+			rows.Close()
+			return err
+		}
+		if staticRelativePathForPage(candidate) == staticRelativePathForPage(pagePath) {
+			hidden = append(hidden, candidate)
+		}
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	for _, candidate := range hidden {
+		if _, err = database.ExecContext(ctx, `DELETE FROM site_hidden_assets WHERE domain=? AND tree='page' AND path=?`, domain, candidate); err != nil {
+			return err
+		}
+	}
+
 	var existing int
 	if err := database.QueryRowContext(ctx, `SELECT COUNT(1) FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&existing); err != nil {
 		return err
@@ -13445,7 +13471,7 @@ func updateOrInsertPage(ctx context.Context, database sqlExecutor, domain, pageP
 		_, err := database.ExecContext(ctx, `UPDATE pages SET title=?,html=?,published=? WHERE domain=? AND path=?`, title, html, published, domain, pagePath)
 		return err
 	}
-	_, err := database.ExecContext(ctx, `INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,?)`, domain, pagePath, title, html, published)
+	_, err = database.ExecContext(ctx, `INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,?)`, domain, pagePath, title, html, published)
 	return err
 }
 
@@ -13935,6 +13961,13 @@ func (a *App) persistImportedPages(ctx context.Context, domain, ownerPath string
 	written := []assetWrite{}
 	started := make(chan struct{})
 	completed := make(chan error, 1)
+	versionedAssets := false
+	if _, versionErr := a.statInsideStorage(filepath.Join(filepath.Dir(a.storageRootDir()), filepath.Dir(sitefreeze.ObjectPath(domain, strings.Repeat("0", 64))))); versionErr == nil {
+		versionedAssets = true
+	} else if !os.IsNotExist(versionErr) {
+		return versionErr
+	}
+
 	err := a.siteContentTransaction(ctx, func(transaction *sql.Tx) error {
 		close(started)
 		usage := domainStorageUsage{}
@@ -14041,7 +14074,7 @@ func (a *App) persistImportedPages(ctx context.Context, domain, ownerPath string
 				if asset.contentType == "" {
 					asset.contentType = mime.TypeByExtension(path.Ext(name))
 				}
-				if frozen && asset.existed && !bytes.Equal(previous, asset.content) {
+				if versionedAssets && asset.existed && !bytes.Equal(previous, asset.content) {
 					fileDelta += int64(len(asset.content))
 				} else {
 					fileDelta += int64(len(asset.content) - len(previous))
@@ -48099,7 +48132,7 @@ func (a *App) createFreezeCheckpoint(ctx context.Context, domain string, epochs 
 		return point, err
 	}
 	point.ID = randomAccessToken()
-	if encoded, readErr := os.ReadFile(publicsite.PolicyPath(a.storagePath, domain)); readErr == nil {
+	if encoded, readErr := a.readFileInsideStorage(publicsite.PolicyPath(a.storagePath, domain)); readErr == nil {
 		var policy publicsite.Policy
 		if err = json.Unmarshal(encoded, &policy); err != nil {
 			return point, err
@@ -48145,7 +48178,15 @@ func (a *App) createFreezeCheckpoint(ctx context.Context, domain string, epochs 
 			if err = a.mkdirAllInsideStorage(filepath.Dir(object), 0700); err != nil {
 				return point, err
 			}
+			if _, statErr := a.statInsideStorage(object); os.IsNotExist(statErr) {
+				if err = a.applyDomainStorageDelta(ctx, domain, 0, 0, 0, int64(len(body)), 0); err != nil {
+					return point, err
+				}
+			} else if statErr != nil {
+				return point, statErr
+			}
 			if err = a.writeAtomicStorageFile(object, []byte(body)); err != nil {
+				a.rebuildDomainStorageUsage(ctx, domain)
 				return point, err
 			}
 		}
@@ -48744,7 +48785,7 @@ func (a *App) freezeDomain(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !a.isAdminRequest(r) || !adminMutationSourceAllowed(r) || !sessionCSRFMutationAllowed(r) {
+	if !a.isAdminRequest(r) || !adminMutationSourceAllowed(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -48761,7 +48802,7 @@ func (a *App) publishDomain(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !a.isAdminRequest(r) || !adminMutationSourceAllowed(r) || !sessionCSRFMutationAllowed(r) {
+	if !a.isAdminRequest(r) || !adminMutationSourceAllowed(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -50360,6 +50401,9 @@ func (a *App) openPublicSiteFile(domain, directory, relative string) (*os.File, 
 	return site.Open(relative)
 }
 func (a *App) servePublishedStaticFileFromDisk(w http.ResponseWriter, r *http.Request, domain, pagePath string, injectPublicMenu bool) bool {
+	if decision, found := r.Context().Value(publicDecisionContextKey{}).(publicsite.Decision); found && decision.PageHidden {
+		return false
+	}
 	pagePath = cleanPath(pagePath)
 	file, err := a.openPublishedStaticFile(domain, pagePath)
 	if decision, found := r.Context().Value(publicDecisionContextKey{}).(publicsite.Decision); found && decision.PageVersion != "" {
@@ -53092,7 +53136,8 @@ func applyFreezePolicy(policy *publicsite.Policy, point sitefreeze.Checkpoint) {
 	policy.ChrootListings = make(map[string][]string)
 	directoryEntries := make(map[string]map[string]bool)
 	for _, page := range point.Published {
-		policy.PublishedVersions[page.Path] = page.Hash
+		policy.PublishedVersions[cleanPath(page.Path)] = page.Hash
+		policy.PublishedVersions["/"+filepath.ToSlash(staticRelativePathForPage(page.Path))] = page.Hash
 	}
 	files := make(map[string]publicsite.FileRule, len(policy.Files))
 	for _, rule := range policy.Files {
@@ -53324,6 +53369,9 @@ func (a *App) writePublicPolicy(domain string) error {
 			break
 		}
 		policy.Hidden[tree+"\x00"+path] = true
+		if tree == "page" {
+			policy.Hidden["page\x00/"+filepath.ToSlash(staticRelativePathForPage(path))] = true
+		}
 	}
 	if hiddenErr == nil {
 		hiddenErr = rows.Err()
@@ -53443,7 +53491,7 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 		}
 		return false
 	}
-	if decision.Hidden {
+	if decision.Hidden || decision.PageHidden && fileName == "" && decision.Chroot.Path == "" {
 		http.NotFound(w, r)
 		return true
 	}

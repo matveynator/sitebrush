@@ -151,7 +151,8 @@ func Restore(root *os.Root, domain, target string, version File) error {
 		}
 		return root.Rename(temporary, target)
 	}
-	if !filepath.IsLocal(filepath.FromSlash(version.Path)) || len(version.Hash) != 64 {
+	decoded, decodeErr := hex.DecodeString(version.Hash)
+	if !filepath.IsLocal(filepath.FromSlash(version.Path)) || decodeErr != nil || len(decoded) != 32 || version.Hash != strings.ToLower(version.Hash) {
 		return errors.New("invalid file version")
 	}
 	if digest, _, err := HashFile(root, target); err == nil && digest == version.Hash {
@@ -172,7 +173,10 @@ func Restore(root *os.Root, domain, target string, version File) error {
 			if actual != version.Hash {
 				return errors.New("corrupt retained file version")
 			}
-			return root.Rename(temporary, target)
+			if err := root.Rename(temporary, target); err != nil {
+				return err
+			}
+			return recordOrigin(root, objectName, target)
 		}
 	}
 	object, err := root.Open(ObjectPath(domain, version.Hash))
@@ -180,7 +184,10 @@ func Restore(root *os.Root, domain, target string, version File) error {
 		return err
 	}
 	defer object.Close()
-	return atomicCopy(root, object, target, os.FileMode(version.Mode), version.Hash)
+	if err = atomicCopy(root, object, target, os.FileMode(version.Mode), version.Hash); err != nil {
+		return err
+	}
+	return recordOrigin(root, objectName, target)
 }
 func atomicCopy(root *os.Root, source io.Reader, target string, mode os.FileMode, expected string) error {
 	if err := root.MkdirAll(filepath.Dir(target), 0700); err != nil {

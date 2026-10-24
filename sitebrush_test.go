@@ -29028,6 +29028,13 @@ func TestSiteFreezeRestoresRevisionSelectionsAndRetainsFiles(t *testing.T) {
 				t.Fatal(err)
 			}
 
+			newStatic := filepath.Join(application.domainStaticDir(domain), staticRelativePathForPage("/new"))
+			if err = application.mkdirAllInsideStorage(filepath.Dir(newStatic), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err = application.writeAtomicStorageFile(newStatic, []byte("must remain private after cancellation")); err != nil {
+				t.Fatal(err)
+			}
 			policy := publicsite.Policy{Domain: domain, Frozen: true}
 			applyFreezePolicy(&policy, point)
 			if err = publicsite.Write(application.storagePath, policy); err != nil {
@@ -29124,6 +29131,19 @@ func TestSiteFreezeRestoresRevisionSelectionsAndRetainsFiles(t *testing.T) {
 			if _, _, err = application.loadFreezeCheckpoint(boundary, domain); !errors.Is(err, sql.ErrNoRows) {
 				t.Fatalf("active checkpoint survived: %v", err)
 			}
+			application.publicCatalog = catalog
+			if err = application.writePublicPolicy(domain); err != nil {
+				t.Fatal(err)
+			}
+			publicOnly := &App{storagePath: application.storagePath, publicCatalog: catalog}
+			for _, requestPath := range []string{"/new", "/new.html", "/p/new.txt"} {
+				response := httptest.NewRecorder()
+				request := httptest.NewRequest(http.MethodGet, "https://"+domain+requestPath, nil)
+				if !publicOnly.servePublicPublished(response, request, false) || response.Code != http.StatusNotFound {
+					t.Fatalf("hidden URL %s returned %d: %s", requestPath, response.Code, response.Body.String())
+				}
+			}
+
 		})
 	}
 }
