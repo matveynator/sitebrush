@@ -69,6 +69,8 @@ type Result struct {
 }
 
 type Options struct {
+	// PublicHost is the exact authority admitted by the site's authorization boundary.
+	PublicHost string
 	Domain     string
 	Resource   string
 	Version    string
@@ -190,13 +192,18 @@ func NewHandler(options Options) http.Handler {
 			return nil, map[string]any{"result": result.Payload}, nil
 		})
 	}
-	// The public demo has an exact configured HTTPS Host gate at the application
-	// boundary, including when served through a loopback reverse proxy.
-	handler := sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server { return server }, &sdk.StreamableHTTPOptions{Stateless: true, JSONResponse: true, MaxRequestBodyBytes: 176 << 20, DisableLocalhostProtection: options.PublicDemo})
+	// SiteBrush admits the public authority through its site and OAuth boundary.
+	// Its internal loopback listener is a proxy contact, not a local MCP service.
+	// Standalone handlers retain the SDK's localhost protection by default.
+	handler := sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server { return server }, &sdk.StreamableHTTPOptions{Stateless: true, JSONResponse: true, MaxRequestBodyBytes: 176 << 20, DisableLocalhostProtection: options.PublicHost != ""})
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		response.Header().Set("Cache-Control", "no-store")
 		response.Header().Set("Referrer-Policy", "no-referrer")
 		response.Header().Set("X-Content-Type-Options", "nosniff")
+		if options.PublicHost != "" && !strings.EqualFold(request.Host, options.PublicHost) {
+			http.Error(response, "invalid MCP host", http.StatusForbidden)
+			return
+		}
 		handler.ServeHTTP(response, request)
 	})
 }

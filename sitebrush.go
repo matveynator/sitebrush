@@ -15761,16 +15761,24 @@ func (a *App) siteMCPRoute(w http.ResponseWriter, r *http.Request) bool {
 	if endpoint == "" {
 		return false
 	}
+	domain := a.siteDomain(r.Context(), r)
+	startedAt := time.Now()
+	writer := &statusCapturingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+	w = writer
+	outcome := "transport"
+	defer func() {
+		a.logDomainEvent(domain, "MCP endpoint=%s method=%s host=%s ip=%s status=%d result=%s duration=%s", endpoint, r.Method, r.Host, accountClientIP(r), writer.statusCode, outcome, time.Since(startedAt))
+	}()
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if requestScheme(r) != "https" && !localAccountRequest(r) {
+		outcome = "https_required"
 		http.Error(w, "HTTPS is required", http.StatusForbidden)
 		return true
 	}
 	origin := requestScheme(r) + "://" + r.Host
 	resource := origin + sitemcp.Path
-	domain := a.siteDomain(r.Context(), r)
 	_, publicDemo := a.publicDemoState(r, domain)
 	if endpoint == sitemcp.Path {
 		w.Header().Add("Vary", "Accept")
@@ -15778,6 +15786,7 @@ func (a *App) siteMCPRoute(w http.ResponseWriter, r *http.Request) bool {
 			(strings.Contains(r.Header.Get("Accept"), "text/html") || publicDemo && !strings.Contains(r.Header.Get("Accept"), "text/event-stream") && !strings.Contains(r.Header.Get("Accept"), "application/json")) &&
 			r.Header.Get("Authorization") == "" && r.Header.Get("MCP-Protocol-Version") == "" && r.Header.Get("Mcp-Session-Id") == "" {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			outcome = "instructions"
 			if r.Method == http.MethodGet {
 				a.render(w, r, "mcp.html", map[string]any{"MCPURL": resource, "SignedIn": a.isAdminRequest(r), "LoginURL": loginURLForRequest(r), "PublicDemo": publicDemo})
 			}
@@ -15789,7 +15798,10 @@ func (a *App) siteMCPRoute(w http.ResponseWriter, r *http.Request) bool {
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(result)
 	}
-	oauthError := func(status int, code string) { writeJSON(status, map[string]string{"error": code}) }
+	oauthError := func(status int, code string) {
+		outcome = code
+		writeJSON(status, map[string]string{"error": code})
+	}
 	oauthFailure := func(err error) {
 		code := err.Error()
 		switch code {
@@ -15822,6 +15834,7 @@ func (a *App) siteMCPRoute(w http.ResponseWriter, r *http.Request) bool {
 	}
 	if endpoint == sitemcp.Path {
 		if browserOrigin := r.Header.Get("Origin"); browserOrigin != "" && browserOrigin != origin {
+			outcome = "invalid_origin"
 			http.Error(w, "invalid origin", 403)
 			return true
 		}
@@ -15836,7 +15849,7 @@ func (a *App) siteMCPRoute(w http.ResponseWriter, r *http.Request) bool {
 		if len(authorizationFields) == 2 && strings.EqualFold(authorizationFields[0], "Bearer") {
 			bearer = authorizationFields[1]
 		}
-		options := sitemcp.Options{Domain: domain, Resource: resource, Version: CompileVersion, Bearer: bearer, Manager: a.aiCapabilities, PublicDemo: publicDemo, Download: downloadAIMCPFile, Invoke: func(boundary context.Context, invocation sitemcp.Invocation) (sitemcp.Result, error) {
+		options := sitemcp.Options{PublicHost: r.Host, Domain: domain, Resource: resource, Version: CompileVersion, Bearer: bearer, Manager: a.aiCapabilities, PublicDemo: publicDemo, Download: downloadAIMCPFile, Invoke: func(boundary context.Context, invocation sitemcp.Invocation) (sitemcp.Result, error) {
 			return a.invokeMCPAIContent(r.WithContext(boundary), domain, invocation)
 		}}
 		if publicDemo {
@@ -15844,10 +15857,12 @@ func (a *App) siteMCPRoute(w http.ResponseWriter, r *http.Request) bool {
 				return a.publicDemoAISession(r, domain)
 			}
 			if _, _, err := options.Authorize(); err != nil {
+				outcome = "demo_unavailable"
 				http.Error(w, "demo site is preparing", http.StatusServiceUnavailable)
 				return true
 			}
 		} else if _, _, err := a.aiCapabilities.ValidateOAuth(domain, resource, bearer); err != nil {
+			outcome = "authorization_required"
 			sitemcp.Challenge(w, origin, 401, aicapability.StandardScopes())
 			return true
 		}
@@ -41216,7 +41231,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
     modalElement.appendChild(textElement);
     modalElement.appendChild(actionRowElement);
     overlayElement.appendChild(modalElement);
-    document.body.appendChild(overlayElement);
+    (document.body || document.documentElement).appendChild(overlayElement);
     function closeDialog() { overlayElement.remove(); }
     cancelButtonElement.addEventListener("click", closeDialog);
     confirmButtonElement.addEventListener("click", function onConfirmClick() { closeDialog(); onConfirm(); });
@@ -41260,7 +41275,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
     actionRowElement.appendChild(cancelButtonElement);
     modalElement.appendChild(actionRowElement);
     overlayElement.appendChild(modalElement);
-    document.body.appendChild(overlayElement);
+    (document.body || document.documentElement).appendChild(overlayElement);
     function closeDialog() { overlayElement.remove(); }
     cancelButtonElement.addEventListener("click", closeDialog);
     confirmButtonElement.addEventListener("click", function onConfirmClick() { closeDialog(); onConfirm(); });
@@ -41300,7 +41315,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
     modalElement.appendChild(errorElement);
     modalElement.appendChild(actionRowElement);
     overlayElement.appendChild(modalElement);
-    document.body.appendChild(overlayElement);
+    (document.body || document.documentElement).appendChild(overlayElement);
     function closeDialog() { overlayElement.remove(); }
     function submitPasswordDialog() {
       const passwordText = passwordInputElement.value || "";
@@ -41386,7 +41401,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
     modalElement.appendChild(pathElement);
     modalElement.appendChild(progressElement);
     overlayElement.appendChild(modalElement);
-    document.body.appendChild(overlayElement);
+    (document.body || document.documentElement).appendChild(overlayElement);
     let readyCallbackWasCalled = false;
     function setProgressPercent(percentNumber) {
       const boundedPercent = Math.max(0, Math.min(100, Math.round(Number(percentNumber) || 0)));
@@ -41512,7 +41527,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
         tokenInputElement.value = publishToken;
         actionFormElement.appendChild(tokenInputElement);
       }
-      document.body.appendChild(actionFormElement);
+      (document.body || document.documentElement).appendChild(actionFormElement);
       actionFormElement.submit();
     }
     function submitPasswordActionForm(actionPath, passwordText) {
@@ -41532,7 +41547,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
       passwordInputElement.name = "password";
       passwordInputElement.value = passwordText;
       actionFormElement.appendChild(passwordInputElement);
-      document.body.appendChild(actionFormElement);
+      (document.body || document.documentElement).appendChild(actionFormElement);
       actionFormElement.submit();
     }
   }, {capture: true});
@@ -41614,7 +41629,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
     modalElement.appendChild(contentElement);
     modalElement.appendChild(closeButtonElement);
     overlayElement.appendChild(modalElement);
-    document.body.appendChild(overlayElement);
+    (document.body || document.documentElement).appendChild(overlayElement);
     function closeTreeDialog() { overlayElement.remove(); }
     closeButtonElement.addEventListener("click", closeTreeDialog);
     overlayElement.addEventListener("click", function closeTreeDialogOnOverlay(browserEvent) {
@@ -42034,7 +42049,7 @@ function showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath, froze
   menuBoxElement.style.top = menuPoint.clientY + "px";
   menuRoot.appendChild(menuStyleElement);
   menuRoot.appendChild(menuBoxElement);
-  document.body.appendChild(menuHostElement);
+  (document.body || document.documentElement).appendChild(menuHostElement);
   if (window.sitebrushRefreshMenu) window.sitebrushRefreshMenu(browserEvent);
   positionSitebrushMenuBox(menuBoxElement, menuPoint);
   menuBoxElement.addEventListener("click", function onMenuClick(browserEvent) {
@@ -42385,7 +42400,7 @@ function showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath, froze
   menuBoxElement.style.top = menuPoint.clientY + "px";
   menuRoot.appendChild(menuStyleElement);
   menuRoot.appendChild(menuBoxElement);
-  document.body.appendChild(menuHostElement);
+  (document.body || document.documentElement).appendChild(menuHostElement);
   if (window.sitebrushRefreshMenu) window.sitebrushRefreshMenu(browserEvent);
   positionSitebrushMenuBox(menuBoxElement, menuPoint);
   menuBoxElement.addEventListener("click", function onMenuClick(browserEvent) {
@@ -46450,7 +46465,13 @@ func (a *App) runAutomaticSSLProcessWithIPDetection(stop <-chan struct{}, certif
 			if len(snapshot.Events) > 20 {
 				snapshot.Events = snapshot.Events[len(snapshot.Events)-20:]
 			}
-			a.logDomainEvent(domain, "AUTOCERT stage=%s", state)
+		}
+		if snapshot.State != state || err != nil && snapshot.Error != err.Error() {
+			if err != nil {
+				a.logDomainEvent(domain, "AUTOCERT stage=%s error=%v retry_at=%s", state, err, retryAt.UTC().Format(time.RFC3339))
+			} else {
+				a.logDomainEvent(domain, "AUTOCERT stage=%s", state)
+			}
 		}
 		snapshot.State, snapshot.RetryAt, snapshot.Error = state, retryAt, ""
 		if err != nil {
@@ -46824,6 +46845,20 @@ func (a *App) prepareAutomaticSSLDomainWithProgress(certificateManager automatic
 		return result
 	}
 	domainContext := contextWithDomain(context.Background(), certificateDomain)
+	if a.siteDatabaseRouter != nil {
+		_, err := a.siteDatabaseRouter.databaseForContext(domainContext)
+		if err != nil {
+			if !errors.Is(err, errSiteDatabaseMissing) {
+				result.state, result.err, result.retryAfter = "storage_error", err, time.Now().Add(time.Minute)
+				return result
+			}
+			if !a.pendingRegistrationDomain(domainContext, certificateDomain) {
+				result.state = "ignored"
+				result.retryAfter = time.Now().Add(automaticSSLRetryDelayEligibility)
+				return result
+			}
+		}
+	}
 	if !a.domainIsAutomaticSSLCandidate(domainContext, certificateDomain) {
 		result.state = "ignored"
 		result.retryAfter = time.Now().Add(automaticSSLRetryDelayEligibility)
@@ -46864,8 +46899,12 @@ func (a *App) prepareAutomaticSSLDomainWithProgress(certificateManager automatic
 	a.clearDomainAutomaticSSLFailure(domainContext, certificateDomain)
 	attemptedAt := time.Now().UTC()
 	if _, err := a.db.ExecContext(domainContext, `UPDATE domain_ssl_settings SET last_acme_attempt_at=?,retry_after=? WHERE domain=?`, attemptedAt.Format(time.RFC3339), attemptedAt.Add(5*time.Minute).Format(time.RFC3339), certificateDomain); err != nil {
-		result.state, result.err, result.retryAfter = "storage_error", err, time.Now().Add(time.Minute)
-		return result
+		// Confirmed registrations can obtain TLS before their site database exists.
+		// The durable registration and certificate cache own this bootstrap stage.
+		if !errors.Is(err, errSiteDatabaseMissing) || !a.pendingRegistrationDomain(domainContext, certificateDomain) {
+			result.state, result.err, result.retryAfter = "storage_error", err, time.Now().Add(time.Minute)
+			return result
+		}
 	}
 	progress("requesting")
 	issueContext, cancelIssue := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -46968,11 +47007,8 @@ func (a *App) listAutomaticSSLDomainCandidates(ctx context.Context) []string {
 	for _, databaseDomain := range databaseDomains {
 		a.collectAutomaticSSLDomainCandidates(contextWithDomain(ctx, databaseDomain), seenDomains)
 	}
-	for _, domain := range a.autoCertCachedCertificateDomains(ctx) {
-		if autoCertDomainEligibilityError(domain) == nil {
-			seenDomains[domain] = struct{}{}
-		}
-	}
+	// Cached certificates remain reusable, but do not establish site ownership
+	// or authorize background renewal after their site has been removed.
 	domainList := make([]string, 0, len(seenDomains))
 	for domain := range seenDomains {
 		domainList = append(domainList, domain)
@@ -47052,9 +47088,6 @@ func (a *App) domainIsAutomaticSSLCandidate(ctx context.Context, domain string) 
 	certificateDomain := normalizeDomainName(domain)
 	if certificateDomain == "" {
 		return false
-	}
-	if a.autoCertCachedCertificateValid(certificateDomain, time.Now()) {
-		return true
 	}
 	if a.pendingRegistrationDomain(ctx, certificateDomain) {
 		return true
@@ -49147,7 +49180,7 @@ func (a *App) servePublishedStaticFileFromDisk(w http.ResponseWriter, r *http.Re
 	if decision, found := r.Context().Value(publicDecisionContextKey{}).(publicsite.Decision); found && decision.Layout != "" {
 		layoutAttribute = ` data-analytics-layout="` + template.HTMLEscapeString(decision.Layout) + `"`
 	}
-	bootstrap := `<script defer src="/p/static/visitor.js?v=` + url.QueryEscape(CompileVersion) + `" data-sitebrush-owned="true"` + menuAttribute + layoutAttribute + `></script>`
+	bootstrap := `<script async src="/p/static/visitor.js?v=` + url.QueryEscape(CompileVersion) + `" data-sitebrush-owned="true"` + menuAttribute + layoutAttribute + `></script>`
 	w.Header().Add("Vary", "Accept-Language")
 	if !injectPublicMenu && w.Header().Get("Cache-Control") == "" {
 		w.Header().Set("Cache-Control", "private, no-cache")

@@ -14,6 +14,7 @@
     const menuScript = document.createElement('script');
     menuScript.src = '/p/static/' + menuAsset + (loaderScript ? new URL(loaderScript.src).search : '');
     menuScript.async = true;
+    menuScript.fetchPriority = 'high';
     menuScript.dataset.sitebrushOwned = 'true';
     menuScript.onload = function openRequestedMenu() {
       const eventOptions = {bubbles: true, cancelable: true, clientX: menuPoint.clientX, clientY: menuPoint.clientY, pointerType: menuPoint.pointerType};

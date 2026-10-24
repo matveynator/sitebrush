@@ -14482,8 +14482,11 @@ func TestNextAutomaticSSLRenewalAuditTimeUsesNextLocalDay(t *testing.T) {
 }
 
 func TestAutomaticSSLRenewalAuditRunsAtStartupAndStops(t *testing.T) {
-	application, _ := newTestApplication(t)
+	application, database := newTestApplication(t)
 	certificateDomain := "startup-renewal.example.com"
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, certificateDomain, "owner@example.org", "fixture"); err != nil {
+		t.Fatal(err)
+	}
 	now := time.Now()
 	writeCachedAutoCertForTest(t, application, certificateDomain, now.Add(-time.Hour), now.Add(24*time.Hour))
 	cacheContext, cancelCache := context.WithCancel(context.Background())
@@ -27888,7 +27891,7 @@ func TestMCPConnectionAndAIEditorBrowser(t *testing.T) {
 	router.HandleFunc("/p/static/", application.serveEmbeddedStaticAsset)
 	router.HandleFunc("/public-fixture", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		io.WriteString(w, "<!doctype html><html><body><h1>Public fixture</h1><script defer src='/p/static/visitor.js' data-menu='guest_menu.ru.js'></script></body></html>")
+		io.WriteString(w, "<!doctype html><html><head><script async src='/p/static/visitor.js' data-menu='guest_menu.ru.js'></script></head><body><h1>Public fixture</h1></body></html>")
 	})
 	router.HandleFunc("/menu-fixture", func(w http.ResponseWriter, r *http.Request) {
 		domain := "example.org"

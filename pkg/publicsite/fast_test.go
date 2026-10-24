@@ -109,7 +109,7 @@ func TestHTMLStreamsConditionalAndRangeResponses(t *testing.T) {
 	}
 	defer file.Close()
 	script := "<script>bootstrap()</script>"
-	expected := strings.Replace(original, "</body>", script+"</body>", 1)
+	expected := strings.Replace(original, "<html>", "<html>"+script, 1)
 	response := httptest.NewRecorder()
 	if err := HTML(response, httptest.NewRequest("GET", "http://site.test/", nil), file, script, "test"); err != nil {
 		t.Fatal(err)

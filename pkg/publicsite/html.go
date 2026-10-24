@@ -1,10 +1,13 @@
 package publicsite
 
 import (
+	"bytes"
 	"io"
 	"net/http"
 	"os"
 	"strconv"
+
+	"golang.org/x/net/html"
 )
 
 // HTML inserts a small service bootstrap without retaining a whole page or
@@ -86,14 +89,11 @@ func (html *insertedHTML) ReadAt(destination []byte, offset int64) (int, error) 
 	}
 	if html.insertion < 0 {
 		length := min(html.size, 8192)
-		tail := html.buffer[:length]
-		if _, err := html.source.ReadAt(tail, html.size-length); err != nil && err != io.EOF {
+		prefix := html.buffer[:length]
+		if _, err := html.source.ReadAt(prefix, 0); err != nil && err != io.EOF {
 			return 0, err
 		}
-		html.insertion = html.size
-		if closing := lastClosingBody(tail); closing >= 0 {
-			html.insertion = html.size - length + int64(closing)
-		}
+		html.insertion = int64(bootstrapPosition(prefix))
 	}
 
 	total := 0
@@ -125,23 +125,37 @@ func (html *insertedHTML) ReadAt(destination []byte, offset int64) (int, error) 
 	return total, nil
 }
 
-func lastClosingBody(tail []byte) int {
-	for offset := len(tail) - 7; offset >= 0; offset-- {
-		marker := "</body>"
-		matched := true
-		for index := 0; index < len(marker); index++ {
-			character := tail[offset+index]
-			if character >= 'A' && character <= 'Z' {
-				character += 'a' - 'A'
+// Preserve the doctype and start the asynchronous visitor contact before page
+// scripts. A bounded prefix is sufficient, including documents with implicit heads.
+func bootstrapPosition(prefix []byte) int {
+	offset, insertion := 0, 0
+	if bytes.HasPrefix(prefix, []byte{0xef, 0xbb, 0xbf}) {
+		offset, insertion = 3, 3
+		prefix = prefix[3:]
+	}
+	tokens := html.NewTokenizer(bytes.NewReader(prefix))
+	for {
+		kind := tokens.Next()
+		offset += len(tokens.Raw())
+		switch kind {
+		case html.DoctypeToken:
+			insertion = offset
+		case html.CommentToken:
+		case html.TextToken:
+			if len(bytes.TrimSpace(tokens.Raw())) > 0 {
+				return insertion
 			}
-			if character != marker[index] {
-				matched = false
-				break
+		case html.StartTagToken:
+			name, _ := tokens.TagName()
+			if string(name) == "head" {
+				return offset
 			}
-		}
-		if matched {
-			return offset
+			if string(name) != "html" {
+				return insertion
+			}
+			insertion = offset
+		default:
+			return insertion
 		}
 	}
-	return -1
 }
