@@ -172,9 +172,9 @@ jobs:
       - name: Test hidden AI ingress and site database ownership
         run: >-
           go test -count=1 -timeout=180s -covermode=atomic
-          -coverpkg=./pkg/aicapability,./pkg/aiingress,./pkg/analytics,./pkg/appupdate,./pkg/storagejail
+          -coverpkg=./pkg/aicapability,./pkg/aiingress,./pkg/analytics,./pkg/appupdate,./pkg/storagejail,./pkg/sitefreeze
           -coverprofile=application-ai-coverage.out .
-          -run '^Test(MCP|AIRestoredRoutes|AISiteTools|AIImport|AIIngress|AIProviderGate|SiteSubsystem|SiteControl|LegacyAIMigration|LegacySitePartition|LegacyAnalytics|ConcurrentSiteControl|SiteDatabaseBackup|HiddenAISelectors|PartitionedSiteManagement)'
+          -run '^Test(MCP|AIRestoredRoutes|AISiteTools|AIImport|AIIngress|AIProviderGate|SiteSubsystem|SiteControl|LegacyAIMigration|LegacySitePartition|LegacyAnalytics|ConcurrentSiteControl|SiteDatabaseBackup|HiddenAISelectors|PartitionedSiteManagement|SiteFreeze)'
       - name: Test public routing and AI editor regressions
         run: >-
           go test -count=1 .
@@ -184,7 +184,7 @@ jobs:
           go test -count=1 -timeout=120s -covermode=atomic
           -coverpkg=./pkg/publicsite,./pkg/httpsecurity
           -coverprofile=application-public-coverage.out .
-          -run '^Test(PublicStaticTrustedLoadWithoutCookiesOrSQL|PublicBoundaryPolicyHandoffKeepsGuestsIndependent|PublishedBoundaryAvoidsSQLAndPreservesPrivateFiles|PublicHTTPSPreservesPortFallback|PublishedStaticRejectsSymlinkToNeighborSite|PublicFallbackObservesEachRequestOnce|ProfileAIIngressSaveUsesAuthenticatedAccount)$'
+          -run '^Test(PublicStaticTrustedLoadWithoutCookiesOrSQL|PublicBoundaryPolicyHandoffKeepsGuestsIndependent|PublishedBoundaryAvoidsSQLAndPreservesPrivateFiles|PublicHTTPSPreservesPortFallback|PublishedStaticRejectsSymlinkToNeighborSite|PublicFallbackObservesEachRequestOnce|ProfileAIIngressSaveUsesAuthenticatedAccount|GuestMenuBundleRetainsOriginalStylesAndLogin|LocalhostPublicRootAndAuthenticatedMenuDuringCatalogPreload)$'
       - name: Upload coverage
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6
         with:

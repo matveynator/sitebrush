@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"github.com/matveynator/sitebrush/v2/pkg/dirprotect"
 	"io"
 	"net/netip"
 	"os"
@@ -14,9 +13,13 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/matveynator/sitebrush/v2/pkg/dirprotect"
 )
 
 type FileRule struct {
+	Version       string
+	AccessMode    string
 	Name          string
 	Mode          string
 	Expires       string
@@ -41,19 +44,27 @@ type TrustedIP struct {
 }
 
 type Policy struct {
-	Layouts       map[string]string
-	TrustedIPs    []TrustedIP
-	ServerIPs     []TrustedIP
-	Chroots       []Chroot
-	Domain        string
-	Frozen        bool
-	Stealth       bool
-	AllowedIPs    []string
-	Aliases       []string
-	Files         []FileRule
-	Passwords     []dirprotect.Rule
-	Redirects     []Redirect
-	OwnerSessions []Session
+	Versioned         bool
+	PublishedVersions map[string]string
+	ChrootVersions    map[string]string
+	FileVersions      map[string]string
+	FileAliases       map[string]string
+	ChrootAliases     map[string]string
+	ChrootListings    map[string][]string
+	Hidden            map[string]bool
+	Layouts           map[string]string
+	TrustedIPs        []TrustedIP
+	ServerIPs         []TrustedIP
+	Chroots           []Chroot
+	Domain            string
+	Frozen            bool
+	Stealth           bool
+	AllowedIPs        []string
+	Aliases           []string
+	Files             []FileRule
+	Passwords         []dirprotect.Rule
+	Redirects         []Redirect
+	OwnerSessions     []Session
 }
 type Lookup struct {
 	ClientIP    string
@@ -63,20 +74,28 @@ type Lookup struct {
 	SessionHash string
 }
 type Decision struct {
-	Layout       string
-	AdminAllowed bool
-	LoadTrusted  bool
-	Known        bool
-	Chroot       Chroot
-	Domain       string
-	Frozen       bool
-	Stealth      bool
-	AllowedIPs   []string
-	Password     dirprotect.Rule
-	File         FileRule
-	Redirect     string
-	Owner        bool
-	Found        bool
+	PageHidden      bool
+	ChrootEntries   []string
+	ChrootDirectory bool
+	ChrootName      string
+	Versioned       bool
+	PageVersion     string
+	ChrootVersion   string
+	Hidden          bool
+	Layout          string
+	AdminAllowed    bool
+	LoadTrusted     bool
+	Known           bool
+	Chroot          Chroot
+	Domain          string
+	Frozen          bool
+	Stealth         bool
+	AllowedIPs      []string
+	Password        dirprotect.Rule
+	File            FileRule
+	Redirect        string
+	Owner           bool
+	Found           bool
 }
 
 func policyName(domain string) string {
@@ -274,7 +293,7 @@ func NewCatalog(root string, stop <-chan struct{}) *Catalog {
 				}
 				cached = cachedPolicy{policy: policy, modified: info.ModTime(), size: info.Size(), files: make(map[string]FileRule, len(policy.Files)), redirects: make(map[string]string, len(policy.Redirects))}
 				for _, rule := range policy.Files {
-					cached.files[rule.Name] = rule
+					cached.files[rule.Name] = admittedFileRule(rule)
 				}
 				for _, redirect := range policy.Redirects {
 					cached.redirects[redirect.From] = redirect.To
@@ -370,6 +389,9 @@ func NewCatalog(root string, stop <-chan struct{}) *Catalog {
 				}
 				if found {
 					decision = Decision{Layout: policy.Layouts[task.query.Path], Known: true, Domain: policy.Domain, Frozen: policy.Frozen, Stealth: policy.Stealth, Found: true}
+					decision.PageHidden = policy.Hidden["page\x00"+task.query.Path]
+					decision.PageVersion = policy.PublishedVersions[task.query.Path]
+					decision.Versioned = policy.Versioned
 
 					if task.query.ClientIP == "" {
 						decision.AllowedIPs = append([]string(nil), policy.AllowedIPs...)
@@ -393,6 +415,20 @@ func NewCatalog(root string, stop <-chan struct{}) *Catalog {
 						}
 					}
 					decision.File = cached.files[task.query.File]
+					if policy.Versioned && policy.Frozen && task.query.File != "" {
+						resolved := resolveVersionPath(task.query.File, policy.FileAliases)
+						decision.File.Version = policy.FileVersions[resolved]
+						if resolved != task.query.File {
+							targetRule := cached.files[resolved]
+							if targetRule.Mode != "" && targetRule.Mode != "public" {
+								decision.File.Mode = "hidden"
+							}
+						}
+					}
+					if decision.File.Mode == "hidden" || hiddenVersionPath(policy.Hidden, "files", task.query.File) || policy.Versioned && policy.Frozen && task.query.File != "" && decision.File.Version == "" {
+						decision.Hidden = true
+						decision.File.Mode = "hidden"
+					}
 
 					if decision.File.Mode == "page_password" {
 						decision.Password = dirprotect.Rule{}
@@ -405,6 +441,25 @@ func NewCatalog(root string, stop <-chan struct{}) *Catalog {
 					for _, location := range policy.Chroots {
 						if (task.query.Path == location.Path || strings.HasPrefix(task.query.Path, strings.TrimSuffix(location.Path, "/")+"/")) && len(location.Path) > len(decision.Chroot.Path) {
 							decision.Chroot = location
+						}
+					}
+					if decision.Chroot.Path != "" {
+						relative := filepath.ToSlash(filepath.Join(strings.TrimPrefix(decision.Chroot.Directory, "/"), strings.TrimPrefix(strings.TrimPrefix(task.query.Path, decision.Chroot.Path), "/")))
+						resolved := resolveVersionPath(relative, policy.ChrootAliases)
+						decision.ChrootVersion = policy.ChrootVersions[resolved]
+						decision.ChrootName = filepath.Base(task.query.Path)
+						if decision.ChrootVersion == "" {
+							decision.ChrootVersion = policy.ChrootVersions[filepath.ToSlash(filepath.Join(resolved, "index.html"))]
+							if decision.ChrootVersion != "" {
+								decision.ChrootName = "index.html"
+							}
+						}
+						if entries, exists := policy.ChrootListings[resolved]; exists && decision.ChrootVersion == "" {
+							decision.ChrootDirectory = true
+							decision.ChrootEntries = append([]string(nil), entries...)
+						}
+						if decision.PageVersion == "" && policy.Layouts[task.query.Path] == "" && (hiddenVersionPath(policy.Hidden, "chroot", relative) || policy.Versioned && policy.Frozen && decision.ChrootVersion == "" && !decision.ChrootDirectory) {
+							decision.Hidden = true
 						}
 					}
 					current := task.query.Path
@@ -576,7 +631,7 @@ func loadPolicies(root, domain string) (map[string]cachedPolicy, error) {
 		}
 		cached := cachedPolicy{policy: policy, size: int64(len(encoded)), files: make(map[string]FileRule), redirects: make(map[string]string)}
 		for _, rule := range policy.Files {
-			cached.files[rule.Name] = rule
+			cached.files[rule.Name] = admittedFileRule(rule)
 		}
 		for _, redirect := range policy.Redirects {
 			cached.redirects[redirect.From] = redirect.To
@@ -602,12 +657,53 @@ func containsIP(rule, address string) bool {
 	allowed, allowedErr := netip.ParseAddr(rule)
 	return allowedErr == nil && allowed.Unmap() == ip.Unmap()
 }
+func admittedFileRule(rule FileRule) FileRule {
+	if rule.Mode == "versioned" {
+		rule.Mode = rule.AccessMode
+	}
+	return rule
+}
 func trustedIP(rules []TrustedIP, address string) bool {
 	now := time.Now().Unix()
 	for _, rule := range rules {
 		if (rule.Expires == 0 || rule.Expires > now) && containsIP(rule.Address, address) {
 			return true
 		}
+	}
+	return false
+}
+
+// Resolve only checkpointed relative links, never the live filesystem. A cycle
+// or an escaping target has no published version and therefore fails closed.
+func resolveVersionPath(name string, aliases map[string]string) string {
+	for attempt := 0; attempt < 16; attempt++ {
+		longest, target := "", ""
+		for source, destination := range aliases {
+			if (name == source || strings.HasPrefix(name, source+"/")) && len(source) > len(longest) {
+				longest, target = source, destination
+			}
+		}
+		if longest == "" {
+			return name
+		}
+		name = filepath.ToSlash(filepath.Clean(filepath.Join(target, strings.TrimPrefix(strings.TrimPrefix(name, longest), "/"))))
+		if !filepath.IsLocal(filepath.FromSlash(name)) {
+			return ""
+		}
+	}
+	return ""
+}
+
+func hiddenVersionPath(hidden map[string]bool, tree, name string) bool {
+	for depth := 0; name != "" && name != "." && depth < 256; depth++ {
+		if hidden[tree+"\x00"+name] {
+			return true
+		}
+		parent := filepath.ToSlash(filepath.Dir(filepath.FromSlash(name)))
+		if parent == name {
+			break
+		}
+		name = parent
 	}
 	return false
 }

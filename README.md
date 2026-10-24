@@ -498,3 +498,44 @@ After installation:
 http://your-domain.example
 ```
 
+
+
+## Reversible site freezing
+
+`?freeze` keeps visitors on the published site and records the current page and
+published revision selections, file versions, redirects, folder mappings and
+content protection properties. Repeating freeze keeps the original checkpoint.
+No ZIP backup or second copy of the whole site is created. Files use private,
+content-addressed versions, sharing unchanged bodies where the filesystem permits.
+The history consumes site storage and remains included in its quota.
+
+Before publication, choose **Discard changes and unfreeze** beside **Publish
+changes** in the SiteBrush menu, or open `?unfreeze`. Review the list and confirm.
+Restoration moves the selected versions directly, without propagating
+SiteBrush-Template blocks, inserting editorial revisions or publishing drafts that
+already existed before freezing. New pages, revisions and files remain in history
+and are hidden from the current site. **Freeze history** (`?unfreeze&history`)
+lets the owner inspect retained page revisions and download retained files.
+
+Accounts, sessions, OAuth grants, analytics, other sites and server settings are
+outside this rollback. Content passwords and file access modes are restored, but
+revoked download tokens and consumed one-use links are never revived. Confirmed
+restoration continues after the browser disconnects and resumes after a server
+restart. Publication ends the cancellation window; failed publication preserves
+it until the durable publication completion stage. A freeze made by an older
+version without a checkpoint cannot reconstruct its earlier state. Restart the
+launcher after installing this feature so it can serve pinned file versions.
+
+Manual acceptance:
+
+1. Make an unpublished draft, freeze, edit two pages sharing a template, replace
+   an existing file and upload a new file. Guests should retain the published
+   page and existing file while the editor shows the draft changes.
+2. Review and confirm cancellation. Check both original page sources, the
+   pre-existing draft, old file contents, redirects and content passwords. New
+   pages/files should disappear publicly and remain accessible in owner history.
+3. Start an AI import, cancel the freeze, then wait. No old task should modify
+   the restored site. Repeat a freeze and publish; cancellation should disappear.
+4. Interrupt the process during restoration, restart it, and check that the same
+   restoration completes. Revoke or consume a file token during the freeze;
+   cancellation must not make that old token usable again.
