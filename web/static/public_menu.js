@@ -39,13 +39,20 @@
           menuList.replaceChildren(notice);
           return;
         }
-        if (response.admin === false) { answered = true; reportGuestAccountStatus('guest'); return; }
+        if (response.admin === false) {
+          answered = true;
+          if (window.__sitebrushAdminMenuLoaded && window.sitebrushShowGuestMenu) {
+            window.__sitebrushAdminMenuLoaded = false;
+            window.sitebrushShowGuestMenu(menuPoint);
+          }
+          reportGuestAccountStatus('guest');
+          return;
+        }
         if (response.admin !== true || !response.menu && !window.__sitebrushAdminMenuLoaded) {
           throw new Error('Invalid SiteBrush menu response');
         }
         answered = true;
         if (window.__sitebrushAdminMenuLoaded) return;
-        window.__sitebrushAdminMenuLoaded = true;
         window.__sitebrushContextMenuInitialized = false;
         const menuDocument = new DOMParser().parseFromString(response.menu, 'text/html');
         for (const menuElement of menuDocument.querySelectorAll('style, script')) {
@@ -53,6 +60,10 @@
           if (menuElement.src) continue;
           installedElement.textContent = menuElement.textContent;
           (document.body || document.head || document.documentElement).appendChild(installedElement);
+        }
+        if (!window.__sitebrushAdminMenuLoaded) {
+          window.__sitebrushContextMenuInitialized = true;
+          throw new Error('SiteBrush administrator menu could not initialize');
         }
         document.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: menuPoint.clientX || 0, clientY: menuPoint.clientY || 0}));
       } catch (menuError) {

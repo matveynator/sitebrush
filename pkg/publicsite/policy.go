@@ -418,8 +418,14 @@ func NewCatalog(root string, stop <-chan struct{}) *Catalog {
 					if policy.Versioned && policy.Frozen && task.query.File != "" {
 						resolved := resolveVersionPath(task.query.File, policy.FileAliases)
 						decision.File.Version = policy.FileVersions[resolved]
+						if resolved != task.query.File {
+							targetRule := cached.files[resolved]
+							if targetRule.Mode != "" && targetRule.Mode != "public" {
+								decision.File.Mode = "hidden"
+							}
+						}
 					}
-					if hiddenVersionPath(policy.Hidden, "files", task.query.File) || policy.Versioned && policy.Frozen && task.query.File != "" && decision.File.Version == "" {
+					if decision.File.Mode == "hidden" || hiddenVersionPath(policy.Hidden, "files", task.query.File) || policy.Versioned && policy.Frozen && task.query.File != "" && decision.File.Version == "" {
 						decision.Hidden = true
 						decision.File.Mode = "hidden"
 					}
@@ -452,7 +458,7 @@ func NewCatalog(root string, stop <-chan struct{}) *Catalog {
 							decision.ChrootDirectory = true
 							decision.ChrootEntries = append([]string(nil), entries...)
 						}
-						if hiddenVersionPath(policy.Hidden, "chroot", relative) || policy.Versioned && policy.Frozen && decision.ChrootVersion == "" && !decision.ChrootDirectory {
+						if decision.PageVersion == "" && policy.Layouts[task.query.Path] == "" && (hiddenVersionPath(policy.Hidden, "chroot", relative) || policy.Versioned && policy.Frozen && decision.ChrootVersion == "" && !decision.ChrootDirectory) {
 							decision.Hidden = true
 						}
 					}

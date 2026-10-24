@@ -29147,3 +29147,155 @@ func TestSiteFreezeRestoresRevisionSelectionsAndRetainsFiles(t *testing.T) {
 		})
 	}
 }
+
+func TestSiteFreezeDeletedProtectedFilesAndEmbeddedAssets(t *testing.T) {
+	for _, mode := range []string{"token", "single_use", "timer", "page_password", "public"} {
+		t.Run(mode, func(t *testing.T) {
+			root := t.TempDir()
+			domain := "protected.example"
+			body := []byte("retained confidential contents")
+			digest := sha256.Sum256(body)
+			hash := hex.EncodeToString(digest[:])
+			filename := filepath.Join(root, sitefreeze.ObjectPath(domain, hash))
+			if err := os.MkdirAll(filepath.Dir(filename), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filename, body, 0600); err != nil {
+				t.Fatal(err)
+			}
+			point := sitefreeze.Checkpoint{Files: []sitefreeze.File{{Tree: "files", Path: "secret.txt", Hash: hash}}, Properties: []sitefreeze.Property{{Table: "file_access_rules", Columns: []string{"file_name", "access_mode"}, Rows: [][]any{{"secret.txt", mode}}}}}
+			policy := publicsite.Policy{Domain: domain, Frozen: true}
+			// Deletion removes the live row. The retained body must not lose protection.
+			applyFreezePolicy(&policy, point)
+			if err := publicsite.Write(root, policy); err != nil {
+				t.Fatal(err)
+			}
+			stop := make(chan struct{})
+			defer close(stop)
+			application := &App{storagePath: root, publicCatalog: publicsite.NewCatalog(root, stop), embeddedStaticAssets: map[string]embeddedStaticAsset{}}
+			if err := application.publicCatalog.SetMemory(true); err != nil {
+				t.Fatal(err)
+			}
+			response := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodGet, "https://"+domain+"/p/secret.txt", nil)
+			if !application.servePublicPublished(response, request, false) {
+				t.Fatal("retained file fell through to a live-rule fallback")
+			}
+			expected := http.StatusNotFound
+			if mode == "public" {
+				expected = http.StatusOK
+			}
+			if response.Code != expected {
+				t.Fatalf("deleted %s file returned %d, want %d: %q", mode, response.Code, expected, response.Body.String())
+			}
+			if mode != "public" && strings.Contains(response.Body.String(), string(body)) {
+				t.Fatal("confidential retained body was exposed")
+			}
+			// Both anonymous and owner bootstrap requests bypass the site's asset versions.
+			for _, script := range []string{"visitor.js", "guest_menu.en.js", "unfreeze.js"} {
+				application.embeddedStaticAssets[script] = embeddedStaticAsset{body: []byte("/* embedded */"), contentType: "text/javascript"}
+				for _, authenticated := range []bool{false, true} {
+					request = httptest.NewRequest(http.MethodGet, "https://"+domain+"/p/static/"+script, nil)
+					if authenticated {
+						request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "owner-cookie"})
+					}
+					response = httptest.NewRecorder()
+					if !application.servePublicPublished(response, request, false) || response.Code != http.StatusOK || response.Body.String() != "/* embedded */" {
+						t.Fatalf("frozen embedded %s authenticated=%t returned %d: %s", script, authenticated, response.Code, response.Body.String())
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestGuestMenuBundleRetainsOriginalStylesAndLogin(t *testing.T) {
+	staticFiles, err := fs.Sub(embeddedWebFiles, "web/static")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assets, err := buildEmbeddedStaticAssetCache(staticFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle := string(assets["guest_menu.ru.js"].body)
+	fragments := strings.Split(bundle, "menuStyles.textContent=")
+	if len(fragments) < 2 {
+		t.Fatal("lazy menu lost its stylesheet")
+	}
+	var stylesheet string
+	if err = json.NewDecoder(strings.NewReader(fragments[len(fragments)-1])).Decode(&stylesheet); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stylesheet, ".SiteBrushMenuBox") || !strings.Contains(stylesheet, ".SiteBrushContextMenuLink") {
+		t.Fatal("empty or unrelated stylesheet replaced the menu's original styles")
+	}
+	if !strings.Contains(bundle, "?login") || strings.Contains(bundle, "Checking sign-in") || strings.Contains(bundle, "guestAccountContents") {
+		t.Fatal("guest menu no longer exposes its original sign-in action")
+	}
+}
+
+func TestLocalhostPublicRootAndAuthenticatedMenuDuringCatalogPreload(t *testing.T) {
+	application, database := newTestApplication(t)
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "owner@example.org", "unused"); err != nil {
+		t.Fatal(err)
+	}
+	body := `<!doctype html><html><body>public localhost home</body></html>`
+	for _, table := range []string{"pages", "published_pages"} {
+		query := `INSERT INTO ` + table + `(domain,path,title,html) VALUES(?,?,?,?)`
+		if _, err := database.Exec(query, "localhost", "/", "Home", body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	filename := filepath.Join(application.domainStaticDir("localhost"), "index.html")
+	if err := application.mkdirAllInsideStorage(filepath.Dir(filename), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.writeAtomicStorageFile(filename, []byte(body)); err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	defer close(stop)
+	application.publicCatalog = publicsite.NewCatalog(application.storagePath, stop)
+	application.publicStreamer = publicsite.NewStreamer()
+	handler := application.siteHTTPHandler(http.HandlerFunc(application.route))
+	sessionRequest := httptest.NewRequest(http.MethodGet, "http://localhost:777/", nil)
+	sessionRequest.RemoteAddr = "127.0.0.1:12345"
+	sessionResponse := httptest.NewRecorder()
+	application.createSession(sessionResponse, sessionRequest, "owner@example.org")
+	cookies := sessionResponse.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("owner session was not created")
+	}
+	ownerCookie := cookies[0]
+	for _, ready := range []bool{false, true} {
+		if ready {
+			if err := publicsite.Write(application.storagePath, publicsite.Policy{Domain: "localhost"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := application.publicCatalog.Reload("localhost"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, role := range []string{"guest", "expired", "owner"} {
+			t.Run(fmt.Sprintf("catalog=%t/%s", ready, role), func(t *testing.T) {
+				request := httptest.NewRequest(http.MethodGet, "http://localhost:777/", nil)
+				request.RemoteAddr = "127.0.0.1:12345"
+				if role == "owner" {
+					request.AddCookie(ownerCookie)
+				} else if role == "expired" {
+					request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "expired-cookie"})
+				}
+				response := httptest.NewRecorder()
+				handler.ServeHTTP(response, request)
+				if response.Code != http.StatusOK || response.Header().Get("Location") != "" || !strings.Contains(response.Body.String(), "public localhost home") {
+					t.Fatalf("bare localhost was redirected or lost public contents: %d %q", response.Code, response.Header().Get("Location"))
+				}
+				administratorMenu := strings.Contains(response.Body.String(), "initializeSitebrushContextMenuForAdmin")
+				if administratorMenu != (role == "owner") {
+					t.Fatalf("wrong menu for %s: administrator=%t", role, administratorMenu)
+				}
+			})
+		}
+	}
+}

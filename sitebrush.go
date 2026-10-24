@@ -10581,6 +10581,10 @@ func buildEmbeddedStaticAssetCache(staticFiles fs.FS) (map[string]embeddedStatic
 				tag = token.Data
 				continue
 			}
+			if tokenType == html.EndTagToken {
+				tag = ""
+				continue
+			}
 			if tokenType != html.TextToken {
 				continue
 			}
@@ -12280,7 +12284,17 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 				return
 			}
 			if !decision.Known && r.URL.Path == "/" && httpsecurity.IsLocalRequest(r) {
-				httpsecurity.RedirectLocal(w, r, "/?register", http.StatusSeeOther)
+				if a.siteDatabaseRouter != nil {
+					databasePath := siteDatabaseFile(siteDatabaseRootPath(a.serverControlDBPath()), "localhost")
+					if _, err := os.Stat(databasePath); os.IsNotExist(err) {
+						httpsecurity.RedirectLocal(w, r, "/?register", http.StatusSeeOther)
+						return
+					} else if err != nil {
+						http.Error(w, "account storage temporarily unavailable", http.StatusServiceUnavailable)
+						return
+					}
+				}
+				dynamic.ServeHTTP(w, r)
 				return
 			}
 			if decision.Known {
@@ -41335,7 +41349,6 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
     return;
   }
   window.__sitebrushContextMenuInitialized = true;
-  window.__sitebrushAdminMenuLoaded = true;
   const currentPagePath = "` + escapedPath + `";
   const currentDomainName = "` + escapedDomain + `";
   const isDomainFrozen = ` + strconv.FormatBool(isFrozen) + `;
@@ -41810,6 +41823,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
     return typeof browserEvent.button === "number" && browserEvent.button === 2;
   }
   function onContextMenuOpen(browserEvent) {
+    if (!window.__sitebrushAdminMenuLoaded) return;
     if (browserEvent.__sitebrushContextMenuHandled || browserEvent.ctrlKey) {
       return;
     }
@@ -41829,6 +41843,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
   window.addEventListener("contextmenu", onContextMenuOpen, {capture: true, passive: false});
   document.addEventListener("contextmenu", onContextMenuOpen, {capture: true, passive: false});
   installSitebrushLongPressMenu(function openAdminMenuFromLongPress(menuPoint) {
+    if (!window.__sitebrushAdminMenuLoaded) return;
     showSitebrushMenu(menuPoint, buildSitebrushAdminMenuEntries(false), currentPagePath, isDomainFrozen);
     requestSitebrushUpdateStatus();
   });
@@ -41873,6 +41888,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
       .then(function renderTree(treeData) { renderSiteTree(contentElement, treeData); })
       .catch(function showTreeError() { contentElement.textContent = "` + treeLoadErrorLabel + `"; });
   }
+  window.__sitebrushAdminMenuLoaded = true;
 })();
 	</script>`
 	}
@@ -41944,8 +41960,6 @@ func buildGuestContextMenuScriptForLanguage(pagePath, domain, languageCode strin
 
 func buildGuestContextMenuScriptTemplate(translations map[string]string) string {
 	loginLabel := template.JSEscapeString(translationOrDefault(translations, "menu_login", "Sign in to edit"))
-	checkingLabel := template.JSEscapeString(template.HTMLEscapeString(translationOrDefault(translations, "menu_checking_account", "Checking sign-in…")))
-	unavailableLabel := template.JSEscapeString(template.HTMLEscapeString(translationOrDefault(translations, "menu_account_unavailable", "Unable to check sign-in. Open the menu to retry.")))
 	standardMenuHint := template.JSEscapeString(template.HTMLEscapeString(translationOrDefault(translations, "menu_standard_context_hint", "Browser standard menu: Ctrl + right mouse click.")))
 	compiledVersionLabel := template.JSEscapeString("v." + CompileVersion)
 	sitebrushHomeURL := "https://sitebrush.com"
@@ -41959,28 +41973,11 @@ func buildGuestContextMenuScriptTemplate(translations map[string]string) string 
   window.__sitebrushContextMenuInitialized = true;
   const currentPagePath = "` + guestContextMenuPagePathPlaceholder + `";
   const currentDomainName = "` + guestContextMenuDomainPlaceholder + `";
-  const guestMenuModel = {accountStatus: "pending"};
-  function guestAccountContents() {
-    if (guestMenuModel.accountStatus === "guest") {
-      return "<a href='?login' class='SiteBrushContextMenuLink'><img src='/p/static/login.png' class='SiteBrushMenuIcon' alt=''>" + "` + loginLabel + `" + "</a>";
-    }
-    const statusLabel = guestMenuModel.accountStatus === "unavailable" ? "` + unavailableLabel + `" : "` + checkingLabel + `";
-    return "<span class='SiteBrushContextMenuLink'>" + statusLabel + "</span>";
-  }
-  document.addEventListener("sitebrush-account-state", function receiveGuestAccountState(accountEvent) {
-    const accountStatus = accountEvent.detail && accountEvent.detail.status;
-    if (!["pending", "guest", "unavailable"].includes(accountStatus)) return;
-    guestMenuModel.accountStatus = accountStatus;
-    const menuHost = document.getElementById("SiteBrushMenuBox");
-    const menuRoot = menuHost && (menuHost.shadowRoot || menuHost);
-    const accountRow = menuRoot && menuRoot.querySelector("[data-sitebrush-account]");
-    if (accountRow) accountRow.innerHTML = guestAccountContents();
-  });
   function buildSitebrushGuestMenuEntries(showStandardMenuHint) {
     const menuEntries = [
       "<ul class='SiteBrushMenuList'>",
       "<li class='SiteBrushContextMenu SiteBrushDomainMenuItem'><a href='/' class='SiteBrushContextMenuLink'>" + currentDomainName + "</a></li>",
-      "<li class='SiteBrushContextMenu' data-sitebrush-account>" + guestAccountContents() + "</li>",
+      "<li class='SiteBrushContextMenu'><a href='?login' class='SiteBrushContextMenuLink'><img src='/p/static/login.png' class='SiteBrushMenuIcon' alt=''>" + "` + loginLabel + `" + "</a></li>",
       "` + copyrightMenuEntry + `"
     ];
     if (showStandardMenuHint) {
@@ -42010,14 +42007,15 @@ func buildGuestContextMenuScriptTemplate(translations map[string]string) string 
     browserEvent.__sitebrushContextMenuHandled = true;
     browserEvent.preventDefault();
     browserEvent.stopPropagation();
-    guestMenuModel.accountStatus = "pending";
     showSitebrushMenu(browserEvent, buildSitebrushGuestMenuEntries(sitebrushContextMenuWasOpenedByMouse(browserEvent)), currentPagePath, false);
   }
   window.addEventListener("contextmenu", onContextMenuOpen, {capture: true, passive: false});
   document.addEventListener("contextmenu", onContextMenuOpen, {capture: true, passive: false});
+  window.sitebrushShowGuestMenu = function showGuestMenu(menuPoint) {
+    showSitebrushMenu(menuPoint, buildSitebrushGuestMenuEntries(false), currentPagePath, false);
+  };
   installSitebrushLongPressMenu(function openGuestMenuFromLongPress(menuPoint) {
     if (window.__sitebrushAdminMenuLoaded) return;
-    guestMenuModel.accountStatus = "pending";
     showSitebrushMenu(menuPoint, buildSitebrushGuestMenuEntries(false), currentPagePath, false);
   });
 })();
@@ -53152,9 +53150,52 @@ func applyFreezePolicy(policy *publicsite.Policy, point sitefreeze.Checkpoint) {
 		policy.PublishedVersions[cleanPath(page.Path)] = page.Hash
 		policy.PublishedVersions["/"+filepath.ToSlash(staticRelativePathForPage(page.Path))] = page.Hash
 	}
+	// A deleted live rule is not an instruction to publish the retained body.
+	// Checkpoint protection is private SQL state; only its denial status enters
+	// the public catalog, never token identities or password hashes.
+	protected := make(map[string]bool)
+	protectionKnown := false
+	for _, property := range point.Properties {
+		if property.Table != "file_access_rules" {
+			continue
+		}
+		protectionKnown = true
+		for _, record := range property.Rows {
+			if len(record) < 2 {
+				protectionKnown = false
+				break
+			}
+			name, nameOK := record[0].(string)
+			mode, modeOK := record[1].(string)
+			if !nameOK || !modeOK {
+				protectionKnown = false
+				break
+			}
+			protected[name] = mode != "" && mode != "public"
+		}
+	}
+
 	files := make(map[string]publicsite.FileRule, len(policy.Files))
 	for _, rule := range policy.Files {
 		files[rule.Name] = rule
+	}
+	retainedRule := func(name, version string) publicsite.FileRule {
+		rule, liveRule := files[name]
+		rule.Name = name
+		rule.Version = version
+		accessMode := rule.Mode
+		if accessMode == "versioned" {
+			accessMode = rule.AccessMode
+		}
+		if accessMode == "" {
+			accessMode = "public"
+		}
+		if !liveRule && (!protectionKnown || protected[name] || isPrivateAssetName(name)) {
+			accessMode = "hidden"
+		}
+		rule.Mode = "versioned"
+		rule.AccessMode = accessMode
+		return rule
 	}
 	for _, file := range point.Files {
 		if file.Tree == "chroot" {
@@ -53180,6 +53221,7 @@ func applyFreezePolicy(policy *publicsite.Policy, point sitefreeze.Checkpoint) {
 			resolved := filepath.ToSlash(filepath.Clean(filepath.Join(filepath.Dir(filepath.FromSlash(file.Path)), file.Link)))
 			if file.Tree == "files" {
 				policy.FileAliases[file.Path] = resolved
+				files[file.Path] = retainedRule(file.Path, "")
 			} else {
 				policy.ChrootAliases[file.Path] = resolved
 			}
@@ -53187,15 +53229,7 @@ func applyFreezePolicy(policy *publicsite.Policy, point sitefreeze.Checkpoint) {
 		}
 		if file.Tree == "files" {
 			policy.FileVersions[file.Path] = file.Hash
-			rule := files[file.Path]
-			rule.Name = file.Path
-			rule.Version = file.Hash
-			rule.AccessMode = rule.Mode
-			if rule.AccessMode == "" {
-				rule.AccessMode = "public"
-			}
-			rule.Mode = "versioned"
-			files[file.Path] = rule
+			files[file.Path] = retainedRule(file.Path, file.Hash)
 		} else if file.Tree == "chroot" {
 			policy.ChrootVersions[file.Path] = file.Hash
 		}
@@ -53367,6 +53401,7 @@ func (a *App) writePublicPolicy(domain string) error {
 		}
 		digest := sha256.Sum256([]byte(pageHTML))
 		policy.Layouts[cleanPath(pagePath)] = hex.EncodeToString(digest[:8])
+		policy.Layouts["/"+filepath.ToSlash(staticRelativePathForPage(pagePath))] = hex.EncodeToString(digest[:8])
 		return nil
 	}); err != nil {
 		return err
@@ -53504,11 +53539,15 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 		}
 		return false
 	}
+	if strings.HasPrefix(r.URL.Path, "/p/static/") {
+		a.serveEmbeddedStaticAsset(w, r)
+		return true
+	}
 	if decision.Hidden || decision.PageHidden && fileName == "" && decision.Chroot.Path == "" {
 		http.NotFound(w, r)
 		return true
 	}
-	if !paused && hasSitebrushSessionCookie(r) && (decision.Frozen || decision.File.Mode == "page_password" || fileName == "" && decision.Password.Path != "") {
+	if !paused && hasSitebrushSessionCookie(r) && (decision.Frozen || decision.File.Mode == "page_password" || fileName == "" && (decision.Password.Path != "" || pageContentKind(pagePath, "") == "html")) {
 		return false
 	}
 	if _, found := r.Context().Value(publicDecisionContextKey{}).(publicsite.Decision); !found {
@@ -53519,10 +53558,7 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 	if decision.Stealth && w.Header().Get("Cache-Control") == "" {
 		w.Header().Set("Cache-Control", "private, no-cache")
 	}
-	if strings.HasPrefix(r.URL.Path, "/p/static/") {
-		a.serveEmbeddedStaticAsset(w, r)
-		return true
-	}
+
 	if fileName == legacyPublicTrialWidgetAssetName {
 		assetRequest := r.Clone(r.Context())
 		assetRequest.URL.Path = "/p/static/site_copy.js"
