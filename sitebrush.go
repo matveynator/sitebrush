@@ -10572,6 +10572,9 @@ func buildEmbeddedStaticAssetCache(staticFiles fs.FS) (map[string]embeddedStatic
 	if err != nil {
 		return nil, err
 	}
+	if err = embedUnfreezeSharedStyles(assets); err != nil {
+		return nil, err
+	}
 	refreshScript, readErr := fs.ReadFile(staticFiles, "public_menu.js")
 	if readErr != nil {
 		return nil, readErr
@@ -10616,6 +10619,39 @@ func buildEmbeddedStaticAssetCache(staticFiles fs.FS) (map[string]embeddedStatic
 	}
 	log.Printf("%sPRELOAD%s embedded static assets=%d", terminalGreen(), terminalReset(), len(assets))
 	return assets, nil
+}
+
+// The isolated dialog uses the same theme and controls as server pages. Bundle
+// them once at startup so opening it needs no extra stylesheet round trip.
+func embedUnfreezeSharedStyles(assets map[string]embeddedStaticAsset) error {
+	var stylesheet strings.Builder
+	for _, filename := range []string{"admin_theme.css", "admin_controls.css", "unfreeze_dialog.css"} {
+		asset, found := assets[filename]
+		if !found {
+			return fmt.Errorf("unfreeze stylesheet is missing: %s", filename)
+		}
+		content := string(asset.body)
+		if filename == "admin_theme.css" {
+			content = strings.ReplaceAll(content, ":root", ":host")
+		}
+		if filename == "admin_controls.css" {
+			content = strings.ReplaceAll(content, "body.technical-page", ".technical-page")
+		}
+		stylesheet.WriteString(content)
+		stylesheet.WriteByte('\n')
+	}
+	script, found := assets["unfreeze.js"]
+	placeholder := []byte(`"SITEBRUSH_UNFREEZE_SHARED_STYLES"`)
+	if !found || !bytes.Contains(script.body, placeholder) {
+		return errors.New("unfreeze script has no shared stylesheet placeholder")
+	}
+	encoded, err := json.Marshal(stylesheet.String())
+	if err != nil {
+		return err
+	}
+	script.body = bytes.Replace(script.body, placeholder, encoded, 1)
+	assets["unfreeze.js"] = script
+	return nil
 }
 
 func staticAssetContentType(assetPath string, body []byte) string {

@@ -28,9 +28,9 @@
     overlay.dataset.sitebrushOwned = 'true';
     const shadow = overlay.attachShadow({mode: 'open'});
     const stylesheet = document.createElement('style');
-    stylesheet.textContent = ':host{all:initial;position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;padding:16px;background:#0007;font:15px/1.5 Arial,sans-serif;color:#202630;box-sizing:border-box}.dialog{background:#fff;border:1px solid #c9cfd8;border-radius:12px;box-shadow:0 12px 40px #0005;max-width:680px;width:100%;max-height:85vh;overflow:auto;padding:22px;box-sizing:border-box}h2{margin:0 0 14px;font-size:20px}p{white-space:pre-line}ul{padding-left:20px;overflow-wrap:anywhere}button,a{font:inherit}button{padding:8px 12px;border:1px solid #c9cfd8;border-radius:7px;cursor:pointer;background:#f4f6f8;color:inherit}.confirm{background:#a82727;color:white;border-color:#a82727}.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}.error{color:#b42323}@media(prefers-color-scheme:dark){.dialog{background:#1c2027;color:#e5e8ef;border-color:#353c48}button{background:#303640;border-color:#505866}.confirm{background:#a82727}.error{color:#ffb4ab}a{color:#a8c9ff}}';
+    stylesheet.textContent = "SITEBRUSH_UNFREEZE_SHARED_STYLES";
     const dialog = document.createElement('section');
-    dialog.className = 'dialog';
+    dialog.className = 'technical-page unfreeze-dialog';
     dialog.setAttribute('role', 'dialog');
     dialog.setAttribute('aria-modal', 'true');
     dialog.tabIndex = -1;
@@ -67,7 +67,7 @@
       const buttonElement = document.createElement('button');
       buttonElement.type = 'button';
       buttonElement.textContent = caption;
-      if (className) buttonElement.className = className;
+      buttonElement.className = className || 'btn btn-outline-secondary';
       buttonElement.addEventListener('click', action);
       return buttonElement;
     }
@@ -81,6 +81,15 @@
       heading.id = 'SiteBrushUnfreezeTitle';
       heading.textContent = labels.title;
       dialog.appendChild(heading);
+      if (model.phase !== 'restoring') {
+        const historyParagraph = document.createElement('p');
+        historyParagraph.className = 'unfreeze-history-link';
+        const historyLink = document.createElement('a');
+        historyLink.href = '/?unfreeze&history';
+        historyLink.textContent = labels.history;
+        historyParagraph.appendChild(historyLink);
+        dialog.appendChild(historyParagraph);
+      }
       if (model.phase === 'loading') paragraph(labels.loading);
       if (model.phase === 'restoring') paragraph(labels.restoring);
       if (model.error) paragraph(model.error, 'error');
@@ -103,16 +112,12 @@
         actions.appendChild(button(labels.keepEditing, closeDialog));
         if (model.offset > 0) actions.appendChild(button(labels.previous, function previousChanges() { loadPreview(model.offset - 100); }));
         if (model.offset + 100 < model.preview.total) actions.appendChild(button(labels.next, function nextChanges() { loadPreview(model.offset + 100); }));
-        actions.appendChild(button(labels.confirm, restore, 'confirm'));
+        actions.appendChild(button(labels.confirm, restore, 'btn btn-danger'));
       } else if (model.phase === 'error') {
         actions.appendChild(button(labels.refresh, function refreshPreview() { loadPreview(0); }));
         actions.appendChild(button(labels.keepEditing, closeDialog));
       }
       dialog.appendChild(actions);
-      const historyLink = document.createElement('a');
-      historyLink.href = '/?unfreeze&history';
-      historyLink.textContent = labels.history;
-      if (model.phase !== 'restoring') dialog.appendChild(historyLink);
       dialog.focus();
     }
     function exchange(command) {
