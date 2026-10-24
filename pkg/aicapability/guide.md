@@ -143,7 +143,9 @@ use MCP for the draft workflow described here.
 
 1. Read get_access and get_site_state. Record existing pending changes.
 2. Call freeze_site with publish permission before a multi-page editing task.
-   Visitors retain the published copy while edits are in progress.
+   Visitors retain the published copy while edits are in progress. This also saves
+   a reversible checkpoint of the site's page revision selections, files and
+   protection properties. Repeating freeze_site keeps the original checkpoint.
 3. Read pages, edit their source using expected_version, and re-read pages that
    share changed templates. A revision_conflict requires re-reading and merging.
 4. Check navigation, assets, content and pending paths. publish publishes ALL
@@ -418,6 +420,15 @@ that path; an ancestor's protection still applies. Both password operations
 require site-wide grants because protection can affect an entire subtree.
 POST freeze_site (publish): JSON {}. Visitors keep seeing the published snapshot
 while the owner edits. Use publish to publish all pending changes and unfreeze.
+get_site_state reports checkpoint_id, frozen_at, rollback_available and history_url.
+Before successful publication, the owner may open cancel_freeze_url or choose
+"Discard changes and unfreeze" in the site menu, review all changes, and restore
+that checkpoint. Restoration bypasses SiteBrush-Template propagation and preserves
+pre-existing unpublished drafts. New pages, file versions and revisions remain in
+private history, hidden from the current site. Accounts, AI grants and analytics
+are not rolled back; revoked or consumed download tokens are never revived.
+After publication this checkpoint becomes history and cannot cancel that publication.
+An older freeze without a checkpoint cannot restore a state it never recorded.
 
 POST import_site (site-wide write): JSON source_url, path and mode (page or site).
 Returns HTTP 202 with job_id. Imports use the normal bounded crawler and quota

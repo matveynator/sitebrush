@@ -99,6 +99,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/serviceinstall"
 	"github.com/matveynator/sitebrush/v2/pkg/shutdownsignals"
 	"github.com/matveynator/sitebrush/v2/pkg/sitebrushtemplate"
+	"github.com/matveynator/sitebrush/v2/pkg/sitefreeze"
 	"github.com/matveynator/sitebrush/v2/pkg/storagejail"
 	"github.com/matveynator/sitebrush/v2/pkg/systeminit"
 	"github.com/matveynator/sitebrush/v2/pkg/updateannounce"
@@ -149,7 +150,7 @@ const sitebrushHTTPWriteTimeout = 0
 const sitebrushHTTPIdleTimeout = 65 * time.Second
 const sitebrushHTTPReadHeaderTimeout = 5 * time.Second
 const sitebrushHTTP10KeepAliveBufferLimit = 1024 * 1024
-const currentSiteDatabaseSchemaVersion = 13
+const currentSiteDatabaseSchemaVersion = 14
 const siteDatabaseStartupMigrationTimeout = 30 * time.Second
 const pagePasswordSessionTTL = time.Hour
 const serviceMailRelayPath = "/?service_mail_relay"
@@ -194,6 +195,8 @@ var sitebrushComNetChanTLSPublicKey = ""
 
 // App keeps only explicit dependencies to stay readable and easy to swap.
 type App struct {
+	workspace             *sitefreeze.Gate
+	publicProxy           bool
 	publicStreamer        *publicsite.Streamer
 	publicCatalog         *publicsite.Catalog
 	publicPublication     chan publicPublicationTask
@@ -2059,7 +2062,7 @@ func (router *perSiteDBRouter) relocateSiteContent(root, domain string, database
 
 func siteTableSubsystem(table string) string {
 	switch table {
-	case "pages", "published_pages", "page_redirects", "domain_storage_usage", "revisions", "file_metadata", "page_pending_deletions":
+	case "pages", "published_pages", "page_redirects", "domain_storage_usage", "revisions", "file_metadata", "page_pending_deletions", "site_freeze_points", "site_freeze_state", "site_hidden_assets":
 		return "content"
 	case "analytics_events", "analytics_reports", "analytics_configuration":
 		return "analytics"
@@ -2078,7 +2081,7 @@ func siteQuerySubsystem(query string) string {
 	for _, word := range words {
 		owner := ""
 		switch word {
-		case "pages", "published_pages", "page_redirects", "domain_storage_usage", "revisions", "file_metadata", "page_pending_deletions":
+		case "pages", "published_pages", "page_redirects", "domain_storage_usage", "revisions", "file_metadata", "page_pending_deletions", "site_freeze_points", "site_freeze_state", "site_hidden_assets":
 			owner = "content"
 		case "analytics_events", "analytics_reports", "analytics_configuration", "checkpoints":
 			owner = "analytics"
@@ -2086,6 +2089,9 @@ func siteQuerySubsystem(query string) string {
 			owner = "control"
 		}
 		if strings.HasPrefix(word, "account_") || word == "admin_allowed_ips" || word == "admin_ip_policies" {
+			owner = "control"
+		}
+		if word == "site_freeze_protection" {
 			owner = "control"
 		}
 		if strings.HasPrefix(word, "whole_site_import") {
@@ -4464,7 +4470,7 @@ func isSitebrushControllerQuery(query url.Values) bool {
 	for _, controllerFlag := range []string{
 		"server_update", "server_update_ws", "save", "template_events", "grab_preview", "grab_events", "grab_ws", "revision_preview", "revision_restore", "revision_delete", "revision_toggle",
 		"tree", "native_pick_files", "native_save_backup", "edit", "ai", "ai_capability_create", "ai_authorize", "ai_execute", "ai_execute_ws", "ai_background", "visual", "text", "editraw", "settings", "properties",
-		"backup_download", "hosting_and_support_backup_download", "billing_backup_download", "backup_import", "profile", "freeze", "publish", "publish_events", "publish_preview", "files",
+		"backup_download", "hosting_and_support_backup_download", "billing_backup_download", "backup_import", "profile", "freeze", "unfreeze", "unfreeze_ws", "publish", "publish_events", "publish_preview", "files",
 		"revisions", "login", "register", "email_confirm", "grab", "recover", "captcha", "analytics", "expenses", "hosting_and_support", "billing",
 	} {
 		if _, found := query[controllerFlag]; found {
@@ -10089,6 +10095,8 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application.aiExecutor = aieditor.NewExecutor(&appAIStore{application: application}, 32)
 	defer application.aiExecutor.Close()
 	application.aiImports = aiimport.New(application.runAIImport)
+	application.workspace = sitefreeze.NewGate(ctx.Done())
+	application.publicProxy = config.PublicProxy
 	defer application.aiImports.Close()
 	application.analyticsMemoryLimit = analyticsConfiguredMemoryLimit()
 	attackGuardPath := filepath.Join(application.storageRootDir(), "security", "attackguard.json")
@@ -10636,6 +10644,7 @@ func (a *App) runStartupPreload(ctx context.Context, siteDatabaseRootDir string)
 	if a.siteDatabaseRouter != nil {
 		a.siteDatabaseRouter.Preload(ctx)
 	}
+	a.recoverFreezeCheckpoints(ctx)
 	a.refreshAllPublicPolicies()
 	staticStats := startupStaticPreloadStats{}
 	if a.publicStreamer == nil {
@@ -11524,6 +11533,14 @@ func siteSchemaSteps(ctx context.Context, repair bool) []migrations.Step {
 		return err
 	}})
 	steps = append(steps, siteFileAccessSteps(ctx, repair)...)
+	for index, query := range sitefreeze.Schema() {
+		step := migrations.SQL("site-freeze-schema-"+strconv.Itoa(index), query)
+		step.Ensure = repair
+		steps = append(steps, step)
+	}
+	protection := migrations.SQL("site-freeze-protection", `CREATE TABLE IF NOT EXISTS site_freeze_protection(domain TEXT NOT NULL,checkpoint_id TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(domain,checkpoint_id))`)
+	protection.Ensure = repair
+	steps = append(steps, protection)
 	return steps
 }
 
@@ -11654,7 +11671,7 @@ func siteDatabaseSchemaComplete(ctx context.Context, database sqlExecutor) (bool
 	if err != nil || !complete {
 		return complete, err
 	}
-	for _, column := range []struct{ table, name string }{{"page_pending_deletions", "path"}, {"whole_site_imports", "draft_only"}, {"file_access_rules", "protected_page_path"}} {
+	for _, column := range []struct{ table, name string }{{"page_pending_deletions", "path"}, {"whole_site_imports", "draft_only"}, {"file_access_rules", "protected_page_path"}, {"site_freeze_points", "id"}, {"site_freeze_state", "stage"}, {"site_hidden_assets", "tree"}, {"site_freeze_protection", "payload"}} {
 		found, err := siteDatabaseColumnExists(ctx, database, column.table, column.name)
 		if err != nil || !found {
 			return false, err
@@ -12279,6 +12296,24 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 
 func (a *App) siteDynamicHTTPCore(router http.Handler) http.Handler {
 	queryRouter := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if siteAITransportRequest(r) {
+			cloned := r.Clone(r.Context())
+			cloned.Header.Set("X-SiteBrush-Workspace-Epoch", strconv.FormatUint(a.workspace.Generation(a.siteDomain(r.Context(), r)), 10))
+			r = cloned
+		}
+		if a.publicMutationRequest(r) && siteWorkspaceMutationRequest(r) && !siteFreezeControlRequest(r) && !siteAITransportRequest(r) {
+			domain := a.siteDomain(r.Context(), r)
+			lease, leaseErr := a.workspace.Enter(domain, 0, false, r.Context().Done())
+			if leaseErr != nil {
+				http.Error(w, leaseErr.Error(), http.StatusConflict)
+				return
+			}
+			defer lease.Close(false)
+			if err := a.freezeWorkspaceEditable(r.Context(), domain); err != nil {
+				http.Error(w, err.Error(), http.StatusConflict)
+				return
+			}
+		}
 		if hasQueryFlag(r, "sitebrush_menu_ws") {
 			a.publicMenuSocket(w, r)
 			return
@@ -12331,7 +12366,7 @@ func (a *App) aiIngressAdmission(r *http.Request) (machine, owner bool) {
 	if r.URL.Path != "/.well-known/oauth-authorization-server" {
 		query := r.URL.Query()
 		control := false
-		for _, selector := range []string{"mcp", "oauth", "ai", "ai_token", "ai_session", "ai_authorize"} {
+		for _, selector := range []string{"mcp", "oauth", "ai", "ai_token", "ai_session", "ai_authorize", "ai_execute", "ai_execute_ws"} {
 			if query.Has(selector) {
 				control = true
 				break
@@ -13020,6 +13055,14 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.freezeDomain(w, r)
 		return
 	}
+	if hasQueryFlag(r, "unfreeze_ws") {
+		a.unfreezeSocket(w, r)
+		return
+	}
+	if hasQueryFlag(r, "unfreeze") {
+		a.unfreezeDomain(w, r)
+		return
+	}
 	if hasQueryFlag(r, "publish") {
 		a.publishDomain(w, r)
 		return
@@ -13185,6 +13228,13 @@ func (store *appAIStore) Execute(request aieditor.Request, done <-chan struct{})
 	if store == nil || store.application == nil {
 		return aieditor.Result{Operation: request.Operation, Err: errors.New("AI editor application is unavailable")}
 	}
+	if request.Operation != aieditor.OperationFreezeSite && request.Operation != aieditor.OperationPublish && request.Operation != aieditor.OperationListPages && request.Operation != aieditor.OperationReadPage {
+		lease, leaseErr := store.application.workspace.Enter(request.Domain, request.WorkspaceEpoch, false, done)
+		if leaseErr != nil {
+			return aieditor.Result{Operation: request.Operation, Err: leaseErr}
+		}
+		defer lease.Close(false)
+	}
 	if request.Operation != aieditor.OperationListPages && request.Operation != aieditor.OperationReadPage {
 		if err := store.application.publicPublicationRequest("begin", request.Domain); err != nil {
 			return aieditor.Result{Operation: request.Operation, Err: err}
@@ -13221,6 +13271,12 @@ func (store *appAIStore) Execute(request aieditor.Request, done <-chan struct{})
 		cancel()
 	}()
 
+	if request.Operation != aieditor.OperationFreezeSite && request.Operation != aieditor.OperationListPages && request.Operation != aieditor.OperationReadPage {
+		if err := store.application.freezeWorkspaceEditable(ctx, domain); err != nil {
+			return aieditor.Result{Operation: request.Operation, Err: err}
+		}
+	}
+
 	switch request.Operation {
 	case aieditor.OperationListPages:
 		pages, err := store.application.listAIPages(ctx, domain)
@@ -13250,7 +13306,7 @@ func (store *appAIStore) Execute(request aieditor.Request, done <-chan struct{})
 		}
 		return aieditor.Result{Operation: request.Operation, Path: fileName, Payload: payload}
 	case aieditor.OperationPublish:
-		return aieditor.Result{Operation: request.Operation, Message: "published", Err: store.application.publishAI(ctx, domain)}
+		return aieditor.Result{Operation: request.Operation, Message: "published", Err: store.application.publishAI(ctx, domain, request.WorkspaceEpoch)}
 	case aieditor.OperationGetSiteState, aieditor.OperationGetPageSettings, aieditor.OperationDeletePage, aieditor.OperationDeleteRevision, aieditor.OperationSetRevisionActive, aieditor.OperationGetFileSettings, aieditor.OperationSetFileAccess, aieditor.OperationSetPagePassword, aieditor.OperationRemovePagePassword, aieditor.OperationFreezeSite:
 		return store.application.executeAISiteOperation(ctx, domain, request)
 	case aieditor.OperationRollback:
@@ -13534,7 +13590,17 @@ func (a *App) executeAISiteOperation(ctx context.Context, domain string, request
 			return result
 		}
 		total, changed, paths := a.countPublishChanges(ctx, domain)
-		result.Payload = map[string]any{"domain": domain, "frozen": frozen == 1, "pages": pages, "total": total, "pending_changes": changed, "pending_paths": paths, "publication": "draft_then_publish"}
+		payload := map[string]any{"domain": domain, "frozen": frozen == 1, "pages": pages, "total": total, "pending_changes": changed, "pending_paths": paths, "publication": "draft_then_publish", "rollback_available": false, "history_url": "/?unfreeze&history"}
+		if point, stage, pointErr := a.loadFreezeCheckpoint(ctx, domain); pointErr == nil {
+			payload["checkpoint_id"] = point.ID
+			payload["frozen_at"] = point.CreatedAt
+			payload["rollback_available"] = stage != "publishing"
+			payload["cancel_freeze_url"] = "/?unfreeze"
+		} else if !errors.Is(pointErr, sql.ErrNoRows) {
+			result.Err = pointErr
+			return result
+		}
+		result.Payload = payload
 	case aieditor.OperationGetPageSettings:
 		page, err := a.readAIPage(ctx, domain, cleanPath(request.Path))
 		if err != nil {
@@ -13589,7 +13655,7 @@ func (a *App) executeAISiteOperation(ctx context.Context, domain string, request
 		}
 		result.Payload = map[string]any{"file_name": fileName, "access_mode": mode, "protected_page_path": protectedPath, "url": "/p/" + fileName}
 	case aieditor.OperationFreezeSite:
-		result.Err = a.setDomainFrozenState(ctx, domain, 1)
+		_, result.Err = a.createFreezeCheckpoint(ctx, domain, request.WorkspaceEpoch)
 		result.Payload = map[string]bool{"frozen": true}
 	case aieditor.OperationSetPagePassword:
 		result.Err = a.setPagePasswordRule(ctx, domain, request.Path, request.Password)
@@ -13721,6 +13787,10 @@ func (a *App) aiImportEndpoint(w http.ResponseWriter, r *http.Request, domain st
 		}
 	}
 	request := aiimport.Request{Domain: domain, Grant: capability.ID, Done: session.Done, SourceURL: arguments.SourceURL, Path: arguments.Path, Mode: arguments.Mode}
+	request.WorkspaceEpoch, _ = strconv.ParseUint(r.Header.Get("X-SiteBrush-Workspace-Epoch"), 10, 64)
+	if request.WorkspaceEpoch == 0 {
+		request.WorkspaceEpoch = a.workspace.Generation(domain)
+	}
 	action := "status"
 	if operation == "import_site" {
 		if arguments.Mode != "page" && arguments.Mode != "site" || strings.TrimSpace(arguments.Path) == "" || aieditor.Validate(aieditor.Request{Operation: aieditor.OperationReadPage, Path: arguments.Path}) != nil {
@@ -13755,14 +13825,24 @@ func (a *App) aiImportEndpoint(w http.ResponseWriter, r *http.Request, domain st
 // The worker owns job lifetime. Context bridges end at the legacy crawler and
 // database/sql boundaries; revocation closes stop and interrupts those calls.
 func (a *App) runAIImport(request aiimport.Request, id string, stop <-chan struct{}, progress chan<- crawler.ProgressEvent) (crawler.ImportResult, error) {
+	lease, leaseErr := a.workspace.Enter(request.Domain, request.WorkspaceEpoch, false, stop)
+	if leaseErr != nil {
+		return crawler.ImportResult{}, leaseErr
+	}
+	defer lease.Close(false)
 	if err := a.publicPublicationRequest("begin", request.Domain); err != nil {
 		return crawler.ImportResult{}, err
 	}
 	defer a.publicPublicationRequest("end", request.Domain)
 	boundary, cancel := context.WithCancel(contextWithDomain(context.Background(), request.Domain))
+	if err := a.freezeWorkspaceEditable(boundary, request.Domain); err != nil {
+		cancel()
+		return crawler.ImportResult{}, err
+	}
 	finished := make(chan struct{})
 	defer close(finished)
 	defer cancel()
+
 	select {
 	case <-stop:
 		return crawler.ImportResult{}, aieditor.ErrTaskCanceled
@@ -13961,7 +14041,11 @@ func (a *App) persistImportedPages(ctx context.Context, domain, ownerPath string
 				if asset.contentType == "" {
 					asset.contentType = mime.TypeByExtension(path.Ext(name))
 				}
-				fileDelta += int64(len(asset.content) - len(previous))
+				if frozen && asset.existed && !bytes.Equal(previous, asset.content) {
+					fileDelta += int64(len(asset.content))
+				} else {
+					fileDelta += int64(len(asset.content) - len(previous))
+				}
 				assets = append(assets, asset)
 			}
 		}
@@ -14101,7 +14185,19 @@ func (a *App) saveAIFile(ctx context.Context, domain string, request aieditor.Re
 	return stored, nil
 }
 
-func (a *App) publishAI(ctx context.Context, domain string) error {
+func (a *App) publishAI(ctx context.Context, domain string, epochs ...uint64) error {
+	var expected uint64
+	if len(epochs) > 0 {
+		expected = epochs[0]
+	}
+	lease, leaseErr := a.workspace.Enter(domain, expected, true, ctx.Done())
+	if leaseErr != nil {
+		return leaseErr
+	}
+	defer lease.Close(false)
+	if err := a.freezeWorkspaceEditable(ctx, domain); err != nil {
+		return err
+	}
 	pageList, err := a.collectPublishPageCandidates(ctx, domain)
 	if err != nil {
 		return err
@@ -14114,7 +14210,7 @@ func (a *App) publishAI(ctx context.Context, domain string) error {
 	if err := a.generateDomainPack(ctx, domain); err != nil {
 		return err
 	}
-	return a.setDomainFrozenState(ctx, domain, 0)
+	return a.finishFreezePublication(ctx, domain)
 }
 
 // Both the administrator and capability adapters publish through the database
@@ -14232,6 +14328,10 @@ func (a *App) executeAITask(request aieditor.Request, r *http.Request) (aieditor
 		return aieditor.Result{}, errors.New("AI editor executor is unavailable")
 	}
 	request.Domain = a.siteDomain(r.Context(), r)
+	request.WorkspaceEpoch = a.workspace.Generation(request.Domain)
+	if epoch, parseErr := strconv.ParseUint(r.Header.Get("X-SiteBrush-Workspace-Epoch"), 10, 64); parseErr == nil && epoch != 0 {
+		request.WorkspaceEpoch = epoch
+	}
 	done := make(chan struct{})
 	finished := make(chan struct{})
 	defer close(finished)
@@ -19086,6 +19186,17 @@ func (a *App) seedDemoSiteContent(ctx context.Context, domain string, settings d
 }
 
 func (a *App) withStagedDemoContent(ctx context.Context, domain string, limitBytes int64, prepare func(*App) error) error {
+	lease, err := a.workspace.Enter(domain, 0, false, ctx.Done())
+	if err != nil {
+		return err
+	}
+	defer lease.Close(false)
+	if _, _, err := a.loadFreezeCheckpoint(contextWithDomain(ctx, domain), domain); err == nil {
+		return errors.New("publish or cancel the active freeze before replacing demo content")
+	} else if !errors.Is(err, sql.ErrNoRows) && !errors.Is(err, errSiteDatabaseMissing) {
+		return err
+	}
+
 	stagingRoot := filepath.Join(a.storageRootDir(), "scratch", "demo-"+randomAccessToken())
 	if err := a.mkdirAllInsideStorage(stagingRoot, 0o700); err != nil {
 		return err
@@ -19734,6 +19845,11 @@ func (a *App) clearDemoSiteContent(ctx context.Context, domain string) error {
 		return fmt.Errorf("demo domain is required")
 	}
 	domainContext := contextWithDomain(ctx, domain)
+	if _, _, freezeErr := a.loadFreezeCheckpoint(domainContext, domain); freezeErr == nil {
+		return errors.New("publish or cancel the active freeze before resetting demo content")
+	} else if !errors.Is(freezeErr, sql.ErrNoRows) {
+		return freezeErr
+	}
 	for _, statement := range []string{
 		`DELETE FROM pages WHERE domain=?`,
 		`DELETE FROM published_pages WHERE domain=?`,
@@ -20344,6 +20460,10 @@ func (a *App) persistPageSave(ctx context.Context, domain, previousPath, pagePat
 	backups := []publishedFileBackup{}
 	publicationChanges := []browserstats.PageChange{}
 	err := a.siteContentTransaction(ctx, func(transaction *sql.Tx) error {
+		if _, err := transaction.Exec(`DELETE FROM site_hidden_assets WHERE domain=? AND tree='page' AND path=?`, domain, pagePath); err != nil {
+			return err
+		}
+
 		pageRows, err := transaction.QueryContext(ctx, `SELECT path,title,html,published FROM pages WHERE domain=? ORDER BY path`, domain)
 		if err != nil {
 			return err
@@ -23761,6 +23881,13 @@ func (a *App) estimateImportedFileDelta(domain string, spider *pageSpider) int64
 		if existingSize <= 0 {
 			fileDelta += newSize
 			continue
+		}
+		if _, err := a.statInsideStorage(filepath.Join(filepath.Dir(a.storageRootDir()), filepath.Dir(sitefreeze.ObjectPath(domain, strings.Repeat("0", 64))))); err == nil {
+			previous, readErr := a.readFileInsideStorage(targetFilePath)
+			if readErr == nil && !bytes.Equal(previous, resource.content) {
+				fileDelta += newSize
+				continue
+			}
 		}
 		fileDelta += newSize - existingSize
 	}
@@ -27498,6 +27625,7 @@ func (a *App) deleteManagedSiteFiles(ctx context.Context, row siteQuotaRow) erro
 		a.domainStaticDir(domain),
 		a.domainChrootRootDir(domain),
 		a.domainLogDir(domain),
+		filepath.Join(filepath.Dir(a.storageRootDir()), filepath.Dir(sitefreeze.ObjectPath(domain, strings.Repeat("0", 64)))),
 	} {
 		if err := a.removeAllInsideStorage(directoryPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
@@ -37196,9 +37324,7 @@ func (a *App) deleteManagedFile(r *http.Request, fileName string) error {
 		return removeErr
 	}
 	domain := a.siteDomain(r.Context(), r)
-	if quotaErr := a.applyDomainStorageDelta(r.Context(), domain, 0, 0, 0, -fileInfo.Size(), 0); quotaErr != nil {
-		return quotaErr
-	}
+	a.rebuildDomainStorageUsage(r.Context(), domain)
 	if _, ruleErr := a.db.ExecContext(r.Context(), `DELETE FROM file_access_rules WHERE domain=? AND file_name=?`, domainStorageName(domain), fileName); ruleErr != nil {
 		return ruleErr
 	}
@@ -37283,6 +37409,10 @@ func (a *App) listManagedFiles(ctx context.Context, r *http.Request, currentPath
 	}
 	domain := domainStorageName(a.siteDomain(ctx, r))
 	metadata := a.fileMetadataByName(ctx, domain)
+	hidden, err := a.hiddenSiteAssets(ctx, domain)
+	if err != nil {
+		return nil, err
+	}
 	currentPath = cleanPath(currentPath)
 	// #nosec G703 -- rootPath is an application-owned directory validated by the storage jail.
 	walkErr := filepath.WalkDir(rootPath, func(filePath string, currentEntry fs.DirEntry, entryErr error) error {
@@ -37294,7 +37424,7 @@ func (a *App) listManagedFiles(ctx context.Context, r *http.Request, currentPath
 			return nil
 		}
 		normalizedPath := filepath.ToSlash(relativePath)
-		if safeRelativeAssetPath(normalizedPath) == "" {
+		if hidden["files\x00"+normalizedPath] || safeRelativeAssetPath(normalizedPath) == "" {
 			return nil
 		}
 		fileInfo, statErr := a.statInsideStorage(filePath)
@@ -37754,6 +37884,7 @@ func (a *App) upsertFileMetadata(ctx context.Context, domain, fileName, pagePath
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
+	_, _ = a.db.ExecContext(ctx, `DELETE FROM site_hidden_assets WHERE domain=? AND tree='files' AND path=?`, domain, fileName)
 	_, _ = a.db.ExecContext(ctx, `INSERT INTO file_metadata(domain,file_name,page_path,size,mime_type,created_at,updated_at,source,download_count)
 VALUES(?,?,?,?,?,?,?,?,0)
 ON CONFLICT(domain,file_name) DO UPDATE SET page_path=excluded.page_path,size=excluded.size,mime_type=excluded.mime_type,updated_at=excluded.updated_at,source=excluded.source`,
@@ -39576,6 +39707,18 @@ func (a *App) rebuildDomainStorageUsage(ctx context.Context, domain string) {
 	revisionBytes := a.sumHTMLColumnBytes(ctx, `SELECT html FROM revisions WHERE domain=?`, domain)
 	fileBytes := a.directorySizeInsideStorage(a.domainFilesDirForDomain(domain)) + a.directorySizeInsideStorage(a.domainChrootRootDir(domain))
 	publishedStaticBytes := a.directorySizeInsideStorage(a.domainStaticDir(domain))
+	root, historyErr := os.OpenRoot(filepath.Dir(a.storageRootDir()))
+	if historyErr != nil {
+		log.Printf("FREEZE storage reconciliation domain=%q: %v", domain, historyErr)
+		return
+	}
+	extraBytes, historyErr := sitefreeze.ExtraBytes(root, domain)
+	root.Close()
+	if historyErr != nil {
+		log.Printf("FREEZE storage reconciliation domain=%q: %v", domain, historyErr)
+		return
+	}
+	fileBytes += extraBytes
 	var importQueueBytes int64
 	_ = a.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(storage_bytes),0) FROM whole_site_import_pages WHERE domain=?`, domain).Scan(&importQueueBytes)
 	a.ensureDomainStorageUsageRow(ctx, domain)
@@ -39844,6 +39987,13 @@ func (a *App) serveAssetFile(w http.ResponseWriter, r *http.Request, domain, fil
 		http.NotFound(w, r)
 		return
 	}
+	if hidden, err := a.hiddenSiteAsset(r.Context(), domain, "files", fileName); err != nil {
+		http.Error(w, "file state is unavailable", 503)
+		return
+	} else if hidden {
+		http.NotFound(w, r)
+		return
+	}
 	rule := ManagedFileAccess{AccessMode: "public"}
 	ruleErr := a.db.QueryRowContext(r.Context(), `SELECT access_mode,token,expires_at,single_use_left,token_use_count,protected_page_path FROM file_access_rules WHERE domain=? AND file_name=?`, domain, fileName).Scan(&rule.AccessMode, &rule.Token, &rule.ExpiresAt, &rule.SingleUseLeft, &rule.TokenUseCount, &rule.ProtectedPagePath)
 	if ruleErr != nil && !errors.Is(ruleErr, sql.ErrNoRows) {
@@ -39903,6 +40053,19 @@ func (a *App) serveAssetFile(w http.ResponseWriter, r *http.Request, domain, fil
 		legacyPath := filepath.Join(domainFilesRoot, "p", filepath.FromSlash(fileName))
 		if _, legacyErr := a.statInsideStorage(legacyPath); legacyErr == nil {
 			selectedFilePath = legacyPath
+		}
+	}
+	if a.publicCatalog != nil && !a.isAdminRequest(r) {
+		decision := a.publicCatalog.LookupRequest(publicsite.Lookup{Host: domain, File: fileName, Path: "/p/" + fileName}, r.Context().Done())
+		if decision.Hidden {
+			http.NotFound(w, r)
+			return
+		}
+		if decision.File.Version != "" {
+			selectedFilePath = filepath.Join(filepath.Dir(a.storageRootDir()), sitefreeze.ObjectPath(domain, decision.File.Version))
+			if contentType := mime.TypeByExtension(path.Ext(fileName)); contentType != "" {
+				w.Header().Set("Content-Type", contentType)
+			}
 		}
 	}
 	if !a.serveFileInsideStorage(w, r, selectedFilePath) {
@@ -41079,7 +41242,8 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
 	filesLabel := template.JSEscapeString(translationOrDefault(translations, "menu_files", "Files"))
 	treeLabel := template.JSEscapeString(translationOrDefault(translations, "menu_tree", "Site tree"))
 	freezeLabel := template.JSEscapeString(translationOrDefault(translations, "menu_freeze", "Freeze"))
-	publishLabel := template.JSEscapeString(translationOrDefault(translations, "menu_publish", "Publish"))
+	publishLabel := template.JSEscapeString(translationOrDefault(translations, "menu_publish_changes", "Publish changes"))
+	unfreezeLabel := template.JSEscapeString(template.HTMLEscapeString(translationOrDefault(translations, "menu_unfreeze", "Discard changes and unfreeze")))
 	settingsLabel := template.JSEscapeString(translationOrDefault(translations, "menu_domain_settings", "Settings"))
 	analyticsLabel := template.JSEscapeString(translationOrDefault(translations, "menu_analytics", "Analytics"))
 	hostingAndSupportLabel := translationOrDefault(translations, "menu_expenses", "Server settings")
@@ -41117,7 +41281,9 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
 		freezeActionEntry := "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='freeze' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/freeze.png' class='SiteBrushMenuIcon' alt=''>" + freezeLabel + "</button></li>"
 		if isFrozen {
 			freezeActionEntry = "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='publish' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/publish.png' class='SiteBrushMenuIcon' alt=''>" + publishLabel + "</button></li>"
+			freezeActionEntry += "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='unfreeze' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/unlock.png' class='SiteBrushMenuIcon' alt=''>" + unfreezeLabel + "</button></li>"
 		}
+		freezeActionEntry += "<li class='SiteBrushContextMenu'><a href='?unfreeze&amp;history' class='SiteBrushContextMenuLink'>" + template.JSEscapeString(template.HTMLEscapeString(translationOrDefault(translations, "unfreeze_history", "Freeze history"))) + "</a></li>"
 		passwordActionEntry := "<li class='SiteBrushContextMenu SiteBrushSeparatedMenuItem'><button type='button' data-sitebrush-action='protect_password' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/lock.png' class='SiteBrushMenuIcon' alt=''>" + protectPasswordLabel + "</button></li>"
 		if pagePasswordProtected {
 			passwordActionEntry = "<li class='SiteBrushContextMenu SiteBrushSeparatedMenuItem'><button type='button' data-sitebrush-action='remove_password_protection' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/unlock.png' class='SiteBrushMenuIcon' alt=''>" + removePasswordProtectionLabel + "</button></li>"
@@ -41462,6 +41628,26 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
       openSiteTreeDialog();
       return;
     }
+    if (actionName === "unfreeze") {
+      closeSitebrushMenu();
+      const configuration = {path: currentPagePath, csrf: mutationCSRFToken, labels: JSON.parse(new TextDecoder().decode(Uint8Array.from([` + unfreezeMenuLabelsByteList(translations) + `])))};
+      if (window.SitebrushUnfreeze) {
+        window.SitebrushUnfreeze.open(configuration);
+        return;
+      }
+      const unfreezeScript = document.createElement("script");
+      unfreezeScript.src = "/p/static/unfreeze.js?v=` + url.QueryEscape(CompileVersion) + `";
+      unfreezeScript.dataset.sitebrushOwned = "true";
+      unfreezeScript.onload = function openUnfreezeModule() {
+        window.SitebrushUnfreeze.open(configuration);
+      };
+      unfreezeScript.onerror = function reportUnfreezeModuleFailure() {
+        console.error("SiteBrush restoration is unavailable");
+        openConfirmationDialog(configuration.labels.connectionError, function closeUnfreezeError(){}, "unlock");
+      };
+      (document.head || document.documentElement).appendChild(unfreezeScript);
+      return;
+    }
     if (actionName === "copy_site") {
       openCopySiteDialog();
       return;
@@ -41476,6 +41662,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
     if (!selectedActionConfig) {
       return;
     }
+    let publishCheckpointIdentifier = "";
     if (actionName === "publish") {
       fetch(currentPagePath + "?publish_preview", { headers: { "Accept": "application/json" } })
         .then(function parsePublishPreview(previewResponse) {
@@ -41483,6 +41670,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
           return previewResponse.json();
         })
 	        .then(function confirmPublishWithPreview(previewPayload) {
+              publishCheckpointIdentifier = previewPayload.checkpoint_id || "";
 		          let summaryText = "` + publishPreviewSummaryLabel + `" + " " + previewPayload.changed + " / " + previewPayload.total;
 		          let confirmQuestionText = "` + publishConfirmWithChangesLabel + `";
 		          if (previewPayload.changed === 0) {
@@ -41513,6 +41701,13 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
       actionFormElement.setAttribute("data-sitebrush-owned", "true");
       actionFormElement.method = "POST";
       actionFormElement.action = selectedActionConfig.path;
+      if (actionName === "publish") {
+       const checkpointInputElement = document.createElement("input");
+        checkpointInputElement.type = "hidden";
+        checkpointInputElement.name = "checkpoint_id";
+        checkpointInputElement.value = publishCheckpointIdentifier;
+        actionFormElement.appendChild(checkpointInputElement);
+      }
       if (mutationCSRFToken !== "") {
         const csrfInputElement = document.createElement("input");
         csrfInputElement.type = "hidden";
@@ -43093,7 +43288,7 @@ func (a *App) persistSpiderAssets(ctx context.Context, spider *pageSpider, pageP
 		if err := os.MkdirAll(filepath.Dir(realTargetFilePath), 0o755); err != nil {
 			return err
 		}
-		if err := os.WriteFile(realTargetFilePath, resource.content, 0o644); err != nil {
+		if err := a.writeAtomicStorageFile(realTargetFilePath, resource.content); err != nil {
 			return err
 		}
 		resourceContentType := resource.contentType
@@ -45641,6 +45836,22 @@ func (a *App) openFileInsideStorage(filePath string) (*os.File, error) {
 }
 
 func (a *App) createFileInsideStorage(filePath string) (*os.File, error) {
+	if _, _, versioned := a.versionedAssetPath(filePath); versioned {
+		rootPath, err := a.storageJailRootPath()
+		if err != nil {
+			return nil, err
+		}
+		root, err := os.OpenRoot(rootPath)
+		if err != nil {
+			return nil, err
+		}
+		defer root.Close()
+		_, relative, err := a.storageJailForPath(filePath)
+		if err != nil {
+			return nil, err
+		}
+		return root.OpenFile(relative, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+	}
 	jail, relativeFilePath, err := a.storageJailForPath(filePath)
 	if err != nil {
 		return nil, err
@@ -45711,6 +45922,21 @@ func (a *App) serveFileInsideStorage(w http.ResponseWriter, r *http.Request, fil
 }
 
 func (a *App) writeFileInsideStorage(filePath string, payload []byte, perm os.FileMode) error {
+	if _, _, versioned := a.versionedAssetPath(filePath); versioned {
+		if err := a.retainAssetVersion(filePath); err != nil {
+			return err
+		}
+		temporary := filePath + ".sitebrush-version-" + randomAccessToken()
+		jail, relative, err := a.storageJailForPath(temporary)
+		if err != nil {
+			return err
+		}
+		defer jail.Remove(relative)
+		if err = jail.WriteFile(relative, payload, perm); err != nil {
+			return err
+		}
+		return a.renameInsideStorage(temporary, filePath)
+	}
 	jail, relativeFilePath, err := a.storageJailForPath(filePath)
 	if err != nil {
 		return err
@@ -45719,6 +45945,9 @@ func (a *App) writeFileInsideStorage(filePath string, payload []byte, perm os.Fi
 }
 
 func (a *App) removeInsideStorage(filePath string) error {
+	if err := a.retainAssetVersion(filePath); err != nil {
+		return err
+	}
 	jail, relativeFilePath, err := a.storageJailForPath(filePath)
 	if err != nil {
 		return err
@@ -45735,6 +45964,12 @@ func (a *App) removeAllInsideStorage(pathToRemove string) error {
 }
 
 func (a *App) renameInsideStorage(oldPath string, newPath string) error {
+	if err := a.retainAssetVersion(oldPath); err != nil {
+		return err
+	}
+	if err := a.retainAssetVersion(newPath); err != nil {
+		return err
+	}
 	oldJail, oldRelativePath, err := a.storageJailForPath(oldPath)
 	if err != nil {
 		return err
@@ -45743,7 +45978,49 @@ func (a *App) renameInsideStorage(oldPath string, newPath string) error {
 	if err != nil {
 		return err
 	}
-	return oldJail.Rename(oldRelativePath, newRelativePath)
+	if err = oldJail.Rename(oldRelativePath, newRelativePath); err != nil {
+		return err
+	}
+	return a.retainAssetVersion(newPath)
+}
+
+func (a *App) versionedAssetPath(filename string) (string, string, bool) {
+	_, relative, err := a.storageJailForPath(filename)
+	if err != nil || !filepath.IsLocal(relative) {
+		return "", "", false
+	}
+	parts := strings.Split(filepath.ToSlash(relative), "/")
+	if len(parts) < 4 || parts[0] != "storage" || parts[1] != "files" && parts[1] != "chroot" {
+		return "", "", false
+	}
+	if strings.Contains(filepath.Base(filename), ".sitebrush-") {
+		return "", "", false
+	}
+	return parts[2], relative, true
+}
+func (a *App) retainAssetVersion(filename string) error {
+	domain, relative, versioned := a.versionedAssetPath(filename)
+	if !versioned {
+		return nil
+	}
+	rootPath, err := a.storageJailRootPath()
+	if err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	if info, statErr := root.Lstat(relative); statErr == nil && info.IsDir() {
+		return nil
+	}
+	if _, statErr := root.Stat(filepath.Dir(sitefreeze.ObjectPath(domain, strings.Repeat("0", 64)))); os.IsNotExist(statErr) {
+		return nil
+	} else if statErr != nil {
+		return statErr
+	}
+	return sitefreeze.Retain(root, domain, relative)
 }
 
 func (a *App) storageJailForPath(candidatePath string) (storagejail.Root, string, error) {
@@ -47582,17 +47859,900 @@ func firstAutomaticSSLIPv4(ipList []net.IP) string {
 	return ""
 }
 
+// Reversible site editing: immutable revision references, not full-tree backups.
+func unfreezeMenuLabels(translations map[string]string) map[string]string {
+	labels := make(map[string]string)
+	for _, name := range []string{"title", "description", "frozenAt", "total", "keepEditing", "confirm", "loading", "restoring", "connectionError", "history", "refresh", "previous", "next", "created", "modified", "deleted", "page", "files", "chroot", "properties", "revision", "publication"} {
+		labels[name] = translationOrDefault(translations, "unfreeze_"+name, name)
+	}
+	return labels
+}
+func unfreezeMenuLabelsByteList(translations map[string]string) string {
+	encoded, _ := json.Marshal(unfreezeMenuLabels(translations))
+	numbers := make([]string, len(encoded))
+	for index, character := range encoded {
+		numbers[index] = strconv.Itoa(int(character))
+	}
+	return strings.Join(numbers, ",")
+}
+func siteWorkspaceMutationRequest(r *http.Request) bool {
+	for _, selector := range []string{"save", "delete", "revision_restore", "revision_delete", "revision_toggle", "files", "backup_import", "grab", "grab_ws", "site_copy", "copy", "properties", "settings", "page_password", "edit", "editraw", "text", "visual"} {
+		if hasQueryFlag(r, selector) {
+			return true
+		}
+	}
+	return false
+}
+
+func siteFreezeControlRequest(r *http.Request) bool {
+	return hasQueryFlag(r, "freeze") || hasQueryFlag(r, "unfreeze") || hasQueryFlag(r, "unfreeze_ws") || hasQueryFlag(r, "publish")
+}
+func siteAITransportRequest(r *http.Request) bool {
+	for _, selector := range []string{"mcp", "oauth", "ai", "ai_token", "ai_session", "ai_authorize"} {
+		if hasQueryFlag(r, selector) {
+			return true
+		}
+	}
+	return false
+}
+func (a *App) checkpointPropertyDefinitions(control bool) []sitefreeze.Property {
+	if control {
+		return []sitefreeze.Property{
+			{Table: "page_password_rules", Columns: []string{"path", "password_hash", "created_at", "updated_at"}},
+			{Table: "domain_chroot_locations", Columns: []string{"url_path", "directory_path", "updated_at"}},
+			{Table: "file_access_rules", Columns: []string{"file_name", "access_mode", "token", "expires_at", "single_use_left", "token_use_count", "protected_page_path"}},
+		}
+	}
+	return []sitefreeze.Property{
+		{Table: "page_redirects", Columns: []string{"old_path", "new_path", "created_at"}},
+		{Table: "file_metadata", Columns: []string{"file_name", "page_path", "size", "mime_type", "created_at", "updated_at", "source"}},
+	}
+}
+func (a *App) checkpointProperties(ctx context.Context, domain string, control bool) ([]sitefreeze.Property, error) {
+	properties := a.checkpointPropertyDefinitions(control)
+	for index := range properties {
+		property := &properties[index]
+		rows, err := a.db.QueryContext(ctx, `SELECT `+strings.Join(property.Columns, ",")+` FROM `+property.Table+` WHERE domain=? ORDER BY `+property.Columns[0], domain)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			record := make([]any, len(property.Columns))
+			pointers := make([]any, len(record))
+			for column := range record {
+				pointers[column] = &record[column]
+			}
+			if err = rows.Scan(pointers...); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			for column, cell := range record {
+				if encoded, ok := cell.([]byte); ok {
+					record[column] = string(encoded)
+				}
+			}
+			property.Rows = append(property.Rows, record)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return properties, nil
+}
+func (a *App) captureFreezeCheckpoint(ctx context.Context, domain string, ensure bool) (sitefreeze.Checkpoint, error) {
+	var point sitefreeze.Checkpoint
+	if ensure {
+		a.ensureDomainStorageUsageRow(ctx, domain)
+		a.rebuildDomainStorageUsage(ctx, domain)
+	}
+	err := a.siteContentTransaction(ctx, func(transaction *sql.Tx) error {
+		var captureErr error
+		point, captureErr = sitefreeze.Capture(transaction, domain, ensure)
+		return captureErr
+	}, func(error) {})
+	if err != nil {
+		return point, err
+	}
+	for _, control := range []bool{false, true} {
+		properties, readErr := a.checkpointProperties(ctx, domain, control)
+		if readErr != nil {
+			return point, readErr
+		}
+		point.Properties = append(point.Properties, properties...)
+	}
+	root, err := os.OpenRoot(filepath.Dir(a.storageRootDir()))
+	if err != nil {
+		return point, err
+	}
+	defer root.Close()
+	hidden, err := a.hiddenSiteAssets(ctx, domain)
+	if err != nil {
+		return point, err
+	}
+	for _, tree := range []string{"files", "chroot"} {
+		directory := filepath.Join("storage", tree, domainStorageName(domain))
+		files, readErr := sitefreeze.Inventory(root, directory, tree, ctx.Done())
+		if readErr != nil {
+			return point, readErr
+		}
+		for _, file := range files {
+			if !hidden[tree+"\x00"+file.Path] {
+				point.Files = append(point.Files, file)
+			}
+		}
+	}
+	return point, nil
+}
+func (a *App) loadFreezeCheckpoint(ctx context.Context, domain string) (sitefreeze.Checkpoint, string, error) {
+	var point sitefreeze.Checkpoint
+	var stage, encoded string
+	err := a.db.QueryRowContext(ctx, `SELECT points.payload,state.stage FROM site_freeze_state state JOIN site_freeze_points points ON points.domain=state.domain AND points.id=state.checkpoint_id WHERE state.domain=?`, domain).Scan(&encoded, &stage)
+	if err != nil {
+		return point, stage, err
+	}
+	if err = json.Unmarshal([]byte(encoded), &point); err != nil {
+		return point, stage, err
+	}
+	err = a.db.QueryRowContext(ctx, `SELECT payload FROM site_freeze_protection WHERE domain=? AND checkpoint_id=?`, domain, point.ID).Scan(&encoded)
+	if err != nil {
+		return point, stage, err
+	}
+	var protection []sitefreeze.Property
+	if err = json.Unmarshal([]byte(encoded), &protection); err != nil {
+		return point, stage, err
+	}
+	point.Properties = append(point.Properties, protection...)
+	return point, stage, nil
+}
+
+// An interrupted restore resumes from its original retained edit session, never
+// from a partially restored filesystem. Both references are durable before writes.
+func (a *App) savedFreezeCheckpoint(ctx context.Context, domain, identifier string) (sitefreeze.Checkpoint, error) {
+	var point sitefreeze.Checkpoint
+	var encoded string
+	if err := a.db.QueryRowContext(ctx, `SELECT payload FROM site_freeze_points WHERE domain=? AND id=?`, domain, identifier).Scan(&encoded); err != nil {
+		return point, err
+	}
+	if err := json.Unmarshal([]byte(encoded), &point); err != nil {
+		return point, err
+	}
+	if err := a.db.QueryRowContext(ctx, `SELECT payload FROM site_freeze_protection WHERE domain=? AND checkpoint_id=?`, domain, identifier).Scan(&encoded); err != nil {
+		return point, err
+	}
+	var protection []sitefreeze.Property
+	if err := json.Unmarshal([]byte(encoded), &protection); err != nil {
+		return point, err
+	}
+	point.Properties = append(point.Properties, protection...)
+	return point, nil
+}
+
+func (a *App) saveFreezeCheckpoint(ctx context.Context, domain string, point sitefreeze.Checkpoint, status string, activate bool) error {
+	content := point
+	content.Properties = nil
+	protection := []sitefreeze.Property{}
+	for _, property := range point.Properties {
+		if siteTableSubsystem(property.Table) == "control" {
+			protection = append(protection, property)
+		} else {
+			content.Properties = append(content.Properties, property)
+		}
+	}
+	encoded, err := json.Marshal(protection)
+	if err != nil {
+		return err
+	}
+	if err = a.accountTransaction(ctx, func(transaction *sql.Tx) error {
+		_, writeErr := transaction.Exec(`INSERT INTO site_freeze_protection(domain,checkpoint_id,payload) VALUES(?,?,?)`, domain, point.ID, string(encoded))
+		return writeErr
+	}); err != nil {
+		return err
+	}
+	return a.siteContentTransaction(ctx, func(transaction *sql.Tx) error {
+		if err := sitefreeze.Save(transaction, domain, content, status); err != nil {
+			return err
+		}
+		if activate {
+			return sitefreeze.Activate(transaction, domain, point.ID, "preparing")
+		}
+		return nil
+	}, func(error) {})
+}
+func (a *App) createFreezeCheckpoint(ctx context.Context, domain string, epochs ...uint64) (sitefreeze.Checkpoint, error) {
+	expected := uint64(0)
+	if len(epochs) > 0 {
+		expected = epochs[0]
+	}
+	lease, err := a.workspace.Enter(domain, expected, true, ctx.Done())
+	if err != nil {
+		return sitefreeze.Checkpoint{}, err
+	}
+	defer lease.Close(false)
+	if a.publicProxy {
+		encoded, _ := json.Marshal(publicsite.Change{Action: "freeze_versions"})
+		response, capabilityErr := appupdate.Exchange(a.storagePath, appupdate.Request{Action: "public_policy", Detail: string(encoded)}, ctx.Done())
+		if capabilityErr != nil || response.Detail != "1" {
+			return sitefreeze.Checkpoint{}, errors.New("restart the SiteBrush launcher before using reversible freezing")
+		}
+	}
+	point, stage, err := a.loadFreezeCheckpoint(ctx, domain)
+	if err == nil {
+		if stage == "publishing" || strings.HasPrefix(stage, "restoring/") {
+			return point, errors.New("site restoration or publication is in progress")
+		}
+		if err = a.setDomainFrozenState(ctx, domain, 1); err != nil {
+			return point, err
+		}
+		err = a.siteContentTransaction(ctx, func(transaction *sql.Tx) error { return sitefreeze.Activate(transaction, domain, point.ID, "frozen") }, func(error) {})
+		return point, err
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return point, err
+	}
+	if a.isDomainFrozen(ctx, domain) {
+		return point, errors.New("this older freeze has no restoration checkpoint; publish it before starting a new freeze")
+	}
+	point, err = a.captureFreezeCheckpoint(ctx, domain, true)
+	if err != nil {
+		return point, err
+	}
+	point.ID = randomAccessToken()
+	if encoded, readErr := os.ReadFile(publicsite.PolicyPath(a.storagePath, domain)); readErr == nil {
+		var policy publicsite.Policy
+		if err = json.Unmarshal(encoded, &policy); err != nil {
+			return point, err
+		}
+		policy.Frozen = true
+		applyFreezePolicy(&policy, point)
+		projected, encodeErr := json.Marshal(policy)
+		if encodeErr != nil {
+			return point, encodeErr
+		}
+		if len(projected) > 8<<20 {
+			return point, errors.New("site version catalog exceeds the public policy limit")
+		}
+	} else if !os.IsNotExist(readErr) {
+		return point, readErr
+	}
+	root, err := os.OpenRoot(filepath.Dir(a.storageRootDir()))
+	if err != nil {
+		return point, err
+	}
+	defer root.Close()
+	for _, file := range point.Files {
+		if err = sitefreeze.Retain(root, domain, filepath.Join("storage", file.Tree, domainStorageName(domain), filepath.FromSlash(file.Path))); err != nil {
+			return point, err
+		}
+	}
+	for _, page := range point.Published {
+		filename := filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(page.Path))
+		_, relative, relativeErr := a.storageJailForPath(filename)
+		if relativeErr != nil {
+			return point, relativeErr
+		}
+		if hash, _, readErr := sitefreeze.HashFile(root, relative); readErr == nil && hash == page.Hash {
+			if err = sitefreeze.Retain(root, domain, relative); err != nil {
+				return point, err
+			}
+		} else {
+			var body string
+			if err = a.db.QueryRowContext(ctx, `SELECT html FROM revisions WHERE domain=? AND id=?`, domain, page.Revision).Scan(&body); err != nil {
+				return point, err
+			}
+			object := filepath.Join(filepath.Dir(a.storageRootDir()), sitefreeze.ObjectPath(domain, page.Hash))
+			if err = a.mkdirAllInsideStorage(filepath.Dir(object), 0700); err != nil {
+				return point, err
+			}
+			if err = a.writeAtomicStorageFile(object, []byte(body)); err != nil {
+				return point, err
+			}
+		}
+	}
+	if err = a.saveFreezeCheckpoint(ctx, domain, point, "active", true); err != nil {
+		return point, err
+	}
+	if err = a.setDomainFrozenState(ctx, domain, 1); err != nil {
+		return point, err
+	}
+	err = a.siteContentTransaction(ctx, func(transaction *sql.Tx) error { return sitefreeze.Activate(transaction, domain, point.ID, "frozen") }, func(error) {})
+	return point, err
+}
+func (a *App) restoreCheckpointProperties(ctx context.Context, domain string, point sitefreeze.Checkpoint, control bool) error {
+	definitions := a.checkpointPropertyDefinitions(control)
+	write := func(transaction *sql.Tx) error {
+		for _, definition := range definitions {
+			var captured *sitefreeze.Property
+			for index := range point.Properties {
+				if point.Properties[index].Table == definition.Table {
+					captured = &point.Properties[index]
+					break
+				}
+			}
+			if captured == nil {
+				return errors.New("checkpoint property set is incomplete")
+			}
+			if strings.Join(captured.Columns, ",") != strings.Join(definition.Columns, ",") {
+				return errors.New("unsupported checkpoint property schema")
+			}
+			// Live token identities and consumption are never rolled back.
+			tokens := make(map[string][]any)
+			if definition.Table == "file_access_rules" {
+				rows, err := transaction.Query(`SELECT file_name,COALESCE(token,''),COALESCE(single_use_left,0),COALESCE(token_use_count,0) FROM file_access_rules WHERE domain=?`, domain)
+				if err != nil {
+					return err
+				}
+				for rows.Next() {
+					var name, token string
+					var remaining, used int64
+					if err = rows.Scan(&name, &token, &remaining, &used); err != nil {
+						rows.Close()
+						return err
+					}
+					tokens[name] = []any{token, remaining, used}
+				}
+				err = rows.Err()
+				rows.Close()
+				if err != nil {
+					return err
+				}
+			}
+			downloads := make(map[string]int64)
+			if definition.Table == "file_metadata" {
+				rows, err := transaction.Query(`SELECT file_name,COALESCE(download_count,0) FROM file_metadata WHERE domain=?`, domain)
+				if err != nil {
+					return err
+				}
+				for rows.Next() {
+					var name string
+					var count int64
+					if err = rows.Scan(&name, &count); err != nil {
+						rows.Close()
+						return err
+					}
+					downloads[name] = count
+				}
+				err = rows.Err()
+				rows.Close()
+				if err != nil {
+					return err
+				}
+			}
+			if _, err := transaction.Exec(`DELETE FROM `+definition.Table+` WHERE domain=?`, domain); err != nil {
+				return err
+			}
+			columns := append([]string{"domain"}, definition.Columns...)
+			if definition.Table == "file_metadata" {
+				columns = append(columns, "download_count")
+			}
+			placeholders := strings.TrimSuffix(strings.Repeat("?,", len(columns)), ",")
+			for _, record := range captured.Rows {
+				if len(record) != len(definition.Columns) {
+					return errors.New("invalid checkpoint property row")
+				}
+				arguments := append([]any{domain}, record...)
+				if definition.Table == "file_metadata" {
+					name, _ := record[0].(string)
+					arguments = append(arguments, downloads[name])
+				}
+				if definition.Table == "file_access_rules" {
+					name, _ := record[0].(string)
+					live := tokens[name]
+					if len(live) > 0 && live[0] == record[2] {
+						arguments[3], arguments[5], arguments[6] = live[0], live[1], live[2]
+					} else {
+						arguments[3], arguments[5], arguments[6] = "", 0, 0
+					}
+				}
+				if _, err := transaction.Exec(`INSERT INTO `+definition.Table+` (`+strings.Join(columns, ",")+`) VALUES(`+placeholders+`)`, arguments...); err != nil {
+					return err
+				}
+			}
+		}
+		if control {
+			_, err := transaction.Exec(`DELETE FROM page_password_sessions WHERE domain=?`, domain)
+			return err
+		}
+		return nil
+	}
+	if control {
+		return a.accountTransaction(ctx, write)
+	}
+	return a.siteContentTransaction(ctx, write, func(error) {})
+}
+func (a *App) restoreFreezeCheckpoint(ctx context.Context, domain, id, digest string) error {
+	if point, stage, err := a.loadFreezeCheckpoint(ctx, domain); err != nil {
+		return err
+	} else if point.ID != id {
+		return sitefreeze.ErrStale
+	} else if stage == "publishing" {
+		return sitefreeze.ErrBusy
+	}
+	if a.aiImports != nil {
+		if err := a.aiImports.CancelDomain(domain); err != nil {
+			return err
+		}
+	}
+	lease, err := a.workspace.Enter(domain, 0, true, ctx.Done())
+	if err != nil {
+		return err
+	}
+	advanced := false
+	defer func() { lease.Close(advanced) }()
+	point, stage, err := a.loadFreezeCheckpoint(ctx, domain)
+	if err != nil {
+		return err
+	}
+	if point.ID != id {
+		return sitefreeze.ErrStale
+	}
+	if stage == "publishing" {
+		return sitefreeze.ErrBusy
+	}
+	var current sitefreeze.Checkpoint
+	if strings.HasPrefix(stage, "restoring/") {
+		current, err = a.savedFreezeCheckpoint(ctx, domain, strings.TrimPrefix(stage, "restoring/"))
+	} else {
+		current, err = a.captureFreezeCheckpoint(ctx, domain, false)
+	}
+	if err != nil {
+		return err
+	}
+	if !strings.HasPrefix(stage, "restoring/") && sitefreeze.Compare(point, current).Digest != digest {
+		return sitefreeze.ErrStale
+	}
+	if !strings.HasPrefix(stage, "restoring/") {
+		for _, page := range append(append([]sitefreeze.Page(nil), current.Pages...), current.Published...) {
+			if page.Revision == 0 {
+				return errors.New("current page has no retained revision; save it before canceling the freeze")
+			}
+		}
+		current.ID = randomAccessToken()
+		root, openErr := os.OpenRoot(filepath.Dir(a.storageRootDir()))
+		if openErr != nil {
+			return openErr
+		}
+		for _, file := range current.Files {
+			err = sitefreeze.Retain(root, domain, filepath.Join("storage", file.Tree, domainStorageName(domain), filepath.FromSlash(file.Path)))
+			if err != nil {
+				break
+			}
+		}
+		root.Close()
+		if err != nil {
+			return err
+		}
+		if err = a.saveFreezeCheckpoint(ctx, domain, current, "cancelled", false); err != nil {
+			return err
+		}
+		if err = a.siteContentTransaction(ctx, func(transaction *sql.Tx) error {
+			return sitefreeze.Activate(transaction, domain, point.ID, "restoring/"+current.ID)
+		}, func(error) {}); err != nil {
+			return err
+		}
+	}
+	// The public policy continues to serve pinned published files while the
+	// materialized editor views and selected file names are restored.
+	root, err := os.OpenRoot(filepath.Dir(a.storageRootDir()))
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	retained := make(map[string]bool)
+	restoreFiles := append([]sitefreeze.File(nil), point.Files...)
+	sort.SliceStable(restoreFiles, func(left, right int) bool { return restoreFiles[left].Link == "" && restoreFiles[right].Link != "" })
+	for _, file := range restoreFiles {
+		retained[file.Tree+"\x00"+file.Path] = true
+		target := filepath.Join("storage", file.Tree, domainStorageName(domain), filepath.FromSlash(file.Path))
+		if err = sitefreeze.Restore(root, domain, target, file); err != nil {
+			return err
+		}
+	}
+	for _, page := range point.Published {
+		relative := staticRelativePathForPage(page.Path)
+		if err = sitefreeze.Restore(root, domain, filepath.Join("storage", "static", domainStorageName(domain), relative), sitefreeze.File{Path: relative, Hash: page.Hash, Mode: 0644}); err != nil {
+			return err
+		}
+	}
+	if err = a.restoreCheckpointProperties(ctx, domain, point, false); err != nil {
+		return err
+	}
+	if err = a.siteContentTransaction(ctx, func(transaction *sql.Tx) error {
+		if err := sitefreeze.RestoreMaterializedViews(transaction, domain, point, current); err != nil {
+			return err
+		}
+		for _, file := range current.Files {
+			if !retained[file.Tree+"\x00"+file.Path] {
+				if err := sitefreeze.Hide(transaction, domain, file.Tree, file.Path); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}, func(error) {}); err != nil {
+		return err
+	}
+	if err = a.restoreCheckpointProperties(ctx, domain, point, true); err != nil {
+		return err
+	}
+	rules := []PagePasswordRule{}
+	for _, property := range point.Properties {
+		if property.Table == "page_password_rules" {
+			for _, record := range property.Rows {
+				path, _ := record[0].(string)
+				hash, _ := record[1].(string)
+				rules = append(rules, PagePasswordRule{Path: path, PasswordHash: hash})
+			}
+		}
+	}
+	prefix := a.pagePasswordPrefixFilePath(domain)
+	if len(rules) == 0 {
+		if err = a.removeInsideStorage(prefix); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	} else {
+		if err = a.mkdirAllInsideStorage(filepath.Dir(prefix), 0700); err != nil {
+			return err
+		}
+		if err = a.writeAtomicStorageFile(prefix, dirprotect.PrefixFileBody(rules)); err != nil {
+			return err
+		}
+	}
+	a.rebuildDomainStorageUsage(ctx, domain)
+	if err = a.setDomainFrozenState(ctx, domain, 0); err != nil {
+		return err
+	}
+	if err = a.siteContentTransaction(ctx, func(transaction *sql.Tx) error { return sitefreeze.Finish(transaction, domain, "restored") }, func(error) {}); err != nil {
+		return err
+	}
+	advanced = true
+	a.logDomainEvent(domain, "FREEZE restored checkpoint=%s cancelled=%s", point.ID, current.ID)
+	return nil
+}
+func (a *App) finishFreezePublication(ctx context.Context, domain string) error {
+	point, _, err := a.loadFreezeCheckpoint(ctx, domain)
+	if errors.Is(err, sql.ErrNoRows) {
+		return a.setDomainFrozenState(ctx, domain, 0)
+	}
+	if err != nil {
+		return err
+	}
+	// Publication has committed its contents before this journal transition.
+	// Recovery completes publication rather than offering a destructive undo.
+	if err = a.siteContentTransaction(ctx, func(transaction *sql.Tx) error {
+		return sitefreeze.Activate(transaction, domain, point.ID, "publishing")
+	}, func(error) {}); err != nil {
+		return err
+	}
+	if err = a.setDomainFrozenState(ctx, domain, 0); err != nil {
+		return err
+	}
+	return a.siteContentTransaction(ctx, func(transaction *sql.Tx) error { return sitefreeze.Finish(transaction, domain, "published") }, func(error) {})
+}
+func (a *App) hiddenSiteAssets(ctx context.Context, domain string) (map[string]bool, error) {
+	hidden := make(map[string]bool)
+	rows, err := a.db.QueryContext(ctx, `SELECT tree,path FROM site_hidden_assets WHERE domain=?`, domain)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var tree, path string
+		if err = rows.Scan(&tree, &path); err != nil {
+			return nil, err
+		}
+		hidden[tree+"\x00"+path] = true
+	}
+	return hidden, rows.Err()
+}
+
+func (a *App) hiddenSiteAsset(ctx context.Context, domain, tree, path string) (bool, error) {
+	var count int
+	err := a.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM site_hidden_assets WHERE domain=? AND tree=? AND path=?`, domain, tree, path).Scan(&count)
+	return count != 0, err
+}
+func (a *App) freezeWorkspaceEditable(ctx context.Context, domain string) error {
+	var stage string
+	err := a.db.QueryRowContext(ctx, `SELECT stage FROM site_freeze_state WHERE domain=?`, domain).Scan(&stage)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if stage != "frozen" {
+		return errors.New("site restoration or checkpoint preparation must finish before editing")
+	}
+	return nil
+}
+
+func (a *App) recoverFreezeCheckpoints(ctx context.Context) {
+	domains := []string{}
+	if a.siteDatabaseRouter != nil {
+		domains = a.siteDatabaseRouter.Domains(ctx)
+	} else {
+		rows, err := a.db.QueryContext(ctx, `SELECT domain FROM site_freeze_state`)
+		if err != nil {
+			return
+		}
+		for rows.Next() {
+			var domain string
+			if rows.Scan(&domain) == nil {
+				domains = append(domains, domain)
+			}
+		}
+		rows.Close()
+	}
+	for _, domain := range domains {
+		boundary := contextWithDomain(ctx, domain)
+		point, stage, err := a.loadFreezeCheckpoint(boundary, domain)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err == nil && strings.HasPrefix(stage, "restoring/") {
+			if err = a.publicPublicationRequest("begin", domain); err == nil {
+				err = a.restoreFreezeCheckpoint(boundary, domain, point.ID, "resume")
+				a.publicPublicationRequest("end", domain)
+			}
+		} else if err == nil && stage == "publishing" {
+			err = a.finishFreezePublication(boundary, domain)
+		} else if err == nil && stage == "preparing" {
+			_, err = a.createFreezeCheckpoint(boundary, domain)
+		}
+		if err != nil {
+			a.logDomainEvent(domain, "FREEZE recovery failed: %v", err)
+		}
+	}
+}
+
+func (a *App) checkpointPreview(ctx context.Context, domain string) (sitefreeze.Preview, error) {
+	lease, err := a.workspace.Enter(domain, 0, true, ctx.Done())
+	if err != nil {
+		return sitefreeze.Preview{}, err
+	}
+	defer lease.Close(false)
+	point, stage, err := a.loadFreezeCheckpoint(ctx, domain)
+	if err != nil {
+		return sitefreeze.Preview{}, err
+	}
+	if stage == "publishing" {
+		return sitefreeze.Preview{}, sitefreeze.ErrBusy
+	}
+	if strings.HasPrefix(stage, "restoring") {
+		return sitefreeze.Preview{ID: point.ID, CreatedAt: point.CreatedAt, Digest: "resume", Changes: []sitefreeze.Change{}}, nil
+	}
+	current, err := a.captureFreezeCheckpoint(ctx, domain, false)
+	if err != nil {
+		return sitefreeze.Preview{}, err
+	}
+	return sitefreeze.Compare(point, current), nil
+}
+func (a *App) unfreezeSocket(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) || !publicMenuOriginAllowed(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	domain := a.siteDomain(r.Context(), r)
+	websocket.Handler(func(connection *websocket.Conn) {
+		defer connection.Close()
+		connection.MaxPayloadBytes = 4096
+		connection.SetReadDeadline(time.Now().Add(30 * time.Second))
+		var command struct {
+			Action string `json:"action"`
+			CSRF   string `json:"csrf"`
+			ID     string `json:"checkpoint_id"`
+			Digest string `json:"digest"`
+			Offset int    `json:"offset"`
+		}
+		if err := websocket.JSON.Receive(connection, &command); err != nil {
+			return
+		}
+		if subtle.ConstantTimeCompare([]byte(command.CSRF), []byte(accountCSRF(r))) != 1 {
+			websocket.JSON.Send(connection, map[string]any{"error": "forbidden"})
+			return
+		}
+		if command.Action == "preview" {
+			boundary, cancel := context.WithCancel(r.Context())
+			defer cancel()
+			connection.SetReadDeadline(time.Now().Add(60 * time.Second))
+			go func() { var unexpected string; _ = websocket.Message.Receive(connection, &unexpected); cancel() }()
+			preview, err := a.checkpointPreview(boundary, domain)
+			if err != nil {
+				message := err.Error()
+				if errors.Is(err, sql.ErrNoRows) {
+					message = translationOrDefault(translationsForRequest(r), "unfreeze_unavailable", "This freeze has no restoration checkpoint.")
+				}
+				websocket.JSON.Send(connection, map[string]any{"error": message})
+				return
+			}
+			offset := command.Offset
+			if offset < 0 {
+				offset = 0
+			}
+			if offset > len(preview.Changes) {
+				offset = len(preview.Changes)
+			}
+			end := offset + 100
+			if end > len(preview.Changes) {
+				end = len(preview.Changes)
+			}
+			preview.Changes = preview.Changes[offset:end]
+			translations := translationsForRequest(r)
+			for index, change := range preview.Changes {
+				if change.Kind == "properties" {
+					preview.Changes[index].Path = translationOrDefault(translations, "unfreeze_property_"+change.Path, change.Path)
+				}
+			}
+			connection.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			websocket.JSON.Send(connection, preview)
+			return
+		}
+		if command.Action != "restore" || command.ID == "" || command.Digest == "" {
+			websocket.JSON.Send(connection, map[string]any{"error": "invalid request"})
+			return
+		}
+		if err := a.publicPublicationRequest("begin", domain); err != nil {
+			websocket.JSON.Send(connection, map[string]any{"error": err.Error()})
+			return
+		}
+		defer a.publicPublicationRequest("end", domain)
+		// A confirmed restoration has its own durable lifetime. Closing the
+		// browser only removes the progress subscriber, not the committed job.
+		err := a.restoreFreezeCheckpoint(contextWithDomain(context.Background(), domain), domain, command.ID, command.Digest)
+		if err != nil {
+			a.logDomainEvent(domain, "FREEZE restore failed: %v", err)
+			websocket.JSON.Send(connection, map[string]any{"error": err.Error()})
+			return
+		}
+		returnPath := cleanPath(r.URL.Path)
+		var exists int
+		if err := a.db.QueryRowContext(contextWithDomain(context.Background(), domain), `SELECT COUNT(*) FROM pages WHERE domain=? AND path=?`, domain, returnPath).Scan(&exists); err != nil || exists == 0 {
+			returnPath = "/"
+		}
+		websocket.JSON.Send(connection, map[string]any{"restored": true, "return_path": returnPath})
+	}).ServeHTTP(w, r)
+}
+func historyOffset(r *http.Request) int {
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	return max(0, min(offset, 1000000))
+}
+
+func (a *App) unfreezeDomain(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	domain := a.siteDomain(r.Context(), r)
+	if r.Method == http.MethodPost {
+		if !sessionCSRFMutationAllowed(r) || !adminMutationSourceAllowed(r) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		if err := a.restoreFreezeCheckpoint(r.Context(), domain, r.FormValue("checkpoint_id"), r.FormValue("digest")); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		httpsecurity.RedirectLocal(w, r, requestedReturnPath(r), http.StatusSeeOther)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if identifier := r.URL.Query().Get("point"); identifier != "" && r.URL.Query().Get("file") != "" {
+		var encoded string
+		if err := a.db.QueryRowContext(r.Context(), `SELECT payload FROM site_freeze_points WHERE domain=? AND id=?`, domain, identifier).Scan(&encoded); err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		var point sitefreeze.Checkpoint
+		if json.Unmarshal([]byte(encoded), &point) != nil {
+			http.Error(w, "history is unavailable", 500)
+			return
+		}
+		for _, file := range point.Files {
+			if file.Hash == r.URL.Query().Get("file") && file.Path == r.URL.Query().Get("path") {
+				root, err := os.OpenRoot(filepath.Dir(a.storageRootDir()))
+				if err != nil {
+					http.Error(w, "history is unavailable", 503)
+					return
+				}
+				defer root.Close()
+				source, err := root.Open(sitefreeze.ObjectPath(domain, file.Hash))
+				if err != nil {
+					http.NotFound(w, r)
+					return
+				}
+				defer source.Close()
+				info, err := source.Stat()
+				if err != nil {
+					http.Error(w, "history is unavailable", 503)
+					return
+				}
+				w.Header().Set("Cache-Control", "private, no-store")
+				w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filepath.Base(file.Path)}))
+				w.Header().Set("Content-Type", "application/octet-stream")
+				http.ServeContent(w, r, file.Path, info.ModTime(), source)
+				return
+			}
+		}
+		http.NotFound(w, r)
+		return
+	}
+	type historyFile struct{ Name, URL string }
+	type historyPage struct{ Path, URL string }
+	type historyPoint struct {
+		Date, Status string
+		Files        []historyFile
+		Pages        []historyPage
+	}
+	history := []historyPoint{}
+	rows, err := a.db.QueryContext(r.Context(), `SELECT id,created_at,status,payload FROM site_freeze_points WHERE domain=? ORDER BY created_at DESC LIMIT 20 OFFSET ?`, domain, historyOffset(r))
+	if err != nil {
+		http.Error(w, "history is unavailable", 503)
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var identifier, date, status, encoded string
+		if err = rows.Scan(&identifier, &date, &status, &encoded); err != nil {
+			http.Error(w, "history is unavailable", 503)
+			return
+		}
+		var point sitefreeze.Checkpoint
+		if json.Unmarshal([]byte(encoded), &point) != nil {
+			http.Error(w, "history is unavailable", 503)
+			return
+		}
+		entry := historyPoint{Date: date, Status: translationOrDefault(translationsForRequest(r), "unfreeze_state_"+status, status)}
+		for _, file := range point.Files {
+			if file.Link != "" {
+				continue
+			}
+			query := url.Values{"unfreeze": {""}, "point": {identifier}, "file": {file.Hash}, "path": {file.Path}}
+			entry.Files = append(entry.Files, historyFile{Name: file.Tree + "/" + file.Path, URL: "/?" + query.Encode()})
+		}
+		for _, page := range point.Pages {
+			query := url.Values{"revision_preview": {""}, "id": {strconv.FormatInt(page.Revision, 10)}, "path": {page.Path}}
+			entry.Pages = append(entry.Pages, historyPage{Path: page.Path, URL: page.Path + "?" + query.Encode()})
+		}
+		history = append(history, entry)
+	}
+	if err = rows.Err(); err != nil {
+		http.Error(w, "history is unavailable", 503)
+		return
+	}
+	w.Header().Set("Cache-Control", "private, no-store")
+	configuration := ""
+	if _, _, pointErr := a.loadFreezeCheckpoint(r.Context(), domain); pointErr == nil {
+		labels := unfreezeMenuLabels(translationsForRequest(r))
+		encoded, encodeErr := json.Marshal(map[string]any{"path": r.URL.Path, "csrf": accountCSRF(r), "labels": labels, "open": !hasQueryFlag(r, "history")})
+		if encodeErr != nil {
+			http.Error(w, "history is unavailable", 503)
+			return
+		}
+		configuration = string(encoded)
+	} else if !errors.Is(pointErr, sql.ErrNoRows) {
+		http.Error(w, "history is unavailable", 503)
+		return
+	}
+	a.render(w, r, "unfreeze.html", map[string]any{"History": history, "Offset": historyOffset(r), "NextOffset": historyOffset(r) + 20, "PreviousOffset": max(0, historyOffset(r)-20), "HasNext": len(history) == 20, "Configuration": configuration})
+}
 func (a *App) freezeDomain(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !a.isAdminRequest(r) || !adminMutationSourceAllowed(r) {
+	if !a.isAdminRequest(r) || !adminMutationSourceAllowed(r) || !sessionCSRFMutationAllowed(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 	domain := a.siteDomain(r.Context(), r)
-	a.setDomainFrozenState(r.Context(), domain, 1)
+	if _, err := a.createFreezeCheckpoint(r.Context(), domain); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
 	httpsecurity.RedirectLocal(w, r, requestedReturnPath(r), http.StatusFound)
 }
 
@@ -47601,11 +48761,31 @@ func (a *App) publishDomain(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !a.isAdminRequest(r) || !adminMutationSourceAllowed(r) {
+	if !a.isAdminRequest(r) || !adminMutationSourceAllowed(r) || !sessionCSRFMutationAllowed(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 	domain := a.siteDomain(r.Context(), r)
+	lease, leaseErr := a.workspace.Enter(domain, 0, true, r.Context().Done())
+	if leaseErr != nil {
+		http.Error(w, leaseErr.Error(), http.StatusConflict)
+		return
+	}
+	defer lease.Close(false)
+	if err := a.freezeWorkspaceEditable(r.Context(), domain); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	point, _, pointErr := a.loadFreezeCheckpoint(r.Context(), domain)
+	identifier := r.FormValue("checkpoint_id")
+	if pointErr != nil && !errors.Is(pointErr, sql.ErrNoRows) {
+		http.Error(w, pointErr.Error(), 503)
+		return
+	}
+	if (pointErr == nil && identifier != point.ID) || (pointErr != nil && identifier != "") {
+		http.Error(w, sitefreeze.ErrStale.Error(), http.StatusConflict)
+		return
+	}
 	progressToken := strings.TrimSpace(r.FormValue("publish_token"))
 	progressTracker := a.activePublishTracker()
 	publishProgress := func(stage, currentPath string, completed, total int, message string) {
@@ -47669,7 +48849,10 @@ func (a *App) publishDomain(w http.ResponseWriter, r *http.Request) {
 		log.Printf("publish pack updated domain=%s", domain)
 	}
 	publishProgress("unfreeze", "", totalSteps-1, totalSteps, "unfreeze")
-	a.setDomainFrozenState(r.Context(), domain, 0)
+	if err := a.finishFreezePublication(r.Context(), domain); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
 	publishProgress("done", "", totalSteps, totalSteps, "done")
 	a.logHostingSupportEvent(r.Context(), "site_published", "success", "", domain, fmt.Sprintf("updated=%d unchanged=%d", updatedPagesCount, skippedPagesCount))
 	log.Printf("publish completed domain=%s", domain)
@@ -47684,7 +48867,14 @@ func (a *App) publishPreviewJSON(w http.ResponseWriter, r *http.Request) {
 	domain := a.siteDomain(r.Context(), r)
 	totalPagesCount, changedPagesCount, changedPagePaths := a.countPublishChanges(r.Context(), domain)
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"total": totalPagesCount, "changed": changedPagesCount, "unchanged": totalPagesCount - changedPagesCount, "paths": changedPagePaths})
+	identifier := ""
+	if point, _, err := a.loadFreezeCheckpoint(r.Context(), domain); err == nil {
+		identifier = point.ID
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		http.Error(w, err.Error(), 503)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"total": totalPagesCount, "changed": changedPagesCount, "unchanged": totalPagesCount - changedPagesCount, "paths": changedPagePaths, "checkpoint_id": identifier})
 }
 
 func (a *App) countPublishChanges(ctx context.Context, domain string) (int, int, []string) {
@@ -48750,7 +49940,8 @@ ON CONFLICT(domain,file_name) DO UPDATE SET access_mode=excluded.access_mode,tok
 		if openErr != nil {
 			return rootRedirectPath, openErr
 		}
-		targetFile, createErr := a.createFileInsideStorage(targetFilePath)
+		temporaryPath := targetFilePath + ".sitebrush-import-" + randomAccessToken()
+		targetFile, createErr := a.createFileInsideStorage(temporaryPath)
 		if createErr != nil {
 			_ = entryReader.Close()
 			return rootRedirectPath, createErr
@@ -48759,12 +49950,16 @@ ON CONFLICT(domain,file_name) DO UPDATE SET access_mode=excluded.access_mode,tok
 		closeErr := targetFile.Close()
 		_ = entryReader.Close()
 		if copyErr != nil {
-			_ = a.removeInsideStorage(targetFilePath)
+			_ = a.removeInsideStorage(temporaryPath)
 			return rootRedirectPath, copyErr
 		}
 		if closeErr != nil {
-			_ = a.removeInsideStorage(targetFilePath)
+			_ = a.removeInsideStorage(temporaryPath)
 			return rootRedirectPath, closeErr
+		}
+		if renameErr := a.renameInsideStorage(temporaryPath, targetFilePath); renameErr != nil {
+			_ = a.removeInsideStorage(temporaryPath)
+			return rootRedirectPath, renameErr
 		}
 	}
 
@@ -49079,12 +50274,16 @@ func (a *App) siteTreeJSON(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"current_path": requestedReturnPath(r), "paths": pathList})
 }
 
-func (a *App) setDomainFrozenState(ctx context.Context, domain string, frozenState int) error {
+func (a *App) setDomainFrozenState(ctx context.Context, domain string, frozenState int) (resultErr error) {
 	policyDomain := domain
 	if err := a.publicPublicationRequest("protect", policyDomain); err != nil {
 		return err
 	}
-	defer a.publicPublicationRequest("unprotect", policyDomain)
+	defer func() {
+		if err := a.publicPublicationRequest("unprotect", policyDomain); resultErr == nil {
+			resultErr = err
+		}
+	}()
 	result, err := a.db.ExecContext(ctx, `UPDATE domain_states SET is_frozen=? WHERE domain=?`, frozenState, domain)
 	if err != nil {
 		return err
@@ -49131,6 +50330,18 @@ func hasSitebrushSessionCookie(r *http.Request) bool {
 func (a *App) openPublishedStaticFile(domain, pagePath string) (*os.File, error) {
 	return a.openPublicSiteFile(domain, "static", staticRelativePathForPage(cleanPath(pagePath)))
 }
+func (a *App) openSiteVersion(domain, digest string) (*os.File, error) {
+	decoded, err := hex.DecodeString(digest)
+	if err != nil || len(decoded) != 32 || digest != strings.ToLower(digest) {
+		return nil, errors.New("invalid file version")
+	}
+	root, err := os.OpenRoot(filepath.Dir(a.storageRootDir()))
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	return root.Open(sitefreeze.ObjectPath(domain, digest))
+}
 func (a *App) openPublicSiteFile(domain, directory, relative string) (*os.File, error) {
 	rootPath, err := a.storageJailRootPath()
 	if err != nil {
@@ -49151,6 +50362,28 @@ func (a *App) openPublicSiteFile(domain, directory, relative string) (*os.File, 
 func (a *App) servePublishedStaticFileFromDisk(w http.ResponseWriter, r *http.Request, domain, pagePath string, injectPublicMenu bool) bool {
 	pagePath = cleanPath(pagePath)
 	file, err := a.openPublishedStaticFile(domain, pagePath)
+	if decision, found := r.Context().Value(publicDecisionContextKey{}).(publicsite.Decision); found && decision.PageVersion != "" {
+		if file != nil {
+			file.Close()
+		}
+		file, err = a.openSiteVersion(domain, decision.PageVersion)
+	}
+	if decision, found := r.Context().Value(publicDecisionContextKey{}).(publicsite.Decision); found && decision.Versioned && decision.Frozen {
+		if decision.PageVersion == "" {
+			if file != nil {
+				file.Close()
+			}
+			if decision.Chroot.Path != "" {
+				return false
+			}
+			http.NotFound(w, r)
+			return true
+		}
+		if err != nil {
+			http.Error(w, "published version is unavailable", http.StatusServiceUnavailable)
+			return true
+		}
+	}
 	if err != nil {
 		return false
 	}
@@ -49167,7 +50400,7 @@ func (a *App) servePublishedStaticFileFromDisk(w http.ResponseWriter, r *http.Re
 			return false
 		}
 		a.logContentDelivery(w, "static-file")
-		http.ServeContent(w, r, info.Name(), info.ModTime(), file)
+		http.ServeContent(w, r, pagePath, info.ModTime(), file)
 		return true
 	}
 	a.logContentDelivery(w, "static-file")
@@ -51812,7 +53045,7 @@ func (a *App) publicMutationRequest(r *http.Request) bool {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
 		return true
 	}
-	for _, flag := range []string{"freeze", "publish", "delete", "revision_restore", "revision_delete", "revision_toggle", "logout"} {
+	for _, flag := range []string{"freeze", "unfreeze", "unfreeze_ws", "publish", "delete", "revision_restore", "revision_delete", "revision_toggle", "logout"} {
 		if hasQueryFlag(r, flag) {
 			return true
 		}
@@ -51848,6 +53081,81 @@ func (a *App) refreshAllPublicPolicies() error {
 		}
 	}
 	return nil
+}
+func applyFreezePolicy(policy *publicsite.Policy, point sitefreeze.Checkpoint) {
+	policy.Versioned = true
+	policy.PublishedVersions = make(map[string]string)
+	policy.ChrootVersions = make(map[string]string)
+	policy.FileVersions = make(map[string]string)
+	policy.FileAliases = make(map[string]string)
+	policy.ChrootAliases = make(map[string]string)
+	policy.ChrootListings = make(map[string][]string)
+	directoryEntries := make(map[string]map[string]bool)
+	for _, page := range point.Published {
+		policy.PublishedVersions[page.Path] = page.Hash
+	}
+	files := make(map[string]publicsite.FileRule, len(policy.Files))
+	for _, rule := range policy.Files {
+		files[rule.Name] = rule
+	}
+	for _, file := range point.Files {
+		if file.Tree == "chroot" {
+			current := file.Path
+			for depth := 0; depth < 256; depth++ {
+				parent := filepath.ToSlash(filepath.Dir(filepath.FromSlash(current)))
+				if directoryEntries[parent] == nil {
+					directoryEntries[parent] = make(map[string]bool)
+				}
+				name := filepath.Base(filepath.FromSlash(current))
+				if current != file.Path {
+					name += "/"
+				}
+				directoryEntries[parent][name] = true
+				if parent == "." || parent == current {
+					break
+				}
+				current = parent
+			}
+		}
+
+		if file.Link != "" {
+			resolved := filepath.ToSlash(filepath.Clean(filepath.Join(filepath.Dir(filepath.FromSlash(file.Path)), file.Link)))
+			if file.Tree == "files" {
+				policy.FileAliases[file.Path] = resolved
+			} else {
+				policy.ChrootAliases[file.Path] = resolved
+			}
+			continue
+		}
+		if file.Tree == "files" {
+			policy.FileVersions[file.Path] = file.Hash
+			rule := files[file.Path]
+			rule.Name = file.Path
+			rule.Version = file.Hash
+			rule.AccessMode = rule.Mode
+			if rule.AccessMode == "" {
+				rule.AccessMode = "public"
+			}
+			rule.Mode = "versioned"
+			files[file.Path] = rule
+		} else if file.Tree == "chroot" {
+			policy.ChrootVersions[file.Path] = file.Hash
+		}
+	}
+	for directory, entries := range directoryEntries {
+		names := make([]string, 0, len(entries))
+		for name := range entries {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		policy.ChrootListings[directory] = names
+	}
+
+	policy.Files = nil
+	for _, rule := range files {
+		policy.Files = append(policy.Files, rule)
+	}
+	sort.Slice(policy.Files, func(left, right int) bool { return policy.Files[left].Name < policy.Files[right].Name })
 }
 func (a *App) writePublicPolicy(domain string) error {
 	ctx := contextWithDomain(context.Background(), domain)
@@ -52005,6 +53313,33 @@ func (a *App) writePublicPolicy(domain string) error {
 	}); err != nil {
 		return err
 	}
+	policy.Hidden = make(map[string]bool)
+	rows, hiddenErr := a.db.QueryContext(ctx, `SELECT tree,path FROM site_hidden_assets WHERE domain=?`, domain)
+	if hiddenErr != nil {
+		return hiddenErr
+	}
+	for rows.Next() {
+		var tree, path string
+		if hiddenErr = rows.Scan(&tree, &path); hiddenErr != nil {
+			break
+		}
+		policy.Hidden[tree+"\x00"+path] = true
+	}
+	if hiddenErr == nil {
+		hiddenErr = rows.Err()
+	}
+	rows.Close()
+	if hiddenErr != nil {
+		return hiddenErr
+	}
+	if policy.Frozen {
+		point, _, pointErr := a.loadFreezeCheckpoint(ctx, domain)
+		if pointErr == nil {
+			applyFreezePolicy(&policy, point)
+		} else if !errors.Is(pointErr, sql.ErrNoRows) {
+			return pointErr
+		}
+	}
 	if err = publicsite.Write(a.storagePath, policy); err != nil {
 		return err
 	}
@@ -52080,7 +53415,7 @@ func publicOrdinaryRequest(r *http.Request) bool {
 	return true
 }
 func sitebrushControlQueryFlag(flag string) bool {
-	for _, selector := range []string{"ai", "ai_token", "ai_session", "ai_authorize", "mcp", "oauth", "login", "logout", "register", "recover", "profile", "email_confirm", "server_update", "server_update_ws", "visual", "edit", "text", "save", "files", "backup", "backup_import", "analytics", "expenses", "hosting_and_support", "billing", "settings", "domain", "freeze", "publish", "delete", "revisions", "revision_preview", "revision_restore", "revision_delete", "revision_toggle", "page_password", "page_password_unlock", "captcha", "grab", "grab_ws", "grab_events", "copy", "site_copy", "publish_events", "security_incident_report", "mail_delivery_ws"} {
+	for _, selector := range []string{"ai", "ai_token", "ai_session", "ai_authorize", "mcp", "oauth", "login", "logout", "register", "recover", "profile", "email_confirm", "server_update", "server_update_ws", "visual", "edit", "text", "save", "files", "backup", "backup_import", "analytics", "expenses", "hosting_and_support", "billing", "settings", "domain", "freeze", "unfreeze", "unfreeze_ws", "publish", "delete", "revisions", "revision_preview", "revision_restore", "revision_delete", "revision_toggle", "page_password", "page_password_unlock", "captcha", "grab", "grab_ws", "grab_events", "copy", "site_copy", "publish_events", "security_incident_report", "mail_delivery_ws"} {
 		if flag == selector {
 			return true
 		}
@@ -52107,6 +53442,10 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 			return true
 		}
 		return false
+	}
+	if decision.Hidden {
+		http.NotFound(w, r)
+		return true
 	}
 	if !paused && hasSitebrushSessionCookie(r) && (decision.Frozen || decision.File.Mode == "page_password" || fileName == "" && decision.Password.Path != "") {
 		return false
@@ -52160,6 +53499,12 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 			return false
 		}
 		file, openErr := a.openPublicSiteFile(domain, "files", filepath.FromSlash(fileName))
+		if decision.File.Version != "" {
+			if file != nil {
+				file.Close()
+			}
+			file, openErr = a.openSiteVersion(domain, decision.File.Version)
+		}
 		if openErr != nil {
 			http.NotFound(w, r)
 			return true
@@ -52170,7 +53515,7 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 			http.NotFound(w, r)
 			return true
 		}
-		http.ServeContent(w, r, info.Name(), info.ModTime(), file)
+		http.ServeContent(w, r, fileName, info.ModTime(), file)
 		return true
 	}
 	if decision.Password.Path != "" {
@@ -52189,6 +53534,36 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 		return true
 	}
 	if decision.Chroot.Path != "" {
+		if decision.ChrootDirectory {
+			type listingEntry struct{ Name, URL string }
+			entries := make([]listingEntry, 0, len(decision.ChrootEntries))
+			for _, name := range decision.ChrootEntries {
+				address := url.URL{Path: strings.TrimSuffix(r.URL.Path, "/") + "/" + name}
+				entries = append(entries, listingEntry{Name: name, URL: address.String()})
+			}
+			listing := template.Must(template.New("frozen-directory").Parse(`<!doctype html><meta charset="utf-8"><title>Directory listing</title><h1>Directory listing</h1><ul>{{range .}}<li><a href="{{.URL}}">{{.Name}}</a></li>{{end}}</ul>`))
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			if err := listing.Execute(w, entries); err != nil {
+				log.Printf("FREEZE directory response failed: %v", err)
+			}
+			return true
+		}
+
+		if decision.ChrootVersion != "" {
+			file, openErr := a.openSiteVersion(domain, decision.ChrootVersion)
+			if openErr != nil {
+				http.NotFound(w, r)
+				return true
+			}
+			defer file.Close()
+			info, statErr := file.Stat()
+			if statErr != nil {
+				http.NotFound(w, r)
+				return true
+			}
+			http.ServeContent(w, r, decision.ChrootName, info.ModTime(), file)
+			return true
+		}
 		location := DomainChrootLocation{URLPath: decision.Chroot.Path, DirectoryPath: decision.Chroot.Directory}
 		return a.serveKnownChrootLocation(w, r, domain, pagePath, location, strings.TrimPrefix(pagePath, decision.Chroot.Path))
 	}
@@ -52300,6 +53675,8 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 			return nil, errors.New("invalid public policy change")
 		}
 		switch change.Action {
+		case "freeze_versions":
+			return []byte("1"), nil
 		case "enable":
 			state, stateErr := front.Current()
 			if stateErr != nil {
@@ -52529,7 +53906,7 @@ func (a *App) publicVisitorAsset(requestPath string) bool {
 	if _, found := a.embeddedStaticAssets[relative]; !found {
 		return false
 	}
-	if relative == "visitor.js" || strings.HasPrefix(relative, "guest_menu.") || relative == "public_menu.js" || relative == "analytics.js" || relative == "site_copy.js" {
+	if relative == "visitor.js" || strings.HasPrefix(relative, "guest_menu.") || relative == "public_menu.js" || relative == "unfreeze.js" || relative == "analytics.js" || relative == "site_copy.js" {
 		return true
 	}
 	switch strings.ToLower(path.Ext(relative)) {

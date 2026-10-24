@@ -82,6 +82,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/publicsite"
 	"github.com/matveynator/sitebrush/v2/pkg/securitysync"
 	"github.com/matveynator/sitebrush/v2/pkg/sitebrushtemplate"
+	"github.com/matveynator/sitebrush/v2/pkg/sitefreeze"
 	"github.com/matveynator/sitebrush/v2/pkg/updateannounce"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/net/dns/dnsmessage"
@@ -28963,5 +28964,143 @@ func TestMCPOAuthChatGPTConnectUsesPinnedPublicClient(t *testing.T) {
 	tokens, err := application.aiCapabilities.ExchangeOAuthCode("localhost", clientID, resource, callback, destination.Query().Get("code"), verifier)
 	if err != nil || tokens.AccessToken == "" {
 		t.Fatal("ChatGPT PKCE exchange failed", err)
+	}
+}
+
+// The same restoration must work after a process stops between filesystem and
+// database stages, preserving the original edit session as private history.
+func TestSiteFreezeRestoresRevisionSelectionsAndRetainsFiles(t *testing.T) {
+	for _, resume := range []bool{false, true} {
+		t.Run(fmt.Sprintf("resume=%t", resume), func(t *testing.T) {
+			application := newPartitionedTestApplication(t)
+			stop := make(chan struct{})
+			application.workspace = sitefreeze.NewGate(stop)
+			t.Cleanup(func() { close(stop) })
+			domain := "freeze.example"
+			boundary := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), domain))
+			execute := func(query string, arguments ...any) {
+				t.Helper()
+				if _, err := application.db.ExecContext(boundary, query, arguments...); err != nil {
+					t.Fatal(err)
+				}
+			}
+			execute(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, "owner@example.org", "unused")
+			original := `<div class="SiteBrush-Template Shared">original A</div>`
+			draft := original + " draft before freeze"
+			second := `<div class="SiteBrush-Template Shared">different original B</div>`
+			for pagePath, body := range map[string]string{"/": draft, "/second": second} {
+				execute(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, pagePath, body)
+				execute(`INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, domain, pagePath, body, "before")
+				published := body
+				if pagePath == "/" {
+					published = original
+				}
+				execute(`INSERT INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, pagePath, published)
+			}
+			filename := filepath.Join(application.domainFilesDirForDomain(domain), "existing.txt")
+			if err := application.mkdirAllInsideStorage(filepath.Dir(filename), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := application.writeFileInsideStorage(filename, []byte("before"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			execute(`INSERT INTO file_access_rules(domain,file_name,access_mode,token,expires_at,single_use_left,token_use_count,protected_page_path) VALUES(?,?,?,?,?,?,?,?)`, domain, "existing.txt", "token", "old-token", "", 1, 0, "")
+			point, err := application.createFreezeCheckpoint(boundary, domain)
+			if err != nil {
+				t.Fatal(err)
+			}
+			again, err := application.createFreezeCheckpoint(boundary, domain)
+			if err != nil || again.ID != point.ID {
+				t.Fatalf("freeze replaced baseline: %v", err)
+			}
+			execute(`UPDATE pages SET html='edited' WHERE domain=?`, domain)
+			for _, pagePath := range []string{"/", "/second"} {
+				execute(`INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, domain, pagePath, "edited", "after")
+			}
+			execute(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,0)`, domain, "/new", "new", "new page")
+			execute(`INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, domain, "/new", "new page", "after")
+			execute(`UPDATE file_access_rules SET token='replacement-token',single_use_left=0,token_use_count=7 WHERE domain=?`, domain)
+			if err = application.writeAtomicStorageFile(filename, []byte("after")); err != nil {
+				t.Fatal(err)
+			}
+			newFile := filepath.Join(filepath.Dir(filename), "new.txt")
+			if err = application.writeAtomicStorageFile(newFile, []byte("retain new file")); err != nil {
+				t.Fatal(err)
+			}
+			preview, err := application.checkpointPreview(boundary, domain)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if preview.Total == 0 {
+				t.Fatal("missing changes")
+			}
+			if err = application.restoreFreezeCheckpoint(boundary, domain, point.ID, "stale-preview"); !errors.Is(err, sitefreeze.ErrStale) {
+				t.Fatalf("accepted stale preview: %v", err)
+			}
+			if resume {
+				current, captureErr := application.captureFreezeCheckpoint(boundary, domain, false)
+				if captureErr != nil {
+					t.Fatal(captureErr)
+				}
+				current.ID = randomAccessToken()
+				if err = application.saveFreezeCheckpoint(boundary, domain, current, "cancelled", false); err != nil {
+					t.Fatal(err)
+				}
+				if err = application.siteContentTransaction(boundary, func(transaction *sql.Tx) error {
+					return sitefreeze.Activate(transaction, domain, point.ID, "restoring/"+current.ID)
+				}, func(error) {}); err != nil {
+					t.Fatal(err)
+				}
+				// Reproduce a crash after some current views have already been restored.
+				execute(`DELETE FROM pages WHERE domain=? AND path='/new'`, domain)
+				if err = application.writeAtomicStorageFile(filename, []byte("before")); err != nil {
+					t.Fatal(err)
+				}
+				preview.Digest = "resume"
+			}
+			var beforeCount int
+			if err = application.db.QueryRowContext(boundary, `SELECT COUNT(*) FROM revisions WHERE domain=?`, domain).Scan(&beforeCount); err != nil {
+				t.Fatal(err)
+			}
+			epoch := application.workspace.Generation(domain)
+			if err = application.restoreFreezeCheckpoint(boundary, domain, point.ID, preview.Digest); err != nil {
+				t.Fatal(err)
+			}
+			for pagePath, expected := range map[string]string{"/": draft, "/second": second} {
+				var body string
+				if err = application.db.QueryRowContext(boundary, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&body); err != nil || body != expected {
+					t.Fatalf("restored %s=%q: %v", pagePath, body, err)
+				}
+			}
+			var published string
+			if err = application.db.QueryRowContext(boundary, `SELECT html FROM published_pages WHERE domain=? AND path='/'`, domain).Scan(&published); err != nil || published != original {
+				t.Fatalf("published a pre-existing draft: %q %v", published, err)
+			}
+			var afterCount int
+			if err = application.db.QueryRowContext(boundary, `SELECT COUNT(*) FROM revisions WHERE domain=?`, domain).Scan(&afterCount); err != nil || afterCount != beforeCount {
+				t.Fatalf("changed revision history: %d -> %d %v", beforeCount, afterCount, err)
+			}
+			if body, readErr := application.readFileInsideStorage(filename); readErr != nil || string(body) != "before" {
+				t.Fatalf("file not restored: %q %v", body, readErr)
+			}
+			if body, readErr := application.readFileInsideStorage(newFile); readErr != nil || string(body) != "retain new file" {
+				t.Fatalf("new file was removed: %q %v", body, readErr)
+			}
+			for _, hidden := range []struct{ tree, path string }{{"files", "new.txt"}, {"page", "/new"}} {
+				if found, hiddenErr := application.hiddenSiteAsset(boundary, domain, hidden.tree, hidden.path); hiddenErr != nil || !found {
+					t.Fatalf("not hidden: %+v %v", hidden, hiddenErr)
+				}
+			}
+			var token string
+			if err = application.db.QueryRowContext(boundary, `SELECT token FROM file_access_rules WHERE domain=? AND file_name=?`, domain, "existing.txt").Scan(&token); err != nil || token != "" {
+				t.Fatalf("revived a download token: %q %v", token, err)
+			}
+			if application.isDomainFrozen(boundary, domain) || application.workspace.Generation(domain) == epoch {
+				t.Fatal("freeze state or old task generation survived restoration")
+			}
+			if _, _, err = application.loadFreezeCheckpoint(boundary, domain); !errors.Is(err, sql.ErrNoRows) {
+				t.Fatalf("active checkpoint survived: %v", err)
+			}
+		})
 	}
 }

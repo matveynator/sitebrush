@@ -1,0 +1,12 @@
+<!doctype html>
+<html id="SiteBrush" lang="{{.LanguageCode}}" dir="{{.TextDirection}}">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{index .T "unfreeze_history"}}</title><link rel="stylesheet" href="/p/static/technical_pages.css"></head>
+<body><main data-sitebrush-unfreeze-configuration="{{.Configuration}}" class="technical-page" style="max-width:64rem;margin:2rem auto;padding:1rem">
+<h1>{{index .T "unfreeze_history"}}</h1>{{if .Configuration}}<button type="button" id="SiteBrushUnfreezeOpen">{{index .T "menu_unfreeze"}}</button>{{end}}<p>{{index .T "unfreeze_history_description"}}</p>
+{{range .History}}<details style="margin:1rem 0"><summary>{{.Date}} · {{.Status}}</summary>
+<h2>{{index $.T "unfreeze_page"}}</h2><ul>{{range .Pages}}<li><a href="{{.URL}}">{{.Path}}</a></li>{{end}}</ul>
+<h2>{{index $.T "unfreeze_files"}}</h2><ul>{{range .Files}}<li><a href="{{.URL}}">{{.Name}}</a></li>{{end}}</ul>
+</details>{{else}}<p>{{index .T "unfreeze_unavailable"}}</p>{{end}}
+<nav>{{if .Offset}}<a href="?unfreeze&amp;history&amp;offset={{.PreviousOffset}}">{{index .T "unfreeze_previous"}}</a>{{end}} {{if .HasNext}}<a href="?unfreeze&amp;history&amp;offset={{.NextOffset}}">{{index .T "unfreeze_next"}}</a>{{end}}</nav>
+<p><a href="/">{{index .T "unfreeze_home"}}</a></p>
+</main><script defer src="/p/static/unfreeze.js"></script></body></html>

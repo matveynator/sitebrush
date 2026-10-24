@@ -14,12 +14,13 @@ var ErrCanceled = errors.New("import session canceled")
 var ErrBusy = errors.New("import capacity unavailable")
 
 type Request struct {
-	Domain    string
-	Grant     string
-	SourceURL string
-	Path      string
-	Mode      string
-	Done      <-chan struct{}
+	WorkspaceEpoch uint64
+	Domain         string
+	Grant          string
+	SourceURL      string
+	Path           string
+	Mode           string
+	Done           <-chan struct{}
 }
 
 type Status struct {
@@ -97,6 +98,13 @@ func (worker *Worker) Exchange(action, id string, request Request) (Status, erro
 	}
 }
 
+func (worker *Worker) CancelDomain(domain string) error {
+	if worker == nil {
+		return nil
+	}
+	_, err := worker.Exchange("cancel_domain", "", Request{Domain: domain, Done: worker.finished})
+	return err
+}
 func (worker *Worker) Close() {
 	if worker == nil {
 		return
@@ -162,6 +170,18 @@ func (worker *Worker) run(runner Runner) {
 			job.updated = time.Now()
 			jobs[update.id] = job
 		case request := <-worker.requests:
+			if request.action == "cancel_domain" {
+				for identifier, job := range jobs {
+					if job.request.Domain == request.request.Domain && !job.finished && job.cancel != nil {
+						close(job.cancel)
+						job.cancel = nil
+						job.status.State = "canceling"
+						jobs[identifier] = job
+					}
+				}
+				request.reply <- response{}
+				continue
+			}
 			if request.action == "start" {
 				if running >= 4 || len(jobs) >= 128 || runner == nil || request.request.Domain == "" || request.request.Grant == "" {
 					request.reply <- response{err: ErrBusy}
