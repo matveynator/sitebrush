@@ -3445,13 +3445,14 @@ body.technical-page.analytics-page {
 /* Every account card participates in the same grid and box model. */
 .technical-page .profile-page .profile-account-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; width: 100%; max-width: none; }
 .technical-page .profile-page .profile-account-grid > :is(.profile-form,.authentication-card,.profile-account-card) { width: 100%; max-width: none; min-width: 0; margin: 0; box-sizing: border-box; }
-.technical-page .profile-account-grid > .profile-ai-card:last-child { grid-column: 1 / -1; }
 .technical-page .profile-pagination { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-block-start: 12px; }
 @media (max-width: 760px) { .technical-page .profile-page .profile-account-grid { grid-template-columns: minmax(0, 1fr); } }
 
 @media (min-width: 761px) {
  .technical-page .profile-account-grid > .profile-sessions-card { grid-column: 1; }
  .technical-page .profile-account-grid > .profile-admin-ip-card { grid-column: 2; }
+ .technical-page .profile-account-grid > .profile-ai-connect-card { grid-column: 1; }
+ .technical-page .profile-account-grid > .profile-ai-card { grid-column: 2; }
 }
 
 .account-captcha { display: grid; gap: .5rem; margin: 1rem 0; max-width: 100%; }

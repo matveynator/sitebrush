@@ -53071,9 +53071,18 @@ func (a *App) publicPublicationRequest(action, domain string) error {
 	if a.publicPublication == nil {
 		return nil
 	}
+	// Publication uses site identities, including localhost and IP addresses;
+	// certificate DNS validation would erase those identities.
+	domain = canonicalLocalDomain(domain)
+	switch action {
+	case "begin", "protect", "end", "unprotect", "refresh":
+		if domain == "" {
+			return errors.New("public publication requires a site domain")
+		}
+	}
 	reply := make(chan error, 1)
 	select {
-	case a.publicPublication <- publicPublicationTask{action: action, domain: normalizeDomainName(domain), reply: reply}:
+	case a.publicPublication <- publicPublicationTask{action: action, domain: domain, reply: reply}:
 	case <-a.publicPublicationDone:
 		return errors.New("publication process stopped")
 	}

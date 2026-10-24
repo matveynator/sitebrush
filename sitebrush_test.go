@@ -29429,3 +29429,55 @@ func TestSiteFreezeMigratesExistingControlPartition(t *testing.T) {
 		}
 	}
 }
+
+func TestSiteFreezePublicationKeepsLocalSiteIdentity(t *testing.T) {
+	for _, domain := range []string{"localhost", "192.0.2.44", "2001:db8::44"} {
+		t.Run(domain, func(t *testing.T) {
+			application := newPartitionedTestApplication(t)
+			boundary := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), domain))
+			if _, err := application.db.ExecContext(boundary, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, "owner@example.org", "unused"); err != nil {
+				t.Fatal(err)
+			}
+			if err := publicsite.Write(application.storagePath, publicsite.Policy{}); err == nil {
+				t.Fatal("publication accepted an empty site identity")
+			}
+			// Reproduce the orphan left by the previous DNS-only normalization.
+			orphan := publicsite.PolicyPath(application.storagePath, "")
+			if err := os.MkdirAll(filepath.Dir(orphan), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(orphan, []byte(`{"Domain":""}`), 0600); err != nil {
+				t.Fatal(err)
+			}
+			stop := make(chan struct{})
+			application.publicCatalog = publicsite.NewCatalog(application.storagePath, stop)
+			application.startPublicPublication(stop)
+			t.Cleanup(func() { close(stop); <-application.publicPublicationDone })
+			if err := application.publicCatalog.SetMemory(true); err != nil {
+				t.Fatal(err)
+			}
+			checkpoint, err := application.createFreezeCheckpoint(boundary, domain)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A failed older freeze may have committed its checkpoint before
+			// publication failed. Retrying must finish that same checkpoint.
+			if err = application.siteContentTransaction(boundary, func(transaction *sql.Tx) error {
+				return sitefreeze.Activate(transaction, domain, checkpoint.ID, "preparing")
+			}, func(error) {}); err != nil {
+				t.Fatal(err)
+			}
+			retried, retryErr := application.createFreezeCheckpoint(boundary, domain)
+			if retryErr != nil || retried.ID != checkpoint.ID {
+				t.Fatalf("freeze retry replaced or rejected the checkpoint: %v", retryErr)
+			}
+			if err = application.publicCatalog.SetMemory(true); err != nil {
+				t.Fatal(err)
+			}
+			decision := application.publicCatalog.Lookup(publicsite.Lookup{Host: domain, Path: "/"})
+			if !decision.Found || !decision.Frozen || !decision.Versioned || decision.Domain != domain {
+				t.Fatalf("local site identity lost during publication: %+v", decision)
+			}
+		})
+	}
+}

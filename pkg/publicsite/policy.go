@@ -143,6 +143,9 @@ func SetBlocked(root, domain string, blocked bool) error {
 	return syncPolicyDirectory(storage, name)
 }
 func Write(root string, policy Policy) error {
+	if strings.TrimSpace(policy.Domain) == "" {
+		return errors.New("public policy requires a site domain")
+	}
 	storage, err := os.OpenRoot(root)
 	if err != nil {
 		return err
@@ -585,7 +588,9 @@ func loadPolicies(root, domain string) (map[string]cachedPolicy, error) {
 		for {
 			entries, readErr := directory.ReadDir(128)
 			for _, entry := range entries {
-				if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
+				// Older publication code erased localhost/IP identities and wrote
+				// this orphan. It cannot describe any site or block valid policies.
+				if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") && entry.Name() != policyName("") {
 					names = append(names, entry.Name())
 				}
 			}

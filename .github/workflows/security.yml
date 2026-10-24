@@ -80,7 +80,7 @@ jobs:
       - name: Test embedded UI assets and existing freeze control schema
         run: >-
           go test -count=1 -timeout=120s .
-          -run '^Test(EmbeddedApplicationAssetsIgnoreSitePolicy|SiteFreezeMigratesExistingControlPartition)$'
+          -run '^Test(EmbeddedApplicationAssetsIgnoreSitePolicy|SiteFreezeMigratesExistingControlPartition|SiteFreezePublicationKeepsLocalSiteIdentity)$'
       - name: Database coverage details
         run: |
           set +e
