@@ -151,6 +151,7 @@ const sitebrushHTTPIdleTimeout = 65 * time.Second
 const sitebrushHTTPReadHeaderTimeout = 5 * time.Second
 const sitebrushHTTP10KeepAliveBufferLimit = 1024 * 1024
 const currentSiteDatabaseSchemaVersion = 14
+const legacySiteDataSchemaVersion = 13
 const siteDatabaseStartupMigrationTimeout = 30 * time.Second
 const pagePasswordSessionTTL = time.Hour
 const serviceMailRelayPath = "/?service_mail_relay"
@@ -11381,8 +11382,9 @@ func (a *App) migrate(ctx context.Context) error {
 	}
 
 	// Additive feature migrations must not replay legacy publication backfills
-	// over modern drafts on an otherwise complete generation-2 database.
-	needsDataMigration := schemaVersion < currentSiteDatabaseSchemaVersion || !legacyComplete
+	// over modern drafts. The legacy data boundary remains fixed while newer
+	// additive schemas advance independently.
+	needsDataMigration := schemaVersion < legacySiteDataSchemaVersion || !legacyComplete
 	if err := migrations.Run(migrationDatabase, "site-data-v12", []migrations.Step{{ID: "legacy-data-through-12", Revision: "1", Ensure: needsDataMigration, Recoverable: func() error {
 		if !needsDataMigration {
 			return nil
@@ -18705,14 +18707,12 @@ func (a *App) renderLoginPage(w http.ResponseWriter, r *http.Request, returnPath
 	translations := translationsForRequest(r)
 	domain := a.siteDomain(r.Context(), r)
 	passkeyStartURL := "?login&passkey_begin&return_path=" + url.QueryEscape(httpsecurity.LocalRedirectTarget(returnPath, "/"))
-	hasPasskeys := accountpasskey.Count(r.Context(), a.db, domain) > 0
-	passwordLoginURL := "?login&password_login=1&return_path=" + url.QueryEscape(httpsecurity.LocalRedirectTarget(returnPath, "/"))
+	_, _, passkeyOriginAllowed := accountPasskeyRP(r)
+	hasPasskeys := passkeyOriginAllowed && accountpasskey.Count(r.Context(), a.db, domain) > 0
 	a.render(w, r, "login.html", map[string]any{
 		"ReturnPath":           returnPath,
 		"Domain":               domain,
 		"HasPasskeys":          hasPasskeys,
-		"ShowPasswordForm":     !hasPasskeys || hasQueryFlag(r, "password_login") || r.Method == http.MethodPost,
-		"PasswordLoginURL":     passwordLoginURL,
 		"PasskeyStartURL":      passkeyStartURL,
 		"Email":                strings.TrimSpace(email),
 		"Status":               strings.TrimSpace(status),

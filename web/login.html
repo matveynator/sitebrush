@@ -11,12 +11,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{{index .T "login_title"}}</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-  <link href="/p/static/technical_pages.css" rel="stylesheet">
+  <link href="/p/static/technical_pages.css?v={{.CompileVersion}}" rel="stylesheet">
 </head>
 <body class="technical-page bg-body">
 <div class="container py-5 authentication-shell">
   <div class="page-header mb-4">
-    <h1 class="section-heading"><img src="/p/static/login.png" class="section-icon" alt=""><a href="/">{{.Domain}}</a> <small class="text-muted">| {{index .T "login_header"}}</small></h1>
+    <h1 class="section-heading"><a href="/">{{.Domain}}</a> <small class="text-muted">| {{index .T "login_header"}}</small></h1>
   </div>
   {{if .ShowTOTPForm}}
   <form class="authentication-card profile-form" method="post" action="?login">
@@ -47,20 +47,6 @@
     <div class="auth-actions"><button type="submit">{{index .T "login_submit"}}</button>{{if .Webmail.URL}}<a class="btn btn-outline-secondary" href="{{.Webmail.URL}}" target="_blank" rel="noopener noreferrer">{{index .T "setup_confirmation_open"}} {{.Webmail.Name}}</a>{{end}}<a href="?login">{{index .T "auth_request_again"}}</a></div>
   </form>
   {{else if .ShowForm}}
-  {{if .HasPasskeys}}
-  <div class="card card-body authentication-card mb-3" data-passkey-login-panel>
-    <div class="auth-method-heading auth-method-heading-login">
-      <img class="auth-method-illustration" src="/p/static/sitebrush-goofer-key-small.png" alt="" width="112" height="102">
-      <div class="auth-method-copy">
-        <h2 class="h5">{{index .T "auth_passkey_ready_title"}}</h2>
-        <p>{{index .T "auth_passkey_ready_text"}}</p>
-      </div>
-    </div>
-    <p id="SiteBrushPasskeyLoginStatus" class="text-danger" role="status"></p>
-    <button type="button" class="btn btn-primary" data-passkey-login data-passkey-start="{{.PasskeyStartURL}}" data-passkey-finish="?login&passkey_finish" data-passkey-status="#SiteBrushPasskeyLoginStatus" data-passkey-error="{{index .T "auth_passkey_failed"}}" data-passkey-unavailable="{{index .T "auth_passkey_unavailable"}}">{{index .T "auth_passkey_ready_button"}}</button>
-  </div>
-  {{end}}
-  {{if or .ShowPasswordForm (not .HasPasskeys)}}
   <form class="card card-body authentication-card" method="post" action="?login">
     <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
     <input type="hidden" name="return_path" value="{{.ReturnPath}}">
@@ -68,11 +54,13 @@
     <p><input type="email" name="email" autocomplete="username" required class="form-control" placeholder="{{index .T "login_email_placeholder"}}" value="{{.Email}}"></p>
     <p><input type="password" name="password" autocomplete="current-password" required class="form-control" placeholder="{{index .T "login_password_placeholder"}}"></p>
     <div><input type="submit" class="btn btn-primary" value="{{index .T "login_submit"}}"/></div>
+    {{if .HasPasskeys}}
+    <div class="auth-actions mt-3" data-passkey-login-panel>
+      <button type="button" class="btn btn-outline-secondary" data-passkey-login data-passkey-start="{{.PasskeyStartURL}}" data-passkey-finish="?login&passkey_finish" data-passkey-status="#SiteBrushPasskeyLoginStatus" data-passkey-error="{{index .T "auth_passkey_failed"}}" data-passkey-unavailable="{{index .T "auth_passkey_unavailable"}}">{{index .T "auth_passkey_login"}}</button>
+      <p id="SiteBrushPasskeyLoginStatus" class="text-danger" role="status"></p>
+    </div>
+    {{end}}
   </form>
-  {{else}}
-  {{if .Status}}<p class="text-danger" role="status">{{.Status}}</p>{{end}}
-  <p><a class="btn btn-outline-secondary" href="{{.PasswordLoginURL}}" data-password-fallback>{{index .T "auth_password_fallback"}}</a></p>
-  {{end}}
   {{else}}
   <div class="card card-body authentication-card">
     {{if .Status}}<div class="alert alert-{{if .StatusClass}}{{.StatusClass}}{{else}}warning{{end}}" role="alert">{{.Status}}</div>{{end}}
@@ -151,6 +139,6 @@
 
 <span hidden data-account-code-tools data-copy-label="{{index .T "auth_copy"}}" data-copy-success="{{index .T "auth_copied"}}" data-copy-error="{{index .T "auth_copy_failed"}}"></span>
 <script src="/p/static/account-forms.js" defer></script>
-<script src="/p/static/account-passkeys.js" defer></script>
+<script src="/p/static/account-passkeys.js?v={{.CompileVersion}}" defer></script>
 </body>
 </html>

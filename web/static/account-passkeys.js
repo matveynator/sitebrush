@@ -130,10 +130,7 @@
   if (loginButton) {
     passkeyLoginModel.available = passkeysSupported();
     renderPasskeyLogin(loginButton);
-    if (!passkeyLoginModel.available) {
-      var passwordFallback = document.querySelector('[data-password-fallback]');
-      if (passwordFallback) window.location.replace(passwordFallback.href);
-    } else {
+    if (passkeyLoginModel.available) {
       loginButton.addEventListener('click', async function startPasskeyLogin() {
         passkeyLoginModel.submitting = true;
         passkeyLoginModel.message = '';

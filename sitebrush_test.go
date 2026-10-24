@@ -17454,7 +17454,7 @@ func TestAccountLegacySessionsInvalidatedOnce(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := setSQLiteUserVersion(context.Background(), database, currentSiteDatabaseSchemaVersion-1); err != nil {
+	if err := setSQLiteUserVersion(context.Background(), database, legacySiteDataSchemaVersion-1); err != nil {
 		t.Fatal(err)
 	}
 	if err := application.migrate(context.Background()); err != nil {
@@ -17961,7 +17961,7 @@ func TestAdminIPOptInMigrationRunsForPreviousSchemaVersion(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := setSQLiteUserVersion(context.Background(), database, currentSiteDatabaseSchemaVersion-1); err != nil {
+	if err := setSQLiteUserVersion(context.Background(), database, legacySiteDataSchemaVersion-1); err != nil {
 		_ = database.Close()
 		t.Fatal(err)
 	}
@@ -17976,7 +17976,7 @@ func TestAdminIPOptInMigrationRunsForPreviousSchemaVersion(t *testing.T) {
 		return migrationApplication.migrate(contextWithDomain(ctx, domain))
 	}, results)
 	result := <-results
-	if result.kind != "applied" || result.previousVersion != currentSiteDatabaseSchemaVersion-1 || result.currentVersion != currentSiteDatabaseSchemaVersion {
+	if result.kind != "applied" || result.previousVersion != legacySiteDataSchemaVersion-1 || result.currentVersion != currentSiteDatabaseSchemaVersion {
 		t.Fatalf("migration result=%+v error=%v", result, result.err)
 	}
 
@@ -18053,7 +18053,7 @@ func TestAdminIPAllowlistIsOptInAndRejectsOtherAddresses(t *testing.T) {
 	}
 }
 
-func TestPasskeyReadyGreetingIsLocalizedAndUsesExistingLogin(t *testing.T) {
+func TestPasskeyAlternativeKeepsPasswordLoginAndCommonStyles(t *testing.T) {
 	application, database := newTestApplication(t)
 	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','owner@example.org','secret',1)`); err != nil {
 		t.Fatal(err)
@@ -18077,16 +18077,9 @@ func TestPasskeyReadyGreetingIsLocalizedAndUsesExistingLogin(t *testing.T) {
 			if !exists {
 				t.Fatalf("missing locale %s", language)
 			}
-			for _, key := range []string{"auth_passkey_ready_title", "auth_passkey_ready_text", "auth_passkey_ready_button"} {
-				if strings.TrimSpace(translations[key]) == "" {
-					t.Fatalf("missing local translation %s", key)
-				}
-				if language != "en" && translations[key] == translationCatalog["en"][key] {
-					t.Fatalf("untranslated greeting %s", key)
-				}
-			}
-			if language == "ru" && translations["auth_passkey_ready_title"]+" "+translations["auth_passkey_ready_text"]+" "+translations["auth_passkey_ready_button"] != "Отлично! У нас есть ключ доступа. Нажмите сюда, чтобы войти без пароля." {
-				t.Fatal("passkey greeting does not match the requested text")
+
+			if strings.TrimSpace(translations["auth_passkey_login"]) == "" {
+				t.Fatal("passkey action is not translated")
 			}
 			request := httptest.NewRequest(http.MethodGet, "https://example.org/?login&return_path=%2Fdocs", nil)
 			request.Header.Set("Accept-Language", language)
@@ -18096,15 +18089,17 @@ func TestPasskeyReadyGreetingIsLocalizedAndUsesExistingLogin(t *testing.T) {
 			if response.Code != http.StatusOK {
 				t.Fatalf("login status=%d", response.Code)
 			}
-			for _, key := range []string{"auth_passkey_ready_title", "auth_passkey_ready_text", "auth_passkey_ready_button"} {
-				if !strings.Contains(page, translations[key]) {
-					t.Fatalf("localized greeting not rendered: %s", key)
-				}
+
+			if !strings.Contains(page, translations["auth_passkey_login"]) || strings.Contains(page, translations["auth_passkey_ready_title"]) || strings.Contains(page, translations["auth_passkey_ready_text"]) {
+				t.Fatal("login claims a credential exists in this browser")
+			}
+			if strings.Contains(page, "/p/static/login.png") || !strings.Contains(page, "/p/static/technical_pages.css?v=") {
+				t.Fatal("login lost the common stylesheet or restored the unwanted icon")
 			}
 			if strings.Contains(page, translations["auth_passkey_offer_text"]) {
 				t.Fatal("login still offers to create a key")
 			}
-			if !strings.Contains(page, "data-passkey-login") || !strings.Contains(page, "return_path=%2Fdocs") || !strings.Contains(page, `data-passkey-finish="?login&passkey_finish"`) || strings.Contains(page, `name="password"`) || !strings.Contains(page, "data-password-fallback") {
+			if !strings.Contains(page, "data-passkey-login") || !strings.Contains(page, "return_path=%2Fdocs") || !strings.Contains(page, `data-passkey-finish="?login&passkey_finish"`) || !strings.Contains(page, `name="password"`) || !strings.Contains(page, `name="email"`) {
 				t.Fatal("existing login mechanisms or return path changed")
 			}
 			fallbackRequest := httptest.NewRequest(http.MethodGet, "https://example.org/?login&password_login=1&return_path=%2Fdocs", nil)
@@ -27840,7 +27835,12 @@ func TestAIImportDraftFailureRestoresAssetsAndQuota(t *testing.T) {
 func TestAISiteToolsMigrationPreservesHistoryAndUnpublishedDrafts(t *testing.T) {
 	application, database := newTestApplication(t)
 	for _, query := range []string{
-		`DELETE FROM application_migration_steps WHERE component='site-schema-v12' AND step_id IN ('page-pending-deletions','whole-site-import-draft-mode','file-access-page-password')`,
+		`DELETE FROM application_migration_steps WHERE component='site-schema-v12' AND ordinal >= (SELECT ordinal FROM application_migration_steps WHERE component='site-schema-v12' AND step_id='page-pending-deletions')`,
+		`DROP TABLE site_freeze_points`,
+		`DROP TABLE site_freeze_state`,
+		`DROP TABLE site_hidden_assets`,
+		`DROP TABLE site_freeze_protection`,
+		`PRAGMA user_version=13`,
 		`DROP TABLE page_pending_deletions`,
 		`ALTER TABLE whole_site_imports DROP COLUMN draft_only`,
 		`ALTER TABLE file_access_rules DROP COLUMN protected_page_path`,
