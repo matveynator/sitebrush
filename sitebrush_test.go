@@ -29027,6 +29027,29 @@ func TestSiteFreezeRestoresRevisionSelectionsAndRetainsFiles(t *testing.T) {
 			if err = application.writeAtomicStorageFile(newFile, []byte("retain new file")); err != nil {
 				t.Fatal(err)
 			}
+
+			policy := publicsite.Policy{Domain: domain, Frozen: true}
+			applyFreezePolicy(&policy, point)
+			if err = publicsite.Write(application.storagePath, policy); err != nil {
+				t.Fatal(err)
+			}
+			catalog := publicsite.NewCatalog(application.storagePath, stop)
+			if err = catalog.SetMemory(true); err != nil {
+				t.Fatal(err)
+			}
+			selected := catalog.Lookup(publicsite.Lookup{Host: domain, Path: "/p/existing.txt", File: "existing.txt"})
+			pinned, openErr := application.openSiteVersion(domain, selected.File.Version)
+			if openErr != nil {
+				t.Fatal(openErr)
+			}
+			pinnedBody, readErr := io.ReadAll(pinned)
+			pinned.Close()
+			if readErr != nil || string(pinnedBody) != "before" {
+				t.Fatalf("guest file changed during freeze: %q %v", pinnedBody, readErr)
+			}
+			if missing := catalog.Lookup(publicsite.Lookup{Host: domain, Path: "/p/new.txt", File: "new.txt"}); !missing.Hidden {
+				t.Fatal("new file was exposed before publication")
+			}
 			preview, err := application.checkpointPreview(boundary, domain)
 			if err != nil {
 				t.Fatal(err)
