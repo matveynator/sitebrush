@@ -3446,6 +3446,11 @@ body.technical-page.analytics-page {
 .technical-page .profile-page .profile-account-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; width: 100%; max-width: none; }
 .technical-page .profile-page .profile-account-grid > :is(.profile-form,.authentication-card,.profile-account-card) { width: 100%; max-width: none; min-width: 0; margin: 0; box-sizing: border-box; }
 .technical-page .profile-pagination { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-block-start: 12px; }
+.technical-page .freeze-history-list { display: grid; gap: 20px; margin-block: 20px; }
+.technical-page .freeze-history-point > summary { cursor: pointer; font-weight: 600; overflow-wrap: anywhere; }
+.technical-page .freeze-history-contents { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 20px; margin-block-start: 20px; }
+.technical-page .freeze-history-contents section { min-width: 0; }
+.technical-page .freeze-history-contents ul { padding-inline-start: 20px; overflow-wrap: anywhere; }
 @media (max-width: 760px) { .technical-page .profile-page .profile-account-grid { grid-template-columns: minmax(0, 1fr); } }
 
 @media (min-width: 761px) {

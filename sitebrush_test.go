@@ -29309,7 +29309,7 @@ func TestEmbeddedApplicationAssetsIgnoreSitePolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	required := make(map[string]bool)
-	for _, filename := range []string{"profile.html", "login.html", "domain_settings.html", "edit.html"} {
+	for _, filename := range []string{"profile.html", "login.html", "domain_settings.html", "edit.html", "unfreeze.html"} {
 		markup, readErr := fs.ReadFile(embeddedWebFiles, "web/"+filename)
 		if readErr != nil {
 			t.Fatal(readErr)
@@ -29481,6 +29481,35 @@ func TestSiteFreezePublicationKeepsLocalSiteIdentity(t *testing.T) {
 			decision := application.publicCatalog.Lookup(publicsite.Lookup{Host: domain, Path: "/"})
 			if !decision.Found || !decision.Frozen || !decision.Versioned || decision.Domain != domain {
 				t.Fatalf("local site identity lost during publication: %+v", decision)
+			}
+			// Reproduce cancellation that restored SQL but failed to refresh the
+			// public policy before removing its durable restoration journal.
+			archived, captureErr := application.captureFreezeCheckpoint(boundary, domain, false)
+			if captureErr != nil {
+				t.Fatal(captureErr)
+			}
+			archived.ID = randomAccessToken()
+			if err = application.saveFreezeCheckpoint(boundary, domain, archived, "cancelled", false); err != nil {
+				t.Fatal(err)
+			}
+			if err = application.siteContentTransaction(boundary, func(transaction *sql.Tx) error {
+				return sitefreeze.Activate(transaction, domain, checkpoint.ID, "restoring/"+archived.ID)
+			}, func(error) {}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = application.db.ExecContext(boundary, `UPDATE domain_states SET is_frozen=0 WHERE domain=?`, domain); err != nil {
+				t.Fatal(err)
+			}
+			application.recoverFreezeCheckpoints(boundary)
+			if _, _, err = application.loadFreezeCheckpoint(boundary, domain); !errors.Is(err, sql.ErrNoRows) {
+				t.Fatalf("interrupted cancellation did not finish: %v", err)
+			}
+			if err = application.freezeWorkspaceEditable(boundary, domain); err != nil {
+				t.Fatalf("recovered cancellation still blocks edits and copying: %v", err)
+			}
+			decision = application.publicCatalog.Lookup(publicsite.Lookup{Host: domain, Path: "/"})
+			if !decision.Found || decision.Frozen || decision.Domain != domain {
+				t.Fatalf("cancellation did not restore the public policy: %+v", decision)
 			}
 		})
 	}
