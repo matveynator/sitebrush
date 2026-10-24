@@ -48586,21 +48586,41 @@ func (a *App) freezeWorkspaceEditable(ctx context.Context, domain string) error 
 }
 
 func (a *App) recoverFreezeCheckpoints(ctx context.Context) {
-	domains := []string{}
+	// Several local host identities can share the fallback database. Its
+	// registry name alone does not enumerate the journals that need recovery.
+	databaseDomains := []string{""}
 	if a.siteDatabaseRouter != nil {
-		domains = a.siteDatabaseRouter.Domains(ctx)
-	} else {
-		rows, err := a.db.QueryContext(ctx, `SELECT domain FROM site_freeze_state`)
+		databaseDomains = a.siteDatabaseRouter.Domains(ctx)
+	}
+	domains := []string{}
+	seen := make(map[string]bool)
+	for _, databaseDomain := range databaseDomains {
+		boundary := ctx
+		if databaseDomain != "" {
+			boundary = contextWithDomain(ctx, databaseDomain)
+		}
+		rows, err := a.db.QueryContext(boundary, `SELECT domain FROM site_freeze_state`)
 		if err != nil {
-			return
+			a.logDomainEvent(databaseDomain, "FREEZE checkpoint discovery failed: %v", err)
+			continue
 		}
 		for rows.Next() {
 			var domain string
-			if rows.Scan(&domain) == nil {
+			if err = rows.Scan(&domain); err != nil {
+				break
+			}
+			if !seen[domain] {
+				seen[domain] = true
 				domains = append(domains, domain)
 			}
 		}
+		if err == nil {
+			err = rows.Err()
+		}
 		rows.Close()
+		if err != nil {
+			a.logDomainEvent(databaseDomain, "FREEZE checkpoint discovery failed: %v", err)
+		}
 	}
 	for _, domain := range domains {
 		boundary := contextWithDomain(ctx, domain)
