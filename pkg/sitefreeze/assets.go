@@ -118,6 +118,9 @@ func Retain(root *os.Root, domain, name string) error {
 	if err = root.Link(name, object); err == nil {
 		actual, _, verifyErr := HashFile(root, object)
 		if verifyErr == nil && actual == digest {
+			if err = syncParent(root, object); err != nil {
+				return err
+			}
 			return recordOrigin(root, object, name)
 		}
 		root.Remove(object)
@@ -149,16 +152,21 @@ func Restore(root *os.Root, domain, target string, version File) error {
 		if err := root.Symlink(version.Link, temporary); err != nil {
 			return err
 		}
-		return root.Rename(temporary, target)
+		if err := root.Rename(temporary, target); err != nil {
+			return err
+		}
+		return syncParent(root, target)
 	}
 	decoded, decodeErr := hex.DecodeString(version.Hash)
 	if !filepath.IsLocal(filepath.FromSlash(version.Path)) || decodeErr != nil || len(decoded) != 32 || version.Hash != strings.ToLower(version.Hash) {
 		return errors.New("invalid file version")
 	}
-	if digest, _, err := HashFile(root, target); err == nil && digest == version.Hash {
-		return nil
-	}
 	objectName := ObjectPath(domain, version.Hash)
+	if digest, _, err := HashFile(root, target); err == nil && digest == version.Hash {
+		if info, statErr := root.Stat(target); statErr == nil && info.Mode().Perm() == os.FileMode(version.Mode) {
+			return recordOrigin(root, objectName, target)
+		}
+	}
 	if info, statErr := root.Stat(objectName); statErr == nil && info.Mode().Perm() == os.FileMode(version.Mode) {
 		if err := root.MkdirAll(filepath.Dir(target), 0700); err != nil {
 			return err
@@ -174,6 +182,9 @@ func Restore(root *os.Root, domain, target string, version File) error {
 				return errors.New("corrupt retained file version")
 			}
 			if err := root.Rename(temporary, target); err != nil {
+				return err
+			}
+			if err := syncParent(root, target); err != nil {
 				return err
 			}
 			return recordOrigin(root, objectName, target)
@@ -217,6 +228,11 @@ func atomicCopy(root *os.Root, source io.Reader, target string, mode os.FileMode
 	if err = root.Rename(temporary, target); err != nil {
 		return err
 	}
+	return syncParent(root, target)
+}
+
+// A durable SQL checkpoint must never get ahead of its filesystem directory entries.
+func syncParent(root *os.Root, target string) error {
 	directory, err := root.Open(filepath.Dir(target))
 	if err != nil {
 		return err
