@@ -37,6 +37,7 @@ var (
 )
 
 type Request struct {
+	WorkspaceEpoch    uint64    `json:"-"`
 	DraftOnly         bool      `json:"-"`
 	PageOnly          bool      `json:"-"`
 	StrictVersion     bool      `json:"-"`

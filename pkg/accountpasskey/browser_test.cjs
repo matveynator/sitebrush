@@ -28,13 +28,15 @@ function loginBrowser(supported, hostname = 'site.example') {
     return {redirects,requests,credentials,loginButton,status,panel};
 }
 
-(async function verifyPasskeyPriorityAndFallback() {
+(async function verifyOptionalPasskeyAndPasswordFallback() {
     for (const unsupported of [loginBrowser(false),loginBrowser(true,'192.0.2.1')]) {
         assert.equal(unsupported.panel.hidden,true);
-        assert.match(unsupported.redirects[0],/password_login=1&return_path=%2Fdocs/);
+        assert.equal(unsupported.loginButton.hidden,true);
+        assert.equal(unsupported.redirects.length,0,'unsupported devices keep the visible password form without navigation');
+        assert.equal(unsupported.requests.length,0,'unsupported devices must not request a credential');
     }
     const supported = loginBrowser(true);
-    assert.equal(supported.redirects.length,0,'supported browsers must offer the key first');
+    assert.equal(supported.redirects.length,0,'the optional passkey action must wait for the user');
     await supported.loginButton.listeners.click();
     assert.ok(supported.requests[0].publicKey);
     assert.equal(supported.requests[0].password,undefined,'do not request password autofill during passkey sign-in');
@@ -45,5 +47,5 @@ function loginBrowser(supported, hostname = 'site.example') {
     assert.equal(cancelled.loginButton.disabled,false);
     assert.equal(cancelled.status.textContent,'Try the passkey again');
     assert.equal(cancelled.redirects.length,0,'cancelling the key leaves the explicit password fallback available');
-    console.log('Passkeys: primary credential request, unsupported-device fallback, cancellation and return path passed');
+    console.log('Passkeys: optional credential request, visible password fallback, cancellation and return path passed');
 })().catch(error=>{console.error(error);process.exitCode=1;});

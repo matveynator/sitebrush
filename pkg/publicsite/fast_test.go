@@ -198,3 +198,42 @@ func TestObservationsRetainAcknowledgedBoundaryAndDropLater(t *testing.T) {
 		t.Fatal("invalid observation request accepted")
 	}
 }
+
+func TestFrozenCatalogResolvesPinnedFolderLinksAndHidesNewAssets(t *testing.T) {
+	for _, memory := range []bool{false, true} {
+		t.Run(strconv.FormatBool(memory), func(t *testing.T) {
+			root := t.TempDir()
+			stop := make(chan struct{})
+			defer close(stop)
+			policy := Policy{Domain: "frozen.test", Frozen: true, Versioned: true, Chroots: []Chroot{{Path: "/downloads", Directory: "builds"}}, ChrootAliases: map[string]string{"builds/latest": "builds/943"}, ChrootVersions: map[string]string{"builds/943/index.html": "html-version", "builds/943/app.zip": "zip-version"}, ChrootListings: map[string][]string{"builds/943": {"app.zip", "index.html"}}}
+			if err := Write(root, policy); err != nil {
+				t.Fatal(err)
+			}
+			catalog := NewCatalog(root, stop)
+			if memory {
+				if err := catalog.SetMemory(true); err != nil {
+					t.Fatal(err)
+				}
+			}
+			selected := catalog.Lookup(Lookup{Host: policy.Domain, Path: "/downloads/latest/"})
+			if selected.Hidden || selected.ChrootVersion != "html-version" || selected.ChrootName != "index.html" {
+				t.Fatalf("lost pinned directory index: %+v", selected)
+			}
+			if missing := catalog.Lookup(Lookup{Host: policy.Domain, Path: "/downloads/new.zip"}); !missing.Hidden {
+				t.Fatal("new live file was exposed")
+			}
+			policy.Frozen = false
+			policy.Versioned = false
+			policy.Hidden = map[string]bool{"chroot\x00builds/new": true}
+			if err := Write(root, policy); err != nil {
+				t.Fatal(err)
+			}
+			if err := catalog.Reload(policy.Domain); err != nil {
+				t.Fatal(err)
+			}
+			if hidden := catalog.Lookup(Lookup{Host: policy.Domain, Path: "/downloads/new/child.zip"}); !hidden.Hidden {
+				t.Fatal("hidden directory link exposed a child")
+			}
+		})
+	}
+}

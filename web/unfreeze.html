@@ -1,0 +1,53 @@
+<!doctype html>
+<html id="SiteBrush" lang="{{.LanguageCode}}" dir="{{.TextDirection}}">
+<head>
+  <script>
+  (function applySystemThemeMode() {
+    const prefersDarkMode = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    document.documentElement.setAttribute('data-bs-theme', prefersDarkMode ? 'dark' : 'light');
+  })();
+  </script>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{index .T "unfreeze_history"}}</title>
+  <link rel="stylesheet" href="/p/static/technical_pages.css?v={{.CompileVersion}}">
+</head>
+<body class="technical-page">
+<main class="container freeze-history" data-sitebrush-unfreeze-configuration="{{.Configuration}}">
+  <div class="page-header">
+    <h1 class="section-heading"><a href="/">{{.Domain}}</a> <small class="text-muted">| {{index .T "unfreeze_history"}}</small></h1>
+    <a class="btn btn-outline-secondary" href="/">{{index .T "unfreeze_home"}}</a>
+  </div>
+  <section class="dns-box">
+    <p class="hint">{{index .T "unfreeze_history_description"}}</p>
+    {{if .Configuration}}<button type="button" id="SiteBrushUnfreezeOpen" class="btn btn-outline-danger">{{index .T "menu_unfreeze"}}</button>{{end}}
+  </section>
+  <div class="freeze-history-list">
+    {{range .History}}
+    <details class="dns-box freeze-history-point">
+      <summary><time datetime="{{.Date}}">{{.Date}}</time> · {{.Status}}</summary>
+      <div class="freeze-history-contents">
+        <section>
+          <h2>{{index $.T "unfreeze_page"}}</h2>
+          <ul>{{range .Pages}}<li><a href="{{.URL}}">{{.Path}}</a></li>{{end}}</ul>
+        </section>
+        <section>
+          <h2>{{index $.T "unfreeze_files"}}</h2>
+          <ul>{{range .Files}}<li><a href="{{.URL}}">{{.Name}}</a></li>{{end}}</ul>
+        </section>
+      </div>
+    </details>
+    {{else}}
+    <p class="hint">{{index .T "unfreeze_unavailable"}}</p>
+    {{end}}
+  </div>
+  {{if or .Offset .HasNext}}
+  <nav class="profile-pagination" aria-label="{{index .T "account_pagination"}}">
+    {{if .Offset}}<a class="btn btn-outline-secondary" href="?unfreeze&amp;history&amp;offset={{.PreviousOffset}}">{{index .T "unfreeze_previous"}}</a>{{end}}
+    {{if .HasNext}}<a class="btn btn-outline-secondary" href="?unfreeze&amp;history&amp;offset={{.NextOffset}}">{{index .T "unfreeze_next"}}</a>{{end}}
+  </nav>
+  {{end}}
+</main>
+<script defer src="/p/static/unfreeze.js?v={{.CompileVersion}}"></script>
+</body>
+</html>

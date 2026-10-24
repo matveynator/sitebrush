@@ -82,6 +82,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/publicsite"
 	"github.com/matveynator/sitebrush/v2/pkg/securitysync"
 	"github.com/matveynator/sitebrush/v2/pkg/sitebrushtemplate"
+	"github.com/matveynator/sitebrush/v2/pkg/sitefreeze"
 	"github.com/matveynator/sitebrush/v2/pkg/updateannounce"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/net/dns/dnsmessage"
@@ -17453,7 +17454,7 @@ func TestAccountLegacySessionsInvalidatedOnce(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := setSQLiteUserVersion(context.Background(), database, currentSiteDatabaseSchemaVersion-1); err != nil {
+	if err := setSQLiteUserVersion(context.Background(), database, legacySiteDataSchemaVersion-1); err != nil {
 		t.Fatal(err)
 	}
 	if err := application.migrate(context.Background()); err != nil {
@@ -17960,7 +17961,7 @@ func TestAdminIPOptInMigrationRunsForPreviousSchemaVersion(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := setSQLiteUserVersion(context.Background(), database, currentSiteDatabaseSchemaVersion-1); err != nil {
+	if err := setSQLiteUserVersion(context.Background(), database, legacySiteDataSchemaVersion-1); err != nil {
 		_ = database.Close()
 		t.Fatal(err)
 	}
@@ -17975,7 +17976,7 @@ func TestAdminIPOptInMigrationRunsForPreviousSchemaVersion(t *testing.T) {
 		return migrationApplication.migrate(contextWithDomain(ctx, domain))
 	}, results)
 	result := <-results
-	if result.kind != "applied" || result.previousVersion != currentSiteDatabaseSchemaVersion-1 || result.currentVersion != currentSiteDatabaseSchemaVersion {
+	if result.kind != "applied" || result.previousVersion != legacySiteDataSchemaVersion-1 || result.currentVersion != currentSiteDatabaseSchemaVersion {
 		t.Fatalf("migration result=%+v error=%v", result, result.err)
 	}
 
@@ -18052,7 +18053,7 @@ func TestAdminIPAllowlistIsOptInAndRejectsOtherAddresses(t *testing.T) {
 	}
 }
 
-func TestPasskeyReadyGreetingIsLocalizedAndUsesExistingLogin(t *testing.T) {
+func TestPasskeyAlternativeKeepsPasswordLoginAndCommonStyles(t *testing.T) {
 	application, database := newTestApplication(t)
 	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','owner@example.org','secret',1)`); err != nil {
 		t.Fatal(err)
@@ -18076,16 +18077,9 @@ func TestPasskeyReadyGreetingIsLocalizedAndUsesExistingLogin(t *testing.T) {
 			if !exists {
 				t.Fatalf("missing locale %s", language)
 			}
-			for _, key := range []string{"auth_passkey_ready_title", "auth_passkey_ready_text", "auth_passkey_ready_button"} {
-				if strings.TrimSpace(translations[key]) == "" {
-					t.Fatalf("missing local translation %s", key)
-				}
-				if language != "en" && translations[key] == translationCatalog["en"][key] {
-					t.Fatalf("untranslated greeting %s", key)
-				}
-			}
-			if language == "ru" && translations["auth_passkey_ready_title"]+" "+translations["auth_passkey_ready_text"]+" "+translations["auth_passkey_ready_button"] != "Отлично! У нас есть ключ доступа. Нажмите сюда, чтобы войти без пароля." {
-				t.Fatal("passkey greeting does not match the requested text")
+
+			if strings.TrimSpace(translations["auth_passkey_login"]) == "" {
+				t.Fatal("passkey action is not translated")
 			}
 			request := httptest.NewRequest(http.MethodGet, "https://example.org/?login&return_path=%2Fdocs", nil)
 			request.Header.Set("Accept-Language", language)
@@ -18095,15 +18089,17 @@ func TestPasskeyReadyGreetingIsLocalizedAndUsesExistingLogin(t *testing.T) {
 			if response.Code != http.StatusOK {
 				t.Fatalf("login status=%d", response.Code)
 			}
-			for _, key := range []string{"auth_passkey_ready_title", "auth_passkey_ready_text", "auth_passkey_ready_button"} {
-				if !strings.Contains(page, translations[key]) {
-					t.Fatalf("localized greeting not rendered: %s", key)
-				}
+
+			if !strings.Contains(page, translations["auth_passkey_login"]) || strings.Contains(page, translations["auth_passkey_ready_title"]) || strings.Contains(page, translations["auth_passkey_ready_text"]) {
+				t.Fatal("login claims a credential exists in this browser")
+			}
+			if strings.Contains(page, "/p/static/login.png") || !strings.Contains(page, "/p/static/technical_pages.css?v=") {
+				t.Fatal("login lost the common stylesheet or restored the unwanted icon")
 			}
 			if strings.Contains(page, translations["auth_passkey_offer_text"]) {
 				t.Fatal("login still offers to create a key")
 			}
-			if !strings.Contains(page, "data-passkey-login") || !strings.Contains(page, "return_path=%2Fdocs") || !strings.Contains(page, `data-passkey-finish="?login&passkey_finish"`) || strings.Contains(page, `name="password"`) || !strings.Contains(page, "data-password-fallback") {
+			if !strings.Contains(page, "data-passkey-login") || !strings.Contains(page, "return_path=%2Fdocs") || !strings.Contains(page, `data-passkey-finish="?login&passkey_finish"`) || !strings.Contains(page, `name="password"`) || !strings.Contains(page, `name="email"`) {
 				t.Fatal("existing login mechanisms or return path changed")
 			}
 			fallbackRequest := httptest.NewRequest(http.MethodGet, "https://example.org/?login&password_login=1&return_path=%2Fdocs", nil)
@@ -27790,6 +27786,9 @@ func TestAIImportDraftFailureRestoresAssetsAndQuota(t *testing.T) {
 			if err := application.writeAtomicStorageFile(filename, []byte("original")); err != nil {
 				t.Fatal(err)
 			}
+			if _, err := application.createFreezeCheckpoint(boundary, "localhost"); err != nil {
+				t.Fatal(err)
+			}
 			before := application.domainStorageUsage(boundary, "localhost")
 			owner := application.db.(interface {
 				WriteTransactionWithFinish(context.Context, func(*sql.Tx) error, func(error)) error
@@ -27839,7 +27838,12 @@ func TestAIImportDraftFailureRestoresAssetsAndQuota(t *testing.T) {
 func TestAISiteToolsMigrationPreservesHistoryAndUnpublishedDrafts(t *testing.T) {
 	application, database := newTestApplication(t)
 	for _, query := range []string{
-		`DELETE FROM application_migration_steps WHERE component='site-schema-v12' AND step_id IN ('page-pending-deletions','whole-site-import-draft-mode','file-access-page-password')`,
+		`DELETE FROM application_migration_steps WHERE component='site-schema-v12' AND ordinal >= (SELECT ordinal FROM application_migration_steps WHERE component='site-schema-v12' AND step_id='page-pending-deletions')`,
+		`DROP TABLE site_freeze_points`,
+		`DROP TABLE site_freeze_state`,
+		`DROP TABLE site_hidden_assets`,
+		`DROP TABLE site_freeze_protection`,
+		`PRAGMA user_version=13`,
 		`DROP TABLE page_pending_deletions`,
 		`ALTER TABLE whole_site_imports DROP COLUMN draft_only`,
 		`ALTER TABLE file_access_rules DROP COLUMN protected_page_path`,
@@ -28963,5 +28967,550 @@ func TestMCPOAuthChatGPTConnectUsesPinnedPublicClient(t *testing.T) {
 	tokens, err := application.aiCapabilities.ExchangeOAuthCode("localhost", clientID, resource, callback, destination.Query().Get("code"), verifier)
 	if err != nil || tokens.AccessToken == "" {
 		t.Fatal("ChatGPT PKCE exchange failed", err)
+	}
+}
+
+// The same restoration must work after a process stops between filesystem and
+// database stages, preserving the original edit session as private history.
+func TestSiteFreezeRestoresRevisionSelectionsAndRetainsFiles(t *testing.T) {
+	for _, resume := range []bool{false, true} {
+		t.Run(fmt.Sprintf("resume=%t", resume), func(t *testing.T) {
+			application := newPartitionedTestApplication(t)
+			stop := make(chan struct{})
+			application.workspace = sitefreeze.NewGate(stop)
+			t.Cleanup(func() { close(stop) })
+			domain := "freeze.example"
+			boundary := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), domain))
+			execute := func(query string, arguments ...any) {
+				t.Helper()
+				if _, err := application.db.ExecContext(boundary, query, arguments...); err != nil {
+					t.Fatal(err)
+				}
+			}
+			execute(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, "owner@example.org", "unused")
+			original := `<div class="SiteBrush-Template Shared">original A</div>`
+			draft := original + " draft before freeze"
+			second := `<div class="SiteBrush-Template Shared">different original B</div>`
+			for pagePath, body := range map[string]string{"/": draft, "/second": second} {
+				execute(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, pagePath, body)
+				execute(`INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, domain, pagePath, body, "before")
+				published := body
+				if pagePath == "/" {
+					published = original
+				}
+				execute(`INSERT INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, pagePath, published)
+			}
+			filename := filepath.Join(application.domainFilesDirForDomain(domain), "existing.txt")
+			if err := application.mkdirAllInsideStorage(filepath.Dir(filename), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := application.writeFileInsideStorage(filename, []byte("before"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			execute(`INSERT INTO file_access_rules(domain,file_name,access_mode,token,expires_at,single_use_left,token_use_count,protected_page_path) VALUES(?,?,?,?,?,?,?,?)`, domain, "existing.txt", "token", "old-token", "", 1, 0, "")
+			point, err := application.createFreezeCheckpoint(boundary, domain)
+			if err != nil {
+				t.Fatal(err)
+			}
+			again, err := application.createFreezeCheckpoint(boundary, domain)
+			if err != nil || again.ID != point.ID {
+				t.Fatalf("freeze replaced baseline: %v", err)
+			}
+			execute(`UPDATE pages SET html='edited' WHERE domain=?`, domain)
+			for _, pagePath := range []string{"/", "/second"} {
+				execute(`INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, domain, pagePath, "edited", "after")
+			}
+			execute(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,0)`, domain, "/new", "new", "new page")
+			execute(`INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, domain, "/new", "new page", "after")
+			execute(`UPDATE file_access_rules SET token='replacement-token',single_use_left=0,token_use_count=7 WHERE domain=?`, domain)
+			if err = application.writeAtomicStorageFile(filename, []byte("after")); err != nil {
+				t.Fatal(err)
+			}
+			newFile := filepath.Join(filepath.Dir(filename), "new.txt")
+			if err = application.writeAtomicStorageFile(newFile, []byte("retain new file")); err != nil {
+				t.Fatal(err)
+			}
+
+			newStatic := filepath.Join(application.domainStaticDir(domain), staticRelativePathForPage("/new"))
+			if err = application.mkdirAllInsideStorage(filepath.Dir(newStatic), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err = application.writeAtomicStorageFile(newStatic, []byte("must remain private after cancellation")); err != nil {
+				t.Fatal(err)
+			}
+			policy := publicsite.Policy{Domain: domain, Frozen: true}
+			applyFreezePolicy(&policy, point)
+			if err = publicsite.Write(application.storagePath, policy); err != nil {
+				t.Fatal(err)
+			}
+			catalog := publicsite.NewCatalog(application.storagePath, stop)
+			if err = catalog.SetMemory(true); err != nil {
+				t.Fatal(err)
+			}
+			selected := catalog.Lookup(publicsite.Lookup{Host: domain, Path: "/p/existing.txt", File: "existing.txt"})
+			pinned, openErr := application.openSiteVersion(domain, selected.File.Version)
+			if openErr != nil {
+				t.Fatal(openErr)
+			}
+			pinnedBody, readErr := io.ReadAll(pinned)
+			pinned.Close()
+			if readErr != nil || string(pinnedBody) != "before" {
+				t.Fatalf("guest file changed during freeze: %q %v", pinnedBody, readErr)
+			}
+			if missing := catalog.Lookup(publicsite.Lookup{Host: domain, Path: "/p/new.txt", File: "new.txt"}); !missing.Hidden {
+				t.Fatal("new file was exposed before publication")
+			}
+			preview, err := application.checkpointPreview(boundary, domain)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if preview.Total == 0 {
+				t.Fatal("missing changes")
+			}
+			if err = application.restoreFreezeCheckpoint(boundary, domain, point.ID, "stale-preview"); !errors.Is(err, sitefreeze.ErrStale) {
+				t.Fatalf("accepted stale preview: %v", err)
+			}
+			if resume {
+				current, captureErr := application.captureFreezeCheckpoint(boundary, domain, false)
+				if captureErr != nil {
+					t.Fatal(captureErr)
+				}
+				current.ID = randomAccessToken()
+				if err = application.saveFreezeCheckpoint(boundary, domain, current, "cancelled", false); err != nil {
+					t.Fatal(err)
+				}
+				if err = application.siteContentTransaction(boundary, func(transaction *sql.Tx) error {
+					return sitefreeze.Activate(transaction, domain, point.ID, "restoring/"+current.ID)
+				}, func(error) {}); err != nil {
+					t.Fatal(err)
+				}
+				// Reproduce a crash after some current views have already been restored.
+				execute(`DELETE FROM pages WHERE domain=? AND path='/new'`, domain)
+				if err = application.writeAtomicStorageFile(filename, []byte("before")); err != nil {
+					t.Fatal(err)
+				}
+				preview.Digest = "resume"
+			}
+			var beforeCount int
+			if err = application.db.QueryRowContext(boundary, `SELECT COUNT(*) FROM revisions WHERE domain=?`, domain).Scan(&beforeCount); err != nil {
+				t.Fatal(err)
+			}
+			epoch := application.workspace.Generation(domain)
+			if err = application.restoreFreezeCheckpoint(boundary, domain, point.ID, preview.Digest); err != nil {
+				t.Fatal(err)
+			}
+			for pagePath, expected := range map[string]string{"/": draft, "/second": second} {
+				var body string
+				if err = application.db.QueryRowContext(boundary, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&body); err != nil || body != expected {
+					t.Fatalf("restored %s=%q: %v", pagePath, body, err)
+				}
+			}
+			var published string
+			if err = application.db.QueryRowContext(boundary, `SELECT html FROM published_pages WHERE domain=? AND path='/'`, domain).Scan(&published); err != nil || published != original {
+				t.Fatalf("published a pre-existing draft: %q %v", published, err)
+			}
+			var afterCount int
+			if err = application.db.QueryRowContext(boundary, `SELECT COUNT(*) FROM revisions WHERE domain=?`, domain).Scan(&afterCount); err != nil || afterCount != beforeCount {
+				t.Fatalf("changed revision history: %d -> %d %v", beforeCount, afterCount, err)
+			}
+			if body, readErr := application.readFileInsideStorage(filename); readErr != nil || string(body) != "before" {
+				t.Fatalf("file not restored: %q %v", body, readErr)
+			}
+			if body, readErr := application.readFileInsideStorage(newFile); readErr != nil || string(body) != "retain new file" {
+				t.Fatalf("new file was removed: %q %v", body, readErr)
+			}
+			for _, hidden := range []struct{ tree, path string }{{"files", "new.txt"}, {"page", "/new"}} {
+				if found, hiddenErr := application.hiddenSiteAsset(boundary, domain, hidden.tree, hidden.path); hiddenErr != nil || !found {
+					t.Fatalf("not hidden: %+v %v", hidden, hiddenErr)
+				}
+			}
+			var token string
+			if err = application.db.QueryRowContext(boundary, `SELECT token FROM file_access_rules WHERE domain=? AND file_name=?`, domain, "existing.txt").Scan(&token); err != nil || token != "" {
+				t.Fatalf("revived a download token: %q %v", token, err)
+			}
+			if application.isDomainFrozen(boundary, domain) || application.workspace.Generation(domain) == epoch {
+				t.Fatal("freeze state or old task generation survived restoration")
+			}
+			if _, _, err = application.loadFreezeCheckpoint(boundary, domain); !errors.Is(err, sql.ErrNoRows) {
+				t.Fatalf("active checkpoint survived: %v", err)
+			}
+			application.publicCatalog = catalog
+			if err = application.writePublicPolicy(domain); err != nil {
+				t.Fatal(err)
+			}
+			publicOnly := &App{storagePath: application.storagePath, publicCatalog: catalog}
+			for _, requestPath := range []string{"/new", "/new.html", "/p/new.txt"} {
+				response := httptest.NewRecorder()
+				request := httptest.NewRequest(http.MethodGet, "https://"+domain+requestPath, nil)
+				if !publicOnly.servePublicPublished(response, request, false) || response.Code != http.StatusNotFound {
+					t.Fatalf("hidden URL %s returned %d: %s", requestPath, response.Code, response.Body.String())
+				}
+			}
+
+		})
+	}
+}
+
+func TestSiteFreezeDeletedProtectedFilesAndEmbeddedAssets(t *testing.T) {
+	for _, mode := range []string{"token", "single_use", "timer", "page_password", "public"} {
+		t.Run(mode, func(t *testing.T) {
+			root := t.TempDir()
+			domain := "protected.example"
+			body := []byte("retained confidential contents")
+			digest := sha256.Sum256(body)
+			hash := hex.EncodeToString(digest[:])
+			filename := filepath.Join(root, sitefreeze.ObjectPath(domain, hash))
+			if err := os.MkdirAll(filepath.Dir(filename), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filename, body, 0600); err != nil {
+				t.Fatal(err)
+			}
+			point := sitefreeze.Checkpoint{Files: []sitefreeze.File{{Tree: "files", Path: "secret.txt", Hash: hash}}, Properties: []sitefreeze.Property{{Table: "file_access_rules", Columns: []string{"file_name", "access_mode"}, Rows: [][]any{{"secret.txt", mode}}}}}
+			policy := publicsite.Policy{Domain: domain, Frozen: true}
+			// Deletion removes the live row. The retained body must not lose protection.
+			applyFreezePolicy(&policy, point)
+			if err := publicsite.Write(root, policy); err != nil {
+				t.Fatal(err)
+			}
+			stop := make(chan struct{})
+			defer close(stop)
+			application := &App{storagePath: root, publicCatalog: publicsite.NewCatalog(root, stop), embeddedStaticAssets: map[string]embeddedStaticAsset{}}
+			if err := application.publicCatalog.SetMemory(true); err != nil {
+				t.Fatal(err)
+			}
+			response := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodGet, "https://"+domain+"/p/secret.txt", nil)
+			if !application.servePublicPublished(response, request, false) {
+				t.Fatal("retained file fell through to a live-rule fallback")
+			}
+			expected := http.StatusNotFound
+			if mode == "public" {
+				expected = http.StatusOK
+			}
+			if response.Code != expected {
+				t.Fatalf("deleted %s file returned %d, want %d: %q", mode, response.Code, expected, response.Body.String())
+			}
+			if mode != "public" && strings.Contains(response.Body.String(), string(body)) {
+				t.Fatal("confidential retained body was exposed")
+			}
+			// Both anonymous and owner bootstrap requests bypass the site's asset versions.
+			for _, script := range []string{"visitor.js", "guest_menu.en.js", "unfreeze.js"} {
+				application.embeddedStaticAssets[script] = embeddedStaticAsset{body: []byte("/* embedded */"), contentType: "text/javascript"}
+				for _, authenticated := range []bool{false, true} {
+					request = httptest.NewRequest(http.MethodGet, "https://"+domain+"/p/static/"+script, nil)
+					if authenticated {
+						request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "owner-cookie"})
+					}
+					response = httptest.NewRecorder()
+					if !application.servePublicPublished(response, request, false) || response.Code != http.StatusOK || response.Body.String() != "/* embedded */" {
+						t.Fatalf("frozen embedded %s authenticated=%t returned %d: %s", script, authenticated, response.Code, response.Body.String())
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestGuestMenuBundleRetainsOriginalStylesAndLogin(t *testing.T) {
+	staticFiles, err := fs.Sub(embeddedWebFiles, "web/static")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assets, err := buildEmbeddedStaticAssetCache(staticFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle := string(assets["guest_menu.ru.js"].body)
+	fragments := strings.Split(bundle, "menuStyles.textContent=")
+	if len(fragments) < 2 {
+		t.Fatal("lazy menu lost its stylesheet")
+	}
+	var stylesheet string
+	if err = json.NewDecoder(strings.NewReader(fragments[len(fragments)-1])).Decode(&stylesheet); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stylesheet, ".SiteBrushMenuBox") || !strings.Contains(stylesheet, ".SiteBrushContextMenuLink") {
+		t.Fatal("empty or unrelated stylesheet replaced the menu's original styles")
+	}
+	if !strings.Contains(bundle, "?login") || strings.Contains(bundle, "Checking sign-in") || strings.Contains(bundle, "guestAccountContents") {
+		t.Fatal("guest menu no longer exposes its original sign-in action")
+	}
+}
+
+func TestLocalhostPublicRootAndAuthenticatedMenuDuringCatalogPreload(t *testing.T) {
+	application, database := newTestApplication(t)
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "owner@example.org", "unused"); err != nil {
+		t.Fatal(err)
+	}
+	body := `<!doctype html><html><body>public localhost home</body></html>`
+	for _, table := range []string{"pages", "published_pages"} {
+		query := `INSERT INTO ` + table + `(domain,path,title,html) VALUES(?,?,?,?)`
+		if _, err := database.Exec(query, "localhost", "/", "Home", body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	filename := filepath.Join(application.domainStaticDir("localhost"), "index.html")
+	if err := application.mkdirAllInsideStorage(filepath.Dir(filename), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.writeAtomicStorageFile(filename, []byte(body)); err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	defer close(stop)
+	application.publicCatalog = publicsite.NewCatalog(application.storagePath, stop)
+	application.publicStreamer = publicsite.NewStreamer()
+	handler := application.siteHTTPHandler(http.HandlerFunc(application.route))
+	sessionRequest := httptest.NewRequest(http.MethodGet, "http://localhost:777/", nil)
+	sessionRequest.RemoteAddr = "127.0.0.1:12345"
+	sessionResponse := httptest.NewRecorder()
+	application.createSession(sessionResponse, sessionRequest, "owner@example.org")
+	cookies := sessionResponse.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("owner session was not created")
+	}
+	ownerCookie := cookies[0]
+	for _, ready := range []bool{false, true} {
+		if ready {
+			if err := publicsite.Write(application.storagePath, publicsite.Policy{Domain: "localhost"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := application.publicCatalog.Reload("localhost"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, role := range []string{"guest", "expired", "owner"} {
+			t.Run(fmt.Sprintf("catalog=%t/%s", ready, role), func(t *testing.T) {
+				request := httptest.NewRequest(http.MethodGet, "http://localhost:777/", nil)
+				request.RemoteAddr = "127.0.0.1:12345"
+				if role == "owner" {
+					request.AddCookie(ownerCookie)
+				} else if role == "expired" {
+					request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "expired-cookie"})
+				}
+				response := httptest.NewRecorder()
+				handler.ServeHTTP(response, request)
+				if response.Code != http.StatusOK || response.Header().Get("Location") != "" || !strings.Contains(response.Body.String(), "public localhost home") {
+					t.Fatalf("bare localhost was redirected or lost public contents: %d %q", response.Code, response.Header().Get("Location"))
+				}
+				administratorMenu := strings.Contains(response.Body.String(), "initializeSitebrushContextMenuForAdmin")
+				if administratorMenu != (role == "owner") {
+					t.Fatalf("wrong menu for %s: administrator=%t", role, administratorMenu)
+				}
+			})
+		}
+	}
+}
+
+func TestEmbeddedApplicationAssetsIgnoreSitePolicy(t *testing.T) {
+	assets, err := buildEmbeddedStaticAssetCache(testStaticFiles(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	required := make(map[string]bool)
+	for _, filename := range []string{"profile.html", "login.html", "domain_settings.html", "edit.html", "unfreeze.html"} {
+		markup, readErr := fs.ReadFile(embeddedWebFiles, "web/"+filename)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		tokenizer := htmlparser.NewTokenizer(bytes.NewReader(markup))
+		for tokenKind := tokenizer.Next(); tokenKind != htmlparser.ErrorToken; tokenKind = tokenizer.Next() {
+			if tokenKind != htmlparser.StartTagToken && tokenKind != htmlparser.SelfClosingTagToken {
+				continue
+			}
+			token := tokenizer.Token()
+			if token.Data != "script" && token.Data != "link" {
+				continue
+			}
+			for _, attribute := range token.Attr {
+				if attribute.Key != "src" && attribute.Key != "href" {
+					continue
+				}
+				if strings.HasPrefix(attribute.Val, "/p/static/") {
+					required[strings.Split(attribute.Val, "?")[0]] = true
+				}
+			}
+		}
+	}
+	for _, essential := range []string{"technical_pages.css", "account-forms.js", "account-passkeys.js", "jodit.min.js", "codemirror/codemirror.min.js", "visual_editor_document.js"} {
+		if !required["/p/static/"+essential] {
+			t.Fatalf("missing production resource in fixture: %s", essential)
+		}
+	}
+	root := t.TempDir()
+	stop := make(chan struct{})
+	defer close(stop)
+	application := &App{storagePath: root, embeddedStaticAssets: assets, publicCatalog: publicsite.NewCatalog(root, stop)}
+	// The nil database and failing fallback make accidental account/site lookups visible.
+	handler := application.siteHTTPHandler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("embedded resource reached the dynamic fallback") }))
+	for _, state := range []string{"warming", "frozen", "blocked"} {
+		if state == "frozen" {
+			policy := publicsite.Policy{Domain: "localhost", Frozen: true, Versioned: true, Chroots: []publicsite.Chroot{{Path: "/", Directory: "."}}}
+			if err = publicsite.Write(root, policy); err != nil {
+				t.Fatal(err)
+			}
+			if err = application.publicCatalog.Reload("localhost"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if state == "blocked" {
+			if err = application.publicCatalog.Block("localhost"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for assetPath := range required {
+			for _, owner := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/owner=%t%s", state, owner, assetPath), func(t *testing.T) {
+					request := httptest.NewRequest(http.MethodGet, "http://localhost:777"+assetPath+"?v=regression", nil)
+					if owner {
+						request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "owner-session"})
+					}
+					response := httptest.NewRecorder()
+					handler.ServeHTTP(response, request)
+					expected := assets[strings.TrimPrefix(assetPath, "/p/static/")]
+					if response.Code != http.StatusOK || !bytes.Equal(response.Body.Bytes(), expected.body) {
+						t.Fatalf("embedded resource returned %d", response.Code)
+					}
+					actualType := response.Header().Get("Content-Type")
+					if strings.HasSuffix(assetPath, ".css") && !strings.HasPrefix(actualType, "text/css") {
+						t.Fatalf("CSS MIME type=%q", actualType)
+					}
+					if strings.HasSuffix(assetPath, ".js") && !strings.Contains(actualType, "javascript") {
+						t.Fatalf("script MIME type=%q", actualType)
+					}
+					if response.Header().Get("X-Content-Type-Options") != "nosniff" {
+						t.Fatal("embedded response lost nosniff protection")
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestSiteFreezeMigratesExistingControlPartition(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	domain := "upgrade-freeze.example"
+	boundary := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), domain))
+	if _, err := application.db.ExecContext(boundary, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, "owner@example.org", "unused"); err != nil {
+		t.Fatal(err)
+	}
+	participant, err := application.siteDatabaseRouter.databaseForContext(boundary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate an already-imported v13 control database. The content schema has
+	// already advanced, so replaying the initial partition import cannot repair it.
+	if err = participant.control.Migrate(boundary, domain, func(_ context.Context, database *sql.DB, _ string) error {
+		if _, err := database.Exec(`DELETE FROM application_migration_steps WHERE component='site-freeze-control-v1'`); err != nil {
+			return err
+		}
+		_, err := database.Exec(`DROP TABLE site_freeze_protection`)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	identifier := ""
+	for attempt := 0; attempt < 2; attempt++ {
+		if err = application.siteDatabaseRouter.ForgetDomain(boundary, domain); err != nil {
+			t.Fatal(err)
+		}
+		checkpoint, freezeErr := application.createFreezeCheckpoint(boundary, domain)
+		if freezeErr != nil {
+			t.Fatal(freezeErr)
+		}
+		if identifier != "" && checkpoint.ID != identifier {
+			t.Fatal("reopening the control database replaced the active checkpoint")
+		}
+		identifier = checkpoint.ID
+		var retained int
+		if err = application.db.QueryRowContext(boundary, `SELECT COUNT(*) FROM site_freeze_protection WHERE domain=? AND checkpoint_id=?`, domain, identifier).Scan(&retained); err != nil || retained != 1 {
+			t.Fatalf("missing checkpoint protection after restart: %d %v", retained, err)
+		}
+	}
+}
+
+func TestSiteFreezePublicationKeepsLocalSiteIdentity(t *testing.T) {
+	for _, domain := range []string{"localhost", "192.0.2.44", "2001:db8::44"} {
+		t.Run(domain, func(t *testing.T) {
+			application := newPartitionedTestApplication(t)
+			boundary := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), domain))
+			if _, err := application.db.ExecContext(boundary, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, "owner@example.org", "unused"); err != nil {
+				t.Fatal(err)
+			}
+			if err := publicsite.Write(application.storagePath, publicsite.Policy{}); err == nil {
+				t.Fatal("publication accepted an empty site identity")
+			}
+			// Reproduce the orphan left by the previous DNS-only normalization.
+			orphan := publicsite.PolicyPath(application.storagePath, "")
+			if err := os.MkdirAll(filepath.Dir(orphan), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(orphan, []byte(`{"Domain":""}`), 0600); err != nil {
+				t.Fatal(err)
+			}
+			stop := make(chan struct{})
+			application.publicCatalog = publicsite.NewCatalog(application.storagePath, stop)
+			application.startPublicPublication(stop)
+			t.Cleanup(func() { close(stop); <-application.publicPublicationDone })
+			if err := application.publicCatalog.SetMemory(true); err != nil {
+				t.Fatal(err)
+			}
+			checkpoint, err := application.createFreezeCheckpoint(boundary, domain)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A failed older freeze may have committed its checkpoint before
+			// publication failed. Retrying must finish that same checkpoint.
+			if err = application.siteContentTransaction(boundary, func(transaction *sql.Tx) error {
+				return sitefreeze.Activate(transaction, domain, checkpoint.ID, "preparing")
+			}, func(error) {}); err != nil {
+				t.Fatal(err)
+			}
+			application.recoverFreezeCheckpoints(boundary)
+			recovered, stage, recoveryErr := application.loadFreezeCheckpoint(boundary, domain)
+			if recoveryErr != nil || recovered.ID != checkpoint.ID || stage != "frozen" {
+				t.Fatalf("freeze recovery replaced or rejected the checkpoint: %s %v", stage, recoveryErr)
+			}
+			if err = application.freezeWorkspaceEditable(boundary, domain); err != nil {
+				t.Fatalf("recovered preparation still blocks edits and copying: %v", err)
+			}
+			if err = application.publicCatalog.SetMemory(true); err != nil {
+				t.Fatal(err)
+			}
+			decision := application.publicCatalog.Lookup(publicsite.Lookup{Host: domain, Path: "/"})
+			if !decision.Found || !decision.Frozen || !decision.Versioned || decision.Domain != domain {
+				t.Fatalf("local site identity lost during publication: %+v", decision)
+			}
+			// Reproduce cancellation that restored SQL but failed to refresh the
+			// public policy before removing its durable restoration journal.
+			archived, captureErr := application.captureFreezeCheckpoint(boundary, domain, false)
+			if captureErr != nil {
+				t.Fatal(captureErr)
+			}
+			archived.ID = randomAccessToken()
+			if err = application.saveFreezeCheckpoint(boundary, domain, archived, "cancelled", false); err != nil {
+				t.Fatal(err)
+			}
+			if err = application.siteContentTransaction(boundary, func(transaction *sql.Tx) error {
+				return sitefreeze.Activate(transaction, domain, checkpoint.ID, "restoring/"+archived.ID)
+			}, func(error) {}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = application.db.ExecContext(boundary, `UPDATE domain_states SET is_frozen=0 WHERE domain=?`, domain); err != nil {
+				t.Fatal(err)
+			}
+			application.recoverFreezeCheckpoints(boundary)
+			if _, _, err = application.loadFreezeCheckpoint(boundary, domain); !errors.Is(err, sql.ErrNoRows) {
+				t.Fatalf("interrupted cancellation did not finish: %v", err)
+			}
+			if err = application.freezeWorkspaceEditable(boundary, domain); err != nil {
+				t.Fatalf("recovered cancellation still blocks edits and copying: %v", err)
+			}
+			decision = application.publicCatalog.Lookup(publicsite.Lookup{Host: domain, Path: "/"})
+			if !decision.Found || decision.Frozen || decision.Domain != domain {
+				t.Fatalf("cancellation did not restore the public policy: %+v", decision)
+			}
+		})
 	}
 }
