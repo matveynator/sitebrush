@@ -52,7 +52,7 @@
           const installedElement = document.createElement(menuElement.tagName.toLowerCase());
           if (menuElement.src) continue;
           installedElement.textContent = menuElement.textContent;
-          document.body.appendChild(installedElement);
+          (document.body || document.head || document.documentElement).appendChild(installedElement);
         }
         document.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: menuPoint.clientX || 0, clientY: menuPoint.clientY || 0}));
       } catch (menuError) {

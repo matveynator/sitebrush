@@ -41231,7 +41231,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
     modalElement.appendChild(textElement);
     modalElement.appendChild(actionRowElement);
     overlayElement.appendChild(modalElement);
-    document.body.appendChild(overlayElement);
+    (document.body || document.documentElement).appendChild(overlayElement);
     function closeDialog() { overlayElement.remove(); }
     cancelButtonElement.addEventListener("click", closeDialog);
     confirmButtonElement.addEventListener("click", function onConfirmClick() { closeDialog(); onConfirm(); });
@@ -41275,7 +41275,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
     actionRowElement.appendChild(cancelButtonElement);
     modalElement.appendChild(actionRowElement);
     overlayElement.appendChild(modalElement);
-    document.body.appendChild(overlayElement);
+    (document.body || document.documentElement).appendChild(overlayElement);
     function closeDialog() { overlayElement.remove(); }
     cancelButtonElement.addEventListener("click", closeDialog);
     confirmButtonElement.addEventListener("click", function onConfirmClick() { closeDialog(); onConfirm(); });
@@ -41315,7 +41315,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
     modalElement.appendChild(errorElement);
     modalElement.appendChild(actionRowElement);
     overlayElement.appendChild(modalElement);
-    document.body.appendChild(overlayElement);
+    (document.body || document.documentElement).appendChild(overlayElement);
     function closeDialog() { overlayElement.remove(); }
     function submitPasswordDialog() {
       const passwordText = passwordInputElement.value || "";
@@ -41401,7 +41401,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
     modalElement.appendChild(pathElement);
     modalElement.appendChild(progressElement);
     overlayElement.appendChild(modalElement);
-    document.body.appendChild(overlayElement);
+    (document.body || document.documentElement).appendChild(overlayElement);
     let readyCallbackWasCalled = false;
     function setProgressPercent(percentNumber) {
       const boundedPercent = Math.max(0, Math.min(100, Math.round(Number(percentNumber) || 0)));
@@ -41527,7 +41527,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
         tokenInputElement.value = publishToken;
         actionFormElement.appendChild(tokenInputElement);
       }
-      document.body.appendChild(actionFormElement);
+      (document.body || document.documentElement).appendChild(actionFormElement);
       actionFormElement.submit();
     }
     function submitPasswordActionForm(actionPath, passwordText) {
@@ -41547,7 +41547,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
       passwordInputElement.name = "password";
       passwordInputElement.value = passwordText;
       actionFormElement.appendChild(passwordInputElement);
-      document.body.appendChild(actionFormElement);
+      (document.body || document.documentElement).appendChild(actionFormElement);
       actionFormElement.submit();
     }
   }, {capture: true});
@@ -41629,7 +41629,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
     modalElement.appendChild(contentElement);
     modalElement.appendChild(closeButtonElement);
     overlayElement.appendChild(modalElement);
-    document.body.appendChild(overlayElement);
+    (document.body || document.documentElement).appendChild(overlayElement);
     function closeTreeDialog() { overlayElement.remove(); }
     closeButtonElement.addEventListener("click", closeTreeDialog);
     overlayElement.addEventListener("click", function closeTreeDialogOnOverlay(browserEvent) {
@@ -42049,7 +42049,7 @@ function showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath, froze
   menuBoxElement.style.top = menuPoint.clientY + "px";
   menuRoot.appendChild(menuStyleElement);
   menuRoot.appendChild(menuBoxElement);
-  document.body.appendChild(menuHostElement);
+  (document.body || document.documentElement).appendChild(menuHostElement);
   if (window.sitebrushRefreshMenu) window.sitebrushRefreshMenu(browserEvent);
   positionSitebrushMenuBox(menuBoxElement, menuPoint);
   menuBoxElement.addEventListener("click", function onMenuClick(browserEvent) {
@@ -42400,7 +42400,7 @@ function showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath, froze
   menuBoxElement.style.top = menuPoint.clientY + "px";
   menuRoot.appendChild(menuStyleElement);
   menuRoot.appendChild(menuBoxElement);
-  document.body.appendChild(menuHostElement);
+  (document.body || document.documentElement).appendChild(menuHostElement);
   if (window.sitebrushRefreshMenu) window.sitebrushRefreshMenu(browserEvent);
   positionSitebrushMenuBox(menuBoxElement, menuPoint);
   menuBoxElement.addEventListener("click", function onMenuClick(browserEvent) {
