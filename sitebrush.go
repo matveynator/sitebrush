@@ -46845,6 +46845,20 @@ func (a *App) prepareAutomaticSSLDomainWithProgress(certificateManager automatic
 		return result
 	}
 	domainContext := contextWithDomain(context.Background(), certificateDomain)
+	if a.siteDatabaseRouter != nil {
+		_, err := a.siteDatabaseRouter.databaseForContext(domainContext)
+		if err != nil {
+			if !errors.Is(err, errSiteDatabaseMissing) {
+				result.state, result.err, result.retryAfter = "storage_error", err, time.Now().Add(time.Minute)
+				return result
+			}
+			if !a.pendingRegistrationDomain(domainContext, certificateDomain) {
+				result.state = "ignored"
+				result.retryAfter = time.Now().Add(automaticSSLRetryDelayEligibility)
+				return result
+			}
+		}
+	}
 	if !a.domainIsAutomaticSSLCandidate(domainContext, certificateDomain) {
 		result.state = "ignored"
 		result.retryAfter = time.Now().Add(automaticSSLRetryDelayEligibility)
