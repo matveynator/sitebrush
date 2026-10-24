@@ -29467,9 +29467,13 @@ func TestSiteFreezePublicationKeepsLocalSiteIdentity(t *testing.T) {
 			}, func(error) {}); err != nil {
 				t.Fatal(err)
 			}
-			retried, retryErr := application.createFreezeCheckpoint(boundary, domain)
-			if retryErr != nil || retried.ID != checkpoint.ID {
-				t.Fatalf("freeze retry replaced or rejected the checkpoint: %v", retryErr)
+			application.recoverFreezeCheckpoints(boundary)
+			recovered, stage, recoveryErr := application.loadFreezeCheckpoint(boundary, domain)
+			if recoveryErr != nil || recovered.ID != checkpoint.ID || stage != "frozen" {
+				t.Fatalf("freeze recovery replaced or rejected the checkpoint: %s %v", stage, recoveryErr)
+			}
+			if err = application.freezeWorkspaceEditable(boundary, domain); err != nil {
+				t.Fatalf("recovered preparation still blocks edits and copying: %v", err)
 			}
 			if err = application.publicCatalog.SetMemory(true); err != nil {
 				t.Fatal(err)
