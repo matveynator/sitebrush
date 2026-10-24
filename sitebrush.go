@@ -2262,6 +2262,16 @@ func (router *perSiteDBRouter) startSiteSubsystems(root, domain string, content 
 		if err := migrations.Run(database, "site-file-access-v1", siteFileAccessSteps(context.Background(), !foundAccessColumn)); err != nil {
 			return err
 		}
+		// Imported partitions are not copied again when content schema advances.
+		// Protection checkpoints therefore migrate inside their control SQL owner.
+		foundProtection, err := siteDatabaseColumnExists(context.Background(), database, "site_freeze_protection", "payload")
+		if err != nil {
+			return err
+		}
+		if err = migrations.Run(database, "site-freeze-control-v1", siteFreezeProtectionSteps(!foundProtection)); err != nil {
+			return err
+		}
+
 		if err := aicapability.InitSQL(database); err != nil {
 			return err
 		}
@@ -10618,6 +10628,10 @@ func staticAssetContentType(assetPath string, body []byte) string {
 	return http.DetectContentType(body)
 }
 
+func embeddedStaticRequest(r *http.Request) bool {
+	return r != nil && r.URL != nil && strings.HasPrefix(r.URL.Path, "/p/static/") && publicOrdinaryRequest(r)
+}
+
 func (a *App) serveEmbeddedStaticAsset(w http.ResponseWriter, r *http.Request) {
 	relativePath := safeRelativeAssetPath(strings.TrimPrefix(r.URL.Path, "/p/static/"))
 	if relativePath == "" {
@@ -11544,10 +11558,14 @@ func siteSchemaSteps(ctx context.Context, repair bool) []migrations.Step {
 		step.Ensure = repair
 		steps = append(steps, step)
 	}
+	steps = append(steps, siteFreezeProtectionSteps(repair)...)
+	return steps
+}
+
+func siteFreezeProtectionSteps(repair bool) []migrations.Step {
 	protection := migrations.SQL("site-freeze-protection", `CREATE TABLE IF NOT EXISTS site_freeze_protection(domain TEXT NOT NULL,checkpoint_id TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(domain,checkpoint_id))`)
 	protection.Ensure = repair
-	steps = append(steps, protection)
-	return steps
+	return []migrations.Step{protection}
 }
 
 func siteFileAccessSteps(ctx context.Context, repair bool) []migrations.Step {
@@ -12260,6 +12278,7 @@ func (a *App) aiIngressDecisionForRequest(r *http.Request) (machine, owner bool)
 }
 
 func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
+	embedded := a.securityResponseHeadersMiddleware(http.HandlerFunc(a.serveEmbeddedStaticAsset))
 	core := a.siteDynamicHTTPCore(router)
 	fallback := a.aiIngressMiddleware(core)
 	content := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -12275,14 +12294,14 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 		}
 	})))))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if embeddedStaticRequest(r) {
+			embedded.ServeHTTP(w, r)
+			return
+		}
 		if a.publicCatalog != nil && publicOrdinaryRequest(r) {
 			decision := a.publicRequestDecision(r)
 			if decision.Found {
 				public.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), publicDecisionContextKey{}, decision)))
-				return
-			}
-			if strings.HasPrefix(r.URL.Path, "/p/static/") && a.publicVisitorAsset(r.URL.Path) {
-				a.serveEmbeddedStaticAsset(w, r)
 				return
 			}
 			if !decision.Known && r.URL.Path == "/" && httpsecurity.IsLocalRequest(r) {
@@ -14131,11 +14150,7 @@ func (a *App) persistImportedPages(ctx context.Context, domain, ownerPath string
 		var recoveryErr error
 		if storeErr != nil {
 			for _, asset := range written {
-				if asset.existed {
-					recoveryErr = errors.Join(recoveryErr, a.writeAtomicStorageFile(asset.filename, asset.previous))
-				} else {
-					recoveryErr = errors.Join(recoveryErr, a.removeInsideStorage(asset.filename))
-				}
+				recoveryErr = errors.Join(recoveryErr, a.rollbackStorageFile(asset.filename, asset.previous, asset.existed))
 			}
 		}
 		completed <- errors.Join(storeErr, recoveryErr)
@@ -37683,6 +37698,9 @@ func (a *App) storePreparedImageReplacement(r *http.Request, currentPath string,
 }
 
 func updateOrInsertFileMetadata(ctx context.Context, database sqlExecutor, domain, filename, pagePath string, size int, mime, now, source string) error {
+	if _, err := database.ExecContext(ctx, `DELETE FROM site_hidden_assets WHERE domain=? AND tree='files' AND path=?`, domain, filename); err != nil {
+		return err
+	}
 	var existing int
 	if err := database.QueryRowContext(ctx, `SELECT COUNT(1) FROM file_metadata WHERE domain=? AND file_name=?`, domain, filename).Scan(&existing); err != nil {
 		return err
@@ -37766,7 +37784,7 @@ func (a *App) storePreparedFilesWithPrefix(ctx context.Context, domain, currentP
 	}, func(storeErr error) {
 		if storeErr != nil {
 			for _, filename := range created {
-				_ = a.removeInsideStorage(filename)
+				_ = a.rollbackStorageFile(filename, nil, false)
 			}
 		}
 	})
@@ -39928,7 +39946,7 @@ func (a *App) removePrivateUpload(ctx context.Context, domain string, names []st
 			filename := filepath.Join(a.domainFilesDirForDomain(domain), filepath.FromSlash(name))
 			info, err := a.statInsideStorage(filename)
 			if err == nil {
-				if err = a.removeInsideStorage(filename); err != nil {
+				if err = a.rollbackStorageFile(filename, nil, false); err != nil {
 					return err
 				}
 				removed += info.Size()
@@ -41330,7 +41348,6 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
 			freezeActionEntry = "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='publish' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/publish.png' class='SiteBrushMenuIcon' alt=''>" + publishLabel + "</button></li>"
 			freezeActionEntry += "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='unfreeze' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/unlock.png' class='SiteBrushMenuIcon' alt=''>" + unfreezeLabel + "</button></li>"
 		}
-		freezeActionEntry += "<li class='SiteBrushContextMenu'><a href='?unfreeze&amp;history' class='SiteBrushContextMenuLink'>" + template.JSEscapeString(template.HTMLEscapeString(translationOrDefault(translations, "unfreeze_history", "Freeze history"))) + "</a></li>"
 		passwordActionEntry := "<li class='SiteBrushContextMenu SiteBrushSeparatedMenuItem'><button type='button' data-sitebrush-action='protect_password' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/lock.png' class='SiteBrushMenuIcon' alt=''>" + protectPasswordLabel + "</button></li>"
 		if pagePasswordProtected {
 			passwordActionEntry = "<li class='SiteBrushContextMenu SiteBrushSeparatedMenuItem'><button type='button' data-sitebrush-action='remove_password_protection' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/unlock.png' class='SiteBrushMenuIcon' alt=''>" + removePasswordProtectionLabel + "</button></li>"
@@ -45975,6 +45992,46 @@ func (a *App) writeFileInsideStorage(filePath string, payload []byte, perm os.Fi
 	return jail.WriteFile(relativeFilePath, payload, perm)
 }
 
+// Rollback restores the previous selection without making an uncommitted
+// body historical. Callers own the failed write and its original contents.
+func (a *App) rollbackStorageFile(filename string, previous []byte, existed bool) error {
+	jail, relative, err := a.storageJailForPath(filename)
+	if err != nil {
+		return err
+	}
+	if !existed {
+		err = jail.Remove(relative)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if domain, _, versioned := a.versionedAssetPath(filename); versioned {
+		rootPath, rootErr := a.storageJailRootPath()
+		if rootErr != nil {
+			return rootErr
+		}
+		root, openErr := os.OpenRoot(rootPath)
+		if openErr != nil {
+			return openErr
+		}
+		defer root.Close()
+		digest := sha256.Sum256(previous)
+		hash := hex.EncodeToString(digest[:])
+		if _, statErr := root.Stat(sitefreeze.ObjectPath(domain, hash)); statErr == nil {
+			return sitefreeze.Restore(root, domain, relative, sitefreeze.File{Path: relative, Hash: hash, Mode: 0644})
+		} else if !os.IsNotExist(statErr) {
+			return statErr
+		}
+	}
+	temporary := relative + ".sitebrush-rollback-" + randomAccessToken()
+	defer jail.Remove(temporary)
+	if err = jail.WriteFile(temporary, previous, 0644); err != nil {
+		return err
+	}
+	return jail.Rename(temporary, relative)
+}
+
 func (a *App) removeInsideStorage(filePath string) error {
 	if err := a.retainAssetVersion(filePath); err != nil {
 		return err
@@ -46009,10 +46066,7 @@ func (a *App) renameInsideStorage(oldPath string, newPath string) error {
 	if err != nil {
 		return err
 	}
-	if err = oldJail.Rename(oldRelativePath, newRelativePath); err != nil {
-		return err
-	}
-	return a.retainAssetVersion(newPath)
+	return oldJail.Rename(oldRelativePath, newRelativePath)
 }
 
 func (a *App) versionedAssetPath(filename string) (string, string, bool) {
@@ -48027,6 +48081,9 @@ func (a *App) loadFreezeCheckpoint(ctx context.Context, domain string) (sitefree
 		return point, stage, err
 	}
 	err = a.db.QueryRowContext(ctx, `SELECT payload FROM site_freeze_protection WHERE domain=? AND checkpoint_id=?`, domain, point.ID).Scan(&encoded)
+	if errors.Is(err, sql.ErrNoRows) {
+		return point, stage, errors.New("freeze checkpoint protection is missing")
+	}
 	if err != nil {
 		return point, stage, err
 	}
@@ -48091,6 +48148,11 @@ func (a *App) saveFreezeCheckpoint(ctx context.Context, domain string, point sit
 		return nil
 	}, func(error) {})
 }
+func (a *App) ensureSiteVersionDirectory(domain string) error {
+	directory := filepath.Join(filepath.Dir(a.storageRootDir()), filepath.Dir(sitefreeze.ObjectPath(domain, strings.Repeat("0", 64))))
+	return a.mkdirAllInsideStorage(directory, 0700)
+}
+
 func (a *App) createFreezeCheckpoint(ctx context.Context, domain string, epochs ...uint64) (sitefreeze.Checkpoint, error) {
 	expected := uint64(0)
 	if len(epochs) > 0 {
@@ -48113,6 +48175,9 @@ func (a *App) createFreezeCheckpoint(ctx context.Context, domain string, epochs 
 		if stage == "publishing" || strings.HasPrefix(stage, "restoring/") {
 			return point, errors.New("site restoration or publication is in progress")
 		}
+		if err = a.ensureSiteVersionDirectory(domain); err != nil {
+			return point, err
+		}
 		if err = a.setDomainFrozenState(ctx, domain, 1); err != nil {
 			return point, err
 		}
@@ -48124,6 +48189,9 @@ func (a *App) createFreezeCheckpoint(ctx context.Context, domain string, epochs 
 	}
 	if a.isDomainFrozen(ctx, domain) {
 		return point, errors.New("this older freeze has no restoration checkpoint; publish it before starting a new freeze")
+	}
+	if err = a.ensureSiteVersionDirectory(domain); err != nil {
+		return point, err
 	}
 	point, err = a.captureFreezeCheckpoint(ctx, domain, true)
 	if err != nil {
@@ -48539,6 +48607,9 @@ func (a *App) recoverFreezeCheckpoints(ctx context.Context) {
 		point, stage, err := a.loadFreezeCheckpoint(boundary, domain)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
+		}
+		if err == nil && stage == "frozen" {
+			err = a.ensureSiteVersionDirectory(domain)
 		}
 		if err == nil && strings.HasPrefix(stage, "restoring/") {
 			if err = a.publicPublicationRequest("begin", domain); err == nil {
@@ -53525,6 +53596,10 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 	if a.publicBoundary && !paused && strings.HasPrefix(r.URL.Path, "/p/static/") && !a.publicVisitorAsset(r.URL.Path) {
 		return false
 	}
+	if embeddedStaticRequest(r) {
+		a.serveEmbeddedStaticAsset(w, r)
+		return true
+	}
 	host := domainFromRequest(r)
 	pagePath := cleanPath(r.URL.Path)
 	fileName := ""
@@ -53533,15 +53608,10 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 	}
 	decision := a.publicRequestDecision(r)
 	if !decision.Found {
-		if strings.HasPrefix(r.URL.Path, "/p/static/") && a.publicVisitorAsset(r.URL.Path) {
-			a.serveEmbeddedStaticAsset(w, r)
-			return true
-		}
 		return false
 	}
-	if strings.HasPrefix(r.URL.Path, "/p/static/") {
-		a.serveEmbeddedStaticAsset(w, r)
-		return true
+	if !paused && decision.Frozen && hasSitebrushSessionCookie(r) {
+		return false
 	}
 	if decision.Hidden || decision.PageHidden && fileName == "" && decision.Chroot.Path == "" {
 		http.NotFound(w, r)
@@ -53736,6 +53806,11 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 		if !publicOrdinaryRequest(r) || !paused && strings.HasPrefix(r.URL.Path, "/p/static/") && !application.publicVisitorAsset(r.URL.Path) {
 			return false
 		}
+		if embeddedStaticRequest(r) {
+			application.securityResponseHeadersMiddleware(http.HandlerFunc(application.serveEmbeddedStaticAsset)).ServeHTTP(w, r)
+			return true
+		}
+
 		lookup := application.publicRequestDecision(r)
 		r = r.WithContext(context.WithValue(r.Context(), publicDecisionContextKey{}, lookup))
 		if !lookup.Found || !paused && hasSitebrushSessionCookie(r) && (lookup.Frozen || lookup.File.Mode == "page_password" || !strings.HasPrefix(r.URL.Path, "/p/") && lookup.Password.Path != "") || lookup.File.Mode == "token" {

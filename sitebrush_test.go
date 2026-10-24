@@ -27786,6 +27786,9 @@ func TestAIImportDraftFailureRestoresAssetsAndQuota(t *testing.T) {
 			if err := application.writeAtomicStorageFile(filename, []byte("original")); err != nil {
 				t.Fatal(err)
 			}
+			if _, err := application.createFreezeCheckpoint(boundary, "localhost"); err != nil {
+				t.Fatal(err)
+			}
 			before := application.domainStorageUsage(boundary, "localhost")
 			owner := application.db.(interface {
 				WriteTransactionWithFinish(context.Context, func(*sql.Tx) error, func(error)) error
@@ -29296,6 +29299,133 @@ func TestLocalhostPublicRootAndAuthenticatedMenuDuringCatalogPreload(t *testing.
 					t.Fatalf("wrong menu for %s: administrator=%t", role, administratorMenu)
 				}
 			})
+		}
+	}
+}
+
+func TestEmbeddedApplicationAssetsIgnoreSitePolicy(t *testing.T) {
+	assets, err := buildEmbeddedStaticAssetCache(testStaticFiles(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	required := make(map[string]bool)
+	for _, filename := range []string{"profile.html", "login.html", "domain_settings.html", "edit.html"} {
+		markup, readErr := fs.ReadFile(embeddedWebFiles, "web/"+filename)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		tokenizer := htmlparser.NewTokenizer(bytes.NewReader(markup))
+		for tokenKind := tokenizer.Next(); tokenKind != htmlparser.ErrorToken; tokenKind = tokenizer.Next() {
+			if tokenKind != htmlparser.StartTagToken && tokenKind != htmlparser.SelfClosingTagToken {
+				continue
+			}
+			token := tokenizer.Token()
+			if token.Data != "script" && token.Data != "link" {
+				continue
+			}
+			for _, attribute := range token.Attr {
+				if attribute.Key != "src" && attribute.Key != "href" {
+					continue
+				}
+				if strings.HasPrefix(attribute.Val, "/p/static/") {
+					required[strings.Split(attribute.Val, "?")[0]] = true
+				}
+			}
+		}
+	}
+	for _, essential := range []string{"technical_pages.css", "account-forms.js", "account-passkeys.js", "jodit.min.js", "codemirror/codemirror.min.js", "visual_editor_document.js"} {
+		if !required["/p/static/"+essential] {
+			t.Fatalf("missing production resource in fixture: %s", essential)
+		}
+	}
+	root := t.TempDir()
+	stop := make(chan struct{})
+	defer close(stop)
+	application := &App{storagePath: root, embeddedStaticAssets: assets, publicCatalog: publicsite.NewCatalog(root, stop)}
+	// The nil database and failing fallback make accidental account/site lookups visible.
+	handler := application.siteHTTPHandler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("embedded resource reached the dynamic fallback") }))
+	for _, state := range []string{"warming", "frozen", "blocked"} {
+		if state == "frozen" {
+			policy := publicsite.Policy{Domain: "localhost", Frozen: true, Versioned: true, Chroots: []publicsite.Chroot{{Path: "/", Directory: "."}}}
+			if err = publicsite.Write(root, policy); err != nil {
+				t.Fatal(err)
+			}
+			if err = application.publicCatalog.Reload("localhost"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if state == "blocked" {
+			if err = application.publicCatalog.Block("localhost"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for assetPath := range required {
+			for _, owner := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/owner=%t%s", state, owner, assetPath), func(t *testing.T) {
+					request := httptest.NewRequest(http.MethodGet, "http://localhost:777"+assetPath+"?v=regression", nil)
+					if owner {
+						request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "owner-session"})
+					}
+					response := httptest.NewRecorder()
+					handler.ServeHTTP(response, request)
+					expected := assets[strings.TrimPrefix(assetPath, "/p/static/")]
+					if response.Code != http.StatusOK || !bytes.Equal(response.Body.Bytes(), expected.body) {
+						t.Fatalf("embedded resource returned %d", response.Code)
+					}
+					actualType := response.Header().Get("Content-Type")
+					if strings.HasSuffix(assetPath, ".css") && !strings.HasPrefix(actualType, "text/css") {
+						t.Fatalf("CSS MIME type=%q", actualType)
+					}
+					if strings.HasSuffix(assetPath, ".js") && !strings.Contains(actualType, "javascript") {
+						t.Fatalf("script MIME type=%q", actualType)
+					}
+					if response.Header().Get("X-Content-Type-Options") != "nosniff" {
+						t.Fatal("embedded response lost nosniff protection")
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestSiteFreezeMigratesExistingControlPartition(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	domain := "upgrade-freeze.example"
+	boundary := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), domain))
+	if _, err := application.db.ExecContext(boundary, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, "owner@example.org", "unused"); err != nil {
+		t.Fatal(err)
+	}
+	participant, err := application.siteDatabaseRouter.databaseForContext(boundary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate an already-imported v13 control database. The content schema has
+	// already advanced, so replaying the initial partition import cannot repair it.
+	if err = participant.control.Migrate(boundary, domain, func(_ context.Context, database *sql.DB, _ string) error {
+		if _, err := database.Exec(`DELETE FROM application_migration_steps WHERE component='site-freeze-control-v1'`); err != nil {
+			return err
+		}
+		_, err := database.Exec(`DROP TABLE site_freeze_protection`)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	identifier := ""
+	for attempt := 0; attempt < 2; attempt++ {
+		if err = application.siteDatabaseRouter.ForgetDomain(boundary, domain); err != nil {
+			t.Fatal(err)
+		}
+		checkpoint, freezeErr := application.createFreezeCheckpoint(boundary, domain)
+		if freezeErr != nil {
+			t.Fatal(freezeErr)
+		}
+		if identifier != "" && checkpoint.ID != identifier {
+			t.Fatal("reopening the control database replaced the active checkpoint")
+		}
+		identifier = checkpoint.ID
+		var retained int
+		if err = application.db.QueryRowContext(boundary, `SELECT COUNT(*) FROM site_freeze_protection WHERE domain=? AND checkpoint_id=?`, domain, identifier).Scan(&retained); err != nil || retained != 1 {
+			t.Fatalf("missing checkpoint protection after restart: %d %v", retained, err)
 		}
 	}
 }
