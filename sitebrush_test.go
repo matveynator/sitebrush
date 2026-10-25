@@ -79,7 +79,9 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/netchantransport"
 	"github.com/matveynator/sitebrush/v2/pkg/outboundhttp"
 	"github.com/matveynator/sitebrush/v2/pkg/pagearchive"
+	"github.com/matveynator/sitebrush/v2/pkg/publicload"
 	"github.com/matveynator/sitebrush/v2/pkg/publicsite"
+	"github.com/matveynator/sitebrush/v2/pkg/requesttiming"
 	"github.com/matveynator/sitebrush/v2/pkg/securitysync"
 	"github.com/matveynator/sitebrush/v2/pkg/sitebrushtemplate"
 	"github.com/matveynator/sitebrush/v2/pkg/sitefreeze"
@@ -345,7 +347,7 @@ func mustDNSNameForTest(name string) dnsmessage.Name {
 	return dnsName
 }
 
-func writeCachedAutoCertForTest(t *testing.T, application *App, domain string, notBefore time.Time, notAfter time.Time) {
+func writeCachedAutoCertForTest(t testing.TB, application *App, domain string, notBefore time.Time, notAfter time.Time) {
 	t.Helper()
 	certificatePEM := cachedAutoCertPEMForTest(t, domain, notBefore, notAfter)
 	certificateCacheDir := filepath.Join(application.storageRootDir(), "letsencrypt")
@@ -357,7 +359,7 @@ func writeCachedAutoCertForTest(t *testing.T, application *App, domain string, n
 	}
 }
 
-func cachedAutoCertPEMForTest(t *testing.T, domain string, notBefore time.Time, notAfter time.Time) []byte {
+func cachedAutoCertPEMForTest(t testing.TB, domain string, notBefore time.Time, notAfter time.Time) []byte {
 	t.Helper()
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -28732,6 +28734,267 @@ func BenchmarkPublicHTTP(b *testing.B) {
 	}
 }
 
+func BenchmarkPublicConnections(b *testing.B) {
+	for _, mode := range []string{"http-keep", "http-new", "https-keep", "https-new", "https-http2", "https-resume-new", "https12-new"} {
+		for _, concurrency := range []int{300, 600, 1000} {
+			for _, scenario := range []string{"normal", "trusted", "many-ips", "one-shard", "analytics-full", "consumer-offline", "blocked", "throttled", "burst", "timings-off"} {
+				b.Run(fmt.Sprintf("%s/clients=%d/%s", mode, concurrency, scenario), func(b *testing.B) {
+					benchmarkPublicConnections(b, mode, concurrency, scenario)
+				})
+			}
+		}
+	}
+}
+
+func benchmarkPublicConnections(b *testing.B, mode string, concurrency int, scenario string) {
+	stop := make(chan struct{})
+	defer close(stop)
+	application := &App{publicBoundary: true, storagePath: b.TempDir(), publicStreamer: publicsite.NewStreamer(), securityAnalytics: make(chan siteAnalyticsEvent, 16384), securityLosses: make(chan string, 16)}
+	storageRoot, rootErr := prepareStorageJailRoot(application.storagePath)
+	if rootErr != nil {
+		b.Fatal(rootErr)
+	}
+	application.storageRealRoot = storageRoot
+	application.publicCatalog = publicsite.NewCatalog(application.storagePath, stop)
+	if scenario != "timings-off" {
+		application.requestTimings = requesttiming.New(stop)
+	}
+	addresses := make([]string, concurrency)
+	for candidate, count := 1, 0; count < concurrency; candidate++ {
+		address := fmt.Sprintf("198.18.%d.%d", candidate/256, candidate%256)
+		if scenario == "one-shard" {
+			hash := uint32(2166136261)
+			for index := range address {
+				hash = (hash ^ uint32(address[index])) * 16777619
+			}
+			if hash%16 != 0 {
+				continue
+			}
+		}
+		addresses[count] = address
+		count++
+	}
+	policy := publicsite.Policy{Domain: "example.org"}
+	if scenario == "trusted" {
+		policy.AllowedIPs = []string{"198.18.0.0/15"}
+	}
+	if err := publicsite.Write(application.storagePath, policy); err != nil {
+		b.Fatal(err)
+	}
+	if err := application.publicCatalog.SetMemory(true); err != nil {
+		b.Fatal(err)
+	}
+	filename := filepath.Join(application.domainStaticDir(policy.Domain), "index.html")
+	if err := os.MkdirAll(filepath.Dir(filename), 0755); err != nil {
+		b.Fatal(err)
+	}
+	if err := os.WriteFile(filename, []byte("<html><body>"+strings.Repeat("s", 8810)+"</body></html>"), 0644); err != nil {
+		b.Fatal(err)
+	}
+	var err error
+	application.attackGuard, err = httpsecurity.NewAttackGuard("", application.requestTimings)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer application.attackGuard.Close()
+	application.throttleGuard, err = httpsecurity.NewThrottleGuard("", application.requestTimings)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer application.throttleGuard.Close()
+	if scenario == "analytics-full" {
+		application.securityAnalytics = make(chan siteAnalyticsEvent, 1)
+		application.securityAnalytics <- siteAnalyticsEvent{}
+	}
+	if scenario == "blocked" {
+		for _, address := range addresses {
+			if _, err = application.attackGuard.Add(address, "manual", "load fixture", "manual", time.Now().Add(time.Hour), time.Now()); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+	if scenario == "throttled" {
+		started := time.Now().Add(-time.Minute)
+		for index := 0; index <= 600; index++ {
+			application.throttleGuard.ObserveFast(addresses[0], false, started.Add(time.Duration(index)*time.Minute/600))
+		}
+	}
+	boundary, cancel := context.WithCancel(contextWithDomain(context.Background(), policy.Domain))
+	defer cancel()
+	application.autoCertCertificateCache = startAutoCertCertificateMemoryCache(boundary, filepath.Join(application.storageRootDir(), "letsencrypt"))
+	front := newPublicHTTPFront(application, "load-fixture", stop)
+	var releaseObservation chan struct{}
+	if scenario == "analytics-full" {
+		releaseObservation = make(chan struct{})
+		defer func() {
+			if releaseObservation != nil {
+				close(releaseObservation)
+			}
+		}()
+		front.Observe(policy.Domain, publicLoadStalledObservation{release: releaseObservation})
+		for queued := 0; queued < 2048; queued++ {
+			front.Observe(policy.Domain, struct{ Status int }{200})
+		}
+	}
+	// Synthetic identities are confined to this local fixture, before ingress.
+	serve := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		worker, _ := strconv.Atoi(request.Header.Get("X-Test-Worker"))
+		if scenario != "many-ips" && scenario != "one-shard" && scenario != "blocked" {
+			worker = 0
+		}
+		request.Host, request.RemoteAddr = policy.Domain, net.JoinHostPort(addresses[worker], "12345")
+		front.ServeHTTP(writer, request)
+	})
+	if err = front.Set("127.0.0.1:1", false); err != nil {
+		b.Fatal(err)
+	}
+	if scenario != "consumer-offline" {
+		if err = front.PolicyEnabled(); err != nil {
+			b.Fatal(err)
+		}
+	}
+	probe := func() []byte {
+		request := httptest.NewRequest(http.MethodGet, "https://"+policy.Domain+"/", nil)
+		request.Header.Set("Accept-Language", "en")
+		response := httptest.NewRecorder()
+		if !application.servePublicPublished(response, request, false) {
+			b.Fatal("fixture publication unavailable")
+		}
+		if response.Code != http.StatusOK {
+			b.Fatalf("fixture probe returned %d", response.Code)
+		}
+		return response.Body.Bytes()
+	}
+	var expectedDigest string
+	{
+		overhead := len(probe()) - 8836
+		if err = os.WriteFile(filename, []byte("<html><body>"+strings.Repeat("s", 8810-overhead)+"</body></html>"), 0644); err != nil {
+			b.Fatal(err)
+		}
+		expectedBody := probe()
+		if len(expectedBody) != 8836 {
+			b.Fatalf("fixture body length=%d, want 8836", len(expectedBody))
+		}
+		expectedSum := sha256.Sum256(expectedBody)
+		expectedDigest = hex.EncodeToString(expectedSum[:])
+	}
+	server := httptest.NewUnstartedServer(serve)
+	server.Config = newSitebrushHTTPServer(serve, application.requestTimings)
+	secure := strings.HasPrefix(mode, "https")
+	if secure {
+		writeCachedAutoCertForTest(b, application, policy.Domain, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+		certificate, _, found := application.autoCertCachedCertificate(policy.Domain, time.Now(), 0)
+		if !found {
+			b.Fatal("fixture certificate unavailable")
+		}
+		_, fallback, fallbackErr := generateAutomaticSSLFallbackCertificate(time.Now())
+		if fallbackErr != nil {
+			b.Fatal(fallbackErr)
+		}
+		server.TLS = application.publicTLSConfig(fallback, front.ObserveTLS)
+		server.TLS.Certificates = []tls.Certificate{*certificate}
+		server.EnableHTTP2 = strings.Contains(mode, "http2")
+		server.StartTLS()
+	} else {
+		server.Start()
+	}
+	defer server.Close()
+	transport := &http.Transport{MaxIdleConns: concurrency, MaxIdleConnsPerHost: concurrency, DisableKeepAlives: strings.HasSuffix(mode, "new"), DisableCompression: true, ForceAttemptHTTP2: true}
+	transport.Protocols = new(http.Protocols)
+	transport.Protocols.SetHTTP1(true)
+	transport.Protocols.SetHTTP2(strings.Contains(mode, "http2"))
+	if secure {
+		roots := x509.NewCertPool()
+		roots.AddCert(server.Certificate())
+		transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, ServerName: policy.Domain}
+		if strings.Contains(mode, "resume") {
+			transport.TLSClientConfig.ClientSessionCache = tls.NewLRUClientSessionCache(concurrency)
+		}
+		if strings.Contains(mode, "https12") {
+			transport.TLSClientConfig.MaxVersion = tls.VersionTLS12
+		}
+	}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 15 * time.Second}
+	// Network measurements include the load generator; server allocations are
+	// measured separately by BenchmarkPublicPublished.
+	options := publicload.Options{URL: server.URL, Burst: scenario == "burst", Requests: b.N, Concurrency: concurrency, ExpectedBytes: 8836, ExpectedSHA256: expectedDigest, PrepareRequest: func(request *http.Request, worker int) {
+		request.Header.Set("X-Test-Worker", strconv.Itoa(worker))
+		request.Header.Set("Accept-Language", "en")
+	}}
+	if b.N >= 10000 && scenario != "blocked" && scenario != "throttled" {
+		warmOptions := options
+		warmOptions.Requests = 1000
+		if warm, warmErr := publicload.Run(client, warmOptions, stop); warmErr != nil || warm.Successful != warm.Requests {
+			b.Fatalf("warmup failed: %v %+v", warmErr, warm)
+		}
+	}
+	b.ResetTimer()
+	report, err := publicload.Run(client, options, stop)
+	b.StopTimer()
+	if releaseObservation != nil {
+		close(releaseObservation)
+		releaseObservation = nil
+	}
+	if encoded, encodeErr := json.Marshal(report); encodeErr == nil {
+		b.Log(string(encoded))
+	} else {
+		b.Fatal(encodeErr)
+	}
+	if err != nil || report.TransportErrors != 0 {
+		b.Fatalf("load error: %v %s", err, report.FirstError)
+	}
+	if scenario != "blocked" && scenario != "throttled" && report.Successful != report.Requests {
+		b.Fatalf("allowed load was rejected: %v", report.Statuses)
+	}
+	if strings.HasSuffix(mode, "new") && report.ReusedConnections != 0 {
+		b.Fatalf("new-connection scenario reused %d connections", report.ReusedConnections)
+	}
+	if scenario == "blocked" && report.Non2xx != report.Requests {
+		b.Fatalf("blocked load escaped enforcement: %+v", report)
+	}
+	if scenario == "throttled" && b.N > 8 && report.Statuses[429] == 0 {
+		b.Fatalf("active throttle did not reject excess requests: %+v", report)
+	}
+	b.ReportMetric(report.SuccessfulPerSecond, "success-req/s")
+	b.ReportMetric(float64(report.TCP.P95US), "TCP-p95-us")
+	b.ReportMetric(float64(report.TLS.P95US), "TLS-p95-us")
+	b.ReportMetric(float64(report.ResponseWait.P95US), "wait-p95-us")
+	b.ReportMetric(float64(report.TotalTTFB.P95US), "TTFB-p95-us")
+	b.ReportMetric(float64(report.TotalTTFB.P99US), "TTFB-p99-us")
+	if application.requestTimings != nil {
+		stages, snapshotErr := application.requestTimings.Snapshot(stop)
+		if snapshotErr != nil {
+			b.Fatal(snapshotErr)
+		}
+		b.ReportMetric(float64(stages.DroppedMinimum), "timing-dropped-min")
+		for _, counter := range stages.Stages {
+			if counter.Count > 0 {
+				b.ReportMetric(float64(counter.PercentileUpperBound(95).Nanoseconds())/1000, counter.Stage+"-p95-upper-us")
+			}
+		}
+	}
+
+	if scenario != "consumer-offline" {
+		encoded, _ := json.Marshal(publicsite.ObservationRequest{Address: "127.0.0.1:1"})
+		if response, observationErr := front.PullObservations(encoded); observationErr == nil {
+			var observations publicsite.Observations
+			if err := json.Unmarshal(response, &observations); err != nil {
+				b.Fatal(err)
+			}
+			b.ReportMetric(float64(observations.DroppedMinimum), "observations-dropped-min")
+		}
+	}
+}
+
+// A blocked JSON consumer exercises queue saturation without slowing handlers.
+type publicLoadStalledObservation struct{ release <-chan struct{} }
+
+func (observation publicLoadStalledObservation) MarshalJSON() ([]byte, error) {
+	<-observation.release
+	return []byte("{}"), nil
+}
+
 func TestPublicBoundaryPolicyHandoffKeepsGuestsIndependent(t *testing.T) {
 	root := t.TempDir()
 	policy := publicsite.Policy{Domain: "example.org"}
@@ -29513,4 +29776,192 @@ func TestSiteFreezePublicationKeepsLocalSiteIdentity(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPublicSecurityUnavailableReturns503WithoutServing(t *testing.T) {
+	for _, unavailable := range []string{"attack", "throttle"} {
+		t.Run(unavailable, func(t *testing.T) {
+			application := &App{publicBoundary: true}
+			failed := func([]byte) ([]byte, error) { return nil, errors.New("unavailable owner") }
+			if unavailable == "attack" {
+				application.attackGuard = httpsecurity.NewRemoteAttackGuard(failed)
+			} else {
+				application.throttleGuard = httpsecurity.NewRemoteThrottleGuard(failed)
+			}
+			handler := application.authAbuseMiddleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("unverified request reached content") }))
+			request := httptest.NewRequest(http.MethodGet, "https://example.org/", nil)
+			request.RemoteAddr = "203.0.113.8:12345"
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != 503 || response.Header().Get("Retry-After") != "1" || response.Header().Get("Cache-Control") != "no-store" {
+				t.Fatal("unavailable security decision did not fail closed", response.Code, response.Header())
+			}
+		})
+	}
+}
+
+func TestPublicBoundarySharesThrottleAcrossStaticAndProxy(t *testing.T) {
+	root := t.TempDir()
+	policy := publicsite.Policy{Domain: "example.org"}
+	if err := publicsite.Write(root, policy); err != nil {
+		t.Fatal(err)
+	}
+	filename := filepath.Join(root, "storage", "static", policy.Domain, "index.html")
+	if err := os.MkdirAll(filepath.Dir(filename), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filename, []byte("<html><body>Published</body></html>"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	state, err := json.Marshal(struct {
+		Throttles []httpsecurity.SecurityThrottle
+	}{[]httpsecurity.SecurityThrottle{{IP: "203.0.113.8", LastEvent: now, ExpiresAt: now.Add(time.Hour), LimitRPS: 8, Episodes: 1}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	securityDirectory := filepath.Join(root, "storage", "security")
+	if err := os.MkdirAll(securityDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(securityDirectory, "throttleguard.json"), state, 0600); err != nil {
+		t.Fatal(err)
+	}
+	boundary, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	front, closeFront, secret, err := startPublicSiteBoundary(boundary, root, serverRunConfig{ParsedPorts: listenPorts{HTTPPort: 0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeFront()
+	if front.Throttle == nil {
+		t.Fatal("public static ingress has no rate owner")
+	}
+	remoteCalls := make(chan struct{}, 16)
+	child := &App{securityAnalytics: make(chan siteAnalyticsEvent, 16)}
+	child.throttleGuard = httpsecurity.NewRemoteThrottleGuard(func(encoded []byte) ([]byte, error) { remoteCalls <- struct{}{}; return front.Throttle(encoded) })
+	childHandler := publicsite.RestoreRequest(child.analyticsMiddleware(child.authAbuseMiddleware(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if !publicsite.SecurityChecked(request) {
+			t.Error("proxy lost the authenticated enforcement result")
+		}
+		_, _ = io.WriteString(writer, "dynamic")
+	}))), secret)
+	backend := httptest.NewServer(childHandler)
+	defer backend.Close()
+	address := strings.TrimPrefix(backend.URL, "http://")
+	if err := front.Set(address, false); err != nil {
+		t.Fatal(err)
+	}
+	change, _ := json.Marshal(publicsite.Change{Action: "enable", Address: address})
+	if _, err := front.Policy(change); err != nil {
+		t.Fatal(err)
+	}
+	transport := &http.Transport{MaxIdleConnsPerHost: 1}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+	for count := 0; count < 9; count++ {
+		requestPath := "/"
+		if count%2 == 1 {
+			requestPath = "/?login"
+		}
+		request, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d%s", front.HTTPPort, requestPath), nil)
+		request.Host = policy.Domain
+		// The fixture is the trusted loopback proxy for this synthetic public IP.
+		request.Header.Set("X-Forwarded-For", "203.0.113.8")
+		response, requestErr := client.Do(request)
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		_, _ = io.Copy(io.Discard, response.Body)
+		response.Body.Close()
+		expectedStatus := 200
+		if count == 8 {
+			expectedStatus = 429
+		}
+		if response.StatusCode != expectedStatus {
+			t.Fatalf("request %d: status=%d, want %d; rate budget was skipped or counted twice", count, response.StatusCode, expectedStatus)
+		}
+	}
+	if len(remoteCalls) != 0 || len(child.securityAnalytics) != 0 {
+		t.Fatal("the child repeated public rate accounting or observations", len(remoteCalls), len(child.securityAnalytics))
+	}
+	if err := httpsecurity.NewRemoteThrottleGuard(front.Throttle).Remove("203.0.113.8"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNotFoundEnforcementCannotLoseItsMandatoryEvidence(t *testing.T) {
+	owner, err := httpsecurity.NewAttackGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	calls := make(chan struct{}, 2)
+	application := &App{publicBoundary: true, attackGuard: httpsecurity.NewRemoteAttackGuard(func(encoded []byte) ([]byte, error) {
+		calls <- struct{}{}
+		if len(calls) == 2 {
+			return nil, errors.New("full evidence queue")
+		}
+		return owner.Relay(encoded)
+	})}
+	request := httptest.NewRequest(http.MethodGet, "https://example.org/missing", nil)
+	request.RemoteAddr = "203.0.113.8:1234"
+	response := httptest.NewRecorder()
+	application.authAbuseMiddleware(http.HandlerFunc(http.NotFound)).ServeHTTP(response, request)
+	if response.Code != 503 || strings.Contains(response.Body.String(), "404 page not found") {
+		t.Fatal("a 404 escaped without mandatory security evidence", response.Code, response.Body.String())
+	}
+}
+
+func BenchmarkPublicIngressAllocations(b *testing.B) {
+	stop := make(chan struct{})
+	defer close(stop)
+	application := &App{publicBoundary: true, storagePath: b.TempDir(), publicStreamer: publicsite.NewStreamer()}
+	storageRoot, err := prepareStorageJailRoot(application.storagePath)
+	if err != nil {
+		b.Fatal(err)
+	}
+	application.storageRealRoot = storageRoot
+	application.publicCatalog = publicsite.NewCatalog(application.storagePath, stop)
+	if err := publicsite.Write(application.storagePath, publicsite.Policy{Domain: "example.org"}); err != nil {
+		b.Fatal(err)
+	}
+	if err := application.publicCatalog.SetMemory(true); err != nil {
+		b.Fatal(err)
+	}
+	filename := filepath.Join(application.domainStaticDir("example.org"), "index.html")
+	if err := os.MkdirAll(filepath.Dir(filename), 0755); err != nil {
+		b.Fatal(err)
+	}
+	if err := os.WriteFile(filename, []byte("<html><body>"+strings.Repeat("s", 8810)+"</body></html>"), 0644); err != nil {
+		b.Fatal(err)
+	}
+	application.attackGuard, err = httpsecurity.NewAttackGuard("")
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer application.attackGuard.Close()
+	application.throttleGuard, err = httpsecurity.NewThrottleGuard("")
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer application.throttleGuard.Close()
+	front := newPublicHTTPFront(application, "allocation-fixture", stop)
+	if err := front.Set("127.0.0.1:1", false); err != nil {
+		b.Fatal(err)
+	}
+	if err := front.PolicyEnabled(); err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(worker *testing.PB) {
+		request := httptest.NewRequest(http.MethodGet, "https://example.org/", nil)
+		request.RemoteAddr = "203.0.113.8:1234"
+		writer := &analyticsBenchmarkWriter{headers: make(http.Header)}
+		for worker.Next() {
+			clear(writer.headers)
+			front.ServeHTTP(writer, request)
+		}
+	})
 }

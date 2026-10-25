@@ -26,9 +26,11 @@ type observationResult struct {
 	err     error
 }
 type Observations struct {
-	Batch       uint64
-	Events      []json.RawMessage
-	LostDomains []string
+	Batch          uint64
+	Events         []json.RawMessage
+	LostDomains    []string
+	DroppedMinimum uint64 `json:",omitempty"`
+	Incomplete     bool   `json:",omitempty"`
 }
 
 // Admission is only a hint: Observe still checks the queue after a caller
@@ -61,7 +63,9 @@ func (front *Front) deliverObservations() {
 	batch := uint64(1)
 	var inFlight []byte
 	lost := make(map[string]bool)
+	var droppedMinimum uint64
 	markLost := func(domain string) {
+		droppedMinimum++
 		if len(lost) < 128 {
 			lost[domain] = true
 		}
@@ -74,7 +78,7 @@ func (front *Front) deliverObservations() {
 		if err != nil || state.Paused || state.Address == "" || state.PolicyReady {
 			return
 		}
-		envelope := Observations{Events: pending}
+		envelope := Observations{Events: pending, DroppedMinimum: droppedMinimum, Incomplete: droppedMinimum != 0}
 		for domain := range lost {
 			envelope.LostDomains = append(envelope.LostDomains, domain)
 		}
@@ -107,6 +111,7 @@ func (front *Front) deliverObservations() {
 			}
 			pending = make([]json.RawMessage, 0, 64)
 			lost = make(map[string]bool)
+			droppedMinimum = 0
 		}
 	}
 	for {
@@ -127,7 +132,7 @@ func (front *Front) deliverObservations() {
 			}
 			var marshalErr error
 			if inFlight == nil {
-				envelope := Observations{Events: pending, Batch: batch}
+				envelope := Observations{Events: pending, Batch: batch, DroppedMinimum: droppedMinimum, Incomplete: droppedMinimum != 0}
 				for domain := range lost {
 					envelope.LostDomains = append(envelope.LostDomains, domain)
 				}
@@ -135,6 +140,7 @@ func (front *Front) deliverObservations() {
 				if marshalErr == nil {
 					pending = make([]json.RawMessage, 0, 64)
 					lost = make(map[string]bool)
+					droppedMinimum = 0
 				}
 			}
 			pull.reply <- observationResult{encoded: append([]byte(nil), inFlight...), err: marshalErr}

@@ -774,6 +774,16 @@ func readLimitedFile(root *os.Root, name string, limit int64) ([]byte, error) {
 // Old selected children do not understand the private-backend flag. A launcher
 // may enable persistent listeners only after that child's capability is known.
 func PublicBoundarySupported(storagePath, version string) bool {
+	return publicCapabilitySupported(storagePath, version, "public-capabilities")
+}
+
+// A replacement launcher must not open the throttle file while an older child
+// still owns it. Capabilities are recorded only by children that know the relay.
+func PublicThrottleSupported(storagePath, version string) bool {
+	return publicCapabilitySupported(storagePath, version, "throttle-capabilities")
+}
+
+func publicCapabilitySupported(storagePath, version, directory string) bool {
 	store, err := os.OpenRoot(filepath.Join(storagePath, Directory))
 	if os.IsNotExist(err) {
 		return true
@@ -792,10 +802,18 @@ func PublicBoundarySupported(storagePath, version string) bool {
 	if state.Current.Version == version {
 		return true
 	}
-	_, err = store.Stat(filepath.Join("public-capabilities", state.Current.Version))
+	_, err = store.Stat(filepath.Join(directory, state.Current.Version))
 	return err == nil
 }
 func ReportPublicBoundary(storagePath, version string) error {
+	return reportPublicCapability(storagePath, version, "public-capabilities")
+}
+
+func ReportPublicThrottle(storagePath, version string) error {
+	return reportPublicCapability(storagePath, version, "throttle-capabilities")
+}
+
+func reportPublicCapability(storagePath, version, directory string) error {
 	if strings.ContainsAny(version, "/\\") || version == "" || version == "." || version == ".." {
 		return errors.New("invalid public boundary version")
 	}
@@ -804,10 +822,10 @@ func ReportPublicBoundary(storagePath, version string) error {
 		return err
 	}
 	defer store.Close()
-	if err = store.MkdirAll("public-capabilities", 0700); err != nil {
+	if err = store.MkdirAll(directory, 0700); err != nil {
 		return err
 	}
-	file, err := store.OpenFile(filepath.Join("public-capabilities", version), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	file, err := store.OpenFile(filepath.Join(directory, version), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return err
 	}

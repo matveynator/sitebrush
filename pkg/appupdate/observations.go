@@ -12,6 +12,46 @@ import (
 // ObservationContact owns one persistent NetChan session. Each consumer supplies
 // its reply contact; a failed session leaves the batch cursor with the consumer.
 func ObservationContact(storagePath string, requests <-chan Request, stop <-chan struct{}) {
+	publicContact(storagePath, requests, stop, false)
+}
+
+// SecurityContact is separate from observations so delivery acknowledgements
+// and their reconnects cannot occupy the security consumer's session.
+func SecurityContact(storagePath string, requests <-chan Request, stop <-chan struct{}) {
+	publicContact(storagePath, requests, stop, true)
+}
+
+func NewSecurityContact(storagePath string, stop <-chan struct{}) func(Request) (Response, error) {
+	requests := make(chan Request, 128)
+	go SecurityContact(storagePath, requests, stop)
+	return func(request Request) (Response, error) {
+		reply := make(chan Response, 1)
+		request.Reply = reply
+		select {
+		case <-stop:
+			return Response{}, errors.New("security contact stopped")
+		default:
+		}
+		select {
+		case requests <- request:
+		case <-stop:
+			return Response{}, errors.New("security contact stopped")
+		default:
+			return Response{}, errors.New("security contact is busy")
+		}
+		select {
+		case result := <-reply:
+			if result.Error != "" {
+				return result, errors.New(result.Error)
+			}
+			return result, nil
+		case <-stop:
+			return Response{}, errors.New("security contact stopped")
+		}
+	}
+}
+
+func publicContact(storagePath string, requests <-chan Request, stop <-chan struct{}, security bool) {
 	var connection *netchan.Channel[wireRequest]
 	defer func() {
 		if connection != nil {
@@ -33,8 +73,9 @@ func ObservationContact(storagePath string, requests <-chan Request, stop <-chan
 			}
 			var result Response
 			var err error
-			if request.Action != "public_observations" {
-				result.Error = "invalid observation operation"
+			allowed := !security && request.Action == "public_observations" || security && (request.Action == "public_security" || request.Action == "public_throttle")
+			if !allowed {
+				result.Error = "invalid public contact operation"
 			} else {
 				if connection == nil {
 					connection, err = dialObservationContact(storagePath)
