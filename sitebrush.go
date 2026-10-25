@@ -9277,14 +9277,15 @@ func (writer *securityNotFoundWriter) WriteHeader(status int) {
 
 func (writer *securityNotFoundWriter) Write(body []byte) (int, error) {
 	if writer.rejected {
-		return 0, io.ErrClosedPipe
+		// The proxy must finish copying the backend body to preserve the replacement 503.
+		return len(body), nil
 	}
 	return writer.statusCapturingResponseWriter.Write(body)
 }
 
 func (writer *securityNotFoundWriter) ReadFrom(reader io.Reader) (int64, error) {
 	if writer.rejected {
-		return 0, io.ErrClosedPipe
+		return io.Copy(io.Discard, reader)
 	}
 	return writer.statusCapturingResponseWriter.ReadFrom(reader)
 }
@@ -10176,8 +10177,11 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	}
 	publicThrottle := false
 	if config.PublicProxy {
-		capabilities, capabilityErr := securityExchange(appupdate.Request{Action: "public_throttle_capabilities"})
-		publicThrottle = capabilityErr == nil && capabilities.Detail == "1"
+		var capabilityErr error
+		publicThrottle, capabilityErr = appupdate.NegotiatePublicThrottle(securityExchange)
+		if capabilityErr != nil {
+			return fmt.Errorf("negotiate public throttle ownership: %w", capabilityErr)
+		}
 		if publicThrottle {
 			securityExchange = appupdate.NewSecurityContact(effectiveStoragePath, ctx.Done())
 		}

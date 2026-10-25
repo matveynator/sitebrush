@@ -34,6 +34,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/http/httptrace"
+	"net/http/httputil"
 	"net/textproto"
 	"net/url"
 	"os"
@@ -29910,6 +29911,75 @@ func TestNotFoundEnforcementCannotLoseItsMandatoryEvidence(t *testing.T) {
 	application.authAbuseMiddleware(http.HandlerFunc(http.NotFound)).ServeHTTP(response, request)
 	if response.Code != 503 || strings.Contains(response.Body.String(), "404 page not found") {
 		t.Fatal("a 404 escaped without mandatory security evidence", response.Code, response.Body.String())
+	}
+}
+
+func TestRejectedNotFoundBodyDoesNotAbortReverseProxy(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(response, "upstream missing page")
+	}))
+	defer backend.Close()
+	backendURL, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := httpsecurity.NewAttackGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	calls := make(chan struct{}, 2)
+	application := &App{publicBoundary: true, attackGuard: httpsecurity.NewRemoteAttackGuard(func(encoded []byte) ([]byte, error) {
+		calls <- struct{}{}
+		if len(calls) == 2 {
+			return nil, errors.New("full evidence queue")
+		}
+		return owner.Relay(encoded)
+	})}
+	proxy := httputil.NewSingleHostReverseProxy(backendURL)
+	frontend := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		request.RemoteAddr = "203.0.113.8:1234"
+		application.authAbuseMiddleware(proxy).ServeHTTP(response, request)
+	}))
+	defer frontend.Close()
+	client := &http.Client{Timeout: 5 * time.Second}
+	request, err := http.NewRequest(http.MethodGet, frontend.URL+"/missing", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Host = "example.org"
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal("replacement response was aborted:", err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal("replacement response was truncated:", err)
+	}
+	if response.StatusCode != http.StatusServiceUnavailable || string(body) != "temporarily unavailable\n" || len(calls) != 2 {
+		t.Fatalf("status=%d body=%q evidence calls=%d", response.StatusCode, body, len(calls))
+	}
+}
+
+func TestRejectedNotFoundWriterDiscardsBothCopyPaths(t *testing.T) {
+	response := httptest.NewRecorder()
+	writer := &securityNotFoundWriter{
+		statusCapturingResponseWriter: &statusCapturingResponseWriter{ResponseWriter: response},
+		observe:                       func() error { return errors.New("full evidence queue") },
+	}
+	writer.WriteHeader(http.StatusNotFound)
+	count, err := writer.Write([]byte("upstream body"))
+	if err != nil || count != len("upstream body") {
+		t.Fatal("Write did not consume rejected body", count, err)
+	}
+	readCount, err := writer.ReadFrom(strings.NewReader("streamed upstream body"))
+	if err != nil || readCount != int64(len("streamed upstream body")) {
+		t.Fatal("ReadFrom did not drain rejected body", readCount, err)
+	}
+	if response.Code != http.StatusServiceUnavailable || response.Body.String() != "temporarily unavailable\n" {
+		t.Fatal("rejected content reached the client", response.Code, response.Body.String())
 	}
 }
 

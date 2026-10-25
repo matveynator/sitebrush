@@ -51,6 +51,33 @@ func NewSecurityContact(storagePath string, stop <-chan struct{}) func(Request) 
 	}
 }
 
+// Ownership must be settled before a child can open the throttle file. A failed
+// exchange cannot revoke the launcher's ownership. Earlier launchers reported
+// absent support with either an empty successful reply or an unknown command.
+func NegotiatePublicThrottle(exchange func(Request) (Response, error)) (bool, error) {
+	response, err := exchange(Request{Action: "public_throttle_capabilities"})
+	if err != nil {
+		if response.Error == "unknown update command" && err.Error() == response.Error {
+			return false, nil
+		}
+		return false, err
+	}
+	if response.Error != "" {
+		if response.Error == "unknown update command" {
+			return false, nil
+		}
+		return false, errors.New(response.Error)
+	}
+	switch response.Detail {
+	case "1":
+		return true, nil
+	case "0", "":
+		return false, nil
+	default:
+		return false, errors.New("invalid public throttle capability response")
+	}
+}
+
 func publicContact(storagePath string, requests <-chan Request, stop <-chan struct{}, security bool) {
 	var connection *netchan.Channel[wireRequest]
 	defer func() {
