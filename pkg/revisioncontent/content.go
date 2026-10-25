@@ -13,17 +13,49 @@ import (
 )
 
 // HTMLHash ignores HTML markup formatting while retaining attributes, comments,
-// and whitespace where HTML or embedded code can give it meaning.
+// and whitespace where HTML, CSS, or embedded code can give it meaning.
 func HTMLHash(source string) [sha256.Size]byte {
 	document, err := html.Parse(strings.NewReader(source))
 	if err != nil {
 		return sha256.Sum256([]byte(source))
 	}
 	digest := sha256.New()
-	writeNode(digest, document, false)
+	writeNode(digest, document, documentMayStyleWhitespace(document))
 	var result [sha256.Size]byte
 	copy(result[:], digest.Sum(nil))
 	return result
+}
+
+// Selectors, imported rules, and inline display changes can affect text spacing.
+// Keep every text-space distinction when the display model is uncertain.
+func documentMayStyleWhitespace(node *html.Node) bool {
+	if node.Type == html.ElementNode {
+		if node.Data == "style" {
+			return true
+		}
+		for _, attribute := range node.Attr {
+			if attribute.Key == "style" && strings.Contains(strings.ToLower(attribute.Val), "display") {
+				return true
+			}
+		}
+		if node.Data == "link" {
+			for _, attribute := range node.Attr {
+				if attribute.Key == "rel" {
+					for _, relation := range strings.Fields(attribute.Val) {
+						if strings.EqualFold(relation, "stylesheet") {
+							return true
+						}
+					}
+				}
+			}
+		}
+	}
+	for child := node.FirstChild; child != nil; child = child.NextSibling {
+		if documentMayStyleWhitespace(child) {
+			return true
+		}
+	}
+	return false
 }
 
 func writeNode(digest hash.Hash, node *html.Node, preserveWhitespace bool) {
@@ -32,26 +64,12 @@ func writeNode(digest hash.Hash, node *html.Node, preserveWhitespace bool) {
 		writeField(digest, "document", "")
 	case html.DoctypeNode:
 		writeField(digest, "doctype", node.Data)
+		writeAttributes(digest, node.Attr)
 	case html.CommentNode:
 		writeField(digest, "comment", node.Data)
 	case html.ElementNode:
 		writeField(digest, "element", node.Namespace+":"+node.Data)
-		attributes := append([]html.Attribute(nil), node.Attr...)
-		sort.Slice(attributes, func(left, right int) bool {
-			leftAttribute := attributes[left]
-			rightAttribute := attributes[right]
-			if leftAttribute.Namespace != rightAttribute.Namespace {
-				return leftAttribute.Namespace < rightAttribute.Namespace
-			}
-			if leftAttribute.Key != rightAttribute.Key {
-				return leftAttribute.Key < rightAttribute.Key
-			}
-			return leftAttribute.Val < rightAttribute.Val
-		})
-		for _, attribute := range attributes {
-			writeField(digest, "attribute", attribute.Namespace+":"+attribute.Key)
-			writeField(digest, "attribute-value", attribute.Val)
-		}
+		writeAttributes(digest, node.Attr)
 		preserveWhitespace = preserveWhitespace || elementPreservesWhitespace(node)
 	case html.TextNode:
 		text := node.Data
@@ -70,6 +88,25 @@ func writeNode(digest hash.Hash, node *html.Node, preserveWhitespace bool) {
 		writeNode(digest, child, preserveWhitespace)
 	}
 	writeField(digest, "end", "")
+}
+
+func writeAttributes(digest hash.Hash, source []html.Attribute) {
+	attributes := append([]html.Attribute(nil), source...)
+	sort.Slice(attributes, func(left, right int) bool {
+		leftAttribute := attributes[left]
+		rightAttribute := attributes[right]
+		if leftAttribute.Namespace != rightAttribute.Namespace {
+			return leftAttribute.Namespace < rightAttribute.Namespace
+		}
+		if leftAttribute.Key != rightAttribute.Key {
+			return leftAttribute.Key < rightAttribute.Key
+		}
+		return leftAttribute.Val < rightAttribute.Val
+	})
+	for _, attribute := range attributes {
+		writeField(digest, "attribute", attribute.Namespace+":"+attribute.Key)
+		writeField(digest, "attribute-value", attribute.Val)
+	}
 }
 
 func writeField(digest hash.Hash, kind, content string) {

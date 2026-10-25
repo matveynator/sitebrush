@@ -36,3 +36,37 @@ func TestHTMLHashPreservesMeaningfulWhitespaceAndCode(t *testing.T) {
 		t.Fatal("script source was ignored")
 	}
 }
+
+func TestHTMLHashPreservesStylesheetControlledWhitespace(t *testing.T) {
+	testCases := []struct {
+		name   string
+		prefix string
+		first  string
+		second string
+	}{
+		{name: "embedded pre-wrap", prefix: `<style>.poem{white-space:pre-wrap}</style>`, first: `<div class="poem">a  b</div>`, second: `<div class="poem">a b</div>`},
+		{name: "linked stylesheet", prefix: `<link rel="alternate STYLESHEET" href="/theme.css">`, first: `<div class="poem">a  b</div>`, second: `<div class="poem">a b</div>`},
+		{name: "styled block layout", prefix: `<style>div{display:inline}</style>`, first: `<div>a</div> <div>b</div>`, second: `<div>a</div><div>b</div>`},
+		{name: "inline display layout", first: `<div style="display:inline">a</div> <div>b</div>`, second: `<div style="display:inline">a</div><div>b</div>`},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if HTMLHash(testCase.prefix+testCase.first) == HTMLHash(testCase.prefix+testCase.second) {
+				t.Fatal("stylesheet-controlled whitespace was omitted from revision identity")
+			}
+		})
+	}
+}
+
+func TestHTMLHashIncludesDoctypeIdentifiers(t *testing.T) {
+	page := `<html><head><title>Document</title></head><body><p>Text</p></body></html>`
+	modern := `<!DOCTYPE html>` + page
+	legacy := `<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">` + page
+	legacyWithSystem := `<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">` + page
+	if HTMLHash(modern) == HTMLHash(legacy) {
+		t.Fatal("public doctype identifier was omitted from revision identity")
+	}
+	if HTMLHash(legacy) == HTMLHash(legacyWithSystem) {
+		t.Fatal("system doctype identifier was omitted from revision identity")
+	}
+}

@@ -22038,6 +22038,35 @@ func TestFinalPageSaveCreatesOneRevisionPerChangedPage(t *testing.T) {
 	}
 }
 
+func TestPageSavePublishesStylesheetWhitespaceAndDoctypeChanges(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		previous string
+		updated  string
+	}{
+		{name: "stylesheet whitespace", previous: `<style>.poem{white-space:pre-wrap}</style><div class="poem">a  b</div>`, updated: `<style>.poem{white-space:pre-wrap}</style><div class="poem">a b</div>`},
+		{name: "doctype mode", previous: `<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN"><html><body>Page</body></html>`, updated: `<!DOCTYPE html><html><body>Page</body></html>`},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			application, database := newTestApplication(t)
+			boundary := context.Background()
+			for _, pageHTML := range []string{testCase.previous, testCase.updated} {
+				if err := application.persistFinalPageSave(boundary, "localhost", "/page", "/page", "Page", pageHTML); err != nil {
+					t.Fatal(err)
+				}
+			}
+			candidates, err := application.collectPublishPageCandidates(boundary, "localhost")
+			if err != nil || len(candidates) != 1 || candidates[0].HTML != testCase.updated {
+				t.Fatalf("publish candidate did not retain the edit: %+v, %v", candidates, err)
+			}
+			var revisionCount int
+			if err := database.QueryRow(`SELECT COUNT(*) FROM revisions WHERE domain=? AND page_path=?`, "localhost", "/page").Scan(&revisionCount); err != nil || revisionCount != 2 {
+				t.Fatalf("visible change has %d revisions: %v", revisionCount, err)
+			}
+		})
+	}
+}
+
 func TestDemoRefreshReplacesPageSetAndFirstImportCreatesDatabase(t *testing.T) {
 	previousClient := newGrabHTTPClient
 	newGrabHTTPClient = func() *http.Client {
