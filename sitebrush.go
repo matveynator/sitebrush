@@ -21170,13 +21170,19 @@ func (a *App) resumeWholeSiteImport(w http.ResponseWriter, r *http.Request) {
 }
 
 func grabImportResultResponse(importResult grabImportResult) map[string]any {
+	redirectPath := ""
+	if importResult.RedirectPath != "" {
+		redirectPath = httpsecurity.LocalRedirectTarget(importResult.RedirectPath, "/")
+	}
 	return map[string]any{
-		"redirect":        httpsecurity.LocalRedirectTarget(importResult.RedirectPath, "/"),
+		"redirect":        redirectPath,
 		"failed_total":    importResult.FailedTotal,
 		"failed_urls":     importResult.FailedURLs,
 		"failed_reasons":  importResult.FailedReasons,
 		"import_id":       importResult.ImportID,
 		"remaining_pages": importResult.RemainingPages,
+		"completed_pages": importResult.CompletedPages,
+		"crawl_cursor":    importResult.CrawlCursor,
 	}
 }
 
@@ -23086,7 +23092,7 @@ func grabSourceHTMLRetryOptions(tracker *grabProgressTracker, progressToken stri
 }
 
 func shouldRetryGrabSourceHTMLDownload(result crawler.HTMLDownloadResult, downloadErr error) bool {
-	if result.StatusCode != 0 {
+	if result.StatusCode != 0 && (result.StatusCode < http.StatusOK || result.StatusCode >= http.StatusMultipleChoices) {
 		return shouldRetryGrabStatus(result.StatusCode)
 	}
 	if downloadErr == nil || errors.Is(downloadErr, context.Canceled) {
@@ -23769,7 +23775,8 @@ func (a *App) importWholeRemoteSite(ctx context.Context, importRequest grabImpor
 		if statsErr != nil {
 			return grabImportResult{}, statsErr
 		}
-		result := grabImportResult{RedirectPath: cleanPath(importRequest.PagePath), RemainingPages: frontierStats.PendingPages, FailedTotal: frontierStats.PendingPages}
+		redirectPath, _ := a.importedLandingPagePath(cleanupContext, importRequest.Domain, importRequest.PagePath)
+		result := grabImportResult{RedirectPath: redirectPath, RemainingPages: frontierStats.PendingPages, FailedTotal: frontierStats.PendingPages, CompletedPages: frontierStats.CompletedPages, CrawlCursor: frontierStats.CursorOffset}
 		if frontierStats.PendingPages > 0 {
 			result.ImportID = importRequest.ImportID
 		}
@@ -23831,7 +23838,7 @@ func (a *App) importWholeRemoteSite(ctx context.Context, importRequest grabImpor
 	if !landingFound {
 		return grabImportResult{}, errors.New("imported site has no available page")
 	}
-	result := grabImportResult{RedirectPath: redirectPath, FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap(), RemainingPages: frontierStats.PendingPages}
+	result := grabImportResult{RedirectPath: redirectPath, FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap(), RemainingPages: frontierStats.PendingPages, CompletedPages: frontierStats.CompletedPages, CrawlCursor: frontierStats.CursorOffset}
 	if frontierStats.PendingPages > 0 {
 		result.ImportID = importRequest.ImportID
 		result.FailedTotal += frontierStats.PendingPages

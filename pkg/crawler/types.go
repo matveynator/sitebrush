@@ -40,6 +40,8 @@ type ImportResult struct {
 	FailedReasons  map[string]string `json:"failed_reasons,omitempty"`
 	ImportID       string            `json:"import_id,omitempty"`
 	RemainingPages int               `json:"remaining_pages,omitempty"`
+	CompletedPages int               `json:"completed_pages,omitempty"`
+	CrawlCursor    int64             `json:"crawl_cursor,omitempty"`
 }
 
 // ResourcePreview describes one downloadable remote asset before import confirmation.

@@ -520,8 +520,8 @@
     let downloadProgressModel = null;
     let resumeImportID = '';
     let remainingImportPages = 0;
-    let previousRemainingImportPages = Infinity;
-    let automaticResumeCount = 0;
+    let previousCompletedImportPages = -1;
+    let previousCrawlCursor = -1;
     let requestIsRunning = false;
     let progressWebSocketClosedIntentionally = false;
     let progressWebSocketFailureHandled = false;
@@ -546,6 +546,19 @@
         window.localStorage.setItem(pendingImportStorageKey(), JSON.stringify({ importID: importID, sourceURL: sourceURL, remainingPages: Number(remainingPages) }));
       } catch (storageError) {
         return;
+      }
+    }
+
+    function clearPendingImport() {
+      resumeImportID = '';
+      remainingImportPages = 0;
+      resumeImportFieldElement.value = '';
+      previousCompletedImportPages = -1;
+      previousCrawlCursor = -1;
+      savePendingImport('', '', 0);
+      if (!previewPayload) {
+        continueButtonElement.classList.add('SiteBrushCopySiteHidden');
+        setCopySiteStatus(statusElement, '', '');
       }
     }
 
@@ -699,7 +712,12 @@
       resourcesElement.replaceChildren();
       closeButtonElement.classList.remove('SiteBrushCopySiteHidden');
       const sortedFailedResourceURLs = Array.from(failedResourceURLs).sort();
-      setFinishImportButtonMode(true);
+      if (importedRedirectPath !== '') {
+        setFinishImportButtonMode(true);
+      } else {
+        cancelButtonElement.textContent = textFromConfig(configuration, 'closeButton', 'Close');
+        cancelButtonElement.classList.remove('SiteBrushCopySiteContinueButton');
+      }
       if (sortedFailedResourceURLs.length === 0 && remainingImportPages <= 0) {
         resourcesElement.classList.add('SiteBrushCopySiteHidden');
         continueButtonElement.classList.add('SiteBrushCopySiteHidden');
@@ -733,7 +751,13 @@
         pendingPagesElement.appendChild(createElement('div', 'SiteBrushCopySiteResourceURL', textFromConfig(configuration, 'importPagesRemain', 'Pages remain in the saved import queue.')));
         resourcesElement.appendChild(pendingPagesElement);
       }
-      continueButtonElement.classList.add('SiteBrushCopySiteHidden');
+      if (remainingImportPages > 0 && resumeImportID !== '') {
+        continueButtonElement.textContent = textFromConfig(configuration, 'continueImportPages', 'Continue import') + ' (' + remainingImportPages + ')';
+        setContinueButtonPrimaryAction(false);
+        continueButtonElement.classList.remove('SiteBrushCopySiteHidden');
+      } else {
+        continueButtonElement.classList.add('SiteBrushCopySiteHidden');
+      }
     }
 
     function retryStatusText(progressPayload, secondsLeft) {
@@ -801,14 +825,16 @@
     function continueQueuedImport(downloadPayload) {
       const queuedPageCount = Math.max(0, Number(downloadPayload.remaining_pages) || 0);
       const savedImportID = String(downloadPayload.import_id || '');
-      if (publicTrialMode || queuedPageCount === 0 || savedImportID === '') {
+      if (publicTrialMode || downloadCancelRequested || queuedPageCount === 0 || savedImportID === '') {
         return false;
       }
-      if (automaticResumeCount > 0 && queuedPageCount >= previousRemainingImportPages || automaticResumeCount >= 16) {
+      const completedPageCount = Math.max(0, Number(downloadPayload.completed_pages) || 0);
+      const crawlCursor = Math.max(0, Number(downloadPayload.crawl_cursor) || 0);
+      if (previousCompletedImportPages >= 0 && completedPageCount <= previousCompletedImportPages && crawlCursor <= previousCrawlCursor) {
         return false;
       }
-      previousRemainingImportPages = queuedPageCount;
-      automaticResumeCount += 1;
+      previousCompletedImportPages = completedPageCount;
+      previousCrawlCursor = crawlCursor;
       resumeImportID = savedImportID;
       remainingImportPages = queuedPageCount;
       resumeImportFieldElement.value = savedImportID;
@@ -999,9 +1025,7 @@
       }
       const progressToken = randomProgressToken();
       if (resumeImportID !== '') {
-        resumeImportID = '';
-        remainingImportPages = 0;
-        resumeImportFieldElement.value = '';
+        clearPendingImport();
       }
       tokenFieldElement.value = progressToken;
       previewTokenFieldElement.value = '';
@@ -1012,8 +1036,8 @@
       failedResourceURLs = new Set();
       failedResourceReasons = new Map();
       importedRedirectPath = '';
-      previousRemainingImportPages = Infinity;
-      automaticResumeCount = 0;
+      previousCompletedImportPages = -1;
+      previousCrawlCursor = -1;
       resourcesElement.replaceChildren();
       resourcesElement.classList.add('SiteBrushCopySiteHidden');
       quotaElement.classList.add('SiteBrushCopySiteHidden');
@@ -1060,6 +1084,9 @@
     }
 
     function startDownload() {
+      if (!wholeSiteElement.checked && resumeImportID !== '') {
+        clearPendingImport();
+      }
       if (!previewPayload && resumeImportID === '') {
         requestPreview();
         return;
@@ -1119,8 +1146,9 @@
             if (modalClosed) {
               return;
             }
+            const importWasInterrupted = downloadCancelRequested;
             const redirectPath = String(downloadPayload.redirect || importedRedirectPath || '').trim();
-            if (redirectPath === '') {
+            if (redirectPath === '' && !importWasInterrupted) {
               throw new Error(textFromConfig(configuration, 'loadPageFailed', 'Imported page is unavailable.'));
             }
             importedRedirectPath = redirectPath;
@@ -1128,6 +1156,17 @@
             activeGrabToken = '';
             activeDownloadController = null;
             recordCompletedFailures(downloadPayload);
+            if (importWasInterrupted) {
+              applyDownloadFailureState(downloadPayload);
+              downloadFinishedWithErrors = true;
+              submitButtonElement.disabled = false;
+              cancelButtonElement.disabled = false;
+              setProgress(progressBarElement, 100);
+              closeProgressWebSocket();
+              renderFailedResources();
+              setCopySiteStatus(statusElement, textFromConfig(configuration, 'importInterrupted', 'Import interrupted.'), 'warning');
+              return;
+            }
             if (continueQueuedImport(downloadPayload)) {
               return;
             }
@@ -1181,16 +1220,19 @@
     continueButtonElement.addEventListener('click', startDownload);
     sourceUrlElement.addEventListener('input', function onSourceURLChange() {
       if (resumeImportID !== '') {
-        resumeImportID = '';
-        remainingImportPages = 0;
-        resumeImportFieldElement.value = '';
+        clearPendingImport();
       }
       invalidatePreview();
     });
     sourceIPElement.addEventListener('input', invalidatePreview);
     sourceLanguageElement.addEventListener('change', invalidatePreview);
-    wholeSiteElement.addEventListener('change', renderAutomaticTemplateOption);
-    wholeSiteElement.addEventListener('change', invalidatePreview);
+    wholeSiteElement.addEventListener('change', function onImportScopeChange() {
+      if (resumeImportID !== '') {
+        clearPendingImport();
+      }
+      renderAutomaticTemplateOption();
+      invalidatePreview();
+    });
     automaticTemplateElement.addEventListener('change', invalidatePreview);
     formElement.addEventListener('submit', function onCopyFormSubmit(submitEvent) {
       submitEvent.preventDefault();

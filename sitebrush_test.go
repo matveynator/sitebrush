@@ -13720,6 +13720,9 @@ func TestGrabSourceRetryClassifierRejectsPermanentFailures(t *testing.T) {
 	if !shouldRetryGrabSourceHTMLDownload(crawler.HTMLDownloadResult{StatusCode: http.StatusTooManyRequests}, errors.New("limited")) {
 		t.Fatal("429 response was classified as permanent")
 	}
+	if !shouldRetryGrabSourceHTMLDownload(crawler.HTMLDownloadResult{StatusCode: http.StatusOK}, io.ErrUnexpectedEOF) {
+		t.Fatal("interrupted HTML body was classified as permanent")
+	}
 	if !shouldRetryGrabSourceHTMLDownload(crawler.HTMLDownloadResult{}, &net.DNSError{Err: "temporary failure", Name: "example.test", IsTemporary: true}) {
 		t.Fatal("temporary DNS failure was classified as permanent")
 	}
