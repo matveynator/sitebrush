@@ -9,11 +9,14 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/matveynator/sitebrush/v2/pkg/requesttiming"
 )
 
 const (
-	throttleGuardShardCount       = 16
-	throttleGuardQueueSize        = 256
+	throttleGuardShardCount = 16
+	// Match the admitted public burst while retaining bounded backpressure.
+	throttleGuardQueueSize        = 2048
 	throttleSustainedMinimum      = time.Minute
 	throttleSustainedMinimumCount = 600
 	throttleContinuityGap         = 5 * time.Second
@@ -68,27 +71,31 @@ type throttleRequest struct {
 	Trusted           bool
 	ExemptObservation bool
 	Now               time.Time
-	Reply             chan throttleResult
+	Reply             chan throttleResult `json:"-"`
+	Queued            time.Time           `json:"-"`
+	Done              <-chan struct{}     `json:"-"`
 }
 
 type throttleResult struct {
 	Decision  ThrottleDecision
 	Throttles []SecurityThrottle
 	Changed   bool
-	Err       error
+	Err       error `json:"-"`
 }
 
 type ThrottleGuard struct {
+	remote   func(throttleRequest) (throttleResult, bool)
 	shards   []chan throttleRequest
 	save     chan struct{}
 	shutdown chan struct{}
 	done     chan struct{}
 	path     string
+	timings  *requesttiming.Collector
 }
 
 // NewThrottleGuard keeps sustained-rate handling independent from attack
 // blocking. Each shard owns its observations, throttle history, and rate state.
-func NewThrottleGuard(path string) (*ThrottleGuard, error) {
+func NewThrottleGuard(path string, timings ...*requesttiming.Collector) (*ThrottleGuard, error) {
 	state, err := loadThrottleDiskState(path)
 	if err != nil {
 		return nil, err
@@ -99,6 +106,9 @@ func NewThrottleGuard(path string) (*ThrottleGuard, error) {
 		shutdown: make(chan struct{}),
 		done:     make(chan struct{}),
 		path:     path,
+	}
+	if len(timings) > 0 {
+		guard.timings = timings[0]
 	}
 	initial := make([][]SecurityThrottle, throttleGuardShardCount)
 	for _, throttle := range state.Throttles {
@@ -112,7 +122,7 @@ func NewThrottleGuard(path string) (*ThrottleGuard, error) {
 	for index := range guard.shards {
 		requests := make(chan throttleRequest, throttleGuardQueueSize)
 		guard.shards[index] = requests
-		go runThrottleShard(requests, guard.shutdown, initial[index])
+		go runThrottleShard(requests, guard.shutdown, initial[index], guard.timings, guard.save)
 	}
 	go guard.runPersistence()
 	return guard, nil
@@ -136,7 +146,7 @@ func loadThrottleDiskState(path string) (throttleDiskState, error) {
 	return state, nil
 }
 
-func runThrottleShard(requests <-chan throttleRequest, shutdown <-chan struct{}, initial []SecurityThrottle) {
+func runThrottleShard(requests <-chan throttleRequest, shutdown <-chan struct{}, initial []SecurityThrottle, timings *requesttiming.Collector, save chan<- struct{}) {
 	observations := map[string]throttleObservation{}
 	throttles := make(map[string]SecurityThrottle, len(initial))
 	rates := map[string]throttleRateWindow{}
@@ -153,10 +163,24 @@ func runThrottleShard(requests <-chan throttleRequest, shutdown <-chan struct{},
 		case now := <-pruneTicker.C:
 			pruneThrottleState(observations, throttles, rates, now.UTC())
 		case request := <-requests:
+			select {
+			case <-request.Done:
+				continue
+			default:
+			}
+			started := startDecisionTiming(request.Queued)
 			result := handleThrottleRequest(observations, throttles, rates, request)
+			finishDecisionTiming(timings, request.Queued, started, requesttiming.ThrottleQueue, requesttiming.ThrottleWork)
+			if result.Changed {
+				select {
+				case save <- struct{}{}:
+				default:
+				}
+			}
 			if request.Reply != nil {
 				select {
 				case request.Reply <- result:
+				case <-request.Done:
 				case <-shutdown:
 					return
 				}
@@ -373,6 +397,16 @@ func (guard *ThrottleGuard) Remove(ip string) error {
 }
 
 func (guard *ThrottleGuard) exchangeFast(request throttleRequest) (throttleResult, bool) {
+	select {
+	case <-request.Done:
+		return throttleResult{}, false
+	case <-guard.done:
+		return throttleResult{}, false
+	default:
+	}
+	if guard.remote != nil {
+		return guard.remote(request)
+	}
 	ip := normalizeThrottleIP(request.IP)
 	if ip == "" {
 		return throttleResult{}, true
@@ -381,6 +415,9 @@ func (guard *ThrottleGuard) exchangeFast(request throttleRequest) (throttleResul
 	index := throttleShardIndex(ip)
 	reply := make(chan throttleResult, 1)
 	request.Reply = reply
+	if guard.timings != nil {
+		request.Queued = time.Now()
+	}
 	select {
 	case <-guard.done:
 		return throttleResult{}, false
@@ -389,6 +426,8 @@ func (guard *ThrottleGuard) exchangeFast(request throttleRequest) (throttleResul
 		return throttleResult{}, false
 	}
 	select {
+	case <-request.Done:
+		return throttleResult{}, false
 	case <-guard.done:
 		return throttleResult{}, false
 	case result := <-reply:
@@ -406,6 +445,9 @@ func (guard *ThrottleGuard) exchangeAdmin(request throttleRequest) (throttleResu
 }
 
 func (guard *ThrottleGuard) exchangeShardAdmin(index int, request throttleRequest) (throttleResult, bool) {
+	if guard.remote != nil {
+		return guard.remote(request)
+	}
 	reply := make(chan throttleResult, 1)
 	request.Reply = reply
 	select {
@@ -441,6 +483,9 @@ func normalizeThrottleIP(value string) string {
 }
 
 func (guard *ThrottleGuard) signalSave() {
+	if guard.remote != nil {
+		return
+	}
 	select {
 	case guard.save <- struct{}{}:
 	default:
@@ -506,6 +551,9 @@ func (guard *ThrottleGuard) saveSnapshot() error {
 }
 
 func (guard *ThrottleGuard) Close() {
+	if guard.remote != nil {
+		return
+	}
 	_ = guard.saveSnapshot()
 	close(guard.shutdown)
 	<-guard.done

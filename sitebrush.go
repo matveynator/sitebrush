@@ -95,6 +95,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/outboundhttp"
 	"github.com/matveynator/sitebrush/v2/pkg/pagearchive"
 	"github.com/matveynator/sitebrush/v2/pkg/publicsite"
+	"github.com/matveynator/sitebrush/v2/pkg/requesttiming"
 	"github.com/matveynator/sitebrush/v2/pkg/securitysync"
 	"github.com/matveynator/sitebrush/v2/pkg/serviceinstall"
 	"github.com/matveynator/sitebrush/v2/pkg/shutdownsignals"
@@ -200,6 +201,7 @@ type App struct {
 	publicProxy           bool
 	publicStreamer        *publicsite.Streamer
 	publicCatalog         *publicsite.Catalog
+	requestTimings        *requesttiming.Collector
 	publicPublication     chan publicPublicationTask
 	publicPublicationDone <-chan struct{}
 	publicBoundary        bool
@@ -697,6 +699,7 @@ type autoCertCertificateCacheRequest struct {
 	expiresAt        time.Time
 	minimumRemaining time.Duration
 	response         chan autoCertCertificateCacheResponse
+	done             <-chan struct{}
 }
 
 type autoCertCertificateCacheResponse struct {
@@ -4437,13 +4440,13 @@ func (a *App) analyticsMiddleware(next http.Handler) http.Handler {
 		startedAt := time.Now()
 		writer := &statusCapturingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(writer, r)
-		if a.securityAnalytics != nil && len(a.securityAnalytics) >= cap(a.securityAnalytics) {
+		if !publicsite.SecurityChecked(r) && a.securityAnalytics != nil && len(a.securityAnalytics) >= cap(a.securityAnalytics) {
 			select {
 			case a.securityLosses <- a.analyticsEventDomain(r, ""):
 			default:
 			}
 		}
-		if a.securityAnalytics != nil && !isBrowserAnalyticsRequest(r) && len(a.securityAnalytics) < cap(a.securityAnalytics) {
+		if !publicsite.SecurityChecked(r) && a.securityAnalytics != nil && !isBrowserAnalyticsRequest(r) && len(a.securityAnalytics) < cap(a.securityAnalytics) {
 			securityEvent := siteAnalyticsEvent{Bytes: writer.bytesWritten, Domain: a.analyticsEventDomain(r, ""), Path: analyticsBoundedString(r.URL.EscapedPath(), 512), Query: analyticsBoundedString(accountauth.SafeQuery(r.URL.RawQuery), 2048), Method: r.Method, StatusCode: writer.statusCode, OccurredAt: startedAt.UTC(), RemoteAddress: analyticsBoundedString(r.RemoteAddr, 64), Forwarded: analyticsBoundedString(r.Header.Get("Forwarded"), 256), ForwardedFor: analyticsBoundedString(r.Header.Get("X-Forwarded-For"), 256), UserAgent: analyticsBoundedString(r.UserAgent(), 256), AcceptLanguage: analyticsBoundedString(r.Header.Get("Accept-Language"), 64), TrustedPeer: !publicOrdinaryRequest(r) && a.sitebrushPeerRequestTrusted(r, startedAt.UTC()), IndexingCrawler: httpsecurity.IsIndexingCrawlerRequest(r), SecurityBlocked: writer.Header().Get("X-Sitebrush-Security-Incident") != "" || writer.statusCode == http.StatusTooManyRequests || writer.statusCode == http.StatusForbidden}
 			securityEvent.SecurityAlreadyBlocked = writer.Header().Get("X-Sitebrush-Security-Already-Blocked") == "1"
 			select {
@@ -9109,16 +9112,21 @@ func (a *App) handleAnalyticsSecurityAction(w http.ResponseWriter, r *http.Reque
 }
 
 // Security filtering is deliberately before routing and database access. The
-// guard owns its mutable state in channel workers; overload therefore fails open
-// instead of turning the protection layer into a site-wide lock.
+// guard owns its mutable state in channel workers. Failure to obtain a decision
+// rejects this request without bypassing protection or waiting for persistence.
 func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 	if a.attackGuard == nil && a.throttleGuard == nil {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if publicsite.SecurityChecked(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		now := time.Now().UTC()
 		clientIP := clientIPAddress(r)
 		decision := a.publicRequestDecision(r)
+		r = withPublicRequestDecision(r, decision)
 		domain := decision.Domain
 		if domain == "" {
 			domain = normalizeDomainName(domainFromRequest(r))
@@ -9129,19 +9137,21 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 			trusted = a.trustRecordedAdminIP(r, domain, clientIP, now)
 		}
 		serveNext := func() {
+			if a.publicBoundary && a.throttleGuard != nil {
+				r = publicsite.CheckedRequest(r)
+			}
 			if a.attackGuard == nil || trusted || crawlerRead {
 				next.ServeHTTP(w, r)
 				return
 			}
-			responseWriter := &statusCapturingResponseWriter{ResponseWriter: w}
-			next.ServeHTTP(responseWriter, r)
-			if responseWriter.statusCode == http.StatusNotFound && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
-				if decision.Found {
-					_, _, _, _ = a.attackGuard.ObservePublicRequest(domain, clientIP, r.URL.EscapedPath(), r.Method, http.StatusNotFound, now)
-				} else {
-					_, _, _ = a.attackGuard.ObserveSiteNotFoundFastDisposition(domain, clientIP, r.URL.EscapedPath(), now)
+			responseWriter := &securityNotFoundWriter{statusCapturingResponseWriter: &statusCapturingResponseWriter{ResponseWriter: w}}
+			if r.Method == http.MethodGet || r.Method == http.MethodHead {
+				responseWriter.observe = func() error {
+					_, observationErr := a.attackGuard.Decide(httpsecurity.AttackRequest{Domain: domain, IP: clientIP, Path: r.URL.EscapedPath(), Method: r.Method, StatusCode: http.StatusNotFound, PolicyTrust: decision.Found, Now: now}, r.Context().Done())
+					return observationErr
 				}
 			}
+			next.ServeHTTP(responseWriter, r)
 		}
 		if trusted {
 			serveNext()
@@ -9150,20 +9160,28 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 		if a.attackGuard != nil {
 			var block httpsecurity.SecurityBlock
 			var blocked, allowed, alreadyBlocked bool
+			attackStarted := requesttiming.Start(r)
 			category := ""
 			if !trusted {
 				category = browserstats.ProbeCategory(r.URL.EscapedPath(), r.URL.RawQuery)
 			}
+			description := ""
 			if immediateSecurityCategory(category) {
-				description := securityIncidentDescription(category, r.URL.EscapedPath(), 0)
-				block, blocked, alreadyBlocked = a.attackGuard.ObserveSiteIncidentEvidence(domain, clientIP, category, description, now)
+				description = securityIncidentDescription(category, r.URL.EscapedPath(), 0)
 			} else {
-				if decision.Found && !crawlerRead {
-					block, blocked, allowed, alreadyBlocked = a.attackGuard.ObservePublicRequest(domain, clientIP, r.URL.EscapedPath(), r.Method, 0, now)
-				} else {
-					block, blocked, allowed, alreadyBlocked = a.attackGuard.ObserveSiteRequestFastEvidence(domain, clientIP, r.URL.EscapedPath(), r.Method, trusted || crawlerRead, now)
-				}
+				category = ""
 			}
+			attackDecision, decisionErr := a.attackGuard.Decide(httpsecurity.AttackRequest{
+				Domain: domain, IP: clientIP, Path: r.URL.EscapedPath(), Method: r.Method,
+				Category: category, Description: description, Trusted: crawlerRead,
+				PolicyTrust: decision.Found, Now: now,
+			}, r.Context().Done())
+			requesttiming.Finish(r, requesttiming.AttackGuard, attackStarted)
+			if decisionErr != nil {
+				serveSecurityUnavailable(w)
+				return
+			}
+			block, blocked, allowed, alreadyBlocked = attackDecision.Block, attackDecision.Blocked, attackDecision.Allowed, attackDecision.AlreadyBlocked
 			if allowed {
 				serveNext()
 				return
@@ -9195,13 +9213,14 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 		}
 
 		if a.throttleGuard != nil {
-			decision := httpsecurity.ThrottleDecision{}
-			if crawlerRead && !trusted {
-				decision = a.throttleGuard.ObserveFastExemptObservation(clientIP, false, now)
-			} else {
-				decision = a.throttleGuard.ObserveFast(clientIP, trusted, now)
+			throttleStarted := requesttiming.Start(r)
+			throttleDecision, throttleErr := a.throttleGuard.Decide(httpsecurity.ThrottleRequest{IP: clientIP, Trusted: trusted, Exempt: crawlerRead, Now: now}, r.Context().Done())
+			requesttiming.Finish(r, requesttiming.ThrottleGuard, throttleStarted)
+			if throttleErr != nil {
+				serveSecurityUnavailable(w)
+				return
 			}
-			if decision.RateLimited {
+			if throttleDecision.RateLimited {
 				if r.Method == http.MethodPost && hasQueryFlag(r, "security_incident_report") {
 					serveNext()
 					return
@@ -9218,17 +9237,56 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 				_, _ = io.WriteString(w, "Request rate temporarily reduced. Retry shortly.\n")
 				return
 			}
-			if decision.Active && a.trustRecordedAdminIP(r, domain, clientIP, now) {
+			if throttleDecision.Active && a.trustRecordedAdminIP(r, domain, clientIP, now) {
 				serveNext()
 				return
 			}
-			if decision.Active {
+			if throttleDecision.Active {
 				w.Header().Set("X-Sitebrush-Security-Throttle", "active")
 			}
 		}
 
 		serveNext()
 	})
+}
+
+func serveSecurityUnavailable(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Retry-After", "1")
+	http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+}
+
+// Misses contribute to enforcement before committing their headers. An owner
+// that cannot accept evidence causes 503 rather than an uncounted scanner miss.
+type securityNotFoundWriter struct {
+	*statusCapturingResponseWriter
+	observe  func() error
+	rejected bool
+}
+
+func (writer *securityNotFoundWriter) WriteHeader(status int) {
+	if status == http.StatusNotFound && writer.statusCode == 0 && writer.observe != nil {
+		if err := writer.observe(); err != nil {
+			writer.rejected = true
+			serveSecurityUnavailable(writer.statusCapturingResponseWriter)
+			return
+		}
+	}
+	writer.statusCapturingResponseWriter.WriteHeader(status)
+}
+
+func (writer *securityNotFoundWriter) Write(body []byte) (int, error) {
+	if writer.rejected {
+		return 0, io.ErrClosedPipe
+	}
+	return writer.statusCapturingResponseWriter.Write(body)
+}
+
+func (writer *securityNotFoundWriter) ReadFrom(reader io.Reader) (int64, error) {
+	if writer.rejected {
+		return 0, io.ErrClosedPipe
+	}
+	return writer.statusCapturingResponseWriter.ReadFrom(reader)
 }
 
 func (a *App) securityResponseHeadersMiddleware(next http.Handler) http.Handler {
@@ -9569,6 +9627,7 @@ type serverRunConfig struct {
 	PortWasProvided      bool
 	DesktopMode          bool
 	Debug                bool
+	RequestTimings       bool
 	UpdateProbation      bool
 	UpdateChild          bool
 	PublicProxy          bool
@@ -9777,6 +9836,7 @@ func main() {
 	updateTargetVersion := flag.String("update-target-version", "", "internal expected compiled release identity")
 	versionMode := flag.Bool("version", false, "print version and exit")
 	debugMode := flag.Bool("debug", false, "enable verbose HTTP and database diagnostic logs")
+	requestTimings := flag.Bool("request-timings", false, "collect asynchronous request stage timings and log counters every 30 seconds")
 	legacyStoragePath := flag.String("storage-path", "", "")
 	legacyDBPath := flag.String("db-path", "", "")
 	legacyDBType := flag.String("db-type", "", "")
@@ -9956,7 +10016,7 @@ func main() {
 	serverConfig := serverRunConfig{
 		ParsedPorts: parsedPorts, StoragePath: effectiveStoragePath, DBPath: effectiveDBPath,
 		AllowStorageFallback: !storagePathWasProvided && !dbPathWasProvided, PortWasProvided: flagWasProvided("port"),
-		DesktopMode: desktopMode, Debug: *debugMode,
+		DesktopMode: desktopMode, Debug: *debugMode, RequestTimings: *requestTimings,
 		UpdateProbation: *updateProbation, UpdateChild: *serverChild, PublicProxy: *publicProxy,
 	}
 	if *updateSupervisor {
@@ -10100,6 +10160,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	var siteDatabaseRouter *perSiteDBRouter
 	aiCapabilityStatePath := filepath.Join(storageRealRoot, "security", "ai-capabilities.json")
 	application := &App{storagePath: effectiveStoragePath, storageRealRoot: storageRealRoot, dbPath: effectiveDBPath, debug: config.Debug, desktopMode: config.DesktopMode, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), grabCancels: newGrabCancelTracker(), trialPreviews: newPublicTrialPreviewStore(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 1024), analyticsLosses: make(chan string, 64), browserAnalyticsLosses: make(chan string, 64), browserAnalytics: make(chan browserAnalyticsEnvelope, 512), analyticsConnections: make(chan struct{}, 128), domainLogEvents: make(chan domainLogEvent, 1024), aiCapabilities: nil}
+	application.requestTimings = startRequestTimingCounters(config.RequestTimings, ctx.Done(), "application")
 	application.developmentMode = CompileVersion == "dev" && !config.UpdateChild
 	application.updateActivation = activation
 
@@ -10110,16 +10171,27 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application.publicProxy = config.PublicProxy
 	defer application.aiImports.Close()
 	application.analyticsMemoryLimit = analyticsConfiguredMemoryLimit()
+	securityExchange := func(request appupdate.Request) (appupdate.Response, error) {
+		return appupdate.Exchange(effectiveStoragePath, request, ctx.Done())
+	}
+	publicThrottle := false
+	if config.PublicProxy {
+		capabilities, capabilityErr := securityExchange(appupdate.Request{Action: "public_throttle_capabilities"})
+		publicThrottle = capabilityErr == nil && capabilities.Detail == "1"
+		if publicThrottle {
+			securityExchange = appupdate.NewSecurityContact(effectiveStoragePath, ctx.Done())
+		}
+	}
 	attackGuardPath := filepath.Join(application.storageRootDir(), "security", "attackguard.json")
 	var attackGuard *httpsecurity.AttackGuard
 	var attackGuardErr error
 	if config.PublicProxy {
 		attackGuard = httpsecurity.NewRemoteAttackGuard(func(payload []byte) ([]byte, error) {
-			response, exchangeErr := appupdate.Exchange(effectiveStoragePath, appupdate.Request{Action: "public_security", Detail: string(payload)}, ctx.Done())
+			response, exchangeErr := securityExchange(appupdate.Request{Action: "public_security", Detail: string(payload)})
 			return []byte(response.Detail), exchangeErr
 		})
 	} else {
-		attackGuard, attackGuardErr = httpsecurity.NewAttackGuard(attackGuardPath)
+		attackGuard, attackGuardErr = httpsecurity.NewAttackGuard(attackGuardPath, application.requestTimings)
 	}
 	if attackGuardErr != nil {
 		return fmt.Errorf("load security attack guard: %w", attackGuardErr)
@@ -10127,7 +10199,16 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application.attackGuard = attackGuard
 	defer attackGuard.Close()
 	throttleGuardPath := filepath.Join(application.storageRootDir(), "security", "throttleguard.json")
-	throttleGuard, throttleGuardErr := httpsecurity.NewThrottleGuard(throttleGuardPath)
+	var throttleGuard *httpsecurity.ThrottleGuard
+	var throttleGuardErr error
+	if publicThrottle {
+		throttleGuard = httpsecurity.NewRemoteThrottleGuard(func(payload []byte) ([]byte, error) {
+			response, exchangeErr := securityExchange(appupdate.Request{Action: "public_throttle", Detail: string(payload)})
+			return []byte(response.Detail), exchangeErr
+		})
+	} else {
+		throttleGuard, throttleGuardErr = httpsecurity.NewThrottleGuard(throttleGuardPath, application.requestTimings)
+	}
 	if throttleGuardErr != nil {
 		return fmt.Errorf("load security throttle guard: %w", throttleGuardErr)
 	}
@@ -10455,7 +10536,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 			restoredHandler.ServeHTTP(w, r)
 		})
 	}
-	server := newSitebrushHTTPServer(httpHandler)
+	server := newSitebrushHTTPServer(httpHandler, application.requestTimings)
 	server.ConnState = sitebrushConnStateLogger("HTTP", config.Debug)
 	serverErrors := make(chan error, 1)
 	go func() {
@@ -10463,6 +10544,9 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	}()
 	log.Printf("Sitebrush started on http://%s", address)
 	if config.UpdateChild {
+		if capabilityErr := appupdate.ReportPublicThrottle(effectiveStoragePath, CompileVersion); capabilityErr != nil {
+			log.Printf("PUBLIC throttle capability: %v", capabilityErr)
+		}
 		if capabilityErr := appupdate.ReportPublicBoundary(effectiveStoragePath, CompileVersion); capabilityErr != nil {
 			log.Printf("PUBLIC capability: %v", capabilityErr)
 		}
@@ -10528,7 +10612,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	}
 }
 
-func newSitebrushHTTPServer(handler http.Handler) *http.Server {
+func newSitebrushHTTPServer(handler http.Handler, timings ...*requesttiming.Collector) *http.Server {
 	server := &http.Server{
 		Handler:           keepAliveHandler(handler),
 		ReadTimeout:       sitebrushHTTPReadTimeout,
@@ -10537,7 +10621,40 @@ func newSitebrushHTTPServer(handler http.Handler) *http.Server {
 		ReadHeaderTimeout: sitebrushHTTPReadHeaderTimeout,
 	}
 	server.SetKeepAlivesEnabled(true)
+	if len(timings) > 0 && timings[0] != nil {
+		server.Handler = timings[0].Middleware(server.Handler)
+		server.ConnContext = timings[0].ConnContext
+	}
 	return server
+}
+
+func startRequestTimingCounters(enabled bool, stop <-chan struct{}, role string) *requesttiming.Collector {
+	if !enabled {
+		return nil
+	}
+	collector := requesttiming.New(stop)
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				report, err := collector.Snapshot(stop)
+				if err != nil {
+					return
+				}
+				for _, counter := range report.Stages {
+					if counter.Count == 0 {
+						continue
+					}
+					log.Printf("REQUEST TIMING role=%s stage=%s count=%d mean=%s p50_upper=%s p95_upper=%s p99_upper=%s max=%s incomplete=%t dropped_minimum=%d", role, counter.Stage, counter.Count, time.Duration(counter.TotalNS/counter.Count), counter.PercentileUpperBound(50), counter.PercentileUpperBound(95), counter.PercentileUpperBound(99), time.Duration(counter.MaxNS), report.Incomplete, report.DroppedMinimum)
+				}
+			}
+		}
+	}()
+	return collector
 }
 
 func buildEmbeddedStaticAssetCache(staticFiles fs.FS) (map[string]embeddedStaticAsset, error) {
@@ -11127,7 +11244,7 @@ func listenTLSForAutoCert() (net.Listener, error) {
 }
 
 func (a *App) serveTLSWithAutoCert(ctx context.Context, tlsListener net.Listener, tlsConfig *tls.Config, handler http.Handler) {
-	tlsServer := newSitebrushHTTPServer(handler)
+	tlsServer := newSitebrushHTTPServer(handler, a.requestTimings)
 	tlsServer.TLSConfig = tlsConfig
 	tlsServer.ErrorLog = log.New(problemLogWriter{application: a}, "", 0)
 	tlsServer.ConnState = sitebrushConnStateLogger("HTTPS", a.debug)
@@ -11161,9 +11278,12 @@ func (a *App) serveTLSWithAutoCert(ctx context.Context, tlsListener net.Listener
 func (a *App) autoCertTLSConfig(fallbackCertificate *tls.Certificate) *tls.Config {
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, ClientAuth: tls.RequestClientCert}
 	tlsConfig.GetCertificate = func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+		if a.requestTimings != nil {
+			started := time.Now()
+			defer func() { a.requestTimings.Record(requesttiming.Certificate, time.Since(started)) }()
+		}
 		certificateDomain := normalizeDomainName(clientHello.ServerName)
-		now := time.Now()
-		cachedCertificate, _, cachedCertificateOK := a.autoCertCachedCertificateFromMemory(certificateDomain, now, 0)
+		cachedCertificate, cachedCertificateOK := a.autoCertCertificateForClient(clientHello)
 		if cachedCertificateOK {
 			return cachedCertificate, nil
 		}
@@ -12054,7 +12174,10 @@ func automaticSSLCertificateCacheNameMatchesDomain(cacheName string, certificate
 }
 
 func (a *App) autoCertCachedCertificateFromMemory(domain string, now time.Time, minimumRemaining time.Duration) (*tls.Certificate, time.Time, bool) {
-	if a.autoCertCertificateCache == nil {
+	// Local fallback names cannot have an ACME entry. Avoid scheduling a cache
+	// owner or allocating a timeout during their TLS handshake.
+	domain = normalizeDomainName(domain)
+	if a.autoCertCertificateCache == nil || domain == "" {
 		return nil, time.Time{}, false
 	}
 	response := make(chan autoCertCertificateCacheResponse, 1)
@@ -12080,6 +12203,33 @@ func (a *App) autoCertCachedCertificateFromMemory(domain string, now time.Time, 
 		return cacheResponse.certificate, cacheResponse.expiresAt, true
 	case <-time.After(5 * time.Millisecond):
 		return nil, time.Time{}, false
+	}
+}
+
+// A live TLS handshake owns its reply contact. The cache owner does no I/O;
+// cancellation comes from crypto/tls's boundary rather than a timer per lookup.
+func (a *App) autoCertCertificateForClient(hello *tls.ClientHelloInfo) (*tls.Certificate, bool) {
+	domain := normalizeDomainName(hello.ServerName)
+	if a.autoCertCertificateCache == nil || domain == "" {
+		return nil, false
+	}
+	boundary := hello.Context()
+	if boundary == nil {
+		certificate, _, found := a.autoCertCachedCertificateFromMemory(domain, time.Now(), 0)
+		return certificate, found
+	}
+	reply := make(chan autoCertCertificateCacheResponse, 1)
+	request := autoCertCertificateCacheRequest{action: "get", domain: domain, response: reply, done: boundary.Done()}
+	select {
+	case a.autoCertCertificateCache <- request:
+	case <-boundary.Done():
+		return nil, false
+	}
+	select {
+	case result := <-reply:
+		return result.certificate, result.found && result.certificate != nil && time.Now().Before(result.expiresAt)
+	case <-boundary.Done():
+		return nil, false
 	}
 }
 
@@ -12134,17 +12284,28 @@ func (a *App) autoCertCachedCertificateDomains(ctx context.Context) []string {
 
 func startAutoCertCertificateMemoryCache(ctx context.Context, certificateCacheDir string) chan autoCertCertificateCacheRequest {
 	requests := make(chan autoCertCertificateCacheRequest, 256)
-	go runAutoCertCertificateMemoryCache(ctx, certificateCacheDir, requests)
+	ready := make(chan struct{})
+	go runAutoCertCertificateMemoryCache(ctx, certificateCacheDir, requests, ready)
+	select {
+	case <-ready:
+	case <-ctx.Done():
+	}
 	return requests
 }
 
-func runAutoCertCertificateMemoryCache(ctx context.Context, certificateCacheDir string, requests <-chan autoCertCertificateCacheRequest) {
+func runAutoCertCertificateMemoryCache(ctx context.Context, certificateCacheDir string, requests <-chan autoCertCertificateCacheRequest, ready chan<- struct{}) {
 	certificatesByDomain := preloadAutoCertCertificatesFromDisk(certificateCacheDir)
+	close(ready)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case request := <-requests:
+			select {
+			case <-request.done:
+				continue
+			default:
+			}
 			if request.action == "list" {
 				domains := make([]string, 0, len(certificatesByDomain))
 				for domain := range certificatesByDomain {
@@ -51065,6 +51226,9 @@ func runSupervisedSitebrush(ctx context.Context, config serverRunConfig) error {
 		if config.Debug {
 			arguments = append(arguments, "-debug")
 		}
+		if config.RequestTimings {
+			arguments = append(arguments, "-request-timings")
+		}
 		catalog, catalogErr := serverReleaseCatalog(publicKey)
 		if catalogErr != nil {
 			return catalogErr
@@ -51080,11 +51244,14 @@ func runSupervisedSitebrush(ctx context.Context, config serverRunConfig) error {
 	if config.Debug {
 		arguments = append(arguments, "-debug")
 	}
+	if config.RequestTimings {
+		arguments = append(arguments, "-request-timings")
+	}
 	catalog, err := serverReleaseCatalog(publicKey)
 	if err != nil {
 		return err
 	}
-	return appupdate.Run(appupdate.Options{Catalog: &catalog, PublicState: front.Set, PublicSecurity: front.Security, PublicPolicy: front.Policy, PublicObservations: front.PullObservations, PublicCertificate: front.Certificate, Environment: []string{"SITEBRUSH_PUBLIC_POLICY_CHANNEL=1", "SITEBRUSH_PUBLIC_CONTACT=" + secret, "SITEBRUSH_PUBLIC_HTTP_PORT=" + strconv.Itoa(front.HTTPPort), "SITEBRUSH_PUBLIC_HTTPS_PORT=" + strconv.Itoa(front.HTTPSPort)}, StoragePath: storagePath, Executable: executable, Version: CompileVersion, Compatibility: appupdate.CurrentCompatibility(), Arguments: arguments, PublicKey: publicKey, Output: os.Stdout}, ctx.Done())
+	return appupdate.Run(appupdate.Options{Catalog: &catalog, PublicState: front.Set, PublicSecurity: front.Security, PublicThrottle: front.Throttle, PublicPolicy: front.Policy, PublicObservations: front.PullObservations, PublicCertificate: front.Certificate, Environment: []string{"SITEBRUSH_PUBLIC_POLICY_CHANNEL=1", "SITEBRUSH_PUBLIC_CONTACT=" + secret, "SITEBRUSH_PUBLIC_HTTP_PORT=" + strconv.Itoa(front.HTTPPort), "SITEBRUSH_PUBLIC_HTTPS_PORT=" + strconv.Itoa(front.HTTPSPort)}, StoragePath: storagePath, Executable: executable, Version: CompileVersion, Compatibility: appupdate.CurrentCompatibility(), Arguments: arguments, PublicKey: publicKey, Output: os.Stdout}, ctx.Done())
 }
 
 func runManualUpgrade(storagePath, databasePath, port string, debug bool, policies ...appupdate.BackupPolicy) error {
@@ -53589,6 +53756,13 @@ func (a *App) writePublicPolicy(domain string) error {
 
 type publicDecisionContextKey struct{}
 
+func withPublicRequestDecision(request *http.Request, decision publicsite.Decision) *http.Request {
+	if _, found := request.Context().Value(publicDecisionContextKey{}).(publicsite.Decision); found {
+		return request
+	}
+	return request.WithContext(context.WithValue(request.Context(), publicDecisionContextKey{}, decision))
+}
+
 func (a *App) publicRequestDecision(r *http.Request) publicsite.Decision {
 	if decision, found := r.Context().Value(publicDecisionContextKey{}).(publicsite.Decision); found {
 		return decision
@@ -53596,8 +53770,14 @@ func (a *App) publicRequestDecision(r *http.Request) publicsite.Decision {
 	if a.publicCatalog == nil {
 		return publicsite.Decision{}
 	}
+	started := requesttiming.Start(r)
 	host := domainFromRequest(r)
-	return a.publicCatalog.LookupRequest(publicsite.Lookup{Host: host, Path: cleanPath(r.URL.Path), File: publicAssetFileNameFromPath(r.URL.Path, host), ClientIP: accountClientIP(r)}, r.Context().Done())
+	lookup := publicsite.Lookup{Host: host, Path: cleanPath(r.URL.Path), File: publicAssetFileNameFromPath(r.URL.Path, host), ClientIP: accountClientIP(r)}
+	requesttiming.Finish(r, requesttiming.Domain, started)
+	started = requesttiming.Start(r)
+	decision := a.publicCatalog.LookupRequest(lookup, r.Context().Done())
+	requesttiming.Finish(r, requesttiming.Policy, started)
+	return decision
 }
 func (a *App) notifyPublicPolicy(action, domain string) error {
 	if a.publicCatalog != nil {
@@ -53655,6 +53835,8 @@ func sitebrushControlQueryFlag(flag string) bool {
 	return false
 }
 func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, paused bool) bool {
+	started := requesttiming.Start(r)
+	defer requesttiming.Finish(r, requesttiming.PublicHandler, started)
 	if !publicOrdinaryRequest(r) {
 		return false
 	}
@@ -53686,7 +53868,7 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 		return false
 	}
 	if _, found := r.Context().Value(publicDecisionContextKey{}).(publicsite.Decision); !found {
-		r = r.WithContext(context.WithValue(r.Context(), publicDecisionContextKey{}, decision))
+		r = withPublicRequestDecision(r, decision)
 	}
 	domain := decision.Domain
 	hideMenu := decision.Stealth && !decision.AdminAllowed
@@ -53808,32 +53990,8 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 	return true
 }
 
-func startPublicSiteBoundary(ctx context.Context, storagePath string, config serverRunConfig) (*publicsite.Front, func(), string, error) {
-	storageRoot, err := prepareStorageJailRoot(storagePath)
-	if err != nil {
-		return nil, nil, "", err
-	}
-	secret, err := appupdate.Identifier()
-	if err != nil {
-		return nil, nil, "", err
-	}
-	application := &App{storagePath: storagePath, storageRealRoot: storageRoot, publicBoundary: true}
-	application.publicStreamer = publicsite.NewStreamer()
-	application.publicCatalog = publicsite.NewCatalog(storagePath, ctx.Done())
-	application.autoCertCertificateCache = startAutoCertCertificateMemoryCache(ctx, filepath.Join(application.storageRootDir(), "letsencrypt"))
-	application.startDomainLogWorker(ctx)
-	staticFiles, err := fs.Sub(embeddedWebFiles, "web/static")
-	if err != nil {
-		return nil, nil, "", err
-	}
-	application.embeddedStaticAssets, err = buildEmbeddedStaticAssetCache(staticFiles)
-	if err != nil {
-		return nil, nil, "", err
-	}
-	application.attackGuard, err = httpsecurity.NewAttackGuard(filepath.Join(application.storageRootDir(), "security", "attackguard.json"))
-	if err != nil {
-		return nil, nil, "", err
-	}
+// The socket listeners and load fixtures share the same public request path.
+func newPublicHTTPFront(application *App, secret string, stop <-chan struct{}) *publicsite.Front {
 	var front *publicsite.Front
 	publicHandler := func(w http.ResponseWriter, r *http.Request, paused bool) bool {
 		if hasQueryFlag(r, "sitebrush_menu_ws") && paused {
@@ -53877,34 +54035,126 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 		}
 
 		lookup := application.publicRequestDecision(r)
-		r = r.WithContext(context.WithValue(r.Context(), publicDecisionContextKey{}, lookup))
+		r = withPublicRequestDecision(r, lookup)
 		if !lookup.Found || !paused && hasSitebrushSessionCookie(r) && (lookup.Frozen || lookup.File.Mode == "page_password" || !strings.HasPrefix(r.URL.Path, "/p/") && lookup.Password.Path != "") || lookup.File.Mode == "token" {
 			return false
 		}
+		if application.throttleGuard != nil {
+			captured := &statusCapturingResponseWriter{ResponseWriter: w}
+			handled := application.servePublicPublished(captured, r, paused)
+			return handled || captured.statusCode != 0
+		}
 		handled := false
-		handler := application.securityResponseHeadersMiddleware(application.accessLogMiddleware(application.authAbuseMiddleware(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		content := http.Handler(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 			handled = application.servePublicPublished(writer, request, paused)
-		}))))
+		}))
+		if application.throttleGuard == nil {
+			content = application.authAbuseMiddleware(content)
+		}
+		handler := application.securityResponseHeadersMiddleware(application.accessLogMiddleware(content))
 		captured := &statusCapturingResponseWriter{ResponseWriter: w}
 		handler.ServeHTTP(captured, r)
 		delivered := handled || captured.statusCode != 0
-		if delivered && front.ObservationAvailable(lookup.Domain) {
-			status := captured.statusCode
-			if status == 0 {
-				status = http.StatusOK
-			}
-			event := siteAnalyticsEvent{Domain: lookup.Domain, Path: analyticsBoundedString(r.URL.EscapedPath(), 512), Query: analyticsBoundedString(accountauth.SafeQuery(r.URL.RawQuery), 2048), Method: r.Method, StatusCode: status, Bytes: captured.bytesWritten, OccurredAt: time.Now().UTC(), RemoteAddress: analyticsBoundedString(r.RemoteAddr, 64), Forwarded: analyticsBoundedString(r.Header.Get("Forwarded"), 256), ForwardedFor: analyticsBoundedString(r.Header.Get("X-Forwarded-For"), 256), UserAgent: analyticsBoundedString(r.UserAgent(), 256), AcceptLanguage: analyticsBoundedString(r.Header.Get("Accept-Language"), 64), IndexingCrawler: httpsecurity.IsIndexingCrawlerRequest(r), SecurityBlocked: status == http.StatusForbidden || status == http.StatusTooManyRequests, SecurityAlreadyBlocked: captured.Header().Get("X-Sitebrush-Security-Already-Blocked") == "1"}
-			front.Observe(lookup.Domain, event)
+		if delivered && application.throttleGuard == nil {
+			application.observePublicResponse(front, captured, r, lookup.Domain)
 		}
 		return delivered
 	}
-	front = publicsite.NewFront(secret, publicHandler, ctx.Done())
+	var admission []func(http.Handler) http.Handler
+	if application.throttleGuard != nil {
+		admission = append(admission, func(next http.Handler) http.Handler {
+			protected := application.securityResponseHeadersMiddleware(application.accessLogMiddleware(application.authAbuseMiddleware(next)))
+			return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				lookup := application.publicRequestDecision(request)
+				request = withPublicRequestDecision(request, lookup)
+				captured := &statusCapturingResponseWriter{ResponseWriter: writer}
+				protected.ServeHTTP(captured, request)
+				domain := lookup.Domain
+				if domain == "" {
+					domain = normalizeDomainName(domainFromRequest(request))
+				}
+				application.observePublicResponse(front, captured, request, domain)
+			})
+		})
+	}
+	front = publicsite.NewFront(secret, publicHandler, stop, admission...)
 	front.Guest = func(w http.ResponseWriter, r *http.Request) bool {
 		if hasSitebrushSessionCookie(r) || !publicOrdinaryRequest(r) {
 			return false
 		}
 		return publicHandler(w, r, false)
 	}
+	return front
+}
+
+func (a *App) observePublicResponse(front *publicsite.Front, captured *statusCapturingResponseWriter, r *http.Request, domain string) {
+	if !front.ObservationAvailable(domain) {
+		return
+	}
+	status := captured.statusCode
+	if status == 0 {
+		status = http.StatusOK
+	}
+	event := siteAnalyticsEvent{Domain: domain, Path: analyticsBoundedString(r.URL.EscapedPath(), 512), Query: analyticsBoundedString(accountauth.SafeQuery(r.URL.RawQuery), 2048), Method: r.Method, StatusCode: status, Bytes: captured.bytesWritten, OccurredAt: time.Now().UTC(), RemoteAddress: analyticsBoundedString(r.RemoteAddr, 64), Forwarded: analyticsBoundedString(r.Header.Get("Forwarded"), 256), ForwardedFor: analyticsBoundedString(r.Header.Get("X-Forwarded-For"), 256), UserAgent: analyticsBoundedString(r.UserAgent(), 256), AcceptLanguage: analyticsBoundedString(r.Header.Get("Accept-Language"), 64), IndexingCrawler: httpsecurity.IsIndexingCrawlerRequest(r), SecurityBlocked: status == http.StatusForbidden || status == http.StatusTooManyRequests, SecurityAlreadyBlocked: captured.Header().Get("X-Sitebrush-Security-Already-Blocked") == "1"}
+	front.Observe(domain, event)
+}
+
+// Certificate selection is shared by the real listener and connection benchmarks.
+func (a *App) publicTLSConfig(fallback *tls.Certificate, observe func(string)) *tls.Config {
+	return &tls.Config{MinVersion: tls.VersionTLS12, ClientAuth: tls.RequestClientCert, GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+		if a.requestTimings != nil {
+			started := time.Now()
+			defer func() { a.requestTimings.Record(requesttiming.Certificate, time.Since(started)) }()
+		}
+		if certificate, found := a.autoCertCertificateForClient(hello); found {
+			return certificate, nil
+		}
+		observe(normalizeDomainName(hello.ServerName))
+		return fallback, nil
+	}}
+}
+
+func startPublicSiteBoundary(ctx context.Context, storagePath string, config serverRunConfig) (*publicsite.Front, func(), string, error) {
+	storageRoot, err := prepareStorageJailRoot(storagePath)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	secret, err := appupdate.Identifier()
+	if err != nil {
+		return nil, nil, "", err
+	}
+	application := &App{storagePath: storagePath, storageRealRoot: storageRoot, publicBoundary: true}
+	application.requestTimings = startRequestTimingCounters(config.RequestTimings, ctx.Done(), "public")
+	application.publicStreamer = publicsite.NewStreamer()
+	application.publicCatalog = publicsite.NewCatalog(storagePath, ctx.Done())
+	application.autoCertCertificateCache = startAutoCertCertificateMemoryCache(ctx, filepath.Join(application.storageRootDir(), "letsencrypt"))
+	application.startDomainLogWorker(ctx)
+	staticFiles, err := fs.Sub(embeddedWebFiles, "web/static")
+	if err != nil {
+		return nil, nil, "", err
+	}
+	application.embeddedStaticAssets, err = buildEmbeddedStaticAssetCache(staticFiles)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	application.attackGuard, err = httpsecurity.NewAttackGuard(filepath.Join(application.storageRootDir(), "security", "attackguard.json"), application.requestTimings)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	if appupdate.PublicThrottleSupported(storagePath, CompileVersion) {
+		application.throttleGuard, err = httpsecurity.NewThrottleGuard(filepath.Join(application.storageRootDir(), "security", "throttleguard.json"), application.requestTimings)
+		if err != nil {
+			application.attackGuard.Close()
+			return nil, nil, "", err
+		}
+	}
+	closeGuards := func() {
+		application.attackGuard.Close()
+		if application.throttleGuard != nil {
+			application.throttleGuard.Close()
+		}
+	}
+	front := newPublicHTTPFront(application, secret, ctx.Done())
 	front.ResetPolicy = func() error { return application.publicCatalog.SetMemory(false) }
 	front.Policy = func(encoded []byte) ([]byte, error) {
 		var change publicsite.Change
@@ -53942,6 +54192,9 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 		}
 	}
 	front.Security = application.attackGuard.Relay
+	if application.throttleGuard != nil {
+		front.Throttle = application.throttleGuard.Relay
+	}
 	front.Certificate = func(domain string) error {
 		normalized := normalizeDomainName(domain)
 		if normalized == "" {
@@ -53957,12 +54210,12 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 	}
 	listener, port, err := listenOnAvailablePort(config.ParsedPorts.HTTPPort)
 	if err != nil {
-		application.attackGuard.Close()
+		closeGuards()
 		return nil, nil, "", err
 	}
 
 	front.HTTPPort = port
-	server := newSitebrushHTTPServer(front)
+	server := newSitebrushHTTPServer(front, application.requestTimings)
 	go func() {
 		if serveErr := server.Serve(listener); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 			log.Printf("PUBLIC HTTP: %v", serveErr)
@@ -53987,16 +54240,10 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 				tlsListener.Close()
 				front.HTTPSPort = 0
 				application.logProblemEvent("HTTPS certificate unavailable; public HTTP remains active: %v", certificateErr)
-				return front, func() { server.Close(); application.attackGuard.Close() }, secret, nil
+				return front, func() { server.Close(); closeGuards() }, secret, nil
 			}
-			tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, ClientAuth: tls.RequestClientCert, GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-				if certificate, _, found := application.autoCertCachedCertificate(hello.ServerName, time.Now(), 0); found {
-					return certificate, nil
-				}
-				front.ObserveTLS(normalizeDomainName(hello.ServerName))
-				return fallback, nil
-			}}
-			tlsServer = newSitebrushHTTPServer(front)
+			tlsConfig := application.publicTLSConfig(fallback, front.ObserveTLS)
+			tlsServer = newSitebrushHTTPServer(front, application.requestTimings)
 			tlsServer.TLSConfig = tlsConfig
 			go func() {
 				if serveErr := tlsServer.ServeTLS(tlsListener, "", ""); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
@@ -54010,7 +54257,7 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 		if tlsServer != nil {
 			tlsServer.Close()
 		}
-		application.attackGuard.Close()
+		closeGuards()
 	}
 	log.Printf("PUBLIC SiteBrush HTTP port=%d HTTPS port=%d", front.HTTPPort, front.HTTPSPort)
 	return front, closeBoundary, secret, nil

@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/matveynator/sitebrush/v2/pkg/requesttiming"
 )
 
 const (
@@ -23,8 +25,10 @@ const (
 	trustedAdminIPCacheTTL       = 5 * time.Minute
 	securityReasonLogLimit       = 24
 	attackGuardShardCount        = 16
-	attackGuardQueueSize         = 256
-	attackGuardWindowLimit       = 1024
+	// A single-IP burst of 1000 clients must fit without bypassing enforcement.
+	// The queue stays bounded; excess admission still fails explicitly.
+	attackGuardQueueSize   = 2048
+	attackGuardWindowLimit = 1024
 )
 
 type SecuritySettings struct {
@@ -124,6 +128,8 @@ type attackGuardRequest struct {
 	Comment     string
 	Success     bool
 	Reply       chan attackGuardResult `json:"-"`
+	Queued      time.Time              `json:"-"`
+	Done        <-chan struct{}        `json:"-"`
 }
 
 type attackGuardResult struct {
@@ -146,11 +152,12 @@ type AttackGuard struct {
 	shutdown chan struct{}
 	done     chan struct{}
 	path     string
+	timings  *requesttiming.Collector
 }
 
 // NewAttackGuard starts sharded state owners. Each mutable map belongs to exactly
 // one goroutine, so request handling never relies on locks or shared map access.
-func NewAttackGuard(path string) (*AttackGuard, error) {
+func NewAttackGuard(path string, timings ...*requesttiming.Collector) (*AttackGuard, error) {
 	state, err := loadAttackGuardDiskState(path)
 	if err != nil {
 		return nil, err
@@ -161,6 +168,9 @@ func NewAttackGuard(path string) (*AttackGuard, error) {
 		shutdown: make(chan struct{}),
 		done:     make(chan struct{}),
 		path:     path,
+	}
+	if len(timings) > 0 {
+		guard.timings = timings[0]
 	}
 	initialBlocks := make([][]SecurityBlock, attackGuardShardCount)
 	initialAllowlist := make([][]SecurityAllow, attackGuardShardCount)
@@ -185,7 +195,7 @@ func NewAttackGuard(path string) (*AttackGuard, error) {
 	for index := range guard.shards {
 		requests := make(chan attackGuardRequest, attackGuardQueueSize)
 		guard.shards[index] = requests
-		go runAttackGuardShard(requests, guard.shutdown, state.Settings, initialBlocks[index], initialAllowlist[index])
+		go runAttackGuardShard(requests, guard.shutdown, state.Settings, initialBlocks[index], initialAllowlist[index], guard.timings, guard.save)
 	}
 	go guard.runPersistence()
 	return guard, nil
@@ -221,7 +231,7 @@ func loadAttackGuardDiskState(path string) (attackGuardDiskState, error) {
 	return state, nil
 }
 
-func runAttackGuardShard(requests <-chan attackGuardRequest, shutdown <-chan struct{}, settings SecuritySettings, initial []SecurityBlock, initialAllowlist []SecurityAllow) {
+func runAttackGuardShard(requests <-chan attackGuardRequest, shutdown <-chan struct{}, settings SecuritySettings, initial []SecurityBlock, initialAllowlist []SecurityAllow, timings *requesttiming.Collector, save chan<- struct{}) {
 	blocks := make(map[string]SecurityBlock, len(initial))
 	allowlist := make(map[string]SecurityAllow, len(initialAllowlist))
 	trustedAdminIPs := make(map[string]time.Time)
@@ -246,10 +256,29 @@ func runAttackGuardShard(requests <-chan attackGuardRequest, shutdown <-chan str
 			pruneAttackGuardState(blocks, windows, incidents, now.UTC())
 			pruneAdminIPTrustState(trustedAdminIPs, adminIPLookups, now.UTC())
 		case request := <-requests:
+			select {
+			case <-request.Done:
+				continue
+			default:
+			}
+			started := startDecisionTiming(request.Queued)
 			result := handleAttackGuardRequest(blocks, allowlist, trustedAdminIPs, adminIPLookups, windows, incidents, reportClaims, &settings, request)
+			finishDecisionTiming(timings, request.Queued, started, requesttiming.AttackQueue, requesttiming.AttackWork)
+			if result.Changed {
+				select {
+				case save <- struct{}{}:
+				default:
+				}
+			}
 			if request.Reply != nil {
+				// Reply slices must not alias the owner's mutable reason history.
+				result.Block.ReasonLog = append([]SecurityReasonEvent(nil), result.Block.ReasonLog...)
+				for index := range result.Blocks {
+					result.Blocks[index].ReasonLog = append([]SecurityReasonEvent(nil), result.Blocks[index].ReasonLog...)
+				}
 				select {
 				case request.Reply <- result:
+				case <-request.Done:
 				case <-shutdown:
 					return
 				}
@@ -1125,6 +1154,13 @@ func (guard *AttackGuard) persistenceSnapshot(now time.Time) ([]SecurityBlock, e
 }
 
 func (guard *AttackGuard) exchangeFast(request attackGuardRequest) (attackGuardResult, bool) {
+	select {
+	case <-request.Done:
+		return attackGuardResult{}, false
+	case <-guard.done:
+		return attackGuardResult{}, false
+	default:
+	}
 	if guard.remote != nil {
 		return guard.remote(request)
 	}
@@ -1137,6 +1173,9 @@ func (guard *AttackGuard) exchangeFast(request attackGuardRequest) (attackGuardR
 	reply := make(chan attackGuardResult, 1)
 	request.Reply = reply
 
+	if guard.timings != nil {
+		request.Queued = time.Now()
+	}
 	select {
 	case <-guard.done:
 		return attackGuardResult{}, false
@@ -1145,6 +1184,8 @@ func (guard *AttackGuard) exchangeFast(request attackGuardRequest) (attackGuardR
 		return attackGuardResult{}, false
 	}
 	select {
+	case <-request.Done:
+		return attackGuardResult{}, false
 	case <-guard.done:
 		return attackGuardResult{}, false
 	case result := <-reply:

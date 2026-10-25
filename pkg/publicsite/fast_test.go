@@ -194,6 +194,9 @@ func TestObservationsRetainAcknowledgedBoundaryAndDropLater(t *testing.T) {
 	if !lost || total == 0 {
 		t.Fatal("overload failed to retain accepted observations and mark losses")
 	}
+	if !next.Incomplete || next.DroppedMinimum == 0 {
+		t.Fatal("overload omitted its explicit lower-bound loss counter", next)
+	}
 	if _, err := front.PullObservations([]byte("invalid")); err == nil {
 		t.Fatal("invalid observation request accepted")
 	}

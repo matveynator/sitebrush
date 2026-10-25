@@ -36,6 +36,7 @@ type Options struct {
 	// PublicState updates the independent HTTP boundary before a writer stops.
 	PublicState        func(address string, paused bool) error
 	PublicSecurity     func([]byte) ([]byte, error)
+	PublicThrottle     func([]byte) ([]byte, error)
 	PublicObservations func([]byte) ([]byte, error)
 	PublicPolicy       func([]byte) ([]byte, error)
 	PublicCertificate  func(string) error
@@ -288,6 +289,23 @@ func Run(options Options, stop <-chan struct{}) error {
 			response.State.Busy = state.Busy || checking
 			response.State.Checking = checking
 			switch request.Action {
+			case "public_throttle_capabilities":
+				response = Response{}
+				if options.PublicThrottle != nil {
+					response.Detail = "1"
+				}
+			case "public_throttle":
+				response = Response{}
+				if options.PublicThrottle == nil {
+					response.Error = "public throttle contact unavailable"
+					break
+				}
+				encoded, throttleErr := options.PublicThrottle([]byte(request.Detail))
+				if throttleErr != nil {
+					response.Error = throttleErr.Error()
+				} else {
+					response.Detail = string(encoded)
+				}
 			case "public_certificate":
 				response = Response{}
 				if options.PublicCertificate == nil {
@@ -619,7 +637,7 @@ func acceptContacts(listener *netchan.Listener[wireRequest], requests chan<- Req
 								if err := connection.Deliver(result); err != nil {
 									return
 								}
-								if request.Action != "attach" && request.Action != "public_observations" {
+								if request.Action != "attach" && request.Action != "public_observations" && request.Action != "public_security" && request.Action != "public_throttle" {
 									graceful = true
 									return
 								}
