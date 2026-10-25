@@ -16,11 +16,12 @@ func TestNegotiatePublicThrottleRequiresExplicitOwnership(t *testing.T) {
 	}{
 		{name: "owned by launcher", response: Response{Detail: "1"}, owned: true},
 		{name: "explicitly unsupported", response: Response{Detail: "0"}},
+		{name: "legacy non-owning launcher", response: Response{}},
 		{name: "legacy launcher", response: Response{Error: "unknown update command"}, exchangeError: errors.New("unknown update command")},
 		{name: "failed exchange", exchangeError: errors.New("connection closed"), wantError: true},
 		{name: "failed exchange with unsupported detail", response: Response{Detail: "0"}, exchangeError: errors.New("connection closed"), wantError: true},
 		{name: "transport error mimics legacy reply", exchangeError: errors.New("unknown update command"), wantError: true},
-		{name: "missing capability", wantError: true},
+		{name: "failed empty exchange", response: Response{}, exchangeError: errors.New("contact timed out"), wantError: true},
 		{name: "unknown capability", response: Response{Detail: "2"}, wantError: true},
 		{name: "launcher failure", response: Response{Error: "security unavailable"}, exchangeError: errors.New("security unavailable"), wantError: true},
 	}
