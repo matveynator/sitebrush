@@ -290,7 +290,7 @@ func Run(options Options, stop <-chan struct{}) error {
 			response.State.Checking = checking
 			switch request.Action {
 			case "public_throttle_capabilities":
-				response = Response{}
+				response = Response{Detail: "0"}
 				if options.PublicThrottle != nil {
 					response.Detail = "1"
 				}

@@ -1,9 +1,45 @@
 package appupdate
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
+
+func TestNegotiatePublicThrottleRequiresExplicitOwnership(t *testing.T) {
+	tests := []struct {
+		name          string
+		response      Response
+		exchangeError error
+		owned         bool
+		wantError     bool
+	}{
+		{name: "owned by launcher", response: Response{Detail: "1"}, owned: true},
+		{name: "explicitly unsupported", response: Response{Detail: "0"}},
+		{name: "legacy launcher", response: Response{Error: "unknown update command"}, exchangeError: errors.New("unknown update command")},
+		{name: "failed exchange", exchangeError: errors.New("connection closed"), wantError: true},
+		{name: "failed exchange with unsupported detail", response: Response{Detail: "0"}, exchangeError: errors.New("connection closed"), wantError: true},
+		{name: "transport error mimics legacy reply", exchangeError: errors.New("unknown update command"), wantError: true},
+		{name: "missing capability", wantError: true},
+		{name: "unknown capability", response: Response{Detail: "2"}, wantError: true},
+		{name: "launcher failure", response: Response{Error: "security unavailable"}, exchangeError: errors.New("security unavailable"), wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			owned, err := NegotiatePublicThrottle(func(request Request) (Response, error) {
+				calls++
+				if request.Action != "public_throttle_capabilities" {
+					t.Fatalf("unexpected capability request: %s", request.Action)
+				}
+				return test.response, test.exchangeError
+			})
+			if calls != 1 || owned != test.owned || (err != nil) != test.wantError {
+				t.Fatalf("calls=%d owned=%t error=%v", calls, owned, err)
+			}
+		})
+	}
+}
 
 func TestObservationContactAndPolicyRelay(t *testing.T) {
 	root := newFixtureInstallation(t)
@@ -93,6 +129,19 @@ func TestSecurityContactKeepsTheNegotiatedSession(t *testing.T) {
 	}
 	if _, err := exchange(Request{Action: "stop"}); err == nil {
 		t.Fatal("security contact admitted an unrelated lifecycle operation")
+	}
+}
+
+func TestPublicThrottleCapabilityReportsUnsupported(t *testing.T) {
+	root := newFixtureInstallation(t)
+	startFixtureSupervisor(t, root, "success")
+	stop := make(chan struct{})
+	defer close(stop)
+	owned, err := NegotiatePublicThrottle(func(request Request) (Response, error) {
+		return Exchange(root, request, stop)
+	})
+	if err != nil || owned {
+		t.Fatal("launcher without public throttle did not explicitly reject ownership", owned, err)
 	}
 }
 
