@@ -12368,7 +12368,7 @@ func TestAIPageSaveFailureRollsBackContentAndStorageQuota(t *testing.T) {
 	}
 }
 
-func TestAIRollbackIsPageBoundAndChargesRevisionStorage(t *testing.T) {
+func TestAIRollbackIsPageBoundAndReusesRevisionStorage(t *testing.T) {
 	application, database := newTestApplication(t)
 	ctx := context.Background()
 	domain := "ai-rollback.example"
@@ -12422,8 +12422,12 @@ func TestAIRollbackIsPageBoundAndChargesRevisionStorage(t *testing.T) {
 	if err := database.QueryRowContext(ctx, `SELECT revision_bytes FROM domain_storage_usage WHERE domain=?`, domain).Scan(&afterRevisionBytes); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := afterRevisionBytes-beforeRevisionBytes, int64(len([]byte("<p>old</p>"))); got != want {
-		t.Fatalf("revision quota delta=%d, want %d", got, want)
+	if afterRevisionBytes != beforeRevisionBytes {
+		t.Fatalf("rollback duplicated revision quota: before=%d after=%d", beforeRevisionBytes, afterRevisionBytes)
+	}
+	var revisionCount int
+	if err := database.QueryRowContext(ctx, `SELECT COUNT(*) FROM revisions WHERE domain=? AND page_path=?`, domain, "/one").Scan(&revisionCount); err != nil || revisionCount != 1 {
+		t.Fatalf("rollback duplicated page revision: count=%d error=%v", revisionCount, err)
 	}
 }
 
