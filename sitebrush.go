@@ -96,6 +96,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/pagearchive"
 	"github.com/matveynator/sitebrush/v2/pkg/publicsite"
 	"github.com/matveynator/sitebrush/v2/pkg/requesttiming"
+	"github.com/matveynator/sitebrush/v2/pkg/revisioncontent"
 	"github.com/matveynator/sitebrush/v2/pkg/securitysync"
 	"github.com/matveynator/sitebrush/v2/pkg/serviceinstall"
 	"github.com/matveynator/sitebrush/v2/pkg/shutdownsignals"
@@ -14016,6 +14017,9 @@ func (a *App) publishPendingPageDeletion(ctx context.Context, domain string, can
 			return err
 		}
 		existed = err == nil
+		if _, err := transaction.ExecContext(ctx, `UPDATE revisions SET is_active=0 WHERE domain=? AND page_path=? AND is_active=1`, domain, pagePath); err != nil {
+			return err
+		}
 		for _, table := range []string{"pages", "published_pages", "page_pending_deletions"} {
 			if _, err := transaction.ExecContext(ctx, `DELETE FROM `+table+` WHERE domain=? AND path=?`, domain, pagePath); err != nil {
 				return err
@@ -14186,6 +14190,73 @@ func (a *App) persistImportedDraftPages(ctx context.Context, domain, ownerPath s
 	return a.persistImportedPages(ctx, domain, ownerPath, pages, spider, true)
 }
 
+// Revision identity follows normalized HTML while the page keeps its original source.
+// Reusing an older revision disables later active versions so recovery selects it.
+func revisionContentHash(pagePath, content string) [sha256.Size]byte {
+	if pageContentKind(pagePath, content) == "html" {
+		return revisioncontent.HTMLHash(content)
+	}
+	return sha256.Sum256([]byte(content))
+}
+
+func sameRevisionContent(pagePath, first, second string) bool {
+	if first == second {
+		return true
+	}
+	if pageContentKind(pagePath, first) != pageContentKind(pagePath, second) {
+		return false
+	}
+	return revisionContentHash(pagePath, first) == revisionContentHash(pagePath, second)
+}
+
+func matchingPageRevision(ctx context.Context, database sqlExecutor, domain, pagePath, content string) (int64, error) {
+	rows, err := database.QueryContext(ctx, `SELECT id,html FROM revisions WHERE domain=? AND page_path=? ORDER BY id DESC`, domain, pagePath)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	contentKind := pageContentKind(pagePath, content)
+	contentHash := revisionContentHash(pagePath, content)
+	for rows.Next() {
+		var revisionID int64
+		var revisionHTML string
+		if err := rows.Scan(&revisionID, &revisionHTML); err != nil {
+			return 0, err
+		}
+		if revisionHTML == content || pageContentKind(pagePath, revisionHTML) == contentKind && revisionContentHash(pagePath, revisionHTML) == contentHash {
+			return revisionID, nil
+		}
+	}
+	return 0, rows.Err()
+}
+
+func newPageRevisionBytes(ctx context.Context, database sqlExecutor, domain, pagePath, content string) (int64, error) {
+	revisionID, err := matchingPageRevision(ctx, database, domain, pagePath, content)
+	if err != nil || revisionID != 0 {
+		return 0, err
+	}
+	return int64(len(content)), nil
+}
+
+func ensurePageRevision(ctx context.Context, database sqlExecutor, domain, pagePath, content string) (int64, error) {
+	revisionID, err := matchingPageRevision(ctx, database, domain, pagePath, content)
+	if err != nil {
+		return 0, err
+	}
+	if revisionID > 0 {
+		if _, err := database.ExecContext(ctx, `UPDATE revisions SET is_active=0 WHERE domain=? AND page_path=? AND id>? AND is_active=1`, domain, pagePath, revisionID); err != nil {
+			return 0, err
+		}
+		_, err := database.ExecContext(ctx, `UPDATE revisions SET is_active=1 WHERE domain=? AND page_path=? AND id=?`, domain, pagePath, revisionID)
+		return 0, err
+	}
+	_, err = database.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, domain, pagePath, content, time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		return 0, err
+	}
+	return int64(len(content)), nil
+}
+
 func (a *App) persistImportedPages(ctx context.Context, domain, ownerPath string, pages []wholeSiteImportedPage, spider *pageSpider, draftOnly bool) error {
 	frozen := draftOnly || a.isDomainFrozen(ctx, domain)
 	a.ensureDomainStorageUsageRow(ctx, domain)
@@ -14260,12 +14331,13 @@ func (a *App) persistImportedPages(ctx context.Context, domain, ownerPath string
 				if err := updateOrInsertPage(ctx, transaction, domain, pagePath, pagePath, page.HTML, true); err != nil {
 					return err
 				}
-				if _, err := transaction.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, domain, pagePath, page.HTML, time.Now().UTC().Format(time.RFC3339)); err != nil {
-					return err
-				}
 				pageDelta += int64(len(page.HTML) - len(existingHTML))
-				revisionDelta += int64(len(page.HTML))
 			}
+			addedRevisionBytes, err := ensurePageRevision(ctx, transaction, domain, pagePath, page.HTML)
+			if err != nil {
+				return err
+			}
+			revisionDelta += addedRevisionBytes
 			if !draftOnly {
 				if _, err := transaction.ExecContext(ctx, `DELETE FROM page_redirects WHERE domain=? AND old_path=?`, domain, pagePath); err != nil {
 					return err
@@ -20858,7 +20930,11 @@ func (a *App) persistPageSave(ctx context.Context, domain, previousPath, pagePat
 			pageDelta += int64(len(savedHTML))
 		}
 		for _, finalPage := range finalPages {
-			revisionDelta += int64(len(finalPage.html))
+			addedRevisionBytes, revisionErr := ensurePageRevision(ctx, transaction, domain, finalPage.path, finalPage.html)
+			if revisionErr != nil {
+				return revisionErr
+			}
+			revisionDelta += addedRevisionBytes
 			if frozen != 1 {
 				previousPublished := ""
 				if err = transaction.QueryRowContext(ctx, `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, finalPage.path).Scan(&previousPublished); err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -20892,9 +20968,6 @@ func (a *App) persistPageSave(ctx context.Context, domain, previousPath, pagePat
 				if err = updateOrInsertPublishedPage(ctx, transaction, domain, finalPage.path, finalPage.title, finalPage.html); err != nil {
 					return err
 				}
-			}
-			if _, err = transaction.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, finalPage.path, finalPage.html, now); err != nil {
-				return err
 			}
 		}
 		if _, err = transaction.ExecContext(ctx, `DELETE FROM page_redirects WHERE domain=? AND old_path=?`, domain, pagePath); err != nil {
@@ -24133,8 +24206,6 @@ func (a *App) storeWholeSiteImportedPages(ctx context.Context, domain string, im
 	for _, importedPage := range importedPages {
 		pagePath := cleanPath(importedPage.LocalPath)
 		pageHTML := importedPage.HTML
-		var previousHTML string
-		_ = a.db.QueryRowContext(ctx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousHTML)
 		a.clearPageRedirectSource(ctx, domain, pagePath)
 		if _, err := a.db.ExecContext(ctx, `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, pagePath, pageHTML); err != nil {
 			return fmt.Errorf("store imported page %s: %w", pagePath, err)
@@ -24145,10 +24216,8 @@ func (a *App) storeWholeSiteImportedPages(ctx context.Context, domain string, im
 			}
 			a.writePublishedStaticHTML(domain, pagePath, pageHTML)
 		}
-		if previousHTML != pageHTML {
-			if _, err := a.db.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, pageHTML, time.Now().Format(time.RFC3339)); err != nil {
-				return fmt.Errorf("store imported page revision %s: %w", pagePath, err)
-			}
+		if _, err := ensurePageRevision(ctx, a.db, domain, pagePath, pageHTML); err != nil {
+			return fmt.Errorf("store imported page revision %s: %w", pagePath, err)
 		}
 	}
 	return nil
@@ -24167,9 +24236,11 @@ func (a *App) estimateImportedPagesStorageDelta(ctx context.Context, domain stri
 		var previousStoredHTML string
 		_ = a.db.QueryRowContext(ctx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousStoredHTML)
 		pageDelta += newHTMLBytes - int64(len([]byte(previousStoredHTML)))
-		if previousStoredHTML != pageHTML {
-			revisionDelta += newHTMLBytes
+		newRevisionBytes, revisionErr := newPageRevisionBytes(ctx, a.db, domain, pagePath, pageHTML)
+		if revisionErr != nil {
+			newRevisionBytes = newHTMLBytes
 		}
+		revisionDelta += newRevisionBytes
 		if frozenDomain {
 			continue
 		}
@@ -28833,17 +28904,20 @@ func (a *App) restoreRevision(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "revision not found", http.StatusNotFound)
 		return
 	}
-	if storageErr := a.applyDomainStorageDelta(r.Context(), domain, 0, 0, int64(len([]byte(html))), 0, 0); storageErr != nil {
-		http.Error(w, storageErr.Error(), http.StatusInsufficientStorage)
-		return
-	}
-	if _, err := a.db.ExecContext(r.Context(), `INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, domain, pagePath, html, time.Now().UTC().Format(time.RFC3339)); err != nil {
-		_ = a.applyDomainStorageDelta(r.Context(), domain, 0, 0, -int64(len([]byte(html))), 0, 0)
+	err = a.siteContentTransaction(r.Context(), func(transaction *sql.Tx) error {
+		if _, err := transaction.ExecContext(r.Context(), `UPDATE revisions SET is_active=0 WHERE domain=? AND page_path=? AND id>? AND is_active=1`, domain, pagePath, revisionID); err != nil {
+			return err
+		}
+		_, err := transaction.ExecContext(r.Context(), `UPDATE revisions SET is_active=1 WHERE domain=? AND page_path=? AND id=?`, domain, pagePath, revisionID)
+		return err
+	}, func(error) {})
+	if err != nil {
 		http.Error(w, "page could not be restored", http.StatusInternalServerError)
 		return
 	}
 	a.applyLatestActiveRevision(r.Context(), domain, pagePath)
-	if _, err := a.findPage(r.Context(), domain, pagePath); err != nil {
+	page, err := a.findPage(r.Context(), domain, pagePath)
+	if err != nil || page.HTML != html {
 		http.Error(w, "page could not be restored", http.StatusInternalServerError)
 		return
 	}
@@ -43090,7 +43164,12 @@ func (a *App) applyTemplatePropagation(ctx context.Context, domain, sourceHTML, 
 			publishedPageDelta = updatedHTMLBytes - int64(len([]byte(previousPublishedHTML)))
 			publishedStaticDelta = updatedHTMLBytes - a.fileSizeInsideStorage(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(currentPage.path)))
 		}
-		if storageErr := a.applyDomainStorageDelta(ctx, domain, pageDelta, publishedPageDelta, updatedHTMLBytes, 0, publishedStaticDelta); storageErr != nil {
+		revisionDelta, revisionErr := newPageRevisionBytes(ctx, a.db, domain, currentPage.path, updatedHTML)
+		if revisionErr != nil {
+			log.Printf("Template propagation could not inspect revisions domain=%s path=%s error=%v", diagnosticlog.SafeLogValue(domain), diagnosticlog.SafeLogValue(currentPage.path), revisionErr)
+			continue
+		}
+		if storageErr := a.applyDomainStorageDelta(ctx, domain, pageDelta, publishedPageDelta, revisionDelta, 0, publishedStaticDelta); storageErr != nil {
 			message := "Template propagation skipped page because of storage limit"
 			if errors.Is(storageErr, context.Canceled) || errors.Is(storageErr, context.DeadlineExceeded) {
 				message = "Template propagation skipped page because context was canceled"
@@ -43106,7 +43185,11 @@ func (a *App) applyTemplatePropagation(ctx context.Context, domain, sourceHTML, 
 			_, _ = a.db.ExecContext(ctx, `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, currentPage.path, currentPage.title, updatedHTML)
 			a.writePublishedStaticHTML(domain, currentPage.path, updatedHTML)
 		}
-		_, _ = a.db.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, currentPage.path, updatedHTML, time.Now().Format(time.RFC3339))
+		if _, revisionErr := ensurePageRevision(ctx, a.db, domain, currentPage.path, updatedHTML); revisionErr != nil {
+			log.Printf("Template propagation could not store revision domain=%s path=%s error=%v", diagnosticlog.SafeLogValue(domain), diagnosticlog.SafeLogValue(currentPage.path), revisionErr)
+			a.rebuildDomainStorageUsage(ctx, domain)
+			continue
+		}
 		changedCount++
 		sitebrushTemplateProgress.Publish(progressToken, templatePropagationProgressEvent{Stage: "updated", Domain: domain, Path: currentPage.path, Current: pageIndex + 1, Total: len(pageList), Changed: changedCount, Skipped: skippedCount, Message: "Updated template blocks"})
 	}
@@ -43161,7 +43244,12 @@ func (a *App) applyTemplateClassSynchronization(ctx context.Context, domain, pre
 			publishedPageDelta = updatedHTMLBytes - int64(len([]byte(previousPublishedHTML)))
 			publishedStaticDelta = updatedHTMLBytes - a.fileSizeInsideStorage(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(currentPage.path)))
 		}
-		if storageErr := a.applyDomainStorageDelta(ctx, domain, pageDelta, publishedPageDelta, updatedHTMLBytes, 0, publishedStaticDelta); storageErr != nil {
+		revisionDelta, revisionErr := newPageRevisionBytes(ctx, a.db, domain, currentPage.path, updatedHTML)
+		if revisionErr != nil {
+			log.Printf("Template class synchronization could not inspect revisions domain=%s path=%s error=%v", diagnosticlog.SafeLogValue(domain), diagnosticlog.SafeLogValue(currentPage.path), revisionErr)
+			continue
+		}
+		if storageErr := a.applyDomainStorageDelta(ctx, domain, pageDelta, publishedPageDelta, revisionDelta, 0, publishedStaticDelta); storageErr != nil {
 			message := "Template class synchronization skipped page because of storage limit"
 			if errors.Is(storageErr, context.Canceled) || errors.Is(storageErr, context.DeadlineExceeded) {
 				message = "Template class synchronization skipped page because context was canceled"
@@ -43177,7 +43265,11 @@ func (a *App) applyTemplateClassSynchronization(ctx context.Context, domain, pre
 			_, _ = a.db.ExecContext(ctx, `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, currentPage.path, currentPage.title, updatedHTML)
 			a.writePublishedStaticHTML(domain, currentPage.path, updatedHTML)
 		}
-		_, _ = a.db.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, currentPage.path, updatedHTML, time.Now().Format(time.RFC3339))
+		if _, revisionErr := ensurePageRevision(ctx, a.db, domain, currentPage.path, updatedHTML); revisionErr != nil {
+			log.Printf("Template class synchronization could not store revision domain=%s path=%s error=%v", diagnosticlog.SafeLogValue(domain), diagnosticlog.SafeLogValue(currentPage.path), revisionErr)
+			a.rebuildDomainStorageUsage(ctx, domain)
+			continue
+		}
 		changedCount++
 		sitebrushTemplateProgress.Publish(progressToken, templatePropagationProgressEvent{Stage: "class-updated", Domain: domain, Path: currentPage.path, Current: pageIndex + 1, Total: len(pageList), Changed: changedCount, Skipped: skippedCount, Message: "Updated SiteBrush-Template class markers"})
 	}
@@ -49751,13 +49843,13 @@ func (a *App) importSavedPage(ctx context.Context, domain, destination string, s
 				return err
 			}
 		}
-		if previousHTML != pageHTML {
+		if !sameRevisionContent(destination, previousHTML, pageHTML) {
 			if _, err := transaction.ExecContext(ctx, `UPDATE revisions SET is_active=0 WHERE domain=? AND page_path=?`, domain, destination); err != nil {
 				return err
 			}
-			if _, err := transaction.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, domain, destination, pageHTML, time.Now().UTC().Format(time.RFC3339)); err != nil {
-				return err
-			}
+		}
+		if _, err := ensurePageRevision(ctx, transaction, domain, destination, pageHTML); err != nil {
+			return err
 		}
 		for _, file := range files {
 			if _, err := transaction.ExecContext(ctx, `INSERT INTO file_metadata(domain,file_name,page_path,size,mime_type,created_at,download_count) VALUES(?,?,?,?,?,?,0)`, domainStorageName(domain), file.Name, destination, len(file.Content), file.MIME, time.Now().UTC().Format(time.RFC3339)); err != nil {
@@ -50370,7 +50462,7 @@ func (a *App) importDomainBackupZIP(ctx context.Context, domain string, importBa
 		if _, err := a.db.ExecContext(ctx, `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, nextPagePath, nextTitle, nextPageHTML); err != nil {
 			return rootRedirectPath, err
 		}
-		if _, err := a.db.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, domain, nextPagePath, nextPageHTML, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		if _, err := ensurePageRevision(ctx, a.db, domain, nextPagePath, nextPageHTML); err != nil {
 			return rootRedirectPath, err
 		}
 		a.writePublishedStaticHTML(domain, nextPagePath, nextPageHTML)
