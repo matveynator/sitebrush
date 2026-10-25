@@ -12368,7 +12368,7 @@ func TestAIPageSaveFailureRollsBackContentAndStorageQuota(t *testing.T) {
 	}
 }
 
-func TestAIRollbackIsPageBoundAndChargesRevisionStorage(t *testing.T) {
+func TestAIRollbackIsPageBoundAndReusesRevisionStorage(t *testing.T) {
 	application, database := newTestApplication(t)
 	ctx := context.Background()
 	domain := "ai-rollback.example"
@@ -12422,8 +12422,12 @@ func TestAIRollbackIsPageBoundAndChargesRevisionStorage(t *testing.T) {
 	if err := database.QueryRowContext(ctx, `SELECT revision_bytes FROM domain_storage_usage WHERE domain=?`, domain).Scan(&afterRevisionBytes); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := afterRevisionBytes-beforeRevisionBytes, int64(len([]byte("<p>old</p>"))); got != want {
-		t.Fatalf("revision quota delta=%d, want %d", got, want)
+	if afterRevisionBytes != beforeRevisionBytes {
+		t.Fatalf("rollback duplicated revision quota: before=%d after=%d", beforeRevisionBytes, afterRevisionBytes)
+	}
+	var revisionCount int
+	if err := database.QueryRowContext(ctx, `SELECT COUNT(*) FROM revisions WHERE domain=? AND page_path=?`, domain, "/one").Scan(&revisionCount); err != nil || revisionCount != 1 {
+		t.Fatalf("rollback duplicated page revision: count=%d error=%v", revisionCount, err)
 	}
 }
 
@@ -15574,6 +15578,10 @@ func TestMissingAdminPageRestoresAnInactiveRevision(t *testing.T) {
 	var restoredHTML string
 	if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", "/removed").Scan(&restoredHTML); err != nil || restoredHTML != "<h1>Restored</h1>" {
 		t.Fatalf("restored page = %q, %v", restoredHTML, err)
+	}
+	var revisionCount, activeCount int
+	if err := rawDB.QueryRow(`SELECT COUNT(*),COALESCE(SUM(is_active),0) FROM revisions WHERE domain=? AND page_path=?`, "localhost", "/removed").Scan(&revisionCount, &activeCount); err != nil || revisionCount != 1 || activeCount != 1 {
+		t.Fatalf("restored revisions = %d active = %d, %v", revisionCount, activeCount, err)
 	}
 }
 
@@ -22030,6 +22038,35 @@ func TestFinalPageSaveCreatesOneRevisionPerChangedPage(t *testing.T) {
 	}
 }
 
+func TestPageSavePublishesStylesheetWhitespaceAndDoctypeChanges(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		previous string
+		updated  string
+	}{
+		{name: "stylesheet whitespace", previous: `<style>.poem{white-space:pre-wrap}</style><div class="poem">a  b</div>`, updated: `<style>.poem{white-space:pre-wrap}</style><div class="poem">a b</div>`},
+		{name: "doctype mode", previous: `<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN"><html><body>Page</body></html>`, updated: `<!DOCTYPE html><html><body>Page</body></html>`},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			application, database := newTestApplication(t)
+			boundary := context.Background()
+			for _, pageHTML := range []string{testCase.previous, testCase.updated} {
+				if err := application.persistFinalPageSave(boundary, "localhost", "/page", "/page", "Page", pageHTML); err != nil {
+					t.Fatal(err)
+				}
+			}
+			candidates, err := application.collectPublishPageCandidates(boundary, "localhost")
+			if err != nil || len(candidates) != 1 || candidates[0].HTML != testCase.updated {
+				t.Fatalf("publish candidate did not retain the edit: %+v, %v", candidates, err)
+			}
+			var revisionCount int
+			if err := database.QueryRow(`SELECT COUNT(*) FROM revisions WHERE domain=? AND page_path=?`, "localhost", "/page").Scan(&revisionCount); err != nil || revisionCount != 2 {
+				t.Fatalf("visible change has %d revisions: %v", revisionCount, err)
+			}
+		})
+	}
+}
+
 func TestDemoRefreshReplacesPageSetAndFirstImportCreatesDatabase(t *testing.T) {
 	previousClient := newGrabHTTPClient
 	newGrabHTTPClient = func() *http.Client {
@@ -24848,7 +24885,8 @@ func TestSavedPageRepeatedImportKeepsRevisionAndQuotaAccounting(t *testing.T) {
 	if err := application.importSavedPage(ctx, "localhost", "/about", saved); err != nil {
 		t.Fatal(err)
 	}
-	originalUsage := application.domainStorageUsage(ctx, "localhost").totalBytes()
+	initialStorage := application.domainStorageUsage(ctx, "localhost")
+	originalUsage := initialStorage.totalBytes()
 	if err := application.importSavedPage(ctx, "localhost", "/about", saved); err != nil {
 		t.Fatal(err)
 	}
@@ -24858,6 +24896,64 @@ func TestSavedPageRepeatedImportKeepsRevisionAndQuotaAccounting(t *testing.T) {
 	}
 	if nextUsage := application.domainStorageUsage(ctx, "localhost").totalBytes(); nextUsage != originalUsage {
 		t.Fatal("unchanged import inflated storage usage", originalUsage, nextUsage)
+	}
+	formatted := &pagearchive.Archive{Main: &pagearchive.Resource{URL: saved.Main.URL, MIME: "text/html", Content: []byte("<h1>\n  Saved page without external files\n</h1>")}}
+	if err := application.importSavedPage(ctx, "localhost", "/about", formatted); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM revisions WHERE domain=? AND page_path=?`, "localhost", "/about").Scan(&revisions); err != nil || revisions != 1 {
+		t.Fatal("formatting change created a duplicate revision", revisions, err)
+	}
+	if nextRevisionBytes := application.domainStorageUsage(ctx, "localhost").RevisionBytes; nextRevisionBytes != initialStorage.RevisionBytes {
+		t.Fatal("formatting change increased revision quota", nextRevisionBytes)
+	}
+	changed := &pagearchive.Archive{Main: &pagearchive.Resource{URL: saved.Main.URL, MIME: "text/html", Content: []byte(`<h1>Different page</h1>`)}}
+	if err := application.importSavedPage(ctx, "localhost", "/about", changed); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.importSavedPage(ctx, "localhost", "/about", saved); err != nil {
+		t.Fatal(err)
+	}
+	var activeOriginal, inactiveChanged int
+	if err := application.db.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(CASE WHEN html LIKE '%Different page%' AND is_active=0 THEN 1 ELSE 0 END),0) FROM revisions WHERE domain=? AND page_path=?`, "localhost", "/about").Scan(&revisions, &inactiveChanged); err != nil || revisions != 2 || inactiveChanged != 1 {
+		t.Fatalf("reimport did not reuse history: revisions=%d inactive=%d error=%v", revisions, inactiveChanged, err)
+	}
+	if err := application.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM revisions WHERE domain=? AND page_path=? AND is_active=1 AND html LIKE '%Saved page without external files%'`, "localhost", "/about").Scan(&activeOriginal); err != nil || activeOriginal != 1 {
+		t.Fatalf("old revision was not restored: %d %v", activeOriginal, err)
+	}
+}
+
+func TestWholeSiteImportReusesRevisionAfterFormattingAndDeletion(t *testing.T) {
+	application, database := newTestApplication(t)
+	boundary := context.Background()
+	importPage := func(pageHTML string) {
+		t.Helper()
+		page := wholeSiteImportedPage{LocalPath: "/about", HTML: pageHTML}
+		if err := application.persistImportedPages(boundary, "localhost", "/about", []wholeSiteImportedPage{page}, nil, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	importPage("<h1>Same page</h1>")
+	formattedHTML := "<h1>\n  Same page\n</h1>"
+	importPage(formattedHTML)
+	var revisionCount int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM revisions WHERE domain=? AND page_path=?`, "localhost", "/about").Scan(&revisionCount); err != nil || revisionCount != 1 {
+		t.Fatalf("formatting created %d revisions: %v", revisionCount, err)
+	}
+	if _, err := database.Exec(`INSERT INTO page_pending_deletions(domain,path) VALUES(?,?)`, "localhost", "/about"); err != nil {
+		t.Fatal(err)
+	}
+	deleted, err := application.publishPendingPageDeletion(boundary, "localhost", publishPageCandidate{Path: "/about", Title: "/about", HTML: formattedHTML})
+	if err != nil || !deleted {
+		t.Fatalf("page deletion failed: %v", err)
+	}
+	var activeRevisions int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM revisions WHERE domain=? AND page_path=? AND is_active=1`, "localhost", "/about").Scan(&activeRevisions); err != nil || activeRevisions != 0 {
+		t.Fatalf("deleted page kept %d active revisions: %v", activeRevisions, err)
+	}
+	importPage(formattedHTML)
+	if err := database.QueryRow(`SELECT COUNT(*),COALESCE(SUM(is_active),0) FROM revisions WHERE domain=? AND page_path=?`, "localhost", "/about").Scan(&revisionCount, &activeRevisions); err != nil || revisionCount != 1 || activeRevisions != 1 {
+		t.Fatalf("reimport created %d revisions, active=%d: %v", revisionCount, activeRevisions, err)
 	}
 }
 
@@ -27789,6 +27885,10 @@ func TestAISiteToolsKeepDeletionAndRevisionChangesAsDrafts(t *testing.T) {
 	var revisionCount int
 	if err := database.QueryRow(`SELECT COUNT(*) FROM revisions WHERE domain='localhost' AND page_path='/docs'`).Scan(&revisionCount); err != nil || revisionCount < 2 {
 		t.Fatal("deletion lost history", err)
+	}
+	var activeRevisions int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM revisions WHERE domain='localhost' AND page_path='/docs' AND is_active=1`).Scan(&activeRevisions); err != nil || activeRevisions != 0 {
+		t.Fatalf("deleted page kept active revisions: %d %v", activeRevisions, err)
 	}
 }
 
