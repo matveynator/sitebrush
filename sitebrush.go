@@ -21703,6 +21703,12 @@ func (a *App) publicTrialSiteCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	landingPath, landingFound := a.demoSiteLandingPath(domainContext, trialDomain)
+	if !landingFound {
+		_ = a.deleteDemoManagedSiteWithoutBackup(r.Context(), trialDomain)
+		http.Error(w, "imported site has no available page", http.StatusBadGateway)
+		return
+	}
 	serviceStatus := "trial"
 	if preview.FitsFreePlan {
 		serviceStatus = "free"
@@ -21720,10 +21726,22 @@ func (a *App) publicTrialSiteCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	trialCreated = true
+	// The new site must be visible to the public reader before its URL is returned.
+	if err := a.publicPublicationRequest("refresh", trialDomain); err != nil {
+		http.Error(w, "imported site publication failed: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
 	a.refreshHostingAndSupportPanel()
 	a.activePublicTrialPreviewStore().Delete(progressToken)
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"redirect": "http://" + trialDomain + "/"})
+	response := grabImportResultResponse(grabImportResult{RedirectPath: landingPath})
+	response["redirect"] = "http://" + trialDomain + landingPath
+	if preview.Spider != nil {
+		response["failed_total"] = preview.Spider.unresolvedFailedTotal()
+		response["failed_urls"] = preview.Spider.failedResourceURLList()
+		response["failed_reasons"] = preview.Spider.failedResourceReasonMap()
+	}
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 func (a *App) publicTrialSiteWS(w http.ResponseWriter, r *http.Request) {
@@ -22223,8 +22241,9 @@ func (a *App) downloadPublicTrialSourceHTML(ctx context.Context, sourceURL, prog
 		applyGrabRequestHeaders(request, sourceOptions)
 		applyGrabHTMLRequestHeaders(request)
 	}, crawler.HTMLDownloadRetryOptions{
-		Attempts: 3,
-		Delay:    1500 * time.Millisecond,
+		Attempts:    3,
+		Delay:       1500 * time.Millisecond,
+		ShouldRetry: shouldRetryGrabSourceHTMLDownload,
 		OnAttempt: func(attempt, total int, pageURL *url.URL) {
 			a.publishPublicTrialSourceAttempt(progressToken, "source_attempt", pageURL, attempt, total, 0)
 		},
@@ -22243,7 +22262,7 @@ func (a *App) downloadPublicTrialSourceHTML(ctx context.Context, sourceURL, prog
 	if downloadResult.Status != "" {
 		lastStatus = downloadResult.Status
 	}
-	if shouldFallbackGrabSourceToHTTP(remoteSourceURL) {
+	if shouldFallbackGrabSourceAfterFailure(remoteSourceURL, downloadResult, err) {
 		fallbackURL := crawler.CloneURL(remoteSourceURL)
 		fallbackURL.Scheme = "http"
 		fallbackURL.Host = fallbackURL.Hostname()
@@ -22254,8 +22273,9 @@ func (a *App) downloadPublicTrialSourceHTML(ctx context.Context, sourceURL, prog
 			applyGrabRequestHeaders(request, sourceOptions)
 			applyGrabHTMLRequestHeaders(request)
 		}, crawler.HTMLDownloadRetryOptions{
-			Attempts: 2,
-			Delay:    1500 * time.Millisecond,
+			Attempts:    2,
+			Delay:       1500 * time.Millisecond,
+			ShouldRetry: shouldRetryGrabSourceHTMLDownload,
 			OnAttempt: func(attempt, total int, pageURL *url.URL) {
 				a.publishPublicTrialSourceAttempt(progressToken, "source_attempt", pageURL, attempt, total, 0)
 			},
@@ -22453,6 +22473,11 @@ func (a *App) preparePublicTrialPreviewForCreate(ctx context.Context, preview pu
 		return preview
 	}
 	spider := newPageSpider("", remoteSourceURL, grabResourceMaxDepth, a.grabTracker, progressToken, preview.SourceOptions)
+	if preview.Spider != nil {
+		for failedURL, reason := range preview.Spider.failedResourceReasonMap() {
+			spider.recordFailedResource(failedURL, reason)
+		}
+	}
 	spider.setContext(ctx)
 	spider.publicAssetBasePath = "/"
 	spider.selectedResourceURLs = selectedResourceURLs
@@ -22479,6 +22504,7 @@ func (a *App) preparePublicTrialPreviewForCreate(ctx context.Context, preview pu
 	}
 	spider.retryFailedResources(remoteSourceURL, grabImportFailedResourceRetryAttempts)
 	spider.rewriteImportedPagesStaticURLTextReferences(importedPages)
+	spider.finishImportedPageReferences(importedPages)
 	requiredBytes := publicTrialPreviewSelectedBytes(importedPages, selectedResources)
 	plan, freePlan, fitsFreePlan := a.smallestPublicTrialPlan(ctx, requiredBytes)
 	preview.ImportedPages = importedPages
@@ -23007,7 +23033,7 @@ func downloadGrabSourceHTMLWithResolvedURLContextAndProgress(ctx context.Context
 	if downloadResult.Status != "" {
 		lastStatus = downloadResult.Status
 	}
-	if shouldFallbackGrabSourceToHTTP(remoteSourceURL) {
+	if shouldFallbackGrabSourceAfterFailure(remoteSourceURL, downloadResult, err) {
 		fallbackURL := crawler.CloneURL(remoteSourceURL)
 		fallbackURL.Scheme = "http"
 		fallbackURL.Host = fallbackURL.Hostname()
@@ -23061,7 +23087,7 @@ func grabSourceHTMLRetryOptions(tracker *grabProgressTracker, progressToken stri
 
 func shouldRetryGrabSourceHTMLDownload(result crawler.HTMLDownloadResult, downloadErr error) bool {
 	if result.StatusCode != 0 {
-		return result.StatusCode == http.StatusRequestTimeout || result.StatusCode == http.StatusTooEarly || result.StatusCode == http.StatusTooManyRequests || result.StatusCode >= http.StatusInternalServerError
+		return shouldRetryGrabStatus(result.StatusCode)
 	}
 	if downloadErr == nil || errors.Is(downloadErr, context.Canceled) {
 		return false
@@ -23078,6 +23104,15 @@ func shouldRetryGrabSourceHTMLDownload(result crawler.HTMLDownloadResult, downlo
 	}
 	var networkError net.Error
 	return (errors.As(downloadErr, &networkError) && networkError.Timeout()) || errors.Is(downloadErr, io.EOF) || errors.Is(downloadErr, io.ErrUnexpectedEOF)
+}
+
+func shouldRetryGrabStatus(statusCode int) bool {
+	switch statusCode {
+	case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests,
+		http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	}
+	return statusCode >= 520 && statusCode <= 524
 }
 
 func decodeImportedHTMLBytes(htmlBytes []byte, contentType string) string {
@@ -23296,6 +23331,14 @@ func shouldFallbackGrabSourceToHTTP(sourceURL *url.URL) bool {
 	return sourceURL != nil && sourceURL.Scheme == "https"
 }
 
+func shouldFallbackGrabSourceAfterFailure(sourceURL *url.URL, result crawler.HTMLDownloadResult, downloadErr error) bool {
+	if !shouldFallbackGrabSourceToHTTP(sourceURL) || result.StatusCode != 0 || downloadErr == nil || errors.Is(downloadErr, context.Canceled) {
+		return false
+	}
+	var dnsError *net.DNSError
+	return !errors.As(downloadErr, &dnsError) || dnsError.IsTimeout || dnsError.IsTemporary
+}
+
 func grabSourceIPPort(sourceIP string) string {
 	trimmedSourceIP := strings.TrimSpace(sourceIP)
 	if trimmedSourceIP == "" {
@@ -23455,7 +23498,9 @@ func prepareSinglePageImport(importRequest grabImportRequest, tracker *grabProgr
 	spider.fetchSelectedResources()
 	spider.retryFailedResources(importRequest.RemoteSourceURL, grabImportFailedResourceRetryAttempts)
 	rootResource.content = []byte(spider.rewriteStaticURLTextReferences(string(rootResource.content), importRequest.RemoteSourceURL, 0))
-	return spider, string(rootResource.content)
+	pages := []wholeSiteImportedPage{{SourceURL: importRequest.SourceURL, HTML: string(rootResource.content)}}
+	spider.finishImportedPageReferences(pages)
+	return spider, pages[0].HTML
 }
 
 func localizeSavedPageExternalResources(ctx context.Context, domain, pagePath, htmlSource string, request *http.Request, tracker *grabProgressTracker) (*pageSpider, string) {
@@ -23583,7 +23628,11 @@ func (a *App) prepareWholeRemoteSiteImport(importRequest grabImportRequest) (*pa
 				consecutiveFailures++
 				spider.recordFailedResource(currentURL.String(), crawler.ErrorReason(downloadErr))
 				spider.publishResourceProgress("error", currentURL.String(), 0, 0, -1)
-				_ = crawler.SetImportFrontierPageState(spider.context(), a.db, importRequest.ImportID, importRequest.Domain, pageKey, "pending")
+				pageState := "done"
+				if spider.contextCanceled() {
+					pageState = "pending"
+				}
+				_ = crawler.SetImportFrontierPageState(spider.context(), a.db, importRequest.ImportID, importRequest.Domain, pageKey, pageState)
 				continue
 			}
 			pageHTML = downloadedHTML
@@ -23645,6 +23694,7 @@ func (a *App) prepareWholeRemoteSiteImport(importRequest grabImportRequest) (*pa
 	}
 	spider.retryFailedResources(startURL, grabImportFailedResourceRetryAttempts)
 	spider.rewriteImportedPagesStaticURLTextReferences(importedPages)
+	spider.finishImportedPageReferences(importedPages)
 	return spider, importedPages, completedPageKeys, nil
 }
 
@@ -23777,12 +23827,39 @@ func (a *App) importWholeRemoteSite(ctx context.Context, importRequest grabImpor
 		}
 		a.grabTracker.publish(spider.finalProgressEvent(importRequest.ProgressToken, stage))
 	}
-	result := grabImportResult{RedirectPath: cleanPath(importRequest.PagePath), FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap(), RemainingPages: frontierStats.PendingPages}
+	redirectPath, landingFound := a.importedLandingPagePath(ctx, importRequest.Domain, importRequest.PagePath)
+	if !landingFound {
+		return grabImportResult{}, errors.New("imported site has no available page")
+	}
+	result := grabImportResult{RedirectPath: redirectPath, FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap(), RemainingPages: frontierStats.PendingPages}
 	if frontierStats.PendingPages > 0 {
 		result.ImportID = importRequest.ImportID
 		result.FailedTotal += frontierStats.PendingPages
 	}
 	return result, nil
+}
+
+func (a *App) importedLandingPagePath(ctx context.Context, domain, requestedPath string) (string, bool) {
+	requestedPath = cleanPath(requestedPath)
+	var storedPath string
+	if err := a.db.QueryRowContext(ctx, `SELECT path FROM pages WHERE domain=? AND path=?`, domain, requestedPath).Scan(&storedPath); err == nil {
+		return storedPath, true
+	}
+	rows, err := a.db.QueryContext(ctx, `SELECT path FROM pages WHERE domain=? ORDER BY path`, domain)
+	if err != nil {
+		return "", false
+	}
+	defer rows.Close()
+	prefix := strings.TrimRight(requestedPath, "/") + "/"
+	for rows.Next() {
+		if err := rows.Scan(&storedPath); err != nil {
+			return "", false
+		}
+		if strings.HasPrefix(storedPath, prefix) {
+			return storedPath, true
+		}
+	}
+	return "", false
 }
 
 func (a *App) wholeSiteImportQueueBudget(ctx context.Context, domain string) int64 {
@@ -23819,6 +23896,9 @@ func (a *App) loadWholeSiteImportPagesForTemplateDetection(ctx context.Context, 
 	for _, frontierPage := range frontierPages {
 		var pageHTML string
 		if err := a.db.QueryRowContext(ctx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, cleanPath(frontierPage.LocalPath)).Scan(&pageHTML); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
 			return nil, fmt.Errorf("load imported page %s for template detection: %w", frontierPage.LocalPath, err)
 		}
 		importedPages = append(importedPages, wholeSiteImportedPage{SourceURL: frontierPage.URL, LocalPath: frontierPage.LocalPath, HTML: pageHTML})
@@ -24027,36 +24107,11 @@ func crawlWholeRemoteSite(ctx context.Context, startURL *url.URL, startHTML, pub
 }
 
 func downloadWholeSitePageHTMLWithRetries(ctx context.Context, client *http.Client, pageURL *url.URL, sourceOptions grabSourceOptions, retries int) (string, bool, error) {
-	if retries < 0 {
-		retries = 0
-	}
-	var lastErr error
-	for attempt := 0; attempt <= retries; attempt++ {
-		if attempt > 0 {
-			retryTimer := time.NewTimer(grabImportFailedResourceRetryDelay)
-			select {
-			case <-ctx.Done():
-				if !retryTimer.Stop() {
-					select {
-					case <-retryTimer.C:
-					default:
-					}
-				}
-				return "", false, ctx.Err()
-			case <-retryTimer.C:
-			}
-		}
-		pageHTML, downloaded, err := downloadWholeSitePageHTMLContext(ctx, client, pageURL, sourceOptions)
-		if err == nil && downloaded {
-			return pageHTML, true, nil
-		}
-		if err != nil {
-			lastErr = err
-		} else {
-			lastErr = errors.New("page was not downloaded")
-		}
-	}
-	return "", false, lastErr
+	result, err := crawler.DownloadHTMLPageWithRetriesContext(ctx, client, pageURL, func(request *http.Request) {
+		applyGrabRequestHeaders(request, sourceOptions)
+		applyGrabHTMLRequestHeaders(request)
+	}, crawler.HTMLDownloadRetryOptions{Attempts: max(1, retries+1), Delay: grabImportFailedResourceRetryDelay, ShouldRetry: shouldRetryGrabSourceHTMLDownload})
+	return result.HTML, result.IsHTML, err
 }
 
 func (a *App) persistWholeSiteImportBatch(ctx context.Context, request grabImportRequest, pages []wholeSiteImportedPage, spider *pageSpider) error {
@@ -24173,45 +24228,24 @@ func downloadWholeSitePageHTMLContext(ctx context.Context, client *http.Client, 
 }
 
 func (spider *pageSpider) downloadWholeSitePageHTMLWithRetries(client *http.Client, pageURL *url.URL, sourceOptions grabSourceOptions, retries int) (string, bool, error) {
-	if retries < 0 {
-		retries = 0
-	}
-	var lastErr error
-	totalAttempts := retries + 1
-	pageURLText := ""
-	if pageURL != nil {
-		pageURLText = pageURL.String()
-	}
-	for attempt := 1; attempt <= totalAttempts; attempt++ {
-		if spider.contextCanceled() {
-			return "", false, spider.context().Err()
-		}
-		if attempt > 1 {
-			spider.waitBeforeRetry(pageURLText, attempt-1, retries)
-			if spider.contextCanceled() {
-				return "", false, spider.context().Err()
+	result, err := crawler.DownloadHTMLPageWithRetriesContext(spider.context(), client, pageURL, func(request *http.Request) {
+		applyGrabRequestHeaders(request, sourceOptions)
+		applyGrabHTMLRequestHeaders(request)
+	}, crawler.HTMLDownloadRetryOptions{
+		Attempts: max(1, retries+1), Delay: grabImportFailedResourceRetryDelay, ShouldRetry: shouldRetryGrabSourceHTMLDownload,
+		OnRetry: func(attempt, total int, currentURL *url.URL, retryErr error, delay time.Duration) {
+			spider.publishRetryProgress("retry_wait", currentURL.String(), attempt, total-1, delay)
+		},
+		OnAttempt: func(attempt, total int, currentURL *url.URL) {
+			if attempt > 1 {
+				spider.publishRetryProgress("retrying", currentURL.String(), attempt-1, total-1, 0)
 			}
-			spider.publishRetryProgress("retrying", pageURLText, attempt-1, retries, 0)
-		}
-		html, downloaded, err := downloadWholeSitePageHTMLContext(spider.context(), client, pageURL, sourceOptions)
-		if err == nil && downloaded {
-			spider.clearFailedResource(pageURLText)
-			return html, true, nil
-		}
-		if spider.contextCanceled() {
-			return "", false, spider.context().Err()
-		}
-		if err != nil {
-			lastErr = err
-		} else {
-			lastErr = errors.New("not html")
-		}
-		if pageURLText != "" {
-			spider.recordFailedResource(pageURLText, crawler.ErrorReason(lastErr))
-			spider.publishResourceProgress("error", pageURLText, 0, 0, -1)
-		}
+		},
+	})
+	if err == nil && result.IsHTML {
+		spider.clearFailedResource(pageURL.String())
 	}
-	return "", false, lastErr
+	return result.HTML, result.IsHTML, err
 }
 
 type importedHTMLCleanupRule struct {
@@ -26945,7 +26979,6 @@ func publicTrialWidgetTexts(translations map[string]string) map[string]string {
 		texts[key] = value
 	}
 	texts["copyButton"] = translationOrDefault(translations, "public_trial_check_button", "Check website")
-	texts["doneOpenPage"] = translationOrDefault(translations, "public_trial_creating", "Creating a test version with the SiteBrush editor...")
 	return texts
 }
 
@@ -28797,9 +28830,16 @@ func (a *App) restoreRevision(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, storageErr.Error(), http.StatusInsufficientStorage)
 		return
 	}
-	_, _ = a.db.ExecContext(r.Context(), `UPDATE pages SET html=? WHERE domain=? AND path=?`, html, domain, pagePath)
-	_, _ = a.db.ExecContext(r.Context(), `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, html, time.Now().Format(time.RFC3339))
+	if _, err := a.db.ExecContext(r.Context(), `INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, domain, pagePath, html, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		_ = a.applyDomainStorageDelta(r.Context(), domain, 0, 0, -int64(len([]byte(html))), 0, 0)
+		http.Error(w, "page could not be restored", http.StatusInternalServerError)
+		return
+	}
 	a.applyLatestActiveRevision(r.Context(), domain, pagePath)
+	if _, err := a.findPage(r.Context(), domain, pagePath); err != nil {
+		http.Error(w, "page could not be restored", http.StatusInternalServerError)
+		return
+	}
 	httpsecurity.RedirectLocal(w, r, pagePath, http.StatusFound)
 }
 
@@ -41280,8 +41320,43 @@ func (a *App) serveManagedPageContent(w http.ResponseWriter, r *http.Request, do
 }
 
 func (a *App) renderMissingPage(w http.ResponseWriter, r *http.Request, pagePath string, isAdmin bool) {
+	pageData := missingPageTemplateData(pagePath, isAdmin)
+	if isAdmin {
+		domain := a.siteDomain(r.Context(), r)
+		translations := translationsForRequest(r)
+		rows, err := a.db.QueryContext(r.Context(), `SELECT id,created_at,is_active FROM revisions WHERE domain=? AND page_path=? ORDER BY id DESC LIMIT 12`, domain, cleanPath(pagePath))
+		if err == nil {
+			revisions := make([]Revision, 0, 12)
+			for rows.Next() {
+				var revision Revision
+				if scanErr := rows.Scan(&revision.ID, &revision.CreatedAt, &revision.IsActive); scanErr != nil {
+					err = scanErr
+					break
+				}
+				revisions = append(revisions, revision)
+			}
+			if err == nil {
+				err = rows.Err()
+			}
+			rows.Close()
+			if err == nil {
+				pageData["Revisions"] = revisions
+			}
+		}
+		if err != nil {
+			log.Printf("missing page revisions unavailable domain=%s path=%s error=%v", diagnosticlog.SafeLogValue(domain), diagnosticlog.SafeLogValue(pagePath), err)
+		}
+		pageData["CopySiteConfig"] = map[string]any{"path": cleanPath(pagePath), "texts": siteCopyMenuTexts(translations), "csrfToken": accountCSRF(r)}
+		pageData["CopySiteScriptVersion"] = publicTrialWidgetScriptVersion()
+		pageData["ImportPageLabel"] = translationOrDefault(translations, "missing_import_page", "Import a page")
+		pageData["RevisionHistoryLabel"] = translationOrDefault(translations, "missing_revision_history", "Earlier versions of this page")
+		pageData["RestorePageLabel"] = translationOrDefault(translations, "missing_restore_page", "Restore page")
+		pageData["PreviewRevisionLabel"] = translationOrDefault(translations, "revisions_preview", "Preview")
+		pageData["AllRevisionsLabel"] = translationOrDefault(translations, "missing_all_revisions", "All revisions")
+	}
+	w.Header().Set("Cache-Control", "private, no-store")
 	w.WriteHeader(http.StatusNotFound)
-	a.render(w, r, "missing.html", missingPageTemplateData(pagePath, isAdmin))
+	a.render(w, r, "missing.html", pageData)
 }
 
 func missingPageTemplateData(pagePath string, isAdmin bool) map[string]any {
@@ -41453,6 +41528,11 @@ func siteCopyMenuTexts(translations map[string]string) map[string]string {
 		"retryNextIn":               translationOrDefault(translations, "site_copy_retry_next_in", "Next retry in"),
 		"retrySecondsSuffix":        translationOrDefault(translations, "site_copy_retry_seconds_suffix", "s"),
 		"finishImport":              translationOrDefault(translations, "site_copy_finish_import", "Finish import"),
+		"openSite":                  translationOrDefault(translations, "site_copy_open_site", "Open site"),
+		"interruptImport":           translationOrDefault(translations, "site_copy_interrupt_import", "Interrupt import"),
+		"interruptingImport":        translationOrDefault(translations, "site_copy_interrupting_import", "Stopping import..."),
+		"importInterrupted":         translationOrDefault(translations, "site_copy_import_interrupted", "Import interrupted."),
+		"retryingAutomatically":     translationOrDefault(translations, "site_copy_retrying_automatically", "Retrying temporary errors"),
 		"closeButton":               translationOrDefault(translations, "tree_close", "Close"),
 		"failedResourcesTitle":      translationOrDefault(translations, "site_copy_failed_resources_title", "Failed resources:"),
 		"failedResourceBadge":       translationOrDefault(translations, "site_copy_failed_resource_badge", "failed"),
@@ -43592,6 +43672,7 @@ type pageSpider struct {
 	failedTotal           int
 	failedResourceURLs    map[string]struct{}
 	failedResourceErrors  map[string]string
+	retryableResources    map[string]struct{}
 	previewByteLimit      int64
 	previewBytes          int64
 	previewLimitReached   bool
@@ -43756,6 +43837,18 @@ func (spider *pageSpider) recordFailedResource(resourceURL, reason string) {
 	spider.failedResourceErrors[resourceURL] = reason
 }
 
+func (spider *pageSpider) recordRetryableResource(resourceURL, reason string, retryable bool) {
+	spider.recordFailedResource(resourceURL, reason)
+	if !retryable {
+		delete(spider.retryableResources, resourceURL)
+		return
+	}
+	if spider.retryableResources == nil {
+		spider.retryableResources = make(map[string]struct{})
+	}
+	spider.retryableResources[resourceURL] = struct{}{}
+}
+
 func (spider *pageSpider) clearFailedResource(resourceURL string) {
 	resourceURL = strings.TrimSpace(resourceURL)
 	if resourceURL == "" || spider.failedResourceURLs == nil {
@@ -43763,6 +43856,7 @@ func (spider *pageSpider) clearFailedResource(resourceURL string) {
 	}
 	delete(spider.failedResourceURLs, resourceURL)
 	delete(spider.failedResourceErrors, resourceURL)
+	delete(spider.retryableResources, resourceURL)
 }
 
 func (spider *pageSpider) unresolvedFailedTotal() int {
@@ -43842,7 +43936,7 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 	if err != nil {
 		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
 		spider.failedTotal++
-		spider.recordFailedResource(normalizedURL, crawler.ErrorReason(err))
+		spider.recordRetryableResource(normalizedURL, crawler.ErrorReason(err), shouldRetryGrabSourceHTMLDownload(crawler.HTMLDownloadResult{}, err))
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, -1)
 		return nil, err
 	}
@@ -43850,7 +43944,7 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 	if response.StatusCode >= 400 {
 		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
 		spider.failedTotal++
-		spider.recordFailedResource(normalizedURL, strconv.Itoa(response.StatusCode))
+		spider.recordRetryableResource(normalizedURL, strconv.Itoa(response.StatusCode), shouldRetryGrabStatus(response.StatusCode))
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, response.ContentLength)
 		return nil, fmt.Errorf("resource download failed: %s", response.Status)
 	}
@@ -43858,7 +43952,7 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 	if err != nil {
 		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
 		spider.failedTotal++
-		spider.recordFailedResource(normalizedURL, crawler.ErrorReason(err))
+		spider.recordRetryableResource(normalizedURL, crawler.ErrorReason(err), shouldRetryGrabSourceHTMLDownload(crawler.HTMLDownloadResult{}, err))
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, response.ContentLength)
 		return nil, err
 	}
@@ -43867,7 +43961,7 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 	if !spider.isAllowedResourceContentType(normalizedURL, resourceContentType) {
 		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
 		spider.failedTotal++
-		spider.recordFailedResource(normalizedURL, "content-type")
+		spider.recordRetryableResource(normalizedURL, "content-type", false)
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, response.ContentLength)
 		return nil, fmt.Errorf("resource content-type rejected: %s", resourceContentType)
 	}
@@ -44031,10 +44125,9 @@ func (spider *pageSpider) finalProgressEvent(token, stage string) grabProgressEv
 }
 
 func (spider *pageSpider) waitBeforeRetry(currentURL string, attempt, total int) {
-	if spider.tracker == nil || strings.TrimSpace(spider.progressToken) == "" {
-		return
+	if spider.tracker != nil && strings.TrimSpace(spider.progressToken) != "" {
+		spider.publishRetryProgress("retry_wait", currentURL, attempt, total, grabImportFailedResourceRetryDelay)
 	}
-	spider.publishRetryProgress("retry_wait", currentURL, attempt, total, grabImportFailedResourceRetryDelay)
 	select {
 	case <-spider.context().Done():
 	case <-time.After(grabImportFailedResourceRetryDelay):
@@ -44111,11 +44204,15 @@ func (spider *pageSpider) retryFailedResources(baseURL *url.URL, attempts int) {
 	if attempts < 1 {
 		return
 	}
-	for attempt := 1; attempt <= attempts && spider.unresolvedFailedTotal() > 0; attempt++ {
+	for attempt := 1; attempt <= attempts && len(spider.retryableResources) > 0; attempt++ {
 		if spider.contextCanceled() {
 			return
 		}
-		failedURLs := spider.failedResourceURLList()
+		failedURLs := make([]string, 0, len(spider.retryableResources))
+		for failedURL := range spider.retryableResources {
+			failedURLs = append(failedURLs, failedURL)
+		}
+		sort.Strings(failedURLs)
 		currentRetryURL := ""
 		if len(failedURLs) > 0 {
 			currentRetryURL = failedURLs[0]
@@ -44280,6 +44377,52 @@ func (spider *pageSpider) rewriteImportedPagesStaticURLTextReferences(importedPa
 	for pageIndex := range importedPages {
 		baseURL, _ := url.Parse(importedPages[pageIndex].SourceURL)
 		importedPages[pageIndex].HTML = spider.rewriteStaticURLTextReferences(importedPages[pageIndex].HTML, baseURL, 0)
+	}
+}
+
+// The final page only refers to assets that were actually stored. Failed source
+// URLs remain in the import report, without prompting a visitor to fetch them.
+func (spider *pageSpider) finishImportedPageReferences(importedPages []wholeSiteImportedPage) {
+	replacements := make(map[string]string)
+	missingPageLinks := make(map[string]struct{})
+	missingAssetLinks := make(map[string]struct{})
+	for resourceURL, resource := range spider.resources {
+		if resource != nil && resource.persist && resource.assetPath != "" {
+			replacements[resourceURL] = crawler.NormalizeMirroredAssetReference(resource.assetPath)
+		}
+	}
+	for _, failedURL := range spider.failedResourceURLList() {
+		replacements[failedURL] = "data:,"
+		failedPageURL, err := url.Parse(failedURL)
+		if err == nil && spider.pageURL != nil && crawler.SameHost(spider.pageURL, failedPageURL) && crawler.IsWholeSitePageURL(failedPageURL) {
+			missingPageLinks[crawler.WholeSiteLocalLink(cleanPath(spider.publicAssetBasePath), spider.pageURL, failedPageURL)] = struct{}{}
+		} else if err == nil && spider.pageURL != nil && crawler.SameHost(spider.pageURL, failedPageURL) {
+			missingPath := failedPageURL.EscapedPath()
+			if failedPageURL.RawQuery != "" {
+				missingPath += "?" + failedPageURL.RawQuery
+			}
+			missingAssetLinks[missingPath] = struct{}{}
+		}
+	}
+	sourceURLs := make([]string, 0, len(replacements))
+	for sourceURL := range replacements {
+		sourceURLs = append(sourceURLs, sourceURL)
+	}
+	sort.Slice(sourceURLs, func(left, right int) bool { return len(sourceURLs[left]) > len(sourceURLs[right]) })
+	for pageIndex := range importedPages {
+		for _, sourceURL := range sourceURLs {
+			localReference := replacements[sourceURL]
+			importedPages[pageIndex].HTML = strings.ReplaceAll(importedPages[pageIndex].HTML, html.EscapeString(sourceURL), localReference)
+			importedPages[pageIndex].HTML = strings.ReplaceAll(importedPages[pageIndex].HTML, sourceURL, localReference)
+		}
+		for missingLink := range missingPageLinks {
+			importedPages[pageIndex].HTML = strings.ReplaceAll(importedPages[pageIndex].HTML, `"`+missingLink+`"`, `"#"`)
+			importedPages[pageIndex].HTML = strings.ReplaceAll(importedPages[pageIndex].HTML, `'`+missingLink+`'`, `'#'`)
+		}
+		for missingLink := range missingAssetLinks {
+			importedPages[pageIndex].HTML = strings.ReplaceAll(importedPages[pageIndex].HTML, `"`+missingLink+`"`, `"data:,"`)
+			importedPages[pageIndex].HTML = strings.ReplaceAll(importedPages[pageIndex].HTML, `'`+missingLink+`'`, `'data:,'`)
+		}
 	}
 }
 
@@ -53865,6 +54008,9 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 		return false
 	}
 	if decision.Hidden || decision.PageHidden && fileName == "" && decision.Chroot.Path == "" {
+		if hasSitebrushSessionCookie(r) && a.isAdminRequest(r) {
+			return false
+		}
 		http.NotFound(w, r)
 		return true
 	}
@@ -53987,7 +54133,7 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 	}
 	// Generated discovery documents remain with their database owner when no
 	// published file exists. Ordinary missing pages never enter that adapter.
-	if r.URL.RawQuery == "" && (pagePath == "/robots.txt" || pagePath == "/sitemap.xml") {
+	if hasSitebrushSessionCookie(r) || r.URL.RawQuery == "" && (pagePath == "/robots.txt" || pagePath == "/sitemap.xml") {
 		return false
 	}
 	http.NotFound(w, r)
