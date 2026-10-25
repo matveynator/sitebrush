@@ -35,9 +35,12 @@ type ImportFrontierPage struct {
 	LinkOffset int
 }
 
+// Completion and cursor movement reveal progress even when discovery keeps the queue size flat.
 type ImportFrontierStats struct {
-	PendingPages int
-	QueueBytes   int64
+	PendingPages   int
+	CompletedPages int
+	CursorOffset   int64
+	QueueBytes     int64
 }
 
 // ImportFrontierSchema is frozen in the application migration journal.
@@ -274,6 +277,13 @@ func ImportFrontierStatsForRun(ctx context.Context, database importFrontierDatab
 	if err != nil {
 		return ImportFrontierStats{}, fmt.Errorf("read import frontier stats: %w", err)
 	}
+	var totalPages int
+	err = database.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(link_offset),0) FROM whole_site_import_pages WHERE import_id=? AND domain=?`, importID, domain).
+		Scan(&totalPages, &stats.CursorOffset)
+	if err != nil {
+		return ImportFrontierStats{}, fmt.Errorf("read import frontier progress: %w", err)
+	}
+	stats.CompletedPages = totalPages - stats.PendingPages
 	return stats, nil
 }
 

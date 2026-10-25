@@ -81,11 +81,15 @@ func TestImportFrontierPersistsOffsetsAndEnforcesStorageQuota(t *testing.T) {
 	if err != nil || len(claimedPages) != 1 || claimedPages[0].LinkOffset != 1200 {
 		t.Fatalf("resume did not restore page cursor: pages=%+v err=%v", claimedPages, err)
 	}
+	progress, err := ImportFrontierStatsForRun(contextValue, database, run.ID, run.Domain)
+	if err != nil || progress.PendingPages != 1 || progress.CompletedPages != 0 || progress.CursorOffset != 1200 {
+		t.Fatalf("pending page progress = %+v, err=%v", progress, err)
+	}
 	if err := SetImportFrontierPageState(contextValue, database, run.ID, run.Domain, rootPage.Key, "done"); err != nil {
 		t.Fatal(err)
 	}
 	stats, err := ImportFrontierStatsForRun(contextValue, database, run.ID, run.Domain)
-	if err != nil || stats.PendingPages != 0 {
+	if err != nil || stats.PendingPages != 0 || stats.CompletedPages != 1 {
 		t.Fatalf("completed queue stats = %+v, err=%v", stats, err)
 	}
 	if err := FinishImportFrontier(contextValue, database, run.ID, run.Domain); err != nil {

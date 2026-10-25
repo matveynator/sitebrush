@@ -11193,7 +11193,7 @@ func TestDownloadGrabSourceHTMLUsesSourceIPPort(t *testing.T) {
 	}
 }
 
-func TestMissingPageGrabFormIncludesSourceIPOverride(t *testing.T) {
+func TestMissingPageUsesSharedImportDialog(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
 	if err != nil {
@@ -11212,31 +11212,13 @@ func TestMissingPageGrabFormIncludesSourceIPOverride(t *testing.T) {
 		`<link href="/p/static/technical_pages.css?v=dev" rel="stylesheet">`,
 		`<body class="technical-page bg-body">`,
 		`<img src="/p/static/sitebrush-app-icon.png" class="section-icon" alt="">`,
-		`class="missing-page-secondary-field missing-page-source-ip-field"`,
+		`id="missing-import-page"`,
+		`src="/p/static/site_copy.js?v=`,
+		`window.SiteBrushCopySite.open(copySiteConfiguration)`,
+		`"sourceIPLabel"`,
 	} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("missing page does not include admin technical-page fragment %q in %s", expectedFragment, body)
-		}
-	}
-	if !strings.Contains(body, `name="source_ip"`) {
-		t.Fatalf("missing page import form does not include source_ip field: %s", body)
-	}
-	if !strings.Contains(body, `name="copy_whole_site"`) {
-		t.Fatalf("missing page import form does not include whole-site checkbox: %s", body)
-	}
-	if !strings.Contains(body, `body: buildGrabRequestBody()`) {
-		t.Fatalf("missing page import script does not send urlencoded grab body: %s", body)
-	}
-	for _, expectedFragment := range []string{
-		`let previewRequestInFlight = false;`,
-		`function closeProgressStream()`,
-		`function buildDownloadProgressModel(previewPayload)`,
-		`function summarizeDownloadProgress(progressState)`,
-		`downloadProgressModel = buildDownloadProgressModel(previewPayloadForDownload);`,
-		`if (grabRequestInFlight || previewRequestInFlight)`,
-	} {
-		if !strings.Contains(body, expectedFragment) {
-			t.Fatalf("missing page import script does not include progress fix fragment %q in %s", expectedFragment, body)
 		}
 	}
 }
@@ -12534,7 +12516,10 @@ func TestExternalSiteImportPrimaryActionsUseThemeStyles(t *testing.T) {
 		"setCopySiteStatus(statusElement, previewError.message",
 		"cancelButtonElement.classList.toggle('SiteBrushCopySiteContinueButton', finishImportMode)",
 		"continueButtonElement.classList.toggle('SiteBrushCopySiteContinueButton', primaryAction)",
-		"continueButtonElement.textContent = resumeImportID !== ''\n        ? textFromConfig(configuration, 'continueImportPages', 'Continue import')\n        : textFromConfig(configuration, 'retryRemaining', 'Retry remaining');\n      setContinueButtonPrimaryAction(false)",
+		"formElement.classList.add('SiteBrushCopySiteHidden')",
+		"function setActiveImportButtonMode()",
+		"function continueQueuedImport(downloadPayload)",
+		"textFromConfig(configuration, 'openSite', 'Open site')",
 	} {
 		if !strings.Contains(script, expectedFragment) {
 			t.Fatalf("external site import script does not contain %q", expectedFragment)
@@ -12548,13 +12533,9 @@ func TestExternalSiteImportPrimaryActionsUseThemeStyles(t *testing.T) {
 	template := string(templateBytes)
 	for _, expectedFragment := range []string{
 		`/p/static/technical_pages.css?v={{.CompileVersion}}`,
-		"btn btn-success sitebrush-import-primary-action",
-		"cancelButtonElement.classList.toggle('btn-success', finishImportMode)",
-		"cancelButtonElement.classList.toggle('btn-outline-secondary', !finishImportMode)",
-		"cancelButtonElement.classList.toggle('sitebrush-import-primary-action', finishImportMode)",
-		"continueButtonElement.classList.toggle('sitebrush-import-primary-action', primaryAction)",
-		"continueButtonElement.textContent = uiText.retryRemaining || continueButtonOriginalText;\n    setContinueButtonPrimaryAction(false)",
-		"setFinishImportButtonMode(true)",
+		`id="missing-import-page"`,
+		`src="/p/static/site_copy.js?v={{.CopySiteScriptVersion}}"`,
+		"window.SiteBrushCopySite.open(copySiteConfiguration)",
 	} {
 		if !strings.Contains(template, expectedFragment) {
 			t.Fatalf("external site import template does not contain %q", expectedFragment)
@@ -13739,6 +13720,9 @@ func TestGrabSourceRetryClassifierRejectsPermanentFailures(t *testing.T) {
 	if !shouldRetryGrabSourceHTMLDownload(crawler.HTMLDownloadResult{StatusCode: http.StatusTooManyRequests}, errors.New("limited")) {
 		t.Fatal("429 response was classified as permanent")
 	}
+	if !shouldRetryGrabSourceHTMLDownload(crawler.HTMLDownloadResult{StatusCode: http.StatusOK}, io.ErrUnexpectedEOF) {
+		t.Fatal("interrupted HTML body was classified as permanent")
+	}
 	if !shouldRetryGrabSourceHTMLDownload(crawler.HTMLDownloadResult{}, &net.DNSError{Err: "temporary failure", Name: "example.test", IsTemporary: true}) {
 		t.Fatal("temporary DNS failure was classified as permanent")
 	}
@@ -13747,6 +13731,143 @@ func TestGrabSourceRetryClassifierRejectsPermanentFailures(t *testing.T) {
 	}
 	if shouldRetryGrabSourceHTMLDownload(crawler.HTMLDownloadResult{}, context.Canceled) {
 		t.Fatal("canceled request was classified as transient")
+	}
+}
+
+func TestSourceImportDoesNotRetryOrFallbackAfter404(t *testing.T) {
+	requests := make(chan string, 4)
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			requests <- request.URL.String()
+			return (fakeGrabResponse{statusCode: http.StatusNotFound}).httpResponse(request), nil
+		})}
+	}
+	defer func() { newGrabHTTPClient = previousGrabHTTPClient }()
+	const sourceURL = "https://example.com/missing"
+	if _, _, err := downloadGrabSourceHTMLWithResolvedURL(sourceURL, grabSourceOptions{}); err == nil {
+		t.Fatal("ordinary import accepted a missing source page")
+	}
+	if _, _, err := (&App{}).downloadPublicTrialSourceHTML(context.Background(), sourceURL, "", grabSourceOptions{}); err == nil {
+		t.Fatal("Test Drive accepted a missing source page")
+	}
+	if len(requests) != 2 {
+		t.Fatalf("404 source was requested %d times across two imports, want 2", len(requests))
+	}
+	close(requests)
+	for requestedURL := range requests {
+		if requestedURL != sourceURL {
+			t.Fatalf("404 triggered an HTTP fallback: %s", requestedURL)
+		}
+	}
+}
+
+func TestImportResourceRetriesOnlyTemporaryFailures(t *testing.T) {
+	pageURL, err := url.Parse("http://example.com/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const resourceURL = "http://example.com/image.png"
+	for _, testCase := range []struct {
+		name          string
+		initialStatus int
+		wantRequests  int
+		wantReference string
+	}{
+		{name: "missing", initialStatus: http.StatusNotFound, wantRequests: 1, wantReference: "data:,"},
+		{name: "rate-limited", initialStatus: http.StatusTooManyRequests, wantRequests: 2, wantReference: "/p/"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			attempts := make(chan struct{}, 4)
+			spider := newPageSpider("localhost", pageURL, grabResourceMaxDepth, nil, "", grabSourceOptions{})
+			spider.client = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				attempts <- struct{}{}
+				if len(attempts) == 1 {
+					return (fakeGrabResponse{statusCode: testCase.initialStatus}).httpResponse(request), nil
+				}
+				return (fakeGrabResponse{contentType: "image/png", body: "image"}).httpResponse(request), nil
+			})}
+			_, _ = spider.fetchResource(resourceURL, pageURL, 0, true)
+			spider.retryFailedResources(pageURL, grabImportFailedResourceRetryAttempts)
+			if got := len(attempts); got != testCase.wantRequests {
+				t.Fatalf("requests = %d, want %d", got, testCase.wantRequests)
+			}
+			pages := []wholeSiteImportedPage{{HTML: `<img src="` + resourceURL + `">`}}
+			spider.finishImportedPageReferences(pages)
+			if !strings.Contains(pages[0].HTML, testCase.wantReference) || strings.Contains(pages[0].HTML, resourceURL) {
+				t.Fatalf("final reference = %s", pages[0].HTML)
+			}
+		})
+	}
+}
+
+func TestImportLandingPathIsAnExistingPage(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", "/copy/about", "About", "<h1>About</h1>"); err != nil {
+		t.Fatal(err)
+	}
+	landingPath, found := application.importedLandingPagePath(context.Background(), "localhost", "/copy")
+	if !found || landingPath != "/copy/about" {
+		t.Fatalf("landing path = %q, %t", landingPath, found)
+	}
+	if _, found := application.importedLandingPagePath(context.Background(), "localhost", "/elsewhere"); found {
+		t.Fatal("unrelated page was returned as the import landing path")
+	}
+}
+
+func TestWholeSiteImportReportsPermanentFailuresWithoutBrokenLinks(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old"); err != nil {
+		t.Fatal(err)
+	}
+	const sourceURL = "http://example.com/"
+	const missingPageURL = "http://example.com/missing"
+	const missingImageURL = "http://example.com/missing.png"
+	requests := make(chan string, 8)
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			requests <- request.URL.String()
+			switch request.URL.String() {
+			case sourceURL:
+				return (fakeGrabResponse{contentType: "text/html", body: `<html><body><a href="/missing">Missing</a><a href="/missing.png">File</a><img src="/missing.png"></body></html>`}).httpResponse(request), nil
+			default:
+				return (fakeGrabResponse{statusCode: http.StatusNotFound}).httpResponse(request), nil
+			}
+		})}
+	}
+	defer func() { newGrabHTTPClient = previousGrabHTTPClient }()
+	form := url.Values{"path": {"/copy"}, "source_url": {sourceURL}, "copy_whole_site": {"1"}}
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/copy?grab", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept", "application/json")
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("import status = %d: %s", response.Code, response.Body.String())
+	}
+	var result grabImportResult
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.RedirectPath != "/copy" || result.RemainingPages != 0 || result.FailedTotal != 2 {
+		t.Fatalf("import result = %+v", result)
+	}
+	var importedHTML string
+	if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", "/copy").Scan(&importedHTML); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(importedHTML, missingImageURL) || strings.Contains(importedHTML, `/copy/missing`) || !strings.Contains(importedHTML, `src="data:,"`) || !strings.Contains(importedHTML, `href="#"`) || !strings.Contains(importedHTML, `href="data:,"`) {
+		t.Fatalf("missing resources remain in imported HTML: %s", importedHTML)
+	}
+	requestCounts := map[string]int{}
+	close(requests)
+	for requestURL := range requests {
+		requestCounts[requestURL]++
+	}
+	if requestCounts[missingPageURL] != 1 || requestCounts[missingImageURL] != 1 {
+		t.Fatalf("permanent failures were requested again: %#v", requestCounts)
 	}
 }
 
@@ -15384,15 +15505,14 @@ func TestMissingPageReturns404ForGuest(t *testing.T) {
 	body := response.Body.String()
 	for _, expectedFragment := range []string{
 		`class="missing-page-primary-card"`,
-		`href="/missing?visual"`,
-		`создайте эту страницу`,
+		`/missing`,
 	} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("missing page did not include %q in %s", expectedFragment, body)
 		}
 	}
-	if strings.Contains(body, `method="post" action="/missing?grab" data-grab-form`) {
-		t.Fatalf("guest missing page unexpectedly offers copy form: %s", body)
+	if strings.Contains(body, `href="/missing?visual"`) || strings.Contains(body, `id="missing-import-page"`) || strings.Contains(body, `revision_restore`) {
+		t.Fatalf("guest missing page exposed administrator actions: %s", body)
 	}
 	if strings.Contains(body, "sitebrush / /missing") {
 		t.Fatalf("guest missing page still includes the old footer label: %s", body)
@@ -15414,17 +15534,75 @@ func TestMissingPageReturns404ForAdminWithCopyOption(t *testing.T) {
 		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
 	}
 	body := response.Body.String()
-	if !strings.Contains(body, `method="post" action="/missing?grab" data-grab-form`) {
-		t.Fatalf("admin missing page does not offer copy form: %s", body)
+	for _, expectedFragment := range []string{`href="/missing?visual"`, `id="missing-import-page"`, `Создать страницу`, `Импортировать страницу`, `/p/static/site_copy.js?v=`} {
+		if !strings.Contains(body, expectedFragment) {
+			t.Fatalf("admin missing page does not offer %q: %s", expectedFragment, body)
+		}
 	}
-	if !strings.Contains(body, `class="card card-body missing-page-form missing-page-copy-form"`) {
-		t.Fatalf("admin missing page does not use styled copy form: %s", body)
+}
+
+func TestMissingAdminPageRestoresAnInactiveRevision(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old"); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(body, `/p/static/copy.png`) || !strings.Contains(body, `/p/static/backup.png`) {
-		t.Fatalf("admin missing page does not use Sitebrush form icons: %s", body)
+	result, err := rawDB.Exec(`INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,0)`, "localhost", "/removed", "<h1>Restored</h1>", "2026-10-25T10:00:00Z")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(body, `name="copy_whole_site"`) {
-		t.Fatalf("admin missing page does not offer whole-site copy option: %s", body)
+	revisionID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminCookie := newAdminSessionCookie(t, application, "admin@example.com")
+	missingRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/removed", nil)
+	missingRequest.AddCookie(adminCookie)
+	missingResponse := httptest.NewRecorder()
+	application.route(missingResponse, missingRequest)
+	if missingResponse.Code != http.StatusNotFound || !strings.Contains(missingResponse.Body.String(), `action="/removed?revision_restore"`) || !strings.Contains(missingResponse.Body.String(), `value="`+strconv.FormatInt(revisionID, 10)+`"`) {
+		t.Fatalf("missing page did not offer its revision: status=%d body=%s", missingResponse.Code, missingResponse.Body.String())
+	}
+	restoreForm := url.Values{"id": {strconv.FormatInt(revisionID, 10)}, "account_csrf": {accountCSRF(missingRequest)}}
+	restoreRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/removed?revision_restore", strings.NewReader(restoreForm.Encode()))
+	restoreRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	restoreRequest.AddCookie(adminCookie)
+	restoreResponse := httptest.NewRecorder()
+	application.route(restoreResponse, restoreRequest)
+	if restoreResponse.Code != http.StatusFound || restoreResponse.Header().Get("Location") != "/removed" {
+		t.Fatalf("restore response = %d %q: %s", restoreResponse.Code, restoreResponse.Header().Get("Location"), restoreResponse.Body.String())
+	}
+	var restoredHTML string
+	if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", "/removed").Scan(&restoredHTML); err != nil || restoredHTML != "<h1>Restored</h1>" {
+		t.Fatalf("restored page = %q, %v", restoredHTML, err)
+	}
+}
+
+func TestPublishedBoundaryKeepsAdminMissingPageRecovery(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rawDB.Exec(`INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,0)`, "localhost", "/removed", "<h1>Old</h1>", "2026-10-25T10:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	defer close(stop)
+	application.publicCatalog = publicsite.NewCatalog(application.storagePath, stop)
+	if err := application.writePublicPolicy("localhost"); err != nil {
+		t.Fatal(err)
+	}
+	handler := application.siteHTTPHandler(http.HandlerFunc(application.route))
+	guestResponse := httptest.NewRecorder()
+	handler.ServeHTTP(guestResponse, httptest.NewRequest(http.MethodGet, "http://localhost:8080/removed", nil))
+	if guestResponse.Code != http.StatusNotFound || strings.Contains(guestResponse.Body.String(), "revision_restore") {
+		t.Fatalf("guest 404 disclosed recovery: %d %s", guestResponse.Code, guestResponse.Body.String())
+	}
+	adminRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/removed", nil)
+	adminRequest.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	adminResponse := httptest.NewRecorder()
+	handler.ServeHTTP(adminResponse, adminRequest)
+	if adminResponse.Code != http.StatusNotFound || !strings.Contains(adminResponse.Body.String(), `action="/removed?revision_restore"`) {
+		t.Fatalf("admin 404 lost recovery: %d %s", adminResponse.Code, adminResponse.Body.String())
 	}
 }
 

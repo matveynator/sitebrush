@@ -366,16 +366,6 @@
     appendDownloadPlanFields(formElement, downloadProgressSummary.totalTargets, downloadProgressSummary.totalBytes);
   }
 
-  function syncFailedResources(formElement, failedResourceURLs) {
-    clearSelectionFields(formElement);
-    appendHiddenField(formElement, 'import_selection_confirmed', '1');
-    const sortedFailedResourceURLs = Array.from(failedResourceURLs).sort();
-    for (const failedResourceURL of sortedFailedResourceURLs) {
-      appendHiddenField(formElement, 'import_resource_url', failedResourceURL);
-    }
-    appendDownloadPlanFields(formElement, sortedFailedResourceURLs.length, 0);
-  }
-
   function openCopySiteModal(configuration) {
     ensureCopySiteStyles();
     const targetPath = String(configuration && configuration.path ? configuration.path : window.location.pathname || '/');
@@ -513,9 +503,9 @@
     dialogElement.appendChild(statusElement);
     dialogElement.appendChild(urlElement);
     dialogElement.appendChild(progressElement);
+    dialogElement.appendChild(actionRowElement);
     dialogElement.appendChild(quotaElement);
     dialogElement.appendChild(resourcesElement);
-    dialogElement.appendChild(actionRowElement);
     overlayElement.appendChild(dialogElement);
     document.body.appendChild(overlayElement);
 
@@ -524,12 +514,14 @@
     let downloadFinishedWithErrors = false;
     let failedResourceURLs = new Set();
     let failedResourceReasons = new Map();
+    let completedFailedResourceURLs = new Set();
+    let completedFailedResourceReasons = new Map();
     let importedRedirectPath = '';
     let downloadProgressModel = null;
-    let retryWasAttempted = false;
-    let partialImportCanRetry = false;
     let resumeImportID = '';
     let remainingImportPages = 0;
+    let previousCompletedImportPages = -1;
+    let previousCrawlCursor = -1;
     let requestIsRunning = false;
     let progressWebSocketClosedIntentionally = false;
     let progressWebSocketFailureHandled = false;
@@ -538,6 +530,8 @@
     let activeDownloadEndpoint = '?grab';
     let activeGrabToken = '';
     let downloadCancelRequested = false;
+    let activeDownloadController = null;
+    let modalClosed = false;
 
     function pendingImportStorageKey() {
       return 'sitebrush.whole-site-import.' + window.location.host + '.' + targetPath;
@@ -552,6 +546,19 @@
         window.localStorage.setItem(pendingImportStorageKey(), JSON.stringify({ importID: importID, sourceURL: sourceURL, remainingPages: Number(remainingPages) }));
       } catch (storageError) {
         return;
+      }
+    }
+
+    function clearPendingImport() {
+      resumeImportID = '';
+      remainingImportPages = 0;
+      resumeImportFieldElement.value = '';
+      previousCompletedImportPages = -1;
+      previousCrawlCursor = -1;
+      savePendingImport('', '', 0);
+      if (!previewPayload) {
+        continueButtonElement.classList.add('SiteBrushCopySiteHidden');
+        setCopySiteStatus(statusElement, '', '');
       }
     }
 
@@ -589,9 +596,14 @@
 
     function setFinishImportButtonMode(finishImportMode) {
       cancelButtonElement.textContent = finishImportMode
-        ? textFromConfig(configuration, 'finishImport', 'Finish import')
+        ? textFromConfig(configuration, 'openSite', 'Open site')
         : textFromConfig(configuration, 'cancelButton', 'Cancel');
       cancelButtonElement.classList.toggle('SiteBrushCopySiteContinueButton', finishImportMode);
+    }
+
+    function setActiveImportButtonMode() {
+      cancelButtonElement.textContent = textFromConfig(configuration, 'interruptImport', 'Interrupt import');
+      cancelButtonElement.classList.remove('SiteBrushCopySiteContinueButton');
     }
 
     function setContinueButtonPrimaryAction(primaryAction) {
@@ -599,7 +611,11 @@
     }
 
     function closeModal() {
+      modalClosed = true;
       if (requestIsRunning && activeGrabToken !== '') {
+        if (publicTrialMode && activeDownloadController) {
+          activeDownloadController.abort();
+        }
         const cancelRequestBody = new URLSearchParams();
         cancelRequestBody.set('progress_token', activeGrabToken);
         fetch(configuredEndpoint(configuration, cancelQuery), { method: 'POST', body: cancelRequestBody, keepalive: true }).catch(function ignoreCloseCancelError() {});
@@ -625,7 +641,11 @@
     function finishPartialImport() {
       closeProgressWebSocket();
       stopRetryCountdown();
-      window.location.href = importedRedirectPath || targetPath || '/';
+      if (importedRedirectPath !== '') {
+        window.location.href = importedRedirectPath;
+      } else {
+        closeModal();
+      }
     }
 
     function requestActiveDownloadCancel() {
@@ -634,7 +654,11 @@
       }
       downloadCancelRequested = true;
       cancelButtonElement.disabled = true;
-      setCopySiteStatus(statusElement, textFromConfig(configuration, 'partialImportClose', 'Finishing import...'), 'warning');
+      setCopySiteStatus(statusElement, textFromConfig(configuration, 'interruptingImport', 'Stopping import...'), 'warning');
+      if (publicTrialMode && activeDownloadController) {
+        activeDownloadController.abort();
+        return;
+      }
       const cancelRequestBody = new URLSearchParams();
       cancelRequestBody.append('progress_token', activeGrabToken);
       fetch(configuredEndpoint(configuration, cancelQuery), { method: 'POST', body: cancelRequestBody, headers: { Accept: 'application/json' } })
@@ -667,6 +691,15 @@
       }
     }
 
+    function recordCompletedFailures(downloadPayload) {
+      // Progress events include failures that automatic retries may already have resolved.
+      failedResourceURLs = new Set(completedFailedResourceURLs);
+      failedResourceReasons = new Map(completedFailedResourceReasons);
+      collectFailedURLs(downloadPayload);
+      completedFailedResourceURLs = new Set(failedResourceURLs);
+      completedFailedResourceReasons = new Map(failedResourceReasons);
+    }
+
     function stopRetryCountdown() {
       if (!retryCountdownTimer) {
         return;
@@ -677,12 +710,17 @@
 
     function renderFailedResources() {
       resourcesElement.replaceChildren();
+      closeButtonElement.classList.remove('SiteBrushCopySiteHidden');
       const sortedFailedResourceURLs = Array.from(failedResourceURLs).sort();
-      setFinishImportButtonMode(true);
+      if (importedRedirectPath !== '') {
+        setFinishImportButtonMode(true);
+      } else {
+        cancelButtonElement.textContent = textFromConfig(configuration, 'closeButton', 'Close');
+        cancelButtonElement.classList.remove('SiteBrushCopySiteContinueButton');
+      }
       if (sortedFailedResourceURLs.length === 0 && remainingImportPages <= 0) {
         resourcesElement.classList.add('SiteBrushCopySiteHidden');
         continueButtonElement.classList.add('SiteBrushCopySiteHidden');
-        partialImportCanRetry = false;
         return;
       }
       resourcesElement.classList.remove('SiteBrushCopySiteHidden');
@@ -713,19 +751,20 @@
         pendingPagesElement.appendChild(createElement('div', 'SiteBrushCopySiteResourceURL', textFromConfig(configuration, 'importPagesRemain', 'Pages remain in the saved import queue.')));
         resourcesElement.appendChild(pendingPagesElement);
       }
-      continueButtonElement.textContent = resumeImportID !== ''
-        ? textFromConfig(configuration, 'continueImportPages', 'Continue import')
-        : textFromConfig(configuration, 'retryRemaining', 'Retry remaining');
-      setContinueButtonPrimaryAction(false);
-      continueButtonElement.classList.remove('SiteBrushCopySiteHidden');
-      partialImportCanRetry = true;
+      if (remainingImportPages > 0 && resumeImportID !== '') {
+        continueButtonElement.textContent = textFromConfig(configuration, 'continueImportPages', 'Continue import') + ' (' + remainingImportPages + ')';
+        setContinueButtonPrimaryAction(false);
+        continueButtonElement.classList.remove('SiteBrushCopySiteHidden');
+      } else {
+        continueButtonElement.classList.add('SiteBrushCopySiteHidden');
+      }
     }
 
     function retryStatusText(progressPayload, secondsLeft) {
       const retryAttempt = Number(progressPayload.retry_attempt) || 0;
       const retryTotal = Number(progressPayload.retry_total) || 0;
       const failedTotal = Number(progressPayload.failed_total) || failedResourceURLs.size;
-      let statusText = textFromConfig(configuration, 'retryRemaining', 'Retry remaining');
+      let statusText = textFromConfig(configuration, 'retryingAutomatically', 'Retrying temporary errors');
       if (retryAttempt > 0 && retryTotal > 0) {
         statusText += ' ' + retryAttempt + '/' + retryTotal;
       }
@@ -762,13 +801,12 @@
       if (!responseIncludesFailureState(downloadPayload)) {
         return false;
       }
-      collectFailedURLs(downloadPayload);
       const failedTotal = Number(downloadPayload.failed_total) || 0;
       resumeImportID = String(downloadPayload.import_id || '');
       remainingImportPages = Math.max(0, Number(downloadPayload.remaining_pages) || 0);
       resumeImportFieldElement.value = resumeImportID;
       savePendingImport(resumeImportID, sourceUrlElement.value, remainingImportPages);
-      if (failedTotal <= 0 && remainingImportPages <= 0) {
+      if (failedTotal <= 0 && failedResourceURLs.size === 0 && remainingImportPages <= 0) {
         failedResourceURLs = new Set();
         failedResourceReasons = new Map();
         resumeImportID = '';
@@ -777,17 +815,39 @@
         return false;
       }
       downloadFinishedWithErrors = true;
-      setCopySiteStatus(statusElement, textFromConfig(configuration, retryWasAttempted ? 'partialImportClose' : 'partialImportRetry', 'Imported with errors.'), 'error');
+      setCopySiteStatus(statusElement, textFromConfig(configuration, 'partialImportClose', 'Imported with missing resources. Open the available site.'), 'warning');
       setProgress(progressBarElement, 100);
       closeProgressWebSocket();
       renderFailedResources();
       return true;
     }
 
+    function continueQueuedImport(downloadPayload) {
+      const queuedPageCount = Math.max(0, Number(downloadPayload.remaining_pages) || 0);
+      const savedImportID = String(downloadPayload.import_id || '');
+      if (publicTrialMode || downloadCancelRequested || queuedPageCount === 0 || savedImportID === '') {
+        return false;
+      }
+      const completedPageCount = Math.max(0, Number(downloadPayload.completed_pages) || 0);
+      const crawlCursor = Math.max(0, Number(downloadPayload.crawl_cursor) || 0);
+      if (previousCompletedImportPages >= 0 && completedPageCount <= previousCompletedImportPages && crawlCursor <= previousCrawlCursor) {
+        return false;
+      }
+      previousCompletedImportPages = completedPageCount;
+      previousCrawlCursor = crawlCursor;
+      resumeImportID = savedImportID;
+      remainingImportPages = queuedPageCount;
+      resumeImportFieldElement.value = savedImportID;
+      savePendingImport(savedImportID, sourceUrlElement.value, queuedPageCount);
+      setCopySiteStatus(statusElement, textFromConfig(configuration, 'continueImportPages', 'Continuing import') + ' (' + queuedPageCount + ')', 'warning');
+      startDownload();
+      return true;
+    }
+
     function connectProgressWebSocket(progressToken, readyCallback, forDownload) {
       let readyCallbackWasCalled = false;
       function startRequestOnce() {
-        if (readyCallbackWasCalled) {
+        if (readyCallbackWasCalled || modalClosed) {
           return;
         }
         readyCallbackWasCalled = true;
@@ -838,9 +898,6 @@
         setProgress(progressBarElement, completedPercent);
         collectFailedURLs(progressPayload);
         if (progressPayload.stage === 'retry_wait') {
-          renderFailedResources();
-          continueButtonElement.classList.add('SiteBrushCopySiteHidden');
-          partialImportCanRetry = false;
           startRetryCountdown(progressPayload);
           urlElement.textContent = progressPayload.current_url || '';
           return;
@@ -878,9 +935,8 @@
         if (progressPayload.stage === 'partial') {
           stopRetryCountdown();
           downloadFinishedWithErrors = true;
-          setCopySiteStatus(statusElement, progressPayload.message || textFromConfig(configuration, retryWasAttempted ? 'partialImportClose' : 'partialImportRetry', 'Imported with errors.'), 'error');
+          setCopySiteStatus(statusElement, progressPayload.message || textFromConfig(configuration, 'partialImportClose', 'Imported with missing resources.'), 'warning');
           setProgress(progressBarElement, 100);
-          renderFailedResources();
           closeProgressWebSocket();
         }
         if (progressPayload.stage === 'error' && !progressPayload.current_url) {
@@ -914,12 +970,14 @@
       const pageCount = wholeSiteElement.checked ? Math.max(1, Number(previewPayload.page_count) || 1) : 0;
       const targetCount = pageCount + resourceCount;
       const singlePageRequired = Boolean(previewPayload.single_page_required);
+      formElement.classList.add('SiteBrushCopySiteHidden');
+      dialogElement.scrollTop = 0;
       setCopySiteStatus(statusElement, singlePageRequired
         ? (previewPayload.message || textFromConfig(configuration, 'singlePageRequired', 'The website is larger than the free test-drive limit. Stop scanning and copy only its first page.'))
         : textFromConfig(configuration, 'confirmDownloadTextPrefix', 'Ready to download') + ' ' + targetCount + '.', singlePageRequired ? 'warning' : 'success');
       urlElement.textContent = previewPayload.source_url || sourceUrlElement.value;
       setFinishImportButtonMode(false);
-      partialImportCanRetry = false;
+      closeButtonElement.classList.remove('SiteBrushCopySiteHidden');
       setContinueButtonPrimaryAction(true);
       continueButtonElement.textContent = singlePageRequired
         ? textFromConfig(configuration, 'copyFirstPage', 'Copy first page')
@@ -951,6 +1009,7 @@
         return;
       }
       previewPayload = null;
+      formElement.classList.remove('SiteBrushCopySiteHidden');
       previewTokenFieldElement.value = '';
       resourcesElement.replaceChildren();
       resourcesElement.classList.add('SiteBrushCopySiteHidden');
@@ -966,9 +1025,7 @@
       }
       const progressToken = randomProgressToken();
       if (resumeImportID !== '') {
-        resumeImportID = '';
-        remainingImportPages = 0;
-        resumeImportFieldElement.value = '';
+        clearPendingImport();
       }
       tokenFieldElement.value = progressToken;
       previewTokenFieldElement.value = '';
@@ -979,8 +1036,8 @@
       failedResourceURLs = new Set();
       failedResourceReasons = new Map();
       importedRedirectPath = '';
-      retryWasAttempted = false;
-      partialImportCanRetry = false;
+      previousCompletedImportPages = -1;
+      previousCrawlCursor = -1;
       resourcesElement.replaceChildren();
       resourcesElement.classList.add('SiteBrushCopySiteHidden');
       quotaElement.classList.add('SiteBrushCopySiteHidden');
@@ -1003,6 +1060,9 @@
             return previewResponse.json();
           })
           .then(function handlePreviewPayload(previewResponsePayload) {
+            if (modalClosed) {
+              return;
+            }
             requestIsRunning = false;
             activeGrabToken = '';
             submitButtonElement.disabled = false;
@@ -1011,6 +1071,9 @@
             showPreview(previewResponsePayload);
           })
           .catch(function handlePreviewError(previewError) {
+            if (modalClosed) {
+              return;
+            }
             requestIsRunning = false;
             activeGrabToken = '';
             submitButtonElement.disabled = false;
@@ -1021,6 +1084,9 @@
     }
 
     function startDownload() {
+      if (!wholeSiteElement.checked && resumeImportID !== '') {
+        clearPendingImport();
+      }
       if (!previewPayload && resumeImportID === '') {
         requestPreview();
         return;
@@ -1037,26 +1103,17 @@
       downloadCancelRequested = false;
       downloadFinishedWithErrors = false;
       const continuingWholeSiteImport = resumeImportID !== '';
-      const retryOnlyFailedResources = !continuingWholeSiteImport && partialImportCanRetry && failedResourceURLs.size > 0;
       if (continuingWholeSiteImport) {
-        retryWasAttempted = true;
-        partialImportCanRetry = false;
         activeDownloadEndpoint = retryQuery;
         clearSelectionFields(formElement);
         resumeImportFieldElement.value = resumeImportID;
         downloadProgressModel = buildRetryProgressModel(new Set());
-      } else if (retryOnlyFailedResources) {
-        retryWasAttempted = true;
-        partialImportCanRetry = false;
-        activeDownloadEndpoint = retryQuery;
-        syncFailedResources(formElement, failedResourceURLs);
-        downloadProgressModel = buildRetryProgressModel(failedResourceURLs);
       } else {
-        retryWasAttempted = false;
         activeDownloadEndpoint = downloadQuery;
         failedResourceURLs = new Set();
         failedResourceReasons = new Map();
-        partialImportCanRetry = false;
+        completedFailedResourceURLs = new Set();
+        completedFailedResourceReasons = new Map();
         syncSelectedResources(formElement, resourcesElement, wholeSiteElement.checked, previewPayload);
         downloadProgressModel = buildDownloadProgressModel(resourcesElement, wholeSiteElement.checked, previewPayload);
       }
@@ -1064,17 +1121,19 @@
       continueButtonElement.classList.add('SiteBrushCopySiteHidden');
       submitButtonElement.disabled = true;
       cancelButtonElement.disabled = false;
-      setFinishImportButtonMode(true);
+      closeButtonElement.classList.add('SiteBrushCopySiteHidden');
+      setActiveImportButtonMode();
       setProgress(progressBarElement, 0);
       setCopySiteStatus(statusElement, textFromConfig(configuration, 'loadingStarted', 'Loading started...'), '');
       urlElement.textContent = '';
       connectProgressWebSocket(progressToken, function submitDownloadRequest() {
         requestIsRunning = true;
         const downloadBody = formRequestBody(formElement);
+        activeDownloadController = new AbortController();
         if (publicTrialMode) {
           downloadBody.set('create_progress_token', progressToken);
         }
-        fetch(configuredEndpoint(configuration, activeDownloadEndpoint), { method: 'POST', body: downloadBody, headers: { Accept: 'application/json' } })
+        fetch(configuredEndpoint(configuration, activeDownloadEndpoint), { method: 'POST', body: downloadBody, headers: { Accept: 'application/json' }, signal: activeDownloadController.signal })
           .then(function parseDownloadResponse(downloadResponse) {
             if (!downloadResponse.ok) {
               return downloadResponse.text().then(function throwDownloadError(errorText) {
@@ -1084,11 +1143,34 @@
             return downloadResponse.json();
           })
           .then(function handleDownloadPayload(downloadPayload) {
-            const redirectPath = downloadPayload.redirect || importedRedirectPath || targetPath;
+            if (modalClosed) {
+              return;
+            }
+            const importWasInterrupted = downloadCancelRequested;
+            const redirectPath = String(downloadPayload.redirect || importedRedirectPath || '').trim();
+            if (redirectPath === '' && !importWasInterrupted) {
+              throw new Error(textFromConfig(configuration, 'loadPageFailed', 'Imported page is unavailable.'));
+            }
             importedRedirectPath = redirectPath;
             requestIsRunning = false;
             activeGrabToken = '';
-            if (!publicTrialMode && applyDownloadFailureState(downloadPayload)) {
+            activeDownloadController = null;
+            recordCompletedFailures(downloadPayload);
+            if (importWasInterrupted) {
+              applyDownloadFailureState(downloadPayload);
+              downloadFinishedWithErrors = true;
+              submitButtonElement.disabled = false;
+              cancelButtonElement.disabled = false;
+              setProgress(progressBarElement, 100);
+              closeProgressWebSocket();
+              renderFailedResources();
+              setCopySiteStatus(statusElement, textFromConfig(configuration, 'importInterrupted', 'Import interrupted.'), 'warning');
+              return;
+            }
+            if (continueQueuedImport(downloadPayload)) {
+              return;
+            }
+            if (applyDownloadFailureState(downloadPayload)) {
               submitButtonElement.disabled = false;
               cancelButtonElement.disabled = false;
               return;
@@ -1105,13 +1187,20 @@
             window.location.href = redirectPath;
           })
           .catch(function handleDownloadError(downloadError) {
+            if (modalClosed) {
+              return;
+            }
             requestIsRunning = false;
             activeGrabToken = '';
+            activeDownloadController = null;
             submitButtonElement.disabled = false;
             cancelButtonElement.disabled = false;
             setFinishImportButtonMode(false);
+            closeButtonElement.classList.remove('SiteBrushCopySiteHidden');
             closeProgressWebSocket();
-            setCopySiteStatus(statusElement, downloadError.message || textFromConfig(configuration, 'loadPageFailed', 'Load failed.'), 'error');
+            setCopySiteStatus(statusElement, downloadError.name === 'AbortError'
+              ? textFromConfig(configuration, 'importInterrupted', 'Import interrupted.')
+              : downloadError.message || textFromConfig(configuration, 'loadPageFailed', 'Load failed.'), 'error');
           });
       }, true);
     }
@@ -1131,16 +1220,19 @@
     continueButtonElement.addEventListener('click', startDownload);
     sourceUrlElement.addEventListener('input', function onSourceURLChange() {
       if (resumeImportID !== '') {
-        resumeImportID = '';
-        remainingImportPages = 0;
-        resumeImportFieldElement.value = '';
+        clearPendingImport();
       }
       invalidatePreview();
     });
     sourceIPElement.addEventListener('input', invalidatePreview);
     sourceLanguageElement.addEventListener('change', invalidatePreview);
-    wholeSiteElement.addEventListener('change', renderAutomaticTemplateOption);
-    wholeSiteElement.addEventListener('change', invalidatePreview);
+    wholeSiteElement.addEventListener('change', function onImportScopeChange() {
+      if (resumeImportID !== '') {
+        clearPendingImport();
+      }
+      renderAutomaticTemplateOption();
+      invalidatePreview();
+    });
     automaticTemplateElement.addEventListener('change', invalidatePreview);
     formElement.addEventListener('submit', function onCopyFormSubmit(submitEvent) {
       submitEvent.preventDefault();
