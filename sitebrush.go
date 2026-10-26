@@ -154,7 +154,7 @@ const sitebrushHTTPWriteTimeout = 0
 const sitebrushHTTPIdleTimeout = 65 * time.Second
 const sitebrushHTTPReadHeaderTimeout = 5 * time.Second
 const sitebrushHTTP10KeepAliveBufferLimit = 1024 * 1024
-const currentSiteDatabaseSchemaVersion = 14
+const currentSiteDatabaseSchemaVersion = 15
 const legacySiteDataSchemaVersion = 13
 const siteDatabaseStartupMigrationTimeout = 30 * time.Second
 const pagePasswordSessionTTL = time.Hour
@@ -12000,7 +12000,7 @@ func siteDatabaseSchemaComplete(ctx context.Context, database sqlExecutor) (bool
 	if err != nil || !complete {
 		return complete, err
 	}
-	for _, column := range []struct{ table, name string }{{"page_pending_deletions", "path"}, {"whole_site_imports", "draft_only"}, {"file_access_rules", "protected_page_path"}, {"site_freeze_points", "id"}, {"site_freeze_state", "stage"}, {"site_hidden_assets", "tree"}, {"site_freeze_protection", "payload"}} {
+	for _, column := range []struct{ table, name string }{{"page_pending_deletions", "path"}, {"whole_site_imports", "draft_only"}, {"file_access_rules", "protected_page_path"}, {"site_freeze_points", "id"}, {"site_freeze_state", "stage"}, {"site_hidden_assets", "tree"}, {"site_freeze_protection", "payload"}, {"resource_origins", "original_uri"}, {"resource_page_uses", "page_path"}, {"resource_public_paths", "public_path"}, {"site_indexing_state", "robots_manual"}, {"page_import_sources", "original_uri"}} {
 		found, err := siteDatabaseColumnExists(ctx, database, column.table, column.name)
 		if err != nil || !found {
 			return false, err
