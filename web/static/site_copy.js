@@ -366,6 +366,74 @@
     appendDownloadPlanFields(formElement, downloadProgressSummary.totalTargets, downloadProgressSummary.totalBytes);
   }
 
+  function showIndexingDecision(configuration, reviewID, redirectPath, publicTrialMode) {
+    ensureCopySiteStyles();
+    const russian = String(document.documentElement.lang || '').toLowerCase().startsWith('ru');
+    const overlayElement = createElement('div', 'SiteBrushCopySiteOverlay');
+    const dialogElement = createElement('div', 'SiteBrushCopySiteDialog');
+    dialogElement.setAttribute('role', 'dialog');
+    dialogElement.setAttribute('aria-modal', 'true');
+    const headingElement = createElement('h2', 'SiteBrushCopySiteTitle', russian ? 'Скрыть копию от поисковиков?' : 'Hide this copy from search engines?');
+    const explanationElement = createElement('p', 'SiteBrushCopySiteStatus', russian
+      ? 'До выбора действует noindex. При скрытии копии обход останется разрешённым, чтобы поисковики увидели noindex. Позже индексацию можно включить в настройках сайта. robots.txt можно редактировать как страницу.'
+      : 'Noindex stays active until you decide. Hiding the copy still allows crawling so search engines can see noindex. You can enable indexing later in site settings. You can edit robots.txt as a page.');
+    const errorElement = createElement('p', 'SiteBrushCopySiteStatus SiteBrushCopySiteHidden', '');
+    const actionRowElement = createElement('div', 'SiteBrushCopySiteActions');
+    const hideButtonElement = createElement('button', 'SiteBrushCopySiteButton', russian ? 'Скрыть копию' : 'Hide the copy');
+    const showButtonElement = createElement('button', 'SiteBrushCopySiteSecondaryButton', russian ? 'Не скрывать копию' : 'Do not hide the copy');
+    const laterButtonElement = createElement('button', 'SiteBrushCopySiteSecondaryButton', russian ? 'Решить позже' : 'Decide later');
+    for (const buttonElement of [hideButtonElement, showButtonElement, laterButtonElement]) {
+      buttonElement.type = 'button';
+      actionRowElement.appendChild(buttonElement);
+    }
+    dialogElement.appendChild(headingElement);
+    dialogElement.appendChild(explanationElement);
+    dialogElement.appendChild(errorElement);
+    dialogElement.appendChild(actionRowElement);
+    overlayElement.appendChild(dialogElement);
+    document.body.appendChild(overlayElement);
+
+    function submitDecision(choice) {
+      hideButtonElement.disabled = true;
+      showButtonElement.disabled = true;
+      laterButtonElement.disabled = true;
+      errorElement.classList.add('SiteBrushCopySiteHidden');
+      const requestBody = new URLSearchParams();
+      requestBody.set('indexing_review_id', reviewID);
+      requestBody.set('indexing_choice', choice);
+      if (configuration && configuration.csrfToken) {
+        requestBody.set('account_csrf', configuration.csrfToken);
+      }
+      if (publicTrialMode) {
+        requestBody.set('trial_domain', new URL(redirectPath, window.location.href).hostname);
+      }
+      const endpoint = configuredEndpoint(configuration, publicTrialMode ? 'trial_site_indexing' : 'indexing_review');
+      fetch(endpoint, { method: 'POST', body: requestBody, headers: { Accept: 'application/json' } })
+        .then(function checkIndexingResponse(response) {
+          if (!response.ok) {
+            return response.text().then(function reportIndexingError(message) { throw new Error(message || 'Could not save the indexing decision.'); });
+          }
+          overlayElement.remove();
+          window.location.href = redirectPath;
+        })
+        .catch(function showIndexingError(error) {
+          hideButtonElement.disabled = false;
+          showButtonElement.disabled = false;
+          laterButtonElement.disabled = false;
+          errorElement.textContent = error.message || 'Could not save the indexing decision.';
+          errorElement.classList.remove('SiteBrushCopySiteHidden');
+        });
+    }
+
+    hideButtonElement.addEventListener('click', function hideCopy() { submitDecision('hidden'); });
+    showButtonElement.addEventListener('click', function showCopy() { submitDecision('visible'); });
+    laterButtonElement.addEventListener('click', function decideLater() {
+      try { window.sessionStorage.setItem('sitebrush.indexing.snooze.' + reviewID, '1'); } catch (storageError) { /* Browsers may disable session storage. */ }
+      overlayElement.remove();
+      window.location.href = redirectPath;
+    });
+  }
+
   function openCopySiteModal(configuration) {
     ensureCopySiteStyles();
     const targetPath = String(configuration && configuration.path ? configuration.path : window.location.pathname || '/');
@@ -532,6 +600,16 @@
     let downloadCancelRequested = false;
     let activeDownloadController = null;
     let modalClosed = false;
+
+    function offerIndexingDecision(downloadPayload) {
+      const reviewID = String(downloadPayload.indexing_review_id || '').trim();
+      if (!downloadPayload.indexing_decision_required || reviewID === '' || importedRedirectPath === '') {
+        return false;
+      }
+      closeModal();
+      showIndexingDecision(configuration, reviewID, importedRedirectPath, publicTrialMode);
+      return true;
+    }
 
     function pendingImportStorageKey() {
       return 'sitebrush.whole-site-import.' + window.location.host + '.' + targetPath;
@@ -1165,6 +1243,7 @@
               closeProgressWebSocket();
               renderFailedResources();
               setCopySiteStatus(statusElement, textFromConfig(configuration, 'importInterrupted', 'Import interrupted.'), 'warning');
+              offerIndexingDecision(downloadPayload);
               return;
             }
             if (continueQueuedImport(downloadPayload)) {
@@ -1173,17 +1252,22 @@
             if (applyDownloadFailureState(downloadPayload)) {
               submitButtonElement.disabled = false;
               cancelButtonElement.disabled = false;
+              offerIndexingDecision(downloadPayload);
               return;
             }
             if (downloadFinishedWithErrors) {
               submitButtonElement.disabled = false;
               cancelButtonElement.disabled = false;
               renderFailedResources();
+              offerIndexingDecision(downloadPayload);
               return;
             }
             setProgress(progressBarElement, 100);
             setCopySiteStatus(statusElement, textFromConfig(configuration, 'doneOpenPage', 'Done. Opening page...'), 'success');
             closeProgressWebSocket();
+            if (offerIndexingDecision(downloadPayload)) {
+              return;
+            }
             window.location.href = redirectPath;
           })
           .catch(function handleDownloadError(downloadError) {
@@ -1337,7 +1421,8 @@
   }
 
   window.SiteBrushCopySite = {
-    open: openCopySiteModal
+    open: openCopySiteModal,
+    review: showIndexingDecision
   };
   window.SiteBrushPublicTrial = {
     attach: attachPublicTrialForm

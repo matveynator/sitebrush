@@ -2507,6 +2507,23 @@
     margin-top: 4px;
 }
 
+.technical-page .indexing-settings-panel h2 {
+    margin: 0 0 12px;
+}
+
+.technical-page .indexing-status {
+    margin: 0;
+    padding: 14px 16px;
+    border: 1px solid var(--theme-border);
+    border-radius: var(--theme-radius);
+    font-weight: 700;
+}
+
+.technical-page .indexing-status.status-bad {
+    border-color: var(--theme-destructive);
+    background: color-mix(in srgb, var(--theme-destructive) 12%, var(--theme-card));
+}
+
 .technical-page .selected {
     border-color: color-mix(in srgb, var(--green) 15%, var(--panel)) !important;
 }

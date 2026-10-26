@@ -45,6 +45,10 @@ type TrustedIP struct {
 
 type Policy struct {
 	Versioned         bool
+	NoIndex           bool
+	RobotsOverride    bool
+	ResourcePaths     map[string]string
+	ResourceTypes     map[string]string
 	PublishedVersions map[string]string
 	ChrootVersions    map[string]string
 	FileVersions      map[string]string
@@ -75,6 +79,11 @@ type Lookup struct {
 }
 type Decision struct {
 	PageHidden      bool
+	NoIndex         bool
+	RobotsOverride  bool
+	ResourceFile    string
+	ResourceType    string
+	ResourceVersion string
 	ChrootEntries   []string
 	ChrootDirectory bool
 	ChrootName      string
@@ -391,7 +400,7 @@ func NewCatalog(root string, stop <-chan struct{}) *Catalog {
 					}
 				}
 				if found {
-					decision = Decision{Layout: policy.Layouts[task.query.Path], Known: true, Domain: policy.Domain, Frozen: policy.Frozen, Stealth: policy.Stealth, Found: true}
+					decision = Decision{Layout: policy.Layouts[task.query.Path], Known: true, Domain: policy.Domain, Frozen: policy.Frozen, Stealth: policy.Stealth, Found: true, NoIndex: policy.NoIndex, RobotsOverride: policy.RobotsOverride, ResourceFile: policy.ResourcePaths[task.query.Path], ResourceType: policy.ResourceTypes[task.query.Path]}
 					decision.PageHidden = policy.Hidden["page\x00"+task.query.Path]
 					decision.PageVersion = policy.PublishedVersions[task.query.Path]
 					decision.Versioned = policy.Versioned
@@ -418,6 +427,12 @@ func NewCatalog(root string, stop <-chan struct{}) *Catalog {
 						}
 					}
 					decision.File = cached.files[task.query.File]
+					if policy.Versioned && policy.Frozen && decision.ResourceFile != "" {
+						decision.ResourceVersion = policy.FileVersions[decision.ResourceFile]
+						if decision.ResourceVersion == "" || hiddenVersionPath(policy.Hidden, "files", decision.ResourceFile) {
+							decision.Hidden = true
+						}
+					}
 					if policy.Versioned && policy.Frozen && task.query.File != "" {
 						resolved := resolveVersionPath(task.query.File, policy.FileAliases)
 						decision.File.Version = policy.FileVersions[resolved]

@@ -34,14 +34,16 @@ type ImportRequest struct {
 
 // ImportResult is returned after the importer has persisted everything it could fetch.
 type ImportResult struct {
-	RedirectPath   string            `json:"redirect"`
-	FailedTotal    int               `json:"failed_total"`
-	FailedURLs     []string          `json:"failed_urls,omitempty"`
-	FailedReasons  map[string]string `json:"failed_reasons,omitempty"`
-	ImportID       string            `json:"import_id,omitempty"`
-	RemainingPages int               `json:"remaining_pages,omitempty"`
-	CompletedPages int               `json:"completed_pages,omitempty"`
-	CrawlCursor    int64             `json:"crawl_cursor,omitempty"`
+	RedirectPath             string            `json:"redirect"`
+	IndexingReviewID         string            `json:"indexing_review_id,omitempty"`
+	IndexingDecisionRequired bool              `json:"indexing_decision_required,omitempty"`
+	FailedTotal              int               `json:"failed_total"`
+	FailedURLs               []string          `json:"failed_urls,omitempty"`
+	FailedReasons            map[string]string `json:"failed_reasons,omitempty"`
+	ImportID                 string            `json:"import_id,omitempty"`
+	RemainingPages           int               `json:"remaining_pages,omitempty"`
+	CompletedPages           int               `json:"completed_pages,omitempty"`
+	CrawlCursor              int64             `json:"crawl_cursor,omitempty"`
 }
 
 // ResourcePreview describes one downloadable remote asset before import confirmation.

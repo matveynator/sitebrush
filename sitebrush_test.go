@@ -16025,6 +16025,49 @@ func TestCentralNetChanIdentityConfiguresItselfAndPublishesOnlyPublicKey(t *test
 	}
 }
 
+func TestHostingSnapshotHTTPFallbackRegistersUnrecognizedInstallation(t *testing.T) {
+	application, _ := newTestApplication(t)
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_RELAY_PUBLIC_KEY", sitebrushComServiceMailRelayPublicKey)
+	responseCodes := make(chan int, 3)
+	responseCodes <- http.StatusForbidden
+	responseCodes <- http.StatusOK
+	responseCodes <- http.StatusOK
+	requestQueries := make(chan string, 3)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		select {
+		case requestQueries <- request.URL.RawQuery:
+		case <-request.Context().Done():
+			return
+		}
+		select {
+		case statusCode := <-responseCodes:
+			if statusCode == http.StatusForbidden {
+				http.Error(writer, "installation is not registered", statusCode)
+				return
+			}
+			writer.WriteHeader(statusCode)
+		case <-request.Context().Done():
+		}
+	}))
+	defer server.Close()
+	boundary, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	request := serviceMailRequest{CodeKind: "hosting_snapshot", HostingSnapshot: &hostingandsupport.HostingSnapshot{}}
+	if err := application.sendHostingSnapshotWithRegistration(boundary, server.URL+hostingSnapshotPath, request); err != nil {
+		t.Fatal(err)
+	}
+	for _, expectedQuery := range []string{"hosting_snapshot", "service_mail_relay", "hosting_snapshot"} {
+		select {
+		case actualQuery := <-requestQueries:
+			if actualQuery != expectedQuery {
+				t.Fatalf("request query = %q, want %q", actualQuery, expectedQuery)
+			}
+		default:
+			t.Fatalf("missing request with query %q", expectedQuery)
+		}
+	}
+}
+
 func TestCentralNetChanIdentityRestoresCachedTrustAndHonorsExplicitPin(t *testing.T) {
 	application, _ := newTestApplication(t)
 	t.Setenv("SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM", "")
@@ -22100,7 +22143,7 @@ func TestDemoRefreshReplacesPageSetAndFirstImportCreatesDatabase(t *testing.T) {
 			t.Fatal(err)
 		}
 		var count int
-		if err := application.db.QueryRowContext(domainContext, `SELECT COUNT(1) FROM pages WHERE domain=?`, domain).Scan(&count); err != nil || count != 2 {
+		if err := application.db.QueryRowContext(domainContext, `SELECT COUNT(1) FROM pages WHERE domain=?`, domain).Scan(&count); err != nil || count != 3 {
 			t.Fatalf("pages=%d err=%v", count, err)
 		}
 		for _, table := range []string{"pages", "published_pages", "revisions"} {
@@ -22967,7 +23010,7 @@ func TestConcurrentIdenticalPageSavesCreateOneRevision(t *testing.T) {
 		}
 	}
 	var count int
-	if err := application.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM revisions WHERE domain=?`, domain).Scan(&count); err != nil || count != 1 {
+	if err := application.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM revisions WHERE domain=? AND page_path='/'`, domain).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("concurrent saves created %d revisions err=%v", count, err)
 	}
 }
@@ -28043,10 +28086,14 @@ func TestAIImportConcurrentAssetsKeepPageQuota(t *testing.T) {
 			if usage.totalBytes() > usage.LimitBytes {
 				t.Fatalf("imports exceeded quota: %+v", usage)
 			}
-			for _, table := range []string{"pages", "revisions", "file_metadata"} {
+			for _, record := range []struct{ table, filter string }{
+				{table: "pages", filter: "AND path LIKE '/import-%'"},
+				{table: "revisions", filter: "AND page_path LIKE '/import-%'"},
+				{table: "file_metadata"},
+			} {
 				var count int
-				if err := application.db.QueryRowContext(boundary, `SELECT COUNT(*) FROM `+table+` WHERE domain='localhost'`).Scan(&count); err != nil || count != 1 {
-					t.Fatalf("%s committed %d records: %v", table, count, err)
+				if err := application.db.QueryRowContext(boundary, `SELECT COUNT(*) FROM `+record.table+` WHERE domain='localhost' `+record.filter).Scan(&count); err != nil || count != 1 {
+					t.Fatalf("%s committed %d imported records: %v", record.table, count, err)
 				}
 			}
 			files, err := listStoredFiles(application.domainFilesDirForDomain("localhost"))
