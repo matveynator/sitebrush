@@ -16025,6 +16025,49 @@ func TestCentralNetChanIdentityConfiguresItselfAndPublishesOnlyPublicKey(t *test
 	}
 }
 
+func TestHostingSnapshotHTTPFallbackRegistersUnrecognizedInstallation(t *testing.T) {
+	application, _ := newTestApplication(t)
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_RELAY_PUBLIC_KEY", sitebrushComServiceMailRelayPublicKey)
+	responseCodes := make(chan int, 3)
+	responseCodes <- http.StatusForbidden
+	responseCodes <- http.StatusOK
+	responseCodes <- http.StatusOK
+	requestQueries := make(chan string, 3)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		select {
+		case requestQueries <- request.URL.RawQuery:
+		case <-request.Context().Done():
+			return
+		}
+		select {
+		case statusCode := <-responseCodes:
+			if statusCode == http.StatusForbidden {
+				http.Error(writer, "installation is not registered", statusCode)
+				return
+			}
+			writer.WriteHeader(statusCode)
+		case <-request.Context().Done():
+		}
+	}))
+	defer server.Close()
+	boundary, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	request := serviceMailRequest{CodeKind: "hosting_snapshot", HostingSnapshot: &hostingandsupport.HostingSnapshot{}}
+	if err := application.sendHostingSnapshotWithRegistration(boundary, server.URL+hostingSnapshotPath, request); err != nil {
+		t.Fatal(err)
+	}
+	for _, expectedQuery := range []string{"hosting_snapshot", "service_mail_relay", "hosting_snapshot"} {
+		select {
+		case actualQuery := <-requestQueries:
+			if actualQuery != expectedQuery {
+				t.Fatalf("request query = %q, want %q", actualQuery, expectedQuery)
+			}
+		default:
+			t.Fatalf("missing request with query %q", expectedQuery)
+		}
+	}
+}
+
 func TestCentralNetChanIdentityRestoresCachedTrustAndHonorsExplicitPin(t *testing.T) {
 	application, _ := newTestApplication(t)
 	t.Setenv("SITEBRUSH_NETCHAN_TLS_PUBLIC_KEY_SITEBRUSH_COM", "")

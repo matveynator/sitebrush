@@ -34103,6 +34103,30 @@ func (a *App) handleMailMonitorSync(ctx context.Context, request serviceMailRequ
 	return "mail monitor stored", http.StatusOK
 }
 
+func (a *App) sendHostingSnapshotWithRegistration(ctx context.Context, snapshotURL string, request serviceMailRequest) error {
+	deliver := func(payload []byte) error {
+		encrypted, err := serviceMailEncryptPayloadForRelay(snapshotURL, payload)
+		if err != nil {
+			return err
+		}
+		return postServiceMailRelayPayload(ctx, snapshotURL, encrypted, payload, true)
+	}
+	err := a.sendSignedRequestCompatible(ctx, request, deliver)
+	var rejection serviceMailRelayRejection
+	if !errors.As(err, &rejection) || rejection.StatusCode != http.StatusForbidden || strings.TrimSpace(rejection.Message) != "installation is not registered" {
+		return err
+	}
+	parsedURL, parseErr := url.Parse(snapshotURL)
+	if parseErr != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
+		return errors.New("hosting snapshot registration URL is invalid")
+	}
+	registrationURL := (&url.URL{Scheme: parsedURL.Scheme, Host: parsedURL.Host, Path: "/", RawQuery: "service_mail_relay"}).String()
+	if registrationErr := a.registerServiceMailInstallationWithRelay(ctx, registrationURL); registrationErr != nil {
+		return fmt.Errorf("register installation before hosting snapshot: %w", registrationErr)
+	}
+	return a.sendSignedRequestCompatible(ctx, request, deliver)
+}
+
 func (a *App) reportHostingSnapshot(ctx context.Context) error {
 	if err := a.reportHostingSnapshotNetChan(ctx); err == nil {
 		return nil
@@ -34141,13 +34165,7 @@ func (a *App) reportHostingSnapshot(ctx context.Context) error {
 		if strings.TrimSpace(snapshotURL) == "" {
 			continue
 		}
-		err := a.sendSignedRequestCompatible(ctx, request, func(payload []byte) error {
-			encrypted, err := serviceMailEncryptPayloadForRelay(snapshotURL, payload)
-			if err != nil {
-				return err
-			}
-			return postServiceMailRelayPayload(ctx, snapshotURL, encrypted, payload, true)
-		})
+		err := a.sendHostingSnapshotWithRegistration(ctx, snapshotURL, request)
 		if err != nil {
 			lastErr = err
 			continue
