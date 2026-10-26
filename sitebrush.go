@@ -2069,7 +2069,7 @@ func (router *perSiteDBRouter) relocateSiteContent(root, domain string, database
 
 func siteTableSubsystem(table string) string {
 	switch table {
-	case "pages", "published_pages", "page_redirects", "domain_storage_usage", "revisions", "file_metadata", "page_pending_deletions", "site_freeze_points", "site_freeze_state", "site_hidden_assets":
+	case "pages", "published_pages", "page_redirects", "domain_storage_usage", "revisions", "file_metadata", "page_pending_deletions", "site_freeze_points", "site_freeze_state", "site_hidden_assets", "resource_origins", "resource_page_uses", "resource_public_paths", "site_indexing_state", "page_import_sources":
 		return "content"
 	case "analytics_events", "analytics_reports", "analytics_configuration":
 		return "analytics"
@@ -2088,7 +2088,7 @@ func siteQuerySubsystem(query string) string {
 	for _, word := range words {
 		owner := ""
 		switch word {
-		case "pages", "published_pages", "page_redirects", "domain_storage_usage", "revisions", "file_metadata", "page_pending_deletions", "site_freeze_points", "site_freeze_state", "site_hidden_assets":
+		case "pages", "published_pages", "page_redirects", "domain_storage_usage", "revisions", "file_metadata", "page_pending_deletions", "site_freeze_points", "site_freeze_state", "site_hidden_assets", "resource_origins", "resource_page_uses", "resource_public_paths", "site_indexing_state", "page_import_sources":
 			owner = "content"
 		case "analytics_events", "analytics_reports", "analytics_configuration", "checkpoints":
 			owner = "analytics"
@@ -2288,8 +2288,70 @@ func (router *perSiteDBRouter) startSiteSubsystems(root, domain string, content 
 	}); err != nil {
 		return err
 	}
+	if err := recoverMispartitionedImportResourceTables(content, domain); err != nil {
+		return err
+	}
 	content.ai = aicapability.NewStoredManager(siteAIStorage{worker: content.control})
 	return nil
+}
+
+func recoverMispartitionedImportResourceTables(content *siteFileDatabase, domain string) error {
+	if content == nil || content.control == nil {
+		return nil
+	}
+	return content.Migrate(context.Background(), domain, func(ctx context.Context, database *sql.DB, _ string) error {
+		connection, err := database.Conn(ctx)
+		if err != nil {
+			return err
+		}
+		defer connection.Close()
+		if _, err := connection.ExecContext(ctx, `ATTACH DATABASE ? AS legacy_import_resources`, content.control.path); err != nil {
+			return err
+		}
+		defer connection.ExecContext(ctx, `DETACH DATABASE legacy_import_resources`)
+		transaction, err := connection.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer transaction.Rollback()
+		for _, table := range []struct {
+			name, columns string
+			keys          []string
+		}{
+			{"resource_origins", "domain,file_name,original_uri,resolved_uri", []string{"domain", "file_name", "original_uri"}},
+			{"resource_page_uses", "domain,file_name,original_uri,page_path", []string{"domain", "file_name", "original_uri", "page_path"}},
+			{"resource_public_paths", "domain,public_path,file_name", []string{"domain", "public_path"}},
+			{"site_indexing_state", "domain,review_id,state,created_at,robots_manual", []string{"domain"}},
+			{"page_import_sources", "domain,page_path,original_uri", []string{"domain", "page_path", "original_uri"}},
+		} {
+			var exists int
+			if err := transaction.QueryRowContext(ctx, `SELECT COUNT(*) FROM legacy_import_resources.sqlite_master WHERE type='table' AND name=?`, table.name).Scan(&exists); err != nil {
+				return err
+			}
+			if exists == 0 {
+				continue
+			}
+			if _, err := transaction.ExecContext(ctx, `INSERT OR IGNORE INTO main.`+table.name+`(`+table.columns+`) SELECT `+table.columns+` FROM legacy_import_resources.`+table.name); err != nil {
+				return err
+			}
+			matchingKeys := make([]string, 0, len(table.keys))
+			for _, key := range table.keys {
+				matchingKeys = append(matchingKeys, `current.`+key+`=previous.`+key)
+			}
+			var missing int
+			verify := `SELECT COUNT(*) FROM legacy_import_resources.` + table.name + ` AS previous WHERE NOT EXISTS (SELECT 1 FROM main.` + table.name + ` AS current WHERE ` + strings.Join(matchingKeys, " AND ") + `)`
+			if err := transaction.QueryRowContext(ctx, verify).Scan(&missing); err != nil {
+				return err
+			}
+			if missing != 0 {
+				return errors.New("import resource partition recovery is incomplete")
+			}
+			if _, err := transaction.ExecContext(ctx, `DROP TABLE legacy_import_resources.`+table.name); err != nil {
+				return err
+			}
+		}
+		return transaction.Commit()
+	})
 }
 
 func migrateSitePartition(database *sql.DB, filename, identifier, subsystem string) error {
@@ -4525,7 +4587,7 @@ func isSitebrushControllerQuery(query url.Values) bool {
 		"server_update", "server_update_ws", "save", "template_events", "grab_preview", "grab_events", "grab_ws", "revision_preview", "revision_restore", "revision_delete", "revision_toggle",
 		"tree", "native_pick_files", "native_save_backup", "edit", "ai", "ai_capability_create", "ai_authorize", "ai_execute", "ai_execute_ws", "ai_background", "visual", "text", "editraw", "settings", "properties", "indexing_review",
 		"backup_download", "hosting_and_support_backup_download", "billing_backup_download", "backup_import", "profile", "freeze", "unfreeze", "unfreeze_ws", "publish", "publish_events", "publish_preview", "files",
-		"revisions", "login", "register", "email_confirm", "grab", "recover", "captcha", "analytics", "expenses", "hosting_and_support", "billing",
+		"revisions", "login", "register", "email_confirm", "grab", "recover", "captcha", "analytics", "expenses", "hosting_and_support", "billing", "service_mail_relay",
 	} {
 		if _, found := query[controllerFlag]; found {
 			return true
@@ -11799,7 +11861,7 @@ func siteSchemaSteps(ctx context.Context, repair bool) []migrations.Step {
 		`INSERT INTO resource_page_uses(domain,file_name,original_uri,page_path) SELECT domain,file_name,'',page_path FROM file_metadata WHERE page_path<>'' AND NOT EXISTS (SELECT 1 FROM resource_page_uses uses WHERE uses.domain=file_metadata.domain AND uses.file_name=file_metadata.file_name AND uses.original_uri='' AND uses.page_path=file_metadata.page_path)`,
 	} {
 		step := migrations.SQL("import-resource-schema-"+strconv.Itoa(index), query)
-		step.Ensure = repair
+		step.Ensure = repair || index < 6
 		steps = append(steps, step)
 	}
 	return steps
@@ -14672,9 +14734,7 @@ func ensureResourcePageUse(ctx context.Context, database sqlExecutor, domain, fi
 	return err
 }
 
-func syncManagedPageResourceUses(ctx context.Context, database sqlExecutor, domain, pagePath, content string) error {
-	storageDomain := domainStorageName(domain)
-	referencedFiles := make(map[string]bool)
+func managedAssetNamesInText(content string, referencedFiles map[string]bool) {
 	for cursor := 0; cursor < len(content); {
 		index := strings.Index(content[cursor:], "/p/")
 		if index < 0 {
@@ -14695,6 +14755,12 @@ func syncManagedPageResourceUses(ctx context.Context, database sqlExecutor, doma
 		}
 		cursor = max(end, start)
 	}
+
+}
+
+func (a *App) syncManagedPageResourceUses(ctx context.Context, database sqlExecutor, domain, pagePath, content string) error {
+	storageDomain := domainStorageName(domain)
+	aliases := make(map[string]string)
 	routes, err := database.QueryContext(ctx, `SELECT public_path,file_name FROM resource_public_paths WHERE domain=?`, storageDomain)
 	if err != nil {
 		return err
@@ -14704,9 +14770,7 @@ func syncManagedPageResourceUses(ctx context.Context, database sqlExecutor, doma
 		if err = routes.Scan(&publicPath, &fileName); err != nil {
 			break
 		}
-		if strings.Contains(content, publicPath) {
-			referencedFiles[fileName] = true
-		}
+		aliases[publicPath] = fileName
 	}
 	if err == nil {
 		err = routes.Err()
@@ -14714,6 +14778,71 @@ func syncManagedPageResourceUses(ctx context.Context, database sqlExecutor, doma
 	routes.Close()
 	if err != nil {
 		return err
+	}
+	collectReferences := func(source string) map[string]bool {
+		references := make(map[string]bool)
+		managedAssetNamesInText(source, references)
+		for publicPath, fileName := range aliases {
+			if strings.Contains(source, publicPath) {
+				references[fileName] = true
+			}
+		}
+		return references
+	}
+	referencedFiles := collectReferences(content)
+	queue := make([]string, 0, len(referencedFiles))
+	for fileName := range referencedFiles {
+		queue = append(queue, fileName)
+	}
+	// A bounded dependency walk keeps saves responsive. If it cannot finish,
+	// retained links are safer than claiming a still-used file is disposable.
+	const maximumDependencyFiles = 256
+	const maximumDependencyBytes = 16 << 20
+	bytesRemaining := int64(maximumDependencyBytes)
+	processed := 0
+	preserveExisting := false
+	for len(queue) > 0 {
+		fileName := queue[0]
+		queue = queue[1:]
+		switch strings.ToLower(path.Ext(fileName)) {
+		case ".css", ".js", ".mjs", ".cjs", ".html", ".htm", ".xhtml", ".svg", ".json", ".webmanifest", ".xml":
+		default:
+			continue
+		}
+		if processed >= maximumDependencyFiles {
+			preserveExisting = true
+			break
+		}
+		processed++
+		filePath := filepath.Join(a.domainFilesDirForDomain(domain), filepath.FromSlash(fileName))
+		fileInfo, statErr := a.statInsideStorage(filePath)
+		if errors.Is(statErr, os.ErrNotExist) {
+			continue
+		}
+		if statErr != nil {
+			return statErr
+		}
+		if fileInfo.IsDir() {
+			continue
+		}
+		if fileInfo.Size() > bytesRemaining {
+			preserveExisting = true
+			continue
+		}
+		fileBytes, readErr := a.readFileInsideStorage(filePath)
+		if errors.Is(readErr, os.ErrNotExist) {
+			continue
+		}
+		if readErr != nil {
+			return readErr
+		}
+		bytesRemaining -= int64(len(fileBytes))
+		for childFile := range collectReferences(string(fileBytes)) {
+			if !referencedFiles[childFile] {
+				referencedFiles[childFile] = true
+				queue = append(queue, childFile)
+			}
+		}
 	}
 	uses, err := database.QueryContext(ctx, `SELECT DISTINCT file_name FROM resource_page_uses WHERE domain=? AND page_path=?`, storageDomain, pagePath)
 	if err != nil {
@@ -14735,7 +14864,7 @@ func syncManagedPageResourceUses(ctx context.Context, database sqlExecutor, doma
 		return err
 	}
 	for fileName := range previousFiles {
-		if !referencedFiles[fileName] {
+		if !preserveExisting && !referencedFiles[fileName] {
 			if _, err := database.ExecContext(ctx, `DELETE FROM resource_page_uses WHERE domain=? AND page_path=? AND file_name=?`, storageDomain, pagePath, fileName); err != nil {
 				return err
 			}
@@ -19305,6 +19434,9 @@ func (a *App) accountTransaction(ctx context.Context, write func(*sql.Tx) error)
 }
 
 func (a *App) siteContentTransaction(ctx context.Context, write func(*sql.Tx) error, finish func(error)) error {
+	if finish == nil {
+		finish = func(error) {}
+	}
 	if database, ok := a.db.(interface {
 		WriteTransactionWithFinish(context.Context, func(*sql.Tx) error, func(error)) error
 	}); ok {
@@ -21315,7 +21447,7 @@ func (a *App) persistPageSave(ctx context.Context, domain, previousPath, pagePat
 			if err = updateOrInsertPage(ctx, transaction, domain, finalPage.path, finalPage.title, finalPage.html, finalPage.published); err != nil {
 				return err
 			}
-			if err = syncManagedPageResourceUses(ctx, transaction, domain, finalPage.path, finalPage.html); err != nil {
+			if err = a.syncManagedPageResourceUses(ctx, transaction, domain, finalPage.path, finalPage.html); err != nil {
 				return err
 			}
 			if frozen != 1 {
@@ -24133,6 +24265,7 @@ func importServiceLinkCandidates(sourceURL *url.URL, sourceHTML string) ([]impor
 			if reference != "" && (strings.Contains(relation, "icon") || strings.Contains(relation, "manifest")) {
 				linked, parseErr := sourceURL.Parse(reference)
 				if parseErr == nil && linked != nil && crawler.SameHost(sourceURL, linked) && linked.Path != "" {
+					linked.Fragment = ""
 					candidate := importServiceCandidate{SourceURI: linked.String(), PublicPath: cleanPath(linked.Path)}
 					if strings.Contains(relation, "manifest") {
 						manifests = append(manifests, candidate)
@@ -24422,8 +24555,12 @@ func importServiceDocuments(spider *pageSpider, sourceURL *url.URL, sourceHTML, 
 		}
 	}
 	preferredManifestURI := ""
+	declaredManifestURIs := make(map[string]bool)
 	if len(manifestLinks) > 0 {
 		preferredManifestURI = manifestLinks[0].SourceURI
+	}
+	for _, candidate := range manifestLinks {
+		declaredManifestURIs[candidate.SourceURI] = true
 	}
 	paths := []string{"/robots.txt", "/sitemap.xml", "/sitemap_index.xml", "/site.webmanifest", "/manifest.webmanifest", "/manifest.json", "/browserconfig.xml", "/ads.txt", "/humans.txt", "/.well-known/security.txt", "/.well-known/assetlinks.json", "/.well-known/apple-app-site-association", "/apple-app-site-association"}
 	candidates := make([]importServiceCandidate, 0, len(paths)+len(manifestLinks))
@@ -24482,7 +24619,7 @@ func importServiceDocuments(spider *pageSpider, sourceURL *url.URL, sourceHTML, 
 			continue
 		}
 		content := rewriteImportedServiceText(string(result.Body), sourceURL, domain, importBasePath, rootPaths...)
-		if strings.HasSuffix(strings.ToLower(pathname), ".webmanifest") || strings.HasSuffix(strings.ToLower(pathname), "manifest.json") {
+		if declaredManifestURIs[result.Candidate.SourceURI] || strings.HasSuffix(strings.ToLower(pathname), ".webmanifest") || strings.HasSuffix(strings.ToLower(pathname), "manifest.json") {
 			var discoveredIcons []importServiceCandidate
 			content, discoveredIcons = rewriteImportedManifest(string(result.Body), result.Candidate.SourceURI, sourceURL, domain, importBasePath)
 			manifestIcons = append(manifestIcons, discoveredIcons...)
@@ -24525,6 +24662,21 @@ func importServiceDocuments(spider *pageSpider, sourceURL *url.URL, sourceHTML, 
 	}
 	importServiceIcons(spider, sourceURL, iconLinks, manifestIcons)
 	return pages
+}
+
+func (a *App) availableDraftServicePages(ctx context.Context, domain string, servicePages []wholeSiteImportedPage) ([]wholeSiteImportedPage, error) {
+	available := make([]wholeSiteImportedPage, 0, len(servicePages))
+	for _, page := range servicePages {
+		_, err := a.findPage(ctx, domain, cleanPath(page.LocalPath))
+		if err == nil {
+			continue
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+		available = append(available, page)
+	}
+	return available, nil
 }
 
 func importServiceIcons(spider *pageSpider, sourceURL *url.URL, iconLinks, manifestIcons []importServiceCandidate) {
@@ -24910,7 +25062,16 @@ func (a *App) importWholeRemoteSite(ctx context.Context, importRequest grabImpor
 	}
 	for _, importedPage := range importedPages {
 		if importedPage.SourceURL == importRequest.RemoteSourceURL.String() {
-			importedPages = append(importedPages, importServiceDocuments(spider, importRequest.RemoteSourceURL, importRequest.HTML, importRequest.Domain, importRequest.PagePath)...)
+			servicePages := importServiceDocuments(spider, importRequest.RemoteSourceURL, importRequest.HTML, importRequest.Domain, importRequest.PagePath)
+			if importRequest.DraftOnly {
+				var filterErr error
+				servicePages, filterErr = a.availableDraftServicePages(ctx, importRequest.Domain, servicePages)
+				if filterErr != nil {
+					return grabImportResult{}, filterErr
+				}
+				spider.publicResourcePaths = make(map[string]string)
+			}
+			importedPages = append(importedPages, servicePages...)
 			if spider.publicResourcePaths["/favicon.ico"] != "" || spider.serviceManifestPath != "" {
 				for pageIndex := range importedPages {
 					if pageContentKind(importedPages[pageIndex].LocalPath, importedPages[pageIndex].HTML) == "html" {
@@ -38800,7 +38961,7 @@ func (a *App) listManagedServicePages(ctx context.Context, domain string) ([]man
 		if err = rows.Scan(&pagePath, &originalURI); err != nil {
 			break
 		}
-		if isKnownServiceTextPath(pagePath) && pagesByPath[pagePath] == "" {
+		if (isKnownServiceTextPath(pagePath) || strings.HasSuffix(strings.ToLower(pagePath), ".json")) && pagesByPath[pagePath] == "" {
 			pagesByPath[pagePath] = originalURI
 		}
 	}
@@ -38929,7 +39090,7 @@ func (a *App) repointManagedFaviconLinks(ctx context.Context, domain string) err
 		}
 		if strings.Contains(page.html, "/favicon.ico") {
 			if err := a.siteContentTransaction(ctx, func(transaction *sql.Tx) error {
-				return syncManagedPageResourceUses(ctx, transaction, domain, page.path, page.html)
+				return a.syncManagedPageResourceUses(ctx, transaction, domain, page.path, page.html)
 			}, nil); err != nil {
 				return err
 			}
@@ -55355,6 +55516,14 @@ func applyFreezePolicy(policy *publicsite.Policy, point sitefreeze.Checkpoint) {
 	}
 	sort.Slice(policy.Files, func(left, right int) bool { return policy.Files[left].Name < policy.Files[right].Name })
 }
+func missingImportSchemaTable(err error, tableName string) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "no such table: "+tableName) || strings.Contains(message, `relation "`+tableName+`" does not exist`)
+}
+
 func (a *App) writePublicPolicy(domain string) error {
 	ctx := contextWithDomain(context.Background(), domain)
 	policy := publicsite.Policy{Domain: domain}
@@ -55371,7 +55540,7 @@ func (a *App) writePublicPolicy(domain string) error {
 	}
 	var indexingState string
 	var robotsManual int
-	if err := a.db.QueryRowContext(ctx, `SELECT state,robots_manual FROM site_indexing_state WHERE domain=?`, domain).Scan(&indexingState, &robotsManual); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if err := a.db.QueryRowContext(ctx, `SELECT state,robots_manual FROM site_indexing_state WHERE domain=?`, domain).Scan(&indexingState, &robotsManual); err != nil && !errors.Is(err, sql.ErrNoRows) && !missingImportSchemaTable(err, "site_indexing_state") {
 		return err
 	}
 	policy.NoIndex = indexingState == "pending" || indexingState == "hidden"
@@ -55395,7 +55564,7 @@ func (a *App) writePublicPolicy(domain string) error {
 	}
 	policy.ResourcePaths = make(map[string]string)
 	policy.ResourceTypes = make(map[string]string)
-	if err = read(`SELECT routes.public_path,routes.file_name,COALESCE(metadata.mime_type,'') FROM resource_public_paths routes LEFT JOIN file_metadata metadata ON metadata.domain=routes.domain AND metadata.file_name=routes.file_name LEFT JOIN file_access_rules access ON access.domain=routes.domain AND access.file_name=routes.file_name LEFT JOIN site_hidden_assets hidden ON hidden.domain=routes.domain AND hidden.tree='files' AND hidden.path=routes.file_name WHERE routes.domain=? AND hidden.path IS NULL AND (access.access_mode IS NULL OR access.access_mode='public')`, func(rows *sql.Rows) error {
+	if err = read(`SELECT routes.public_path,routes.file_name,COALESCE(metadata.mime_type,'') FROM resource_public_paths routes LEFT JOIN file_metadata metadata ON metadata.domain=routes.domain AND metadata.file_name=routes.file_name WHERE routes.domain=?`, func(rows *sql.Rows) error {
 		var pathname, fileName, contentType string
 		if scanErr := rows.Scan(&pathname, &fileName, &contentType); scanErr != nil {
 			return scanErr
@@ -55406,7 +55575,7 @@ func (a *App) writePublicPolicy(domain string) error {
 		policy.ResourcePaths[pathname] = fileName
 		policy.ResourceTypes[pathname] = contentType
 		return nil
-	}, domainStorageName(domain)); err != nil {
+	}, domainStorageName(domain)); err != nil && !missingImportSchemaTable(err, "resource_public_paths") {
 		return err
 	}
 	if err = read(`SELECT alias_domain FROM domain_aliases WHERE primary_domain=? AND is_verified=1 AND dns_a_ok=1`, func(rows *sql.Rows) error {
@@ -55472,6 +55641,18 @@ func (a *App) writePublicPolicy(domain string) error {
 		return nil
 	}); err != nil {
 		return err
+	}
+	privateFiles := make(map[string]bool)
+	for _, rule := range policy.Files {
+		if rule.Mode != "" && rule.Mode != "public" {
+			privateFiles[rule.Name] = true
+		}
+	}
+	for pathname, fileName := range policy.ResourcePaths {
+		if privateFiles[fileName] {
+			delete(policy.ResourcePaths, pathname)
+			delete(policy.ResourceTypes, pathname)
+		}
 	}
 	if err = read(`SELECT path,password_hash FROM page_password_rules WHERE domain=?`, func(rows *sql.Rows) error {
 		rule := dirprotect.Rule{Domain: domain}
@@ -55663,7 +55844,7 @@ func publicOrdinaryRequest(r *http.Request) bool {
 	return true
 }
 func sitebrushControlQueryFlag(flag string) bool {
-	for _, selector := range []string{"ai", "ai_token", "ai_session", "ai_authorize", "mcp", "oauth", "login", "logout", "register", "recover", "profile", "email_confirm", "server_update", "server_update_ws", "visual", "edit", "text", "save", "files", "backup", "backup_import", "analytics", "expenses", "hosting_and_support", "billing", "settings", "domain", "freeze", "unfreeze", "unfreeze_ws", "publish", "delete", "revisions", "revision_preview", "revision_restore", "revision_delete", "revision_toggle", "page_password", "page_password_unlock", "captcha", "grab", "grab_ws", "grab_events", "copy", "site_copy", "publish_events", "security_incident_report", "mail_delivery_ws", "indexing_review"} {
+	for _, selector := range []string{"ai", "ai_token", "ai_session", "ai_authorize", "mcp", "oauth", "login", "logout", "register", "recover", "profile", "email_confirm", "server_update", "server_update_ws", "visual", "edit", "text", "save", "files", "backup", "backup_import", "analytics", "expenses", "hosting_and_support", "billing", "service_mail_relay", "settings", "domain", "freeze", "unfreeze", "unfreeze_ws", "publish", "delete", "revisions", "revision_preview", "revision_restore", "revision_delete", "revision_toggle", "page_password", "page_password_unlock", "captcha", "grab", "grab_ws", "grab_events", "copy", "site_copy", "publish_events", "security_incident_report", "mail_delivery_ws", "indexing_review"} {
 		if flag == selector {
 			return true
 		}
