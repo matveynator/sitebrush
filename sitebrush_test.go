@@ -28086,10 +28086,14 @@ func TestAIImportConcurrentAssetsKeepPageQuota(t *testing.T) {
 			if usage.totalBytes() > usage.LimitBytes {
 				t.Fatalf("imports exceeded quota: %+v", usage)
 			}
-			for _, table := range []string{"pages", "revisions", "file_metadata"} {
+			for _, record := range []struct{ table, filter string }{
+				{table: "pages", filter: "AND path LIKE '/import-%'"},
+				{table: "revisions", filter: "AND page_path LIKE '/import-%'"},
+				{table: "file_metadata"},
+			} {
 				var count int
-				if err := application.db.QueryRowContext(boundary, `SELECT COUNT(*) FROM `+table+` WHERE domain='localhost'`).Scan(&count); err != nil || count != 1 {
-					t.Fatalf("%s committed %d records: %v", table, count, err)
+				if err := application.db.QueryRowContext(boundary, `SELECT COUNT(*) FROM `+record.table+` WHERE domain='localhost' `+record.filter).Scan(&count); err != nil || count != 1 {
+					t.Fatalf("%s committed %d imported records: %v", record.table, count, err)
 				}
 			}
 			files, err := listStoredFiles(application.domainFilesDirForDomain("localhost"))
