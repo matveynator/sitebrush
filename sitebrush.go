@@ -24679,6 +24679,34 @@ func (a *App) availableDraftServicePages(ctx context.Context, domain string, ser
 	return available, nil
 }
 
+// Draft imports cannot claim public service routes. Keep only assets reachable
+// from pages in the draft, including dependencies inside CSS and JavaScript.
+func (spider *pageSpider) limitPersistentResourcesToImportedPages(pages []wholeSiteImportedPage) {
+	reachable := make(map[string]bool)
+	queue := make([]string, 0)
+	for _, page := range pages {
+		for sourceURI := range spider.pageResourceReferences[cleanPath(page.LocalPath)] {
+			queue = append(queue, sourceURI)
+		}
+	}
+	for len(queue) > 0 {
+		sourceURI := queue[0]
+		queue = queue[1:]
+		if reachable[sourceURI] {
+			continue
+		}
+		reachable[sourceURI] = true
+		for childURI := range spider.resourceReferences[sourceURI] {
+			queue = append(queue, childURI)
+		}
+	}
+	for sourceURI, resource := range spider.resources {
+		if resource != nil && !reachable[sourceURI] {
+			resource.persist = false
+		}
+	}
+}
+
 func importServiceIcons(spider *pageSpider, sourceURL *url.URL, iconLinks, manifestIcons []importServiceCandidate) {
 	iconCandidates := append([]importServiceCandidate(nil), iconLinks...)
 	for _, pathname := range []string{"/favicon.ico", "/favicon.svg", "/favicon.png", "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"} {
@@ -25072,6 +25100,9 @@ func (a *App) importWholeRemoteSite(ctx context.Context, importRequest grabImpor
 				spider.publicResourcePaths = make(map[string]string)
 			}
 			importedPages = append(importedPages, servicePages...)
+			if importRequest.DraftOnly {
+				spider.limitPersistentResourcesToImportedPages(importedPages)
+			}
 			if spider.publicResourcePaths["/favicon.ico"] != "" || spider.serviceManifestPath != "" {
 				for pageIndex := range importedPages {
 					if pageContentKind(importedPages[pageIndex].LocalPath, importedPages[pageIndex].HTML) == "html" {
