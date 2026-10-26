@@ -147,6 +147,17 @@
     <a class="btn btn-outline-secondary manager-back-button" href="{{.Path}}">{{index .T "back_to_uri"}}</a>
   </div>
 
+  <nav class="d-flex flex-wrap gap-2 mb-3" aria-label="{{if eq .LanguageCode "ru"}}Область файлов{{else}}File scope{{end}}">
+    <a class="btn {{if .ShowAllFiles}}btn-outline-secondary{{else}}btn-primary{{end}}" href="{{.Path}}?files">{{if eq .LanguageCode "ru"}}Файлы текущей страницы{{else}}Current page files{{end}}</a>
+    <a class="btn {{if .ShowAllFiles}}btn-primary{{else}}btn-outline-secondary{{end}}" href="{{.Path}}?files&amp;files_scope=all">{{if eq .LanguageCode "ru"}}Все файлы сайта{{else}}All site files{{end}}</a>
+    <a class="btn btn-outline-secondary" href="/robots.txt?edit">robots.txt</a>
+  </nav>
+
+  {{if .ServicePages}}<section class="bg-body-tertiary border rounded-3 p-3 mb-3" aria-label="{{if eq .LanguageCode "ru"}}Служебные страницы{{else}}Service pages{{end}}">
+    <h2 class="h6 mb-2">{{if eq .LanguageCode "ru"}}Служебные страницы с ревизиями{{else}}Service pages with revisions{{end}}</h2>
+    <div class="d-flex flex-wrap gap-2">{{range .ServicePages}}<div class="border rounded px-2 py-1"><a href="{{.Path}}?edit">{{.Path}}</a>{{if .OriginalURI}}<small class="d-block text-muted">{{.OriginalURI}}</small>{{end}}</div>{{end}}</div>
+  </section>{{end}}
+
   <form id="uploadForm" class="bg-body-tertiary border rounded-3 p-3 mb-3 upload-panel" method="post" action="{{.Path}}?files" enctype="multipart/form-data"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
     <input type="hidden" name="action" value="upload">
     <label class="form-label fw-semibold section-heading" for="upload_files"><img src="/p/static/files.png" class="section-icon" alt="">{{index .T "files_upload_for_uri"}}</label>
@@ -156,7 +167,7 @@
     </div>
   </form>
 
-  <form id="selectedFilesForm" class="file-delete-form" method="post" action="{{.Path}}?files"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+  <form id="selectedFilesForm" class="file-delete-form" method="post" action="{{.Path}}?files{{if .ShowAllFiles}}&amp;files_scope=all{{end}}"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
     <input type="hidden" name="action" value="delete_selected">
     <button class="btn btn-outline-danger" id="deleteSelectedFiles" type="submit" hidden>{{index .T "files_delete_selected"}}</button>
   </form>
@@ -189,11 +200,18 @@
               <div class="file-link-row">
                 <input type="checkbox" name="name" value="{{.Name}}" form="selectedFilesForm" data-select-file aria-label="{{.Name}}">
                 <a class="file-name-link" href="{{.AssetPath}}" title="{{.Name}}{{if .PagePath}} · {{index $.T "files_uri_label"}} {{.PagePath}}{{end}}">{{.Name}}</a>
+                {{if .IsFavicon}}<span class="badge text-bg-primary">favicon</span>{{end}}
                 <input type="hidden" data-full-link data-asset-path="{{.AssetPath}}">
                 <button class="btn btn-outline-secondary btn-sm file-icon-button" type="button" data-copy-target="full" title="{{index $.T "files_copy"}}" aria-label="{{index $.T "files_copy"}}"><img src="/p/static/copy.png" alt=""></button>
               </div>
             </td>
-            <td>{{if .PagePath}}<a class="file-uri" href="{{.PagePath}}" title="{{.PagePath}}">{{.PagePath}}</a>{{else}}—{{end}}</td>
+
+            <td>
+              {{range .PublicPaths}}<div><a class="file-uri" href="{{.}}">{{.}}</a></div>{{end}}
+              {{if .UsedByPaths}}<details><summary>{{if eq $.LanguageCode "ru"}}Используют страницы{{else}}Used by pages{{end}} ({{len .UsedByPaths}})</summary>{{range .UsedByPaths}}<div><a href="{{.}}">{{.}}</a></div>{{end}}</details>{{end}}
+              {{if .OriginalURIs}}<details><summary>{{if eq $.LanguageCode "ru"}}Исходные URI{{else}}Original URIs{{end}} ({{len .OriginalURIs}})</summary>{{range .OriginalURIs}}<div><a href="{{.}}" rel="noopener noreferrer" target="_blank">{{.}}</a></div>{{end}}</details>{{end}}
+              {{if not .UsedByPaths}}{{if not .PublicPaths}}—{{end}}{{end}}
+            </td>
             <td data-label="{{index $.T "files_col_size"}}"><span class="text-muted">{{.SizeLabel}}</span></td>
             <td data-label="{{index $.T "files_col_date"}}"><span class="text-muted">{{.CreatedAt}}</span></td>
             <td class="access-cell" data-label="{{index $.T "files_col_access"}}">
@@ -223,7 +241,8 @@
               </details>
             </td>
             <td>
-              <form method="post" action="{{$.Path}}?files" class="file-delete-form"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+              {{if .IsImage}}<form method="post" action="{{$.Path}}?files&amp;files_scope=all" class="file-delete-form"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}"><input type="hidden" name="action" value="set_favicon"><input type="hidden" name="name" value="{{.Name}}"><button class="btn btn-outline-primary btn-sm" type="submit" title="{{if eq $.LanguageCode "ru"}}Сделать favicon{{else}}Use as favicon{{end}}">{{if eq $.LanguageCode "ru"}}Favicon{{else}}Favicon{{end}}</button></form>{{end}}
+              <form method="post" action="{{$.Path}}?files{{if $.ShowAllFiles}}&amp;files_scope=all{{end}}" class="file-delete-form"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
                 <input type="hidden" name="name" value="{{.Name}}">
                 <button class="btn btn-outline-danger btn-sm file-icon-button" type="submit" title="{{index $.T "files_delete"}}" aria-label="{{index $.T "files_delete"}}"><img src="/p/static/cross.png" alt=""></button>
               </form>
