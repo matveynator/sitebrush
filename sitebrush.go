@@ -19925,7 +19925,7 @@ func (a *App) demoSiteLandingPath(ctx context.Context, domain string) (string, b
 	domainContext := contextWithDomain(ctx, domain)
 	var rootHTML string
 	rootErr := a.db.QueryRowContext(domainContext, `SELECT html FROM pages WHERE domain=? AND path='/'`, domain).Scan(&rootHTML)
-	if rootErr == nil && !isSitebrushMissingPageHTML(rootHTML) {
+	if rootErr == nil && pageContentKind("/", rootHTML) == "html" && !isSitebrushMissingPageHTML(rootHTML) {
 		return "/", true
 	}
 	pageRows, err := a.db.QueryContext(domainContext, `SELECT path,html FROM pages WHERE domain=? AND path<>'/' ORDER BY path ASC`, domain)
@@ -19939,7 +19939,7 @@ func (a *App) demoSiteLandingPath(ctx context.Context, domain string) (string, b
 		if scanErr := pageRows.Scan(&pagePath, &pageHTML); scanErr != nil {
 			continue
 		}
-		if !isSitebrushMissingPageHTML(pageHTML) {
+		if pageContentKind(pagePath, pageHTML) == "html" && !isSitebrushMissingPageHTML(pageHTML) {
 			return cleanPath(pagePath), true
 		}
 	}
