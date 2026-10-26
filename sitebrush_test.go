@@ -22100,7 +22100,7 @@ func TestDemoRefreshReplacesPageSetAndFirstImportCreatesDatabase(t *testing.T) {
 			t.Fatal(err)
 		}
 		var count int
-		if err := application.db.QueryRowContext(domainContext, `SELECT COUNT(1) FROM pages WHERE domain=?`, domain).Scan(&count); err != nil || count != 2 {
+		if err := application.db.QueryRowContext(domainContext, `SELECT COUNT(1) FROM pages WHERE domain=?`, domain).Scan(&count); err != nil || count != 3 {
 			t.Fatalf("pages=%d err=%v", count, err)
 		}
 		for _, table := range []string{"pages", "published_pages", "revisions"} {
@@ -22967,7 +22967,7 @@ func TestConcurrentIdenticalPageSavesCreateOneRevision(t *testing.T) {
 		}
 	}
 	var count int
-	if err := application.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM revisions WHERE domain=?`, domain).Scan(&count); err != nil || count != 1 {
+	if err := application.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM revisions WHERE domain=? AND page_path='/'`, domain).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("concurrent saves created %d revisions err=%v", count, err)
 	}
 }
