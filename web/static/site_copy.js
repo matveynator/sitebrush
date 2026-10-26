@@ -375,8 +375,8 @@
     dialogElement.setAttribute('aria-modal', 'true');
     const headingElement = createElement('h2', 'SiteBrushCopySiteTitle', russian ? 'Скрыть копию от поисковиков?' : 'Hide this copy from search engines?');
     const explanationElement = createElement('p', 'SiteBrushCopySiteStatus', russian
-      ? 'До выбора действует noindex. При скрытии копии обход останется разрешённым, чтобы поисковики увидели noindex. robots.txt можно редактировать как страницу.'
-      : 'Noindex stays active until you decide. Hiding the copy still allows crawling so search engines can see noindex. You can edit robots.txt as a page.');
+      ? 'До выбора действует noindex. При скрытии копии обход останется разрешённым, чтобы поисковики увидели noindex. Позже индексацию можно включить в настройках сайта. robots.txt можно редактировать как страницу.'
+      : 'Noindex stays active until you decide. Hiding the copy still allows crawling so search engines can see noindex. You can enable indexing later in site settings. You can edit robots.txt as a page.');
     const errorElement = createElement('p', 'SiteBrushCopySiteStatus SiteBrushCopySiteHidden', '');
     const actionRowElement = createElement('div', 'SiteBrushCopySiteActions');
     const hideButtonElement = createElement('button', 'SiteBrushCopySiteButton', russian ? 'Скрыть копию' : 'Hide the copy');

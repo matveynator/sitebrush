@@ -19,6 +19,31 @@
     <a class="btn btn-outline-secondary" href="{{.ReturnPath}}">{{index .T "back_to_uri"}}</a>
   </div>
 
+  <section class="dns-box indexing-settings-panel">
+    <h2>{{index .T "domain_settings_indexing_title"}}</h2>
+    {{if .IndexingAllowed}}
+      <p class="indexing-status status-ok">{{index .T "domain_settings_indexing_enabled"}}</p>
+    {{else}}
+      <p class="indexing-status status-bad" role="alert">{{index .T "domain_settings_indexing_disabled"}}</p>
+    {{end}}
+    <form method="post" action="?settings">
+      <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
+      <input type="hidden" name="return" value="{{.ReturnPath}}">
+      <input type="hidden" name="action" value="update_indexing">
+      <label class="checkbox-row">
+        <input type="checkbox" name="indexing_allowed" value="1" {{if .IndexingAllowed}}checked{{end}}>
+        <span>{{index .T "domain_settings_indexing_allow"}}</span>
+      </label>
+      {{if .IndexingAllowed}}
+        <p class="hint">{{index .T "domain_settings_indexing_enabled_hint"}}</p>
+      {{else}}
+        <p class="hint">{{index .T "domain_settings_indexing_disabled_hint"}}</p>
+      {{end}}
+      <p class="hint"><a href="/robots.txt?text">{{index .T "domain_settings_indexing_edit_robots"}}</a></p>
+      <button type="submit">{{index .T "domain_settings_indexing_save"}}</button>
+    </form>
+  </section>
+
   <section class="dns-box custom-domain-panel">
     <div class="custom-domain-head">
       <div>

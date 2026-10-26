@@ -21807,6 +21807,41 @@ func (a *App) completeIndexingReview(ctx context.Context, domain, reviewID, choi
 	return a.publicPublicationRequest("refresh", domain)
 }
 
+func (a *App) siteIndexingState(ctx context.Context, domain string) (string, error) {
+	var state string
+	err := a.db.QueryRowContext(contextWithDomain(ctx, domain), `SELECT state FROM site_indexing_state WHERE domain=?`, domain).Scan(&state)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "visible", nil
+	}
+	return state, err
+}
+
+// Site settings retain the import review record so an old review cannot
+// reverse an administrator's later indexing choice.
+func (a *App) setSiteIndexingAllowed(ctx context.Context, domain string, allowed bool) error {
+	state := "hidden"
+	if allowed {
+		state = "visible"
+	}
+	ctx = contextWithDomain(ctx, domain)
+	err := a.siteContentTransaction(ctx, func(transaction *sql.Tx) error {
+		result, updateErr := transaction.ExecContext(ctx, `UPDATE site_indexing_state SET state=? WHERE domain=?`, state, domain)
+		if updateErr != nil {
+			return updateErr
+		}
+		count, countErr := result.RowsAffected()
+		if countErr != nil || count != 0 {
+			return countErr
+		}
+		_, insertErr := transaction.ExecContext(ctx, `INSERT INTO site_indexing_state(domain,review_id,state,created_at) VALUES(?,?,?,?)`, domain, randomAccessToken(), state, time.Now().UTC().Format(time.RFC3339))
+		return insertErr
+	}, nil)
+	if err != nil {
+		return err
+	}
+	return a.publicPublicationRequest("refresh", domain)
+}
+
 func (a *App) indexingReviewEndpoint(w http.ResponseWriter, r *http.Request) {
 	if !a.isAdminRequest(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
@@ -49882,8 +49917,20 @@ func (a *App) domainSettingsPage(w http.ResponseWriter, r *http.Request) {
 			serverIPs, _ := a.automaticSSLServerIPs(r.Context())
 			externalIP = firstAutomaticSSLIPv4(serverIPs)
 		}
-		a.handleDomainSettingsPost(r.Context(), r, siteDomain, externalIP)
+		if action == "update_indexing" {
+			if err := a.setSiteIndexingAllowed(r.Context(), siteDomain, r.FormValue("indexing_allowed") == "1"); err != nil {
+				http.Error(w, "failed to save search indexing setting", http.StatusInternalServerError)
+				return
+			}
+		} else {
+			a.handleDomainSettingsPost(r.Context(), r, siteDomain, externalIP)
+		}
 		httpsecurity.RedirectLocal(w, r, returnPath+"?settings", http.StatusFound)
+		return
+	}
+	indexingState, err := a.siteIndexingState(r.Context(), siteDomain)
+	if err != nil {
+		http.Error(w, "failed to load search indexing setting", http.StatusInternalServerError)
 		return
 	}
 	serverIPs, externalIPErr := a.automaticSSLServerIPs(r.Context())
@@ -49919,6 +49966,7 @@ func (a *App) domainSettingsPage(w http.ResponseWriter, r *http.Request) {
 	}
 	a.render(w, r, "domain_settings.html", map[string]any{
 		"Domain":                         siteDomain,
+		"IndexingAllowed":                indexingState == "visible",
 		"SelectedDomain":                 selectedDomain,
 		"Aliases":                        domainAliases,
 		"ChrootLocations":                chrootLocations,
