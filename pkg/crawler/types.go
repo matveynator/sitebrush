@@ -16,20 +16,21 @@ type SourceOptions struct {
 
 // ImportRequest is the application-facing input for single page and whole site imports.
 type ImportRequest struct {
-	DraftOnly            bool
-	Domain               string
-	PagePath             string
-	SourceURL            string
-	RemoteSourceURL      *url.URL
-	HTML                 string
-	Context              context.Context
-	ProgressToken        string
-	DownloadTotal        int
-	DownloadTotalBytes   int64
-	SelectedResourceURLs map[string]struct{}
-	SourceOptions        SourceOptions
-	AutoDetectTemplates  bool
-	ImportID             string
+	DraftOnly              bool
+	Domain                 string
+	PagePath               string
+	SourceURL              string
+	RemoteSourceURL        *url.URL
+	HTML                   string
+	Context                context.Context
+	ProgressToken          string
+	DownloadTotal          int
+	DownloadTotalBytes     int64
+	SelectedResourceURLs   map[string]struct{}
+	SourceOptions          SourceOptions
+	AutoDetectTemplates    bool
+	ImportID               string
+	ReuseExistingResources bool
 }
 
 // ImportResult is returned after the importer has persisted everything it could fetch.

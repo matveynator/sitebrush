@@ -39,7 +39,7 @@ type Store struct {
 	DB Database
 }
 
-const PublicTrialLifetime = 30 * time.Minute
+const PublicTrialLifetime = 24 * time.Hour
 
 type PublicTrialSite struct {
 	ID          int64
@@ -158,7 +158,9 @@ type SiteUsage struct {
 	DatabasePath   string
 }
 
-const billingIncludedMegabytes int64 = 500
+const BillingFreeBytes int64 = 1 << 30
+const DefaultStoragePricePerGBMinor int64 = 200
+const DefaultStorageCurrency = "EUR"
 const billingStepMegabytes int64 = 50
 
 type ServiceAssignment struct {
@@ -1166,6 +1168,12 @@ func requiredHostingAndSupportColumns() []hostingAndSupportColumn {
 		{tableName: "registry_installation_plans", columnName: "paid_status", definition: "TEXT"},
 		{tableName: "registry_sync_events", columnName: "summary_json", definition: "TEXT"},
 		{tableName: "sitebrush_com_keys", columnName: "private_key_path", definition: "TEXT"},
+		{tableName: "registration_confirmations", columnName: "workflow", definition: "TEXT NOT NULL DEFAULT ''"},
+		{tableName: "public_trial_sites", columnName: "pending_assets_json", definition: "TEXT NOT NULL DEFAULT ''"},
+		{tableName: "public_trial_sites", columnName: "paid_continuation", definition: "INTEGER NOT NULL DEFAULT 0"},
+		{tableName: "public_trial_sites", columnName: "estimated_total_bytes", definition: "INTEGER NOT NULL DEFAULT 0"},
+		{tableName: "public_trial_sites", columnName: "estimated_price_minor", definition: "INTEGER NOT NULL DEFAULT 0"},
+		{tableName: "public_trial_sites", columnName: "billing_currency", definition: "TEXT NOT NULL DEFAULT ''"},
 	}
 }
 
@@ -4041,18 +4049,16 @@ func BillingPriceForUsedBytesWithMinimum(usedBytes int64, minimumPriceGBMinor in
 		currency = "EUR"
 	}
 	usedMegabytes := bytesToRoundedMegabytes(usedBytes)
-	billableMegabytes := roundMegabytesUpToBillingStep(usedMegabytes)
-	if usedMegabytes == 0 {
-		billableMegabytes = 0
-	}
-	minor := (billableMegabytes*minimumPriceGBMinor + 999) / 1000
+	paidBytes := max(int64(0), usedBytes-BillingFreeBytes)
+	billableMegabytes := (paidBytes + 999999) / 1000000
+	minor := (paidBytes/1000000000)*minimumPriceGBMinor + ((paidBytes%1000000000)*minimumPriceGBMinor+999999999)/1000000000
 	price := BillingPrice{
 		UsedMegabytes:     usedMegabytes,
 		BillableMegabytes: billableMegabytes,
 		Amount:            formatMoneyMinor(minor),
 		Currency:          currency,
 		PriceLabel:        formatMoneyMinor(minor) + " " + currency + "/мес",
-		Billable:          usedMegabytes > billingIncludedMegabytes,
+		Billable:          paidBytes > 0,
 	}
 	if currency == "EUR" {
 		price.PriceLabel = "€" + formatMoneyMinor(minor) + "/мес"
@@ -4060,7 +4066,7 @@ func BillingPriceForUsedBytesWithMinimum(usedBytes int64, minimumPriceGBMinor in
 	if price.Billable {
 		price.StatusText = "к выставлению"
 	} else {
-		price.StatusText = "бесплатно до 500 MB"
+		price.StatusText = "бесплатно до 1 GiB"
 	}
 	return price
 }

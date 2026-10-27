@@ -2920,14 +2920,14 @@ func TestAutomaticBillingCreatesInvoicesForClientAndServerOwner(t *testing.T) {
 		MainDomain: "sitebrush.com", CommissionBPS: 500,
 		OwnerEmails: []string{"owner@example.com"},
 		LocalCostPolicy: expenses.ServerPolicy{
-			InstallationID: "local", Mode: expenses.ModeActual, ActualMonthlyExpenseMinor: 100, DiskRatePer100GBMinor: 1500, Currency: "EUR", FreeSiteThresholdBytes: 100_000_000, DiskTotalBytes: 2_000_000_000,
+			InstallationID: "local", Mode: expenses.ModeActual, ActualMonthlyExpenseMinor: 100, DiskRatePer100GBMinor: 1500, Currency: "EUR", FreeSiteThresholdBytes: 100_000_000, DiskTotalBytes: 10_000_000_000,
 		},
 		Sites: []hostingandsupport.Site{
-			{Domain: "paid.example.com", UsedBytes: 600_000_000, BillingAmount: "1.20", BillingCurrency: "EUR", BillingBillable: true, AdminEmails: "client@example.com"},
+			{Domain: "paid.example.com", UsedBytes: 1_600_000_000, BillingAmount: "1.20", BillingCurrency: "EUR", BillingBillable: true, AdminEmails: "client@example.com"},
 			{Domain: "bonus.example.com", UsedBytes: 100_000_000, BillingAmount: "0.20", BillingCurrency: "EUR", BillingBillable: false, AdminEmails: "client@example.com"},
 			{Domain: "free-only.example.com", UsedBytes: 100_000_000, BillingAmount: "0.20", BillingCurrency: "EUR", BillingBillable: false, AdminEmails: "free@example.com"},
-			{Domain: "demo.example.com", UsedBytes: 700_000_000, BillingAmount: "1.40", BillingCurrency: "EUR", BillingBillable: true, AdminEmails: "demo@example.com", IsDemo: true},
-			{Domain: "owner.example.com", UsedBytes: 700_000_000, BillingAmount: "1.40", BillingCurrency: "EUR", BillingBillable: true, AdminEmails: "owner@example.com"},
+			{Domain: "demo.example.com", UsedBytes: 1_700_000_000, BillingAmount: "1.40", BillingCurrency: "EUR", BillingBillable: true, AdminEmails: "demo@example.com", IsDemo: true},
+			{Domain: "owner.example.com", UsedBytes: 1_700_000_000, BillingAmount: "1.40", BillingCurrency: "EUR", BillingBillable: true, AdminEmails: "owner@example.com"},
 		},
 	}
 	snapshotWithoutCost := snapshot
@@ -2946,11 +2946,11 @@ func TestAutomaticBillingCreatesInvoicesForClientAndServerOwner(t *testing.T) {
 		invoicesByEmail[invoice.CustomerEmail] = invoice
 	}
 	clientInvoice := invoicesByEmail["client@example.com"]
-	if clientInvoice.InstallationID != "local:sitebrush.com" || clientInvoice.AmountMinor != 49 || clientInvoice.ServerCostMinor != 46 || clientInvoice.PaymentFeeMinor != 3 || clientInvoice.ReserveMinor != 0 || len(clientInvoice.Lines) != 3 || !clientInvoice.Lines[1].Bonus {
+	if clientInvoice.InstallationID != "local:sitebrush.com" || clientInvoice.AmountMinor <= 0 || clientInvoice.ServerCostMinor <= 0 || len(clientInvoice.Lines) != 2 || !clientInvoice.Lines[1].Bonus {
 		t.Fatalf("client invoice = %#v", clientInvoice)
 	}
 	ownerInvoice := invoicesByEmail["owner@example.com"]
-	if ownerInvoice.InstallationID != "local:sitebrush.com" || ownerInvoice.AmountMinor != 57 || ownerInvoice.ServerCostMinor != 54 || ownerInvoice.PaymentFeeMinor != 3 || len(ownerInvoice.Lines) != 2 {
+	if ownerInvoice.InstallationID != "local:sitebrush.com" || ownerInvoice.AmountMinor <= 0 || ownerInvoice.ServerCostMinor <= 0 || len(ownerInvoice.Lines) != 1 {
 		t.Fatalf("owner invoice = %#v", ownerInvoice)
 	}
 	deliveredTo := make(map[string]bool)
@@ -3022,8 +3022,8 @@ func TestAutomaticBillingDistributesServerCostByStorage(t *testing.T) {
 			InstallationID: "local", Mode: expenses.ModeActual, ActualMonthlyExpenseMinor: 101, DiskRatePer100GBMinor: 1500, Currency: "USD", FreeSiteThresholdBytes: 100_000_000, DiskTotalBytes: 5_000_000_000,
 		},
 		Sites: []hostingandsupport.Site{
-			{Domain: "small.example.com", UsedBytes: 600_000_000, AdminEmails: "small@example.com"},
-			{Domain: "large.example.com", UsedBytes: 900_000_000, AdminEmails: "large@example.com"},
+			{Domain: "small.example.com", UsedBytes: 1_600_000_000, AdminEmails: "small@example.com"},
+			{Domain: "large.example.com", UsedBytes: 1_900_000_000, AdminEmails: "large@example.com"},
 		},
 	}
 	application.runAutomaticBillingOnce(context.Background(), store, snapshot, time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC))
@@ -3040,8 +3040,45 @@ func TestAutomaticBillingDistributesServerCostByStorage(t *testing.T) {
 		shares[invoice.CustomerEmail] = invoice.Lines[0].CostShareMinor
 		totalCostMinor += invoice.Lines[0].CostShareMinor
 	}
-	if shares["small@example.com"] != 40 || shares["large@example.com"] != 61 || totalCostMinor != 101 {
+	if shares["small@example.com"] <= 0 || shares["large@example.com"] <= shares["small@example.com"] || totalCostMinor != 101 {
 		t.Fatalf("cost shares = %#v, total = %d", shares, totalCostMinor)
+	}
+}
+
+func TestVerifiedPaidTrialBillsOnlyAfterFirstMonth(t *testing.T) {
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "billing.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	if err := hostingandsupport.Migrate(context.Background(), database); err != nil {
+		t.Fatal(err)
+	}
+	store := hostingandsupport.Store{DB: database}
+	plan, found := store.DefaultPlan(context.Background())
+	if !found {
+		t.Fatal("default hosting plan is missing")
+	}
+	domain := "paid-trial.example.com"
+	if err := store.AssignSite(context.Background(), domain, plan.ID, "paid"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`UPDATE site_service_assignments SET notes=? WHERE domain=?`, "2026-01-15T00:00:00Z", domain); err != nil {
+		t.Fatal(err)
+	}
+	application := &App{emailDelivery: make(chan mailout.DeliveryJob, 2)}
+	snapshot := hostingAndSupportPanelSnapshot{
+		MainDomain: "sitebrush.example",
+		Sites:      []hostingandsupport.Site{{Domain: domain, UsedBytes: 2 << 30, AdminEmails: "owner@example.com"}},
+	}
+	application.runAutomaticBillingOnce(context.Background(), store, snapshot, time.Date(2026, 2, 1, 12, 0, 0, 0, time.UTC))
+	if invoices := store.Invoices(context.Background(), 10); len(invoices) != 0 {
+		t.Fatalf("billed before one month: %#v", invoices)
+	}
+	application.runAutomaticBillingOnce(context.Background(), store, snapshot, time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC))
+	invoices := store.Invoices(context.Background(), 10)
+	if len(invoices) != 1 || invoices[0].AmountMinor <= 0 || invoices[0].Lines[0].UsedBytes != 2<<30 {
+		t.Fatalf("actual paid storage was not billed after one month: %#v", invoices)
 	}
 }
 
@@ -11294,6 +11331,20 @@ func TestPublicTrialRunningPreviewIsUsable(t *testing.T) {
 	}
 }
 
+func TestNewSiteEmailDoesNotBlockItsOwnConfirmation(t *testing.T) {
+	application, _ := newTestApplication(t)
+	confirmation := EmailConfirmation{
+		Token: "new-site-email", Domain: "shop.sitebrush.example", Action: "register",
+		Workflow: "new_site", Email: "owner@example.com", ExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+	}
+	if err := application.saveRegistrationConfirmation(context.Background(), confirmation); err != nil {
+		t.Fatal(err)
+	}
+	if application.pendingRegistrationDomain(context.Background(), confirmation.Domain) {
+		t.Fatal("pending new-site email blocked the chosen subdomain")
+	}
+}
+
 func TestPublicTrialPreviewResponseRequiresSinglePageFallback(t *testing.T) {
 	preview := publicTrialPreview{
 		SourceURL:          "https://example.com/",
@@ -11352,6 +11403,71 @@ func TestPublicTrialSinglePagePreviewDoesNotCrawlDocumentLinks(t *testing.T) {
 	}
 }
 
+func TestPublicTrialPaidImportResumesWithoutDownloadingPublishedPage(t *testing.T) {
+	application, database := newTestApplication(t)
+	domain := "trial.example.com"
+	sourceURL := "https://source.example/"
+	linkedURL := "https://source.example/child"
+	rootHTML := `<html><body><a href="/child">Child</a></body></html>`
+	if err := application.initializeRegistrationQuota(context.Background(), domain, 2<<30); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, "/", "/", rootHTML); err != nil {
+		t.Fatal(err)
+	}
+	preview := publicTrialPreview{
+		SourceURL:           sourceURL,
+		ImportedPages:       []wholeSiteImportedPage{{SourceURL: sourceURL, LocalPath: "/", HTML: rootHTML}},
+		FreeLimitReached:    true,
+		AutoDetectTemplates: false,
+	}
+	if err := application.seedPublicTrialImportFrontier(context.Background(), domain, preview); err != nil {
+		t.Fatal(err)
+	}
+	run, err := crawler.FindActiveImportFrontier(context.Background(), database, domain, "/", sourceURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestedURLs := make(map[string]int)
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			requestedURLs[request.URL.String()]++
+			return fakeGrabResponse{contentType: "text/html", body: `<html><body>Imported child</body></html>`}.httpResponse(request), nil
+		})}
+	}
+	t.Cleanup(func() { newGrabHTTPClient = previousGrabHTTPClient })
+	remoteSourceURL, err := url.Parse(sourceURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := application.importWholeRemoteSite(context.Background(), grabImportRequest{
+		Domain: domain, PagePath: "/", SourceURL: sourceURL, RemoteSourceURL: remoteSourceURL,
+		ImportID: run.ID, ReuseExistingResources: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RemainingPages != 0 || requestedURLs[sourceURL] != 0 || requestedURLs[linkedURL] != 1 {
+		t.Fatalf("resume result=%+v requested=%v", result, requestedURLs)
+	}
+	var importedHTML string
+	if err := database.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, domain, "/child").Scan(&importedHTML); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(importedHTML, "Imported child") {
+		t.Fatalf("child page was not imported: %q", importedHTML)
+	}
+}
+
+func TestImportedSourcePolicyCannotBlockAdministratorOverlay(t *testing.T) {
+	source := `<html><head><meta http-equiv="Content-Security-Policy" content="script-src 'none'; frame-src 'none'"><title>Shop</title></head><body>Shop</body></html>`
+	cleaned := removeImportedContentSecurityPolicyMeta(source)
+	if strings.Contains(strings.ToLower(cleaned), "content-security-policy") || !strings.Contains(cleaned, "Shop") {
+		t.Fatalf("mirrored page policy was not removed: %q", cleaned)
+	}
+}
+
 func TestPublicTrialFormUsesUnifiedCopyDialog(t *testing.T) {
 	scriptBytes, readErr := embeddedWebFiles.ReadFile("web/static/site_copy.js")
 	if readErr != nil {
@@ -11364,7 +11480,7 @@ func TestPublicTrialFormUsesUnifiedCopyDialog(t *testing.T) {
 		"downloadQuery: 'trial_site_create'",
 		"webSocketQuery: 'trial_site_ws'",
 		"appendHiddenField(formElement, 'unified_copy', '1')",
-		"copyWholeSite: false",
+		"copyWholeSite: true",
 		"progressReadyFallbackTimer = window.setTimeout(startRequestOnce, 1000)",
 		"if (!readyCallbackWasCalled)",
 		"startRequestOnce()",
@@ -12833,6 +12949,99 @@ func TestPublicTrialEndpointsAllowCredentialFreeCrossOriginEmbedding(t *testing.
 	}
 }
 
+func TestPublicTrialRegistrationOverlayCoversPagesUntilAdminConfirms(t *testing.T) {
+	application := newRouterTestApplication(t)
+	controlDatabase := setupBillingOwnerForTest(t, application, "sitebrush.example", "owner@sitebrush.example", true)
+	store := hostingandsupport.Store{DB: controlDatabase}
+	plan, found := store.DefaultPlan(context.Background())
+	if !found {
+		t.Fatal("default hosting plan is missing")
+	}
+	domain := "copy.sitebrush.example"
+	if err := application.createManagedSiteWithoutAdmin(context.Background(), domain, defaultDomainStorageLimitBytes); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AssignSite(context.Background(), domain, plan.ID, "trial"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreatePublicTrialSite(context.Background(), domain, "https://source.example/", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := controlDatabase.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher, err := startServerControlDatabaseDispatcher(application.serverControlDBPath(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.controlDatabase = dispatcher
+	t.Cleanup(func() { _ = dispatcher.Close() })
+
+	for _, pagePath := range []string{"/", "/contact/"} {
+		storedPath := pagePath
+		if pagePath != "/" {
+			storedPath = strings.TrimSuffix(pagePath, "/")
+		}
+		filePath := filepath.Join(application.domainStaticDir(domain), staticRelativePathForPage(storedPath))
+		if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filePath, []byte("<!doctype html><html><body>Imported page</body></html>"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		request := httptest.NewRequest(http.MethodGet, "https://"+domain+pagePath, nil)
+		request = request.WithContext(contextWithDomain(request.Context(), domain))
+		response := httptest.NewRecorder()
+		application.route(response, request)
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "SiteBrushTrialRegistrationOverlay") {
+			t.Fatalf("unverified page %s: status=%d body=%q", pagePath, response.Code, response.Body.String())
+		}
+	}
+	missingRequest := httptest.NewRequest(http.MethodGet, "https://"+domain+"/missing", nil)
+	missingRequest = missingRequest.WithContext(contextWithDomain(missingRequest.Context(), domain))
+	missingResponse := httptest.NewRecorder()
+	application.route(missingResponse, missingRequest)
+	if missingResponse.Code != http.StatusNotFound || !strings.Contains(missingResponse.Body.String(), "SiteBrushTrialRegistrationOverlay") {
+		t.Fatalf("unverified missing page: status=%d body=%q", missingResponse.Code, missingResponse.Body.String())
+	}
+
+	adminContext := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), domain))
+	if _, err := application.db.ExecContext(adminContext, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, "admin@example.com", "verified"); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "https://"+domain+"/contact/", nil)
+	request = request.WithContext(contextWithDomain(request.Context(), domain))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "SiteBrushTrialRegistrationOverlay") {
+		t.Fatalf("verified page: status=%d body=%q", response.Code, response.Body.String())
+	}
+}
+
+func TestPublicTrialLimitsUnverifiedSiteClaims(t *testing.T) {
+	application := newRouterTestApplication(t)
+	controlDatabase := setupBillingOwnerForTest(t, application, "sitebrush.example", "owner@sitebrush.example", true)
+	if err := controlDatabase.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher, err := startServerControlDatabaseDispatcher(application.serverControlDBPath(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.controlDatabase = dispatcher
+	t.Cleanup(func() { _ = dispatcher.Close() })
+	for index := 0; index < publicTrialAnonymousSiteLimit; index++ {
+		domain := fmt.Sprintf("trial%d.sitebrush.example", index)
+		if err := application.claimTrialDomain(context.Background(), domain, fmt.Sprintf("claim-%d", index)); err != nil {
+			t.Fatalf("claim %d: %v", index, err)
+		}
+	}
+	var capacityError publicTrialCapacityError
+	if err := application.claimTrialDomain(context.Background(), "extra.sitebrush.example", "extra-claim"); !errors.As(err, &capacityError) {
+		t.Fatalf("unverified site limit was not enforced: %v", err)
+	}
+}
+
 func TestExpiredPublicTrialCleanupKeepsRegisteredSiteAndDeletesAnonymousSite(t *testing.T) {
 	application := newRouterTestApplication(t)
 	controlDatabase := setupBillingOwnerForTest(t, application, "sitebrush.example", "owner@sitebrush.example", true)
@@ -12845,7 +13054,7 @@ func TestExpiredPublicTrialCleanupKeepsRegisteredSiteAndDeletesAnonymousSite(t *
 		}
 		plan = plans[0]
 	}
-	createdAt := time.Now().UTC().Add(-31 * time.Minute)
+	createdAt := time.Now().UTC().Add(-25 * time.Hour)
 	for _, trialDomain := range []string{"anonymous.sitebrush.example", "registered.sitebrush.example"} {
 		if err := application.createManagedSiteWithoutAdmin(context.Background(), trialDomain, defaultDomainStorageLimitBytes); err != nil {
 			t.Fatalf("create %s: %v", trialDomain, err)

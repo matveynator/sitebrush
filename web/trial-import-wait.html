@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="{{.LanguageCode}}" dir="{{.TextDirection}}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{index .T "trial_import_wait_title"}} · SiteBrush</title>
+  <style>
+    body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f3f6fa;color:#172535;font:16px/1.5 system-ui,sans-serif}
+    main{width:min(560px,calc(100vw - 32px));padding:28px;background:white;border:1px solid #dce4ed;border-radius:12px;box-shadow:0 12px 36px #17253512}
+    h1{margin:0 0 12px;font-size:1.5rem}p{margin:0 0 16px}a{color:#2165aa}
+    [data-import-error]{color:#a32121;white-space:pre-wrap;overflow-wrap:anywhere}
+    @media(prefers-color-scheme:dark){body{background:#131b28;color:#e7eef8}main{background:#202c3c;border-color:#35465d}a{color:#9bc7f4}}
+  </style>
+</head>
+<body>
+  <main data-sitebrush-import-wait data-return-path="{{.ReturnPath}}">
+    <h1>{{index .T "trial_import_wait_title"}}</h1>
+    <p data-import-message>{{index .T "trial_import_wait_message"}}</p>
+    <p data-import-error hidden></p>
+    <a href="{{.ReturnPath}}">{{index .T "trial_import_open_partial"}}</a>
+  </main>
+  <script defer src="/p/static/trial_import_wait.js?v={{.CompileVersion}}"></script>
+</body>
+</html>

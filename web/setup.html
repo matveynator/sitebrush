@@ -41,7 +41,7 @@
     <p>{{index .T "setup_confirmation_delivering"}}</p>
     {{if .Status}}<p class="alert alert-warning">{{.Status}}</p>{{end}}
     {{if .RegistrationFormToken}}
-    <form method="post" action="?register" class="profile-form">
+    <form method="post" action="?register{{if .TrialEmbed}}&amp;trial_embed{{end}}{{if .NewSiteWorkflow}}&amp;site_workflow=new_site{{end}}" class="profile-form">
       <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
       <input type="hidden" name="registration_form_token" value="{{.RegistrationFormToken}}">
       <p>{{index .T "mail_registration_code"}}</p>
@@ -138,10 +138,15 @@
     <p>{{index .T "setup_first_visitor"}}</p>
   </div>
   {{if .Status}}<div class="alert alert-info" style="max-width:520px;">{{.Status}}</div>{{end}}
-  <form class="card card-body authentication-card" method="post" action="?register">
+  <form class="card card-body authentication-card" method="post" action="?register{{if .TrialEmbed}}&amp;trial_embed{{end}}{{if .NewSiteWorkflow}}&amp;site_workflow=new_site{{end}}">
+    {{if .NewSiteWorkflow}}<input type="hidden" name="site_workflow" value="new_site">{{end}}
     <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
     <input type="hidden" name="return_path" value="{{.ReturnPath}}">
     <p><input type="email" autocomplete="username" name="email" class="form-control" placeholder="{{index .T "login_email_placeholder"}}" value="{{.Email}}" required></p>
+    {{if .TrialPaidImport}}
+    <p class="alert alert-warning">{{printf (index .T "trial_paid_registration_notice") .TrialFreeLimit .TrialEstimateSize .TrialEstimatePaidSize .TrialEstimatePrice}}</p>
+    <label><input type="checkbox" name="paid_import_consent" value="1" required> {{index .T "trial_paid_consent"}}</label>
+    {{end}}
     {{if .LocalAccount}}
     <p class="hint">{{index .T "auth_local_setup"}}</p>
     <label>{{index .T "login_password_placeholder"}}<input type="password" name="password" autocomplete="new-password" required></label>
@@ -158,7 +163,7 @@
   </form>
   {{end}}
   {{if or .RegistrationCooldown.Active .ConfirmationPending .RegistrationGuardUnavailable}}
-  <form method="get" action="?register" class="authentication-card">
+  <form method="get" action="?register{{if .TrialEmbed}}&amp;trial_embed{{end}}{{if .NewSiteWorkflow}}&amp;site_workflow=new_site{{end}}" class="authentication-card">
     <input type="hidden" name="register" value="">
     <input type="hidden" name="return_path" value="{{.ReturnPath}}">
     <button class="btn btn-outline-primary" type="submit" data-registration-retry {{if .RegistrationCooldown.Active}}disabled{{end}}>{{index .T "registration_try_again_now"}}</button>
