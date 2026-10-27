@@ -869,9 +869,8 @@ func migrateLegacyBillingData(ctx context.Context, database *sql.DB) error {
 	return nil
 }
 
-// The standalone journal and account protection branches published different
-// append-only tails. Preserve the database's exact known prefix instead of
-// rewriting its history or inserting another branch's steps ahead of it.
+// Published branches recorded mail journal and trial onboarding steps in
+// different orders. Match their exact prefixes without rewriting the ledger.
 func hostingSchemaHistory(ctx context.Context, database *sql.DB, repair bool) ([]migrations.Step, int, error) {
 	steps := hostingSchemaSteps(ctx, repair)
 	found, err := tableExists(ctx, database, "application_migration_steps")
@@ -882,32 +881,58 @@ func hostingSchemaHistory(ctx context.Context, database *sql.DB, repair bool) ([
 	if currentErr == nil {
 		return steps, completed, nil
 	}
-	guardStart, journalStart, journalEnd := -1, -1, -1
-	for index, step := range steps {
-		switch step.ID {
-		case "account-mail-guard-001":
-			guardStart = index
-		case "mail-monitor-006":
-			journalStart = index
-		case "mail-monitor-021":
-			journalEnd = index + 1
-		}
-	}
-	if guardStart < 0 || journalStart <= guardStart || journalEnd <= journalStart {
+	standaloneJournal, journalOK := moveHostingStepsBefore(steps, "mail-monitor-006", "mail-monitor-021", "account-mail-guard-001")
+	earlyOnboarding, onboardingOK := moveHostingStepsBefore(steps, "column-registration_confirmations-workflow", "column-public_trial_sites-billing_currency", "mail-monitor-001")
+	if !journalOK || !onboardingOK {
 		return nil, 0, currentErr
 	}
-	// Pin the historical tail: future journal steps must follow the complete
-	// selected chain, including the account protection appended during this upgrade.
-	legacy := make([]migrations.Step, 0, len(steps))
-	legacy = append(legacy, steps[:guardStart]...)
-	legacy = append(legacy, steps[journalStart:journalEnd]...)
-	legacy = append(legacy, steps[guardStart:journalStart]...)
-	legacy = append(legacy, steps[journalEnd:]...)
-	completed, legacyErr := migrations.Check(database, "billing-schema-v27", legacy)
-	if legacyErr != nil {
-		return nil, 0, fmt.Errorf("%w; standalone mail journal history: %v", currentErr, legacyErr)
+	earlyStandaloneJournal, journalOK := moveHostingStepsBefore(earlyOnboarding, "mail-monitor-006", "mail-monitor-021", "account-mail-guard-001")
+	if !journalOK {
+		return nil, 0, currentErr
 	}
-	return legacy, completed, nil
+	var historicalErrors []string
+	for _, history := range []struct {
+		name  string
+		steps []migrations.Step
+	}{
+		{name: "standalone mail journal", steps: standaloneJournal},
+		{name: "early trial onboarding", steps: earlyOnboarding},
+		{name: "early trial onboarding and standalone mail journal", steps: earlyStandaloneJournal},
+	} {
+		completed, err := migrations.Check(database, "billing-schema-v27", history.steps)
+		if err == nil {
+			return history.steps, completed, nil
+		}
+		historicalErrors = append(historicalErrors, history.name+": "+err.Error())
+	}
+	return nil, 0, fmt.Errorf("%w; %s", currentErr, strings.Join(historicalErrors, "; "))
+}
+
+func moveHostingStepsBefore(steps []migrations.Step, firstID, lastID, beforeID string) ([]migrations.Step, bool) {
+	first, last, before := -1, -1, -1
+	for index, step := range steps {
+		switch step.ID {
+		case firstID:
+			first = index
+		case lastID:
+			last = index
+		case beforeID:
+			before = index
+		}
+	}
+	if first < 0 || last < first || before < 0 || before >= first && before <= last {
+		return nil, false
+	}
+	reordered := make([]migrations.Step, 0, len(steps))
+	for index, step := range steps {
+		if index == before {
+			reordered = append(reordered, steps[first:last+1]...)
+		}
+		if index < first || index > last {
+			reordered = append(reordered, step)
+		}
+	}
+	return reordered, true
 }
 
 func hostingSchemaSteps(ctx context.Context, repair bool) []migrations.Step {
@@ -982,16 +1007,7 @@ func hostingSchemaSteps(ctx context.Context, repair bool) []migrations.Step {
 		step.Ensure = repair
 		steps = append(steps, step)
 	}
-	for _, column := range requiredHostingAndSupportColumns() {
-		steps = append(steps, migrations.Step{ID: "column-" + column.tableName + "-" + column.columnName, Revision: column.definition, Ensure: repair, Apply: func(transaction *sql.Tx) error {
-			found, err := hostingAndSupportColumnExists(ctx, transaction, column.tableName, column.columnName)
-			if err != nil || found {
-				return err
-			}
-			_, err = transaction.Exec(`ALTER TABLE ` + column.tableName + ` ADD COLUMN ` + column.columnName + ` ` + column.definition)
-			return err
-		}})
-	}
+	steps = append(steps, hostingSchemaColumnSteps(ctx, repair, preMailJournalColumns())...)
 	// New steps follow the entire existing ledger, including column migrations.
 	// Inserting table queries before those columns would change recorded ordinals.
 	for index, query := range mailmonitor.SchemaQueries()[:5] {
@@ -1019,6 +1035,23 @@ func hostingSchemaSteps(ctx context.Context, repair bool) []migrations.Step {
 		step := migrations.SQL(fmt.Sprintf("mail-monitor-%03d", index+6), query)
 		step.Ensure = repair
 		steps = append(steps, step)
+	}
+	// These columns were introduced after the mail journal was published.
+	steps = append(steps, hostingSchemaColumnSteps(ctx, repair, trialOnboardingColumns())...)
+	return steps
+}
+
+func hostingSchemaColumnSteps(ctx context.Context, repair bool, columns []hostingAndSupportColumn) []migrations.Step {
+	steps := make([]migrations.Step, 0, len(columns))
+	for _, column := range columns {
+		steps = append(steps, migrations.Step{ID: "column-" + column.tableName + "-" + column.columnName, Revision: column.definition, Ensure: repair, Apply: func(transaction *sql.Tx) error {
+			found, err := hostingAndSupportColumnExists(ctx, transaction, column.tableName, column.columnName)
+			if err != nil || found {
+				return err
+			}
+			_, err = transaction.Exec(`ALTER TABLE ` + column.tableName + ` ADD COLUMN ` + column.columnName + ` ` + column.definition)
+			return err
+		}})
 	}
 	return steps
 }
@@ -1103,6 +1136,11 @@ type hostingAndSupportColumn struct {
 }
 
 func requiredHostingAndSupportColumns() []hostingAndSupportColumn {
+	return append(preMailJournalColumns(), trialOnboardingColumns()...)
+}
+
+// This column list is the frozen ledger prefix before mail-monitor-001.
+func preMailJournalColumns() []hostingAndSupportColumn {
 	return []hostingAndSupportColumn{
 		{tableName: "account_code_rates", columnName: "sent_count", definition: "INTEGER NOT NULL DEFAULT 0"},
 		{"registration_confirmations", "form_token", "TEXT NOT NULL DEFAULT ''"},
@@ -1168,6 +1206,11 @@ func requiredHostingAndSupportColumns() []hostingAndSupportColumn {
 		{tableName: "registry_installation_plans", columnName: "paid_status", definition: "TEXT"},
 		{tableName: "registry_sync_events", columnName: "summary_json", definition: "TEXT"},
 		{tableName: "sitebrush_com_keys", columnName: "private_key_path", definition: "TEXT"},
+	}
+}
+
+func trialOnboardingColumns() []hostingAndSupportColumn {
+	return []hostingAndSupportColumn{
 		{tableName: "registration_confirmations", columnName: "workflow", definition: "TEXT NOT NULL DEFAULT ''"},
 		{tableName: "public_trial_sites", columnName: "pending_assets_json", definition: "TEXT NOT NULL DEFAULT ''"},
 		{tableName: "public_trial_sites", columnName: "paid_continuation", definition: "INTEGER NOT NULL DEFAULT 0"},

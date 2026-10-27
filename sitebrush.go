@@ -3588,6 +3588,7 @@ type publicTrialPreview struct {
 	SourceURL           string
 	SourceHTML          string
 	ImportedPages       []wholeSiteImportedPage
+	UnfinishedPageURLs  []string
 	Resources           []grabResourcePreview
 	Spider              *pageSpider
 	PageCount           int
@@ -12700,7 +12701,7 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 				public.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), publicDecisionContextKey{}, decision)))
 				return
 			}
-			if !decision.Known && r.URL.Path == "/" && httpsecurity.IsLocalRequest(r) {
+			if !decision.Known && r.URL.Path == "/" && canonicalLocalDomain(domainFromRequest(r)) == "localhost" && httpsecurity.IsLocalRequest(r) {
 				if a.siteDatabaseRouter != nil {
 					databasePath := siteDatabaseFile(siteDatabaseRootPath(a.serverControlDBPath()), "localhost")
 					if _, err := os.Stat(databasePath); os.IsNotExist(err) {
@@ -12716,6 +12717,8 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 			}
 			if decision.Known {
 				http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+			} else if publicMissingPageRequest(r, cleanPath(r.URL.Path)) {
+				a.renderMissingPage(w, withPublicRequestDecision(r, decision), cleanPath(r.URL.Path), false)
 			} else {
 				http.NotFound(w, r)
 			}
@@ -17976,6 +17979,10 @@ func (a *App) serveStealthStaticForBlockedAdminIP(w http.ResponseWriter, r *http
 			if cookie, cookieErr := r.Cookie("sitebrush_session"); cookieErr == nil && cookie.Value != "" {
 				a.expireAdminSessionCookie(w, r)
 			}
+			if publicMissingPageRequest(r, pagePath) {
+				a.renderMissingPage(w, r, pagePath, false)
+				return true
+			}
 			httpsecurity.RedirectLocal(w, r, r.URL.Path+"?register", http.StatusSeeOther)
 			return true
 		}
@@ -22267,6 +22274,7 @@ func (a *App) runPublicTrialSitePreviewWithTemplateDetection(progressToken, requ
 		SourceURL:           sourceURL,
 		SourceHTML:          initialHTML,
 		ImportedPages:       importedPages,
+		UnfinishedPageURLs:  append([]string(nil), previewSpider.previewUnfinishedPageURLs...),
 		Resources:           resources,
 		Spider:              previewSpider,
 		PageCount:           pageCount,
@@ -22465,11 +22473,12 @@ func (a *App) publicTrialSiteSuggest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sourceURL := strings.TrimSpace(r.URL.Query().Get("source_url"))
-	parsed, err := url.Parse(sourceURL)
-	if err != nil || parsed.Hostname() == "" || parsed.Scheme != "http" && parsed.Scheme != "https" {
+	parsed, err := parseGrabSourceURL(sourceURL)
+	if err != nil {
 		http.Error(w, "a public source URL is required", http.StatusBadRequest)
 		return
 	}
+	sourceURL = parsed.String()
 	var ownerDomain string
 	err = a.withServerControlDatabaseRead(r.Context(), "public-trial-suggest-domain", func(database *sql.DB) error {
 		var found bool
@@ -22744,6 +22753,13 @@ func (a *App) seedPublicTrialImportFrontier(ctx context.Context, domain string, 
 	}
 	pageURLs := map[string]*url.URL{crawler.WholeSitePageKey(startURL): startURL}
 	completedPages := make(map[string]struct{}, len(preview.ImportedPages))
+	unfinishedPages := make(map[string]struct{}, len(preview.UnfinishedPageURLs))
+	for _, unfinishedURL := range preview.UnfinishedPageURLs {
+		pageURL, parseErr := url.Parse(unfinishedURL)
+		if parseErr == nil {
+			unfinishedPages[crawler.WholeSitePageKey(pageURL)] = struct{}{}
+		}
+	}
 	for _, importedPage := range preview.ImportedPages {
 		pageURL, parseErr := url.Parse(importedPage.SourceURL)
 		if parseErr != nil || !crawler.SameHost(startURL, pageURL) {
@@ -22754,7 +22770,9 @@ func (a *App) seedPublicTrialImportFrontier(ctx context.Context, domain string, 
 			continue
 		}
 		pageURLs[pageKey] = pageURL
-		completedPages[pageKey] = struct{}{}
+		if _, unfinished := unfinishedPages[pageKey]; !unfinished {
+			completedPages[pageKey] = struct{}{}
+		}
 		linkedPages, _ := crawler.ExtractPageLinksWithLimit(importedPage.HTML, pageURL, startURL, wholeSiteImportMaxPages)
 		for _, linkedPage := range linkedPages {
 			linkedKey := crawler.WholeSitePageKey(linkedPage)
@@ -24015,6 +24033,9 @@ func (a *App) preparePublicTrialPreviewForCreate(ctx context.Context, preview pu
 		rootResource := &mirroredResource{url: pageSourceURL.String(), content: []byte(importedPage.HTML)}
 		spider.resources[pageSourceURL.String()] = rootResource
 		spider.rewriteNestedResources(rootResource, 0, "text/html")
+		if spider.previewLimitReached {
+			preview.UnfinishedPageURLs = append(preview.UnfinishedPageURLs, importedPage.SourceURL)
+		}
 		importedPages = append(importedPages, wholeSiteImportedPage{SourceURL: importedPage.SourceURL, LocalPath: importedPage.LocalPath, HTML: string(rootResource.content)})
 		spider.downloadedTotal++
 		spider.publishResourceProgress("downloaded", pageSourceURL.String(), 100, int64(len(importedPage.HTML)), int64(len(importedPage.HTML)))
@@ -25734,6 +25755,16 @@ func (a *App) prepareWholeRemoteSiteImport(importRequest grabImportRequest) (*pa
 		if pageKey == crawler.WholeSitePageKey(startURL) && frontierPage.LinkOffset == 0 {
 			pageHTML = importRequest.HTML
 		}
+		if pageHTML == "" && importRequest.ReuseExistingResources && frontierPage.LinkOffset == 0 {
+			// A free preview can stop midway through asset discovery. Its saved page
+			// still contains the remaining source references for paid continuation.
+			savedPage, savedErr := a.findPage(spider.context(), importRequest.Domain, cleanPath(frontierPage.LocalPath))
+			if savedErr == nil {
+				pageHTML = savedPage.HTML
+			} else if !errors.Is(savedErr, sql.ErrNoRows) {
+				return spider, importedPages, completedPageKeys, savedErr
+			}
+		}
 		if strings.TrimSpace(pageHTML) == "" {
 			downloadedHTML, downloaded, downloadErr := spider.downloadWholeSitePageHTMLWithRetries(pageClient, currentURL, importRequest.SourceOptions, grabImportFailedResourceRetryAttempts)
 			if downloadErr != nil || !downloaded {
@@ -25832,7 +25863,12 @@ func (a *App) loadExistingImportedResources(ctx context.Context, domain string, 
 		if statErr != nil || !fileInfo.Mode().IsRegular() {
 			continue
 		}
-		spider.resources[sourceURL] = &mirroredResource{url: sourceURL, resolvedURL: sourceURL, assetPath: "/p/" + fileName, contentType: mime.TypeByExtension(path.Ext(fileName)), persist: true}
+		assetReference := "/p/" + fileName
+		spider.resources[sourceURL] = &mirroredResource{url: sourceURL, resolvedURL: sourceURL, assetPath: assetReference, contentType: mime.TypeByExtension(path.Ext(fileName)), persist: true}
+		if spider.existingAssetPaths == nil {
+			spider.existingAssetPaths = make(map[string]struct{})
+		}
+		spider.existingAssetPaths[assetReference] = struct{}{}
 	}
 	return rows.Err()
 }
@@ -26257,6 +26293,7 @@ func crawlWholeRemoteSite(ctx context.Context, startURL *url.URL, startHTML, pub
 			spider.resources[currentJob.URL.String()] = rootResource
 			spider.collectPreviewNestedResources(rootResource, 0, "text/html")
 			if spider.previewLimitReached {
+				spider.previewUnfinishedPageURLs = append(spider.previewUnfinishedPageURLs, currentJob.URL.String())
 				partial = true
 				stopDispatch = true
 				pageQueue = nil
@@ -43831,7 +43868,14 @@ func (a *App) serveManagedPageContent(w http.ResponseWriter, r *http.Request, do
 }
 
 func (a *App) renderMissingPage(w http.ResponseWriter, r *http.Request, pagePath string, isAdmin bool) {
+	if !isAdmin && a.publicRequestDecision(r).Stealth {
+		http.NotFound(w, r)
+		return
+	}
 	pageData := missingPageTemplateData(pagePath, isAdmin)
+	if a.publicBoundary {
+		pageData["Domain"] = domainFromRequest(r)
+	}
 	if isAdmin {
 		domain := a.siteDomain(r.Context(), r)
 		translations := translationsForRequest(r)
@@ -43868,8 +43912,10 @@ func (a *App) renderMissingPage(w http.ResponseWriter, r *http.Request, pagePath
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.WriteHeader(http.StatusNotFound)
 	a.render(w, r, "missing.html", pageData)
-	if overlay := a.trialRegistrationOverlayHTML(r, a.siteDomain(r.Context(), r)); overlay != "" {
-		_, _ = io.WriteString(w, overlay)
+	if !a.publicBoundary && a.db != nil {
+		if overlay := a.trialRegistrationOverlayHTML(r, a.siteDomain(r.Context(), r)); overlay != "" {
+			_, _ = io.WriteString(w, overlay)
+		}
 	}
 }
 
@@ -46215,38 +46261,40 @@ type mirroredResource struct {
 }
 
 type pageSpider struct {
-	domain                 string
-	pageURL                *url.URL
-	maxDepth               int
-	client                 *http.Client
-	ctx                    context.Context
-	sourceOptions          grabSourceOptions
-	resources              map[string]*mirroredResource
-	pageResourceReferences map[string]map[string]bool
-	resourceReferences     map[string]map[string]bool
-	publicResourcePaths    map[string]string
-	serviceManifestPath    string
-	currentPagePath        string
-	currentResourceURL     string
-	inFlight               map[string]bool
-	selectedResourceURLs   map[string]struct{}
-	externalResourcesOnly  bool
-	publicAssetBasePath    string
-	documentURLRewriter    func(string) (string, bool)
-	tracker                *grabProgressTracker
-	progressToken          string
-	foundTotal             int
-	downloadedTotal        int
-	downloadTotal          int
-	downloadTotalBytes     int64
-	downloadedBytesByURL   map[string]int64
-	failedTotal            int
-	failedResourceURLs     map[string]struct{}
-	failedResourceErrors   map[string]string
-	retryableResources     map[string]struct{}
-	previewByteLimit       int64
-	previewBytes           int64
-	previewLimitReached    bool
+	domain                    string
+	pageURL                   *url.URL
+	maxDepth                  int
+	client                    *http.Client
+	ctx                       context.Context
+	sourceOptions             grabSourceOptions
+	resources                 map[string]*mirroredResource
+	pageResourceReferences    map[string]map[string]bool
+	resourceReferences        map[string]map[string]bool
+	publicResourcePaths       map[string]string
+	serviceManifestPath       string
+	currentPagePath           string
+	currentResourceURL        string
+	inFlight                  map[string]bool
+	selectedResourceURLs      map[string]struct{}
+	existingAssetPaths        map[string]struct{}
+	externalResourcesOnly     bool
+	publicAssetBasePath       string
+	documentURLRewriter       func(string) (string, bool)
+	tracker                   *grabProgressTracker
+	progressToken             string
+	foundTotal                int
+	downloadedTotal           int
+	downloadTotal             int
+	downloadTotalBytes        int64
+	downloadedBytesByURL      map[string]int64
+	failedTotal               int
+	failedResourceURLs        map[string]struct{}
+	failedResourceErrors      map[string]string
+	retryableResources        map[string]struct{}
+	previewByteLimit          int64
+	previewBytes              int64
+	previewLimitReached       bool
+	previewUnfinishedPageURLs []string
 }
 
 func (spider *pageSpider) recordPreviewBytes(sizeBytes int64) bool {
@@ -46927,6 +46975,9 @@ func (spider *pageSpider) previewGrabberParser() crawler.Parser {
 }
 
 func (spider *pageSpider) rewriteOpenGraphReference(propertyName, rawRef string, baseURL *url.URL, depth int) string {
+	if strings.EqualFold(strings.TrimSpace(propertyName), "og:image") && spider.existingSavedAssetReference(rawRef) {
+		return rawRef
+	}
 	normalizedURL, blocked := spider.normalizeURLForContext(rawRef, baseURL, grabReferenceDocument)
 	if blocked || normalizedURL == "" {
 		return rawRef
@@ -47098,6 +47149,9 @@ func (spider *pageSpider) isResultHostResourceURL(rawURL string) bool {
 }
 
 func (spider *pageSpider) rewriteDocumentResourceReference(rawRef string, baseURL *url.URL, depth int) string {
+	if spider.existingSavedAssetReference(rawRef) {
+		return rawRef
+	}
 	normalizedURL, blocked := spider.normalizeURL(rawRef, baseURL)
 	if blocked || normalizedURL == "" {
 		return rawRef
@@ -47175,6 +47229,9 @@ func (spider *pageSpider) normalizeURLForContext(rawRef string, baseURL *url.URL
 }
 
 func (spider *pageSpider) rewriteResourceReferenceForContext(rawRef string, baseURL *url.URL, depth int, referenceContext grabReferenceContext) string {
+	if spider.existingSavedAssetReference(rawRef) {
+		return rawRef
+	}
 	normalizedURL, blocked := spider.normalizeURLForContext(rawRef, baseURL, referenceContext)
 	if blocked || normalizedURL == "" {
 		return rawRef
@@ -47193,6 +47250,21 @@ func (spider *pageSpider) rewriteResourceReferenceForContext(rawRef string, base
 		return normalizedURL
 	}
 	return crawler.NormalizeMirroredAssetReference(dependency.assetPath)
+}
+
+func (spider *pageSpider) existingSavedAssetReference(rawRef string) bool {
+	if len(spider.existingAssetPaths) == 0 {
+		return false
+	}
+	parsedReference, err := url.Parse(strings.TrimSpace(rawRef))
+	if err != nil || parsedReference.Path == "" {
+		return false
+	}
+	if parsedReference.Host != "" && normalizeDomainName(parsedReference.Hostname()) != normalizeDomainName(spider.domain) {
+		return false
+	}
+	_, found := spider.existingAssetPaths[parsedReference.Path]
+	return found
 }
 
 func (spider *pageSpider) importedServiceReference(normalizedURL string) (string, bool) {
@@ -56977,6 +57049,11 @@ func publicOrdinaryRequest(r *http.Request) bool {
 	}
 	return true
 }
+
+func publicMissingPageRequest(r *http.Request, pagePath string) bool {
+	return publicOrdinaryRequest(r) && !strings.HasPrefix(pagePath, "/p/") && pageContentKind(pagePath, "") == "html"
+}
+
 func sitebrushControlQueryFlag(flag string) bool {
 	for _, selector := range []string{"ai", "ai_token", "ai_session", "ai_authorize", "mcp", "oauth", "login", "logout", "register", "recover", "profile", "email_confirm", "server_update", "server_update_ws", "visual", "edit", "text", "save", "files", "backup", "backup_import", "analytics", "expenses", "hosting_and_support", "billing", "service_mail_relay", "settings", "domain", "freeze", "unfreeze", "unfreeze_ws", "publish", "delete", "revisions", "revision_preview", "revision_restore", "revision_delete", "revision_toggle", "page_password", "page_password_unlock", "captcha", "grab", "grab_ws", "grab_events", "copy", "site_copy", "publish_events", "security_incident_report", "mail_delivery_ws", "indexing_review"} {
 		if flag == selector {
@@ -57182,6 +57259,10 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 	// published file exists. Ordinary missing pages never enter that adapter.
 	if hasSitebrushSessionCookie(r) || r.URL.RawQuery == "" && (pagePath == "/robots.txt" || pagePath == "/sitemap.xml") {
 		return false
+	}
+	if publicMissingPageRequest(r, pagePath) && !decision.Stealth && !paused {
+		a.renderMissingPage(w, r, pagePath, false)
+		return true
 	}
 	http.NotFound(w, r)
 	return true

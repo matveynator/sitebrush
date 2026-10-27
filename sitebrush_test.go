@@ -11460,6 +11460,107 @@ func TestPublicTrialPaidImportResumesWithoutDownloadingPublishedPage(t *testing.
 	}
 }
 
+func TestPublicTrialPaidContinuationDiscoversAssetsAfterFreeLimit(t *testing.T) {
+	application, database := newTestApplication(t)
+	domain := "trial.example.com"
+	sourceURL := "https://source.example/"
+	firstImageURL := "https://source.example/first.png"
+	quotaImageURL := "https://source.example/quota.png"
+	laterImageURL := "https://source.example/later.png"
+	pageHTML := `<html><body><img src="/first.png"><img src="/quota.png"><img src="/later.png"></body></html>`
+	parsedSourceURL, err := url.Parse(sourceURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if request.URL.String() != firstImageURL && request.URL.String() != quotaImageURL {
+				t.Errorf("preview inspected an asset after the free limit: %s", request.URL)
+			}
+			header := make(http.Header)
+			header.Set("Content-Type", "image/png")
+			contentLength := int64(5)
+			if request.URL.String() == quotaImageURL {
+				contentLength = 1024
+			}
+			return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: header, Body: io.NopCloser(strings.NewReader("")), ContentLength: contentLength, Request: request}, nil
+		})}
+	}
+	t.Cleanup(func() { newGrabHTTPClient = previousGrabHTTPClient })
+	previewResult := previewWholeRemoteSiteResourcesWithLimit(context.Background(), parsedSourceURL, pageHTML, "/", nil, "", grabSourceOptions{}, 4*int64(len(pageHTML))+100)
+	if !previewResult.LimitReached || len(previewResult.Spider.previewUnfinishedPageURLs) != 1 || previewResult.Spider.previewUnfinishedPageURLs[0] != sourceURL {
+		t.Fatalf("preview did not preserve unfinished asset discovery: %+v", previewResult.Spider.previewUnfinishedPageURLs)
+	}
+	for _, resource := range previewResult.Resources {
+		if resource.URL == laterImageURL {
+			t.Fatal("later image unexpectedly entered the limited preview")
+		}
+	}
+	if err := application.initializeRegistrationQuota(context.Background(), domain, 2<<30); err != nil {
+		t.Fatal(err)
+	}
+	filesDir := application.domainFilesDirForDomain(domain)
+	if err := application.mkdirAllInsideStorage(filesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.writeFileInsideStorage(filepath.Join(filesDir, "first.png"), []byte("image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO resource_origins(domain,file_name,original_uri,resolved_uri) VALUES(?,?,?,?)`, domain, "first.png", firstImageURL, firstImageURL); err != nil {
+		t.Fatal(err)
+	}
+	savedHTML := `<html><body><img src="/p/first.png"><img src="` + quotaImageURL + `"><img src="` + laterImageURL + `"></body></html>`
+	if _, err := database.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, "/", "/", savedHTML); err != nil {
+		t.Fatal(err)
+	}
+	preview := publicTrialPreview{
+		SourceURL:          sourceURL,
+		ImportedPages:      previewResult.ImportedPages,
+		UnfinishedPageURLs: previewResult.Spider.previewUnfinishedPageURLs,
+		FreeLimitReached:   true,
+	}
+	if err := application.seedPublicTrialImportFrontier(context.Background(), domain, preview); err != nil {
+		t.Fatal(err)
+	}
+	run, err := crawler.FindActiveImportFrontier(context.Background(), database, domain, "/", sourceURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var frontierState string
+	if err := database.QueryRow(`SELECT state FROM whole_site_import_pages WHERE import_id=? AND page_key=?`, run.ID, crawler.WholeSitePageKey(parsedSourceURL)).Scan(&frontierState); err != nil || frontierState != "pending" {
+		t.Fatalf("unfinished page state = %q, error = %v", frontierState, err)
+	}
+	requestedURLs := make(chan string, 128)
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			requestedURLs <- request.URL.String()
+			if request.URL.String() == sourceURL || strings.HasSuffix(request.URL.Path, "/p/first.png") {
+				return fakeGrabResponse{statusCode: http.StatusInternalServerError, body: "page must be reused"}.httpResponse(request), nil
+			}
+			return fakeGrabResponse{contentType: "image/png", body: "image"}.httpResponse(request), nil
+		})}
+	}
+	result, err := application.importWholeRemoteSite(context.Background(), grabImportRequest{
+		Domain: domain, PagePath: "/", SourceURL: sourceURL, RemoteSourceURL: parsedSourceURL,
+		ImportID: run.ID, ReuseExistingResources: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestCounts := make(map[string]int)
+	for len(requestedURLs) > 0 {
+		requestCounts[<-requestedURLs]++
+	}
+	if result.RemainingPages != 0 || requestCounts[sourceURL] != 0 || requestCounts["https://source.example/p/first.png"] != 0 || requestCounts[quotaImageURL] == 0 || requestCounts[laterImageURL] == 0 {
+		t.Fatalf("paid continuation missed later asset: result=%+v requests=%v", result, requestCounts)
+	}
+	var importedAssets int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM resource_origins WHERE domain=? AND original_uri=?`, domain, laterImageURL).Scan(&importedAssets); err != nil || importedAssets != 1 {
+		t.Fatalf("later image was not saved: count=%d error=%v", importedAssets, err)
+	}
+}
+
 func TestImportedSourcePolicyCannotBlockAdministratorOverlay(t *testing.T) {
 	source := `<html><head><meta http-equiv="Content-Security-Policy" content="script-src 'none'; frame-src 'none'"><title>Shop</title></head><body>Shop</body></html>`
 	cleaned := removeImportedContentSecurityPolicyMeta(source)
@@ -11486,9 +11587,35 @@ func TestPublicTrialFormUsesUnifiedCopyDialog(t *testing.T) {
 		"startRequestOnce()",
 		"const singlePageRequired = Boolean(previewPayload.single_page_required)",
 		"wholeSiteElement.checked = false",
+		"registrationURL.protocol = 'http:'",
 	} {
 		if !strings.Contains(script, expectedFragment) {
 			t.Fatalf("unified public trial script does not contain %q", expectedFragment)
+		}
+	}
+}
+
+func TestPublicTrialSuggestAcceptsImporterSourceAddresses(t *testing.T) {
+	application := newRouterTestApplication(t)
+	control := setupBillingOwnerForTest(t, application, "owner.example", "owner@example.com", true)
+	defer control.Close()
+	if err := (hostingandsupport.Store{DB: control}).SaveRegistrationSettings(context.Background(), true, true); err != nil {
+		t.Fatal(err)
+	}
+	availabilityRequests := make(chan publicTrialAvailabilityRequest)
+	application.publicTrialAvailability = availabilityRequests
+	go func() {
+		for request := range availabilityRequests {
+			request.reply <- publicTrialAvailability{Enabled: true}
+		}
+	}()
+	t.Cleanup(func() { close(availabilityRequests) })
+	for _, sourceAddress := range []string{"example.com", "//example.com"} {
+		request := httptest.NewRequest(http.MethodGet, "http://owner.example/?trial_site_suggest&source_url="+url.QueryEscape(sourceAddress), nil)
+		response := httptest.NewRecorder()
+		application.publicTrialSiteSuggest(response, request)
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"domain":"example.owner.example"`) {
+			t.Fatalf("suggestion for %q: status=%d body=%s", sourceAddress, response.Code, response.Body.String())
 		}
 	}
 }
@@ -15719,12 +15846,14 @@ func TestMissingPageReturns404ForGuest(t *testing.T) {
 	for _, expectedFragment := range []string{
 		`class="missing-page-primary-card"`,
 		`/missing`,
+		`href="/missing?visual"`,
+		`Создать страницу`,
 	} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("missing page did not include %q in %s", expectedFragment, body)
 		}
 	}
-	if strings.Contains(body, `href="/missing?visual"`) || strings.Contains(body, `id="missing-import-page"`) || strings.Contains(body, `revision_restore`) {
+	if strings.Contains(body, `id="missing-import-page"`) || strings.Contains(body, `revision_restore`) {
 		t.Fatalf("guest missing page exposed administrator actions: %s", body)
 	}
 	if strings.Contains(body, "sitebrush / /missing") {
@@ -15810,9 +15939,23 @@ func TestPublishedBoundaryKeepsAdminMissingPageRecovery(t *testing.T) {
 	}
 	handler := application.siteHTTPHandler(http.HandlerFunc(application.route))
 	guestResponse := httptest.NewRecorder()
-	handler.ServeHTTP(guestResponse, httptest.NewRequest(http.MethodGet, "http://localhost:8080/removed", nil))
-	if guestResponse.Code != http.StatusNotFound || strings.Contains(guestResponse.Body.String(), "revision_restore") {
+	guestRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/removed", nil)
+	guestRequest.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	handler.ServeHTTP(guestResponse, guestRequest)
+	if guestResponse.Code != http.StatusNotFound || !strings.Contains(guestResponse.Body.String(), `href="/removed?visual"`) || !strings.Contains(guestResponse.Body.String(), "Create page") || strings.Contains(guestResponse.Body.String(), "revision_restore") {
 		t.Fatalf("guest 404 disclosed recovery: %d %s", guestResponse.Code, guestResponse.Body.String())
+	}
+	unknownResponse := httptest.NewRecorder()
+	handler.ServeHTTP(unknownResponse, httptest.NewRequest(http.MethodGet, "http://new.example.com/new-page", nil))
+	if unknownResponse.Code != http.StatusNotFound || !strings.Contains(unknownResponse.Body.String(), `href="/new-page?visual"`) {
+		t.Fatalf("unknown domain 404 lost creation link: %d %s", unknownResponse.Code, unknownResponse.Body.String())
+	}
+	localForwardedRequest := httptest.NewRequest(http.MethodGet, "http://new.example.com/", nil)
+	localForwardedRequest.RemoteAddr = "127.0.0.1:12345"
+	localForwardedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(localForwardedResponse, localForwardedRequest)
+	if localForwardedResponse.Code != http.StatusNotFound || !strings.Contains(localForwardedResponse.Body.String(), `href="/?visual"`) {
+		t.Fatalf("new domain root from local front lost 404: %d %s", localForwardedResponse.Code, localForwardedResponse.Body.String())
 	}
 	adminRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/removed", nil)
 	adminRequest.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
@@ -15820,6 +15963,34 @@ func TestPublishedBoundaryKeepsAdminMissingPageRecovery(t *testing.T) {
 	handler.ServeHTTP(adminResponse, adminRequest)
 	if adminResponse.Code != http.StatusNotFound || !strings.Contains(adminResponse.Body.String(), `action="/removed?revision_restore"`) {
 		t.Fatalf("admin 404 lost recovery: %d %s", adminResponse.Code, adminResponse.Body.String())
+	}
+}
+
+func TestPublicMissingPageHidesSiteBrushInStealthMode(t *testing.T) {
+	application, _ := newTestApplication(t)
+	request := httptest.NewRequest(http.MethodGet, "http://example.com/missing", nil)
+	request = withPublicRequestDecision(request, publicsite.Decision{Found: true, Domain: "example.com", Stealth: true})
+	response := httptest.NewRecorder()
+	if !application.servePublicPublished(response, request, false) {
+		t.Fatal("public missing page was not handled")
+	}
+	if response.Code != http.StatusNotFound || strings.Contains(response.Body.String(), "SiteBrush") || strings.Contains(response.Body.String(), `?visual`) {
+		t.Fatalf("stealth 404 exposed SiteBrush: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestPublicBoundaryRendersMissingPageWithoutDatabase(t *testing.T) {
+	application, _ := newTestApplication(t)
+	application.db = nil
+	application.publicBoundary = true
+	request := httptest.NewRequest(http.MethodGet, "http://example.com/missing", nil)
+	request = withPublicRequestDecision(request, publicsite.Decision{Found: true, Domain: "example.com"})
+	response := httptest.NewRecorder()
+	if !application.servePublicPublished(response, request, false) {
+		t.Fatal("public missing page was not handled")
+	}
+	if response.Code != http.StatusNotFound || !strings.Contains(response.Body.String(), `href="/missing?visual"`) {
+		t.Fatalf("public boundary 404: status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
@@ -22392,12 +22563,17 @@ func TestUnknownAndDeletedHostnamesOfferRegistrationOrRequest(t *testing.T) {
 				}
 				for _, path := range []string{"/", "/old", "/?login"} {
 					request := httptest.NewRequest(http.MethodGet, "https://"+domain+path, nil)
+					request.Header.Set("Accept-Language", "fr-FR,fr;q=0.9")
 					request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "stale-session"})
 					response := httptest.NewRecorder()
 					prepareAccountMailCaptchaForTest(t, application, request)
 					application.route(response, request)
-					if response.Code != http.StatusSeeOther || !strings.HasSuffix(response.Header().Get("Location"), "?register") {
-						t.Fatalf("status=%d location=%q body=%s", response.Code, response.Header().Get("Location"), response.Body.String())
+					if strings.Contains(path, "?") {
+						if response.Code != http.StatusSeeOther || !strings.HasSuffix(response.Header().Get("Location"), "?register") {
+							t.Fatalf("status=%d location=%q body=%s", response.Code, response.Header().Get("Location"), response.Body.String())
+						}
+					} else if response.Code != http.StatusNotFound || !strings.Contains(response.Body.String(), `class="missing-page-primary-card"`) || !strings.Contains(response.Body.String(), `href="`+path+`?visual"`) || !strings.Contains(response.Body.String(), "créer cette page") {
+						t.Fatalf("new domain missing page: status=%d body=%s", response.Code, response.Body.String())
 					}
 				}
 				request := httptest.NewRequest(http.MethodGet, "https://"+domain+"/?register", nil)

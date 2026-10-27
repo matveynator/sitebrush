@@ -1540,6 +1540,8 @@
           if (!check.available) throw new Error('This address is already taken. Choose another name.');
           const registrationURL = new URL('/', configuration.endpoint);
           registrationURL.hostname = check.domain;
+          // Registration begins before automatic TLS can issue this hostname's certificate.
+          registrationURL.protocol = 'http:';
           registrationURL.pathname = '/';
           registrationURL.search = '?register&site_workflow=new_site';
           registrationURL.hash = '';

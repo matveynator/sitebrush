@@ -1354,7 +1354,16 @@ func TestMailMonitoringMigrationPreservesExistingLedger(t *testing.T) {
 	defer database.Close()
 	ctx := context.Background()
 	currentSteps := hostingSchemaSteps(ctx, false)
-	legacySteps := currentSteps[:len(currentSteps)-len(mailmonitor.SchemaQueries())]
+	var legacySteps []migrations.Step
+	for _, step := range currentSteps {
+		if step.ID == "mail-monitor-001" {
+			break
+		}
+		legacySteps = append(legacySteps, step)
+	}
+	if len(legacySteps) == len(currentSteps) {
+		t.Fatal("mail journal migration boundary is missing")
+	}
 	if err := migrations.Run(database, "billing-schema-v27", legacySteps); err != nil {
 		t.Fatal(err)
 	}
