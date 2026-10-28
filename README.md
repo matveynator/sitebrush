@@ -78,6 +78,16 @@ The site owner can still edit the website directly in the browser.
 
 ---
 
+## Test Drive and subdomains
+
+The public Test Drive offers two actions: import an existing website or create a new site on a third-level subdomain of the server owner's domain. A new site is created only after its first administrator passes CAPTCHA and confirms an email address. The confirmation link signs the administrator in on the chosen subdomain.
+
+An import suggests a subdomain from the source URL. CAPTCHA is required before the anonymous crawl starts. The imported copy opens at that address with a SiteBrush registration dialog covering its HTML pages until an administrator confirms an email address. Anonymous copies expire after 24 hours; only a limited number can be active at once.
+
+The importer pauses at the free storage limit of 1 GiB. It shows the estimated total size and monthly price, then resumes from its saved pages and files after the administrator confirms the email and accepts paid storage. The final charge uses actual storage above the free limit, with the first invoice after one month. The default maximum Test Drive size is 10 GiB and can be changed with the hosting setting `public_trial_max_site_bytes`. The storage price comes from the local server cost policy or the hosting default.
+
+---
+
 ## Before and after
 
 ### Before

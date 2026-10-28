@@ -26,12 +26,12 @@
       <h2 id="missing-page-primary-title">{{index .T "missing_title"}}</h2>
       <p>{{index .T "missing_page_not_found_prefix"}} <strong>{{.Path}}</strong> {{index .T "missing_page_not_found_suffix"}}</p>
     </div>
-    {{if .IsAdmin}}
     <div class="d-flex flex-wrap gap-2">
       <a class="btn btn-primary btn-lg missing-page-create-button" href="{{.EditLink}}"><span aria-hidden="true">＋</span>{{index .T "missing_create_page"}}</a>
+      {{if .IsAdmin}}
       <button class="btn btn-outline-primary btn-lg" id="missing-import-page" type="button">{{.ImportPageLabel}}</button>
+      {{end}}
     </div>
-    {{end}}
   </section>
 
   {{if .IsAdmin}}

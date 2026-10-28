@@ -148,7 +148,7 @@ func TestBuildSitesIncludesAssignedPlanQuotaLabels(t *testing.T) {
 	}
 }
 
-func TestBillingPriceForUsedBytesRoundsToFiftyMegabytes(t *testing.T) {
+func TestBillingPriceForUsedBytesChargesOnlyUsageAboveFreeLimit(t *testing.T) {
 	const megabyte = int64(1000 * 1000)
 	tests := []struct {
 		name              string
@@ -166,30 +166,39 @@ func TestBillingPriceForUsedBytesRoundsToFiftyMegabytes(t *testing.T) {
 			wantBillableMB:    0,
 			wantAmount:        "0.00",
 			wantBillable:      false,
-			wantStatus:        "бесплатно до 500 MB",
+			wantStatus:        "бесплатно до 1 GiB",
 		},
 		{
 			name:              "included five hundred megabytes is displayed but free",
 			usedBytes:         500 * megabyte,
 			wantUsedMegabytes: 500,
-			wantBillableMB:    500,
-			wantAmount:        "1.00",
+			wantBillableMB:    0,
+			wantAmount:        "0.00",
 			wantBillable:      false,
-			wantStatus:        "бесплатно до 500 MB",
+			wantStatus:        "бесплатно до 1 GiB",
 		},
 		{
-			name:              "next megabyte is rounded up to next fifty megabytes",
-			usedBytes:         501 * megabyte,
-			wantUsedMegabytes: 501,
-			wantBillableMB:    550,
-			wantAmount:        "1.10",
+			name:              "one gibibyte remains free",
+			usedBytes:         BillingFreeBytes,
+			wantUsedMegabytes: 1074,
+			wantBillableMB:    0,
+			wantAmount:        "0.00",
+			wantBillable:      false,
+			wantStatus:        "бесплатно до 1 GiB",
+		},
+		{
+			name:              "one megabyte beyond the free allowance is billable",
+			usedBytes:         BillingFreeBytes + megabyte,
+			wantUsedMegabytes: 1075,
+			wantBillableMB:    1,
+			wantAmount:        "0.01",
 			wantBillable:      true,
 			wantStatus:        "к выставлению",
 		},
 		{
-			name:              "one thousand megabytes costs two euros",
-			usedBytes:         1000 * megabyte,
-			wantUsedMegabytes: 1000,
+			name:              "one billable gigabyte costs two euros",
+			usedBytes:         BillingFreeBytes + 1000*megabyte,
+			wantUsedMegabytes: 2074,
 			wantBillableMB:    1000,
 			wantAmount:        "2.00",
 			wantBillable:      true,
@@ -1035,7 +1044,7 @@ func TestPublicTrialSitesUseCreationDeadlineAndBackfillLegacyAssignments(t *test
 	}
 	for _, site := range sites {
 		deleteAfter, parseErr := time.Parse(time.RFC3339, site.DeleteAfter)
-		if parseErr != nil || !deleteAfter.Equal(createdAt.Add(30*time.Minute)) {
+		if parseErr != nil || !deleteAfter.Equal(createdAt.Add(PublicTrialLifetime)) {
 			t.Fatalf("delete after for %s = %q, err=%v", site.Domain, site.DeleteAfter, parseErr)
 		}
 		if site.Domain == "legacy.example" && site.SourceURL != "" {
@@ -1345,7 +1354,16 @@ func TestMailMonitoringMigrationPreservesExistingLedger(t *testing.T) {
 	defer database.Close()
 	ctx := context.Background()
 	currentSteps := hostingSchemaSteps(ctx, false)
-	legacySteps := currentSteps[:len(currentSteps)-len(mailmonitor.SchemaQueries())]
+	var legacySteps []migrations.Step
+	for _, step := range currentSteps {
+		if step.ID == "mail-monitor-001" {
+			break
+		}
+		legacySteps = append(legacySteps, step)
+	}
+	if len(legacySteps) == len(currentSteps) {
+		t.Fatal("mail journal migration boundary is missing")
+	}
 	if err := migrations.Run(database, "billing-schema-v27", legacySteps); err != nil {
 		t.Fatal(err)
 	}

@@ -19,7 +19,7 @@ func testDatabase(t *testing.T) *sql.DB {
 	}
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { db.Close() })
-	for _, query := range []string{Schema, `CREATE TABLE registration_confirmations(token TEXT PRIMARY KEY,domain TEXT,expires_at TEXT)`, `CREATE TABLE public_trial_sites(domain TEXT,status TEXT,delete_after TEXT)`} {
+	for _, query := range []string{Schema, `CREATE TABLE registration_confirmations(token TEXT PRIMARY KEY,domain TEXT,expires_at TEXT,workflow TEXT NOT NULL DEFAULT '')`, `CREATE TABLE public_trial_sites(domain TEXT,status TEXT,delete_after TEXT)`} {
 		if _, err := db.Exec(query); err != nil {
 			t.Fatal(err)
 		}
@@ -65,7 +65,9 @@ func TestConcurrentClaimsHaveOneOwner(t *testing.T) {
 func TestPendingEmailAndFinishedTrialReservations(t *testing.T) {
 	db := testDatabase(t)
 	ctx := context.Background()
-	db.Exec(`INSERT INTO registration_confirmations VALUES('mail','ero.sitebrush.ru',?)`, time.Now().Add(time.Minute).UTC().Format(time.RFC3339))
+	if _, err := db.Exec(`INSERT INTO registration_confirmations(token,domain,expires_at) VALUES('mail','ero.sitebrush.ru',?)`, time.Now().Add(time.Minute).UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := Claim(ctx, db, "ero.sitebrush.ru", "trial", "", "trial"); !errors.Is(err, ErrTaken) {
 		t.Fatalf("pending email not reserved: %v", err)
 	}
@@ -87,6 +89,17 @@ func TestPendingEmailAndFinishedTrialReservations(t *testing.T) {
 	db.Exec(`INSERT INTO public_trial_sites VALUES('other.sitebrush.ru','active',?)`, time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
 	if _, err := Claim(ctx, db, "other.sitebrush.ru", "mail", "owner@example.org", "registration"); err != nil {
 		t.Fatalf("finished trial cannot register: %v", err)
+	}
+}
+
+func TestUnconfirmedNewSiteEmailDoesNotOwnSubdomain(t *testing.T) {
+	db := testDatabase(t)
+	ctx := context.Background()
+	if _, err := db.Exec(`INSERT INTO registration_confirmations(token,domain,expires_at,workflow) VALUES(?,?,?,?)`, "mail", "ero.sitebrush.ru", time.Now().Add(time.Hour).UTC().Format(time.RFC3339), "new_site"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Claim(ctx, db, "ero.sitebrush.ru", "trial", "", "trial"); err != nil {
+		t.Fatalf("unconfirmed email blocked a trial: %v", err)
 	}
 }
 

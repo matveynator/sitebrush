@@ -9,6 +9,7 @@ import (
 )
 
 const DefaultCreationLimitBytes int64 = 1024 * 1024 * 1024
+const DefaultTestDriveLimitBytes int64 = 10 * 1024 * 1024 * 1024
 
 type SiteSizeLimits struct {
 	Registration int64
@@ -18,8 +19,16 @@ type SiteSizeLimits struct {
 func (store Store) SiteSizeLimits(ctx context.Context) SiteSizeLimits {
 	return SiteSizeLimits{
 		Registration: positiveSizeSetting(SettingText(ctx, store.DB, "registration_max_site_bytes")),
-		TestDrive:    positiveSizeSetting(SettingText(ctx, store.DB, "public_trial_max_site_bytes")),
+		TestDrive:    testDriveSizeSetting(SettingText(ctx, store.DB, "public_trial_max_site_bytes")),
 	}
+}
+
+func testDriveSizeSetting(setting string) int64 {
+	bytes, err := strconv.ParseInt(setting, 10, 64)
+	if err != nil || bytes <= 0 {
+		return DefaultTestDriveLimitBytes
+	}
+	return bytes
 }
 
 func positiveSizeSetting(setting string) int64 {

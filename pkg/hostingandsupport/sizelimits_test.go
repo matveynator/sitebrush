@@ -31,7 +31,7 @@ func TestCreationSizeLimitsPersistAndPolicyRollsBackTogether(t *testing.T) {
 	if err := store.SetOwner(ctx, "owner.example", "owner@example.com"); err != nil {
 		t.Fatal(err)
 	}
-	defaults := SiteSizeLimits{Registration: DefaultCreationLimitBytes, TestDrive: DefaultCreationLimitBytes}
+	defaults := SiteSizeLimits{Registration: DefaultCreationLimitBytes, TestDrive: DefaultTestDriveLimitBytes}
 	if store.SiteSizeLimits(ctx) != defaults {
 		t.Fatal("creation defaults are not 1 GB")
 	}

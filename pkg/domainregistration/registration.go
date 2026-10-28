@@ -57,7 +57,7 @@ func Claim(ctx context.Context, db *sql.DB, domain, token, email, kind string) (
 	}
 	if kind == "trial" {
 		var count int
-		if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM registration_confirmations WHERE domain=? AND expires_at>?`, domain, now.Format(time.RFC3339)).Scan(&count); err != nil {
+		if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM registration_confirmations WHERE domain=? AND COALESCE(workflow,'')<>'new_site' AND expires_at>?`, domain, now.Format(time.RFC3339)).Scan(&count); err != nil {
 			return false, err
 		}
 		if count > 0 {

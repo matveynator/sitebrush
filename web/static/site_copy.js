@@ -84,7 +84,9 @@
   }
 
   function randomProgressToken() {
-    return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+    const randomBytes = new Uint8Array(16);
+    window.crypto.getRandomValues(randomBytes);
+    return Array.from(randomBytes, function hexByte(byte) { return byte.toString(16).padStart(2, '0'); }).join('');
   }
 
   function configuredEndpoint(configuration, queryName, extraParameters) {
@@ -467,6 +469,9 @@
     }
     if (publicTrialMode) {
       appendHiddenField(formElement, 'unified_copy', '1');
+      if (configuration.trialDomain) {
+        appendHiddenField(formElement, 'requested_domain', configuration.trialDomain);
+      }
     }
     const tokenFieldElement = document.createElement('input');
     tokenFieldElement.type = 'hidden';
@@ -566,6 +571,26 @@
     formElement.appendChild(wholeSiteLabelElement);
     formElement.appendChild(automaticTemplateDisabledFieldElement);
     formElement.appendChild(automaticTemplateOptionElement);
+    let captchaImageElement = null;
+    let captchaAnswerElement = null;
+    let captchaTokenElement = null;
+    if (publicTrialMode) {
+      const captchaFieldElement = createElement('label', 'SiteBrushCopySiteField');
+      captchaFieldElement.appendChild(createElement('span', '', 'Enter the code from the image'));
+      captchaImageElement = document.createElement('img');
+      captchaImageElement.alt = 'CAPTCHA code';
+      captchaFieldElement.appendChild(captchaImageElement);
+      captchaAnswerElement = createElement('input', 'SiteBrushCopySiteInput');
+      captchaAnswerElement.name = 'captcha';
+      captchaAnswerElement.required = true;
+      captchaAnswerElement.autocomplete = 'off';
+      captchaFieldElement.appendChild(captchaAnswerElement);
+      captchaTokenElement = document.createElement('input');
+      captchaTokenElement.type = 'hidden';
+      captchaTokenElement.name = 'captcha_id';
+      captchaFieldElement.appendChild(captchaTokenElement);
+      formElement.appendChild(captchaFieldElement);
+    }
     dialogElement.appendChild(headerElement);
     dialogElement.appendChild(formElement);
     dialogElement.appendChild(statusElement);
@@ -600,6 +625,25 @@
     let downloadCancelRequested = false;
     let activeDownloadController = null;
     let modalClosed = false;
+
+    function refreshPublicTrialCaptcha() {
+      if (!captchaImageElement) return;
+      captchaAnswerElement.value = '';
+      captchaTokenElement.value = '';
+      fetch(configuredEndpoint(configuration, 'trial_site_captcha'), {headers: {Accept: 'application/json'}})
+        .then(function readCaptcha(response) {
+          if (!response.ok) throw new Error('CAPTCHA is temporarily unavailable');
+          return response.json();
+        })
+        .then(function displayCaptcha(challenge) {
+          captchaImageElement.src = challenge.image;
+          captchaTokenElement.value = challenge.captcha_id;
+        })
+        .catch(function reportCaptchaError(error) {
+          setCopySiteStatus(statusElement, error.message, 'error');
+        });
+    }
+    refreshPublicTrialCaptcha();
 
     function offerIndexingDecision(downloadPayload) {
       const reviewID = String(downloadPayload.indexing_review_id || '').trim();
@@ -1048,25 +1092,29 @@
       const pageCount = wholeSiteElement.checked ? Math.max(1, Number(previewPayload.page_count) || 1) : 0;
       const targetCount = pageCount + resourceCount;
       const singlePageRequired = Boolean(previewPayload.single_page_required);
+      const requiresVerification = Boolean(previewPayload.requires_verification);
+      const hostingTooLarge = Number(previewPayload.hosting_maximum_bytes) > 0 && Number(previewPayload.estimated_total_bytes) > Number(previewPayload.hosting_maximum_bytes);
       formElement.classList.add('SiteBrushCopySiteHidden');
       dialogElement.scrollTop = 0;
-      setCopySiteStatus(statusElement, singlePageRequired
-        ? (previewPayload.message || textFromConfig(configuration, 'singlePageRequired', 'The website is larger than the free test-drive limit. Stop scanning and copy only its first page.'))
-        : textFromConfig(configuration, 'confirmDownloadTextPrefix', 'Ready to download') + ' ' + targetCount + '.', singlePageRequired ? 'warning' : 'success');
+      setCopySiteStatus(statusElement, singlePageRequired || requiresVerification || hostingTooLarge
+        ? (previewPayload.message || textFromConfig(configuration, 'singlePageRequired', 'The website is larger than the free test-drive limit.'))
+        : textFromConfig(configuration, 'confirmDownloadTextPrefix', 'Ready to download') + ' ' + targetCount + '.', singlePageRequired || requiresVerification || hostingTooLarge ? 'warning' : 'success');
       urlElement.textContent = previewPayload.source_url || sourceUrlElement.value;
       setFinishImportButtonMode(false);
       closeButtonElement.classList.remove('SiteBrushCopySiteHidden');
       setContinueButtonPrimaryAction(true);
       continueButtonElement.textContent = singlePageRequired
         ? textFromConfig(configuration, 'copyFirstPage', 'Copy first page')
+        : requiresVerification ? (String(document.documentElement.lang || '').startsWith('ru') ? 'Открыть частично импортированный сайт' : 'Open partially imported site')
         : textFromConfig(configuration, 'continueButton', 'Continue');
       continueButtonElement.classList.remove('SiteBrushCopySiteHidden');
+      continueButtonElement.disabled = hostingTooLarge;
       progressElement.classList.add('SiteBrushCopySiteHidden');
       if (resourceCount > 0) {
         resourcesElement.classList.remove('SiteBrushCopySiteHidden');
         for (const previewResource of previewPayload.resources || []) {
           appendPreviewResource(resourcesElement, previewResource, configuration, function onResourceSelectionChange() {
-            if (!previewPayload.single_page_required) {
+            if (!previewPayload.single_page_required && !previewPayload.requires_verification && !hostingTooLarge) {
               renderQuotaSummary(quotaElement, resourcesElement, previewPayload, configuration, continueButtonElement);
             }
           });
@@ -1074,9 +1122,9 @@
       } else {
         resourcesElement.classList.add('SiteBrushCopySiteHidden');
       }
-      if (singlePageRequired) {
+      if (singlePageRequired || requiresVerification || hostingTooLarge) {
         quotaElement.classList.add('SiteBrushCopySiteHidden');
-        continueButtonElement.disabled = false;
+        continueButtonElement.disabled = hostingTooLarge;
       } else {
         renderQuotaSummary(quotaElement, resourcesElement, previewPayload, configuration, continueButtonElement);
       }
@@ -1095,9 +1143,16 @@
       continueButtonElement.classList.add('SiteBrushCopySiteHidden');
       setCopySiteStatus(statusElement, '', '');
       urlElement.textContent = '';
+      if (captchaImageElement) {
+        refreshPublicTrialCaptcha();
+      }
     }
 
     function requestPreview() {
+      if (captchaTokenElement && !captchaTokenElement.value) {
+        setCopySiteStatus(statusElement, 'CAPTCHA is still loading.', 'error');
+        return;
+      }
       if (!formElement.reportValidity()) {
         return;
       }
@@ -1156,6 +1211,9 @@
             activeGrabToken = '';
             submitButtonElement.disabled = false;
             closeProgressWebSocket();
+            if (captchaImageElement) {
+              refreshPublicTrialCaptcha();
+            }
             setCopySiteStatus(statusElement, previewError.message || textFromConfig(configuration, 'previewErrorDefault', 'Preview failed.'), 'error');
           });
       }, false);
@@ -1395,6 +1453,29 @@
     }
     const publicTrialConfiguration = configuration || {};
     formElement.dataset.sitebrushPublicTrialAttached = '1';
+    const sourceInputElement = formElement.querySelector('input[name="source_url"]');
+    const suggestedDomainElement = formElement.querySelector('[data-sitebrush-suggested-domain]');
+    function requestTrialDomain(sourceURL) {
+      const suggestionURL = new URL(publicTrialFetchURL(publicTrialConfiguration.endpoint || '/', 'trial_site_suggest'));
+      suggestionURL.searchParams.set('source_url', sourceURL);
+      return fetch(suggestionURL.toString(), {headers: {Accept: 'application/json'}})
+        .then(function readSuggestion(response) {
+          if (!response.ok) throw new Error('Subdomain suggestion is unavailable');
+          return response.json();
+        });
+    }
+    if (sourceInputElement && suggestedDomainElement) {
+      sourceInputElement.addEventListener('change', function suggestTrialDomain() {
+        suggestedDomainElement.textContent = '';
+        requestTrialDomain(sourceInputElement.value.trim())
+          .then(function displaySuggestion(suggestion) {
+            suggestedDomainElement.textContent = suggestion.domain ? 'Suggested address: ' + suggestion.domain : '';
+          })
+          .catch(function reportSuggestionError(error) {
+            console.error('SiteBrush Test Drive:', error);
+          });
+      });
+    }
     applyPublicTrialTextsToForm(formElement, publicTrialConfiguration);
     const textsReady = loadPublicTrialTexts(formElement, publicTrialConfiguration);
     formElement.addEventListener('submit', function onPublicTrialSubmit(submitEvent) {
@@ -1402,12 +1483,15 @@
       if (!formElement.reportValidity()) {
         return;
       }
-      textsReady.then(function openLocalizedPublicTrialModal() {
+      textsReady.then(function prepareTrialDomain() {
         const sourceURL = String(new FormData(formElement).get('source_url') || '');
+        return requestTrialDomain(sourceURL).then(function openLocalizedPublicTrialModal(suggestion) {
+          if (suggestedDomainElement) suggestedDomainElement.textContent = 'Suggested address: ' + suggestion.domain;
         const unifiedConfiguration = Object.assign({}, publicTrialConfiguration, {
           publicTrial: true,
-          copyWholeSite: false,
+          copyWholeSite: true,
           sourceURL: sourceURL,
+          trialDomain: suggestion.domain,
           path: '/',
           previewQuery: 'trial_site_preview',
           downloadQuery: 'trial_site_create',
@@ -1416,7 +1500,57 @@
           webSocketQuery: 'trial_site_ws'
         });
         openCopySiteModal(unifiedConfiguration);
+        });
+      }).catch(function reportTrialDomainError(error) {
+        if (suggestedDomainElement) suggestedDomainElement.textContent = error.message;
       });
+    });
+  }
+
+  function attachNewSiteForm(formElement, configuration) {
+    if (!formElement || formElement.dataset.sitebrushNewSiteAttached === '1') {
+      return;
+    }
+    formElement.dataset.sitebrushNewSiteAttached = '1';
+    formElement.addEventListener('submit', function onNewSiteSubmit(submitEvent) {
+      submitEvent.preventDefault();
+      if (!formElement.reportValidity()) {
+        return;
+      }
+      const subdomainInput = formElement.querySelector('input[name="subdomain"]');
+      const subdomainName = String(subdomainInput.value || '').toLowerCase().trim();
+      const parentDomain = String(configuration && configuration.parentDomain || '').toLowerCase().trim();
+      if (!/^[a-z0-9](?:[a-z0-9-]{0,22}[a-z0-9])?$/.test(subdomainName) || !parentDomain) {
+        subdomainInput.setCustomValidity('Enter a valid subdomain name.');
+        subdomainInput.reportValidity();
+        return;
+      }
+      subdomainInput.setCustomValidity('');
+      const checkURL = new URL(publicTrialFetchURL(configuration.endpoint || '/', 'trial_site_domain_check'));
+      checkURL.searchParams.set('subdomain', subdomainName);
+      const submitButton = formElement.querySelector('button[type="submit"]');
+      const statusElement = formElement.querySelector('[data-sitebrush-domain-status]');
+      submitButton.disabled = true;
+      fetch(checkURL.toString(), {headers: {Accept: 'application/json'}})
+        .then(function readDomainCheck(response) {
+          if (!response.ok) throw new Error('Could not check this address. Please try again.');
+          return response.json();
+        })
+        .then(function continueNewSiteRegistration(check) {
+          if (!check.available) throw new Error('This address is already taken. Choose another name.');
+          const registrationURL = new URL('/', configuration.endpoint);
+          registrationURL.hostname = check.domain;
+          // Registration begins before automatic TLS can issue this hostname's certificate.
+          registrationURL.protocol = 'http:';
+          registrationURL.pathname = '/';
+          registrationURL.search = '?register&site_workflow=new_site';
+          registrationURL.hash = '';
+          window.location.assign(registrationURL.toString());
+        })
+        .catch(function showDomainCheckError(error) {
+          if (statusElement) statusElement.textContent = error.message;
+          submitButton.disabled = false;
+        });
     });
   }
 
@@ -1425,6 +1559,7 @@
     review: showIndexingDecision
   };
   window.SiteBrushPublicTrial = {
-    attach: attachPublicTrialForm
+    attach: attachPublicTrialForm,
+    attachNewSite: attachNewSiteForm
   };
 })();
