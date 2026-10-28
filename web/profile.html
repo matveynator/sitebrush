@@ -354,19 +354,19 @@
 <section id="ai-access" class="authentication-card profile-form profile-account-card profile-ai-connect-card">
   <div class="profile-account-card-header">
     <h2>AI · SiteBrush</h2>
-    <p>{{if eq .LanguageCode "ru"}}Известные адреса AI-провайдеров, включая xAI / Grok, разрешены по умолчанию и обновляются автоматически. Разрешения на работу с сайтом подтверждаете вы.{{else}}Published AI provider networks, including xAI / Grok, are enabled by default and updated automatically. You approve access to your site.{{end}}</p>
+    <p>{{if eq .LanguageCode "ru"}}MCP и OAuth доступны AI-клиентам с любого IP, когда стелс режим выключен. Редактирование требует вашего подтверждения. Настройки сетей ниже относятся к дополнительному AI API.{{else}}AI clients can reach MCP and OAuth from any IP while stealth mode is off. Editing requires your approval. The network settings below apply to the additional AI API.{{end}}</p>
     <div class="auth-trusted-row profile-ip-row" id="AICurrentIPAccess">
       <div class="profile-ip-details">
         <strong>{{if eq .LanguageCode "ru"}}Ваш IP{{else}}Your IP{{end}}: <bdi>{{.CurrentAdminIP}}</bdi></strong>
-        <p>{{if .AICurrentIPAdmitted}}{{if .AIAdministratorAuthenticated}}{{if eq .LanguageCode "ru"}}Доступ разрешён: вы вошли как администратор сайта.{{else}}Access allowed: you are signed in as a site administrator.{{end}}{{else}}{{if eq .LanguageCode "ru"}}Доступ разрешён по списку IP администратора.{{else}}Access allowed by the administrator IP list.{{end}}{{end}}{{else}}{{if eq .LanguageCode "ru"}}Текущий IP не допущен к AI-интерфейсам. Проверьте ограничения входа администратора.{{else}}Your current IP is not admitted to AI interfaces. Check administrator sign-in restrictions.{{end}}{{end}}</p>
+        <p>{{if .AdminStealthEnabled}}{{if eq .LanguageCode "ru"}}Стелс режим включён: служебные страницы доступны только с разрешённых IP администратора.{{else}}Stealth mode is on: service pages are available only from allowed administrator IPs.{{end}}{{else}}{{if eq .LanguageCode "ru"}}Стелс режим выключен: страницу входа и OAuth можно открыть с любого IP.{{else}}Stealth mode is off: sign-in and OAuth can be opened from any IP.{{end}}{{end}}</p>
       </div>
     </div>
-    <p>{{if eq .LanguageCode "ru"}}Все IP-адреса и CIDR, разрешённые для входа администратора, также разрешены для <code>?mcp</code>, <code>?ai</code> и связанных AI/OAuth-интерфейсов.{{else}}Every IP address and CIDR allowed for administrator sign-in is also allowed for <code>?mcp</code>, <code>?ai</code> and related AI/OAuth interfaces.{{end}} <a href="#ProfileAdminIPs">{{if eq .LanguageCode "ru"}}Список разрешённых IP{{else}}Allowed IP list{{end}}</a>.</p>
+    <p>{{if eq .LanguageCode "ru"}}При включённом стелс режиме разрешённые IP администратора открывают <code>?mcp</code>, <code>?ai</code> и OAuth.{{else}}With stealth mode on, allowed administrator IPs can reach <code>?mcp</code>, <code>?ai</code> and OAuth.{{end}} <a href="#ProfileAdminIPs">{{if eq .LanguageCode "ru"}}Список разрешённых IP{{else}}Allowed IP list{{end}}</a>.</p>
     <p><a href="/?mcp">{{if eq .LanguageCode "ru"}}Как подключить внешнего помощника{{else}}Connect an external assistant{{end}}</a> · <a href="/?ai">{{if eq .LanguageCode "ru"}}Открыть AI-редактор{{else}}Open AI editor{{end}}</a></p>
     <form method="post" action="{{.ProfileFormAction}}">
       <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
       <input type="hidden" name="profile_action" value="ai_ingress_save">
-      <label><input type="checkbox" name="ai_external"{{if .AIIngressPolicy.External}} checked{{end}}> {{if eq .LanguageCode "ru"}}Разрешить внешние AI-подключения{{else}}Allow external AI connections{{end}}</label>
+      <label><input type="checkbox" name="ai_external"{{if .AIIngressPolicy.External}} checked{{end}}> {{if eq .LanguageCode "ru"}}Разрешить подключения к дополнительному AI API{{else}}Allow connections to the additional AI API{{end}}</label>
       {{range .AIIngressProviders}}<label><input type="checkbox" name="ai_{{.ID}}"{{if $.AIIngressPolicy.Enabled .ID}} checked{{end}}> {{.Name}}</label>{{end}}
       <label>{{if eq .LanguageCode "ru"}}Дополнительные CIDR провайдеров (через запятую){{else}}Custom provider CIDRs (comma separated){{end}}<input name="ai_custom_cidrs" value="{{range $index, $cidr := .AIIngressPolicy.CustomCIDRs}}{{if $index}}, {{end}}{{$cidr}}{{end}}" maxlength="2048"></label>
       <button type="submit">{{.SaveLabel}}</button>

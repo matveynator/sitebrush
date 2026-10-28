@@ -21913,12 +21913,14 @@ func TestAccountSessionPersistentCookieAndRollingIdleExpiry(t *testing.T) {
 	for _, scenario := range []struct {
 		name, destination string
 		idle              time.Duration
-		renewed, active   bool
+		renewed           bool
+		cookieRenewed     bool
+		active            bool
 	}{
-		{"foreground", "document", 14 * 24 * time.Hour, true, true},
-		{"recent foreground", "document", 10 * time.Second, false, true},
-		{"background", "empty", 14 * 24 * time.Hour, false, true},
-		{"expired", "document", 16 * 24 * time.Hour, false, false},
+		{"foreground", "document", 14 * 24 * time.Hour, true, true, true},
+		{"recent foreground", "document", 10 * time.Second, false, true, true},
+		{"background", "empty", 14 * 24 * time.Hour, false, false, true},
+		{"expired", "document", 16 * 24 * time.Hour, false, false, false},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			lastUsed := time.Now().Add(-scenario.idle).Unix()
@@ -21942,11 +21944,14 @@ func TestAccountSessionPersistentCookieAndRollingIdleExpiry(t *testing.T) {
 			if (observed > lastUsed) != scenario.renewed {
 				t.Fatal("background or expired session renewed")
 			}
-			if scenario.renewed && len(response.Result().Cookies()) != 1 {
-				t.Fatal("renewed browser cookie missing")
+			persistentCookie := false
+			for _, responseCookie := range response.Result().Cookies() {
+				if responseCookie.Name == "sitebrush_session" && responseCookie.MaxAge > 0 {
+					persistentCookie = true
+				}
 			}
-			if scenario.active && !scenario.renewed && len(response.Result().Cookies()) != 0 {
-				t.Fatal("session cookie renewed without a database refresh")
+			if persistentCookie != scenario.cookieRenewed {
+				t.Fatal("foreground cookie renewal does not match session activity")
 			}
 		})
 	}
@@ -24996,6 +25001,174 @@ func TestMCPPublicTransportSecurityAndCredentialRedaction(t *testing.T) {
 	}
 }
 
+func TestMCPOAuthOffersLoginAndResumesOwnerApprovalOutsideStealth(t *testing.T) {
+	application, database := newTestApplication(t)
+	application.aiCapabilities = aicapability.NewManager()
+	t.Cleanup(application.aiCapabilities.Close)
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('localhost','owner@example.org','fixture',1)`); err != nil {
+		t.Fatal(err)
+	}
+	client, err := application.aiCapabilities.RegisterOAuthClient("localhost", aicapability.OAuthClient{Name: "External assistant", RedirectURIs: []string{"https://client.example/callback"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := application.siteHTTPHandler(http.HandlerFunc(application.route))
+	request := func(target, accept string, cookie *http.Cookie) *httptest.ResponseRecorder {
+		t.Helper()
+		incoming := httptest.NewRequest(http.MethodGet, "https://localhost"+target, nil)
+		incoming.RemoteAddr = "198.51.100.8:1234"
+		if accept != "" {
+			incoming.Header.Set("Accept", accept)
+		}
+		incoming.Header.Set("Accept-Language", "en")
+		if cookie != nil {
+			incoming.AddCookie(cookie)
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, incoming)
+		return response
+	}
+	if response := request("/?mcp", "application/json", nil); response.Code != http.StatusUnauthorized || !strings.Contains(response.Header().Get("WWW-Authenticate"), "/?oauth=resource") {
+		t.Fatalf("MCP discovery status=%d challenge=%q", response.Code, response.Header().Get("WWW-Authenticate"))
+	}
+	if response := request("/?mcp", "text/html", nil); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "Sign in to SiteBrush") {
+		t.Fatalf("MCP browser instructions status=%d body=%q", response.Code, response.Body.String())
+	}
+	if response := request("/?oauth=resource", "application/json", nil); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"authorization_servers"`) {
+		t.Fatalf("OAuth resource metadata status=%d body=%q", response.Code, response.Body.String())
+	}
+	if response := request("/?ai=manifest", "application/json", nil); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "mcp_url") {
+		t.Fatalf("AI manifest status=%d body=%q", response.Code, response.Body.String())
+	}
+	verifier := strings.Repeat("v", 43)
+	digest := sha256.Sum256([]byte(verifier))
+	oauthQuery := url.Values{
+		"oauth": {"authorize"}, "response_type": {"code"}, "client_id": {client.ID},
+		"redirect_uri": {"https://client.example/callback"}, "resource": {"https://localhost/?mcp"},
+		"state": {"login-resume"}, "scope": {"read write"}, "code_challenge_method": {"S256"},
+		"code_challenge": {base64.RawURLEncoding.EncodeToString(digest[:])},
+	}
+	authorizationTarget := "/?" + oauthQuery.Encode()
+	unauthenticated := request(authorizationTarget, "text/html", nil)
+	if unauthenticated.Code != http.StatusSeeOther {
+		t.Fatalf("OAuth authorization status=%d body=%q", unauthenticated.Code, unauthenticated.Body.String())
+	}
+	loginLocation, err := url.Parse(unauthenticated.Header().Get("Location"))
+	if err != nil || !loginLocation.Query().Has("login") {
+		t.Fatalf("OAuth login destination=%q error=%v", unauthenticated.Header().Get("Location"), err)
+	}
+	returnLocation, err := url.Parse(loginLocation.Query().Get("return_path"))
+	if err != nil || returnLocation.Query().Get("state") != "login-resume" || returnLocation.Query().Get("code_challenge") != oauthQuery.Get("code_challenge") {
+		t.Fatalf("OAuth return destination=%q error=%v", loginLocation.Query().Get("return_path"), err)
+	}
+	if login := request(loginLocation.String(), "text/html", nil); login.Code != http.StatusOK || !strings.Contains(login.Body.String(), "SiteBrush") {
+		t.Fatalf("login page status=%d body=%q", login.Code, login.Body.String())
+	}
+	cookie := newAdminSessionCookie(t, application, "owner@example.org")
+	approved := request(returnLocation.String(), "text/html", cookie)
+	if approved.Code != http.StatusSeeOther || !strings.Contains(approved.Header().Get("Location"), "ai_authorize=") {
+		t.Fatalf("OAuth did not resume approval status=%d location=%q", approved.Code, approved.Header().Get("Location"))
+	}
+	if consent := request(approved.Header().Get("Location"), "text/html", cookie); consent.Code != http.StatusOK || !strings.Contains(consent.Body.String(), "External assistant") {
+		t.Fatalf("OAuth consent status=%d body=%q", consent.Code, consent.Body.String())
+	}
+	if pairing := request("/?ai_authorize=unused", "text/html", nil); pairing.Code != http.StatusSeeOther || !strings.Contains(pairing.Header().Get("Location"), "login=") {
+		t.Fatalf("pairing approval did not offer login status=%d location=%q", pairing.Code, pairing.Header().Get("Location"))
+	}
+	for _, statement := range []string{
+		`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES('localhost','owner@example.org',1)`,
+		`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES('localhost','owner@example.org','198.51.100.0/24',1)`,
+		`INSERT INTO admin_stealth_modes(domain,email,enabled_at) VALUES('localhost','owner@example.org',1)`,
+	} {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	blockedRequest := func(target string) *httptest.ResponseRecorder {
+		incoming := httptest.NewRequest(http.MethodGet, "https://localhost"+target, nil)
+		incoming.RemoteAddr = "203.0.113.8:1234"
+		incoming.AddCookie(cookie)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, incoming)
+		return response
+	}
+	baseline := blockedRequest("/")
+	for _, target := range []string{"/?mcp", "/?oauth=resource", authorizationTarget, "/?ai_authorize=unused"} {
+		response := blockedRequest(target)
+		if response.Code != baseline.Code || response.Body.String() != baseline.Body.String() || response.Header().Get("WWW-Authenticate") != "" {
+			t.Fatalf("stealth leaked %s status=%d challenge=%q", target, response.Code, response.Header().Get("WWW-Authenticate"))
+		}
+	}
+	if allowed := request(authorizationTarget, "text/html", nil); allowed.Code != http.StatusSeeOther || !strings.Contains(allowed.Header().Get("Location"), "login=") {
+		t.Fatalf("allowed stealth IP did not offer login status=%d location=%q", allowed.Code, allowed.Header().Get("Location"))
+	}
+}
+
+func TestProtectedServicePagesOfferLoginAndKeepReturnPath(t *testing.T) {
+	application, database := newTestApplication(t)
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('localhost','owner@example.org','fixture',1)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{"/?unfreeze", "/?indexing_review", "/?publish_preview", "/?revision_preview&id=7", "/?backup_download"} {
+		request := httptest.NewRequest(http.MethodGet, "https://localhost"+target, nil)
+		request.Header.Set("Accept", "text/html")
+		response := httptest.NewRecorder()
+		application.route(response, request)
+		if response.Code != http.StatusSeeOther {
+			t.Fatalf("%s status=%d body=%q", target, response.Code, response.Body.String())
+		}
+		loginURL, err := url.Parse(response.Header().Get("Location"))
+		if err != nil {
+			t.Fatalf("%s invalid login destination: %v", target, err)
+		}
+		returnURL, returnErr := url.Parse(loginURL.Query().Get("return_path"))
+		requestedURL, requestedErr := url.Parse(target)
+		if returnErr != nil || requestedErr != nil || !loginURL.Query().Has("login") || returnURL.Path != requestedURL.Path || returnURL.Query().Encode() != requestedURL.Query().Encode() {
+			t.Fatalf("%s login destination=%q return_error=%v requested_error=%v", target, response.Header().Get("Location"), returnErr, requestedErr)
+		}
+	}
+	jsonRequest := httptest.NewRequest(http.MethodGet, "https://localhost/?publish_preview", nil)
+	jsonRequest.Header.Set("Accept", "application/json")
+	jsonResponse := httptest.NewRecorder()
+	application.route(jsonResponse, jsonRequest)
+	if jsonResponse.Code != http.StatusUnauthorized || !strings.Contains(jsonResponse.Body.String(), `"login_url"`) || jsonResponse.Header().Get("Location") != "" {
+		t.Fatalf("service API challenge status=%d body=%q", jsonResponse.Code, jsonResponse.Body.String())
+	}
+	postRequest := httptest.NewRequest(http.MethodPost, "https://localhost/?indexing_review", strings.NewReader("indexing_choice=allow"))
+	postRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	postResponse := httptest.NewRecorder()
+	application.route(postResponse, postRequest)
+	if postResponse.Code != http.StatusForbidden || postResponse.Header().Get("Location") != "" {
+		t.Fatalf("mutation unexpectedly redirected status=%d location=%q", postResponse.Code, postResponse.Header().Get("Location"))
+	}
+	for _, target := range []string{"/?backup_download&token=invalid", "/?billing_schedule&token=invalid", "/?hosting_invoice&token=invalid"} {
+		request := httptest.NewRequest(http.MethodGet, "https://localhost"+target, nil)
+		response := httptest.NewRecorder()
+		application.route(response, request)
+		if response.Header().Get("Location") != "" {
+			t.Fatalf("public token link redirected to login: %s -> %q", target, response.Header().Get("Location"))
+		}
+	}
+}
+
+func TestPublicFastPathKeepsServiceQueriesDynamic(t *testing.T) {
+	for _, target := range []string{
+		"/?mcp", "/?oauth=resource", "/?ai_provider_status", "/?ai_provider_models",
+		"/?ai_apply", "/?grab_retry", "/?trial_site_suggest", "/?publish_preview",
+		"/?tree", "/?mail_monitor_ws", "/?hosting_invoice&token=invoice",
+		"/?billing_schedule&token=schedule", "/?hosting_and_support_backup_download&token=backup",
+	} {
+		request := httptest.NewRequest(http.MethodGet, "https://example.org"+target, nil)
+		if publicOrdinaryRequest(request) {
+			t.Fatalf("public fast path swallowed service route %s", target)
+		}
+	}
+	request := httptest.NewRequest(http.MethodGet, "https://example.org/?utm_source=visitor", nil)
+	if !publicOrdinaryRequest(request) {
+		t.Fatal("ordinary public query was sent to the dynamic router")
+	}
+}
+
 func TestMCPApprovalBrowserRedirect(t *testing.T) {
 	if os.Getenv("SITEBRUSH_MCP_BROWSER_TEST") != "1" {
 		t.Skip("set SITEBRUSH_MCP_BROWSER_TEST=1 after installing scripts/editor browser dependencies")
@@ -25915,16 +26088,26 @@ func TestSiteSubsystemIsolationAndUnknownHost(t *testing.T) {
 }
 
 func TestAIIngressStealthQueriesMatchPublicRouting(t *testing.T) {
-	application, _ := newTestApplication(t)
+	application, database := newTestApplication(t)
+	for _, statement := range []string{
+		`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','owner@example.org','secret',1)`,
+		`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
+		`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES('example.org','owner@example.org','192.0.2.1',1)`,
+		`INSERT INTO admin_stealth_modes(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
+	} {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, pathname := range []string{"/", "/about", "/index.html", "/random/path"} {
 		for _, method := range []string{"GET", "HEAD", "POST", "OPTIONS"} {
 			baseline := httptest.NewRecorder()
-			request := httptest.NewRequest(method, "https://localhost"+pathname, nil)
+			request := httptest.NewRequest(method, "https://example.org"+pathname, nil)
 			request.RemoteAddr = "203.0.113.7:1234"
 			application.route(baseline, request)
 			for _, selector := range []string{"mcp", "oauth=server", "oauth=token", "oauth=authorize", "ai=manifest", "ai=documentation", "ai=openapi", "ai=pair", "ai=token", "ai=exchange", "ai_authorize=private"} {
 				response := httptest.NewRecorder()
-				probe := httptest.NewRequest(method, "https://localhost"+pathname+"?"+selector, nil)
+				probe := httptest.NewRequest(method, "https://example.org"+pathname+"?"+selector, nil)
 				probe.RemoteAddr = request.RemoteAddr
 				application.route(response, probe)
 				if response.Code != baseline.Code || response.Body.String() != baseline.Body.String() {
@@ -25979,15 +26162,24 @@ func TestAIProviderGateBeforeQueryRoutingAndProxyTrust(t *testing.T) {
 		peer, forwarded string
 		allowed         bool
 	}{
-		{"203.0.113.5", "for=" + validIP, false},
+		{"203.0.113.5", "for=" + validIP, true},
 		{"127.0.0.1", "for=" + validIP, true},
-		{"127.0.0.1", "for=unknown", false},
+		{"127.0.0.1", "for=unknown", true},
 		{"160.79.104.1", "", true},
-		{"104.16.2.1", "", false},
+		{"104.16.2.1", "", true},
 	} {
 		machine, _ := application.aiIngressAdmission(requestFor("/?mcp", test.peer, test.forwarded))
 		if machine != test.allowed {
 			t.Fatalf("peer=%s forwarded=%s allowed=%t", test.peer, test.forwarded, machine)
+		}
+	}
+	for _, test := range []struct {
+		ip      string
+		allowed bool
+	}{{"203.0.113.8", false}, {validIP, true}} {
+		machine, _ := application.aiIngressAdmission(requestFor("/?ai=pair", test.ip, ""))
+		if machine != test.allowed {
+			t.Fatalf("additional AI API admission ip=%s allowed=%t", test.ip, machine)
 		}
 	}
 	for _, oldPath := range []string{"/_sitebrush/mcp", "/_sitebrush/oauth/token", "/.well-known/oauth-protected-resource"} {
@@ -26001,6 +26193,9 @@ func TestAIProviderGateBeforeQueryRoutingAndProxyTrust(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := application.db.ExecContext(boundary, `INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES(?,?,?,1)`, domain, "owner@example.org", "198.51.100.0/24"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.db.ExecContext(boundary, `INSERT INTO admin_stealth_modes(domain,email,enabled_at) VALUES(?,?,1)`, domain, "owner@example.org"); err != nil {
 		t.Fatal(err)
 	}
 	for _, test := range []struct {
@@ -26710,8 +26905,8 @@ func TestAIIngressDefaultsAndAdministratorMCP(t *testing.T) {
 	}
 	unknown := httptest.NewRecorder()
 	handler.ServeHTTP(unknown, requestFor("mcp", "203.0.113.8"))
-	if unknown.Header().Get("WWW-Authenticate") != "" || unknown.Header().Get("Access-Control-Allow-Origin") != "" {
-		t.Fatal("unknown source discovered MCP")
+	if unknown.Code != http.StatusUnauthorized || unknown.Header().Get("WWW-Authenticate") == "" {
+		t.Fatal("non-stealth site hid MCP from an unfamiliar client")
 	}
 }
 
@@ -26745,11 +26940,11 @@ type ingressAdmissionCountingDatabase struct {
 	admissions chan struct{}
 }
 
-func (database ingressAdmissionCountingDatabase) QueryRowContext(boundary context.Context, query string, arguments ...any) *sql.Row {
-	if strings.Contains(query, "FROM ai_provider_policy") {
+func (database ingressAdmissionCountingDatabase) QueryContext(boundary context.Context, query string, arguments ...any) (*sql.Rows, error) {
+	if strings.Contains(query, "FROM admin_stealth_modes") {
 		database.admissions <- struct{}{}
 	}
-	return database.sqlExecutor.QueryRowContext(boundary, query, arguments...)
+	return database.sqlExecutor.QueryContext(boundary, query, arguments...)
 }
 
 func TestAIIngressPublicPagesSkipControlSQL(t *testing.T) {
@@ -26800,7 +26995,7 @@ func TestAIIngressAdmissionRunsOnceAcrossProductionHTTPAdapters(t *testing.T) {
 			t.Fatalf("HTTP adapters evaluated admission %d times for %s", len(admissions), clientIP)
 		}
 		<-admissions
-		if (response.Header().Get("WWW-Authenticate") != "") != (clientIP == "203.0.113.17") {
+		if response.Header().Get("WWW-Authenticate") == "" {
 			t.Fatal("HTTP adapters changed the admitted protocol boundary")
 		}
 	}
@@ -26816,6 +27011,7 @@ func BenchmarkAIIngressHTTP(b *testing.B) {
 		`CREATE TABLE domain_aliases(alias_domain TEXT,primary_domain TEXT,is_verified INTEGER,dns_a_ok INTEGER)`,
 		`CREATE TABLE admin_ip_policies(domain TEXT,email TEXT)`,
 		`CREATE TABLE admin_allowed_ips(domain TEXT,email TEXT,client_ip TEXT)`,
+		`CREATE TABLE admin_stealth_modes(domain TEXT,email TEXT,enabled_at INTEGER)`,
 		`CREATE TABLE users(domain TEXT,email TEXT,is_admin INTEGER)`,
 		`CREATE TABLE ai_provider_policy(id INTEGER,policy TEXT)`,
 	} {

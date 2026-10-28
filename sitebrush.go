@@ -4613,19 +4613,13 @@ func analyticsFileContentType(contentType string) bool {
 	return mediaType != "" && mediaType != "text/html" && mediaType != "application/xhtml+xml"
 }
 
+// Analytics and published-page delivery share one control-query boundary.
+// Otherwise a published page can shadow an account or service endpoint.
 func isSitebrushControllerQuery(query url.Values) bool {
-	for _, controllerFlag := range []string{
-		"server_update", "server_update_ws", "save", "template_events", "grab_preview", "grab_events", "grab_ws", "revision_preview", "revision_restore", "revision_delete", "revision_toggle",
-		"tree", "native_pick_files", "native_save_backup", "edit", "ai", "ai_capability_create", "ai_authorize", "ai_execute", "ai_execute_ws", "ai_background", "visual", "text", "editraw", "settings", "properties", "indexing_review",
-		"backup_download", "hosting_and_support_backup_download", "billing_backup_download", "backup_import", "profile", "freeze", "unfreeze", "unfreeze_ws", "publish", "publish_events", "publish_preview", "files",
-		"revisions", "login", "register", "email_confirm", "grab", "recover", "captcha", "analytics", "expenses", "hosting_and_support", "billing", "service_mail_relay",
-	} {
-		if _, found := query[controllerFlag]; found {
+	for flag := range query {
+		if sitebrushControlQueryFlag(flag) {
 			return true
 		}
-	}
-	if strings.TrimSpace(query.Get("delete")) != "" {
-		return true
 	}
 	return false
 }
@@ -12666,8 +12660,8 @@ func (a *App) connectAIControlFacade() {
 	}, func() []string { return a.siteDatabaseRouter.Domains(context.Background()) })
 }
 
-// Admission is evaluated before inspecting any AI selector or writing a
-// protocol-specific header. Credentials cannot substitute for network trust.
+// Admission is evaluated before writing protocol headers. Stealth hides
+// control routes from unapproved addresses; capability handlers own access.
 type aiIngressDecision struct {
 	machine bool
 	owner   bool
@@ -12827,11 +12821,28 @@ func (a *App) aiIngressAdmission(r *http.Request) (machine, owner bool) {
 		return false, false
 	}
 	domain := a.siteDomain(r.Context(), r)
+	stealthEnabled, stealthErr := a.adminStealthEnabled(r.Context(), domain, "")
+	if stealthErr != nil {
+		return false, false
+	}
+	clientIP := accountClientIP(r)
+	if stealthEnabled && a.adminIPLoginBlocked(r.Context(), domain, clientIP, "") {
+		return false, false
+	}
+	// MCP and OAuth use owner approval instead of provider IP ranges. Browser
+	// entry points must also remain reachable outside stealth mode.
+	if !stealthEnabled {
+		query := r.URL.Query()
+		operation := strings.TrimSpace(query.Get("ai"))
+		if r.URL.Path == "/.well-known/oauth-authorization-server" || query.Has("mcp") || query.Has("oauth") || query.Has("ai_authorize") ||
+			query.Has("ai") && (operation == "" || operation == "manifest" || operation == "documentation" || operation == "openapi") {
+			return true, false
+		}
+	}
 	if _, public := a.publicDemoState(r, domain); public {
 		// Public demo permission is independent of provider networks and cookies.
 		return true, true
 	}
-	clientIP := accountClientIP(r)
 	if clientIP == "" {
 		return false, false
 	}
@@ -12880,7 +12891,7 @@ func aiRequestAfterAdmission(r *http.Request, machine, owner bool) *http.Request
 			hidden = !machine
 		}
 		if selector == "ai_authorize" {
-			hidden = true
+			hidden = !machine
 		}
 		if hidden {
 			query.Del(selector)
@@ -13265,6 +13276,9 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		a.awaitAccountHTTPS(w, r)
+		return
+	}
+	if a.offerAdminServiceLogin(w, r, requestDomain) {
 		return
 	}
 	// Unlocking a public protected page does not mutate the administrator account.
@@ -16727,7 +16741,7 @@ func (a *App) siteMCPRoute(w http.ResponseWriter, r *http.Request) bool {
 	if query.Has("mcp") {
 		endpoint = sitemcp.Path
 	}
-	if operation := query.Get("oauth"); operation != "" && (operation != "authorize" || owner) {
+	if operation := query.Get("oauth"); operation != "" {
 		endpoint = sitemcp.OAuthPath + operation
 	}
 	if r.URL.Path == "/.well-known/oauth-authorization-server" {
@@ -18194,6 +18208,7 @@ func (a *App) renewAccountSession(w http.ResponseWriter, r *http.Request, domain
 	// A recent foreground request has already extended the durable idle deadline.
 	// Avoid a SQLite write and WAL sync for every click during an active visit.
 	if lastUsed > now.Add(-time.Minute).Unix() && lastUsed <= now.Unix() {
+		setAccountSessionCookie(w, r, token, now)
 		return true
 	}
 	result, err := a.db.ExecContext(r.Context(), `UPDATE sessions SET last_used_at=? WHERE token=? AND user_email=? AND last_used_at<=? AND (last_used_at=0 OR last_used_at>?)`, now.Unix(), token, domain+"|"+email, now.Unix(), now.Add(-accountauth.SessionTTL).Unix())
@@ -21117,6 +21132,55 @@ func loginURLForRequest(r *http.Request) string {
 	queryValues.Set("return_path", requestedReturnTarget(r))
 	loginURL.RawQuery = queryValues.Encode()
 	return loginURL.String()
+}
+
+// Browser service pages resume their original destination after sign-in.
+// Machine requests receive a structured challenge instead of an HTML redirect.
+func (a *App) offerAdminServiceLogin(w http.ResponseWriter, r *http.Request, domain string) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	if r.Header.Get("Upgrade") != "" || r.URL.RawQuery == "" {
+		return false
+	}
+	query := r.URL.Query()
+	protected := false
+	for _, selector := range []string{
+		"unfreeze", "indexing_review", "publish_preview", "tree", "revision_preview",
+		"backup_download", "grab_events", "template_events", "publish_events",
+		"ai_provider_status", "ai_provider_models", "ai_execute_ws", "grab_ws", "unfreeze_ws",
+		"certificate_renew_ws", "mail_monitor_ws", "mail_delivery_ws", "server_update_ws",
+	} {
+		if query.Has(selector) {
+			protected = true
+			break
+		}
+	}
+	if !protected || a.isAdminRequest(r) {
+		return false
+	}
+	// Public links carrying a backup token have their own capability check.
+	if query.Has("backup_download") && strings.TrimSpace(query.Get("token")) != "" {
+		return false
+	}
+	loginURL := loginURLForRequest(r)
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	accept := strings.ToLower(r.Header.Get("Accept"))
+	if accept != "" && !strings.Contains(accept, "text/html") {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusUnauthorized)
+		if r.Method == http.MethodGet {
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "authentication_required", "login_url": loginURL})
+		}
+		return true
+	}
+	if !a.hasAdmin(r.Context(), domain) {
+		httpsecurity.RedirectLocal(w, r, r.URL.Path+"?register", http.StatusSeeOther)
+		return true
+	}
+	httpsecurity.RedirectLocal(w, r, loginURL, http.StatusSeeOther)
+	return true
 }
 
 type templatePropagationProgressEvent struct {
@@ -32051,81 +32115,78 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 			}
 		}
 	}
-	_, aiOwnerAdmitted := a.aiIngressDecisionForRequest(r)
 	a.render(w, r, "profile.html", map[string]any{
-		"ProfileSessions":              profileSessions,
-		"ProfileSessionsMore":          profileSessionsMore,
-		"ProfileSessionCount":          profileSessionCount,
-		"AIEditorCapabilities":         aiEditorCapabilities,
-		"AIEditorSessions":             aiEditorSessions,
-		"AdminAllowedIPs":              adminAllowedIPs,
-		"AdminAllowedIPMore":           adminAllowedIPMore,
-		"AdminAllowedIPCount":          adminAllowedIPCount,
-		"AdminIPCandidates":            adminIPCandidates,
-		"AdminIPProtectionEnabled":     adminIPProtectionEnabled,
-		"AdminStealthEnabled":          adminStealthEnabled,
-		"CurrentAdminIP":               canonicalAccountIP(accountClientIP(r)),
-		"Passkeys":                     passkeys,
-		"ProfileFormAction":            profileFormAction(r),
-		"AdminIPStatus":                adminIPStatus,
-		"AdminIPDraft":                 adminIPDraft,
-		"PasskeyPagination":            passkeyPagination,
-		"SessionPagination":            sessionPagination,
-		"IPPagination":                 ipPagination,
-		"AIAccessPagination":           aiAccessPagination,
-		"AISessionPagination":          aiSessionPagination,
-		"HasAIAccess":                  aiAccessPagination.Count+aiSessionPagination.Count > 0,
-		"AIIngressPolicy":              a.aiProviderPolicy(r),
-		"AIIngressProviders":           aiingress.Providers(),
-		"AICurrentIPAdmitted":          aiOwnerAdmitted,
-		"AIAdministratorAuthenticated": authenticated,
-		"PasskeyOffer":                 passkeyOffer,
-		"PasskeyContinuePath":          passkeyContinuePath,
-		"TOTPEnabled":                  totpEnabled,
-		"TOTPSetupSecret":              totpSetupSecret,
-		"TOTPSetupURI":                 totpSetupURI,
-		"TOTPSetupQRCode":              totpSetupQRCode,
-		"AccountCSRF":                  accountCSRF(r),
-		"CodeWebmail":                  webmailProviderForAddress(email),
-		"EmailChange":                  emailChange,
-		"ProfileCodeAction":            "?profile&profile_resume=" + url.QueryEscape(r.URL.Query().Get("profile_resume")),
-		"Email":                        strings.TrimSpace(email),
-		"Status":                       status,
-		"StatusClass":                  statusClass,
-		"ShowPasswordCodeForm":         showPasswordCodeForm,
-		"ShowPasswordForm":             emailChange.Step != 2 && !showPasswordCodeForm && !hardLocked && blockedUntil.IsZero(),
-		"PasswordConfirmationToken":    passwordConfirmationToken,
-		"PasswordWebmailProvider":      passwordWebmailProvider,
-		"BlockedUntilUnix":             blockedUntil.Unix(),
-		"BlockedUntilISO":              blockedUntil.UTC().Format(time.RFC3339),
-		"IsHardLocked":                 hardLocked,
-		"EmailDelivery":                emailDeliveryView,
-		"Title":                        translationOrDefault(translations, "profile_title", "Account"),
-		"EmailLabel":                   translationOrDefault(translations, "profile_email", "Email"),
-		"EmailFormTitle":               translationOrDefault(translations, "profile_email_form_title", "Change email"),
-		"EmailFormHint":                translationOrDefault(translations, "profile_email_form_hint", "A one-time code will be sent to your current email address."),
-		"EmailSubmitLabel":             translationOrDefault(translations, "profile_email_submit", "Send email change code"),
-		"PasswordFormTitle":            translationOrDefault(translations, "profile_password_form_title", "Change password"),
-		"PasswordFormHint":             translationOrDefault(translations, "profile_password_form_hint", "A one-time code will be sent to your current email address."),
-		"PasswordLabel":                translationOrDefault(translations, "profile_new_password", "New password"),
-		"PasswordConfirmLabel":         translationOrDefault(translations, "profile_confirm_password", "Confirm password"),
-		"PasswordSubmitLabel":          translationOrDefault(translations, "profile_password_submit", "Send password change code"),
-		"SaveLabel":                    translationOrDefault(translations, "profile_save", "Save"),
-		"PasswordCodeLabel":            translationOrDefault(translations, "profile_password_code", "6-digit code"),
-		"PasswordCodeHelp":             translationOrDefault(translations, "profile_password_code_help", "Enter the code sent to your current email address to confirm the change."),
-		"PasswordCodeSubmit":           translationOrDefault(translations, "profile_password_code_submit", "Confirm change"),
-		"CountdownLabel":               translationOrDefault(translations, "login_retry_in", "You can try again in:"),
-		"RetryAtLabel":                 translationOrDefault(translations, "login_retry_at", "You can try again at:"),
-		"TryAgainNowText":              translationOrDefault(translations, "login_try_again_now", "You can try again now."),
-		"RecoveryRequiredText":         translationOrDefault(translations, "login_recovery_required", "Use account recovery to continue."),
-		"EmailSendProgressTitle":       translationOrDefault(translations, "profile_email_send_progress_title", "Sending email and waiting for SMTP confirmation..."),
-		"EmailSendProgressStepOne":     translationOrDefault(translations, "profile_email_send_progress_step_one", "Preparing the confirmation code"),
-		"EmailSendProgressStepTwo":     translationOrDefault(translations, "profile_email_send_progress_step_two", "Looking up the recipient mail server"),
-		"EmailSendProgressStepThree":   translationOrDefault(translations, "profile_email_send_progress_step_three", "Opening the SMTP connection"),
-		"EmailSendProgressStepFour":    translationOrDefault(translations, "profile_email_send_progress_step_four", "Sending the message body"),
-		"EmailSendProgressStepFive":    translationOrDefault(translations, "profile_email_send_progress_step_five", "Waiting for the recipient server response"),
-		"EmailSendProgressTimeout":     translationOrDefault(translations, "profile_email_send_progress_timeout", "Still waiting for the mail server. The final result will appear here as soon as it responds."),
-		"EmailSendProgressPrefix":      translationOrDefault(translations, "profile_email_send_progress_prefix", "SMTP timeout countdown:"),
+		"ProfileSessions":            profileSessions,
+		"ProfileSessionsMore":        profileSessionsMore,
+		"ProfileSessionCount":        profileSessionCount,
+		"AIEditorCapabilities":       aiEditorCapabilities,
+		"AIEditorSessions":           aiEditorSessions,
+		"AdminAllowedIPs":            adminAllowedIPs,
+		"AdminAllowedIPMore":         adminAllowedIPMore,
+		"AdminAllowedIPCount":        adminAllowedIPCount,
+		"AdminIPCandidates":          adminIPCandidates,
+		"AdminIPProtectionEnabled":   adminIPProtectionEnabled,
+		"AdminStealthEnabled":        adminStealthEnabled,
+		"CurrentAdminIP":             canonicalAccountIP(accountClientIP(r)),
+		"Passkeys":                   passkeys,
+		"ProfileFormAction":          profileFormAction(r),
+		"AdminIPStatus":              adminIPStatus,
+		"AdminIPDraft":               adminIPDraft,
+		"PasskeyPagination":          passkeyPagination,
+		"SessionPagination":          sessionPagination,
+		"IPPagination":               ipPagination,
+		"AIAccessPagination":         aiAccessPagination,
+		"AISessionPagination":        aiSessionPagination,
+		"HasAIAccess":                aiAccessPagination.Count+aiSessionPagination.Count > 0,
+		"AIIngressPolicy":            a.aiProviderPolicy(r),
+		"AIIngressProviders":         aiingress.Providers(),
+		"PasskeyOffer":               passkeyOffer,
+		"PasskeyContinuePath":        passkeyContinuePath,
+		"TOTPEnabled":                totpEnabled,
+		"TOTPSetupSecret":            totpSetupSecret,
+		"TOTPSetupURI":               totpSetupURI,
+		"TOTPSetupQRCode":            totpSetupQRCode,
+		"AccountCSRF":                accountCSRF(r),
+		"CodeWebmail":                webmailProviderForAddress(email),
+		"EmailChange":                emailChange,
+		"ProfileCodeAction":          "?profile&profile_resume=" + url.QueryEscape(r.URL.Query().Get("profile_resume")),
+		"Email":                      strings.TrimSpace(email),
+		"Status":                     status,
+		"StatusClass":                statusClass,
+		"ShowPasswordCodeForm":       showPasswordCodeForm,
+		"ShowPasswordForm":           emailChange.Step != 2 && !showPasswordCodeForm && !hardLocked && blockedUntil.IsZero(),
+		"PasswordConfirmationToken":  passwordConfirmationToken,
+		"PasswordWebmailProvider":    passwordWebmailProvider,
+		"BlockedUntilUnix":           blockedUntil.Unix(),
+		"BlockedUntilISO":            blockedUntil.UTC().Format(time.RFC3339),
+		"IsHardLocked":               hardLocked,
+		"EmailDelivery":              emailDeliveryView,
+		"Title":                      translationOrDefault(translations, "profile_title", "Account"),
+		"EmailLabel":                 translationOrDefault(translations, "profile_email", "Email"),
+		"EmailFormTitle":             translationOrDefault(translations, "profile_email_form_title", "Change email"),
+		"EmailFormHint":              translationOrDefault(translations, "profile_email_form_hint", "A one-time code will be sent to your current email address."),
+		"EmailSubmitLabel":           translationOrDefault(translations, "profile_email_submit", "Send email change code"),
+		"PasswordFormTitle":          translationOrDefault(translations, "profile_password_form_title", "Change password"),
+		"PasswordFormHint":           translationOrDefault(translations, "profile_password_form_hint", "A one-time code will be sent to your current email address."),
+		"PasswordLabel":              translationOrDefault(translations, "profile_new_password", "New password"),
+		"PasswordConfirmLabel":       translationOrDefault(translations, "profile_confirm_password", "Confirm password"),
+		"PasswordSubmitLabel":        translationOrDefault(translations, "profile_password_submit", "Send password change code"),
+		"SaveLabel":                  translationOrDefault(translations, "profile_save", "Save"),
+		"PasswordCodeLabel":          translationOrDefault(translations, "profile_password_code", "6-digit code"),
+		"PasswordCodeHelp":           translationOrDefault(translations, "profile_password_code_help", "Enter the code sent to your current email address to confirm the change."),
+		"PasswordCodeSubmit":         translationOrDefault(translations, "profile_password_code_submit", "Confirm change"),
+		"CountdownLabel":             translationOrDefault(translations, "login_retry_in", "You can try again in:"),
+		"RetryAtLabel":               translationOrDefault(translations, "login_retry_at", "You can try again at:"),
+		"TryAgainNowText":            translationOrDefault(translations, "login_try_again_now", "You can try again now."),
+		"RecoveryRequiredText":       translationOrDefault(translations, "login_recovery_required", "Use account recovery to continue."),
+		"EmailSendProgressTitle":     translationOrDefault(translations, "profile_email_send_progress_title", "Sending email and waiting for SMTP confirmation..."),
+		"EmailSendProgressStepOne":   translationOrDefault(translations, "profile_email_send_progress_step_one", "Preparing the confirmation code"),
+		"EmailSendProgressStepTwo":   translationOrDefault(translations, "profile_email_send_progress_step_two", "Looking up the recipient mail server"),
+		"EmailSendProgressStepThree": translationOrDefault(translations, "profile_email_send_progress_step_three", "Opening the SMTP connection"),
+		"EmailSendProgressStepFour":  translationOrDefault(translations, "profile_email_send_progress_step_four", "Sending the message body"),
+		"EmailSendProgressStepFive":  translationOrDefault(translations, "profile_email_send_progress_step_five", "Waiting for the recipient server response"),
+		"EmailSendProgressTimeout":   translationOrDefault(translations, "profile_email_send_progress_timeout", "Still waiting for the mail server. The final result will appear here as soon as it responds."),
+		"EmailSendProgressPrefix":    translationOrDefault(translations, "profile_email_send_progress_prefix", "SMTP timeout countdown:"),
 	})
 }
 
@@ -57089,7 +57150,27 @@ func publicMissingPageRequest(r *http.Request, pagePath string) bool {
 }
 
 func sitebrushControlQueryFlag(flag string) bool {
-	for _, selector := range []string{"ai", "ai_token", "ai_session", "ai_authorize", "mcp", "oauth", "login", "logout", "register", "recover", "profile", "email_confirm", "server_update", "server_update_ws", "visual", "edit", "text", "save", "files", "backup", "backup_import", "analytics", "expenses", "hosting_and_support", "billing", "service_mail_relay", "settings", "domain", "freeze", "unfreeze", "unfreeze_ws", "publish", "delete", "revisions", "revision_preview", "revision_restore", "revision_delete", "revision_toggle", "page_password", "page_password_unlock", "captcha", "grab", "grab_ws", "grab_events", "copy", "site_copy", "publish_events", "security_incident_report", "mail_delivery_ws", "indexing_review"} {
+	for _, selector := range []string{
+		"mcp", "oauth", "ai", "ai_token", "ai_session", "ai_authorize", "ai_capability_create",
+		"ai_provider_status", "ai_provider_models", "ai_provider_save", "ai_provider_delete",
+		"ai_execute", "ai_execute_ws", "ai_apply", "ai_background",
+		"login", "logout", "login_link", "register", "recover", "profile", "email_confirm", "https_status",
+		"server_update", "server_update_ws", "settings", "properties", "domain", "analytics",
+		"visual", "edit", "editraw", "text", "save", "delete", "files", "revisions",
+		"revision_preview", "revision_restore", "revision_delete", "revision_toggle", "tree",
+		"freeze", "unfreeze", "unfreeze_ws", "publish", "publish_events", "publish_preview",
+		"page_password", "page_password_unlock", "captcha", "security_incident_report", "indexing_review",
+		"grab", "grab_preview", "grab_retry", "grab_cancel", "grab_ws", "grab_events", "template_events",
+		"copy", "site_copy", "trial_import_wait", "trial_import_status", "trial_registration_status",
+		"trial_site_ws", "trial_site_events", "trial_site_texts", "trial_site_preview",
+		"trial_site_preview_status", "trial_site_preview_cancel", "trial_site_preview_frame",
+		"trial_site_create", "trial_site_indexing", "trial_site_suggest", "trial_site_captcha", "trial_site_domain_check",
+		"demo_grab_preview", "demo_grab_refresh", "site_request",
+		"backup", "backup_import", "backup_download", "native_pick_files", "native_save_backup",
+		"hosting_and_support", "expenses", "billing", "hosting_invoice", "billing_schedule",
+		"hosting_and_support_demo_payment", "hosting_and_support_backup_download", "billing_backup_download",
+		"service_mail_relay", "hosting_snapshot", "mail_delivery_ws", "mail_monitor_ws", "certificate_renew_ws",
+	} {
 		if flag == selector {
 			return true
 		}
