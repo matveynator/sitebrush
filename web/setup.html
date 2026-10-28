@@ -151,7 +151,7 @@
     <p class="hint">{{index .T "auth_local_setup"}}</p>
     <label>{{index .T "login_password_placeholder"}}<input type="password" name="password" autocomplete="new-password" required></label>
     <label>{{index .T "profile_confirm_password"}}<input type="password" name="password_confirm" autocomplete="new-password" required></label>
-    {{else}}<p class="hint">{{index .T "auth_registration_secure"}}</p>
+    {{else}}<p class="hint">{{if .TrialEmbed}}{{index .T "trial_confirm_email_to_continue"}}{{else}}{{index .T "auth_registration_secure"}}{{end}}</p>
     <div class="account-captcha">
       <label>{{index .T "account_captcha_label"}}<input type="text" class="form-control" name="captcha" autocomplete="off" autocapitalize="characters" spellcheck="false" minlength="6" maxlength="6" pattern="[A-Za-z2-9]{6}" required></label>
       <input type="hidden" name="captcha_id" value="{{.CaptchaID}}">

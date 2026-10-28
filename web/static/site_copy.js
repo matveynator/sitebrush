@@ -576,9 +576,9 @@
     let captchaTokenElement = null;
     if (publicTrialMode) {
       const captchaFieldElement = createElement('label', 'SiteBrushCopySiteField');
-      captchaFieldElement.appendChild(createElement('span', '', 'Enter the code from the image'));
+      captchaFieldElement.appendChild(createElement('span', '', textFromConfig(configuration, 'captchaLabel', 'Characters from the image')));
       captchaImageElement = document.createElement('img');
-      captchaImageElement.alt = 'CAPTCHA code';
+      captchaImageElement.alt = textFromConfig(configuration, 'captchaAlt', 'CAPTCHA image');
       captchaFieldElement.appendChild(captchaImageElement);
       captchaAnswerElement = createElement('input', 'SiteBrushCopySiteInput');
       captchaAnswerElement.name = 'captcha';
@@ -632,7 +632,7 @@
       captchaTokenElement.value = '';
       fetch(configuredEndpoint(configuration, 'trial_site_captcha'), {headers: {Accept: 'application/json'}})
         .then(function readCaptcha(response) {
-          if (!response.ok) throw new Error('CAPTCHA is temporarily unavailable');
+          if (!response.ok) throw new Error(textFromConfig(configuration, 'captchaUnavailable', 'CAPTCHA is temporarily unavailable.'));
           return response.json();
         })
         .then(function displayCaptcha(challenge) {
@@ -1417,6 +1417,7 @@
   }
 
   function applyPublicTrialTextsToForm(formElement, configuration) {
+    if (!formElement.hasAttribute('data-sitebrush-public-trial-form')) return;
     const titleElement = formElement.querySelector('[data-sitebrush-public-trial-title]');
     const labelTextElement = formElement.querySelector('[data-sitebrush-public-trial-label]');
     const buttonElement = formElement.querySelector('button[type="submit"]');
@@ -1429,6 +1430,8 @@
     if (buttonElement) {
       buttonElement.textContent = publicTrialText(configuration, 'checkButton', 'Check website');
     }
+    const domainLabelElement = formElement.querySelector('[data-sitebrush-trial-domain-label]');
+    if (domainLabelElement) domainLabelElement.textContent = publicTrialText(configuration, 'newSiteLabel', 'Choose your SiteBrush address');
   }
 
   function loadPublicTrialTexts(formElement, configuration) {
@@ -1444,7 +1447,9 @@
         mergePublicTrialTexts(configuration, textsPayload);
         applyPublicTrialTextsToForm(formElement, configuration);
       })
-      .catch(function ignorePublicTrialTextLoad() {});
+      .catch(function reportPublicTrialTextLoad(error) {
+        console.error('SiteBrush Test Drive translations:', error);
+      });
   }
 
   function attachPublicTrialForm(formElement, configuration) {
@@ -1454,26 +1459,43 @@
     const publicTrialConfiguration = configuration || {};
     formElement.dataset.sitebrushPublicTrialAttached = '1';
     const sourceInputElement = formElement.querySelector('input[name="source_url"]');
+    const subdomainInputElement = formElement.querySelector('input[name="subdomain"]');
     const suggestedDomainElement = formElement.querySelector('[data-sitebrush-suggested-domain]');
+    const parentDomain = String(publicTrialConfiguration.parentDomain || '').toLowerCase().trim();
+    let subdomainEdited = false;
+    function renderTrialAddress() {
+      if (!suggestedDomainElement || !subdomainInputElement) return;
+      const label = String(subdomainInputElement.value || '').toLowerCase().trim();
+      suggestedDomainElement.textContent = label && parentDomain ? publicTrialText(publicTrialConfiguration, 'suggestedAddress', 'Your site address') + ': ' + label + '.' + parentDomain : '';
+    }
     function requestTrialDomain(sourceURL) {
       const suggestionURL = new URL(publicTrialFetchURL(publicTrialConfiguration.endpoint || '/', 'trial_site_suggest'));
       suggestionURL.searchParams.set('source_url', sourceURL);
       return fetch(suggestionURL.toString(), {headers: {Accept: 'application/json'}})
         .then(function readSuggestion(response) {
-          if (!response.ok) throw new Error('Subdomain suggestion is unavailable');
+          if (!response.ok) throw new Error(publicTrialText(publicTrialConfiguration, 'suggestionUnavailable', 'Could not suggest an address. Try again.'));
           return response.json();
         });
     }
     if (sourceInputElement && suggestedDomainElement) {
       sourceInputElement.addEventListener('change', function suggestTrialDomain() {
-        suggestedDomainElement.textContent = '';
         requestTrialDomain(sourceInputElement.value.trim())
           .then(function displaySuggestion(suggestion) {
-            suggestedDomainElement.textContent = suggestion.domain ? 'Suggested address: ' + suggestion.domain : '';
+            if (!subdomainEdited && subdomainInputElement && suggestion.domain) {
+              subdomainInputElement.value = suggestion.domain.slice(0, -parentDomain.length - 1);
+            }
+            renderTrialAddress();
           })
           .catch(function reportSuggestionError(error) {
-            console.error('SiteBrush Test Drive:', error);
+            if (suggestedDomainElement) suggestedDomainElement.textContent = error.message;
           });
+      });
+    }
+    if (subdomainInputElement) {
+      subdomainInputElement.addEventListener('input', function changeTrialAddress() {
+        subdomainEdited = true;
+        subdomainInputElement.value = subdomainInputElement.value.toLowerCase();
+        renderTrialAddress();
       });
     }
     applyPublicTrialTextsToForm(formElement, publicTrialConfiguration);
@@ -1485,13 +1507,33 @@
       }
       textsReady.then(function prepareTrialDomain() {
         const sourceURL = String(new FormData(formElement).get('source_url') || '');
-        return requestTrialDomain(sourceURL).then(function openLocalizedPublicTrialModal(suggestion) {
-          if (suggestedDomainElement) suggestedDomainElement.textContent = 'Suggested address: ' + suggestion.domain;
+        const suggestionRequest = requestTrialDomain(sourceURL).catch(function continueWithChosenAddress(error) {
+          if (subdomainEdited && subdomainInputElement && subdomainInputElement.value.trim()) return {domain: ''};
+          throw error;
+        });
+        return suggestionRequest.then(function openLocalizedPublicTrialModal(suggestion) {
+          if (!subdomainEdited && subdomainInputElement && suggestion.domain) {
+            subdomainInputElement.value = suggestion.domain.slice(0, -parentDomain.length - 1);
+          }
+          const subdomainName = String(subdomainInputElement && subdomainInputElement.value || '').toLowerCase().trim();
+          if (!/^[a-z0-9](?:[a-z0-9-]{0,22}[a-z0-9])?$/.test(subdomainName) || !parentDomain) {
+            throw new Error(publicTrialText(publicTrialConfiguration, 'newSiteInvalid', 'Enter a valid subdomain name.'));
+          }
+          renderTrialAddress();
+          const checkURL = new URL(publicTrialFetchURL(publicTrialConfiguration.endpoint || '/', 'trial_site_domain_check'));
+          checkURL.searchParams.set('subdomain', subdomainName);
+          return fetch(checkURL.toString(), {headers: {Accept: 'application/json'}}).then(function readTrialAddressCheck(response) {
+            if (!response.ok) throw new Error(publicTrialText(publicTrialConfiguration, 'addressCheckFailed', 'Could not check the address. Please try again.'));
+            return response.json();
+          }).then(function startAvailableTrialAddress(check) {
+          if (!check.available || check.domain !== subdomainName + '.' + parentDomain) {
+            throw new Error(publicTrialText(publicTrialConfiguration, 'addressUnavailable', 'This address is unavailable. Choose another name.'));
+          }
         const unifiedConfiguration = Object.assign({}, publicTrialConfiguration, {
           publicTrial: true,
           copyWholeSite: true,
           sourceURL: sourceURL,
-          trialDomain: suggestion.domain,
+          trialDomain: check.domain,
           path: '/',
           previewQuery: 'trial_site_preview',
           downloadQuery: 'trial_site_create',
@@ -1500,6 +1542,7 @@
           webSocketQuery: 'trial_site_ws'
         });
         openCopySiteModal(unifiedConfiguration);
+          });
         });
       }).catch(function reportTrialDomainError(error) {
         if (suggestedDomainElement) suggestedDomainElement.textContent = error.message;
@@ -1512,6 +1555,24 @@
       return;
     }
     formElement.dataset.sitebrushNewSiteAttached = '1';
+    loadPublicTrialTexts(formElement, configuration).then(function applyNewSiteTexts() {
+      const titleElement = formElement.querySelector('[data-sitebrush-new-site-title]');
+      const labelElement = formElement.querySelector('[data-sitebrush-new-site-label]');
+      const buttonElement = formElement.querySelector('[data-sitebrush-new-site-button]');
+      if (titleElement) titleElement.textContent = publicTrialText(configuration, 'newSiteTitle', 'Create an empty site');
+      if (labelElement) labelElement.textContent = publicTrialText(configuration, 'newSiteLabel', 'Choose your SiteBrush address');
+      if (buttonElement) buttonElement.textContent = publicTrialText(configuration, 'newSiteTitle', 'Create an empty site');
+      renderNewSiteAddress();
+    });
+    const subdomainInputElement = formElement.querySelector('input[name="subdomain"]');
+    const domainPreviewElement = formElement.querySelector('[data-sitebrush-new-domain-preview]');
+    function renderNewSiteAddress() {
+      if (!domainPreviewElement || !subdomainInputElement) return;
+      const label = String(subdomainInputElement.value || '').toLowerCase().trim();
+      domainPreviewElement.textContent = label ? publicTrialText(configuration, 'suggestedAddress', 'Your site address') + ': ' + label + '.' + String(configuration.parentDomain || '') : '';
+    }
+    if (subdomainInputElement) subdomainInputElement.addEventListener('input', renderNewSiteAddress);
+    renderNewSiteAddress();
     formElement.addEventListener('submit', function onNewSiteSubmit(submitEvent) {
       submitEvent.preventDefault();
       if (!formElement.reportValidity()) {
@@ -1521,7 +1582,7 @@
       const subdomainName = String(subdomainInput.value || '').toLowerCase().trim();
       const parentDomain = String(configuration && configuration.parentDomain || '').toLowerCase().trim();
       if (!/^[a-z0-9](?:[a-z0-9-]{0,22}[a-z0-9])?$/.test(subdomainName) || !parentDomain) {
-        subdomainInput.setCustomValidity('Enter a valid subdomain name.');
+        subdomainInput.setCustomValidity(publicTrialText(configuration, 'newSiteInvalid', 'Enter a valid subdomain name.'));
         subdomainInput.reportValidity();
         return;
       }
@@ -1533,11 +1594,11 @@
       submitButton.disabled = true;
       fetch(checkURL.toString(), {headers: {Accept: 'application/json'}})
         .then(function readDomainCheck(response) {
-          if (!response.ok) throw new Error('Could not check this address. Please try again.');
+          if (!response.ok) throw new Error(publicTrialText(configuration, 'addressCheckFailed', 'Could not check the address. Please try again.'));
           return response.json();
         })
         .then(function continueNewSiteRegistration(check) {
-          if (!check.available) throw new Error('This address is already taken. Choose another name.');
+          if (!check.available) throw new Error(publicTrialText(configuration, 'addressUnavailable', 'This address is unavailable. Choose another name.'));
           const registrationURL = new URL('/', configuration.endpoint);
           registrationURL.hostname = check.domain;
           // Registration begins before automatic TLS can issue this hostname's certificate.

@@ -11,7 +11,7 @@
 <body class="technical-page">
 <main class="container" data-server-update data-csrf="{{.AccountCSRF}}" data-server-version="{{.ServerVersion}}"
   data-log-empty="{{index .T "update_log_empty"}}" data-waiting="{{index .T "update_connecting"}}" data-unavailable="{{index .T "update_unavailable"}}">
-  <header class="page-header"><h1>{{index .T "update_title"}}</h1><a href="/?expenses">{{index .T "menu_expenses"}}</a></header>
+  {{if not .Embedded}}<header class="page-header"><h1>{{index .T "update_title"}}</h1><a href="/?expenses#server-update">{{index .T "menu_expenses"}}</a></header>{{end}}
   <p class="update-introduction">{{index .T "update_maintenance_notice"}}</p>
   <section class="update-versions" aria-label="{{index .T "update_versions"}}">
     <div class="update-card"><span>{{index .T "update_running_version"}}</span><strong data-update-current>—</strong><small data-update-selected hidden></small><small data-update-launcher-version></small></div>
@@ -40,9 +40,9 @@
       <legend>{{index .T "update_backup_title"}}</legend>
       <p>{{index .T "update_backup_hint"}}</p>
       <label><input type="checkbox" data-backup-group="databases" checked> {{index .T "update_backup_databases"}}</label>
-      <label><input type="checkbox" data-backup-group="analytics" checked> {{index .T "update_backup_analytics"}}</label>
-      <label><input type="checkbox" data-backup-group="files" checked> {{index .T "update_backup_files"}}</label>
-      <label><input type="checkbox" data-backup-group="settings" checked> {{index .T "update_backup_settings"}}</label>
+      <label><input type="checkbox" data-backup-group="analytics"> {{index .T "update_backup_analytics"}}</label>
+      <label><input type="checkbox" data-backup-group="files"> {{index .T "update_backup_files"}}</label>
+      <label><input type="checkbox" data-backup-group="settings"> {{index .T "update_backup_settings"}}</label>
       <p class="update-warning" data-update-backup-warning hidden>{{index .T "update_backup_warning"}}</p>
       <p class="update-warning" data-update-launcher-warning hidden>{{index .T "update_launcher_required"}}</p>
       <p data-update-backup-estimate></p>

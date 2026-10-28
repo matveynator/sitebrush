@@ -2833,7 +2833,7 @@ func TestHostingAndSupportRealClientHostingsExcludeLocalAndUnroutedServers(t *te
 	}
 }
 
-func TestHostingAndSupportCentralServersRequireSitebrushComDNSAndKey(t *testing.T) {
+func TestHostingAndSupportCentralServersUsePinnedKeyAcrossReverseProxy(t *testing.T) {
 	previousIPLookup := lookupIPRecords
 	previousExternalIPLookup := lookupServerExternalIP
 	t.Cleanup(func() {
@@ -2841,34 +2841,20 @@ func TestHostingAndSupportCentralServersRequireSitebrushComDNSAndKey(t *testing.
 		lookupServerExternalIP = previousExternalIPLookup
 	})
 	lookupIPRecords = func(domain string) ([]net.IP, error) {
-		if domain == "sitebrush.com" {
-			return []net.IP{net.ParseIP("203.0.113.10")}, nil
-		}
-		return nil, errors.New("unexpected domain")
+		return nil, errors.New("DNS is unavailable")
 	}
 	lookupServerExternalIP = func(context.Context) (string, error) {
-		return "203.0.113.10", nil
-	}
-	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "hostingandsupport.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = database.Close()
-	})
-	if err := hostingandsupport.Migrate(context.Background(), database); err != nil {
-		t.Fatal(err)
-	}
-	store := hostingandsupport.Store{DB: database}
-	if err := store.SetOwner(context.Background(), "sitebrush.com", "owner@sitebrush.com"); err != nil {
-		t.Fatal(err)
+		return "", errors.New("external IP is unavailable")
 	}
 	application := &App{}
 	if !application.hostingAndSupportCanShowCentralServers(context.Background(), "sitebrush.com", hostingandsupport.SitebrushComKey{PublicKey: sitebrushComServiceMailRelayPublicKey}) {
-		t.Fatal("sitebrush.com with matching DNS and public key was not accepted")
+		t.Fatal("reverse proxy topology hid the pinned central registry")
 	}
 	if application.hostingAndSupportCanShowCentralServers(context.Background(), "sitebrush.com", hostingandsupport.SitebrushComKey{PublicKey: "wrong"}) {
 		t.Fatal("sitebrush.com with wrong public key was accepted")
+	}
+	if application.hostingAndSupportCanShowCentralServers(context.Background(), "other.example", hostingandsupport.SitebrushComKey{PublicKey: sitebrushComServiceMailRelayPublicKey}) {
+		t.Fatal("another owner domain was accepted as central")
 	}
 }
 
@@ -4816,6 +4802,197 @@ func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
 	}
 	if len(confirmResponse.Result().Cookies()) == 0 {
 		t.Fatal("confirmation did not create session")
+	}
+}
+
+func TestTrialEmailConfirmationFromBlockedPhoneCreatesSession(t *testing.T) {
+	application, database := newTestApplication(t)
+	control := setupBillingOwnerForTest(t, application, "example.org", "owner@example.org", true)
+	defer control.Close()
+	if err := (hostingandsupport.Store{DB: control}).CreatePublicTrialSite(context.Background(), "copy.example.org", "https://example.net/", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	confirmation := EmailConfirmation{
+		Token: "trial-mail-proof", Domain: "copy.example.org", Action: "register",
+		Email: "owner@example.org", ReturnPath: "/", LanguageCode: "ru",
+		ExpiresAt: time.Now().Add(15 * time.Minute).UTC().Format(time.RFC3339), Workflow: "trial",
+	}
+	if err := application.saveRegistrationConfirmation(context.Background(), confirmation); err != nil {
+		t.Fatal(err)
+	}
+	phoneIP := "198.51.100.73"
+	if _, err := database.Exec(`INSERT INTO auth_ip_failures(domain,client_ip,failure_count,blocked_until,hard_locked,last_failed_at,last_attempt_at) VALUES(?,?,?,?,?,?,?)`, confirmation.Domain, phoneIP, 8, time.Now().Add(time.Hour).UTC().Format(time.RFC3339), 0, time.Now().UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	confirmationURL := "https://copy.example.org/?email_confirm=" + url.QueryEscape(confirmation.Token)
+	getRequest := httptest.NewRequest(http.MethodGet, confirmationURL, nil)
+	getRequest.RemoteAddr = phoneIP + ":4000"
+	getResponse := httptest.NewRecorder()
+	application.route(getResponse, getRequest)
+	if getResponse.Code != http.StatusOK || !strings.Contains(getResponse.Body.String(), `data-account-auto-confirm`) || strings.Contains(getResponse.Body.String(), `name="password"`) {
+		t.Fatalf("trial confirmation on phone: status=%d body=%s", getResponse.Code, getResponse.Body.String())
+	}
+	postRequest := httptest.NewRequest(http.MethodPost, confirmationURL, nil)
+	postRequest.RemoteAddr = phoneIP + ":4001"
+	postResponse := httptest.NewRecorder()
+	application.route(postResponse, postRequest)
+	if postResponse.Code != http.StatusFound {
+		t.Fatalf("trial confirmation post: status=%d body=%s", postResponse.Code, postResponse.Body.String())
+	}
+	if cookie := postResponse.Result().Cookies(); len(cookie) == 0 || cookie[0].Name != "sitebrush_session" {
+		t.Fatalf("confirmed phone has no session cookie: %v", cookie)
+	}
+	var failures int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM auth_ip_failures WHERE domain=? AND client_ip=?`, confirmation.Domain, phoneIP).Scan(&failures); err != nil || failures != 0 {
+		t.Fatalf("verified phone remained blocked: count=%d err=%v", failures, err)
+	}
+}
+
+func TestTrialRegistrationSendsEmailWithoutDirectSubdomainDNSMatch(t *testing.T) {
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
+	application, _ := newTestApplication(t)
+	control := setupBillingOwnerForTest(t, application, "example.org", "owner@example.org", true)
+	if err := (hostingandsupport.Store{DB: control}).CreatePublicTrialSite(context.Background(), "copy.example.org", "https://example.net/", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := control.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher, err := startServerControlDatabaseDispatcher(application.serverControlDBPath(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.controlDatabase = dispatcher
+	t.Cleanup(func() { dispatcher.Close() })
+	form := url.Values{"email": {"new@example.net"}}
+	request := httptest.NewRequest(http.MethodPost, "https://copy.example.org/?register&trial_embed", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.RemoteAddr = "198.51.100.72:4000"
+	prepareAccountMailCaptchaForTest(t, application, request)
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "new@example.net") {
+		t.Fatalf("trial signup needs no direct DNS match: status=%d body=%s", response.Code, response.Body.String())
+	}
+	select {
+	case message := <-application.emailDelivery:
+		if message.Message.To != "new@example.net" {
+			t.Fatalf("confirmation recipient: %q", message.Message.To)
+		}
+	default:
+		t.Fatal("trial confirmation mail was not queued")
+	}
+	var expiresAt string
+	if err := application.withServerControlDatabaseRead(context.Background(), "test-registration-expiry", func(database *sql.DB) error {
+		return database.QueryRow(`SELECT expires_at FROM registration_confirmations WHERE domain=? AND email=?`, "copy.example.org", "new@example.net").Scan(&expiresAt)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	expires, err := time.Parse(time.RFC3339, expiresAt)
+	if err != nil || time.Until(expires) < 11*time.Hour {
+		t.Fatalf("registration link expires too soon: %s err=%v", expiresAt, err)
+	}
+}
+
+func TestMailedLoginLinkFromAnotherDeviceBypassesPasswordIPBlock(t *testing.T) {
+	application, database := newTestApplication(t)
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','owner@example.org','secret',1)`); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	var challenge accountauth.Outcome
+	if err := application.accountTransaction(context.Background(), func(transaction *sql.Tx) error {
+		var challengeErr error
+		challenge, challengeErr = accountauth.Challenge(context.Background(), transaction, "example.org", "owner@example.org", "198.51.100.10", "/", "en", now)
+		return challengeErr
+	}); err != nil || challenge.Status != "code" {
+		t.Fatalf("mailed proof: %+v, %v", challenge, err)
+	}
+	phoneIP := "198.51.100.73"
+	if _, err := database.Exec(`INSERT INTO auth_ip_failures(domain,client_ip,failure_count,blocked_until,hard_locked,last_failed_at,last_attempt_at) VALUES(?,?,?,?,?,?,?)`, "example.org", phoneIP, 8, now.Add(time.Hour).Format(time.RFC3339), 0, now.Format(time.RFC3339), now.Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "https://example.org/?login&login_challenge="+url.QueryEscape(challenge.Token)+"&login_link=1", nil)
+	request.RemoteAddr = phoneIP + ":4000"
+	response := httptest.NewRecorder()
+	application.login(response, request)
+	if response.Code != http.StatusFound || len(response.Result().Cookies()) == 0 {
+		t.Fatalf("mailed proof on another device: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestReservedDomainCanResendDuringRegistrationCooldown(t *testing.T) {
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
+	application, _ := newTestApplication(t)
+	control := setupBillingOwnerForTest(t, application, "example.org", "owner@example.org", true)
+	if err := control.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher, err := startServerControlDatabaseDispatcher(application.serverControlDBPath(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.controlDatabase = dispatcher
+	t.Cleanup(func() { dispatcher.Close() })
+	confirmation := EmailConfirmation{Token: "reserved-confirmation-token", Domain: "copy.example.org", Action: "register", Email: "owner@example.net", Code: "123456", ExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339)}
+	if err := application.saveRegistrationConfirmation(context.Background(), confirmation); err != nil {
+		t.Fatal(err)
+	}
+	claimRequest := httptest.NewRequest(http.MethodGet, "https://copy.example.org/?email_confirm="+confirmation.Token, nil)
+	if err := application.confirmRegistrationDomain(claimRequest, confirmation); err != nil {
+		t.Fatal(err)
+	}
+	if !application.registrationDomainClaimed(context.Background(), confirmation.Domain) {
+		t.Fatal("domain reservation was not recorded")
+	}
+	now := time.Now().UTC()
+	clientIP := "198.51.100.76"
+	if err := application.withServerControlDatabaseWrite(context.Background(), "test-registration-cooldown", func(database *sql.DB) error {
+		_, writeErr := database.Exec(`INSERT INTO registration_mail_cooldowns(client_ip,domain,attempt_id,message_id,phase,failures,retry_at,expires_at) VALUES(?,?,?,?,?,?,?,?)`, clientIP, confirmation.Domain, "registration-attempt", "mail-message", "pending", 0, now.Add(time.Hour).Unix(), now.Add(time.Hour).Unix())
+		return writeErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{"email": {confirmation.Email}}
+	request := httptest.NewRequest(http.MethodPost, "https://copy.example.org/?register&resend_confirmation", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.RemoteAddr = clientIP + ":4000"
+	prepareAccountMailCaptchaForTest(t, application, request)
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "owner@example.net") {
+		t.Fatalf("resend during cooldown: status=%d location=%s body=%s", response.Code, response.Header().Get("Location"), response.Body.String())
+	}
+	select {
+	case message := <-application.emailDelivery:
+		if message.Message.To != confirmation.Email {
+			t.Fatalf("confirmation recipient: %q", message.Message.To)
+		}
+	default:
+		t.Fatal("reserved-domain resend was not queued")
+	}
+}
+
+func TestPublicTrialIPAdmissionSurvivesSeparateRequests(t *testing.T) {
+	application, _ := newTestApplication(t)
+	control := setupBillingOwnerForTest(t, application, "example.org", "owner@example.org", true)
+	defer control.Close()
+	ctx := context.Background()
+	clientIP := "198.51.100.78"
+	for _, token := range []string{"first-preview", "second-preview"} {
+		allowed, _, err := application.reservePublicTrialIPAdmission(ctx, clientIP, "preview", token, 2)
+		if err != nil || !allowed {
+			t.Fatalf("admit %s: allowed=%t err=%v", token, allowed, err)
+		}
+	}
+	allowed, retryAfter, err := application.reservePublicTrialIPAdmission(ctx, clientIP, "preview", "third-preview", 2)
+	if err != nil || allowed || retryAfter <= 0 {
+		t.Fatalf("daily admission limit: allowed=%t retry=%d err=%v", allowed, retryAfter, err)
+	}
+	application.releasePublicTrialIPAdmission(ctx, "preview", "first-preview")
+	allowed, _, err = application.reservePublicTrialIPAdmission(ctx, clientIP, "preview", "third-preview", 2)
+	if err != nil || !allowed {
+		t.Fatalf("released admission was not reusable: allowed=%t err=%v", allowed, err)
 	}
 }
 
@@ -11684,6 +11861,20 @@ func TestPublicTrialFormUsesUnifiedCopyDialog(t *testing.T) {
 	} {
 		if !strings.Contains(script, expectedFragment) {
 			t.Fatalf("unified public trial script does not contain %q", expectedFragment)
+		}
+	}
+}
+
+func TestPublicTrialSubdomainLabelUsesPathBeforeRegistrableHost(t *testing.T) {
+	cases := map[string]string{
+		"https://mitserominerun.github.io/MitseroMineRun": "mitserominerun",
+		"https://limnobioexplab.github.io/protistcloud/":  "protistcloud",
+		"https://limnobioexplab.github.io/":               "limnobioexplab",
+		"https://mitserominerun.github.io/":               "mitserominerun",
+	}
+	for sourceURL, expected := range cases {
+		if actual := publicTrialSubdomainLabel(sourceURL); actual != expected {
+			t.Errorf("label for %s: got %q, want %q", sourceURL, actual, expected)
 		}
 	}
 }
@@ -23857,8 +24048,16 @@ func TestServerUpdateRequiresServerOwnerAndNeverMutatesOnGET(t *testing.T) {
 			result := httptest.NewRecorder()
 			application.serverUpdatePage(result, request)
 			if email == "owner@example.com" {
-				if result.Code != http.StatusOK || !strings.Contains(result.Body.String(), "data-server-update") {
-					t.Fatalf("owner page=%d %s", result.Code, result.Body.String())
+				if result.Code != http.StatusSeeOther || result.Header().Get("Location") != "/?expenses#server-update" {
+					t.Fatalf("owner redirect=%d %s", result.Code, result.Header().Get("Location"))
+				}
+				embedded := httptest.NewRequest(http.MethodGet, "http://localhost/?server_update&embedded", nil)
+				embedded.AddCookie(cookie)
+				embedded = embedded.WithContext(contextWithDomain(embedded.Context(), "localhost"))
+				embeddedResult := httptest.NewRecorder()
+				application.serverUpdatePage(embeddedResult, embedded)
+				if embeddedResult.Code != http.StatusOK || !strings.Contains(embeddedResult.Body.String(), "data-server-update") {
+					t.Fatalf("embedded owner page=%d %s", embeddedResult.Code, embeddedResult.Body.String())
 				}
 			} else if result.Code != http.StatusForbidden {
 				t.Fatalf("site admin status=%d", result.Code)
@@ -24394,7 +24593,7 @@ func TestUpdateDevelopmentBuildNeverContactsStaleSupervisor(t *testing.T) {
 		t.Fatalf("development central authority: %v", err)
 	}
 	page := httptest.NewRecorder()
-	pageRequest := httptest.NewRequest(http.MethodGet, "http://localhost/?server_update", nil)
+	pageRequest := httptest.NewRequest(http.MethodGet, "http://localhost/?server_update&embedded", nil)
 	pageRequest.AddCookie(cookie)
 	pageRequest = pageRequest.WithContext(contextWithDomain(pageRequest.Context(), "localhost"))
 	application.serverUpdatePage(page, pageRequest)
@@ -25721,8 +25920,8 @@ func TestConfirmedDomainReservationSurvivesTLSWaitAndRestart(t *testing.T) {
 	register := httptest.NewRequest(http.MethodGet, "http://"+domain+"/?register", nil).WithContext(contextWithDomain(ctx, domain))
 	reserved := httptest.NewRecorder()
 	application.registerPage(reserved, register)
-	if reserved.Code != http.StatusConflict || strings.Contains(reserved.Body.String(), `name="email"`) {
-		t.Fatalf("reserved site offers signup: %d %s", reserved.Code, reserved.Body.String())
+	if reserved.Code != http.StatusConflict || !strings.Contains(reserved.Body.String(), `resend_confirmation`) || !strings.Contains(reserved.Body.String(), `name="email"`) {
+		t.Fatalf("reserved site lacks confirmation resend: %d %s", reserved.Code, reserved.Body.String())
 	}
 	// A restarted confirmation worker reloads the durable token, extended for slow TLS issuance.
 	application.registrationConfirmations = startEmailConfirmationMemoryWorker(ctx)

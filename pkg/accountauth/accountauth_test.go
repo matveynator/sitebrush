@@ -221,11 +221,8 @@ func TestLoginAlwaysRequiresMailWithoutSession(t *testing.T) {
 	verify := func(token, code, ip string, at time.Time) Outcome {
 		return transact(t, db, func(tx *sql.Tx) (Outcome, error) { return Verify(ctx, tx, "example.org", token, code, ip, at) })
 	}
-	if verify(challenge.Token, challenge.Code, "192.0.2.2", now).Status != "invalid" {
-		t.Fatal("wrong IP accepted")
-	}
-	if verify(challenge.Token, challenge.Code, "192.0.2.1", now).Status != "session" {
-		t.Fatal("valid code rejected")
+	if verify(challenge.Token, challenge.Code, "192.0.2.2", now).Status != "session" {
+		t.Fatal("mailed code rejected on another device")
 	}
 	if verify(challenge.Token, challenge.Code, "192.0.2.1", now).Status != "invalid" {
 		t.Fatal("code reused")
@@ -271,7 +268,7 @@ func TestCredentialsAndSingleUseLoginLink(t *testing.T) {
 		t.Fatalf("login challenge = %#v", challenge)
 	}
 	link := transact(t, database, func(tx *sql.Tx) (Outcome, error) {
-		return VerifyLink(ctx, tx, "example.org", challenge.Token, "192.0.2.10", now.Add(time.Second))
+		return VerifyLink(ctx, tx, "example.org", challenge.Token, "192.0.2.11", now.Add(time.Second))
 	})
 	if link.Status != "session" || link.Email != "owner@example.org" || link.Path != "/profile" || link.Language != "en" || link.Token == "" {
 		t.Fatalf("verified login link = %#v", link)
@@ -287,6 +284,43 @@ func TestCredentialsAndSingleUseLoginLink(t *testing.T) {
 		t.Fatalf("wrong address login link = %#v", invalid)
 	}
 }
+
+func TestPasswordlessTrialAccountUsesMailedLink(t *testing.T) {
+	database := testDatabase(t)
+	if _, err := database.Exec(`UPDATE users SET password='' WHERE domain='example.org' AND email='owner@example.org'`); err != nil {
+		t.Fatal(err)
+	}
+	transaction, err := database.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	now := time.Now().UTC()
+	valid, err := Credentials(ctx, transaction, "example.org", "owner@example.org", "")
+	if err != nil || valid {
+		t.Fatalf("empty password authenticated a trial account: valid=%t err=%v", valid, err)
+	}
+	passwordOutcome, err := Password(ctx, transaction, "example.org", "owner@example.org", "", "198.51.100.80", "/", "en", now)
+	if err != nil || passwordOutcome.Status != "credentials" {
+		t.Fatalf("passwordless account accepted empty password: %+v err=%v", passwordOutcome, err)
+	}
+	if err := transaction.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	challenge := transact(t, database, func(tx *sql.Tx) (Outcome, error) {
+		return Challenge(ctx, tx, "example.org", "owner@example.org", "198.51.100.80", "/", "en", now)
+	})
+	if challenge.Status != "code" {
+		t.Fatalf("passwordless mail challenge: %+v", challenge)
+	}
+	login := transact(t, database, func(tx *sql.Tx) (Outcome, error) {
+		return VerifyLink(ctx, tx, "example.org", challenge.Token, "198.51.100.81", now.Add(time.Second))
+	})
+	if login.Status != "session" || login.Token == "" {
+		t.Fatalf("mailed trial login on another device: %+v", login)
+	}
+}
+
 func TestResendExpiryAndUnknownAddress(t *testing.T) {
 	db := testDatabase(t)
 	ctx := context.Background()

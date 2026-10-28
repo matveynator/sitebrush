@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="{{.LanguageCode}}" dir="{{.TextDirection}}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{{.Domain}} · {{index .T "auth_domain_reserved_title"}}</title>
+  <link rel="stylesheet" href="/p/static/technical_pages.css?v={{.CompileVersion}}">
+</head>
+<body class="technical-page">
+  <main class="container authentication-shell">
+    <section class="authentication-card profile-form">
+      <h1>{{index .T "auth_domain_reserved_title"}}</h1>
+      <p><strong dir="ltr">{{.Domain}}</strong></p>
+      <p role="status">{{.Status}}</p>
+      <form method="post" action="?register&amp;resend_confirmation">
+        <h2>{{index .T "auth_resend_confirmation_title"}}</h2>
+        <p>{{index .T "auth_resend_confirmation_hint"}}</p>
+        <label>{{index .T "login_email_placeholder"}}<input name="email" type="email" autocomplete="email" maxlength="254" value="{{.Email}}" required></label>
+        {{if .CaptchaUnavailable}}
+          <p role="alert">{{index .T "public_trial_captcha_unavailable"}}</p>
+        {{else}}
+          <input type="hidden" name="captcha_id" value="{{.CaptchaID}}">
+          <img src="{{.CaptchaImage}}" alt="{{index .T "account_captcha_label"}}" width="240" height="80">
+          <label>{{index .T "account_captcha_label"}}<input name="captcha" type="text" autocomplete="off" required></label>
+          <button type="submit">{{index .T "auth_resend_confirmation_button"}}</button>
+        {{end}}
+      </form>
+      <p><a href="{{.LoginURL}}">{{index .T "auth_return_to_login"}}</a></p>
+      <p><a href="{{.MainURL}}">{{index .T "auth_create_another_site"}}</a></p>
+    </section>
+  </main>
+</body>
+</html>

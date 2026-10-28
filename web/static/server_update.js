@@ -3,7 +3,7 @@
   const updateRoot = document.querySelector('[data-server-update]');
   if (!updateRoot) return;
   const announcementRoot = updateRoot.querySelector('[data-announcements]');
-  const updateModel = { serverVersion: updateRoot.dataset.serverVersion || '', lastContact: 0, pendingAction: '', queuedCommand: null, logText: '', renderedLog: '', connected: false, state: null, error: '', pending: false, socket: null, stopped: false, preview: null, campaigns: [], reason: 'security', backupPolicy: {databases: true, analytics: true, files: true, settings: true} };
+  const updateModel = { serverVersion: updateRoot.dataset.serverVersion || '', lastContact: 0, pendingAction: '', queuedCommand: null, logText: '', renderedLog: '', connected: false, state: null, error: '', pending: false, socket: null, stopped: false, preview: null, campaigns: [], reason: 'security', backupPolicy: {databases: true, analytics: false, files: false, settings: false} };
   const stageLabels = Object.fromEntries(Array.from(updateRoot.querySelectorAll('[data-stage]'), function readStageLabel(stageElement) {
     return [stageElement.dataset.stage, stageElement.textContent];
   }));
@@ -279,7 +279,7 @@
       if (updateResponse.Preview) updateModel.preview = updateResponse.Preview;
       if (updateResponse.Campaigns) updateModel.campaigns = updateResponse.Campaigns;
       if (updateResponse.State && updateResponse.State.current && updateResponse.State.current.version) {
-        if (updateResponse.State.progress && updateResponse.State.progress.finished_at && updateModel.state && updateModel.state.progress && !updateModel.state.progress.finished_at) updateModel.backupPolicy = {databases: true, analytics: true, files: true, settings: true};
+        if (updateResponse.State.progress && updateResponse.State.progress.finished_at && updateModel.state && updateModel.state.progress && !updateModel.state.progress.finished_at) updateModel.backupPolicy = {databases: true, analytics: false, files: false, settings: false};
         updateModel.state = updateResponse.State;
       }
       updateModel.error = updateResponse.Error || '';
