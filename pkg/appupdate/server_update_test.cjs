@@ -95,7 +95,7 @@ ordinary.element('[data-update-install]').dispatch('click');
 assert.equal(ordinary.socket.commands.at(-1).action, 'upgrade_with_options');
 assert.equal(ordinary.socket.commands.at(-1).csrf, 'session-proof');
 assert.equal(ordinary.socket.commands.at(-1).manifest_hash, 'signed-release');
-assert.deepEqual(ordinary.socket.commands.at(-1).backup_policy, {databases: true, analytics: true, files: true, settings: true});
+assert.deepEqual(ordinary.socket.commands.at(-1).backup_policy, {databases: true, analytics: false, files: false, settings: false});
 assert.equal(ordinary.element('[data-update-install]').disabled, true);
 ordinary.poll();
 assert.equal(ordinary.socket.commands.length, 2, 'polling must not queue behind an outstanding operation');
@@ -113,11 +113,12 @@ assert.equal(ordinary.element('[data-update-rollback]').disabled, true);
 
 const optionsPanel = installationPanel(false);
 const fileCheckbox = optionsPanel.element('[data-backup-group="files"]');
-fileCheckbox.checked = false;
+assert.equal(fileCheckbox.checked, false, 'only the database backup is selected by default');
+fileCheckbox.checked = true;
 fileCheckbox.dispatch('change');
 assert.equal(optionsPanel.element('[data-update-backup-warning]').hidden, false);
 optionsPanel.element('[data-update-install]').dispatch('click');
-assert.equal(optionsPanel.socket.commands.at(-1).backup_policy.files, false);
+assert.equal(optionsPanel.socket.commands.at(-1).backup_policy.files, true);
 assert.equal(optionsPanel.socket.commands.at(-1).backup_policy.databases, true);
 optionsPanel.socket.reply({State: {stage: 'available', current: {version: '1'}, available: {version: '21'}, backup_options: false}});
 assert.equal(optionsPanel.element('[data-update-install]').disabled, true, 'old supervisor cannot silently ignore options');
@@ -135,7 +136,7 @@ activePolicyPanel.socket.reply({State: {current: {version: '1'}, busy: true, sta
 assert.equal(activePolicyPanel.element('[data-backup-group="files"]').checked, false, 'a reopened page must show the accepted operation policy');
 assert.equal(activePolicyPanel.element('[data-backup-group="files"]').disabled, true);
 activePolicyPanel.socket.reply({State: {current: {version: '21'}, busy: false, stage: 'completed', progress: {action: 'upgrade', stage: 'completed', finished_at: '2026-10-16T00:00:15Z'}}});
-assert.equal(activePolicyPanel.element('[data-backup-group="files"]').checked, true, 'each subsequent operation defaults to a full backup');
+assert.equal(activePolicyPanel.element('[data-backup-group="files"]').checked, false, 'each subsequent operation defaults to a database backup');
 
 const central = installationPanel(true);
 const previewButton = central.element('[data-announcement-preview]');
