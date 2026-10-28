@@ -11895,6 +11895,19 @@ func siteSchemaSteps(ctx context.Context, repair bool) []migrations.Step {
 		step.Ensure = repair || index < 6
 		steps = append(steps, step)
 	}
+	// The administrator menu reads revision counts and the latest active version
+	// on each page. Keep those lookups within one page's history as sites grow.
+	for _, definition := range []struct {
+		name  string
+		query string
+	}{
+		{"revision-page-history-index", `CREATE INDEX IF NOT EXISTS idx_revisions_domain_page_id ON revisions(domain,page_path,id)`},
+		{"revision-page-active-index", `CREATE INDEX IF NOT EXISTS idx_revisions_domain_page_active_id ON revisions(domain,page_path,is_active,id)`},
+	} {
+		step := migrations.SQL(definition.name, definition.query)
+		step.Ensure = repair
+		steps = append(steps, step)
+	}
 	return steps
 }
 
@@ -18143,7 +18156,7 @@ func (a *App) enforceAdminIPAllowlist(w http.ResponseWriter, r *http.Request, do
 		return false
 	}
 	if policyEnabled == 0 {
-		return a.renewAccountSession(w, r, domain, email, cookie.Value, now)
+		return a.renewAccountSession(w, r, domain, email, cookie.Value, now, lastUsed)
 	}
 	allowedRows, err := a.db.QueryContext(r.Context(), `SELECT client_ip FROM admin_allowed_ips WHERE domain=? AND email=?`, domain, email)
 	if err != nil {
@@ -18168,14 +18181,19 @@ func (a *App) enforceAdminIPAllowlist(w http.ResponseWriter, r *http.Request, do
 		a.expireAdminSessionCookie(w, r)
 		return true
 	}
-	return a.renewAccountSession(w, r, domain, email, cookie.Value, now)
+	return a.renewAccountSession(w, r, domain, email, cookie.Value, now, lastUsed)
 }
 
 // Only foreground navigation and mutations extend the idle period. Assets and
 // background requests must not keep an unattended account authenticated.
-func (a *App) renewAccountSession(w http.ResponseWriter, r *http.Request, domain, email, token string, now time.Time) bool {
+func (a *App) renewAccountSession(w http.ResponseWriter, r *http.Request, domain, email, token string, now time.Time, lastUsed int64) bool {
 	if isLikelyStaticAssetPath(r.URL.Path) || r.Method == http.MethodHead || r.Method == http.MethodOptions ||
 		r.Method == http.MethodGet && r.Header.Get("Sec-Fetch-Dest") != "" && r.Header.Get("Sec-Fetch-Dest") != "document" || strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+		return true
+	}
+	// A recent foreground request has already extended the durable idle deadline.
+	// Avoid a SQLite write and WAL sync for every click during an active visit.
+	if lastUsed > now.Add(-time.Minute).Unix() && lastUsed <= now.Unix() {
 		return true
 	}
 	result, err := a.db.ExecContext(r.Context(), `UPDATE sessions SET last_used_at=? WHERE token=? AND user_email=? AND last_used_at<=? AND (last_used_at=0 OR last_used_at>?)`, now.Unix(), token, domain+"|"+email, now.Unix(), now.Add(-accountauth.SessionTTL).Unix())
@@ -26873,7 +26891,8 @@ func (a *App) revisionsPage(w http.ResponseWriter, r *http.Request) {
 		pagePath = cleanPath(r.URL.Path)
 	}
 	domain := a.siteDomain(r.Context(), r)
-	revisionRows, err := a.db.QueryContext(r.Context(), `SELECT id,page_path,html,created_at,is_active FROM revisions WHERE domain=? AND page_path=? ORDER BY id DESC`, domain, pagePath)
+	// The list shows only a short excerpt; full HTML is loaded by the preview route.
+	revisionRows, err := a.db.QueryContext(r.Context(), `SELECT id,page_path,SUBSTRING(html,1,120),created_at,is_active FROM revisions WHERE domain=? AND page_path=? ORDER BY id DESC`, domain, pagePath)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -42443,8 +42462,7 @@ func (a *App) domainStorageUsage(ctx context.Context, domain string) domainStora
 
 func (a *App) storedDomainStorageUsage(ctx context.Context, domain string) domainStorageUsage {
 	usage := domainStorageUsage{LimitBytes: defaultDomainStorageLimitBytes}
-	_ = a.db.QueryRowContext(ctx, `SELECT page_bytes,published_page_bytes,revision_bytes,file_bytes,published_static_bytes,COALESCE(import_queue_bytes,0),limit_bytes FROM domain_storage_usage WHERE domain=?`, domain).Scan(&usage.PageBytes, &usage.PublishedPageBytes, &usage.RevisionBytes, &usage.FileBytes, &usage.PublishedStaticBytes, &usage.ImportQueueBytes, &usage.LimitBytes)
-	_ = a.db.QueryRowContext(ctx, `SELECT COALESCE(analytics_bytes,0),COALESCE(analytics_reserved_bytes,0),COALESCE(analytics_limited,0) FROM domain_storage_usage WHERE domain=?`, domain).Scan(&usage.AnalyticsBytes, &usage.AnalyticsReservedBytes, &usage.AnalyticsLimited)
+	_ = a.db.QueryRowContext(ctx, `SELECT page_bytes,published_page_bytes,revision_bytes,file_bytes,published_static_bytes,COALESCE(import_queue_bytes,0),limit_bytes,COALESCE(analytics_bytes,0),COALESCE(analytics_reserved_bytes,0),COALESCE(analytics_limited,0) FROM domain_storage_usage WHERE domain=?`, domain).Scan(&usage.PageBytes, &usage.PublishedPageBytes, &usage.RevisionBytes, &usage.FileBytes, &usage.PublishedStaticBytes, &usage.ImportQueueBytes, &usage.LimitBytes, &usage.AnalyticsBytes, &usage.AnalyticsReservedBytes, &usage.AnalyticsLimited)
 	if usage.LimitBytes <= 0 {
 		usage.LimitBytes = defaultDomainStorageLimitBytes
 	}
@@ -43857,16 +43875,10 @@ func formatRetryCountdownSeconds(totalSeconds int) string {
 	return fmt.Sprintf("%02d:%02d:%02d", hours, minutes, seconds)
 }
 
-func (a *App) latestActiveRevisionID(ctx context.Context, domain string, pagePath string) int {
-	var revisionID int
-	_ = a.db.QueryRowContext(ctx, `SELECT id FROM revisions WHERE domain=? AND page_path=? AND is_active=1 ORDER BY id DESC LIMIT 1`, domain, pagePath).Scan(&revisionID)
-	return revisionID
-}
-
-func (a *App) revisionCount(ctx context.Context, domain string, pagePath string) int {
-	var revisionCount int
-	_ = a.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM revisions WHERE domain=? AND page_path=?`, domain, pagePath).Scan(&revisionCount)
-	return revisionCount
+func (a *App) revisionMenuSummary(ctx context.Context, domain string, pagePath string) (int, int) {
+	var revisionID, revisionCount int
+	_ = a.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(CASE WHEN is_active=1 THEN id END),0),COUNT(1) FROM revisions WHERE domain=? AND page_path=?`, domain, pagePath).Scan(&revisionID, &revisionCount)
+	return revisionID, revisionCount
 }
 
 func (a *App) serveManagedPageContent(w http.ResponseWriter, r *http.Request, domain, pagePath, content, sourceType string, isAdmin bool, adminEmail string, domainFrozen bool) {
@@ -43957,8 +43969,7 @@ func (a *App) injectContextMenuForRequest(r *http.Request, domain, pagePath, htm
 	storageUsageLabel := ""
 	showLogout := true
 	if isAdmin {
-		revisionID = a.latestActiveRevisionID(r.Context(), domain, pagePath)
-		revisionCount = a.revisionCount(r.Context(), domain, pagePath)
+		revisionID, revisionCount = a.revisionMenuSummary(r.Context(), domain, pagePath)
 		storageUsage := a.storedDomainStorageUsage(r.Context(), domain)
 		storageUsageLabel = formatFileSize(storageUsage.totalBytes()) + " / " + formatFileSize(storageUsage.LimitBytes)
 		showLogout = !a.isDemoSiteDomain(r.Context(), domain)
@@ -43977,9 +43988,11 @@ func (a *App) injectContextMenuForRequest(r *http.Request, domain, pagePath, htm
 }
 
 func injectMenuScriptIntoHTML(html string, menuScript string) string {
-	if strings.Contains(strings.ToLower(html), "</body>") {
-		bodyClosePattern := regexp.MustCompile(`(?i)</body>`)
-		return bodyClosePattern.ReplaceAllString(html, menuScript+"</body>")
+	const closingBody = "</body>"
+	for index := len(html) - len(closingBody); index >= 0; index-- {
+		if html[index] == '<' && strings.EqualFold(html[index:index+len(closingBody)], closingBody) {
+			return html[:index] + menuScript + html[index:]
+		}
 	}
 	return html + menuScript
 }
@@ -53935,8 +53948,7 @@ func (a *App) servePublishedStaticFileForAdmin(w http.ResponseWriter, r *http.Re
 			return false
 		}
 	}
-	revisionID := a.latestActiveRevisionID(r.Context(), domain, pagePath)
-	revisionCount := a.revisionCount(r.Context(), domain, pagePath)
+	revisionID, revisionCount := a.revisionMenuSummary(r.Context(), domain, pagePath)
 	_, pagePasswordProtected := a.pagePasswordRuleFromPrefixFile(domain, pagePath)
 	isServerManager := a.isServerManagerEmail(r.Context(), domain, adminEmail)
 	storageUsage := a.storedDomainStorageUsage(r.Context(), domain)
@@ -57650,7 +57662,8 @@ func (a *App) publicMenuSocket(w http.ResponseWriter, r *http.Request) {
 		pagePath := cleanPath(command.Path)
 		_, protected := a.pagePasswordRuleFromPrefixFile(domain, pagePath)
 		usage := a.storedDomainStorageUsage(r.Context(), domain)
-		menu := buildContextMenuScript(true, a.isServerManagerEmail(r.Context(), domain, email), a.isDomainFrozen(r.Context(), domain), protected, !a.isDemoSiteDomain(r.Context(), domain), pagePath, domain, a.latestActiveRevisionID(r.Context(), domain, pagePath), a.revisionCount(r.Context(), domain, pagePath), formatFileSize(usage.totalBytes())+" / "+formatFileSize(usage.LimitBytes), accountCSRF(r), translationsForRequest(r))
+		revisionID, revisionCount := a.revisionMenuSummary(r.Context(), domain, pagePath)
+		menu := buildContextMenuScript(true, a.isServerManagerEmail(r.Context(), domain, email), a.isDomainFrozen(r.Context(), domain), protected, !a.isDemoSiteDomain(r.Context(), domain), pagePath, domain, revisionID, revisionCount, formatFileSize(usage.totalBytes())+" / "+formatFileSize(usage.LimitBytes), accountCSRF(r), translationsForRequest(r))
 		connection.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		websocket.JSON.Send(connection, map[string]any{"admin": true, "menu": menu})
 	}).ServeHTTP(w, r)

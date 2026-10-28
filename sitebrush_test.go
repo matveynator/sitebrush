@@ -732,7 +732,7 @@ func TestGuestRouteServesExistingPHPPageAsHTML(t *testing.T) {
 	if contentType := response.Header().Get("Content-Type"); contentType != "text/html; charset=utf-8" {
 		t.Fatalf("content type = %q, want HTML", contentType)
 	}
-	if !strings.Contains(response.Body.String(), "Imported PHP page") || !strings.Contains(response.Body.String(), "initializeSitebrushContextMenuForGuests") {
+	if !strings.Contains(response.Body.String(), "Imported PHP page") || !strings.Contains(response.Body.String(), `data-menu="guest_menu.`) {
 		t.Fatalf("guest PHP page did not contain page and menu: %s", response.Body.String())
 	}
 	if response.Header().Get("X-Sitebrush-Source") != "static" {
@@ -1080,6 +1080,14 @@ func TestPreparedDemoSiteStartsAndLogsOutWhileControlDatabaseWriterIsBusy(t *tes
 	writerStarted := make(chan struct{})
 	releaseWriter := make(chan struct{})
 	writerDone := make(chan struct{})
+	firstWriterRelease := releaseWriter
+	t.Cleanup(func() {
+		select {
+		case <-firstWriterRelease:
+		default:
+			close(firstWriterRelease)
+		}
+	})
 	go func() {
 		_ = dispatcher.execute(context.Background(), serverControlDatabaseWrite, "test-blocking-demo-writer", func(*sql.DB) error {
 			close(writerStarted)
@@ -1097,8 +1105,8 @@ func TestPreparedDemoSiteStartsAndLogsOutWhileControlDatabaseWriterIsBusy(t *tes
 	if duration := time.Since(startedAt); duration >= time.Second {
 		t.Fatalf("prepared demo start waited for control database: %s", duration)
 	}
-	if response.Code != http.StatusFound {
-		t.Fatalf("prepared demo start status = %d, body=%q", response.Code, response.Body.String())
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "Sitebrush Demo") {
+		t.Fatalf("prepared demo start status = %d", response.Code)
 	}
 	var sessionCookie *http.Cookie
 	for _, responseCookie := range response.Result().Cookies() {
@@ -1117,6 +1125,14 @@ func TestPreparedDemoSiteStartsAndLogsOutWhileControlDatabaseWriterIsBusy(t *tes
 	writerStarted = make(chan struct{})
 	releaseWriter = make(chan struct{})
 	writerDone = make(chan struct{})
+	secondWriterRelease := releaseWriter
+	t.Cleanup(func() {
+		select {
+		case <-secondWriterRelease:
+		default:
+			close(secondWriterRelease)
+		}
+	})
 	go func() {
 		_ = dispatcher.execute(context.Background(), serverControlDatabaseWrite, "test-blocking-demo-logout-writer", func(*sql.DB) error {
 			close(writerStarted)
@@ -2650,6 +2666,7 @@ func TestMobileServicePageDesignCoversEverySharedTemplate(t *testing.T) {
 		"revisions.html",
 		"server_update.html",
 		"setup.html",
+		"unfreeze.html",
 	}
 	coveredTemplates := make([]string, 0, len(expectedTemplates))
 	templatePaths, err := fs.Glob(embeddedWebFiles, "web/*.html")
@@ -4822,7 +4839,7 @@ func TestSetupConfirmationOffersKnownWebmailWithoutRegistrationForm(t *testing.T
 			t.Fatalf("confirmation page missing %q in %s", expectedFragment, body)
 		}
 	}
-	if strings.Contains(body, `name="password"`) || strings.Contains(body, `action="?register"`) {
+	if strings.Contains(body, `name="password"`) || strings.Contains(body, `name="email"`) {
 		t.Fatalf("confirmation page contains registration form: %s", body)
 	}
 }
@@ -8835,6 +8852,69 @@ func TestAdminRequestUsesStaticPageWhenDomainIsNotFrozen(t *testing.T) {
 	}
 	if response.Header().Get("X-Sitebrush-Source") != "static" {
 		t.Fatalf("source header = %q, want static", response.Header().Get("X-Sitebrush-Source"))
+	}
+}
+
+func TestAdminRevisionQueriesUsePageIndexes(t *testing.T) {
+	application, database := newTestApplication(t)
+	for _, revision := range []struct {
+		path   string
+		active int
+	}{
+		{"/docs", 1},
+		{"/other", 1},
+		{"/docs", 1},
+		{"/docs", 0},
+	} {
+		if _, err := database.Exec(`INSERT INTO revisions(domain,page_path,html,is_active) VALUES(?,?,?,?)`, "localhost", revision.path, "<p>revision</p>", revision.active); err != nil {
+			t.Fatal(err)
+		}
+	}
+	latestActiveID, count := application.revisionMenuSummary(context.Background(), "localhost", "/docs")
+	if latestActiveID != 3 || count != 3 {
+		t.Fatalf("revision menu summary = (%d, %d), want (3, 3)", latestActiveID, count)
+	}
+	for _, query := range []string{
+		`SELECT COALESCE(MAX(CASE WHEN is_active=1 THEN id END),0),COUNT(1) FROM revisions WHERE domain=? AND page_path=?`,
+		`SELECT id FROM revisions WHERE domain=? AND page_path=? AND is_active=1 ORDER BY id DESC LIMIT 1`,
+		`SELECT COUNT(1) FROM revisions WHERE domain=? AND page_path=?`,
+		`SELECT id,page_path,html,created_at,is_active FROM revisions WHERE domain=? AND page_path=? ORDER BY id DESC`,
+	} {
+		rows, err := database.Query(`EXPLAIN QUERY PLAN `+query, "localhost", "/docs")
+		if err != nil {
+			t.Fatal(err)
+		}
+		indexed := false
+		for rows.Next() {
+			var node, parent, unused int
+			var detail string
+			if err := rows.Scan(&node, &parent, &unused, &detail); err != nil {
+				rows.Close()
+				t.Fatal(err)
+			}
+			if strings.Contains(detail, "SEARCH revisions USING") {
+				indexed = true
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		rows.Close()
+		if !indexed {
+			t.Fatalf("revision query has no page index: %s", query)
+		}
+	}
+}
+
+func TestAdminMenuInjectionUsesFinalBodyClose(t *testing.T) {
+	html := `<html><body><script>const marker = "</body>";</script><p>Page</p></BODY></html>`
+	result := injectMenuScriptIntoHTML(html, `<menu>Admin</menu>`)
+	if !strings.Contains(result, `<script>const marker = "</body>";</script><p>Page</p><menu>Admin</menu></BODY>`) {
+		t.Fatalf("administrator menu was not placed before the final body close: %s", result)
+	}
+	if strings.Count(result, `<menu>Admin</menu>`) != 1 {
+		t.Fatalf("administrator menu was injected more than once: %s", result)
 	}
 }
 
@@ -14169,11 +14249,15 @@ func TestWholeSiteImportReportsPermanentFailuresWithoutBrokenLinks(t *testing.T)
 	const sourceURL = "http://example.com/"
 	const missingPageURL = "http://example.com/missing"
 	const missingImageURL = "http://example.com/missing.png"
-	requests := make(chan string, 8)
+	requests := make(chan string, 128)
 	previousGrabHTTPClient := newGrabHTTPClient
 	newGrabHTTPClient = func() *http.Client {
 		return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-			requests <- request.URL.String()
+			select {
+			case requests <- request.URL.String():
+			default:
+				return nil, errors.New("import request recorder is full")
+			}
 			switch request.URL.String() {
 			case sourceURL:
 				return (fakeGrabResponse{contentType: "text/html", body: `<html><body><a href="/missing">Missing</a><a href="/missing.png">File</a><img src="/missing.png"></body></html>`}).httpResponse(request), nil
@@ -21822,6 +21906,7 @@ func TestAccountSessionPersistentCookieAndRollingIdleExpiry(t *testing.T) {
 		renewed, active   bool
 	}{
 		{"foreground", "document", 14 * 24 * time.Hour, true, true},
+		{"recent foreground", "document", 10 * time.Second, false, true},
 		{"background", "empty", 14 * 24 * time.Hour, false, true},
 		{"expired", "document", 16 * 24 * time.Hour, false, false},
 	} {
@@ -21850,6 +21935,9 @@ func TestAccountSessionPersistentCookieAndRollingIdleExpiry(t *testing.T) {
 			if scenario.renewed && len(response.Result().Cookies()) != 1 {
 				t.Fatal("renewed browser cookie missing")
 			}
+			if scenario.active && !scenario.renewed && len(response.Result().Cookies()) != 0 {
+				t.Fatal("session cookie renewed without a database refresh")
+			}
 		})
 	}
 	if _, err := database.Exec(`DELETE FROM sessions WHERE token=?`, cookie.Value); err != nil {
@@ -21857,7 +21945,7 @@ func TestAccountSessionPersistentCookieAndRollingIdleExpiry(t *testing.T) {
 	}
 	request := httptest.NewRequest(http.MethodPost, "http://localhost/?profile", nil)
 	response := httptest.NewRecorder()
-	if !application.renewAccountSession(response, request, "localhost", "idle@example.org", cookie.Value, time.Now()) || len(response.Result().Cookies()) != 0 {
+	if !application.renewAccountSession(response, request, "localhost", "idle@example.org", cookie.Value, time.Now(), 0) || len(response.Result().Cookies()) != 0 {
 		t.Fatal("revoked session was recreated")
 	}
 }
