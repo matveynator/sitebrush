@@ -17979,6 +17979,10 @@ func (a *App) serveStealthStaticForBlockedAdminIP(w http.ResponseWriter, r *http
 			if cookie, cookieErr := r.Cookie("sitebrush_session"); cookieErr == nil && cookie.Value != "" {
 				a.expireAdminSessionCookie(w, r)
 			}
+			if canonicalLocalDomain(domain) == "localhost" && pagePath == "/" && localAccountRequest(r) {
+				httpsecurity.RedirectLocal(w, r, r.URL.Path+"?register", http.StatusSeeOther)
+				return true
+			}
 			if publicMissingPageRequest(r, pagePath) {
 				a.renderMissingPage(w, r, pagePath, false)
 				return true
@@ -18751,6 +18755,7 @@ func (a *App) confirmRegistrationCode(w http.ResponseWriter, r *http.Request) {
 	query.Set("email_confirm", confirmation.Token)
 	confirmationURL.RawQuery = query.Encode()
 	confirmationRequest.URL = &confirmationURL
+	confirmationRequest.Method = http.MethodGet
 	a.confirmEmailToken(w, confirmationRequest)
 }
 
@@ -32962,13 +32967,13 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 		a.awaitAccountHTTPS(w, r)
 		return
 	}
-	if r.Method == http.MethodGet && confirmation.Action != "register" {
+	if r.Method == http.MethodGet {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		a.render(w, r, "account-confirm.html", map[string]any{"Domain": confirmation.Domain, "Email": confirmation.Email, "CurrentEmail": confirmation.CurrentEmail, "Token": token, "AcceptEmail": confirmation.Action == "profile", "SetPassword": confirmation.Action == "register" && confirmation.Password == ""})
 		return
 	}
-	if r.Method != http.MethodPost && !(r.Method == http.MethodGet && confirmation.Action == "register") {
+	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
@@ -32979,7 +32984,19 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if confirmation.Password == "" {
-			confirmation.Password = randomAccessToken()
+			password := r.FormValue("password")
+			status := ""
+			if password == "" {
+				status = translationOrDefault(confirmationTranslations, "recover_status_password_required", "Password is required.")
+			} else if password != r.FormValue("password_confirm") {
+				status = translationOrDefault(confirmationTranslations, "recover_status_password_mismatch", "Password confirmation does not match.")
+			}
+			if status != "" {
+				w.WriteHeader(http.StatusBadRequest)
+				a.render(w, r, "account-confirm.html", map[string]any{"Domain": confirmation.Domain, "Email": confirmation.Email, "Token": token, "SetPassword": true, "Status": status})
+				return
+			}
+			confirmation.Password = password
 		}
 		confirmationContext := contextWithDomain(r.Context(), confirmation.Domain)
 		if a.hasAdmin(confirmationContext, confirmation.Domain) {
@@ -55422,17 +55439,6 @@ func (a *App) confirmRegistrationDomain(r *http.Request, confirmation EmailConfi
 	})
 	if err != nil {
 		return err
-	}
-	domainContext := contextWithSiteDatabaseCreation(contextWithDomain(ctx, confirmation.Domain))
-	// Bootstrap through the same router/writer used by HTTP and ACME workers.
-	var existingLimit int64
-	if err := a.db.QueryRowContext(domainContext, `SELECT limit_bytes FROM domain_storage_usage WHERE domain=?`, confirmation.Domain).Scan(&existingLimit); err != nil {
-		if !errors.Is(err, sql.ErrNoRows) && !errors.Is(err, errSiteDatabaseMissing) {
-			return err
-		}
-		if err := a.initializeRegistrationQuota(domainContext, confirmation.Domain, a.registrationCreationQuota(ctx)); err != nil {
-			return err
-		}
 	}
 	if created {
 		a.observeAutomaticSSLRegistration(r, confirmation.Domain)

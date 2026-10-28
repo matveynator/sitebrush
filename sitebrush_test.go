@@ -4768,7 +4768,13 @@ func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
 	prepareAccountMailCaptchaForTest(t, application, confirmRequest)
 	application.route(confirmResponse, confirmRequest)
 	if confirmResponse.Code != http.StatusOK || !strings.Contains(confirmResponse.Body.String(), `autocomplete="new-password"`) {
-		t.Fatal("verified email should open password setup")
+		t.Fatalf("verified local email should open password setup: status=%d body=%q", confirmResponse.Code, confirmResponse.Body.String())
+	}
+	secureSetupRequest := httptest.NewRequest(http.MethodGet, "https://localhost/?email_confirm="+url.QueryEscape(pendingToken), nil)
+	secureSetupResponse := httptest.NewRecorder()
+	application.route(secureSetupResponse, secureSetupRequest)
+	if secureSetupResponse.Code != http.StatusOK || !strings.Contains(secureSetupResponse.Body.String(), `autocomplete="new-password"`) {
+		t.Fatal("verified email should open password setup on HTTPS")
 	}
 	passwordForm := url.Values{"password": {"secret"}, "password_confirm": {"secret"}}
 	passwordRequest := httptest.NewRequest(http.MethodPost, "https://localhost/?email_confirm="+url.QueryEscape(pendingToken), strings.NewReader(passwordForm.Encode()))
@@ -17937,6 +17943,18 @@ func TestAccountRegistrationPasswordOnlyAfterSecureConfirmation(t *testing.T) {
 	database.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&count)
 	if count != 0 {
 		t.Fatal("GET mutated account")
+	}
+	for _, form := range []string{"", "password=one&password_confirm=two"} {
+		request := httptest.NewRequest(http.MethodPost, "https://localhost/?email_confirm=mail-secret", strings.NewReader(form))
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		response := httptest.NewRecorder()
+		application.confirmEmailToken(response, request)
+		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `autocomplete="new-password"`) || !strings.Contains(response.Body.String(), `role="alert"`) {
+			t.Fatalf("invalid password setup status=%d body=%q", response.Code, response.Body.String())
+		}
+		if err := database.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("invalid password setup created administrator: count=%d error=%v", count, err)
+		}
 	}
 }
 
