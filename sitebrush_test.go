@@ -5814,6 +5814,13 @@ func TestBillingDemoGrabRefreshRetryDownloadsOnlyFailedResources(t *testing.T) {
 	if failedTotal := int(refreshPayload["failed_total"].(float64)); failedTotal != 1 {
 		t.Fatalf("failed_total = %d, want 1", failedTotal)
 	}
+	var pendingHTML string
+	if err := application.db.QueryRowContext(contextWithDomain(context.Background(), "demo-retry.example"), `SELECT html FROM pages WHERE domain=? AND path='/'`, "demo-retry.example").Scan(&pendingHTML); err != nil {
+		t.Fatalf("read pending demo page: %v", err)
+	}
+	if !strings.Contains(pendingHTML, pendingFailedResourceReference(resourceURL)) || strings.Contains(pendingHTML, resourceURL) {
+		t.Fatalf("pending resource is not safely retained for retry: %s", pendingHTML)
+	}
 
 	resourceShouldFail = false
 	retryForm := url.Values{}
@@ -5862,8 +5869,8 @@ func TestActiveDemoSessionDoesNotBlockScheduledSiteRecreation(t *testing.T) {
 	request = request.WithContext(contextWithDomain(request.Context(), "demo-active.example"))
 	response := httptest.NewRecorder()
 	application.route(response, request)
-	if response.Code != http.StatusFound {
-		t.Fatalf("demo start status = %d, body=%q", response.Code, response.Body.String())
+	if response.Code != http.StatusOK {
+		t.Fatalf("demo start status = %d", response.Code)
 	}
 
 	siteDatabasePath := filepath.Join(siteDatabaseRootPath(application.serverControlDBPath()), domainStorageName("demo-active.example")+".db")
@@ -5887,11 +5894,11 @@ func TestActiveDemoSessionDoesNotBlockScheduledSiteRecreation(t *testing.T) {
 	recreateRequest = recreateRequest.WithContext(contextWithDomain(recreateRequest.Context(), "demo-active.example"))
 	recreateResponse := httptest.NewRecorder()
 	application.route(recreateResponse, recreateRequest)
-	if recreateResponse.Code != http.StatusFound {
-		t.Fatalf("demo recreate status = %d, body=%q", recreateResponse.Code, recreateResponse.Body.String())
+	if recreateResponse.Code != http.StatusOK {
+		t.Fatalf("demo recreate status = %d", recreateResponse.Code)
 	}
-	if location := recreateResponse.Header().Get("Location"); location != "/" {
-		t.Fatalf("demo recreate redirect = %q, want /", location)
+	if location := recreateResponse.Header().Get("Location"); location != "" {
+		t.Fatalf("demo recreate redirect = %q, want no redirect", location)
 	}
 	if _, err := os.Stat(siteDatabasePath); err != nil {
 		t.Fatalf("recreated demo site database stat err = %v, want exists", err)
@@ -12792,6 +12799,9 @@ func TestWholeSitePreviewStopsAtFreeByteLimitWithUsableFirstPage(t *testing.T) {
 	}
 	if len(preview.ImportedPages) != 1 || preview.ImportedPages[0].SourceURL != startURL.String() {
 		t.Fatalf("limited preview pages = %#v, want usable first page", preview.ImportedPages)
+	}
+	if reason := preview.Spider.failedResourceErrors[startURL.String()]; reason == "whole-site page limit reached" {
+		t.Fatal("byte limit was reported as a page-count limit")
 	}
 	nextRequests := 0
 	for {
@@ -22901,7 +22911,7 @@ func TestCreationLimitsAreIndependentAndPreserveExistingSites(t *testing.T) {
 	defer control.Close()
 	store := hostingandsupport.Store{DB: control}
 	defaults := store.SiteSizeLimits(context.Background())
-	if defaults.Registration != 1<<30 || defaults.TestDrive != 1<<30 {
+	if defaults.Registration != 1<<30 || defaults.TestDrive != 10<<30 {
 		t.Fatalf("unexpected defaults %+v", defaults)
 	}
 	if err := application.createManagedSite(context.Background(), "existing.example", "owner@example.com", "old", 9<<20); err != nil {

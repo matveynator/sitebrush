@@ -20299,14 +20299,14 @@ func (a *App) importDemoSiteContent(ctx context.Context, domain string, settings
 	}
 	domainContext := contextWithDomain(ctx, domain)
 	if settings.CopyWholeSite {
-		importResult, err := a.importWholeRemoteSite(domainContext, grabImportRequest{Domain: domain, PagePath: "/", SourceURL: resolvedSourceURL.String(), RemoteSourceURL: resolvedSourceURL, HTML: string(htmlBytes), ProgressToken: progressToken, AutoDetectTemplates: true})
+		importResult, err := a.importWholeRemoteSite(domainContext, grabImportRequest{Domain: domain, PagePath: "/", SourceURL: resolvedSourceURL.String(), RemoteSourceURL: resolvedSourceURL, HTML: string(htmlBytes), ProgressToken: progressToken, AutoDetectTemplates: true, PreserveFailedReferences: true})
 		failedTotal := importResult.FailedTotal
 		if err == nil && importResult.RemainingPages > 0 {
 			err = errors.New("demo page import is incomplete")
 		}
 		return failedTotal, err
 	}
-	spider, importedHTML := prepareSinglePageImport(grabImportRequest{Domain: domain, PagePath: "/", SourceURL: resolvedSourceURL.String(), RemoteSourceURL: resolvedSourceURL, HTML: string(htmlBytes), ProgressToken: progressToken}, a.grabTracker)
+	spider, importedHTML := prepareSinglePageImport(grabImportRequest{Domain: domain, PagePath: "/", SourceURL: resolvedSourceURL.String(), RemoteSourceURL: resolvedSourceURL, HTML: string(htmlBytes), ProgressToken: progressToken, PreserveFailedReferences: true}, a.grabTracker)
 	importedPages := []wholeSiteImportedPage{{SourceURL: resolvedSourceURL.String(), LocalPath: "/", HTML: importedHTML}}
 	importedPages = append(importedPages, importServiceDocuments(spider, resolvedSourceURL, string(htmlBytes), domain, "/")...)
 	if spider.publicResourcePaths["/favicon.ico"] != "" || spider.serviceManifestPath != "" {
@@ -20669,8 +20669,15 @@ func replaceRetriedResourceReferences(sourceHTML string, replacements map[string
 		}
 		updatedHTML = strings.ReplaceAll(updatedHTML, resourceURL, localReference)
 		updatedHTML = strings.ReplaceAll(updatedHTML, template.HTMLEscapeString(resourceURL), localReference)
+		updatedHTML = strings.ReplaceAll(updatedHTML, pendingFailedResourceReference(resourceURL), localReference)
 	}
 	return updatedHTML
+}
+
+// A data URL keeps a failed demo asset inert while retaining its retry target.
+func pendingFailedResourceReference(resourceURL string) string {
+	resourceDigest := sha256.Sum256([]byte(resourceURL))
+	return "data:,#sitebrush-pending-" + hex.EncodeToString(resourceDigest[:])
 }
 
 func (a *App) createDemoWelcomePage(ctx context.Context, domain string) {
@@ -25053,6 +25060,7 @@ func previewGrabResources(pageURL *url.URL, htmlSource string, tracker *grabProg
 
 func prepareSinglePageImport(importRequest grabImportRequest, tracker *grabProgressTracker) (*pageSpider, string) {
 	spider := newPageSpider(importRequest.Domain, importRequest.RemoteSourceURL, grabResourceMaxDepth, tracker, importRequest.ProgressToken, importRequest.SourceOptions)
+	spider.preserveFailedReferences = importRequest.PreserveFailedReferences
 	spider.currentPagePath = cleanPath(importRequest.PagePath)
 	spider.setContext(importRequest.Context)
 	spider.setDownloadPlan(importRequest.DownloadTotal, importRequest.DownloadTotalBytes)
@@ -25718,6 +25726,7 @@ func (a *App) prepareWholeRemoteSiteImport(importRequest grabImportRequest) (*pa
 		return nil, nil, nil, errors.New("source_url is invalid")
 	}
 	spider := newPageSpider(importRequest.Domain, startURL, grabResourceMaxDepth, a.grabTracker, importRequest.ProgressToken, importRequest.SourceOptions)
+	spider.preserveFailedReferences = importRequest.PreserveFailedReferences
 	spider.setContext(importRequest.Context)
 	spider.setDownloadPlan(importRequest.DownloadTotal, importRequest.DownloadTotalBytes)
 	spider.selectedResourceURLs = importRequest.SelectedResourceURLs
@@ -26286,9 +26295,12 @@ func crawlWholeRemoteSite(ctx context.Context, startURL *url.URL, startHTML, pub
 			}
 			if spider.previewLimitReached {
 				spider.publishResourceProgress("partial", currentJob.URL.String(), 100, int64(len(pageHTML)), int64(len(pageHTML)))
-				continue
 			}
-			linkedPageURLs, linksTruncated := crawler.ExtractPageLinksWithLimit(pageHTML, currentJob.URL, startURL, wholeSiteImportMaxPages)
+			var linkedPageURLs []*url.URL
+			var linksTruncated bool
+			if !spider.previewLimitReached {
+				linkedPageURLs, linksTruncated = crawler.ExtractPageLinksWithLimit(pageHTML, currentJob.URL, startURL, wholeSiteImportMaxPages)
+			}
 			if linksTruncated {
 				partial = true
 				spider.recordFailedResource(currentJob.URL.String(), "page link limit reached")
@@ -46325,6 +46337,7 @@ type pageSpider struct {
 	previewBytes              int64
 	previewLimitReached       bool
 	previewUnfinishedPageURLs []string
+	preserveFailedReferences  bool
 }
 
 func (spider *pageSpider) recordPreviewBytes(sizeBytes int64) bool {
@@ -47091,9 +47104,13 @@ func (spider *pageSpider) finishImportedPageReferences(importedPages []wholeSite
 		}
 	}
 	for _, failedURL := range spider.failedResourceURLList() {
-		replacements[failedURL] = "data:,"
 		failedPageURL, err := url.Parse(failedURL)
-		if err == nil && spider.pageURL != nil && crawler.SameHost(spider.pageURL, failedPageURL) && crawler.IsWholeSitePageURL(failedPageURL) {
+		isPageURL := err == nil && spider.pageURL != nil && crawler.SameHost(spider.pageURL, failedPageURL) && crawler.IsWholeSitePageURL(failedPageURL)
+		replacements[failedURL] = "data:,"
+		if spider.preserveFailedReferences && !isPageURL {
+			replacements[failedURL] = pendingFailedResourceReference(failedURL)
+		}
+		if isPageURL {
 			missingPageLinks[crawler.WholeSiteLocalLink(cleanPath(spider.publicAssetBasePath), spider.pageURL, failedPageURL)] = struct{}{}
 		} else if err == nil && spider.pageURL != nil && crawler.SameHost(spider.pageURL, failedPageURL) {
 			missingPath := failedPageURL.EscapedPath()
@@ -48096,9 +48113,8 @@ func (a *App) siteDomain(ctx context.Context, r *http.Request) string {
 		if decision.Found {
 			return decision.Domain
 		}
-		if a.publicBoundary {
-			return requestDomain
-		}
+		// Public policy is authoritative for ordinary reads, including unknown hosts.
+		return requestDomain
 	}
 	var primaryDomain string
 	err := a.db.QueryRowContext(ctx, `SELECT primary_domain FROM domain_aliases WHERE alias_domain=? AND is_verified=1 AND dns_a_ok=1`, requestDomain).Scan(&primaryDomain)
