@@ -45,69 +45,86 @@ func Finish(transaction *sql.Tx, domain, status string) error {
 func Capture(transaction *sql.Tx, domain string, ensure bool) (Checkpoint, error) {
 	point := Checkpoint{CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	for _, table := range []string{"pages", "published_pages"} {
-		query := `SELECT path,title,html FROM ` + table + ` WHERE domain=? ORDER BY path`
-		if table == "pages" {
-			query = `SELECT path,title,html,COALESCE(published,0),EXISTS(SELECT 1 FROM page_pending_deletions WHERE domain=pages.domain AND path=pages.path) FROM pages WHERE domain=? ORDER BY path`
-		}
-		rows, err := transaction.Query(query, domain)
-		if err != nil {
-			return point, err
-		}
 		type sourcePage struct {
 			page Page
 			html string
 		}
-		sources := []sourcePage{}
-		for rows.Next() {
-			var source sourcePage
+		// Close each cursor before matching revisions or writing baselines. This
+		// bounds HTML memory while preserving the content owner's SQL turn.
+		lastPath := ""
+		firstBatch := true
+		for {
+			query := `SELECT path,title,html FROM ` + table + ` WHERE domain=?`
 			if table == "pages" {
-				err = rows.Scan(&source.page.Path, &source.page.Title, &source.html, &source.page.Published, &source.page.PendingDelete)
-			} else {
-				err = rows.Scan(&source.page.Path, &source.page.Title, &source.html)
+				query = `SELECT path,title,html,COALESCE(published,0),EXISTS(SELECT 1 FROM page_pending_deletions WHERE domain=pages.domain AND path=pages.path) FROM pages WHERE domain=?`
 			}
+			arguments := []any{domain}
+			if !firstBatch {
+				query += ` AND path>?`
+				arguments = append(arguments, lastPath)
+			}
+			query += ` ORDER BY path LIMIT 64`
+			rows, err := transaction.Query(query, arguments...)
 			if err != nil {
-				rows.Close()
 				return point, err
 			}
-			sources = append(sources, source)
-		}
-		err = rows.Err()
-		rows.Close()
-		if err != nil {
-			return point, err
-		}
-		for _, source := range sources {
-			digest := sha256.Sum256([]byte(source.html))
-			source.page.Hash = hex.EncodeToString(digest[:])
-			err = transaction.QueryRow(`SELECT id FROM revisions WHERE domain=? AND page_path=? AND html=? ORDER BY id DESC LIMIT 1`, domain, source.page.Path, source.html).Scan(&source.page.Revision)
-			if errors.Is(err, sql.ErrNoRows) && ensure {
-				count := int64(len(source.html))
-				reservation, reserveErr := transaction.Exec(`UPDATE domain_storage_usage SET revision_bytes=revision_bytes+? WHERE domain=? AND page_bytes+published_page_bytes+revision_bytes+file_bytes+published_static_bytes+COALESCE(import_queue_bytes,0)+COALESCE(analytics_bytes,0)+COALESCE(analytics_reserved_bytes,0)+?<=limit_bytes`, count, domain, count)
-				if reserveErr != nil {
-					return point, reserveErr
+			sources := make([]sourcePage, 0, 64)
+			for rows.Next() {
+				var source sourcePage
+				if table == "pages" {
+					err = rows.Scan(&source.page.Path, &source.page.Title, &source.html, &source.page.Published, &source.page.PendingDelete)
+				} else {
+					err = rows.Scan(&source.page.Path, &source.page.Title, &source.html)
 				}
-				admitted, reserveErr := reservation.RowsAffected()
-				if reserveErr != nil {
-					return point, reserveErr
+				if err != nil {
+					rows.Close()
+					return point, err
 				}
-				if admitted != 1 {
-					return point, errors.New("not enough storage to retain a baseline revision")
-				}
-				result, insertErr := transaction.Exec(`INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,0)`, domain, source.page.Path, source.html, point.CreatedAt)
-				if insertErr != nil {
-					return point, insertErr
-				}
-				source.page.Revision, err = result.LastInsertId()
+				sources = append(sources, source)
 			}
-			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			err = rows.Err()
+			rows.Close()
+			if err != nil {
 				return point, err
 			}
-			if table == "pages" {
-				point.Pages = append(point.Pages, source.page)
-			} else {
-				source.page.Published = true
-				point.Published = append(point.Published, source.page)
+			for _, source := range sources {
+				digest := sha256.Sum256([]byte(source.html))
+				source.page.Hash = hex.EncodeToString(digest[:])
+				source.page.Revision, err = matchingRevision(transaction, domain, source.page.Path, source.html)
+				if errors.Is(err, sql.ErrNoRows) && ensure {
+					count := int64(len(source.html))
+					reservation, reserveErr := transaction.Exec(`UPDATE domain_storage_usage SET revision_bytes=revision_bytes+? WHERE domain=? AND page_bytes+published_page_bytes+revision_bytes+file_bytes+published_static_bytes+COALESCE(import_queue_bytes,0)+COALESCE(analytics_bytes,0)+COALESCE(analytics_reserved_bytes,0)+?<=limit_bytes`, count, domain, count)
+					if reserveErr != nil {
+						return point, reserveErr
+					}
+					admitted, reserveErr := reservation.RowsAffected()
+					if reserveErr != nil {
+						return point, reserveErr
+					}
+					if admitted != 1 {
+						return point, errors.New("not enough storage to retain a baseline revision")
+					}
+					result, insertErr := transaction.Exec(`INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,0)`, domain, source.page.Path, source.html, point.CreatedAt)
+					if insertErr != nil {
+						return point, insertErr
+					}
+					source.page.Revision, err = result.LastInsertId()
+				}
+				if err != nil && !errors.Is(err, sql.ErrNoRows) {
+					return point, err
+				}
+				if table == "pages" {
+					point.Pages = append(point.Pages, source.page)
+				} else {
+					source.page.Published = true
+					point.Published = append(point.Published, source.page)
+				}
 			}
+			if len(sources) < 64 {
+				break
+			}
+			lastPath = sources[len(sources)-1].page.Path
+			firstBatch = false
 		}
 	}
 	rows, err := transaction.Query(`SELECT id,page_path,COALESCE(is_active,0) FROM revisions WHERE domain=? ORDER BY id`, domain)
@@ -123,6 +140,31 @@ func Capture(transaction *sql.Tx, domain string, ensure bool) (Checkpoint, error
 		point.Revisions = append(point.Revisions, revision)
 	}
 	return point, rows.Err()
+}
+
+// The latest revision normally owns the current page body. Checking it first
+// avoids comparing every historical HTML document on large sites.
+func matchingRevision(transaction *sql.Tx, domain, pagePath, html string) (int64, error) {
+	for index, query := range []string{
+		`SELECT id,html FROM revisions WHERE domain=? AND page_path=? ORDER BY id DESC LIMIT 1`,
+		`SELECT id,html FROM revisions WHERE domain=? AND page_path=? AND is_active=1 ORDER BY id DESC LIMIT 1`,
+	} {
+		var identifier int64
+		var candidate string
+		err := transaction.QueryRow(query, domain, pagePath).Scan(&identifier, &candidate)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return 0, err
+		}
+		if errors.Is(err, sql.ErrNoRows) && index == 0 {
+			return 0, sql.ErrNoRows
+		}
+		if err == nil && candidate == html {
+			return identifier, nil
+		}
+	}
+	var identifier int64
+	err := transaction.QueryRow(`SELECT id FROM revisions WHERE domain=? AND page_path=? AND html=? ORDER BY id DESC LIMIT 1`, domain, pagePath, html).Scan(&identifier)
+	return identifier, err
 }
 
 // RestoreMaterializedViews deliberately bypasses page saving, template

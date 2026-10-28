@@ -20,6 +20,14 @@ type Challenge struct {
 }
 
 func SchemaQueries() []string {
+	return append(InitialSchemaQueries(),
+		`CREATE TABLE IF NOT EXISTS account_captcha_fail_events(client_ip TEXT NOT NULL,purpose TEXT NOT NULL,failed_at INTEGER NOT NULL)`,
+		`CREATE INDEX IF NOT EXISTS idx_account_captcha_fail_ip_purpose_time ON account_captcha_fail_events(client_ip,purpose,failed_at)`,
+	)
+}
+
+// The original three steps keep their migration IDs on existing installations.
+func InitialSchemaQueries() []string {
 	return []string{
 		`CREATE TABLE IF NOT EXISTS account_captchas(token_hash TEXT PRIMARY KEY,client_ip TEXT NOT NULL,domain TEXT NOT NULL,purpose TEXT NOT NULL,answer_hash TEXT NOT NULL,created_at INTEGER NOT NULL)`,
 		`CREATE INDEX IF NOT EXISTS idx_account_captchas_ip_time ON account_captchas(client_ip,created_at)`,
@@ -78,7 +86,24 @@ func Save(transaction *sql.Tx, challenge Challenge, ip, domain, purpose string, 
 
 // Every attempt spends the challenge, including a wrong answer or identity.
 // Knowing the opaque cookie never provides or selects the expected answer.
-func Verify(transaction *sql.Tx, token, answer, ip, domain, purpose string, now time.Time) (bool, error) {
+func Verify(transaction *sql.Tx, token, answer, ip, domain, purpose string, now time.Time) (verified bool, resultErr error) {
+	if purpose == "trial_preview" || purpose == "register" {
+		if _, err := transaction.Exec(`DELETE FROM account_captcha_fail_events WHERE failed_at<?`, now.Add(-24*time.Hour).Unix()); err != nil {
+			return false, err
+		}
+		var failures int
+		if err := transaction.QueryRow(`SELECT COUNT(*) FROM account_captcha_fail_events WHERE client_ip=? AND purpose=?`, ip, purpose).Scan(&failures); err != nil {
+			return false, err
+		}
+		if failures >= 12 {
+			return false, nil
+		}
+		defer func() {
+			if !verified && resultErr == nil {
+				_, resultErr = transaction.Exec(`INSERT INTO account_captcha_fail_events(client_ip,purpose,failed_at) VALUES(?,?,?)`, ip, purpose, now.Unix())
+			}
+		}()
+	}
 	if len(token) != 64 {
 		return false, nil
 	}

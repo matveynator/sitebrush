@@ -94,7 +94,7 @@ func TestAccountAuthReserveAndChallengeFailClosedOnWriteErrors(t *testing.T) {
 	}
 }
 
-func TestAccountAuthVerificationRejectsExpiredFutureAndWrongBinding(t *testing.T) {
+func TestAccountAuthVerificationRejectsExpiredFutureAndWrongDomain(t *testing.T) {
 	database := testDatabase(t)
 	now := time.Unix(1_800_900_200, 0).UTC()
 	challenge := transact(t, database, func(transaction *sql.Tx) (Outcome, error) {
@@ -109,7 +109,6 @@ func TestAccountAuthVerificationRejectsExpiredFutureAndWrongBinding(t *testing.T
 		{name: "future", when: now.Add(-time.Second), domain: "example.org", ip: "192.0.2.53"},
 		{name: "expired", when: now.Add(CodeTTL), domain: "example.org", ip: "192.0.2.53"},
 		{name: "wrong domain", when: now.Add(time.Second), domain: "other.example", ip: "192.0.2.53"},
-		{name: "wrong address", when: now.Add(time.Second), domain: "example.org", ip: "192.0.2.54"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			outcome := transact(t, database, func(transaction *sql.Tx) (Outcome, error) {

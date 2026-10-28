@@ -162,6 +162,9 @@ func Reserve(ctx context.Context, tx *sql.Tx, domain, email, ip string, now time
 }
 
 func Credentials(ctx context.Context, tx *sql.Tx, domain, email, password string) (bool, error) {
+	if password == "" {
+		return false, nil
+	}
 	var stored string
 	err := tx.QueryRowContext(ctx, `SELECT password FROM users WHERE domain=? AND email=? AND is_admin=1`, domain, email).Scan(&stored)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -170,10 +173,13 @@ func Credentials(ctx context.Context, tx *sql.Tx, domain, email, password string
 	if err != nil {
 		return false, err
 	}
-	return subtle.ConstantTimeCompare([]byte(password), []byte(stored)) == 1, nil
+	return stored != "" && subtle.ConstantTimeCompare([]byte(password), []byte(stored)) == 1, nil
 }
 
 func Password(ctx context.Context, tx *sql.Tx, domain, email, password, ip, path, language string, now time.Time, allowLocalSession ...bool) (Outcome, error) {
+	if password == "" {
+		return Outcome{Status: "credentials"}, nil
+	}
 	var stored string
 	err := tx.QueryRowContext(ctx, `SELECT password FROM users WHERE domain=? AND email=? AND is_admin=1`, domain, email).Scan(&stored)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -182,7 +188,7 @@ func Password(ctx context.Context, tx *sql.Tx, domain, email, password, ip, path
 	if err != nil {
 		return Outcome{}, err
 	}
-	if subtle.ConstantTimeCompare([]byte(password), []byte(stored)) != 1 {
+	if stored == "" || subtle.ConstantTimeCompare([]byte(password), []byte(stored)) != 1 {
 		return Outcome{Status: "credentials"}, nil
 	}
 	if len(allowLocalSession) > 0 && allowLocalSession[0] {
@@ -248,7 +254,9 @@ func Verify(ctx context.Context, tx *sql.Tx, domain, token, code, ip string, now
 	var email, expected, passwordHash, path, language string
 	var attempts int
 	var created int64
-	err := tx.QueryRowContext(ctx, `SELECT email,code_hash,password_hash,created_at,attempts,return_path,language FROM account_login_codes WHERE token=? AND domain=? AND client_ip=?`, token, domain, ip).Scan(&email, &expected, &passwordHash, &created, &attempts, &path, &language)
+	// The opaque token and the mailed code are the proof. The reader may use
+	// another device or network after requesting the message.
+	err := tx.QueryRowContext(ctx, `SELECT email,code_hash,password_hash,created_at,attempts,return_path,language FROM account_login_codes WHERE token=? AND domain=?`, token, domain).Scan(&email, &expected, &passwordHash, &created, &attempts, &path, &language)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Outcome{Status: "invalid"}, nil
 	}
@@ -298,7 +306,7 @@ func VerifyLink(ctx context.Context, tx *sql.Tx, domain, token, ip string, now t
 	var email, passwordHash, path, language string
 	var attempts int
 	var created int64
-	err := tx.QueryRowContext(ctx, `SELECT email,password_hash,created_at,attempts,return_path,language FROM account_login_codes WHERE token=? AND domain=? AND client_ip=?`, token, domain, ip).Scan(&email, &passwordHash, &created, &attempts, &path, &language)
+	err := tx.QueryRowContext(ctx, `SELECT email,password_hash,created_at,attempts,return_path,language FROM account_login_codes WHERE token=? AND domain=?`, token, domain).Scan(&email, &passwordHash, &created, &attempts, &path, &language)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Outcome{Status: "invalid"}, nil
 	}

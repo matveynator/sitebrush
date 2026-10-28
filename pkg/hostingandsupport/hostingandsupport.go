@@ -42,14 +42,19 @@ type Store struct {
 const PublicTrialLifetime = 24 * time.Hour
 
 type PublicTrialSite struct {
-	ID          int64
-	Domain      string
-	SourceURL   string
-	Status      string
-	CreatedAt   string
-	DeleteAfter string
-	DeletedAt   string
-	LastError   string
+	ID            int64
+	Domain        string
+	SourceURL     string
+	ClientIP      string
+	Country       string
+	City          string
+	VerifiedEmail string
+	PossibleEmail string
+	Status        string
+	CreatedAt     string
+	DeleteAfter   string
+	DeletedAt     string
+	LastError     string
 }
 
 type Database interface {
@@ -762,6 +767,20 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 	if err := migrations.Run(database, "billing-schema-v27", steps); err != nil {
 		return err
 	}
+	if err := migrations.Run(database, "trial-origin-v1", []migrations.Step{
+		migrations.SQL("client-ip", `ALTER TABLE public_trial_sites ADD COLUMN client_ip TEXT NOT NULL DEFAULT ''`),
+		migrations.SQL("country", `ALTER TABLE public_trial_sites ADD COLUMN country TEXT NOT NULL DEFAULT ''`),
+		migrations.SQL("city", `ALTER TABLE public_trial_sites ADD COLUMN city TEXT NOT NULL DEFAULT ''`),
+		migrations.SQL("verified-email", `ALTER TABLE public_trial_sites ADD COLUMN verified_email TEXT NOT NULL DEFAULT ''`),
+		migrations.SQL("trial-ip-index", `CREATE INDEX IF NOT EXISTS idx_public_trial_sites_client_ip ON public_trial_sites(client_ip)`),
+		migrations.SQL("trial-admissions", `CREATE TABLE IF NOT EXISTS public_trial_ip_admissions(client_ip TEXT NOT NULL,kind TEXT NOT NULL,token TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(kind,token))`),
+		migrations.SQL("trial-admissions-index", `CREATE INDEX IF NOT EXISTS idx_public_trial_ip_admissions_ip_kind_time ON public_trial_ip_admissions(client_ip,kind,created_at)`),
+		migrations.SQL("trial-ip-identities", `CREATE TABLE IF NOT EXISTS public_trial_ip_identities(client_ip TEXT NOT NULL,domain TEXT NOT NULL,email TEXT NOT NULL,verified_at TEXT NOT NULL,PRIMARY KEY(client_ip,domain,email))`),
+		migrations.SQL("trial-captcha-failures", `CREATE TABLE IF NOT EXISTS account_captcha_fail_events(client_ip TEXT NOT NULL,purpose TEXT NOT NULL,failed_at INTEGER NOT NULL)`),
+		migrations.SQL("trial-captcha-failures-index", `CREATE INDEX IF NOT EXISTS idx_account_captcha_fail_ip_purpose_time ON account_captcha_fail_events(client_ip,purpose,failed_at)`),
+	}); err != nil {
+		return err
+	}
 	if err := migrations.Run(database, "mail-journal-v1", []migrations.Step{{ID: "rebuild", Revision: "1", Ensure: !schemaComplete, Apply: func(transaction *sql.Tx) error {
 		store := mailmonitor.Store{DB: transaction}
 		var localOrigin string
@@ -1015,7 +1034,7 @@ func hostingSchemaSteps(ctx context.Context, repair bool) []migrations.Step {
 		step.Ensure = repair
 		steps = append(steps, step)
 	}
-	for index, query := range append(mailguard.SchemaQueries(), captcha.SchemaQueries()...) {
+	for index, query := range append(mailguard.SchemaQueries(), captcha.InitialSchemaQueries()...) {
 		step := migrations.SQL(fmt.Sprintf("account-mail-guard-%03d", index+1), query)
 		step.Ensure = repair
 		steps = append(steps, step)
@@ -1429,7 +1448,7 @@ func (store Store) CreatePublicTrialSite(ctx context.Context, domain, sourceURL 
 }
 
 func (store Store) PublicTrialSites(ctx context.Context) []PublicTrialSite {
-	rows, err := store.DB.QueryContext(ctx, `SELECT id,domain,source_url,status,created_at,delete_after,deleted_at,last_error FROM public_trial_sites ORDER BY created_at DESC,id DESC`)
+	rows, err := store.DB.QueryContext(ctx, `SELECT id,domain,source_url,COALESCE(client_ip,''),COALESCE(country,''),COALESCE(city,''),COALESCE(verified_email,''),status,created_at,delete_after,deleted_at,last_error FROM public_trial_sites ORDER BY created_at DESC,id DESC`)
 	if err != nil {
 		return nil
 	}
@@ -1437,7 +1456,7 @@ func (store Store) PublicTrialSites(ctx context.Context) []PublicTrialSite {
 	sites := make([]PublicTrialSite, 0, 8)
 	for rows.Next() {
 		var site PublicTrialSite
-		if scanErr := rows.Scan(&site.ID, &site.Domain, &site.SourceURL, &site.Status, &site.CreatedAt, &site.DeleteAfter, &site.DeletedAt, &site.LastError); scanErr == nil {
+		if scanErr := rows.Scan(&site.ID, &site.Domain, &site.SourceURL, &site.ClientIP, &site.Country, &site.City, &site.VerifiedEmail, &site.Status, &site.CreatedAt, &site.DeleteAfter, &site.DeletedAt, &site.LastError); scanErr == nil {
 			sites = append(sites, site)
 		}
 	}

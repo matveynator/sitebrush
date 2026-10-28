@@ -39,7 +39,7 @@ func TestSecurityBoundaryPasswordChangeInvalidatesPendingChallenges(t *testing.T
 	}
 }
 
-func TestSecurityBoundaryChallengeCannotCrossDomainOrClientIP(t *testing.T) {
+func TestSecurityBoundaryChallengeCannotCrossDomainAndTracksReceivingIP(t *testing.T) {
 	db := testDatabase(t)
 	ctx := context.Background()
 	now := time.Unix(1_800_000_100, 0).UTC()
@@ -57,7 +57,6 @@ func TestSecurityBoundaryChallengeCannotCrossDomainOrClientIP(t *testing.T) {
 		ip     string
 	}{
 		{name: "other domain", domain: "evil.example", ip: "198.51.100.10"},
-		{name: "other address", domain: "example.org", ip: "198.51.100.11"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			result := transact(t, db, func(tx *sql.Tx) (Outcome, error) {
@@ -70,10 +69,14 @@ func TestSecurityBoundaryChallengeCannotCrossDomainOrClientIP(t *testing.T) {
 	}
 
 	valid := transact(t, db, func(tx *sql.Tx) (Outcome, error) {
-		return Verify(ctx, tx, "example.org", challenge.Token, challenge.Code, "198.51.100.10", now.Add(2*time.Second))
+		return Verify(ctx, tx, "example.org", challenge.Token, challenge.Code, "198.51.100.11", now.Add(2*time.Second))
 	})
 	if valid.Status != "session" {
 		t.Fatalf("valid challenge rejected after boundary probes: %#v", valid)
+	}
+	var sessionIP string
+	if err := db.QueryRow(`SELECT client_ip FROM sessions WHERE token=?`, valid.Token).Scan(&sessionIP); err != nil || sessionIP != "198.51.100.11" {
+		t.Fatalf("receiving IP was not stored: %q, %v", sessionIP, err)
 	}
 }
 
@@ -170,7 +173,6 @@ func TestSecurityBoundaryPasswordSnapshotRejectsMalformedState(t *testing.T) {
 		}
 	}
 }
-
 
 func TestSecurityBoundaryReserveEnforcesCooldownWindowAndReset(t *testing.T) {
 	db := testDatabase(t)
@@ -309,7 +311,6 @@ func TestAccountRandomTokenAndDigestProperties(t *testing.T) {
 	}
 }
 
-
 func TestSecurityBoundaryChallengeCooldownReusesExistingChallenge(t *testing.T) {
 	db := testDatabase(t)
 	ctx := context.Background()
@@ -356,7 +357,6 @@ func TestSecurityBoundarySessionFailsClosedWithoutSessionStorage(t *testing.T) {
 	}
 	_ = tx.Rollback()
 }
-
 
 func TestSecurityBoundaryAuthenticationFailsClosedOnStorageErrors(t *testing.T) {
 	ctx := context.Background()

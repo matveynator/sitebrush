@@ -103,6 +103,23 @@ func Retain(root *os.Root, domain, name string) error {
 	if err != nil {
 		return err
 	}
+	return RetainKnown(root, domain, name, digest, count)
+}
+
+// Inventory already hashed the files under the caller's exclusive site lease.
+// Reusing those digests avoids a second full read of every large asset.
+func RetainKnown(root *os.Root, domain, name, digest string, count int64) error {
+	decoded, err := hex.DecodeString(digest)
+	if err != nil || len(decoded) != sha256.Size || digest != strings.ToLower(digest) || count < 0 {
+		return errors.New("invalid retained file digest")
+	}
+	info, err := root.Lstat(name)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Size() != count {
+		return errors.New("file changed while retaining its version")
+	}
 	object := ObjectPath(domain, digest)
 	if info, statErr := root.Stat(object); statErr == nil {
 		if info.Size() != count {
@@ -271,8 +288,18 @@ func recordOrigin(root *os.Root, object, name string) error {
 	if err != nil {
 		return err
 	}
+	originPath := filepath.Join(directory, hex.EncodeToString(digest[:]))
+	if existing, openErr := root.Open(originPath); openErr == nil {
+		previous, readErr := io.ReadAll(io.LimitReader(existing, 1024))
+		closeErr := existing.Close()
+		if readErr == nil && closeErr == nil && string(previous) == string(encoded) {
+			return nil
+		}
+	} else if !os.IsNotExist(openErr) {
+		return openErr
+	}
 	payloadHash := sha256.Sum256(encoded)
-	return atomicCopy(root, strings.NewReader(string(encoded)), filepath.Join(directory, hex.EncodeToString(digest[:])), 0600, hex.EncodeToString(payloadHash[:]))
+	return atomicCopy(root, strings.NewReader(string(encoded)), originPath, 0600, hex.EncodeToString(payloadHash[:]))
 }
 
 // ExtraBytes counts retained content once. Links to a current file consume no

@@ -111,6 +111,7 @@ import (
 	"github.com/skip2/go-qrcode"
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/html"
+	"golang.org/x/net/publicsuffix"
 	"golang.org/x/net/websocket"
 	"golang.org/x/term"
 )
@@ -160,6 +161,7 @@ const guestStaticHTMLCacheQueueSize = 4096
 const authIPFailureCacheQueueSize = 4096
 const emailConfirmationTTL = 15 * time.Minute
 const profilePasswordCodeTTL = 15 * time.Minute
+const registrationConfirmationTTL = 12 * time.Hour
 const sitebrushHTTPReadTimeout = 10 * time.Second
 const sitebrushHTTPWriteTimeout = 0
 const sitebrushHTTPIdleTimeout = 65 * time.Second
@@ -18658,7 +18660,7 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if a.registrationDomainClaimed(r.Context(), domain) && !a.hasAdmin(r.Context(), domain) {
-		a.renderEmailConfirmationStatus(w, r, http.StatusConflict, translationOrDefault(translationsForRequest(r), "auth_domain_reserved", "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site."))
+		a.renderReservedDomain(w, r, translationOrDefault(translationsForRequest(r), "auth_domain_reserved", "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site."), http.StatusConflict)
 		return
 	}
 	translations := translationsForRequest(r)
@@ -18727,8 +18729,24 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 	if !a.authorizeAccountMailForm(w, r, "register") {
 		return
 	}
+	newSiteAdmission := r.FormValue("site_workflow") == "new_site"
+	if newSiteAdmission {
+		allowed, retryAfter, admissionErr := a.reservePublicTrialIPAdmission(r.Context(), accountClientIP(r), "create", domain, 2)
+		if admissionErr != nil {
+			http.Error(w, "Test Drive admission is unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if !allowed {
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+			a.renderSetupPage(w, r, domain, email, translationOrDefault(translations, "public_trial_ip_limit", "Test Drive limit for this IP was reached. Please try again later."))
+			return
+		}
+	}
 	pending := EmailConfirmation{}
 	if err := a.createAndSendEmailConfirmationForLanguage(r, "register", domain, "", email, password, requestedReturnPath(r), preferredLanguageCode(r.Header.Get("Accept-Language")), &pending); err != nil {
+		if newSiteAdmission {
+			a.releasePublicTrialIPAdmission(context.WithoutCancel(r.Context()), "create", domain)
+		}
 		var cooldown registrationCooldownError
 		if errors.As(err, &cooldown) {
 			w.Header().Set("Retry-After", strconv.Itoa(max(1, int(time.Until(cooldown.until).Seconds()))))
@@ -18965,6 +18983,10 @@ func (a *App) awaitAccountHTTPS(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) registerPage(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost && hasQueryFlag(r, "resend_confirmation") {
+		a.resendReservedDomainConfirmation(w, r)
+		return
+	}
 	if r.Method == http.MethodPost && r.FormValue("registration_form_token") != "" {
 		a.confirmRegistrationCode(w, r)
 		return
@@ -18979,7 +19001,7 @@ func (a *App) registerPage(w http.ResponseWriter, r *http.Request) {
 	}
 	domain := a.siteDomain(r.Context(), r)
 	if a.registrationDomainClaimed(r.Context(), domain) && !a.hasAdmin(r.Context(), domain) {
-		a.renderEmailConfirmationStatus(w, r, http.StatusConflict, translationOrDefault(translationsForRequest(r), "auth_domain_reserved", "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site."))
+		a.renderReservedDomain(w, r, translationOrDefault(translationsForRequest(r), "auth_domain_reserved", "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site."), http.StatusConflict)
 		return
 	}
 	if a.hasAdmin(r.Context(), domain) {
@@ -18995,6 +19017,52 @@ func (a *App) registerPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.renderSetupPage(w, r, domain, "", "")
+}
+
+func (a *App) renderReservedDomain(w http.ResponseWriter, r *http.Request, status string, statusCode int) {
+	domain := a.siteDomain(r.Context(), r)
+	ownerDomain := ""
+	_ = a.withServerControlDatabaseRead(r.Context(), "reserved-domain-owner", func(database *sql.DB) error {
+		ownerDomain, _ = (hostingandsupport.Store{DB: database}).OwnerDomain(r.Context())
+		return nil
+	})
+	if ownerDomain == "" {
+		ownerDomain = domain
+	}
+	mainURL := requestScheme(r) + "://" + ownerDomain + "/"
+	view := map[string]any{"Domain": domain, "Status": status, "MainURL": mainURL, "LoginURL": mainURL + "?login", "Email": strings.TrimSpace(r.FormValue("email"))}
+	if err := a.addAccountCaptchaToView(r, view, "register"); err != nil {
+		view["CaptchaUnavailable"] = true
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(statusCode)
+	a.render(w, r, "domain-reserved.html", view)
+}
+
+func (a *App) resendReservedDomainConfirmation(w http.ResponseWriter, r *http.Request) {
+	domain := a.siteDomain(r.Context(), r)
+	if !a.registrationDomainClaimed(r.Context(), domain) || a.hasAdmin(r.Context(), domain) {
+		httpsecurity.RedirectLocal(w, r, "/?register", http.StatusSeeOther)
+		return
+	}
+	if !a.authorizeAccountMailForm(w, r, "register") {
+		return
+	}
+	email := strings.TrimSpace(r.FormValue("email"))
+	token := ""
+	_ = a.withServerControlDatabaseRead(r.Context(), "reserved-domain-confirmation", func(database *sql.DB) error {
+		return database.QueryRowContext(r.Context(), `SELECT token FROM registration_confirmations WHERE domain=? AND email=? AND action='register' AND expires_at>? ORDER BY created_at DESC LIMIT 1`, domain, email, time.Now().UTC().Format(time.RFC3339)).Scan(&token)
+	})
+	if token != "" {
+		if confirmation, found := a.registrationConfirmationByToken(r.Context(), token); found {
+			link := emailConfirmationURL(r, token)
+			if err := a.enqueueServiceEmailContent(r.Context(), r, "email_confirm", domain, email, link, "", confirmation.LanguageCode, confirmation.Code, mailMonitorFlowID(token)); err != nil {
+				a.renderReservedDomain(w, r, translationOrDefault(translationsForRequest(r), "account_mail_unavailable", "Email requests are temporarily unavailable. Please try later."), http.StatusServiceUnavailable)
+				return
+			}
+		}
+	}
+	a.renderReservedDomain(w, r, translationOrDefault(translationsForRequest(r), "auth_resend_confirmation_sent", "If this email address owns the reservation, a new confirmation message has been sent."), http.StatusOK)
 }
 
 func (a *App) renderSetupPage(w http.ResponseWriter, r *http.Request, domain, email, status string) {
@@ -19185,9 +19253,15 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 		a.render(w, r, "login.html", map[string]any{"Domain": domain, "Status": message, "StatusClass": "danger", "ShowForm": false})
 		return
 	}
-	blocked, locked, until := a.authIPIsBlocked(r.Context(), domain, clientIPAddress(r))
-	if a.renderAccountLoginBlock(w, r, blocked, locked, until) {
-		return
+	// A mailed one-time proof can be used on a different device, even when
+	// password guesses from that device's network were previously throttled.
+	mailedProof := r.Method == http.MethodGet && hasQueryFlag(r, "login_link") && r.URL.Query().Get("login_challenge") != "" ||
+		r.Method == http.MethodPost && r.FormValue("login_challenge") != ""
+	if !mailedProof {
+		blocked, locked, until := a.authIPIsBlocked(r.Context(), domain, clientIPAddress(r))
+		if a.renderAccountLoginBlock(w, r, blocked, locked, until) {
+			return
+		}
 	}
 	if hasQueryFlag(r, "passkey_begin") {
 		a.beginAccountPasskeyLogin(w, r, domain)
@@ -19265,6 +19339,10 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 			return nil
 		default:
 			returnPath := httpsecurity.LocalRedirectTarget(r.FormValue("return_path"), "/")
+			if hasQueryFlag(r, "email_login") || r.FormValue("password") == "" {
+				outcome, transactionErr = accountauth.Challenge(r.Context(), transaction, domain, email, ip, returnPath, preferredLanguageCode(r.Header.Get("Accept-Language")), time.Now())
+				return transactionErr
+			}
 			if !localAccountRequest(r) && accounttotp.Enabled(r.Context(), transaction, domain, email) {
 				var valid bool
 				valid, transactionErr = accountauth.Credentials(r.Context(), transaction, domain, email, r.FormValue("password"))
@@ -19316,16 +19394,21 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
 		a.renderLoginPage(w, r, "/", email, translationsForRequest(r)["auth_send_limited"], "warning", time.Time{}, false)
 	default:
+		if token != "" || hasQueryFlag(r, "email_login") || r.FormValue("password") == "" {
+			w.WriteHeader(http.StatusUnauthorized)
+			if token != "" {
+				a.renderAccountCode(w, r, token, "", translationsForRequest(r)["auth_invalid"])
+			} else {
+				a.renderLoginPage(w, r, "/", email, translationsForRequest(r)["login_status_invalid_credentials"], "danger", time.Time{}, false)
+			}
+			return
+		}
 		_, blockedUntil, hardLocked := a.registerFailedLoginAttempt(r.Context(), domain, clientIPAddress(r))
 		if a.renderAccountLoginBlock(w, r, !blockedUntil.IsZero(), hardLocked, blockedUntil) {
 			return
 		}
 		w.WriteHeader(http.StatusUnauthorized)
-		if token != "" {
-			a.renderAccountCode(w, r, token, "", translationsForRequest(r)["auth_invalid"])
-		} else {
-			a.renderLoginPage(w, r, "/", email, translationsForRequest(r)["login_status_invalid_credentials"], "danger", time.Time{}, false)
-		}
+		a.renderLoginPage(w, r, "/", email, translationsForRequest(r)["login_status_invalid_credentials"], "danger", time.Time{}, false)
 	}
 }
 
@@ -19378,6 +19461,7 @@ func (a *App) completeAccountLogin(w http.ResponseWriter, r *http.Request, domai
 	a.storeProfileSessionDetails(r, outcome.Token)
 	a.clearFailedLoginAttempts(r.Context(), domain, clientIPAddress(r))
 	a.rememberAuthenticatedAdminIP(r, domain, time.Now().UTC())
+	a.recordPublicTrialIPIdentity(r.Context(), accountClientIP(r), domain, outcome.Email)
 	setAccountSessionCookie(w, r, outcome.Token, time.Now())
 	a.logHostingSupportEvent(r.Context(), "client_login", "success", outcome.Email, domain, "client signed in")
 	redirectPath := outcome.Path
@@ -22091,8 +22175,24 @@ func (a *App) publicTrialSitePreview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "CAPTCHA is invalid or expired", http.StatusForbidden)
 		return
 	}
+	_, existingPreview := a.activePublicTrialPreviewStore().Status(progressToken)
+	if !existingPreview {
+		allowed, retryAfter, admissionErr := a.reservePublicTrialIPAdmission(r.Context(), clientIP, "preview", progressToken, a.publicTrialAdmissionLimits(r.Context()).DailyJobsPerIP)
+		if admissionErr != nil {
+			http.Error(w, "Test Drive admission is unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if !allowed {
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+			http.Error(w, translationOrDefault(translationsForRequest(r), "public_trial_ip_limit", "Test Drive limit for this IP was reached. Please try again later."), http.StatusTooManyRequests)
+			return
+		}
+	}
 	cancelSession, started := a.activePublicTrialPreviewStore().StartWithLimits(progressToken, clientIP, a.publicTrialAdmissionLimits(r.Context()))
 	if !started {
+		if !existingPreview {
+			a.releasePublicTrialIPAdmission(context.WithoutCancel(r.Context()), "preview", progressToken)
+		}
 		status, found := a.activePublicTrialPreviewStore().Status(progressToken)
 		if !found {
 			w.Header().Set("Retry-After", "60")
@@ -22728,6 +22828,22 @@ func (a *App) publicTrialSiteCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	quotaBytes := hostingandsupport.CreationQuota(hostingandsupport.BillingFreeBytes, preview.Plan.QuotaBytes)
 	claimToken := randomAccessToken()
+	allowed, retryAfter, admissionErr := a.reservePublicTrialIPAdmission(r.Context(), accountClientIP(r), "create", trialDomain, 2)
+	if admissionErr != nil {
+		http.Error(w, "Test Drive admission is unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if !allowed {
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		http.Error(w, translationOrDefault(translationsForRequest(r), "public_trial_ip_limit", "Test Drive limit for this IP was reached. Please try again later."), http.StatusTooManyRequests)
+		return
+	}
+	trialCreated := false
+	defer func() {
+		if !trialCreated {
+			a.releasePublicTrialIPAdmission(context.WithoutCancel(r.Context()), "create", trialDomain)
+		}
+	}()
 	if err := a.claimTrialDomain(r.Context(), trialDomain, claimToken); err != nil {
 		statusCode := http.StatusConflict
 		var capacityError publicTrialCapacityError
@@ -22738,7 +22854,6 @@ func (a *App) publicTrialSiteCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), statusCode)
 		return
 	}
-	trialCreated := false
 	defer func() {
 		if !trialCreated {
 			a.releaseTrialDomain(context.WithoutCancel(r.Context()), trialDomain, claimToken)
@@ -22777,6 +22892,7 @@ func (a *App) publicTrialSiteCreate(w http.ResponseWriter, r *http.Request) {
 	if preview.FitsFreePlan {
 		serviceStatus = "free"
 	}
+	origin := a.hostingAndSupportClientIP(r.Context(), accountClientIP(r))
 	// The control record owns the trial lifetime and remains after automatic deletion as its audit entry.
 	if err := a.withServerControlDatabaseWrite(r.Context(), "public-trial-assign", func(database *sql.DB) error {
 		store := hostingandsupport.Store{DB: database}
@@ -22794,7 +22910,7 @@ func (a *App) publicTrialSiteCreate(w http.ResponseWriter, r *http.Request) {
 		if preview.FreeLimitReached {
 			paidContinuation = 1
 		}
-		_, err = database.ExecContext(r.Context(), `UPDATE public_trial_sites SET pending_assets_json=?,paid_continuation=?,estimated_total_bytes=?,estimated_price_minor=?,billing_currency=? WHERE domain=? AND status='active'`, string(pendingJSON), paidContinuation, preview.EstimatedTotalBytes, preview.EstimatedPriceMinor, preview.BillingCurrency, trialDomain)
+		_, err = database.ExecContext(r.Context(), `UPDATE public_trial_sites SET pending_assets_json=?,paid_continuation=?,estimated_total_bytes=?,estimated_price_minor=?,billing_currency=?,client_ip=?,country=?,city=? WHERE domain=? AND status='active'`, string(pendingJSON), paidContinuation, preview.EstimatedTotalBytes, preview.EstimatedPriceMinor, preview.BillingCurrency, origin.IP, origin.Country, origin.City, trialDomain)
 		return err
 	}); err != nil {
 		_ = a.deleteDemoManagedSiteWithoutBackup(r.Context(), trialDomain)
@@ -24193,19 +24309,24 @@ func publicTrialSubdomainLabel(sourceURL string) string {
 	if err != nil {
 		return ""
 	}
+	for _, segment := range strings.Split(strings.Trim(parsedURL.EscapedPath(), "/"), "/") {
+		decoded, decodeErr := url.PathUnescape(segment)
+		if decodeErr != nil {
+			continue
+		}
+		if label := safePublicTrialLabel(decoded); label != "" {
+			return label
+		}
+	}
 	host := normalizeDomainName(parsedURL.Hostname())
 	if host == "" {
 		return ""
 	}
-	parts := strings.Split(host, ".")
-	if len(parts) < 2 {
+	registrable, err := publicsuffix.EffectiveTLDPlusOne(host)
+	if err != nil {
 		return ""
 	}
-	label := parts[len(parts)-2]
-	if label == "co" || label == "com" || label == "net" || label == "org" {
-		label = parts[0]
-	}
-	return safePublicTrialLabel(label)
+	return safePublicTrialLabel(strings.Split(registrable, ".")[0])
 }
 
 func safePublicTrialLabel(rawLabel string) string {
@@ -27760,18 +27881,13 @@ func (a *App) saveSitebrushCommissionFromForm(r *http.Request) string {
 	return translationOrDefault(translationsForRequest(r), "billing_commission_saved", "Commission saved.")
 }
 
-func (a *App) hostingAndSupportCanShowCentralServers(ctx context.Context, ownerDomain string, sitebrushComKey hostingandsupport.SitebrushComKey) bool {
+func (a *App) hostingAndSupportCanShowCentralServers(_ context.Context, ownerDomain string, sitebrushComKey hostingandsupport.SitebrushComKey) bool {
 	if normalizeDomainName(ownerDomain) != "sitebrush.com" {
 		return false
 	}
-	if strings.TrimSpace(sitebrushComKey.PublicKey) != strings.TrimSpace(sitebrushComServiceMailRelayPublicKey) {
-		return false
-	}
-	ipList, _, err := detectServerIPCandidates(ctx)
-	if err != nil || len(ipList) == 0 {
-		return false
-	}
-	return domainARecordMatchesAny("sitebrush.com", ipList)
+	// DNS can point at a reverse proxy while the signed installation registry
+	// lives on the origin. The pinned central key identifies that registry.
+	return strings.TrimSpace(sitebrushComKey.PublicKey) == strings.TrimSpace(sitebrushComServiceMailRelayPublicKey)
 }
 
 func (a *App) expensesView(ctx context.Context, r *http.Request) (map[string]any, error) {
@@ -27815,6 +27931,13 @@ func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, control
 		demoSettings = demoStore.Settings(ctx)
 		demoSessions = demoStore.Sessions(ctx)
 		publicTrialSites = store.PublicTrialSites(ctx)
+		for siteIndex := range publicTrialSites {
+			trialSite := &publicTrialSites[siteIndex]
+			if trialSite.ClientIP == "" {
+				continue
+			}
+			_ = database.QueryRowContext(ctx, `SELECT email FROM public_trial_ip_identities WHERE client_ip=? AND domain<>? ORDER BY verified_at DESC LIMIT 1`, trialSite.ClientIP, trialSite.Domain).Scan(&trialSite.PossibleEmail)
+		}
 		mainDomain, _ = store.OwnerDomain(ctx)
 		ownerEmails = store.OwnerEmails(ctx)
 		allClientHostings = store.ClientHostings(ctx)
@@ -29291,30 +29414,30 @@ func publicTrialSignupEmbedHTML(r *http.Request, translations map[string]string,
 	formTitle := template.HTMLEscapeString(translationOrDefault(translations, "public_trial_form_title", "Enter the website where you want to launch SiteBrush:"))
 	fieldLabel := template.HTMLEscapeString(translationOrDefault(translations, "public_trial_field_label", "Website address"))
 	checkButton := template.HTMLEscapeString(translationOrDefault(translations, "public_trial_check_button", "Check website"))
-	newSiteTitle := "Create a site on a subdomain"
-	newSiteLabel := "Subdomain name"
-	if preferredLanguageCode(r.Header.Get("Accept-Language")) == "ru" {
-		newSiteTitle = "Создать сайт на поддомене"
-		newSiteLabel = "Имя поддомена"
-	}
+	newSiteTitle := template.HTMLEscapeString(translationOrDefault(translations, "public_trial_new_site_title", "Create an empty site"))
+	newSiteLabel := template.HTMLEscapeString(translationOrDefault(translations, "public_trial_subdomain_label", "Choose your SiteBrush address"))
 	return `<form class="SiteBrushPublicTrialForm sitebrush-public-trial-form" data-sitebrush-public-trial-form>
   <p class="SiteBrushPublicTrialTitle sitebrush-public-trial-title" data-sitebrush-public-trial-title>` + formTitle + `</p>
   <label class="SiteBrushPublicTrialField sitebrush-public-trial-field">
     <span class="SiteBrushPublicTrialLabel sitebrush-public-trial-label" data-sitebrush-public-trial-label>` + fieldLabel + `</span>
     <input class="SiteBrushPublicTrialInput sitebrush-public-trial-input" data-sitebrush-public-trial-input type="text" name="source_url" autocomplete="url" inputmode="url" required>
   </label>
+  <label class="SiteBrushPublicTrialField sitebrush-public-trial-field">
+    <span class="SiteBrushPublicTrialLabel sitebrush-public-trial-label" data-sitebrush-trial-domain-label>` + newSiteLabel + `</span>
+    <input class="SiteBrushPublicTrialInput sitebrush-public-trial-input" name="subdomain" type="text" pattern="[a-z0-9](?:[a-z0-9-]{0,22}[a-z0-9])?" maxlength="24" autocomplete="off">
+  </label>
   <output class="SiteBrushPublicTrialLabel sitebrush-public-trial-label" data-sitebrush-suggested-domain></output>
   <button class="SiteBrushPublicTrialButton sitebrush-public-trial-button" data-sitebrush-public-trial-submit type="submit">` + checkButton + `</button>
 </form>
 <form class="SiteBrushPublicTrialForm sitebrush-public-trial-form" data-sitebrush-new-site-form>
-  <p class="SiteBrushPublicTrialTitle sitebrush-public-trial-title">` + newSiteTitle + `</p>
+  <p class="SiteBrushPublicTrialTitle sitebrush-public-trial-title" data-sitebrush-new-site-title>` + newSiteTitle + `</p>
   <label class="SiteBrushPublicTrialField sitebrush-public-trial-field">
-    <span class="SiteBrushPublicTrialLabel sitebrush-public-trial-label">` + newSiteLabel + `</span>
+    <span class="SiteBrushPublicTrialLabel sitebrush-public-trial-label" data-sitebrush-new-site-label>` + newSiteLabel + `</span>
     <input class="SiteBrushPublicTrialInput sitebrush-public-trial-input" name="subdomain" type="text" required pattern="[a-z0-9](?:[a-z0-9-]{0,22}[a-z0-9])?" maxlength="24" autocomplete="off">
   </label>
-  <small class="SiteBrushPublicTrialLabel sitebrush-public-trial-label">myshop.` + template.HTMLEscapeString(ownerDomain) + `</small>
+  <output class="SiteBrushPublicTrialLabel sitebrush-public-trial-label" data-sitebrush-new-domain-preview></output>
   <output class="SiteBrushPublicTrialLabel sitebrush-public-trial-label" role="status" data-sitebrush-domain-status></output>
-  <button class="SiteBrushPublicTrialButton sitebrush-public-trial-button" type="submit">` + newSiteTitle + `</button>
+  <button class="SiteBrushPublicTrialButton sitebrush-public-trial-button" type="submit" data-sitebrush-new-site-button>` + newSiteTitle + `</button>
 </form>
 <script src="` + template.HTMLEscapeString(scriptURL) + `" data-sitebrush-live-asset></script>
 <script>
@@ -29350,39 +29473,49 @@ func publicTrialWidgetScriptVersion() string {
 func publicTrialWidgetTexts(translations map[string]string) map[string]string {
 	texts := siteCopyMenuTexts(translations)
 	for key, value := range map[string]string{
-		"modalTitle":          translationOrDefault(translations, "public_trial_modal_title", "Checking if SiteBrush can be installed on the selected website:"),
-		"formTitle":           translationOrDefault(translations, "public_trial_form_title", "Enter the website where you want to launch SiteBrush:"),
-		"fieldLabel":          translationOrDefault(translations, "public_trial_field_label", "Website address"),
-		"checkButton":         translationOrDefault(translations, "public_trial_check_button", "Check website"),
-		"createButton":        translationOrDefault(translations, "public_trial_create_button", "Create test website"),
-		"analyzing":           translationOrDefault(translations, "public_trial_analyzing", "Analyzing the website..."),
-		"preparing":           translationOrDefault(translations, "public_trial_preparing", "Preparing the website for SiteBrush..."),
-		"creating":            translationOrDefault(translations, "public_trial_creating", "Creating a test version with the SiteBrush editor..."),
-		"reconnecting":        translationOrDefault(translations, "public_trial_reconnecting", "Restoring the connection. The website check continues..."),
-		"usableWhileChecking": translationOrDefault(translations, "public_trial_usable_while_checking", "The preview is ready. The remaining pages are still being checked."),
-		"partialReady":        translationOrDefault(translations, "public_trial_partial_ready", "The available pages are ready for testing."),
-		"loadFailed":          translationOrDefault(translations, "public_trial_load_failed", "Website analysis failed."),
-		"pages":               translationOrDefault(translations, "public_trial_pages", "Found pages"),
-		"files":               translationOrDefault(translations, "public_trial_files", "Found files"),
-		"images":              translationOrDefault(translations, "public_trial_images", "Images"),
-		"css":                 translationOrDefault(translations, "public_trial_css", "CSS"),
-		"js":                  translationOrDefault(translations, "public_trial_js", "JS"),
-		"other":               translationOrDefault(translations, "public_trial_other", "Other resources"),
-		"estimatedSize":       translationOrDefault(translations, "public_trial_estimated_size", "Estimated total size"),
-		"requiredSpace":       translationOrDefault(translations, "public_trial_required_space", "Required disk space"),
-		"freeCompatibility":   translationOrDefault(translations, "public_trial_free_compatibility", "Free plan compatibility"),
-		"requiredPlan":        translationOrDefault(translations, "public_trial_required_plan", "Minimal required paid plan"),
-		"planStorage":         translationOrDefault(translations, "public_trial_plan_storage", "Plan storage"),
-		"planUsage":           translationOrDefault(translations, "public_trial_plan_usage", "Storage used"),
-		"freeResult":          translationOrDefault(translations, "public_trial_free_result", "Great – this website can be launched on the free SiteBrush plan."),
-		"paidResult":          translationOrDefault(translations, "public_trial_paid_result", "This website requires a paid plan, but you can test SiteBrush for free for 1 month. Payment is required only after the trial period."),
-		"freeFitResult":       translationOrDefault(translations, "public_trial_free_fit_result", "The website fits the free plan."),
-		"paidFitResult":       translationOrDefault(translations, "public_trial_paid_fit_result", "The website does not fit the free plan (%s). We recommend the %s plan."),
-		"paidPlanFallback":    translationOrDefault(translations, "public_trial_paid_plan_fallback", "a paid plan"),
-		"retryNextIn":         translationOrDefault(translations, "site_copy_retry_next_in", "Next retry in"),
-		"retrySecondsSuffix":  translationOrDefault(translations, "site_copy_retry_seconds_suffix", "s"),
-		"yes":                 translationOrDefault(translations, "confirm_yes", "Yes"),
-		"no":                  translationOrDefault(translations, "confirm_no", "No"),
+		"modalTitle":            translationOrDefault(translations, "public_trial_modal_title", "Checking if SiteBrush can be installed on the selected website:"),
+		"formTitle":             translationOrDefault(translations, "public_trial_form_title", "Enter the website where you want to launch SiteBrush:"),
+		"fieldLabel":            translationOrDefault(translations, "public_trial_field_label", "Website address"),
+		"checkButton":           translationOrDefault(translations, "public_trial_check_button", "Check website"),
+		"suggestedAddress":      translationOrDefault(translations, "public_trial_suggested_address", "Your site address"),
+		"addressUnavailable":    translationOrDefault(translations, "public_trial_address_unavailable", "This address is unavailable. Choose another name."),
+		"addressCheckFailed":    translationOrDefault(translations, "public_trial_address_check_failed", "Could not check the address. Please try again."),
+		"newSiteInvalid":        translationOrDefault(translations, "public_trial_address_invalid", "Enter a valid subdomain name."),
+		"newSiteTitle":          translationOrDefault(translations, "public_trial_new_site_title", "Create an empty site"),
+		"newSiteLabel":          translationOrDefault(translations, "public_trial_subdomain_label", "Choose your SiteBrush address"),
+		"captchaLabel":          translationOrDefault(translations, "account_captcha_label", "Characters from the image"),
+		"captchaAlt":            translationOrDefault(translations, "recover_captcha_alt", "CAPTCHA image"),
+		"captchaUnavailable":    translationOrDefault(translations, "public_trial_captcha_unavailable", "CAPTCHA is temporarily unavailable."),
+		"suggestionUnavailable": translationOrDefault(translations, "public_trial_suggestion_unavailable", "Could not suggest an address. Try again."),
+		"createButton":          translationOrDefault(translations, "public_trial_create_button", "Create test website"),
+		"analyzing":             translationOrDefault(translations, "public_trial_analyzing", "Analyzing the website..."),
+		"preparing":             translationOrDefault(translations, "public_trial_preparing", "Preparing the website for SiteBrush..."),
+		"creating":              translationOrDefault(translations, "public_trial_creating", "Creating a test version with the SiteBrush editor..."),
+		"reconnecting":          translationOrDefault(translations, "public_trial_reconnecting", "Restoring the connection. The website check continues..."),
+		"usableWhileChecking":   translationOrDefault(translations, "public_trial_usable_while_checking", "The preview is ready. The remaining pages are still being checked."),
+		"partialReady":          translationOrDefault(translations, "public_trial_partial_ready", "The available pages are ready for testing."),
+		"loadFailed":            translationOrDefault(translations, "public_trial_load_failed", "Website analysis failed."),
+		"pages":                 translationOrDefault(translations, "public_trial_pages", "Found pages"),
+		"files":                 translationOrDefault(translations, "public_trial_files", "Found files"),
+		"images":                translationOrDefault(translations, "public_trial_images", "Images"),
+		"css":                   translationOrDefault(translations, "public_trial_css", "CSS"),
+		"js":                    translationOrDefault(translations, "public_trial_js", "JS"),
+		"other":                 translationOrDefault(translations, "public_trial_other", "Other resources"),
+		"estimatedSize":         translationOrDefault(translations, "public_trial_estimated_size", "Estimated total size"),
+		"requiredSpace":         translationOrDefault(translations, "public_trial_required_space", "Required disk space"),
+		"freeCompatibility":     translationOrDefault(translations, "public_trial_free_compatibility", "Free plan compatibility"),
+		"requiredPlan":          translationOrDefault(translations, "public_trial_required_plan", "Minimal required paid plan"),
+		"planStorage":           translationOrDefault(translations, "public_trial_plan_storage", "Plan storage"),
+		"planUsage":             translationOrDefault(translations, "public_trial_plan_usage", "Storage used"),
+		"freeResult":            translationOrDefault(translations, "public_trial_free_result", "Great – this website can be launched on the free SiteBrush plan."),
+		"paidResult":            translationOrDefault(translations, "public_trial_paid_result", "This website requires a paid plan, but you can test SiteBrush for free for 1 month. Payment is required only after the trial period."),
+		"freeFitResult":         translationOrDefault(translations, "public_trial_free_fit_result", "The website fits the free plan."),
+		"paidFitResult":         translationOrDefault(translations, "public_trial_paid_fit_result", "The website does not fit the free plan (%s). We recommend the %s plan."),
+		"paidPlanFallback":      translationOrDefault(translations, "public_trial_paid_plan_fallback", "a paid plan"),
+		"retryNextIn":           translationOrDefault(translations, "site_copy_retry_next_in", "Next retry in"),
+		"retrySecondsSuffix":    translationOrDefault(translations, "site_copy_retry_seconds_suffix", "s"),
+		"yes":                   translationOrDefault(translations, "confirm_yes", "Yes"),
+		"no":                    translationOrDefault(translations, "confirm_no", "No"),
 	} {
 		texts[key] = value
 	}
@@ -32958,10 +33091,10 @@ func (a *App) createAndSendEmailConfirmationForLanguage(r *http.Request, action,
 		if err := a.reserveAccountMail(r, domain, email); err != nil {
 			return err
 		}
-		confirmation.ExpiresAt = now.Add(profilePasswordCodeTTL).Format(time.RFC3339)
+		confirmation.ExpiresAt = now.Add(registrationConfirmationTTL).Format(time.RFC3339)
 		confirmation.Code = randomSixDigitCode()
 		confirmation.FormToken = randomAccessToken()
-		if dnsSetup, dnsSetupRequired := a.registrationDomainAddressSetupView(databaseContext, domain, languageCode); dnsSetupRequired {
+		if dnsSetup, dnsSetupRequired := a.registrationConfirmationDNSSetup(databaseContext, confirmation); dnsSetupRequired {
 			return errors.New(dnsSetup.PlainText)
 		}
 		var admitted bool
@@ -33062,7 +33195,7 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		a.render(w, r, "account-confirm.html", map[string]any{"Domain": confirmation.Domain, "Email": confirmation.Email, "CurrentEmail": confirmation.CurrentEmail, "Token": token, "AcceptEmail": confirmation.Action == "profile", "SetPassword": confirmation.Action == "register" && confirmation.Password == ""})
+		a.render(w, r, "account-confirm.html", map[string]any{"Domain": confirmation.Domain, "Email": confirmation.Email, "CurrentEmail": confirmation.CurrentEmail, "Token": token, "AcceptEmail": confirmation.Action == "profile", "AutoConfirm": confirmation.Action == "register" && (confirmation.Workflow == "trial" || confirmation.Workflow == "trial_paid"), "SetPassword": confirmation.Action == "register" && confirmation.Password == "" && confirmation.Workflow != "trial" && confirmation.Workflow != "trial_paid"})
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -33075,7 +33208,7 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 			a.renderEmailConfirmationStatus(w, r, http.StatusConflict, "Confirm the paid import estimate before registering this site.")
 			return
 		}
-		if confirmation.Password == "" {
+		if confirmation.Password == "" && confirmation.Workflow != "trial" && confirmation.Workflow != "trial_paid" {
 			password := r.FormValue("password")
 			status := ""
 			if password == "" {
@@ -33101,7 +33234,7 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 			a.renderSiteRequestPage(w, r, confirmation.Domain, "", "", confirmation.Email, "", 0)
 			return
 		}
-		if dnsSetup, dnsSetupRequired := a.registrationDomainAddressSetupView(confirmationContext, confirmation.Domain, confirmation.LanguageCode); dnsSetupRequired {
+		if dnsSetup, dnsSetupRequired := a.registrationConfirmationDNSSetup(confirmationContext, confirmation); dnsSetupRequired {
 			_ = a.finishRegistrationAttempt(mailMonitorFlowID(token), "technical")
 			a.renderEmailConfirmationStatus(w, r, http.StatusBadRequest, dnsSetup.PlainText)
 			return
@@ -33161,10 +33294,21 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 		}
 		a.promoteFirstServerOwner(registerContext, confirmation.Domain, confirmation.Email)
 		a.markServiceMailRecipientVerified(registerContext, confirmation.Domain, confirmation.Email, confirmation.LanguageCode)
+		a.recordPublicTrialIPIdentity(registerContext, accountClientIP(r), confirmation.Domain, confirmation.Email)
+		_ = a.withServerControlDatabaseWrite(registerContext, "trial-confirmed-email", func(database *sql.DB) error {
+			_, err := database.ExecContext(registerContext, `UPDATE public_trial_sites SET verified_email=? WHERE domain=? AND status='active'`, confirmation.Email, confirmation.Domain)
+			return err
+		})
 		a.logHostingSupportEvent(registerContext, "client_registered", "success", confirmation.Email, confirmation.Domain, "email confirmed")
 		a.recordMailMonitorEvent(registerContext, registrationOutcome)
 		a.reportHostingSnapshotAsync(registerContext)
-		a.createSessionForDomain(w, r, registerContext, confirmation.Domain, confirmation.Email)
+		// A verified mailbox clears password throttling for the device that
+		// followed the link, including a phone on a different network.
+		a.clearFailedLoginAttempts(registerContext, confirmation.Domain, clientIPAddress(r))
+		if a.createSessionForDomain(w, r, registerContext, confirmation.Domain, confirmation.Email) == "" {
+			httpsecurity.RedirectLocal(w, r, "/?login", http.StatusSeeOther)
+			return
+		}
 		a.observeAutomaticSSLRegistration(r, confirmation.Domain)
 		returnPath := safeConfirmationReturnPath(confirmation.ReturnPath)
 		if confirmation.Workflow == "trial_paid" {
@@ -38790,6 +38934,15 @@ func (a *App) registrationDomainAddressSetupView(ctx context.Context, siteDomain
 	return emailDNSSetupViewForLanguage(languageCode, registrationDomain, setupFromAddress, selectedIP.String()), true
 }
 
+func (a *App) registrationConfirmationDNSSetup(ctx context.Context, confirmation EmailConfirmation) (EmailDNSSetupView, bool) {
+	if (confirmation.Workflow == "trial" || confirmation.Workflow == "trial_paid") && a.pendingTrialRegistration(ctx, confirmation.Domain) {
+		// The owner already serves this managed wildcard domain and sends mail
+		// for it. A direct A-record match would reject reverse proxies.
+		return EmailDNSSetupView{}, false
+	}
+	return a.registrationDomainAddressSetupView(ctx, confirmation.Domain, confirmation.LanguageCode)
+}
+
 func emailDomainCannotUseDNS(domain string) bool {
 	cleanDomain := strings.ToLower(strings.Trim(strings.TrimSpace(domain), "."))
 	if cleanDomain == "" || cleanDomain == "localhost" {
@@ -39813,7 +39966,7 @@ func (a *App) withAccountMailTransaction(r *http.Request, operation string, writ
 }
 
 func (a *App) authorizeAccountMailForm(w http.ResponseWriter, r *http.Request, purpose string) bool {
-	if purpose == "register" {
+	if purpose == "register" && !hasQueryFlag(r, "resend_confirmation") {
 		registration, readErr := a.readRegistrationCooldown(r)
 		if readErr != nil {
 			a.renderAccountMailFailure(w, r, purpose, "account_mail_unavailable", "Email requests are temporarily unavailable. Please try later.", http.StatusServiceUnavailable)
@@ -39912,6 +40065,10 @@ func (a *App) updateAccountMailBlockFromForm(r *http.Request, blocked bool) stri
 
 func (a *App) renderAccountMailFailure(w http.ResponseWriter, r *http.Request, purpose, translationKey, fallback string, status int) {
 	message := translationOrDefault(translationsForRequest(r), translationKey, fallback)
+	if purpose == "register" && hasQueryFlag(r, "resend_confirmation") {
+		a.renderReservedDomain(w, r, message, status)
+		return
+	}
 	w.WriteHeader(status)
 	if purpose == "recover" {
 		a.renderRecoveryPage(w, r, map[string]any{"Status": message, "StatusClass": "danger", "ShowForm": true, "RecoveryEmail": strings.TrimSpace(r.FormValue("email"))})
@@ -44053,7 +44210,7 @@ func (a *App) injectContextMenuForRequest(r *http.Request, domain, pagePath, htm
 	}
 	isServerManager := false
 	if isAdmin && strings.TrimSpace(adminEmail) != "" {
-		isServerManager = a.isServerManagerEmail(r.Context(), domain, adminEmail)
+		isServerManager = a.updateAuthorized(r)
 	}
 	menuScript := buildContextMenuScript(isAdmin, isServerManager, domainFrozen, pagePasswordProtected, showLogout, pagePath, domain, revisionID, revisionCount, storageUsageLabel, accountCSRF(r), translationsForRequest(r))
 	menuScript += a.trialRegistrationOverlayHTML(r, domain)
@@ -44289,7 +44446,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
 	}
 	updateMenuLink := ""
 	if isServerManager {
-		updateMenuLink = "<a href='/?server_update' class='SiteBrushContextMenuUpdate' hidden>" + template.HTMLEscapeString(translationOrDefault(translations, "update_title", "SiteBrush updates")) + "</a>"
+		updateMenuLink = "<a href='/?expenses#server-update' class='SiteBrushContextMenuUpdate' hidden>" + template.HTMLEscapeString(translationOrDefault(translations, "update_title", "SiteBrush updates")) + "</a>"
 	}
 	copyrightMenuEntry := fmt.Sprintf("<li class='SiteBrushContextMenu ContextMenuCopyright'><div class='SiteBrushContextMenuFooter'><a href='%s' class='SiteBrushContextMenuFooterLink' target='_blank' rel='noopener noreferrer'>sitebrush</a>%s<a href='%s' class='SiteBrushContextMenuVersion' download>%s</a></div>%s</li>", sitebrushHomeURL, storageUsageHTML, serverBinaryDownloadURL, compiledVersionLabel, updateMenuLink)
 	if isAdmin {
@@ -44324,7 +44481,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
   const currentDomainName = "` + escapedDomain + `";
   const isDomainFrozen = ` + strconv.FormatBool(isFrozen) + `;
   const mutationCSRFToken = "` + escapedMutationCSRFToken + `";
-  const serverUpdateModel = {requestedAt: 0, pending: false, available: false};
+  const serverUpdateModel = {requestedAt: 0, pending: false, available: false, version: ""};
   function renderSitebrushUpdateLink() {
     const menuHostElement = document.getElementById("SiteBrushMenuBox");
     if (!menuHostElement) {
@@ -44334,6 +44491,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
     const updateLinkElement = menuRoot.querySelector(".SiteBrushContextMenuUpdate");
     if (updateLinkElement) {
       updateLinkElement.hidden = !serverUpdateModel.available;
+      updateLinkElement.textContent = "` + template.JSEscapeString(translationOrDefault(translations, "update_menu_available", "Update to version")) + ` " + serverUpdateModel.version;
       const menuBoxElement = menuRoot.querySelector(".SiteBrushMenuBox");
       positionSitebrushMenuBox(menuBoxElement, {clientX: parseFloat(menuBoxElement.style.left), clientY: parseFloat(menuBoxElement.style.top)});
     }
@@ -44358,7 +44516,10 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
         statusResponse = JSON.parse(statusEvent.data);
         const releaseVersion = statusResponse.State && statusResponse.State.available && statusResponse.State.available.version;
         const runningVersion = "` + template.JSEscapeString(CompileVersion) + `";
-        if (!statusResponse.Error) serverUpdateModel.available = /^\d+$/.test(runningVersion) && /^\d+$/.test(releaseVersion) && BigInt(releaseVersion) > BigInt(runningVersion);
+        if (!statusResponse.Error) {
+          serverUpdateModel.version = releaseVersion || "";
+          serverUpdateModel.available = /^\d+$/.test(runningVersion) && /^\d+$/.test(releaseVersion) && BigInt(releaseVersion) > BigInt(runningVersion);
+        }
         renderSitebrushUpdateLink();
       } catch (statusError) {
         console.error("SiteBrush update status:", statusError);
@@ -44370,6 +44531,12 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
     };
     statusSocket.onerror = function reportUpdateStatusFailure() { console.error("SiteBrush update status is unavailable"); };
     statusSocket.onclose = function clearUpdateStatusDeadline() { serverUpdateModel.pending = false; window.clearTimeout(statusDeadline); };
+  }
+  if (` + strconv.FormatBool(isServerManager) + `) {
+    requestSitebrushUpdateStatus();
+    window.setInterval(function checkSitebrushUpdateInBackground() {
+      if (document.visibilityState === "visible") requestSitebrushUpdateStatus();
+    }, 60000);
   }
   const siteCopyConfig = JSON.parse(new TextDecoder().decode(Uint8Array.from([` + siteCopyMenuConfigByteList(pagePath, translations) + `])));
   siteCopyConfig.csrfToken = mutationCSRFToken;
@@ -46247,7 +46414,7 @@ func preferredLanguageCode(acceptLanguageHeader string) string {
 			weight = parsedWeight
 			break
 		}
-		if weight > bestWeight {
+		if weight > 0 && weight > bestWeight {
 			bestWeight = weight
 			bestLanguageCode = baseCode
 		}
@@ -51265,8 +51432,11 @@ func (a *App) checkpointProperties(ctx context.Context, domain string, control b
 func (a *App) captureFreezeCheckpoint(ctx context.Context, domain string, ensure bool) (sitefreeze.Checkpoint, error) {
 	var point sitefreeze.Checkpoint
 	if ensure {
-		a.ensureDomainStorageUsageRow(ctx, domain)
-		a.rebuildDomainStorageUsage(ctx, domain)
+		var updatedAt string
+		if err := a.db.QueryRowContext(ctx, `SELECT COALESCE(updated_at,'') FROM domain_storage_usage WHERE domain=?`, domain).Scan(&updatedAt); err != nil || updatedAt == "" {
+			a.ensureDomainStorageUsageRow(ctx, domain)
+			a.rebuildDomainStorageUsage(ctx, domain)
+		}
 	}
 	err := a.siteContentTransaction(ctx, func(transaction *sql.Tx) error {
 		var captureErr error
@@ -51457,7 +51627,10 @@ func (a *App) createFreezeCheckpoint(ctx context.Context, domain string, epochs 
 	}
 	defer root.Close()
 	for _, file := range point.Files {
-		if err = sitefreeze.Retain(root, domain, filepath.Join("storage", file.Tree, domainStorageName(domain), filepath.FromSlash(file.Path))); err != nil {
+		if file.Link != "" {
+			continue
+		}
+		if err = sitefreeze.RetainKnown(root, domain, filepath.Join("storage", file.Tree, domainStorageName(domain), filepath.FromSlash(file.Path)), file.Hash, file.Bytes); err != nil {
 			return point, err
 		}
 	}
@@ -51467,8 +51640,8 @@ func (a *App) createFreezeCheckpoint(ctx context.Context, domain string, epochs 
 		if relativeErr != nil {
 			return point, relativeErr
 		}
-		if hash, _, readErr := sitefreeze.HashFile(root, relative); readErr == nil && hash == page.Hash {
-			if err = sitefreeze.Retain(root, domain, relative); err != nil {
+		if hash, count, readErr := sitefreeze.HashFile(root, relative); readErr == nil && hash == page.Hash {
+			if err = sitefreeze.RetainKnown(root, domain, relative, hash, count); err != nil {
 				return point, err
 			}
 		} else {
@@ -54027,7 +54200,7 @@ func (a *App) servePublishedStaticFileForAdmin(w http.ResponseWriter, r *http.Re
 	}
 	revisionID, revisionCount := a.revisionMenuSummary(r.Context(), domain, pagePath)
 	_, pagePasswordProtected := a.pagePasswordRuleFromPrefixFile(domain, pagePath)
-	isServerManager := a.isServerManagerEmail(r.Context(), domain, adminEmail)
+	isServerManager := a.updateAuthorized(r)
 	storageUsage := a.storedDomainStorageUsage(r.Context(), domain)
 	storageUsageLabel := formatFileSize(storageUsage.totalBytes()) + " / " + formatFileSize(storageUsage.LimitBytes)
 	menuScript := buildContextMenuScript(true, isServerManager, false, pagePasswordProtected, !a.isDemoSiteDomain(r.Context(), domain), pagePath, domain, revisionID, revisionCount, storageUsageLabel, accountCSRF(r), translationsForRequest(r))
@@ -54979,8 +55152,12 @@ func (a *App) serverUpdatePage(w http.ResponseWriter, r *http.Request) {
 		a.serverUpdateSocket(w, r)
 		return
 	}
+	if !hasQueryFlag(r, "embedded") {
+		httpsecurity.RedirectLocal(w, r, "/?expenses#server-update", http.StatusSeeOther)
+		return
+	}
 	_, centralErr := a.centralAnnouncementIdentity()
-	view := map[string]any{"T": translationsForRequest(r), "AccountCSRF": accountCSRF(r), "CentralAnnouncements": centralErr == nil, "ServerVersion": CompileVersion}
+	view := map[string]any{"T": translationsForRequest(r), "AccountCSRF": accountCSRF(r), "CentralAnnouncements": centralErr == nil, "ServerVersion": CompileVersion, "Embedded": true}
 	a.render(w, r, "server_update.html", view)
 }
 
@@ -55566,6 +55743,84 @@ func (a *App) claimTrialDomain(ctx context.Context, domain, token string) error 
 		_, err := domainregistration.Claim(ctx, db, domain, token, "", "trial")
 		return err
 	})
+}
+
+// The control database owner serializes admissions across preview and creation workers.
+func (a *App) reservePublicTrialIPAdmission(ctx context.Context, clientIP, kind, token string, limit int) (bool, int, error) {
+	if clientIP == "" || token == "" || (kind != "preview" && kind != "create") {
+		return false, 60, errors.New("invalid Test Drive admission")
+	}
+	allowed := false
+	retryAfter := 60
+	now := time.Now().UTC().Unix()
+	err := a.withServerControlDatabaseWrite(ctx, "public-trial-ip-admit", func(database *sql.DB) error {
+		if _, err := database.ExecContext(ctx, `DELETE FROM public_trial_ip_admissions WHERE created_at<?`, now-int64((24*time.Hour).Seconds())); err != nil {
+			return err
+		}
+		var count int
+		var oldest int64
+		if err := database.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(MIN(created_at),0) FROM public_trial_ip_admissions WHERE client_ip=? AND kind=?`, clientIP, kind).Scan(&count, &oldest); err != nil {
+			return err
+		}
+		if count >= limit {
+			retryAfter = max(1, int(oldest+int64((24*time.Hour).Seconds())-now))
+			return nil
+		}
+		var existing int
+		if err := database.QueryRowContext(ctx, `SELECT COUNT(*) FROM public_trial_ip_admissions WHERE kind=? AND token=?`, kind, token).Scan(&existing); err != nil {
+			return err
+		}
+		if existing != 0 {
+			return nil
+		}
+		_, err := database.ExecContext(ctx, `INSERT INTO public_trial_ip_admissions(client_ip,kind,token,created_at) VALUES(?,?,?,?)`, clientIP, kind, token, now)
+		if err != nil {
+			return err
+		}
+		allowed = true
+		return nil
+	})
+	return allowed, retryAfter, err
+}
+
+func (a *App) releasePublicTrialIPAdmission(ctx context.Context, kind, token string) {
+	_ = a.withServerControlDatabaseWrite(ctx, "public-trial-ip-release", func(database *sql.DB) error {
+		_, err := database.ExecContext(ctx, `DELETE FROM public_trial_ip_admissions WHERE kind=? AND token=?`, kind, token)
+		return err
+	})
+}
+
+func (a *App) recordPublicTrialIPIdentity(ctx context.Context, clientIP, domain, email string) {
+	if a.controlDatabase == nil || clientIP == "" || domain == "" || email == "" {
+		return
+	}
+	_ = a.withServerControlDatabaseWrite(ctx, "public-trial-ip-identity", func(database *sql.DB) error {
+		verifiedAt := time.Now().UTC().Format(time.RFC3339)
+		if err := savePublicTrialIPIdentity(ctx, database, clientIP, domain, email, verifiedAt); err != nil {
+			return err
+		}
+		var originalIP string
+		if err := database.QueryRowContext(ctx, `SELECT client_ip FROM public_trial_sites WHERE domain=? ORDER BY id DESC LIMIT 1`, domain).Scan(&originalIP); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if originalIP == "" || originalIP == clientIP {
+			return nil
+		}
+		return savePublicTrialIPIdentity(ctx, database, originalIP, domain, email, verifiedAt)
+	})
+}
+
+func savePublicTrialIPIdentity(ctx context.Context, database *sql.DB, clientIP, domain, email, verifiedAt string) error {
+	result, err := database.ExecContext(ctx, `UPDATE public_trial_ip_identities SET verified_at=? WHERE client_ip=? AND domain=? AND email=?`, verifiedAt, clientIP, domain, email)
+	if err != nil {
+		return err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil || updated != 0 {
+		return err
+	}
+	_, err = database.ExecContext(ctx, `INSERT INTO public_trial_ip_identities(client_ip,domain,email,verified_at) VALUES(?,?,?,?)`, clientIP, domain, email, verifiedAt)
+	return err
 }
 
 func (a *App) releaseTrialDomain(ctx context.Context, domain, token string) {
@@ -57751,7 +58006,7 @@ func (a *App) publicMenuSocket(w http.ResponseWriter, r *http.Request) {
 		if websocket.JSON.Receive(connection, &command) != nil {
 			return
 		}
-		email, admin := a.currentAdminEmailForDomain(r, domain)
+		_, admin := a.currentAdminEmailForDomain(r, domain)
 		if !admin || command.Admin {
 			websocket.JSON.Send(connection, map[string]any{"admin": admin})
 			return
@@ -57760,7 +58015,7 @@ func (a *App) publicMenuSocket(w http.ResponseWriter, r *http.Request) {
 		_, protected := a.pagePasswordRuleFromPrefixFile(domain, pagePath)
 		usage := a.storedDomainStorageUsage(r.Context(), domain)
 		revisionID, revisionCount := a.revisionMenuSummary(r.Context(), domain, pagePath)
-		menu := buildContextMenuScript(true, a.isServerManagerEmail(r.Context(), domain, email), a.isDomainFrozen(r.Context(), domain), protected, !a.isDemoSiteDomain(r.Context(), domain), pagePath, domain, revisionID, revisionCount, formatFileSize(usage.totalBytes())+" / "+formatFileSize(usage.LimitBytes), accountCSRF(r), translationsForRequest(r))
+		menu := buildContextMenuScript(true, a.updateAuthorized(r), a.isDomainFrozen(r.Context(), domain), protected, !a.isDemoSiteDomain(r.Context(), domain), pagePath, domain, revisionID, revisionCount, formatFileSize(usage.totalBytes())+" / "+formatFileSize(usage.LimitBytes), accountCSRF(r), translationsForRequest(r))
 		connection.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		websocket.JSON.Send(connection, map[string]any{"admin": true, "menu": menu})
 	}).ServeHTTP(w, r)
