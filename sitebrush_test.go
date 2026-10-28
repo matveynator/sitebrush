@@ -26546,8 +26546,15 @@ func TestHiddenAISelectorsMatchPublicMiddlewareResponses(t *testing.T) {
 	application := newPartitionedTestApplication(t)
 	domain := "middleware.example"
 	boundary := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), domain))
-	if _, err := application.db.ExecContext(boundary, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, "owner@example.org", "test"); err != nil {
-		t.Fatal(err)
+	for _, statement := range []string{
+		`INSERT INTO users(domain,email,password,is_admin) VALUES('middleware.example','owner@example.org','test',1)`,
+		`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES('middleware.example','owner@example.org',1)`,
+		`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES('middleware.example','owner@example.org','192.0.2.1',1)`,
+		`INSERT INTO admin_stealth_modes(domain,email,enabled_at) VALUES('middleware.example','owner@example.org',1)`,
+	} {
+		if _, err := application.db.ExecContext(boundary, statement); err != nil {
+			t.Fatal(err)
+		}
 	}
 	application.securityAnalytics = make(chan siteAnalyticsEvent, 64)
 	handler := application.aiIngressMiddleware(application.analyticsMiddleware(application.authAbuseMiddleware(http.HandlerFunc(application.route))))
