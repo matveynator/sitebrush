@@ -15,7 +15,7 @@
     <h1>{{index .T "test_drive_title"}}</h1>
     <label for="test-drive-name">{{index .T "test_drive_name_label"}}</label>
     <div class="test-drive-domain-input">
-      <input id="test-drive-name" name="subdomain" type="text" required maxlength="24" pattern="[a-z0-9](?:[a-z0-9-]{0,22}[a-z0-9])?" autocomplete="off" autocapitalize="none" spellcheck="false" data-test-drive-name>
+      <input id="test-drive-name" name="subdomain" type="text" value="{{.ChosenName}}" required maxlength="24" pattern="[a-z0-9](?:[a-z0-9-]{0,22}[a-z0-9])?" autocomplete="off" autocapitalize="none" spellcheck="false" data-test-drive-name>
       <span dir="ltr">.{{.ParentDomain}}</span>
     </div>
     <output class="test-drive-address" data-test-drive-address></output>

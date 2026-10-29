@@ -43,11 +43,18 @@
     formModel.checkController = new AbortController();
     fetch(checkURL.toString(), {headers: {Accept: 'application/json'}, signal: formModel.checkController.signal})
       .then(function readAvailability(response) {
+        if (response.headers.get('X-SiteBrush-Captcha-Required') === '1' && !captchaImageElement) {
+          const retryURL = new URL('/?test_drive', window.location.href);
+          retryURL.searchParams.set('subdomain', formModel.name);
+          window.location.replace(retryURL.toString());
+          return null;
+        }
         if (response.status === 429) throw new Error('limited');
         if (!response.ok) throw new Error('failed');
         return response.json();
       })
       .then(function showAvailability(availability) {
+        if (!availability) return;
         if (sequence !== formModel.checkSequence || name !== formModel.name) return;
         const expectedDomain = domainInput.address(name, parentDomain);
         formModel.domainState = availability.domain === expectedDomain ? (availability.available ? 'available' : 'unavailable') : 'failed';
@@ -85,7 +92,8 @@
   formElement.addEventListener('submit', function validateDomainBeforeStart(event) {
     if (submitElement.disabled) event.preventDefault();
   });
-  scheduleDomainCheck();
+  if (formModel.name && captchaImageElement) render();
+  else scheduleDomainCheck();
   if (!captchaImageElement) return;
   fetch('/?trial_site_captcha', {headers: {Accept: 'application/json'}})
     .then(function readChallenge(response) {

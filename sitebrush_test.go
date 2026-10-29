@@ -13575,13 +13575,48 @@ func TestDriveNameCheckRequiresCaptchaAfterSoftLimit(t *testing.T) {
 		request.AddCookie(entryCookie)
 		response := httptest.NewRecorder()
 		admitted := application.admitTestDriveNameCheck(response, request)
-		if attempt == 11 {
+		if attempt == 10 {
+			if !admitted || response.Header().Get("X-SiteBrush-Captcha-Required") != "1" {
+				t.Fatalf("successful check did not signal revoked CAPTCHA trust: admitted=%t headers=%v", admitted, response.Header())
+			}
+		} else if attempt == 11 {
 			if admitted || response.Code != http.StatusTooManyRequests || response.Header().Get("X-SiteBrush-Captcha-Required") != "1" {
 				t.Fatalf("soft limit did not require CAPTCHA: admitted=%t status=%d headers=%v", admitted, response.Code, response.Header())
 			}
 		} else if !admitted {
 			t.Fatalf("request %d rejected before soft limit: %d %s", attempt, response.Code, response.Body.String())
 		}
+	}
+	availabilityRequests := make(chan publicTrialAvailabilityRequest)
+	stopAvailability := make(chan struct{})
+	application.publicTrialAvailability = availabilityRequests
+	t.Cleanup(func() { close(stopAvailability) })
+	go func() {
+		for {
+			select {
+			case request := <-availabilityRequests:
+				request.reply <- publicTrialAvailability{Enabled: true}
+			case <-stopAvailability:
+				return
+			}
+		}
+	}()
+	reloadRequest := httptest.NewRequest(http.MethodGet, "https://sitebrush.example/?test_drive&subdomain=hello", nil)
+	reloadRequest.AddCookie(entryCookie)
+	reloadResponse := httptest.NewRecorder()
+	application.route(reloadResponse, reloadRequest)
+	if reloadResponse.Code != http.StatusOK || !strings.Contains(reloadResponse.Body.String(), `value="hello"`) || !strings.Contains(reloadResponse.Body.String(), `data-test-drive-captcha`) {
+		t.Fatalf("revoked browser form did not restore CAPTCHA: %d %s", reloadResponse.Code, reloadResponse.Body.String())
+	}
+	startForm := url.Values{"subdomain": {"hello"}}
+	startRequest := httptest.NewRequest(http.MethodPost, "https://sitebrush.example/?test_drive_start", strings.NewReader(startForm.Encode()))
+	startRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	startRequest.Header.Set("Origin", "https://sitebrush.example")
+	startRequest.AddCookie(entryCookie)
+	startResponse := httptest.NewRecorder()
+	application.route(startResponse, startRequest)
+	if startResponse.Code != http.StatusForbidden || !strings.HasPrefix(startResponse.Header().Get("Content-Type"), "text/html") || !strings.Contains(startResponse.Body.String(), `value="hello"`) || !strings.Contains(startResponse.Body.String(), `data-test-drive-captcha`) || !strings.Contains(startResponse.Body.String(), translationsForRequest(startRequest)["test_drive_captcha_required"]) {
+		t.Fatalf("revoked browser did not receive retry form: %d %s", startResponse.Code, startResponse.Body.String())
 	}
 	challenge, err := captcha.New()
 	if err != nil {
@@ -13598,20 +13633,6 @@ func TestDriveNameCheckRequiresCaptchaAfterSoftLimit(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	availabilityRequests := make(chan publicTrialAvailabilityRequest)
-	stopAvailability := make(chan struct{})
-	application.publicTrialAvailability = availabilityRequests
-	t.Cleanup(func() { close(stopAvailability) })
-	go func() {
-		for {
-			select {
-			case request := <-availabilityRequests:
-				request.reply <- publicTrialAvailability{Enabled: true}
-			case <-stopAvailability:
-				return
-			}
-		}
-	}()
 	confirmResponse := httptest.NewRecorder()
 	application.route(confirmResponse, confirmRequest)
 	if confirmResponse.Code != http.StatusOK {
