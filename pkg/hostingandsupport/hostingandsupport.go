@@ -55,6 +55,13 @@ type PublicTrialSite struct {
 	DeleteAfter   string
 	DeletedAt     string
 	LastError     string
+	LastActiveAt  string
+	LastIP        string
+	UserAgent     string
+	MailCount     int
+	HumanVerified bool
+	PendingEmail  string
+	IPHistory     string
 }
 
 type Database interface {
@@ -828,6 +835,33 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 	if err := migrations.Run(database, "billing-data-v27", dataSteps); err != nil {
 		return err
 	}
+	if err := migrations.Run(database, "private-test-drive-v1", []migrations.Step{
+		migrations.SQL("session-hash", `ALTER TABLE public_trial_sites ADD COLUMN session_hash TEXT NOT NULL DEFAULT ''`),
+		migrations.SQL("handoff-hash", `ALTER TABLE public_trial_sites ADD COLUMN handoff_hash TEXT NOT NULL DEFAULT ''`),
+		migrations.SQL("temporary-admin", `ALTER TABLE public_trial_sites ADD COLUMN temporary_admin TEXT NOT NULL DEFAULT ''`),
+		migrations.SQL("last-active", `ALTER TABLE public_trial_sites ADD COLUMN last_active_at TEXT NOT NULL DEFAULT ''`),
+		migrations.SQL("last-ip", `ALTER TABLE public_trial_sites ADD COLUMN last_ip TEXT NOT NULL DEFAULT ''`),
+		migrations.SQL("user-agent", `ALTER TABLE public_trial_sites ADD COLUMN user_agent TEXT NOT NULL DEFAULT ''`),
+		migrations.SQL("pending-email", `ALTER TABLE public_trial_sites ADD COLUMN pending_email TEXT NOT NULL DEFAULT ''`),
+		migrations.SQL("email-history", `ALTER TABLE public_trial_sites ADD COLUMN email_history TEXT NOT NULL DEFAULT ''`),
+		migrations.SQL("code-hash", `ALTER TABLE public_trial_sites ADD COLUMN code_hash TEXT NOT NULL DEFAULT ''`),
+		migrations.SQL("code-expires", `ALTER TABLE public_trial_sites ADD COLUMN code_expires_at TEXT NOT NULL DEFAULT ''`),
+		migrations.SQL("code-attempts", `ALTER TABLE public_trial_sites ADD COLUMN code_attempts INTEGER NOT NULL DEFAULT 0`),
+		migrations.SQL("mail-count", `ALTER TABLE public_trial_sites ADD COLUMN mail_count INTEGER NOT NULL DEFAULT 0`),
+		migrations.SQL("last-mail", `ALTER TABLE public_trial_sites ADD COLUMN last_mail_at TEXT NOT NULL DEFAULT ''`),
+		migrations.SQL("human-verified", `ALTER TABLE public_trial_sites ADD COLUMN human_verified INTEGER NOT NULL DEFAULT 0`),
+		migrations.SQL("ip-history", `ALTER TABLE public_trial_sites ADD COLUMN ip_history TEXT NOT NULL DEFAULT ''`),
+		migrations.SQL("mail-events", `CREATE TABLE IF NOT EXISTS test_drive_mail_events(trial_id INTEGER NOT NULL,recipient TEXT NOT NULL,client_ip TEXT NOT NULL,session_hash TEXT NOT NULL,sent_at INTEGER NOT NULL)`),
+		migrations.SQL("check-events", `CREATE TABLE IF NOT EXISTS test_drive_check_events(client_ip TEXT NOT NULL,session_hash TEXT NOT NULL,checked_at INTEGER NOT NULL)`),
+		migrations.SQL("entry-sessions", `CREATE TABLE IF NOT EXISTS test_drive_entry_sessions(session_hash TEXT PRIMARY KEY,created_at INTEGER NOT NULL,last_used_at INTEGER NOT NULL,human_verified INTEGER NOT NULL DEFAULT 0)`),
+		migrations.SQL("entry-hash", `ALTER TABLE public_trial_sites ADD COLUMN entry_hash TEXT NOT NULL DEFAULT ''`),
+		migrations.SQL("suspicion-events", `CREATE TABLE IF NOT EXISTS test_drive_suspicion_events(session_hash TEXT NOT NULL,trial_id INTEGER NOT NULL,kind TEXT NOT NULL,occurred_at INTEGER NOT NULL)`),
+		migrations.SQL("trial-domain-index", `CREATE INDEX IF NOT EXISTS public_trial_sites_domain_status_idx ON public_trial_sites(domain,status)`),
+		migrations.SQL("mail-event-time-index", `CREATE INDEX IF NOT EXISTS test_drive_mail_events_time_idx ON test_drive_mail_events(sent_at)`),
+		migrations.SQL("check-event-time-index", `CREATE INDEX IF NOT EXISTS test_drive_check_events_time_idx ON test_drive_check_events(checked_at)`),
+	}); err != nil {
+		return err
+	}
 	if err := setSchemaMigrationVersion(ctx, database, "billing", currentBillingSchemaVersion); err != nil {
 		return fmt.Errorf("write billing schema version: %w", err)
 	}
@@ -1448,23 +1482,29 @@ func (store Store) CreatePublicTrialSite(ctx context.Context, domain, sourceURL 
 }
 
 func (store Store) PublicTrialSites(ctx context.Context) []PublicTrialSite {
-	rows, err := store.DB.QueryContext(ctx, `SELECT id,domain,source_url,COALESCE(client_ip,''),COALESCE(country,''),COALESCE(city,''),COALESCE(verified_email,''),status,created_at,delete_after,deleted_at,last_error FROM public_trial_sites ORDER BY created_at DESC,id DESC`)
+	sites, _ := store.PublicTrialSitesWithError(ctx)
+	return sites
+}
+
+func (store Store) PublicTrialSitesWithError(ctx context.Context) ([]PublicTrialSite, error) {
+	rows, err := store.DB.QueryContext(ctx, `SELECT id,domain,source_url,COALESCE(client_ip,''),COALESCE(country,''),COALESCE(city,''),COALESCE(verified_email,''),status,created_at,delete_after,COALESCE(deleted_at,''),COALESCE(last_error,''),COALESCE(last_active_at,''),COALESCE(last_ip,''),COALESCE(user_agent,''),COALESCE(mail_count,0),COALESCE(human_verified,0),COALESCE(pending_email,''),COALESCE(ip_history,'') FROM public_trial_sites ORDER BY created_at DESC,id DESC`)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer rows.Close()
 	sites := make([]PublicTrialSite, 0, 8)
 	for rows.Next() {
 		var site PublicTrialSite
-		if scanErr := rows.Scan(&site.ID, &site.Domain, &site.SourceURL, &site.ClientIP, &site.Country, &site.City, &site.VerifiedEmail, &site.Status, &site.CreatedAt, &site.DeleteAfter, &site.DeletedAt, &site.LastError); scanErr == nil {
-			sites = append(sites, site)
+		if scanErr := rows.Scan(&site.ID, &site.Domain, &site.SourceURL, &site.ClientIP, &site.Country, &site.City, &site.VerifiedEmail, &site.Status, &site.CreatedAt, &site.DeleteAfter, &site.DeletedAt, &site.LastError, &site.LastActiveAt, &site.LastIP, &site.UserAgent, &site.MailCount, &site.HumanVerified, &site.PendingEmail, &site.IPHistory); scanErr != nil {
+			return nil, scanErr
 		}
+		sites = append(sites, site)
 	}
-	return sites
+	return sites, rows.Err()
 }
 
 func (store Store) BackfillPublicTrialSites(ctx context.Context) error {
-	rows, err := store.DB.QueryContext(ctx, `SELECT assignments.domain,assignments.updated_at FROM site_service_assignments assignments WHERE assignments.service_status IN ('trial','free') AND NOT EXISTS (SELECT 1 FROM public_trial_sites trials WHERE trials.domain=assignments.domain AND trials.status='active')`)
+	rows, err := store.DB.QueryContext(ctx, `SELECT assignments.domain,assignments.updated_at FROM site_service_assignments assignments WHERE assignments.service_status IN ('trial','free') AND NOT EXISTS (SELECT 1 FROM public_trial_sites trials WHERE trials.domain=assignments.domain AND trials.status IN ('active','private','email_pending','email_verified','activated'))`)
 	if err != nil {
 		return err
 	}
@@ -1506,7 +1546,7 @@ func (store Store) ArchivePublicTrialSite(ctx context.Context, trialSiteID int64
 	if deletedAt.IsZero() {
 		deletedAt = time.Now()
 	}
-	_, err := store.DB.ExecContext(ctx, `UPDATE public_trial_sites SET status='deleted',deleted_at=?,last_error='' WHERE id=? AND status='active'`,
+	_, err := store.DB.ExecContext(ctx, `UPDATE public_trial_sites SET status=CASE WHEN status='active' THEN 'deleted' ELSE 'expired' END,deleted_at=?,last_error='' WHERE id=? AND status IN ('active','private','email_pending','expiring')`,
 		deletedAt.UTC().Format(time.RFC3339), trialSiteID)
 	return err
 }

@@ -80,11 +80,11 @@ The site owner can still edit the website directly in the browser.
 
 ## Test Drive and subdomains
 
-The public Test Drive offers two actions: import an existing website or create a new site on a third-level subdomain of the server owner's domain. A new site is created only after its first administrator passes CAPTCHA and confirms an email address. The confirmation link signs the administrator in on the chosen subdomain.
+Test Drive and ordinary site creation use separate forms. In Test Drive, the visitor chooses only the first label of a subdomain under the server owner's domain. The new site opens in a private editor session after CAPTCHA. Until the visitor confirms an email address and chooses **Save and activate my site**, other sessions receive a neutral page at that hostname. Private Test Drives expire after 30 minutes without activity by default.
 
-An import suggests a subdomain from the source URL. CAPTCHA is required before the anonymous crawl starts. The imported copy opens at that address with a SiteBrush registration dialog covering its HTML pages until an administrator confirms an email address. Anonymous copies expire after 24 hours; only a limited number can be active at once.
+The editor offers a small save reminder after 60 seconds and a dismissible confirmation dialog after three minutes. Publishing and other external actions require activation. Confirmation uses a six-digit code sent in a neutral email without any link or user-created content. A Test Drive accepts at most three distinct email addresses. Resending a code has a 60-second default cooldown.
 
-The importer pauses at the free storage limit of 1 GiB. It shows the estimated total size and monthly price, then resumes from its saved pages and files after the administrator confirms the email and accepts paid storage. The final charge uses actual storage above the free limit, with the first invoice after one month. The default maximum Test Drive size is 10 GiB and can be changed with the hosting setting `public_trial_max_site_bytes`. The storage price comes from the local server cost policy or the hosting default.
+The control database stores Test Drive status, timestamps, verification counts, client IPs, and user agent for the administrator panel and rate limits. The hosting settings `test_drive_idle_minutes`, `test_drive_resend_seconds`, `test_drive_active_per_session`, `test_drive_active_per_ip`, `test_drive_daily_per_session`, `test_drive_daily_per_ip`, `test_drive_name_checks_soft_minute`, `test_drive_name_checks_hard_minute`, `test_drive_mail_per_email_hour`, `test_drive_mail_per_ip_hour`, `test_drive_mail_per_session_hour`, and `test_drive_mail_per_trial` override their respective defaults. CAPTCHA trust belongs to the current browser session and is reset after suspicious activity or rate-limit violations.
 
 ---
 

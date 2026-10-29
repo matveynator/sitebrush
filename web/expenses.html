@@ -168,6 +168,23 @@
           <div id="server-update" class="mb-4">
             <h2>{{index $.T "update_title"}}</h2>
             <iframe title="{{index $.T "update_title"}}" src="/?server_update&embedded" loading="lazy" style="width:100%;min-height:1000px;border:0" data-server-update-frame></iframe>
+            <p role="alert" class="alert alert-danger" data-server-update-frame-error hidden>{{index $.T "update_unavailable"}}</p>
+            <script>
+              (function checkEmbeddedUpdate() {
+                const frameElement = document.querySelector('[data-server-update-frame]');
+                const errorElement = document.querySelector('[data-server-update-frame-error]');
+                if (!frameElement || !errorElement) return;
+                const frameModel = {ready: false};
+                function renderFrameStatus() { errorElement.hidden = frameModel.ready; }
+                frameElement.addEventListener('load', function showEmbeddedUpdateStatus() {
+                  try {
+                    frameModel.ready = Boolean(frameElement.contentDocument && frameElement.contentDocument.querySelector('[data-server-update]'));
+                  } catch (frameError) { frameModel.ready = false; }
+                  renderFrameStatus();
+                });
+                frameElement.addEventListener('error', function showEmbeddedUpdateError() { frameModel.ready = false; renderFrameStatus(); });
+              })();
+            </script>
           </div>
           <div>
             <h2>{{index $.T "billing_registration_title"}}</h2>
@@ -274,7 +291,7 @@
       <h2>{{index .T "billing_temporary_sites"}}</h2>
       <p class="text-muted">{{index .T "billing_temporary_sites_description"}}</p>
       <h3 class="h6">{{index .T "billing_temporary_sites_active"}}</h3>
-      <div class="billing-plan-list mb-4">{{range .ActivePublicTrialSites}}<div class="billing-plan-row"><span><strong><a href="https://{{.Domain}}/" target="_blank" rel="noopener noreferrer">{{.Domain}}</a></strong><br><small>{{index $.T "billing_temporary_sites_source"}}: {{if .SourceURL}}<a href="{{.SourceURL}}" target="_blank" rel="noopener noreferrer">{{.SourceURL}}</a>{{else}}{{index $.T "billing_temporary_sites_source_unknown"}}{{end}} · {{index $.T "billing_temporary_sites_created"}}: {{.CreatedAt}}{{if .ClientIP}} · {{index $.T "billing_temporary_sites_ip"}}: {{.ClientIP}}{{if .City}} · {{.City}}{{end}}{{if .Country}} · {{.Country}}{{end}}{{end}}{{if .VerifiedEmail}} · {{index $.T "billing_temporary_sites_verified_email"}}: {{.VerifiedEmail}}{{end}}{{if .PossibleEmail}} · {{index $.T "billing_temporary_sites_possible_email"}}: {{.PossibleEmail}}{{end}} · {{index $.T "billing_temporary_sites_delete_after"}}: {{.DeleteAfter}}{{if .LastError}}<br><span class="text-danger">{{.LastError}}</span>{{end}}</small></span></div>{{else}}<div class="empty">{{index .T "billing_temporary_sites_active_empty"}}</div>{{end}}</div>
+      <div class="billing-plan-list mb-4">{{range .ActivePublicTrialSites}}<div class="billing-plan-row"><span><strong><a href="https://{{.Domain}}/" target="_blank" rel="noopener noreferrer">{{.Domain}}</a></strong><br><small>{{index $.T "billing_temporary_sites_source"}}: {{if .SourceURL}}<a href="{{.SourceURL}}" target="_blank" rel="noopener noreferrer">{{.SourceURL}}</a>{{else}}{{index $.T "billing_temporary_sites_source_unknown"}}{{end}} · {{index $.T "billing_temporary_sites_created"}}: {{.CreatedAt}}{{if .ClientIP}} · {{index $.T "billing_temporary_sites_ip"}}: {{.ClientIP}}{{if .City}} · {{.City}}{{end}}{{if .Country}} · {{.Country}}{{end}}{{end}}{{if .VerifiedEmail}} · {{index $.T "billing_temporary_sites_verified_email"}}: {{.VerifiedEmail}}{{end}}{{if .PossibleEmail}} · {{index $.T "billing_temporary_sites_possible_email"}}: {{.PossibleEmail}}{{end}} · {{index $.T "billing_temporary_sites_delete_after"}}: {{.DeleteAfter}}<br>{{index $.T "test_drive_admin_id"}}: {{.ID}} · {{index $.T "test_drive_admin_status"}}: {{.Status}} · {{index $.T "test_drive_admin_last_activity"}}: {{.LastActiveAt}} · {{index $.T "test_drive_admin_last_ip"}}: {{.LastIP}} · {{index $.T "test_drive_admin_mail_count"}}: {{.MailCount}} · {{index $.T "test_drive_admin_captcha"}}: {{if .HumanVerified}}{{index $.T "test_drive_admin_yes"}}{{else}}{{index $.T "test_drive_admin_no"}}{{end}}{{if .PendingEmail}} · {{index $.T "test_drive_admin_pending_email"}}: {{.PendingEmail}}{{end}}<br>{{index $.T "test_drive_admin_user_agent"}}: {{.UserAgent}}{{if .IPHistory}}<br>{{index $.T "test_drive_admin_ip_history"}}: {{.IPHistory}}{{end}}{{if .LastError}}<br><span class="text-danger">{{.LastError}}</span>{{end}}</small></span></div>{{else}}<div class="empty">{{index .T "billing_temporary_sites_active_empty"}}</div>{{end}}</div>
       <h3 class="h6">{{index .T "billing_temporary_sites_archive"}}</h3>
       <div class="billing-plan-list">{{range .ArchivedPublicTrialSites}}<div class="billing-plan-row"><span><strong>{{.Domain}}</strong><br><small>{{index $.T "billing_temporary_sites_source"}}: {{if .SourceURL}}<a href="{{.SourceURL}}" target="_blank" rel="noopener noreferrer">{{.SourceURL}}</a>{{else}}{{index $.T "billing_temporary_sites_source_unknown"}}{{end}} · {{index $.T "billing_temporary_sites_created"}}: {{.CreatedAt}}{{if .ClientIP}} · {{index $.T "billing_temporary_sites_ip"}}: {{.ClientIP}}{{if .City}} · {{.City}}{{end}}{{if .Country}} · {{.Country}}{{end}}{{end}}{{if .VerifiedEmail}} · {{index $.T "billing_temporary_sites_verified_email"}}: {{.VerifiedEmail}}{{end}}{{if .PossibleEmail}} · {{index $.T "billing_temporary_sites_possible_email"}}: {{.PossibleEmail}}{{end}} · {{index $.T "billing_temporary_sites_deleted"}}: {{.DeletedAt}}</small></span></div>{{else}}<div class="empty">{{index .T "billing_temporary_sites_archive_empty"}}</div>{{end}}</div>
     </section>
@@ -1151,7 +1168,7 @@
     <div class="card-body">
       <div class="billing-section-header"><div><h2>{{index .T "billing_temporary_sites"}}</h2><p class="text-muted">{{index .T "billing_temporary_sites_description"}}</p></div></div>
       <h3 class="h6">{{index .T "billing_temporary_sites_active"}}</h3>
-      <div class="d-grid gap-2 mb-4">{{range .ActivePublicTrialSites}}<article class="border rounded p-3"><strong><a href="https://{{.Domain}}/" target="_blank" rel="noopener noreferrer">{{.Domain}}</a></strong><div class="small text-muted">{{index $.T "billing_temporary_sites_source"}}: {{if .SourceURL}}<a href="{{.SourceURL}}" target="_blank" rel="noopener noreferrer">{{.SourceURL}}</a>{{else}}{{index $.T "billing_temporary_sites_source_unknown"}}{{end}} · {{index $.T "billing_temporary_sites_created"}}: {{.CreatedAt}}{{if .ClientIP}} · {{index $.T "billing_temporary_sites_ip"}}: {{.ClientIP}}{{if .City}} · {{.City}}{{end}}{{if .Country}} · {{.Country}}{{end}}{{end}}{{if .VerifiedEmail}} · {{index $.T "billing_temporary_sites_verified_email"}}: {{.VerifiedEmail}}{{end}}{{if .PossibleEmail}} · {{index $.T "billing_temporary_sites_possible_email"}}: {{.PossibleEmail}}{{end}} · {{index $.T "billing_temporary_sites_delete_after"}}: {{.DeleteAfter}}</div>{{if .LastError}}<div class="small text-danger">{{.LastError}}</div>{{end}}</article>{{else}}<div class="empty">{{index .T "billing_temporary_sites_active_empty"}}</div>{{end}}</div>
+      <div class="d-grid gap-2 mb-4">{{range .ActivePublicTrialSites}}<article class="border rounded p-3"><strong><a href="https://{{.Domain}}/" target="_blank" rel="noopener noreferrer">{{.Domain}}</a></strong><div class="small text-muted">{{index $.T "billing_temporary_sites_source"}}: {{if .SourceURL}}<a href="{{.SourceURL}}" target="_blank" rel="noopener noreferrer">{{.SourceURL}}</a>{{else}}{{index $.T "billing_temporary_sites_source_unknown"}}{{end}} · {{index $.T "billing_temporary_sites_created"}}: {{.CreatedAt}}{{if .ClientIP}} · {{index $.T "billing_temporary_sites_ip"}}: {{.ClientIP}}{{if .City}} · {{.City}}{{end}}{{if .Country}} · {{.Country}}{{end}}{{end}}{{if .VerifiedEmail}} · {{index $.T "billing_temporary_sites_verified_email"}}: {{.VerifiedEmail}}{{end}}{{if .PossibleEmail}} · {{index $.T "billing_temporary_sites_possible_email"}}: {{.PossibleEmail}}{{end}} · {{index $.T "billing_temporary_sites_delete_after"}}: {{.DeleteAfter}}<br>{{index $.T "test_drive_admin_id"}}: {{.ID}} · {{index $.T "test_drive_admin_status"}}: {{.Status}} · {{index $.T "test_drive_admin_last_activity"}}: {{.LastActiveAt}} · {{index $.T "test_drive_admin_last_ip"}}: {{.LastIP}} · {{index $.T "test_drive_admin_mail_count"}}: {{.MailCount}} · {{index $.T "test_drive_admin_captcha"}}: {{if .HumanVerified}}{{index $.T "test_drive_admin_yes"}}{{else}}{{index $.T "test_drive_admin_no"}}{{end}}{{if .PendingEmail}} · {{index $.T "test_drive_admin_pending_email"}}: {{.PendingEmail}}{{end}}<br>{{index $.T "test_drive_admin_user_agent"}}: {{.UserAgent}}{{if .IPHistory}}<br>{{index $.T "test_drive_admin_ip_history"}}: {{.IPHistory}}{{end}}</div>{{if .LastError}}<div class="small text-danger">{{.LastError}}</div>{{end}}</article>{{else}}<div class="empty">{{index .T "billing_temporary_sites_active_empty"}}</div>{{end}}</div>
       <h3 class="h6">{{index .T "billing_temporary_sites_archive"}}</h3>
       <div class="d-grid gap-2">{{range .ArchivedPublicTrialSites}}<article class="border rounded p-3"><strong>{{.Domain}}</strong><div class="small text-muted">{{index $.T "billing_temporary_sites_source"}}: {{if .SourceURL}}<a href="{{.SourceURL}}" target="_blank" rel="noopener noreferrer">{{.SourceURL}}</a>{{else}}{{index $.T "billing_temporary_sites_source_unknown"}}{{end}} · {{index $.T "billing_temporary_sites_created"}}: {{.CreatedAt}}{{if .ClientIP}} · {{index $.T "billing_temporary_sites_ip"}}: {{.ClientIP}}{{if .City}} · {{.City}}{{end}}{{if .Country}} · {{.Country}}{{end}}{{end}}{{if .VerifiedEmail}} · {{index $.T "billing_temporary_sites_verified_email"}}: {{.VerifiedEmail}}{{end}}{{if .PossibleEmail}} · {{index $.T "billing_temporary_sites_possible_email"}}: {{.PossibleEmail}}{{end}} · {{index $.T "billing_temporary_sites_deleted"}}: {{.DeletedAt}}</div></article>{{else}}<div class="empty">{{index .T "billing_temporary_sites_archive_empty"}}</div>{{end}}</div>
     </div>
@@ -2551,6 +2568,8 @@
 (function initializePublicTrialEmbedControls() {
   const embedTextAreaElement = document.getElementById('publicTrialEmbedHTML');
   const copyButtonElement = document.querySelector('[data-public-trial-copy-html]');
+  const createSiteEmbedElement = document.getElementById('createSiteEmbedHTML');
+  const createSiteCopyButtonElement = document.querySelector('[data-create-site-copy-html]');
   const previewButtonElement = document.querySelector('[data-public-trial-preview]');
   const previewFrameElement = document.getElementById('publicTrialPreviewFrame');
 
@@ -2558,17 +2577,20 @@
     return;
   }
 
-  if (copyButtonElement) {
-    copyButtonElement.addEventListener('click', function copyPublicTrialEmbedHTML() {
+  function connectCopyButton(buttonElement, textAreaElement) {
+    if (!buttonElement || !textAreaElement) return;
+    buttonElement.addEventListener('click', function copyEmbedHTML() {
       if (navigator.clipboard) {
-        navigator.clipboard.writeText(embedTextAreaElement.value);
+        navigator.clipboard.writeText(textAreaElement.value);
         return;
       }
-      embedTextAreaElement.focus();
-      embedTextAreaElement.select();
+      textAreaElement.focus();
+      textAreaElement.select();
       document.execCommand('copy');
     });
   }
+  connectCopyButton(copyButtonElement, embedTextAreaElement);
+  connectCopyButton(createSiteCopyButtonElement, createSiteEmbedElement);
 
   function escapePublicTrialPreviewText(rawText) {
     return String(rawText)
@@ -3217,11 +3239,17 @@
 {{if .PublicTrialAvailable}}
 <p class="text-muted">{{index .T "public_trial_embed_hint"}}</p>
 <div data-public-trial-embed-section>
+  <h3>{{index .T "test_drive_title"}}</h3>
   <div class="d-flex flex-wrap gap-2 mb-3">
     <button type="button" class="btn btn-outline-primary" data-public-trial-copy-html><img src="/p/static/copy.png" alt="">{{index .T "public_trial_copy_html"}}</button>
     <button type="button" class="btn btn-outline-primary" data-bs-toggle="modal" data-bs-target="#publicTrialPreviewModal" data-public-trial-preview><img src="/p/static/publish.png" alt="">{{index .T "public_trial_preview"}}</button>
   </div>
-  <textarea id="publicTrialEmbedHTML" class="form-control" rows="10" readonly>{{.PublicTrialEmbedHTML}}</textarea>
+  <textarea id="publicTrialEmbedHTML" class="form-control" rows="5" readonly>{{.TestDriveEmbedHTML}}</textarea>
+</div>
+<div data-create-site-embed-section class="mt-4">
+  <h3>{{index .T "public_trial_new_site_title"}}</h3>
+  <button type="button" class="btn btn-outline-primary mb-3" data-create-site-copy-html><img src="/p/static/copy.png" alt="">{{index .T "public_trial_copy_html"}}</button>
+  <textarea id="createSiteEmbedHTML" class="form-control" rows="10" readonly>{{.CreateSiteEmbedHTML}}</textarea>
 </div>
 {{else}}
 <p class="text-muted">{{index .T "public_trial_setup_hint"}}</p>

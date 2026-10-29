@@ -2653,6 +2653,7 @@ func TestMobileServicePageDesignCoversEverySharedTemplate(t *testing.T) {
 		"analytics.html",
 		"billing_invoice.html",
 		"billing_schedule.html",
+		"domain-reserved.html",
 		"domain_settings.html",
 		"edit_ai.html",
 		"expenses.html",
@@ -2666,6 +2667,7 @@ func TestMobileServicePageDesignCoversEverySharedTemplate(t *testing.T) {
 		"revisions.html",
 		"server_update.html",
 		"setup.html",
+		"test_drive.html",
 		"unfreeze.html",
 	}
 	coveredTemplates := make([]string, 0, len(expectedTemplates))
@@ -4829,22 +4831,22 @@ func TestTrialEmailConfirmationFromBlockedPhoneCreatesSession(t *testing.T) {
 	getRequest.RemoteAddr = phoneIP + ":4000"
 	getResponse := httptest.NewRecorder()
 	application.route(getResponse, getRequest)
-	if getResponse.Code != http.StatusOK || !strings.Contains(getResponse.Body.String(), `data-account-auto-confirm`) || strings.Contains(getResponse.Body.String(), `name="password"`) {
+	if getResponse.Code != http.StatusForbidden || !strings.Contains(getResponse.Body.String(), translationsForLanguageCode("ru")["test_drive_not_activated"]) || strings.Contains(getResponse.Body.String(), `data-account-auto-confirm`) {
 		t.Fatalf("trial confirmation on phone: status=%d body=%s", getResponse.Code, getResponse.Body.String())
 	}
 	postRequest := httptest.NewRequest(http.MethodPost, confirmationURL, nil)
 	postRequest.RemoteAddr = phoneIP + ":4001"
 	postResponse := httptest.NewRecorder()
 	application.route(postResponse, postRequest)
-	if postResponse.Code != http.StatusFound {
+	if postResponse.Code != http.StatusForbidden {
 		t.Fatalf("trial confirmation post: status=%d body=%s", postResponse.Code, postResponse.Body.String())
 	}
-	if cookie := postResponse.Result().Cookies(); len(cookie) == 0 || cookie[0].Name != "sitebrush_session" {
-		t.Fatalf("confirmed phone has no session cookie: %v", cookie)
+	if cookie := postResponse.Result().Cookies(); len(cookie) != 0 {
+		t.Fatalf("foreign phone received session cookie: %v", cookie)
 	}
 	var failures int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM auth_ip_failures WHERE domain=? AND client_ip=?`, confirmation.Domain, phoneIP).Scan(&failures); err != nil || failures != 0 {
-		t.Fatalf("verified phone remained blocked: count=%d err=%v", failures, err)
+	if err := database.QueryRow(`SELECT COUNT(*) FROM auth_ip_failures WHERE domain=? AND client_ip=?`, confirmation.Domain, phoneIP).Scan(&failures); err != nil || failures != 1 {
+		t.Fatalf("foreign phone changed login block: count=%d err=%v", failures, err)
 	}
 }
 
@@ -4871,26 +4873,13 @@ func TestTrialRegistrationSendsEmailWithoutDirectSubdomainDNSMatch(t *testing.T)
 	prepareAccountMailCaptchaForTest(t, application, request)
 	response := httptest.NewRecorder()
 	application.route(response, request)
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "new@example.net") {
-		t.Fatalf("trial signup needs no direct DNS match: status=%d body=%s", response.Code, response.Body.String())
+	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), translationsForLanguageCode("ru")["test_drive_not_activated"]) {
+		t.Fatalf("legacy unverified trial accepted registration: status=%d body=%s", response.Code, response.Body.String())
 	}
 	select {
 	case message := <-application.emailDelivery:
-		if message.Message.To != "new@example.net" {
-			t.Fatalf("confirmation recipient: %q", message.Message.To)
-		}
+		t.Fatalf("legacy trial queued confirmation to %q", message.Message.To)
 	default:
-		t.Fatal("trial confirmation mail was not queued")
-	}
-	var expiresAt string
-	if err := application.withServerControlDatabaseRead(context.Background(), "test-registration-expiry", func(database *sql.DB) error {
-		return database.QueryRow(`SELECT expires_at FROM registration_confirmations WHERE domain=? AND email=?`, "copy.example.org", "new@example.net").Scan(&expiresAt)
-	}); err != nil {
-		t.Fatal(err)
-	}
-	expires, err := time.Parse(time.RFC3339, expiresAt)
-	if err != nil || time.Until(expires) < 11*time.Hour {
-		t.Fatalf("registration link expires too soon: %s err=%v", expiresAt, err)
 	}
 }
 
@@ -13407,20 +13396,26 @@ func TestPublicTrialRegistrationOverlayCoversPagesUntilAdminConfirms(t *testing.
 		request = request.WithContext(contextWithDomain(request.Context(), domain))
 		response := httptest.NewRecorder()
 		application.route(response, request)
-		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "SiteBrushTrialRegistrationOverlay") {
-			t.Fatalf("unverified page %s: status=%d body=%q", pagePath, response.Code, response.Body.String())
+		if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), translationsForLanguageCode("ru")["test_drive_not_activated"]) || strings.Contains(response.Body.String(), "Imported page") {
+			t.Fatalf("unverified page leaked content %s: status=%d body=%q", pagePath, response.Code, response.Body.String())
 		}
 	}
 	missingRequest := httptest.NewRequest(http.MethodGet, "https://"+domain+"/missing", nil)
 	missingRequest = missingRequest.WithContext(contextWithDomain(missingRequest.Context(), domain))
 	missingResponse := httptest.NewRecorder()
 	application.route(missingResponse, missingRequest)
-	if missingResponse.Code != http.StatusNotFound || !strings.Contains(missingResponse.Body.String(), "SiteBrushTrialRegistrationOverlay") {
+	if missingResponse.Code != http.StatusForbidden || !strings.Contains(missingResponse.Body.String(), translationsForLanguageCode("ru")["test_drive_not_activated"]) {
 		t.Fatalf("unverified missing page: status=%d body=%q", missingResponse.Code, missingResponse.Body.String())
 	}
 
 	adminContext := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), domain))
 	if _, err := application.db.ExecContext(adminContext, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, "admin@example.com", "verified"); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.withServerControlDatabaseWrite(context.Background(), "test-verified-trial", func(database *sql.DB) error {
+		_, err := database.Exec(`UPDATE public_trial_sites SET verified_email=? WHERE domain=?`, "admin@example.com", domain)
+		return err
+	}); err != nil {
 		t.Fatal(err)
 	}
 	request := httptest.NewRequest(http.MethodGet, "https://"+domain+"/contact/", nil)
@@ -13429,6 +13424,566 @@ func TestPublicTrialRegistrationOverlayCoversPagesUntilAdminConfirms(t *testing.
 	application.route(response, request)
 	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "SiteBrushTrialRegistrationOverlay") {
 		t.Fatalf("verified page: status=%d body=%q", response.Code, response.Body.String())
+	}
+}
+
+func TestPrivateTestDriveRequiresCreatingBrowserSession(t *testing.T) {
+	application := newRouterTestApplication(t)
+	controlDatabase := setupBillingOwnerForTest(t, application, "sitebrush.example", "owner@sitebrush.example", true)
+	domain := "private.sitebrush.example"
+	if err := application.createManagedSiteWithoutAdmin(context.Background(), domain, defaultDomainStorageLimitBytes); err != nil {
+		t.Fatal(err)
+	}
+	secret := randomAccessToken()
+	now := time.Now().UTC()
+	if _, err := controlDatabase.Exec(`INSERT INTO public_trial_sites(domain,source_url,status,created_at,delete_after,session_hash) VALUES(?,'','private',?,?,?)`, domain, now.Format(time.RFC3339), now.Add(time.Hour).Format(time.RFC3339), testDriveHash(secret)); err != nil {
+		t.Fatal(err)
+	}
+	if err := controlDatabase.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher, err := startServerControlDatabaseDispatcher(application.serverControlDBPath(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.controlDatabase = dispatcher
+	t.Cleanup(func() { _ = dispatcher.Close() })
+	content := "private site content"
+	filePath := filepath.Join(application.domainStaticDir(domain), staticRelativePathForPage("/"))
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filePath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, visit := range []struct {
+		name            string
+		token           string
+		path            string
+		status          int
+		containsContent bool
+	}{
+		{"no cookie", "", "/", http.StatusForbidden, false},
+		{"wrong cookie", randomAccessToken(), "/", http.StatusForbidden, false},
+		{"owner", secret, "/", http.StatusOK, true},
+		{"publication blocked", secret, "/?publish", http.StatusForbidden, false},
+	} {
+		t.Run(visit.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "https://"+domain+visit.path, nil)
+			request = request.WithContext(contextWithDomain(request.Context(), domain))
+			if visit.token != "" {
+				request.AddCookie(&http.Cookie{Name: "sitebrush_test_drive", Value: visit.token})
+			}
+			response := httptest.NewRecorder()
+			application.route(response, request)
+			if response.Code != visit.status || strings.Contains(response.Body.String(), content) != visit.containsContent {
+				t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+			}
+		})
+	}
+	if err := application.withServerControlDatabaseWrite(context.Background(), "test-expire-trial", func(database *sql.DB) error {
+		_, err := database.Exec(`UPDATE public_trial_sites SET delete_after=? WHERE domain=?`, now.Add(-time.Minute).Format(time.RFC3339), domain)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	expiredRequest := httptest.NewRequest(http.MethodGet, "https://"+domain+"/", nil)
+	expiredRequest.AddCookie(&http.Cookie{Name: "sitebrush_test_drive", Value: secret})
+	expiredResponse := httptest.NewRecorder()
+	application.route(expiredResponse, expiredRequest)
+	if expiredResponse.Code != http.StatusForbidden || strings.Contains(expiredResponse.Body.String(), content) {
+		t.Fatalf("expired owner still reached site: %d %s", expiredResponse.Code, expiredResponse.Body.String())
+	}
+	var trialRows []hostingandsupport.PublicTrialSite
+	if err := application.withServerControlDatabaseRead(context.Background(), "test-trial-cleanup-list", func(database *sql.DB) error {
+		var listErr error
+		trialRows, listErr = (hostingandsupport.Store{DB: database}).PublicTrialSitesWithError(context.Background())
+		return listErr
+	}); err != nil || len(trialRows) != 1 {
+		t.Fatalf("trial cleanup list: %v %+v", err, trialRows)
+	}
+	application.cleanupExpiredPublicTrialSites(context.Background(), now)
+	if err := application.withServerControlDatabaseRead(context.Background(), "test-expired-status", func(database *sql.DB) error {
+		var status string
+		if err := database.QueryRow(`SELECT status FROM public_trial_sites WHERE domain=?`, domain).Scan(&status); err != nil {
+			return err
+		}
+		if status != "expired" {
+			return fmt.Errorf("expired trial status=%s", status)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDriveLabelAndConfirmationCodeAreStrict(t *testing.T) {
+	for _, valid := range []string{"hello", "my-site", "test123"} {
+		if !testDriveLabelValid(valid) {
+			t.Fatalf("rejected valid label %q", valid)
+		}
+	}
+	for _, invalid := range []string{"hello.sitebrush.com", "hello.com", "www.hello", "https://hello.com", "hello/test", "hello.sitebrush.com.evil.com", " hello", "hello ", "<script>", "-hello", "hello-"} {
+		if testDriveLabelValid(invalid) {
+			t.Fatalf("accepted invalid label %q", invalid)
+		}
+	}
+	digest := testDriveCodeDigest("384219", "private-salt")
+	if !testDriveCodeMatches(digest, "384219") || testDriveCodeMatches(digest, "384218") || testDriveCodeMatches(digest, "3842190") {
+		t.Fatal("confirmation code comparison failed")
+	}
+}
+
+func TestDriveNameCheckRequiresCaptchaAfterSoftLimit(t *testing.T) {
+	application := newRouterTestApplication(t)
+	controlDatabase := setupBillingOwnerForTest(t, application, "sitebrush.example", "owner@sitebrush.example", true)
+	if err := (hostingandsupport.Store{DB: controlDatabase}).SaveRegistrationSettingsWithLimits(context.Background(), true, true, hostingandsupport.SiteSizeLimits{Registration: 1 << 30, TestDrive: 1 << 30}); err != nil {
+		t.Fatal(err)
+	}
+	if err := controlDatabase.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher, err := startServerControlDatabaseDispatcher(application.serverControlDBPath(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.controlDatabase = dispatcher
+	t.Cleanup(func() { _ = dispatcher.Close() })
+	entryRequest := httptest.NewRequest(http.MethodGet, "https://sitebrush.example/?test_drive", nil)
+	entryResponse := httptest.NewRecorder()
+	entryHash, _ := application.testDriveEntrySession(entryResponse, entryRequest)
+	if entryHash == "" {
+		t.Fatal("entry session missing")
+	}
+	var entryCookie *http.Cookie
+	for _, cookie := range entryResponse.Result().Cookies() {
+		if cookie.Name == "sitebrush_trial_entry" {
+			entryCookie = cookie
+		}
+	}
+	if entryCookie == nil {
+		t.Fatal("entry cookie missing")
+	}
+	if err := application.withServerControlDatabaseWrite(context.Background(), "test-name-check-trust", func(database *sql.DB) error {
+		_, writeErr := database.Exec(`UPDATE test_drive_entry_sessions SET human_verified=1 WHERE session_hash=?`, entryHash)
+		return writeErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < 12; attempt++ {
+		request := httptest.NewRequest(http.MethodGet, "https://sitebrush.example/?trial_site_domain_check&subdomain=hello", nil)
+		request.AddCookie(entryCookie)
+		response := httptest.NewRecorder()
+		admitted := application.admitTestDriveNameCheck(response, request)
+		if attempt == 11 {
+			if admitted || response.Code != http.StatusTooManyRequests || response.Header().Get("X-SiteBrush-Captcha-Required") != "1" {
+				t.Fatalf("soft limit did not require CAPTCHA: admitted=%t status=%d headers=%v", admitted, response.Code, response.Header())
+			}
+		} else if !admitted {
+			t.Fatalf("request %d rejected before soft limit: %d %s", attempt, response.Code, response.Body.String())
+		}
+	}
+	challenge, err := captcha.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmForm := url.Values{"captcha": {challenge.Answer}, "captcha_id": {challenge.Token}}
+	confirmRequest := httptest.NewRequest(http.MethodPost, "https://sitebrush.example/?test_drive_check_captcha", strings.NewReader(confirmForm.Encode()))
+	confirmRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	confirmRequest.Header.Set("Origin", "https://sitebrush.example")
+	confirmRequest.AddCookie(entryCookie)
+	if err := application.withAccountMailTransaction(confirmRequest, "test-name-check-captcha", func(transaction *sql.Tx) error {
+		_, saveErr := captcha.Save(transaction, challenge, accountClientIP(confirmRequest), application.siteDomain(confirmRequest.Context(), confirmRequest), "trial_preview", time.Now().Add(-3*time.Second).UTC())
+		return saveErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+	availabilityRequests := make(chan publicTrialAvailabilityRequest)
+	stopAvailability := make(chan struct{})
+	application.publicTrialAvailability = availabilityRequests
+	t.Cleanup(func() { close(stopAvailability) })
+	go func() {
+		for {
+			select {
+			case request := <-availabilityRequests:
+				request.reply <- publicTrialAvailability{Enabled: true}
+			case <-stopAvailability:
+				return
+			}
+		}
+	}()
+	confirmResponse := httptest.NewRecorder()
+	application.route(confirmResponse, confirmRequest)
+	if confirmResponse.Code != http.StatusOK {
+		t.Fatalf("CAPTCHA confirmation: %d %s", confirmResponse.Code, confirmResponse.Body.String())
+	}
+	if err := application.withServerControlDatabaseRead(context.Background(), "test-name-check-retrusted", func(database *sql.DB) error {
+		var trusted bool
+		if readErr := database.QueryRow(`SELECT human_verified FROM test_drive_entry_sessions WHERE session_hash=?`, entryHash).Scan(&trusted); readErr != nil {
+			return readErr
+		}
+		if !trusted {
+			return errors.New("valid CAPTCHA did not restore session trust")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPrivateTestDriveStartsBeforeEmailAndHandsOffOnce(t *testing.T) {
+	application := newRouterTestApplication(t)
+	controlDatabase := setupBillingOwnerForTest(t, application, "sitebrush.example", "owner@sitebrush.example", true)
+	store := hostingandsupport.Store{DB: controlDatabase}
+	if err := store.SaveRegistrationSettingsWithLimits(context.Background(), true, true, hostingandsupport.SiteSizeLimits{Registration: 1 << 30, TestDrive: 1 << 30}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controlDatabase.Exec(`INSERT INTO server_settings(name,value) VALUES('test_drive_idle_minutes','21'),('test_drive_resend_seconds','65')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := controlDatabase.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher, err := startServerControlDatabaseDispatcher(application.serverControlDBPath(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.controlDatabase = dispatcher
+	t.Cleanup(func() { _ = dispatcher.Close() })
+	availabilityRequests := make(chan publicTrialAvailabilityRequest)
+	stopAvailability := make(chan struct{})
+	application.publicTrialAvailability = availabilityRequests
+	t.Cleanup(func() { close(stopAvailability) })
+	go func() {
+		for {
+			select {
+			case request := <-availabilityRequests:
+				if request.reply != nil {
+					request.reply <- publicTrialAvailability{Enabled: true}
+				}
+			case <-stopAvailability:
+				return
+			}
+		}
+	}()
+	formRequest := httptest.NewRequest(http.MethodGet, "https://sitebrush.example/?test_drive", nil)
+	formResponse := httptest.NewRecorder()
+	application.route(formResponse, formRequest)
+	if formResponse.Code != http.StatusOK || !strings.Contains(formResponse.Body.String(), translationsForLanguageCode("ru")["test_drive_name_label"]) {
+		t.Fatalf("form: %d %s", formResponse.Code, formResponse.Body.String())
+	}
+	var entryCookie *http.Cookie
+	for _, cookie := range formResponse.Result().Cookies() {
+		if cookie.Name == "sitebrush_trial_entry" {
+			entryCookie = cookie
+		}
+	}
+	if entryCookie == nil {
+		t.Fatal("entry session cookie missing")
+	}
+	if err := application.withServerControlDatabaseWrite(context.Background(), "test-trust-entry", func(database *sql.DB) error {
+		_, err := database.Exec(`UPDATE test_drive_entry_sessions SET human_verified=1 WHERE session_hash=?`, testDriveHash(entryCookie.Value))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{"subdomain": {"myproject"}}
+	startRequest := httptest.NewRequest(http.MethodPost, "https://sitebrush.example/?test_drive_start", strings.NewReader(form.Encode()))
+	startRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	startRequest.Header.Set("Origin", "https://sitebrush.example")
+	startRequest.AddCookie(entryCookie)
+	startResponse := httptest.NewRecorder()
+	application.route(startResponse, startRequest)
+	if startResponse.Code != http.StatusOK || !strings.Contains(startResponse.Body.String(), "myproject.sitebrush.example") {
+		t.Fatalf("start: %d %s", startResponse.Code, startResponse.Body.String())
+	}
+	trial, found, err := application.privateTestDrive(context.Background(), "myproject.sitebrush.example")
+	if err != nil || !found || trial.Status != "private" || trial.ID == 0 {
+		t.Fatalf("trial: %+v %t %v", trial, found, err)
+	}
+	if trial.VerifiedEmail != "" {
+		t.Fatal("new site unexpectedly verified")
+	}
+	trialCreatedAt, _ := time.Parse(time.RFC3339, trial.CreatedAt)
+	trialExpiry, _ := time.Parse(time.RFC3339, trial.DeleteAfter)
+	if trialExpiry.Sub(trialCreatedAt) != 21*time.Minute {
+		t.Fatalf("configured idle TTL not applied: %s", trialExpiry.Sub(trialCreatedAt))
+	}
+	limitForm := url.Values{"subdomain": {"another-project"}}
+	limitRequest := httptest.NewRequest(http.MethodPost, "https://sitebrush.example/?test_drive_start", strings.NewReader(limitForm.Encode()))
+	limitRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	limitRequest.Header.Set("Origin", "https://sitebrush.example")
+	limitRequest.AddCookie(entryCookie)
+	limitResponse := httptest.NewRecorder()
+	application.route(limitResponse, limitRequest)
+	if limitResponse.Code != http.StatusTooManyRequests {
+		t.Fatalf("second active Test Drive should be limited: %d %s", limitResponse.Code, limitResponse.Body.String())
+	}
+	if !strings.Contains(limitResponse.Body.String(), "data-test-drive-captcha") {
+		t.Fatal("creation limit did not show a new CAPTCHA")
+	}
+	if err := application.withServerControlDatabaseRead(context.Background(), "test-create-captcha-reset", func(database *sql.DB) error {
+		var trusted bool
+		if readErr := database.QueryRow(`SELECT human_verified FROM test_drive_entry_sessions WHERE session_hash=?`, testDriveHash(entryCookie.Value)).Scan(&trusted); readErr != nil {
+			return readErr
+		}
+		if trusted {
+			return errors.New("creation limit did not reset CAPTCHA trust")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ticketMatch := regexp.MustCompile(`name="ticket" value="([^"]+)"`).FindStringSubmatch(startResponse.Body.String())
+	if len(ticketMatch) != 2 {
+		t.Fatal("one-time handoff ticket missing")
+	}
+	handoffForm := url.Values{"ticket": {ticketMatch[1]}}
+	handoffRequest := httptest.NewRequest(http.MethodPost, "https://myproject.sitebrush.example/?test_drive_handoff", strings.NewReader(handoffForm.Encode()))
+	handoffRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	handoffResponse := httptest.NewRecorder()
+	application.route(handoffResponse, handoffRequest)
+	if handoffResponse.Code != http.StatusSeeOther || handoffResponse.Header().Get("Location") != "/?edit" {
+		t.Fatalf("handoff: %d %s", handoffResponse.Code, handoffResponse.Body.String())
+	}
+	var trialCookie, editorCookie *http.Cookie
+	for _, cookie := range handoffResponse.Result().Cookies() {
+		if cookie.Name == "sitebrush_test_drive" {
+			trialCookie = cookie
+		}
+		if cookie.Name == "sitebrush_session" {
+			editorCookie = cookie
+		}
+	}
+	if trialCookie == nil || editorCookie == nil || !trialCookie.HttpOnly || !trialCookie.Secure {
+		t.Fatalf("trial cookies: %#v", handoffResponse.Result().Cookies())
+	}
+	secondResponse := httptest.NewRecorder()
+	application.route(secondResponse, handoffRequest)
+	if secondResponse.Code != http.StatusForbidden {
+		t.Fatalf("ticket reused: %d", secondResponse.Code)
+	}
+	ownerRequest := httptest.NewRequest(http.MethodGet, "https://myproject.sitebrush.example/?edit", nil)
+	ownerRequest = ownerRequest.WithContext(contextWithDomain(ownerRequest.Context(), "myproject.sitebrush.example"))
+	ownerRequest.AddCookie(trialCookie)
+	ownerRequest.AddCookie(editorCookie)
+	trialCSRF := accountCSRF(ownerRequest)
+	ownerResponse := httptest.NewRecorder()
+	application.route(ownerResponse, ownerRequest)
+	if ownerResponse.Code != http.StatusOK || !strings.Contains(ownerResponse.Body.String(), "data-test-drive-save") {
+		t.Fatalf("private editor: %d %s", ownerResponse.Code, ownerResponse.Body.String())
+	}
+	socketServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		request.Host = "myproject.sitebrush.example"
+		request.AddCookie(trialCookie)
+		request.AddCookie(editorCookie)
+		application.route(writer, request)
+	}))
+	defer socketServer.Close()
+	sendSocketCommand := func(command testDriveSocketCommand) testDriveSocketReply {
+		connection, dialErr := websocket.Dial("ws"+strings.TrimPrefix(socketServer.URL, "http")+"/?test_drive_ws", "", "http://myproject.sitebrush.example")
+		if dialErr != nil {
+			t.Fatal(dialErr)
+		}
+		defer connection.Close()
+		if sendErr := websocket.JSON.Send(connection, command); sendErr != nil {
+			t.Fatal(sendErr)
+		}
+		var reply testDriveSocketReply
+		if receiveErr := websocket.JSON.Receive(connection, &reply); receiveErr != nil {
+			t.Fatal(receiveErr)
+		}
+		return reply
+	}
+	socketReply := sendSocketCommand(testDriveSocketCommand{ID: 1, Action: "status"})
+	if socketReply.Status != http.StatusOK || !bytes.Contains(socketReply.Payload, []byte(`"status":"private"`)) {
+		t.Fatalf("Test Drive WebSocket reply: %+v", socketReply)
+	}
+	emailReply := sendSocketCommand(testDriveSocketCommand{ID: 1, Action: "email", Email: "creator@example.com", CSRF: trialCSRF})
+	if emailReply.Status != http.StatusOK || !bytes.Contains(emailReply.Payload, []byte(`"retry_after":65`)) {
+		t.Fatalf("email WebSocket reply: %+v", emailReply)
+	}
+	var message mailout.Message
+	select {
+	case job := <-application.emailDelivery:
+		message = job.Message
+	default:
+		t.Fatal("confirmation message not queued")
+	}
+	if message.To != "creator@example.com" || strings.Contains(message.Body, "myproject.sitebrush.example") || strings.Contains(message.Body, "http") {
+		t.Fatalf("non-neutral confirmation: %+v", message)
+	}
+	codeMatch := regexp.MustCompile(`[0-9]{6}`).FindString(message.Body)
+	if codeMatch == "" {
+		t.Fatalf("confirmation code missing: %q", message.Body)
+	}
+	sendAlternateEmail := func(email string) (int, string) {
+		formBody := url.Values{"email": {email}, "account_csrf": {trialCSRF}}
+		request := httptest.NewRequest(http.MethodPost, "https://myproject.sitebrush.example/?test_drive_email", strings.NewReader(formBody.Encode()))
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		request.Header.Set("Origin", "https://myproject.sitebrush.example")
+		request.AddCookie(trialCookie)
+		request.AddCookie(editorCookie)
+		response := httptest.NewRecorder()
+		application.route(response, request)
+		if response.Code != http.StatusOK {
+			return response.Code, ""
+		}
+		select {
+		case job := <-application.emailDelivery:
+			return response.Code, regexp.MustCompile(`[0-9]{6}`).FindString(job.Message.Body)
+		default:
+			return response.Code, ""
+		}
+	}
+	if responseCode, _ := sendAlternateEmail("second@example.com"); responseCode != http.StatusTooManyRequests {
+		t.Fatalf("email cooldown status=%d", responseCode)
+	}
+	rewindEmailCooldown := func() {
+		if err := application.withServerControlDatabaseWrite(context.Background(), "test-email-cooldown", func(database *sql.DB) error {
+			_, err := database.Exec(`UPDATE public_trial_sites SET last_mail_at=? WHERE id=?`, time.Now().Add(-66*time.Second).UTC().Format(time.RFC3339), trial.ID)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rewindEmailCooldown()
+	if responseCode, secondCode := sendAlternateEmail("second@example.com"); responseCode != http.StatusOK || secondCode == "" {
+		t.Fatalf("second address: status=%d code=%q", responseCode, secondCode)
+	}
+	oldCodeForm := url.Values{"code": {codeMatch}, "account_csrf": {trialCSRF}}
+	oldCodeRequest := httptest.NewRequest(http.MethodPost, "https://myproject.sitebrush.example/?test_drive_verify", strings.NewReader(oldCodeForm.Encode()))
+	oldCodeRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	oldCodeRequest.Header.Set("Origin", "https://myproject.sitebrush.example")
+	oldCodeRequest.AddCookie(trialCookie)
+	oldCodeRequest.AddCookie(editorCookie)
+	oldCodeResponse := httptest.NewRecorder()
+	application.route(oldCodeResponse, oldCodeRequest)
+	if oldCodeResponse.Code != http.StatusBadRequest {
+		t.Fatalf("old confirmation code was accepted: %d", oldCodeResponse.Code)
+	}
+	rewindEmailCooldown()
+	thirdStatus, thirdCode := sendAlternateEmail("third@example.com")
+	if thirdStatus != http.StatusOK || thirdCode == "" {
+		t.Fatalf("third address: status=%d code=%q", thirdStatus, thirdCode)
+	}
+	rewindEmailCooldown()
+	if fourthStatus, _ := sendAlternateEmail("fourth@example.com"); fourthStatus != http.StatusTooManyRequests {
+		t.Fatalf("fourth address status=%d", fourthStatus)
+	}
+	saveTrialCaptcha := func(request *http.Request) captcha.Challenge {
+		challenge, challengeErr := captcha.New()
+		if challengeErr != nil {
+			t.Fatal(challengeErr)
+		}
+		if challengeErr = application.withAccountMailTransaction(request, "test-trial-captcha", func(transaction *sql.Tx) error {
+			_, saveErr := captcha.Save(transaction, challenge, accountClientIP(request), trial.Domain, "test_drive", time.Now().Add(-3*time.Second).UTC())
+			return saveErr
+		}); challengeErr != nil {
+			t.Fatal(challengeErr)
+		}
+		return challenge
+	}
+	if err := application.withServerControlDatabaseWrite(context.Background(), "test-reset-captcha-before-code", func(database *sql.DB) error {
+		_, writeErr := database.Exec(`UPDATE public_trial_sites SET human_verified=0 WHERE id=?`, trial.ID)
+		return writeErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+	codeMatch = thirdCode
+	verifyForm := url.Values{"code": {codeMatch}, "account_csrf": {trialCSRF}}
+	verifyRequest := httptest.NewRequest(http.MethodPost, "https://myproject.sitebrush.example/?test_drive_verify", strings.NewReader(verifyForm.Encode()))
+	verifyRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	verifyRequest.Header.Set("Origin", "https://myproject.sitebrush.example")
+	verifyRequest = verifyRequest.WithContext(contextWithDomain(verifyRequest.Context(), "myproject.sitebrush.example"))
+	verifyRequest.AddCookie(trialCookie)
+	verifyRequest.AddCookie(editorCookie)
+	verifyResponse := httptest.NewRecorder()
+	application.route(verifyResponse, verifyRequest)
+	if verifyResponse.Code != http.StatusForbidden {
+		t.Fatalf("verification bypassed reset CAPTCHA: %d", verifyResponse.Code)
+	}
+	verifyChallenge := saveTrialCaptcha(verifyRequest)
+	verifyForm.Set("captcha", verifyChallenge.Answer)
+	verifyForm.Set("captcha_id", verifyChallenge.Token)
+	verifyRequest = httptest.NewRequest(http.MethodPost, "https://myproject.sitebrush.example/?test_drive_verify", strings.NewReader(verifyForm.Encode()))
+	verifyRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	verifyRequest.Header.Set("Origin", "https://myproject.sitebrush.example")
+	verifyRequest.AddCookie(trialCookie)
+	verifyRequest.AddCookie(editorCookie)
+	verifyResponse = httptest.NewRecorder()
+	application.route(verifyResponse, verifyRequest)
+	if verifyResponse.Code != http.StatusOK {
+		t.Fatalf("verify: %d %s", verifyResponse.Code, verifyResponse.Body.String())
+	}
+	var status, verifiedEmail string
+	if err := application.withServerControlDatabaseRead(context.Background(), "test-email-verified", func(database *sql.DB) error {
+		return database.QueryRow(`SELECT status,verified_email FROM public_trial_sites WHERE id=?`, trial.ID).Scan(&status, &verifiedEmail)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if status != "email_verified" || verifiedEmail != "third@example.com" {
+		t.Fatalf("verification status=%s email=%s", status, verifiedEmail)
+	}
+	privateVisitor := httptest.NewRequest(http.MethodGet, "https://myproject.sitebrush.example/", nil)
+	privateResponse := httptest.NewRecorder()
+	application.route(privateResponse, privateVisitor)
+	if privateResponse.Code != http.StatusForbidden {
+		t.Fatalf("verified but inactive site leaked: %d", privateResponse.Code)
+	}
+	if err := application.withServerControlDatabaseWrite(context.Background(), "test-reset-captcha-before-activation", func(database *sql.DB) error {
+		_, writeErr := database.Exec(`UPDATE public_trial_sites SET human_verified=0 WHERE id=?`, trial.ID)
+		return writeErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+	activateForm := url.Values{"account_csrf": {trialCSRF}}
+	activateRequest := httptest.NewRequest(http.MethodPost, "https://myproject.sitebrush.example/?test_drive_activate", strings.NewReader(activateForm.Encode()))
+	activateRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	activateRequest.Header.Set("Origin", "https://myproject.sitebrush.example")
+	activateRequest.AddCookie(trialCookie)
+	activateRequest.AddCookie(editorCookie)
+	activateResponse := httptest.NewRecorder()
+	application.route(activateResponse, activateRequest)
+	if activateResponse.Code != http.StatusForbidden {
+		t.Fatalf("activation bypassed reset CAPTCHA: %d", activateResponse.Code)
+	}
+	activateChallenge := saveTrialCaptcha(activateRequest)
+	activateForm.Set("captcha", activateChallenge.Answer)
+	activateForm.Set("captcha_id", activateChallenge.Token)
+	activateRequest = httptest.NewRequest(http.MethodPost, "https://myproject.sitebrush.example/?test_drive_activate", strings.NewReader(activateForm.Encode()))
+	activateRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	activateRequest.Header.Set("Origin", "https://myproject.sitebrush.example")
+	activateRequest.AddCookie(trialCookie)
+	activateRequest.AddCookie(editorCookie)
+	activateResponse = httptest.NewRecorder()
+	application.route(activateResponse, activateRequest)
+	if activateResponse.Code != http.StatusOK {
+		t.Fatalf("activate: %d %s", activateResponse.Code, activateResponse.Body.String())
+	}
+	activatedSession := false
+	for _, cookie := range activateResponse.Result().Cookies() {
+		if cookie.Name == "sitebrush_session" && cookie.Value != "" && cookie.HttpOnly {
+			activatedSession = true
+		}
+	}
+	if !activatedSession {
+		t.Fatal("activation did not preserve an authenticated editor session")
+	}
+	if err := application.withServerControlDatabaseRead(context.Background(), "test-activation", func(database *sql.DB) error {
+		return database.QueryRow(`SELECT status FROM public_trial_sites WHERE id=?`, trial.ID).Scan(&status)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if status != "activated" {
+		t.Fatalf("activation status=%s", status)
+	}
+	visitorRequest := httptest.NewRequest(http.MethodGet, "https://myproject.sitebrush.example/", nil)
+	visitorRequest = visitorRequest.WithContext(contextWithDomain(visitorRequest.Context(), "myproject.sitebrush.example"))
+	visitorResponse := httptest.NewRecorder()
+	application.route(visitorResponse, visitorRequest)
+	if visitorResponse.Code != http.StatusOK || !strings.Contains(visitorResponse.Body.String(), "SiteBrush") {
+		t.Fatalf("activated site unavailable: %d %s", visitorResponse.Code, visitorResponse.Body.String())
 	}
 }
 
@@ -24072,6 +24627,22 @@ func TestServerUpdateRequiresServerOwnerAndNeverMutatesOnGET(t *testing.T) {
 				t.Fatalf("POST status=%d", postResult.Code)
 			}
 		})
+	}
+}
+
+func TestServerUpdateFailureShowsAdministratorDiagnostic(t *testing.T) {
+	application, _ := newUpdateTestApplication(t)
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/?server_update&embedded", nil)
+	request.Header.Set("X-Request-ID", "update-test-17")
+	request.AddCookie(newAdminSessionCookie(t, application, "owner@example.com"))
+	request = request.WithContext(contextWithDomain(request.Context(), "localhost"))
+	response := httptest.NewRecorder()
+	application.serverUpdateDiagnosticPage(response, request, errors.New("private updater failure"))
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("diagnostic status=%d", response.Code)
+	}
+	if !strings.Contains(response.Body.String(), "update-test-17") || strings.Contains(response.Body.String(), "private updater failure") {
+		t.Fatalf("unsafe or missing administrator diagnostic: %s", response.Body.String())
 	}
 }
 

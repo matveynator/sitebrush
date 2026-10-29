@@ -13169,6 +13169,25 @@ func (a *App) refreshAIProviderRange(source aiingress.Source, stop <-chan struct
 }
 
 func (a *App) route(w http.ResponseWriter, r *http.Request) {
+	if hasQueryFlag(r, "server_update_client_error") {
+		a.serverUpdateClientError(w, r)
+		return
+	}
+	if hasQueryFlag(r, "test_drive") {
+		a.testDriveForm(w, r)
+		return
+	}
+	if hasQueryFlag(r, "test_drive_start") {
+		a.startPrivateTestDrive(w, r)
+		return
+	}
+	if hasQueryFlag(r, "test_drive_check_captcha") {
+		a.confirmTestDriveNameCheckCaptcha(w, r)
+		return
+	}
+	if a.privateTestDriveGate(w, r) {
+		return
+	}
 	machine, owner := a.aiIngressDecisionForRequest(r)
 	r = requestWithAIIngressDecision(aiRequestAfterAdmission(r, machine, owner), machine, owner)
 
@@ -22701,7 +22720,14 @@ func (a *App) publicTrialSiteDomainCheck(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	label := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("subdomain")))
+	if !a.admitTestDriveNameCheck(w, r) {
+		return
+	}
+	label := r.URL.Query().Get("subdomain")
+	if !testDriveLabelValid(label) {
+		http.Error(w, "invalid site name", http.StatusBadRequest)
+		return
+	}
 	var parentDomain string
 	err := a.withServerControlDatabaseRead(r.Context(), "public-trial-domain-check", func(database *sql.DB) error {
 		parentDomain, _ = (hostingandsupport.Store{DB: database}).OwnerDomain(r.Context())
@@ -22753,190 +22779,8 @@ func (a *App) publicTrialSiteCaptcha(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) publicTrialSiteCreate(w http.ResponseWriter, r *http.Request) {
-	if !a.publicTrialAllowed(r) || r.Method != http.MethodPost {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
-	progressToken := strings.TrimSpace(r.FormValue("preview_token"))
-	if progressToken == "" {
-		progressToken = strings.TrimSpace(r.FormValue("progress_token"))
-	}
-	status, statusFound := a.activePublicTrialPreviewStore().Status(progressToken)
-	if !statusFound || status.ClientIP != "" && status.ClientIP != accountClientIP(r) {
-		http.Error(w, "preview token is unavailable", http.StatusForbidden)
-		return
-	}
-	if status.Status != "done" && status.Status != "partial" {
-		http.Error(w, "wait for the Test Drive analysis to finish", http.StatusConflict)
-		return
-	}
-	createProgressToken := strings.TrimSpace(r.FormValue("create_progress_token"))
-	if createProgressToken == "" {
-		createProgressToken = progressToken
-	}
-	a.activePublicTrialPreviewStore().Cancel(progressToken)
-	preview, found := a.activePublicTrialPreviewStore().Get(progressToken)
-	if !found {
-		http.Error(w, "preview not found", http.StatusNotFound)
-		return
-	}
-	if preview.SinglePageRequired && preview.CopyWholeSite {
-		http.Error(w, translationOrDefault(translationsForRequest(r), "public_trial_single_page_required", "The website is larger than the free test-drive limit. Stop scanning the website and copy only its first page."), http.StatusConflict)
-		return
-	}
-	if preview.HostingMaximumBytes > 0 && preview.EstimatedTotalBytes > preview.HostingMaximumBytes {
-		http.Error(w, publicTrialPlanMessage(translationsForRequest(r), preview), http.StatusInsufficientStorage)
-		return
-	}
-	selectedResourceURLs := selectedGrabResourceURLs(r)
-	selectionConfirmed := strings.TrimSpace(r.FormValue("import_selection_confirmed")) == "1"
-	if len(selectedResourceURLs) == 0 && !selectionConfirmed {
-		selectedResourceURLs = publicTrialResourceURLMap(preview.Resources)
-	}
-	preview = a.preparePublicTrialPreviewForCreate(r.Context(), preview, selectedResourceURLs, createProgressToken)
-	if !preview.FreeLimitReached && (preview.Spider != nil && preview.Spider.previewLimitReached || preview.RequiredBytes > hostingandsupport.BillingFreeBytes) {
-		http.Error(w, "free Test Drive download limit reached; confirm the site administrator email before continuing", http.StatusInsufficientStorage)
-		return
-	}
-	pendingAssetURLs := publicTrialPendingAssets(preview, selectedResourceURLs)
-	var parentDomain string
-	err := a.withServerControlDatabaseRead(r.Context(), "public-trial-owner", func(database *sql.DB) error {
-		var ownerFound bool
-		parentDomain, ownerFound = (hostingandsupport.Store{DB: database}).OwnerDomain(r.Context())
-		if !ownerFound {
-			return errors.New("owner domain is required")
-		}
-		return nil
-	})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	trialDomain := normalizeDomainName(r.FormValue("requested_domain"))
-	if trialDomain == "" {
-		trialDomain, err = a.availablePublicTrialDomain(r.Context(), preview.SourceURL, parentDomain)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusConflict)
-			return
-		}
-	}
-	if trialDomain == "" || !a.newSiteSubdomainAllowed(r.Context(), trialDomain) ||
-		!strings.HasSuffix(trialDomain, "."+normalizeDomainName(parentDomain)) ||
-		!a.publicTrialDomainAvailable(r.Context(), trialDomain) {
-		http.Error(w, "the selected Test Drive address is unavailable", http.StatusConflict)
-		return
-	}
-	quotaBytes := hostingandsupport.CreationQuota(hostingandsupport.BillingFreeBytes, preview.Plan.QuotaBytes)
-	claimToken := randomAccessToken()
-	allowed, retryAfter, admissionErr := a.reservePublicTrialIPAdmission(r.Context(), accountClientIP(r), "create", trialDomain, 2)
-	if admissionErr != nil {
-		http.Error(w, "Test Drive admission is unavailable", http.StatusServiceUnavailable)
-		return
-	}
-	if !allowed {
-		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
-		http.Error(w, translationOrDefault(translationsForRequest(r), "public_trial_ip_limit", "Test Drive limit for this IP was reached. Please try again later."), http.StatusTooManyRequests)
-		return
-	}
-	trialCreated := false
-	defer func() {
-		if !trialCreated {
-			a.releasePublicTrialIPAdmission(context.WithoutCancel(r.Context()), "create", trialDomain)
-		}
-	}()
-	if err := a.claimTrialDomain(r.Context(), trialDomain, claimToken); err != nil {
-		statusCode := http.StatusConflict
-		var capacityError publicTrialCapacityError
-		if errors.As(err, &capacityError) {
-			statusCode = http.StatusTooManyRequests
-			w.Header().Set("Retry-After", "3600")
-		}
-		http.Error(w, err.Error(), statusCode)
-		return
-	}
-	defer func() {
-		if !trialCreated {
-			a.releaseTrialDomain(context.WithoutCancel(r.Context()), trialDomain, claimToken)
-		}
-	}()
-	if err := a.createManagedSiteWithoutAdmin(r.Context(), trialDomain, quotaBytes); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	domainContext := contextWithSiteDatabaseCreation(contextWithDomain(r.Context(), trialDomain))
-	if err := a.persistPublicTrialPreview(domainContext, trialDomain, preview); err != nil {
-		_ = a.deleteDemoManagedSiteWithoutBackup(r.Context(), trialDomain)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if preview.FreeLimitReached {
-		if err := a.seedPublicTrialImportFrontier(domainContext, trialDomain, preview); err != nil {
-			_ = a.deleteDemoManagedSiteWithoutBackup(r.Context(), trialDomain)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-	}
-	indexingReviewID, indexingErr := a.beginIndexingReview(domainContext, trialDomain)
-	if indexingErr != nil {
-		_ = a.deleteDemoManagedSiteWithoutBackup(r.Context(), trialDomain)
-		http.Error(w, indexingErr.Error(), http.StatusInternalServerError)
-		return
-	}
-	landingPath, landingFound := a.demoSiteLandingPath(domainContext, trialDomain)
-	if !landingFound {
-		_ = a.deleteDemoManagedSiteWithoutBackup(r.Context(), trialDomain)
-		http.Error(w, "imported site has no available page", http.StatusBadGateway)
-		return
-	}
-	serviceStatus := "trial"
-	if preview.FitsFreePlan {
-		serviceStatus = "free"
-	}
-	origin := a.hostingAndSupportClientIP(r.Context(), accountClientIP(r))
-	// The control record owns the trial lifetime and remains after automatic deletion as its audit entry.
-	if err := a.withServerControlDatabaseWrite(r.Context(), "public-trial-assign", func(database *sql.DB) error {
-		store := hostingandsupport.Store{DB: database}
-		if err := store.AssignSite(r.Context(), trialDomain, preview.Plan.ID, serviceStatus); err != nil {
-			return err
-		}
-		if err := store.CreatePublicTrialSite(r.Context(), trialDomain, preview.SourceURL, time.Now()); err != nil {
-			return err
-		}
-		pendingJSON, err := json.Marshal(pendingAssetURLs)
-		if err != nil {
-			return err
-		}
-		paidContinuation := 0
-		if preview.FreeLimitReached {
-			paidContinuation = 1
-		}
-		_, err = database.ExecContext(r.Context(), `UPDATE public_trial_sites SET pending_assets_json=?,paid_continuation=?,estimated_total_bytes=?,estimated_price_minor=?,billing_currency=?,client_ip=?,country=?,city=? WHERE domain=? AND status='active'`, string(pendingJSON), paidContinuation, preview.EstimatedTotalBytes, preview.EstimatedPriceMinor, preview.BillingCurrency, origin.IP, origin.Country, origin.City, trialDomain)
-		return err
-	}); err != nil {
-		_ = a.deleteDemoManagedSiteWithoutBackup(r.Context(), trialDomain)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	trialCreated = true
-	a.activePublicTrialPreviewStore().Delete(progressToken)
-	// The new site must be visible to the public reader before its URL is returned.
-	if err := a.publicPublicationRequest("refresh", trialDomain); err != nil {
-		http.Error(w, "imported site publication failed: "+err.Error(), http.StatusServiceUnavailable)
-		return
-	}
-	a.refreshHostingAndSupportPanel()
-	w.Header().Set("Content-Type", "application/json")
-	response := grabImportResultResponse(grabImportResult{RedirectPath: landingPath})
-	response["redirect"] = "http://" + trialDomain + landingPath
-	response["indexing_decision_required"] = false
-	response["indexing_review_id"] = indexingReviewID
-	response["import_paused"] = preview.FreeLimitReached
-	if preview.Spider != nil {
-		response["failed_total"] = preview.Spider.unresolvedFailedTotal()
-		response["failed_urls"] = preview.Spider.failedResourceURLList()
-		response["failed_reasons"] = preview.Spider.failedResourceReasonMap()
-	}
-	_ = json.NewEncoder(w).Encode(response)
+	// Anonymous copies no longer become public before mailbox confirmation.
+	http.Error(w, "use the private Test Drive form", http.StatusGone)
 }
 
 func publicTrialPendingAssets(preview publicTrialPreview, selectedResourceURLs map[string]struct{}) []string {
@@ -23553,15 +23397,29 @@ func (a *App) cleanupExpiredPublicTrialSite(ctx context.Context, trialSite hosti
 		return
 	}
 	deleteAfter, parseErr := time.Parse(time.RFC3339, strings.TrimSpace(trialSite.DeleteAfter))
-	if strings.ToLower(strings.TrimSpace(trialSite.Status)) != "active" || parseErr != nil || now.Before(deleteAfter) {
+	if trialSite.Status != "active" && trialSite.Status != "private" && trialSite.Status != "email_pending" && trialSite.Status != "expiring" || parseErr != nil || now.Before(deleteAfter) {
 		return
 	}
-	if a.rawManagedSiteHasAdmin(ctx, domain) || a.registrationDomainClaimed(ctx, domain) {
+	if trialSite.Status == "active" && (a.rawManagedSiteHasAdmin(ctx, domain) || a.registrationDomainClaimed(ctx, domain)) {
 		_ = a.withServerControlDatabaseWrite(ctx, "trial-cleanup-registered", func(database *sql.DB) error {
 			(hostingandsupport.Store{DB: database}).RemoveActivePublicTrialSites(ctx, domain)
 			return nil
 		})
 		return
+	}
+	if trialSite.Status == "private" || trialSite.Status == "email_pending" {
+		claimed := false
+		if err := a.withServerControlDatabaseWrite(ctx, "trial-cleanup-claim", func(database *sql.DB) error {
+			result, updateErr := database.ExecContext(ctx, `UPDATE public_trial_sites SET status='expiring' WHERE id=? AND status IN ('private','email_pending') AND delete_after<=?`, trialSite.ID, now.UTC().Format(time.RFC3339))
+			if updateErr != nil {
+				return updateErr
+			}
+			count, countErr := result.RowsAffected()
+			claimed = countErr == nil && count == 1
+			return countErr
+		}); err != nil || !claimed {
+			return
+		}
 	}
 	row, found, rowErr := a.managedSiteQuotaRow(ctx, domain)
 	if rowErr != nil {
@@ -23610,9 +23468,13 @@ func (a *App) cleanupExpiredPublicTrialSite(ctx context.Context, trialSite hosti
 func (a *App) cleanupExpiredPublicTrialSites(ctx context.Context, now time.Time) {
 	expiredSites := make([]hostingandsupport.PublicTrialSite, 0)
 	if err := a.withServerControlDatabaseRead(ctx, "trial-cleanup-scan", func(database *sql.DB) error {
-		for _, trialSite := range (hostingandsupport.Store{DB: database}).PublicTrialSites(ctx) {
+		trialSites, err := (hostingandsupport.Store{DB: database}).PublicTrialSitesWithError(ctx)
+		if err != nil {
+			return err
+		}
+		for _, trialSite := range trialSites {
 			deleteAfter, parseErr := time.Parse(time.RFC3339, strings.TrimSpace(trialSite.DeleteAfter))
-			if trialSite.Status == "active" && parseErr == nil && !now.Before(deleteAfter) {
+			if (trialSite.Status == "active" || trialSite.Status == "private" || trialSite.Status == "email_pending" || trialSite.Status == "expiring") && parseErr == nil && !now.Before(deleteAfter) {
 				expiredSites = append(expiredSites, trialSite)
 			}
 		}
@@ -27930,7 +27792,11 @@ func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, control
 		demoStore := demo.Store{DB: database}
 		demoSettings = demoStore.Settings(ctx)
 		demoSessions = demoStore.Sessions(ctx)
-		publicTrialSites = store.PublicTrialSites(ctx)
+		var trialSitesErr error
+		publicTrialSites, trialSitesErr = store.PublicTrialSitesWithError(ctx)
+		if trialSitesErr != nil {
+			return trialSitesErr
+		}
 		for siteIndex := range publicTrialSites {
 			trialSite := &publicTrialSites[siteIndex]
 			if trialSite.ClientIP == "" {
@@ -27957,7 +27823,7 @@ func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, control
 	activePublicTrialSites := make([]hostingandsupport.PublicTrialSite, 0, len(publicTrialSites))
 	archivedPublicTrialSites := make([]hostingandsupport.PublicTrialSite, 0, len(publicTrialSites))
 	for _, publicTrialSite := range publicTrialSites {
-		if strings.EqualFold(publicTrialSite.Status, "deleted") {
+		if strings.EqualFold(publicTrialSite.Status, "deleted") || strings.EqualFold(publicTrialSite.Status, "expired") {
 			archivedPublicTrialSites = append(archivedPublicTrialSites, publicTrialSite)
 			continue
 		}
@@ -28269,8 +28135,12 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 		trialUnavailableText = translationOrDefault(translations, trialAvailability.ReasonKey, "Test drive is unavailable until automatic registration and wildcard DNS are configured.")
 	}
 	publicTrialEmbedHTML := ""
+	testDriveEmbedHTML := ""
+	createSiteEmbedHTML := ""
 	if trialAvailability.Enabled {
 		publicTrialEmbedHTML = publicTrialSignupEmbedHTML(r, translations, snapshot.MainDomain)
+		testDriveEmbedHTML = testDriveSignupEmbedHTML(r, translations, snapshot.MainDomain)
+		createSiteEmbedHTML = createSiteSignupEmbedHTML(r, translations, snapshot.MainDomain)
 	}
 	expensesTitle := translationOrDefault(translations, "expenses_title", "Server settings")
 	if normalizeDomainName(snapshot.MainDomain) == "sitebrush.com" {
@@ -28330,6 +28200,8 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 		"PublicTrialWildcardDomain":  trialAvailability.WildcardDomain,
 		"PublicTrialExternalIP":      trialAvailability.ExternalIP,
 		"PublicTrialEmbedHTML":       publicTrialEmbedHTML,
+		"TestDriveEmbedHTML":         testDriveEmbedHTML,
+		"CreateSiteEmbedHTML":        createSiteEmbedHTML,
 		"CurrentDomain":              domainFromRequest(r),
 		"PanelSnapshotBuiltAt":       snapshot.BuiltAt,
 		"CommissionBPS":              snapshot.CommissionBPS,
@@ -29400,36 +29272,39 @@ func (a *App) hostingAndSupportSiteURL(domain string) string {
 }
 
 func publicTrialSignupEmbedHTML(r *http.Request, translations map[string]string, ownerDomains ...string) string {
+	return testDriveSignupEmbedHTML(r, translations, ownerDomains...) + "\n" + createSiteSignupEmbedHTML(r, translations, ownerDomains...)
+}
+
+func testDriveSignupEmbedHTML(r *http.Request, translations map[string]string, ownerDomains ...string) string {
+	ownerDomain := normalizeDomainName(domainFromRequest(r))
+	if len(ownerDomains) > 0 && normalizeDomainName(ownerDomains[0]) != "" {
+		ownerDomain = normalizeDomainName(ownerDomains[0])
+	}
+	endpointURL := requestScheme(r) + "://" + ownerDomain + "/"
+	formTitle := template.HTMLEscapeString(translationOrDefault(translations, "test_drive_title", "Test Drive"))
+	checkButton := template.HTMLEscapeString(translationOrDefault(translations, "test_drive_create", "Start private Test Drive"))
+	return `<div class="SiteBrushPublicTrialForm SiteBrush-TestDrive-Form sitebrush-public-trial-form">
+  <p class="SiteBrushPublicTrialTitle sitebrush-public-trial-title" data-sitebrush-public-trial-title>` + formTitle + `</p>
+  <a class="SiteBrushPublicTrialButton sitebrush-public-trial-button" href="` + template.HTMLEscapeString(endpointURL+"?test_drive") + `">` + checkButton + `</a>
+</div>`
+}
+
+func createSiteSignupEmbedHTML(r *http.Request, translations map[string]string, ownerDomains ...string) string {
 	ownerDomain := normalizeDomainName(domainFromRequest(r))
 	if len(ownerDomains) > 0 && normalizeDomainName(ownerDomains[0]) != "" {
 		ownerDomain = normalizeDomainName(ownerDomains[0])
 	}
 	endpointURL := requestScheme(r) + "://" + ownerDomain + "/"
 	scriptURL := requestScheme(r) + "://" + ownerDomain + "/p/static/site_copy.js?v=" + url.QueryEscape(publicTrialWidgetScriptVersion())
+	domainInputURL := requestScheme(r) + "://" + ownerDomain + "/p/static/domain_name_input.js?v=" + url.QueryEscape(publicTrialWidgetScriptVersion())
 	config := map[string]any{"endpoint": endpointURL, "parentDomain": ownerDomain, "texts": publicTrialWidgetTexts(translations)}
 	configJSON, err := json.Marshal(config)
 	if err != nil {
 		configJSON = []byte(`{"endpoint":` + strconv.Quote(endpointURL) + `}`)
 	}
-	formTitle := template.HTMLEscapeString(translationOrDefault(translations, "public_trial_form_title", "Enter the website where you want to launch SiteBrush:"))
-	fieldLabel := template.HTMLEscapeString(translationOrDefault(translations, "public_trial_field_label", "Website address"))
-	checkButton := template.HTMLEscapeString(translationOrDefault(translations, "public_trial_check_button", "Check website"))
 	newSiteTitle := template.HTMLEscapeString(translationOrDefault(translations, "public_trial_new_site_title", "Create an empty site"))
 	newSiteLabel := template.HTMLEscapeString(translationOrDefault(translations, "public_trial_subdomain_label", "Choose your SiteBrush address"))
-	return `<form class="SiteBrushPublicTrialForm sitebrush-public-trial-form" data-sitebrush-public-trial-form>
-  <p class="SiteBrushPublicTrialTitle sitebrush-public-trial-title" data-sitebrush-public-trial-title>` + formTitle + `</p>
-  <label class="SiteBrushPublicTrialField sitebrush-public-trial-field">
-    <span class="SiteBrushPublicTrialLabel sitebrush-public-trial-label" data-sitebrush-public-trial-label>` + fieldLabel + `</span>
-    <input class="SiteBrushPublicTrialInput sitebrush-public-trial-input" data-sitebrush-public-trial-input type="text" name="source_url" autocomplete="url" inputmode="url" required>
-  </label>
-  <label class="SiteBrushPublicTrialField sitebrush-public-trial-field">
-    <span class="SiteBrushPublicTrialLabel sitebrush-public-trial-label" data-sitebrush-trial-domain-label>` + newSiteLabel + `</span>
-    <input class="SiteBrushPublicTrialInput sitebrush-public-trial-input" name="subdomain" type="text" pattern="[a-z0-9](?:[a-z0-9-]{0,22}[a-z0-9])?" maxlength="24" autocomplete="off">
-  </label>
-  <output class="SiteBrushPublicTrialLabel sitebrush-public-trial-label" data-sitebrush-suggested-domain></output>
-  <button class="SiteBrushPublicTrialButton sitebrush-public-trial-button" data-sitebrush-public-trial-submit type="submit">` + checkButton + `</button>
-</form>
-<form class="SiteBrushPublicTrialForm sitebrush-public-trial-form" data-sitebrush-new-site-form>
+	return `<form class="SiteBrushPublicTrialForm SiteBrush-CreateSite-Form sitebrush-public-trial-form" data-sitebrush-new-site-form>
   <p class="SiteBrushPublicTrialTitle sitebrush-public-trial-title" data-sitebrush-new-site-title>` + newSiteTitle + `</p>
   <label class="SiteBrushPublicTrialField sitebrush-public-trial-field">
     <span class="SiteBrushPublicTrialLabel sitebrush-public-trial-label" data-sitebrush-new-site-label>` + newSiteLabel + `</span>
@@ -29437,8 +29312,14 @@ func publicTrialSignupEmbedHTML(r *http.Request, translations map[string]string,
   </label>
   <output class="SiteBrushPublicTrialLabel sitebrush-public-trial-label" data-sitebrush-new-domain-preview></output>
   <output class="SiteBrushPublicTrialLabel sitebrush-public-trial-label" role="status" data-sitebrush-domain-status></output>
+  <div class="SiteBrushPublicTrialField sitebrush-public-trial-field" data-sitebrush-name-check-captcha hidden>
+    <label><span>` + template.HTMLEscapeString(translationOrDefault(translations, "account_captcha_label", "Characters from the image")) + `</span><img width="240" height="80" alt="` + template.HTMLEscapeString(translationOrDefault(translations, "recover_captcha_alt", "CAPTCHA image")) + `" data-sitebrush-name-check-captcha-image><input name="captcha" autocomplete="off"></label>
+    <input type="hidden" name="captcha_id" data-sitebrush-name-check-captcha-id>
+    <button type="button" data-sitebrush-name-check-captcha-confirm>` + template.HTMLEscapeString(translationOrDefault(translations, "test_drive_confirm_captcha", "Confirm CAPTCHA")) + `</button>
+  </div>
   <button class="SiteBrushPublicTrialButton sitebrush-public-trial-button" type="submit" data-sitebrush-new-site-button>` + newSiteTitle + `</button>
 </form>
+<script src="` + template.HTMLEscapeString(domainInputURL) + `" data-sitebrush-live-asset></script>
 <script src="` + template.HTMLEscapeString(scriptURL) + `" data-sitebrush-live-asset></script>
 <script>
 (function () {
@@ -29451,9 +29332,6 @@ func publicTrialSignupEmbedHTML(r *http.Request, translations map[string]string,
     ? currentScript.parentNode.querySelector("[data-sitebrush-new-site-form]")
     : null;
 
-  if (window.SiteBrushPublicTrial && formElement) {
-    window.SiteBrushPublicTrial.attach(formElement, ` + string(configJSON) + `);
-  }
   if (window.SiteBrushPublicTrial && newSiteFormElement) {
     window.SiteBrushPublicTrial.attachNewSite(newSiteFormElement, ` + string(configJSON) + `);
   }
@@ -29486,6 +29364,7 @@ func publicTrialWidgetTexts(translations map[string]string) map[string]string {
 		"captchaLabel":          translationOrDefault(translations, "account_captcha_label", "Characters from the image"),
 		"captchaAlt":            translationOrDefault(translations, "recover_captcha_alt", "CAPTCHA image"),
 		"captchaUnavailable":    translationOrDefault(translations, "public_trial_captcha_unavailable", "CAPTCHA is temporarily unavailable."),
+		"nameCheckLimited":      translationOrDefault(translations, "test_drive_limit_error", "Too many requests. Please try again later."),
 		"suggestionUnavailable": translationOrDefault(translations, "public_trial_suggestion_unavailable", "Could not suggest an address. Try again."),
 		"createButton":          translationOrDefault(translations, "public_trial_create_button", "Create test website"),
 		"analyzing":             translationOrDefault(translations, "public_trial_analyzing", "Analyzing the website..."),
@@ -46099,6 +45978,10 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, templateName string
 	envelope := map[string]any{"Domain": domain, "T": translations, "CompileVersion": CompileVersion, "LanguageCode": languageCode, "TextDirection": textDirection, "AccountCSRF": accountCSRF(r)}
 	mergeTemplateData(envelope, templateData)
 	if templateName == "edit.html" {
+		if trial, found, _ := a.privateTestDrive(r.Context(), domain); found && testDriveOwner(r, trial) {
+			envelope["PrivateTestDrive"] = true
+			envelope["TestDriveCreatedAt"] = trial.CreatedAt
+		}
 		assetVersion, err := visualEditorAssetVersion()
 		if err != nil {
 			http.Error(w, "editor assets unavailable", http.StatusInternalServerError)
@@ -55133,6 +55016,11 @@ func (a *App) updateAuthorized(r *http.Request) bool {
 }
 
 func (a *App) serverUpdatePage(w http.ResponseWriter, r *http.Request) {
+	defer func() {
+		if failure := recover(); failure != nil {
+			a.serverUpdateDiagnosticPage(w, r, fmt.Errorf("update page panic: %v", failure))
+		}
+	}()
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -55158,7 +55046,66 @@ func (a *App) serverUpdatePage(w http.ResponseWriter, r *http.Request) {
 	}
 	_, centralErr := a.centralAnnouncementIdentity()
 	view := map[string]any{"T": translationsForRequest(r), "AccountCSRF": accountCSRF(r), "CentralAnnouncements": centralErr == nil, "ServerVersion": CompileVersion, "Embedded": true}
-	a.render(w, r, "server_update.html", view)
+	page := &serverUpdatePageBuffer{headers: make(http.Header)}
+	a.render(page, r, "server_update.html", view)
+	if page.status >= http.StatusBadRequest || page.body.Len() == 0 {
+		renderError := strings.TrimSpace(page.body.String())
+		if len(renderError) > 500 {
+			renderError = renderError[:500]
+		}
+		a.serverUpdateDiagnosticPage(w, r, fmt.Errorf("update template status=%d bytes=%d error=%s", page.status, page.body.Len(), renderError))
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write(page.body.Bytes())
+}
+
+type serverUpdatePageBuffer struct {
+	headers http.Header
+	body    bytes.Buffer
+	status  int
+}
+
+func (page *serverUpdatePageBuffer) Header() http.Header { return page.headers }
+
+func (page *serverUpdatePageBuffer) WriteHeader(status int) { page.status = status }
+
+func (page *serverUpdatePageBuffer) Write(content []byte) (int, error) {
+	if page.status == 0 {
+		page.status = http.StatusOK
+	}
+	return page.body.Write(content)
+}
+
+func (a *App) serverUpdateDiagnosticPage(w http.ResponseWriter, r *http.Request, failure error) {
+	requestID := strings.TrimSpace(r.Header.Get("X-Request-ID"))
+	if requestID == "" {
+		requestID = randomAccessToken()
+	}
+	adminEmail, _ := a.currentAdminEmail(r)
+	log.Printf("UPDATE error endpoint=server_update request_id=%s admin=%s at=%s error=%s", diagnosticlog.SafeLogValue(requestID), diagnosticlog.SafeLogValue(adminEmail), time.Now().UTC().Format(time.RFC3339), diagnosticlog.SafeLogValue(failure.Error()))
+	translations := translationsForRequest(r)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusInternalServerError)
+	_, _ = fmt.Fprintf(w, `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><main style="font:16px/1.5 system-ui,sans-serif;max-width:40rem;margin:10vh auto;padding:1rem"><h1>%s</h1><p>%s</p><p>%s: %s</p></main>`, template.HTMLEscapeString(translations["update_title"]), template.HTMLEscapeString(translations["update_unavailable"]), template.HTMLEscapeString(translations["update_request_id_label"]), template.HTMLEscapeString(requestID))
+}
+
+func (a *App) serverUpdateClientError(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost || !a.updateAuthorized(r) || !adminMutationSourceAllowed(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	adminEmail, _ := a.currentAdminEmail(r)
+	requestID := strings.TrimSpace(r.FormValue("request_id"))
+	if requestID == "" {
+		requestID = randomAccessToken()
+	}
+	message := strings.TrimSpace(r.FormValue("message"))
+	if len(message) > 500 {
+		message = message[:500]
+	}
+	log.Printf("UPDATE error endpoint=server_update_client_error request_id=%s admin=%s at=%s error=%s", diagnosticlog.SafeLogValue(requestID), diagnosticlog.SafeLogValue(adminEmail), time.Now().UTC().Format(time.RFC3339), diagnosticlog.SafeLogValue(message))
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (a *App) serverUpdateSocket(w http.ResponseWriter, r *http.Request) {
@@ -57410,7 +57357,7 @@ func sitebrushControlQueryFlag(flag string) bool {
 		"ai_provider_status", "ai_provider_models", "ai_provider_save", "ai_provider_delete",
 		"ai_execute", "ai_execute_ws", "ai_apply", "ai_background",
 		"login", "logout", "login_link", "register", "recover", "profile", "email_confirm", "https_status",
-		"server_update", "server_update_ws", "settings", "properties", "domain", "analytics",
+		"server_update", "server_update_ws", "server_update_client_error", "settings", "properties", "domain", "analytics",
 		"visual", "edit", "editraw", "text", "save", "delete", "files", "revisions",
 		"revision_preview", "revision_restore", "revision_delete", "revision_toggle", "tree",
 		"freeze", "unfreeze", "unfreeze_ws", "publish", "publish_events", "publish_preview",
@@ -57420,6 +57367,7 @@ func sitebrushControlQueryFlag(flag string) bool {
 		"trial_site_ws", "trial_site_events", "trial_site_texts", "trial_site_preview",
 		"trial_site_preview_status", "trial_site_preview_cancel", "trial_site_preview_frame",
 		"trial_site_create", "trial_site_indexing", "trial_site_suggest", "trial_site_captcha", "trial_site_domain_check",
+		"test_drive", "test_drive_start", "test_drive_handoff", "test_drive_status", "test_drive_email", "test_drive_verify", "test_drive_activate", "test_drive_captcha", "test_drive_check_captcha", "test_drive_ws",
 		"demo_grab_preview", "demo_grab_refresh", "site_request",
 		"backup", "backup_import", "backup_download", "native_pick_files", "native_save_backup",
 		"hosting_and_support", "expenses", "billing", "hosting_invoice", "billing_schedule",
@@ -57642,6 +57590,9 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 func newPublicHTTPFront(application *App, secret string, stop <-chan struct{}) *publicsite.Front {
 	var front *publicsite.Front
 	publicHandler := func(w http.ResponseWriter, r *http.Request, paused bool) bool {
+		if application.privateTestDriveGate(w, r) {
+			return true
+		}
 		if hasQueryFlag(r, "sitebrush_menu_ws") && paused {
 			application.publicUpdatingMenuSocket(w, r)
 			return true
@@ -57970,6 +57921,8 @@ func (a *App) publicUpdateStatusSocket(w http.ResponseWriter, r *http.Request) {
 			response, exchangeErr := appupdate.Exchange(a.storagePath, appupdate.Request{Action: command.Action}, connection.Request().Context().Done())
 			if exchangeErr != nil {
 				response.Error = exchangeErr.Error()
+				adminEmail, _ := a.currentAdminEmail(r)
+				log.Printf("UPDATE error endpoint=server_update_ws request_id=%s admin=%s at=%s action=%s error=%s", diagnosticlog.SafeLogValue(r.Header.Get("X-Request-ID")), diagnosticlog.SafeLogValue(adminEmail), time.Now().UTC().Format(time.RFC3339), command.Action, diagnosticlog.SafeLogValue(exchangeErr.Error()))
 			}
 			connection.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			if websocket.JSON.Send(connection, serverUpdateResponse{Response: response, ServerVersion: response.State.Current.Version}) != nil {

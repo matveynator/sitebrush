@@ -1,0 +1,26 @@
+.test-drive-domain-input{display:flex;align-items:center;gap:.35rem;max-width:100%;border:1px solid #adb5bd;border-radius:.5rem;padding:0 .65rem}
+.test-drive-domain-input input{flex:1;min-width:0;border:0;background:transparent;padding:.75rem .25rem;outline:0}
+.test-drive-domain-input span{flex:none;white-space:nowrap}
+.test-drive-address{display:block;min-height:1.5rem;overflow-wrap:anywhere}
+.test-drive-captcha{display:grid;gap:.45rem}
+.test-drive-captcha img{max-width:100%;height:auto}
+.test-drive-captcha input{max-width:20rem}
+.SiteBrush-TestDrive-Form{display:grid;gap:.8rem}
+@media(max-width:380px){.test-drive-domain-input{font-size:.85rem}}
+.test-drive-save-notice{position:fixed;right:1rem;bottom:1rem;z-index:10000;border:0;border-radius:.5rem;background:#146d8b;color:#fff;padding:.75rem 1rem;box-shadow:0 4px 15px #0003}
+.test-drive-save-overlay{position:fixed;inset:0;z-index:10001;display:grid;place-items:center;background:#0008;padding:1rem}
+.test-drive-save-overlay[hidden],.test-drive-save-notice[hidden]{display:none}
+.test-drive-save-dialog{position:relative;box-sizing:border-box;width:min(100%,30rem);max-height:calc(100dvh - 2rem);overflow:visible;background:var(--theme-card,#fff);color:var(--theme-foreground,#222);border-radius:.75rem;padding:1.25rem;box-shadow:0 12px 40px #0004;display:grid;gap:.7rem}
+.test-drive-save-dialog [hidden]{display:none!important}
+.test-drive-save-dialog h2,.test-drive-save-dialog p{margin:0}
+.test-drive-save-dialog form{display:grid;gap:.7rem}
+.test-drive-save-dialog label{display:grid;gap:.35rem}
+.test-drive-save-dialog input{box-sizing:border-box;width:100%;padding:.55rem;border:1px solid var(--theme-border,#aaa);border-radius:.4rem}
+.test-drive-save-dialog button{padding:.55rem .8rem;border:1px solid var(--theme-border,#aaa);border-radius:.4rem;cursor:pointer}
+.test-drive-save-dialog form button{background:var(--theme-primary,#146d8b);color:#fff}
+.test-drive-close{position:absolute;right:.5rem;top:.4rem;background:transparent;border:0!important;font-size:1.4rem}
+.test-drive-code-actions,.test-drive-mail-links{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center}
+.test-drive-code-actions button{font-size:.85rem;padding:.4rem .55rem;white-space:nowrap}
+.test-drive-mail-links a{font-size:.85rem}
+@media(max-height:600px){.test-drive-save-dialog{gap:.35rem;padding:.65rem;font-size:.85rem}.test-drive-save-dialog input,.test-drive-save-dialog button{padding:.35rem}}
+@media(max-height:540px){.test-drive-save-dialog>p:not([data-trial-reason]),.test-drive-mail-links{display:none}.test-drive-save-dialog{gap:.25rem;padding:.5rem;font-size:.8rem}.test-drive-save-overlay{padding:.35rem}}

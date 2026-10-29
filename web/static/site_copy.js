@@ -1566,22 +1566,52 @@
     });
     const subdomainInputElement = formElement.querySelector('input[name="subdomain"]');
     const domainPreviewElement = formElement.querySelector('[data-sitebrush-new-domain-preview]');
+    const domainInput = window.SiteBrushDomainNameInput;
+    const statusElement = formElement.querySelector('[data-sitebrush-domain-status]');
+    const submitButton = formElement.querySelector('button[type="submit"]');
+    const captchaElement = formElement.querySelector('[data-sitebrush-name-check-captcha]');
+    const captchaImageElement = formElement.querySelector('[data-sitebrush-name-check-captcha-image]');
+    const captchaIDElement = formElement.querySelector('[data-sitebrush-name-check-captcha-id]');
+    const captchaConfirmElement = formElement.querySelector('[data-sitebrush-name-check-captcha-confirm]');
+    const formModel = {busy: false, status: '', captchaRequired: false, captchaImage: '', captchaID: ''};
+    function renderNewSiteState() {
+      submitButton.disabled = formModel.busy;
+      statusElement.textContent = formModel.status;
+      captchaElement.hidden = !formModel.captchaRequired;
+      if (formModel.captchaImage) captchaImageElement.src = formModel.captchaImage;
+      captchaIDElement.value = formModel.captchaID;
+      captchaConfirmElement.disabled = formModel.busy;
+    }
     function renderNewSiteAddress() {
       if (!domainPreviewElement || !subdomainInputElement) return;
-      const label = String(subdomainInputElement.value || '').toLowerCase().trim();
-      domainPreviewElement.textContent = label ? publicTrialText(configuration, 'suggestedAddress', 'Your site address') + ': ' + label + '.' + String(configuration.parentDomain || '') : '';
+      const label = domainInput.normalize(subdomainInputElement.value).trim();
+      const address = domainInput.address(label, String(configuration.parentDomain || ''));
+      domainPreviewElement.textContent = address ? publicTrialText(configuration, 'suggestedAddress', 'Your site address') + ': ' + address : '';
     }
     if (subdomainInputElement) subdomainInputElement.addEventListener('input', renderNewSiteAddress);
     renderNewSiteAddress();
-    formElement.addEventListener('submit', function onNewSiteSubmit(submitEvent) {
-      submitEvent.preventDefault();
-      if (!formElement.reportValidity()) {
-        return;
-      }
+    renderNewSiteState();
+
+    function loadNameCheckCaptcha() {
+      const challengeURL = publicTrialFetchURL(configuration.endpoint || '/', 'trial_site_captcha');
+      return fetch(challengeURL, {headers: {Accept: 'application/json'}})
+        .then(function readNameCheckCaptcha(response) {
+          if (!response.ok) throw new Error(publicTrialText(configuration, 'captchaUnavailable', ''));
+          return response.json();
+        })
+        .then(function showNameCheckCaptcha(challenge) {
+          formModel.captchaImage = challenge.image;
+          formModel.captchaID = challenge.captcha_id;
+          formModel.captchaRequired = true;
+          renderNewSiteState();
+        });
+    }
+
+    function checkNewSiteDomain() {
       const subdomainInput = formElement.querySelector('input[name="subdomain"]');
-      const subdomainName = String(subdomainInput.value || '').toLowerCase().trim();
+      const subdomainName = domainInput.normalize(subdomainInput.value).trim();
       const parentDomain = String(configuration && configuration.parentDomain || '').toLowerCase().trim();
-      if (!/^[a-z0-9](?:[a-z0-9-]{0,22}[a-z0-9])?$/.test(subdomainName) || !parentDomain) {
+      if (!domainInput.valid(subdomainName) || !parentDomain) {
         subdomainInput.setCustomValidity(publicTrialText(configuration, 'newSiteInvalid', 'Enter a valid subdomain name.'));
         subdomainInput.reportValidity();
         return;
@@ -1589,11 +1619,20 @@
       subdomainInput.setCustomValidity('');
       const checkURL = new URL(publicTrialFetchURL(configuration.endpoint || '/', 'trial_site_domain_check'));
       checkURL.searchParams.set('subdomain', subdomainName);
-      const submitButton = formElement.querySelector('button[type="submit"]');
-      const statusElement = formElement.querySelector('[data-sitebrush-domain-status]');
-      submitButton.disabled = true;
+      formModel.busy = true;
+      formModel.status = '';
+      renderNewSiteState();
       fetch(checkURL.toString(), {headers: {Accept: 'application/json'}})
         .then(function readDomainCheck(response) {
+          if (response.status === 429) {
+            if (response.headers.get('X-SiteBrush-Captcha-Required') === '1') {
+              loadNameCheckCaptcha().catch(function reportCaptchaLoad(error) {
+                formModel.status = error.message;
+                renderNewSiteState();
+              });
+            }
+            throw new Error(publicTrialText(configuration, 'nameCheckLimited', ''));
+          }
           if (!response.ok) throw new Error(publicTrialText(configuration, 'addressCheckFailed', 'Could not check the address. Please try again.'));
           return response.json();
         })
@@ -1609,9 +1648,43 @@
           window.location.assign(registrationURL.toString());
         })
         .catch(function showDomainCheckError(error) {
-          if (statusElement) statusElement.textContent = error.message;
-          submitButton.disabled = false;
+          formModel.status = error.message;
+          formModel.busy = false;
+          renderNewSiteState();
         });
+    }
+
+    captchaConfirmElement.addEventListener('click', function confirmNameCheckCaptcha() {
+      const captchaAnswer = formElement.querySelector('[data-sitebrush-name-check-captcha] input[name="captcha"]');
+      const formBody = new FormData();
+      formBody.set('captcha', captchaAnswer.value);
+      formBody.set('captcha_id', formModel.captchaID);
+      formModel.busy = true;
+      renderNewSiteState();
+      fetch(publicTrialFetchURL(configuration.endpoint || '/', 'test_drive_check_captcha'), {method: 'POST', body: formBody})
+        .then(function readNameCheckConfirmation(response) {
+          if (!response.ok) throw new Error(publicTrialText(configuration, 'captchaUnavailable', ''));
+          formModel.captchaRequired = false;
+          formModel.busy = false;
+          formModel.status = '';
+          renderNewSiteState();
+          checkNewSiteDomain();
+        })
+        .catch(function reportNameCheckConfirmation(error) {
+          formModel.status = error.message;
+          formModel.busy = false;
+          renderNewSiteState();
+          loadNameCheckCaptcha().catch(function reportReloadError(reloadError) {
+            formModel.status = reloadError.message;
+            renderNewSiteState();
+          });
+        });
+    });
+
+    formElement.addEventListener('submit', function onNewSiteSubmit(submitEvent) {
+      submitEvent.preventDefault();
+      if (!formElement.reportValidity()) return;
+      checkNewSiteDomain();
     });
   }
 
