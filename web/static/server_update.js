@@ -4,6 +4,19 @@
   if (!updateRoot) return;
   const announcementRoot = updateRoot.querySelector('[data-announcements]');
   const updateModel = { serverVersion: updateRoot.dataset.serverVersion || '', lastContact: 0, pendingAction: '', queuedCommand: null, logText: '', renderedLog: '', connected: false, state: null, error: '', pending: false, socket: null, stopped: false, preview: null, campaigns: [], reason: 'security', backupPolicy: {databases: true, analytics: false, files: false, settings: false} };
+
+  function reportUpdateError(error) {
+    const requestID = window.crypto && window.crypto.randomUUID ? window.crypto.randomUUID() : String(Date.now());
+    updateModel.error = label('unavailable') + ' (' + requestID + ')';
+    const body = new URLSearchParams({request_id: requestID, message: String(error && error.message || error).slice(0, 500), account_csrf: updateRoot.dataset.csrf});
+    fetch('/?server_update_client_error', {method: 'POST', body: body, credentials: 'same-origin'}).catch(function ignoreReportFailure() {});
+    const errorElement = updateRoot.querySelector('[data-update-error]');
+    errorElement.textContent = updateModel.error;
+    errorElement.hidden = false;
+  }
+
+  window.addEventListener('error', function handleUpdateScriptError(errorEvent) { reportUpdateError(errorEvent.error || errorEvent.message); });
+  window.addEventListener('unhandledrejection', function handleUpdatePromiseError(errorEvent) { reportUpdateError(errorEvent.reason); });
   const stageLabels = Object.fromEntries(Array.from(updateRoot.querySelectorAll('[data-stage]'), function readStageLabel(stageElement) {
     return [stageElement.dataset.stage, stageElement.textContent];
   }));
@@ -34,14 +47,15 @@
 
   function renderUpdate() {
     const updateState = updateModel.state;
+	const currentVersion = updateState && updateState.current ? updateState.current.version || '' : '';
     const operationBusy = Boolean(updateModel.queuedCommand) || (updateModel.pending && updateModel.pendingAction !== 'status') || Boolean(updateState && updateState.busy);
-    putText('[data-update-current]', updateModel.serverVersion || (updateState ? updateState.current.version : '—'));
+    putText('[data-update-current]', updateModel.serverVersion || currentVersion || '—');
     putText('[data-update-launcher-version]', updateState && updateState.launcher_version ? label('launcher_version').replace('%s', updateState.launcher_version) : '');
     putText('[data-update-available]', updateState && updateState.available ? updateState.available.version : '—');
     putText('[data-update-previous]', updateState && updateState.previous ? updateState.previous.version : '—');
     const selectedVersion = updateRoot.querySelector('[data-update-selected]');
-    selectedVersion.hidden = !updateState || !updateModel.serverVersion || updateState.current.version === updateModel.serverVersion;
-    selectedVersion.textContent = updateState ? label('selected').replace('%s', updateState.current.version) : '';
+    selectedVersion.hidden = !currentVersion || !updateModel.serverVersion || currentVersion === updateModel.serverVersion;
+    selectedVersion.textContent = currentVersion ? label('selected').replace('%s', currentVersion) : '';
     const progress = updateState && updateState.progress && updateState.progress.action ? updateState.progress : null;
     let operationStage = progress ? progress.stage : updateState && updateState.stage;
     if (progress && !timestamp(progress.finished_at) && ['completed', 'rolled_back'].includes(progress.stage)) operationStage = 'cleanup';
@@ -57,7 +71,7 @@
     cleanupElement.textContent = updateState && updateState.cleanup_error ? label('cleanup_warning') + ': ' + updateState.cleanup_error : '';
     cleanupElement.hidden = !cleanupElement.textContent;
     updateRoot.querySelector('[data-update-check]').disabled = !updateModel.connected || operationBusy;
-    const newerRelease = updateState && updateState.available && /^\d+$/.test(updateState.current.version) && /^\d+$/.test(updateState.available.version) && BigInt(updateState.available.version) > BigInt(updateState.current.version);
+    const newerRelease = updateState && updateState.available && /^\d+$/.test(currentVersion) && /^\d+$/.test(updateState.available.version) && BigInt(updateState.available.version) > BigInt(currentVersion);
     updateRoot.querySelector('[data-update-install]').disabled = !updateModel.connected || operationBusy || !newerRelease || !updateState.backup_options || Boolean(updateState.recovery_required);
     updateRoot.querySelector('[data-update-rollback]').disabled = !updateModel.connected || operationBusy || !updateState || !updateState.rollback_available || !updateState.backup_options || Boolean(updateState.recovery_required);
     updateRoot.querySelector('[data-update-rollback-reason]').hidden = !updateState || !updateState.previous || updateState.rollback_available;
@@ -113,7 +127,7 @@
     let percent = stageIndex >= 0 ? Math.floor(100 * (stageIndex + stageFraction) / stages.length) : 0;
     const finishedAt = progress ? timestamp(progress.finished_at) : 0;
     const expectedVersion = progress && recovering ? progress.from_version : progress && progress.target_version;
-    const confirmed = progress && finishedAt && (!updateModel.state.busy || updateModel.state.checking) && updateModel.state.current.version === expectedVersion && updateModel.serverVersion === expectedVersion;
+    const confirmed = progress && finishedAt && (!updateModel.state.busy || updateModel.state.checking) && updateModel.state.current && updateModel.state.current.version === expectedVersion && updateModel.serverVersion === expectedVersion;
     if (recovering) percent = 0;
     if (progress && ['completed', 'rolled_back'].includes(progress.stage)) percent = confirmed ? 100 : 99;
     percent = Math.max(0, Math.min(100, percent));
@@ -239,7 +253,8 @@
   function sendUpdateCommand(command) {
     updateModel.pending = true;
     updateModel.pendingAction = command.action;
-    updateModel.socket.send(JSON.stringify(command));
+    try { updateModel.socket.send(JSON.stringify(command)); }
+    catch (sendError) { updateModel.pending = false; reportUpdateError(sendError); }
     renderUpdate();
   }
 
@@ -262,7 +277,8 @@
     if (updateModel.stopped) return;
     const socketAddress = new URL('/?server_update_ws', window.location.href);
     socketAddress.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    updateModel.socket = new WebSocket(socketAddress.href);
+    try { updateModel.socket = new WebSocket(socketAddress.href); }
+    catch (socketError) { reportUpdateError(socketError); renderUpdate(); window.setTimeout(connectUpdateSocket, 2000); return; }
     updateModel.socket.addEventListener('open', function handleUpdateOpen() {
       updateModel.connected = true;
       submitUpdateCommand('status');
@@ -270,7 +286,14 @@
     updateModel.socket.addEventListener('message', function handleUpdateMessage(messageEvent) {
       let updateResponse;
       try { updateResponse = JSON.parse(messageEvent.data); }
-      catch (parseError) { updateModel.error = String(parseError); updateModel.pending = false; renderUpdate(); return; }
+      catch (parseError) { updateModel.pending = false; reportUpdateError(parseError); renderUpdate(); return; }
+      if (!updateResponse || typeof updateResponse !== 'object') {
+        updateModel.pending = false;
+        reportUpdateError(new Error('invalid updater response'));
+        renderUpdate();
+        return;
+      }
+      const requestedAction = updateModel.pendingAction;
       updateModel.pending = false;
       updateModel.pendingAction = '';
       updateModel.lastContact = Date.now();
@@ -281,6 +304,11 @@
       if (updateResponse.State && updateResponse.State.current && updateResponse.State.current.version) {
         if (updateResponse.State.progress && updateResponse.State.progress.finished_at && updateModel.state && updateModel.state.progress && !updateModel.state.progress.finished_at) updateModel.backupPolicy = {databases: true, analytics: false, files: false, settings: false};
         updateModel.state = updateResponse.State;
+      }
+      if (requestedAction === 'status' && !updateResponse.Error && (!updateResponse.State || !updateResponse.State.current || !updateResponse.State.current.version)) {
+        reportUpdateError(new Error('incomplete updater status'));
+        renderUpdate();
+        return;
       }
       updateModel.error = updateResponse.Error || '';
       renderUpdate();
@@ -333,7 +361,7 @@
     const downloadAddress = URL.createObjectURL(new Blob([updateModel.logText], {type: 'text/plain;charset=utf-8'}));
     const downloadLink = document.createElement('a');
     downloadLink.href = downloadAddress;
-    downloadLink.download = 'sitebrush-update-' + (updateModel.state.operation || 'log') + '.txt';
+    downloadLink.download = 'sitebrush-update-' + (updateModel.state && updateModel.state.operation || 'log') + '.txt';
     document.body.append(downloadLink);
     downloadLink.click();
     downloadLink.remove();

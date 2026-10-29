@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="{{.LanguageCode}}" dir="{{.TextDirection}}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{{index .T "test_drive_title"}}</title>
+  <link rel="stylesheet" href="/p/static/technical_pages.css">
+  <link rel="stylesheet" href="/p/static/test_drive.css">
+  <script defer src="/p/static/domain_name_input.js"></script>
+  <script defer src="/p/static/test_drive_form.js"></script>
+</head>
+<body class="technical-page">
+<main class="container authentication-shell">
+  <form class="authentication-card SiteBrush-TestDrive-Form" method="post" action="/?test_drive_start" data-test-drive-form>
+    <h1>{{index .T "test_drive_title"}}</h1>
+    <label for="test-drive-name">{{index .T "test_drive_name_label"}}</label>
+    <div class="test-drive-domain-input">
+      <input id="test-drive-name" name="subdomain" type="text" required maxlength="24" pattern="[a-z0-9](?:[a-z0-9-]{0,22}[a-z0-9])?" autocomplete="off" autocapitalize="none" spellcheck="false" data-test-drive-name>
+      <span dir="ltr">.{{.ParentDomain}}</span>
+    </div>
+    <output class="test-drive-address" data-test-drive-address></output>
+    {{if not .HumanVerified}}
+    <div class="test-drive-captcha" data-test-drive-captcha>
+      <label for="test-drive-captcha-answer">{{index .T "account_captcha_label"}}</label>
+      <img width="240" height="80" alt="{{index .T "recover_captcha_alt"}}" data-test-drive-captcha-image>
+      <input id="test-drive-captcha-answer" name="captcha" required autocomplete="off">
+      <input type="hidden" name="captcha_id" data-test-drive-captcha-id>
+    </div>
+    {{end}}
+    {{if .FormError}}<p role="alert">{{.FormError}}</p>{{end}}
+    <p role="alert" data-test-drive-error hidden>{{index .T "public_trial_captcha_unavailable"}}</p>
+    <button type="submit" class="btn btn-primary">{{index .T "test_drive_create"}}</button>
+    <p class="small">{{index .T "test_drive_private_hint"}}</p>
+  </form>
+</main>
+</body>
+</html>

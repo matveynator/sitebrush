@@ -1150,5 +1150,34 @@ if (visualEditorThemeMediaQuery) {
 }
 connectSaveHotkey(visualHtmlEditor);
 </script>
+{{if .PrivateTestDrive}}
+<link rel="stylesheet" href="/p/static/test_drive.css">
+<section class="test-drive-save" data-test-drive-save data-created-at="{{.TestDriveCreatedAt}}" data-csrf="{{.AccountCSRF}}">
+  <button type="button" class="test-drive-save-notice" data-trial-notice hidden>{{index .T "test_drive_save_title"}}</button>
+  <div class="test-drive-save-overlay" data-trial-overlay hidden>
+    <div class="test-drive-save-dialog" role="dialog" aria-modal="true" aria-labelledby="trial-save-title">
+      <button type="button" class="test-drive-close" data-trial-close aria-label="{{index .T "edit_cancel"}}">×</button>
+      <h2 id="trial-save-title">{{index .T "test_drive_save_title"}}</h2>
+      <p>{{index .T "test_drive_save_hint"}}</p>
+      <p data-trial-reason hidden>{{index .T "test_drive_publish_requires_email"}}</p>
+      <div data-trial-captcha hidden><label>{{index .T "account_captcha_label"}} <img width="240" height="80" alt="{{index .T "recover_captcha_alt"}}" data-trial-captcha-image><input name="captcha" autocomplete="off"></label><input name="captcha_id" type="hidden" data-trial-captcha-id></div>
+      <form data-trial-email-form>
+        <label>{{index .T "test_drive_email_label"}} <input name="email" type="email" autocomplete="email" required></label>
+        <button type="submit">{{index .T "test_drive_send_code"}}</button>
+      </form>
+      <div data-trial-code-stage hidden>
+        <p data-trial-current-email></p>
+        <form data-trial-code-form><label>{{index .T "test_drive_code_label"}} <input name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required autocomplete="one-time-code"></label><button type="submit">{{index .T "test_drive_enter_code"}}</button></form>
+        <div class="test-drive-code-actions"><button type="button" data-trial-resend data-label="{{index .T "test_drive_resend"}}" data-wait="{{index .T "test_drive_resend_wait"}}">{{index .T "test_drive_resend"}}</button><button type="button" data-trial-change>{{index .T "test_drive_change_email"}}</button></div>
+        <div class="test-drive-mail-links" data-trial-mail-links><a href="https://mail.google.com/" target="_blank" rel="noopener noreferrer">{{index .T "test_drive_open_gmail"}}</a><a href="https://outlook.live.com/mail/" target="_blank" rel="noopener noreferrer">{{index .T "test_drive_open_outlook"}}</a><a href="https://mail.yahoo.com/" target="_blank" rel="noopener noreferrer">{{index .T "test_drive_open_yahoo"}}</a></div>
+      </div>
+      <form data-trial-activate-form hidden><button type="submit">{{index .T "test_drive_activate_site"}}</button></form>
+      <p role="alert" data-trial-error hidden>{{index .T "test_drive_generic_error"}}</p>
+    </div>
+  </div>
+</section>
+<script defer src="/p/static/test_drive_session.js"></script>
+<script defer src="/p/static/test_drive_editor.js"></script>
+{{end}}
 </body>
 </html>
