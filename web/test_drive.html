@@ -15,10 +15,17 @@
     <h1>{{index .T "test_drive_title"}}</h1>
     <label for="test-drive-name">{{index .T "test_drive_name_label"}}</label>
     <div class="test-drive-domain-input">
-      <input id="test-drive-name" name="subdomain" type="text" required maxlength="24" pattern="[a-z0-9](?:[a-z0-9-]{0,22}[a-z0-9])?" autocomplete="off" autocapitalize="none" spellcheck="false" data-test-drive-name>
+      <input id="test-drive-name" name="subdomain" type="text" value="{{.ChosenName}}" required maxlength="24" pattern="[a-z0-9](?:[a-z0-9-]{0,22}[a-z0-9])?" autocomplete="off" autocapitalize="none" spellcheck="false" data-test-drive-name>
       <span dir="ltr">.{{.ParentDomain}}</span>
     </div>
     <output class="test-drive-address" data-test-drive-address></output>
+    <p class="test-drive-domain-status" role="status" aria-live="polite" data-test-drive-domain-status
+       data-available="{{index .T "test_drive_address_available"}}"
+       data-checking="{{index .T "test_drive_address_checking"}}"
+       data-unavailable="{{index .T "public_trial_address_unavailable"}}"
+       data-invalid="{{index .T "public_trial_address_invalid"}}"
+       data-failed="{{index .T "public_trial_address_check_failed"}}"
+       data-limited="{{index .T "test_drive_limit_error"}}" hidden></p>
     {{if not .HumanVerified}}
     <div class="test-drive-captcha" data-test-drive-captcha>
       <label for="test-drive-captcha-answer">{{index .T "account_captcha_label"}}</label>
