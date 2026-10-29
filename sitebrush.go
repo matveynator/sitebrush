@@ -57922,7 +57922,7 @@ func (a *App) publicUpdateStatusSocket(w http.ResponseWriter, r *http.Request) {
 			if exchangeErr != nil {
 				response.Error = exchangeErr.Error()
 				adminEmail, _ := a.currentAdminEmail(r)
-				log.Printf("UPDATE error endpoint=server_update_ws request_id=%s admin=%s at=%s action=%s error=%s", diagnosticlog.SafeLogValue(r.Header.Get("X-Request-ID")), diagnosticlog.SafeLogValue(adminEmail), time.Now().UTC().Format(time.RFC3339), command.Action, diagnosticlog.SafeLogValue(exchangeErr.Error()))
+				log.Printf("UPDATE error endpoint=server_update_ws request_id=%s admin=%s at=%s action=%s error=%s", diagnosticlog.SafeLogValue(r.Header.Get("X-Request-ID")), diagnosticlog.SafeLogValue(adminEmail), time.Now().UTC().Format(time.RFC3339), diagnosticlog.SafeLogValue(command.Action), diagnosticlog.SafeLogValue(exchangeErr.Error()))
 			}
 			connection.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			if websocket.JSON.Send(connection, serverUpdateResponse{Response: response, ServerVersion: response.State.Current.Version}) != nil {
