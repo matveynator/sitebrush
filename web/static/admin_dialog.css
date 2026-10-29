@@ -1,0 +1,226 @@
+/* Dialog controls use the same theme tokens and dimensions as administration forms. */
+.SiteBrushAdminDialogOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgb(7 15 28 / 55%);
+}
+
+.SiteBrushAdminDialogOverlay[hidden],
+.SiteBrushAdminDialog [hidden],
+.SiteBrushAdminDialogNotice[hidden] {
+  display: none !important;
+}
+
+.SiteBrushAdminDialog {
+  box-sizing: border-box;
+  width: min(100%, 480px);
+  max-height: calc(100dvh - 32px);
+  overflow: visible;
+  border: 1px solid var(--theme-border);
+  border-radius: var(--theme-radius);
+  background: var(--theme-card);
+  color: var(--theme-card-foreground);
+  box-shadow: 0 20px 60px rgb(0 0 0 / 35%);
+  font-family: var(--theme-font-sans);
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.SiteBrushAdminDialogHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--theme-border);
+}
+
+.SiteBrushAdminDialogTitle {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.25;
+}
+
+.SiteBrushAdminDialogClose {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: calc(var(--theme-radius) - 2px);
+  background: transparent;
+  color: var(--theme-foreground);
+  font: inherit;
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.SiteBrushAdminDialogClose:hover,
+.SiteBrushAdminDialogButton:hover:not(:disabled) {
+  background: var(--theme-accent);
+  color: var(--theme-accent-foreground);
+}
+
+.SiteBrushAdminDialogBody,
+.SiteBrushAdminDialogForm,
+.SiteBrushAdminDialogField,
+.SiteBrushAdminDialogCaptcha {
+  display: grid;
+  gap: 8px;
+}
+
+.SiteBrushAdminDialogBody {
+  padding: 16px;
+}
+
+.SiteBrushAdminDialogBody p {
+  margin: 0;
+}
+
+.SiteBrushAdminDialogBody [data-trial-code-stage] {
+  display: grid;
+  gap: 8px;
+}
+
+.SiteBrushAdminDialogHint {
+  color: var(--theme-muted-foreground);
+}
+
+.SiteBrushAdminDialogReason,
+.SiteBrushAdminDialogField {
+  font-weight: 500;
+}
+
+.SiteBrushAdminDialogReason {
+  color: var(--theme-destructive);
+}
+
+.SiteBrushAdminDialogField input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+  padding: 7px 12px;
+  border: 1px solid var(--theme-input);
+  border-radius: calc(var(--theme-radius) - 2px);
+  background: var(--theme-card);
+  color: var(--theme-card-foreground);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 5%);
+  font: inherit;
+  font-weight: 400;
+}
+
+.SiteBrushAdminDialogField input[autocomplete="one-time-code"] {
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: .12em;
+  text-align: center;
+}
+
+.SiteBrushAdminDialogButton,
+.SiteBrushAdminDialogNotice {
+  box-sizing: border-box;
+  min-height: 36px;
+  padding: 7px 16px;
+  border: 1px solid var(--theme-border);
+  border-radius: calc(var(--theme-radius) - 2px);
+  background: var(--theme-card);
+  color: var(--theme-card-foreground);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 5%);
+  font: inherit;
+  font-weight: 500;
+  line-height: 20px;
+  cursor: pointer;
+}
+
+.SiteBrushAdminDialogButton.primary,
+.SiteBrushAdminDialogNotice {
+  border-color: var(--theme-primary);
+  background: var(--theme-primary);
+  color: var(--theme-primary-foreground);
+}
+
+.SiteBrushAdminDialogButton.primary:hover:not(:disabled),
+.SiteBrushAdminDialogNotice:hover {
+  background: color-mix(in srgb, var(--theme-primary) 90%, transparent);
+  color: var(--theme-primary-foreground);
+}
+
+.SiteBrushAdminDialogButton:disabled {
+  opacity: .5;
+  cursor: default;
+}
+
+.SiteBrushAdminDialog :is(button, input, a):focus-visible,
+.SiteBrushAdminDialogNotice:focus-visible {
+  outline: 2px solid var(--theme-ring);
+  outline-offset: 2px;
+}
+
+.SiteBrushAdminDialogActions,
+.SiteBrushAdminDialogMailLinks {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.SiteBrushAdminDialogActions .SiteBrushAdminDialogButton {
+  padding-inline: 10px;
+}
+
+.SiteBrushAdminDialogMailLinks a {
+  color: var(--theme-primary);
+  font-size: 13px;
+}
+
+.SiteBrushAdminDialogCurrentEmail {
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+
+.SiteBrushAdminDialogError {
+  color: var(--theme-destructive);
+}
+
+.SiteBrushAdminDialogNotice {
+  position: fixed;
+  inset-inline-end: 16px;
+  bottom: 16px;
+  z-index: 2147483646;
+  max-width: calc(100vw - 32px);
+  text-align: start;
+}
+
+@media (max-width: 620px) {
+  .SiteBrushAdminDialogField input {
+    font-size: 16px;
+  }
+}
+
+@media (max-height: 600px) {
+  .SiteBrushAdminDialogHeader {
+    padding-block: 6px;
+  }
+  .SiteBrushAdminDialogBody {
+    gap: 6px;
+    padding: 10px 14px;
+  }
+  .SiteBrushAdminDialogForm,
+  .SiteBrushAdminDialogField,
+  .SiteBrushAdminDialogCaptcha {
+    gap: 5px;
+  }
+}
+
+@media (max-height: 540px) {
+  .SiteBrushAdminDialogHint,
+  .SiteBrushAdminDialogMailLinks {
+    display: none;
+  }
+}

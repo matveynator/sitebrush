@@ -94,7 +94,7 @@
     }
     // Activation must use HTTP so the browser accepts the new HttpOnly session cookie.
     formBody.set('account_csrf', rootElement.dataset.csrf);
-    return fetch('/?' + queryFlag, {method: 'POST', body: formBody, credentials: 'same-origin'})
+    return fetch('/?' + queryFlag, {method: 'POST', body: formBody, credentials: 'same-origin', headers: {'X-SiteBrush-CSRF': rootElement.dataset.csrf}})
       .then(function readAction(response) {
         if (!response.ok) return response.text().then(function reportActionError(body) { throw new Error(body.trim() || defaultErrorText); });
         return response.json();
