@@ -13482,7 +13482,7 @@ func TestPrivateTestDriveRequiresCreatingBrowserSession(t *testing.T) {
 		})
 	}
 	if err := application.withServerControlDatabaseWrite(context.Background(), "test-expire-trial", func(database *sql.DB) error {
-		_, err := database.Exec(`UPDATE public_trial_sites SET delete_after=? WHERE domain=?`, now.Add(-time.Minute).Format(time.RFC3339), domain)
+		_, err := database.Exec(`UPDATE public_trial_sites SET status='email_verified',verified_email=?,delete_after=? WHERE domain=?`, "creator@example.com", now.Add(-time.Minute).Format(time.RFC3339), domain)
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -13492,7 +13492,7 @@ func TestPrivateTestDriveRequiresCreatingBrowserSession(t *testing.T) {
 	expiredResponse := httptest.NewRecorder()
 	application.route(expiredResponse, expiredRequest)
 	if expiredResponse.Code != http.StatusForbidden || strings.Contains(expiredResponse.Body.String(), content) {
-		t.Fatalf("expired owner still reached site: %d %s", expiredResponse.Code, expiredResponse.Body.String())
+		t.Fatalf("expired verified owner still reached site: %d %s", expiredResponse.Code, expiredResponse.Body.String())
 	}
 	var trialRows []hostingandsupport.PublicTrialSite
 	if err := application.withServerControlDatabaseRead(context.Background(), "test-trial-cleanup-list", func(database *sql.DB) error {
@@ -13509,7 +13509,7 @@ func TestPrivateTestDriveRequiresCreatingBrowserSession(t *testing.T) {
 			return err
 		}
 		if status != "expired" {
-			return fmt.Errorf("expired trial status=%s", status)
+			return fmt.Errorf("expired verified trial status=%s", status)
 		}
 		return nil
 	}); err != nil {
@@ -13741,6 +13741,15 @@ func TestPrivateTestDriveStartsBeforeEmailAndHandsOffOnce(t *testing.T) {
 	handoffForm := url.Values{"ticket": {ticketMatch[1]}}
 	handoffRequest := httptest.NewRequest(http.MethodPost, "https://myproject.sitebrush.example/?test_drive_handoff", strings.NewReader(handoffForm.Encode()))
 	handoffRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	publicBoundary := &App{storagePath: application.storagePath, storageRealRoot: application.storageRealRoot, publicBoundary: true, controlDatabase: dispatcher}
+	boundaryResponse := httptest.NewRecorder()
+	if publicBoundary.privateTestDriveGate(boundaryResponse, handoffRequest) || boundaryResponse.Body.Len() != 0 {
+		t.Fatalf("public boundary consumed the handoff: %d %s", boundaryResponse.Code, boundaryResponse.Body.String())
+	}
+	beforeHandoff, found, err := application.privateTestDrive(context.Background(), "myproject.sitebrush.example")
+	if err != nil || !found || beforeHandoff.HandoffHash == "" {
+		t.Fatalf("public boundary changed the handoff ticket: %+v %t %v", beforeHandoff, found, err)
+	}
 	handoffResponse := httptest.NewRecorder()
 	application.route(handoffResponse, handoffRequest)
 	if handoffResponse.Code != http.StatusSeeOther || handoffResponse.Header().Get("Location") != "/?edit" {
@@ -13758,6 +13767,12 @@ func TestPrivateTestDriveStartsBeforeEmailAndHandsOffOnce(t *testing.T) {
 	if trialCookie == nil || editorCookie == nil || !trialCookie.HttpOnly || !trialCookie.Secure {
 		t.Fatalf("trial cookies: %#v", handoffResponse.Result().Cookies())
 	}
+	boundaryStatusRequest := httptest.NewRequest(http.MethodGet, "https://myproject.sitebrush.example/?test_drive_status", nil)
+	boundaryStatusRequest.AddCookie(trialCookie)
+	boundaryStatusResponse := httptest.NewRecorder()
+	if publicBoundary.privateTestDriveGate(boundaryStatusResponse, boundaryStatusRequest) || boundaryStatusResponse.Body.Len() != 0 {
+		t.Fatalf("public boundary handled an owner action: %d %s", boundaryStatusResponse.Code, boundaryStatusResponse.Body.String())
+	}
 	secondResponse := httptest.NewRecorder()
 	application.route(secondResponse, handoffRequest)
 	if secondResponse.Code != http.StatusForbidden {
@@ -13768,6 +13783,29 @@ func TestPrivateTestDriveStartsBeforeEmailAndHandsOffOnce(t *testing.T) {
 	ownerRequest.AddCookie(trialCookie)
 	ownerRequest.AddCookie(editorCookie)
 	trialCSRF := accountCSRF(ownerRequest)
+	multipartTrialRequest := func(action string, fields url.Values, csrfHeader bool) *http.Request {
+		var body bytes.Buffer
+		formWriter := multipart.NewWriter(&body)
+		for name, entries := range fields {
+			for _, entry := range entries {
+				if writeErr := formWriter.WriteField(name, entry); writeErr != nil {
+					t.Fatal(writeErr)
+				}
+			}
+		}
+		if closeErr := formWriter.Close(); closeErr != nil {
+			t.Fatal(closeErr)
+		}
+		request := httptest.NewRequest(http.MethodPost, "https://myproject.sitebrush.example/?"+action, &body)
+		request.Header.Set("Content-Type", formWriter.FormDataContentType())
+		request.Header.Set("Origin", "https://myproject.sitebrush.example")
+		if csrfHeader {
+			request.Header.Set("X-SiteBrush-CSRF", trialCSRF)
+		}
+		request.AddCookie(trialCookie)
+		request.AddCookie(editorCookie)
+		return request
+	}
 	ownerResponse := httptest.NewRecorder()
 	application.route(ownerResponse, ownerRequest)
 	if ownerResponse.Code != http.StatusOK || !strings.Contains(ownerResponse.Body.String(), "data-test-drive-save") {
@@ -13906,11 +13944,13 @@ func TestPrivateTestDriveStartsBeforeEmailAndHandsOffOnce(t *testing.T) {
 	verifyChallenge := saveTrialCaptcha(verifyRequest)
 	verifyForm.Set("captcha", verifyChallenge.Answer)
 	verifyForm.Set("captcha_id", verifyChallenge.Token)
-	verifyRequest = httptest.NewRequest(http.MethodPost, "https://myproject.sitebrush.example/?test_drive_verify", strings.NewReader(verifyForm.Encode()))
-	verifyRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	verifyRequest.Header.Set("Origin", "https://myproject.sitebrush.example")
-	verifyRequest.AddCookie(trialCookie)
-	verifyRequest.AddCookie(editorCookie)
+	verifyRequest = multipartTrialRequest("test_drive_verify", verifyForm, false)
+	verifyResponse = httptest.NewRecorder()
+	application.route(verifyResponse, verifyRequest)
+	if verifyResponse.Code != http.StatusForbidden {
+		t.Fatalf("multipart verification accepted a body-only CSRF token: %d", verifyResponse.Code)
+	}
+	verifyRequest = multipartTrialRequest("test_drive_verify", verifyForm, true)
 	verifyResponse = httptest.NewRecorder()
 	application.route(verifyResponse, verifyRequest)
 	if verifyResponse.Code != http.StatusOK {
@@ -13951,11 +13991,13 @@ func TestPrivateTestDriveStartsBeforeEmailAndHandsOffOnce(t *testing.T) {
 	activateChallenge := saveTrialCaptcha(activateRequest)
 	activateForm.Set("captcha", activateChallenge.Answer)
 	activateForm.Set("captcha_id", activateChallenge.Token)
-	activateRequest = httptest.NewRequest(http.MethodPost, "https://myproject.sitebrush.example/?test_drive_activate", strings.NewReader(activateForm.Encode()))
-	activateRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	activateRequest.Header.Set("Origin", "https://myproject.sitebrush.example")
-	activateRequest.AddCookie(trialCookie)
-	activateRequest.AddCookie(editorCookie)
+	activateRequest = multipartTrialRequest("test_drive_activate", activateForm, false)
+	activateResponse = httptest.NewRecorder()
+	application.route(activateResponse, activateRequest)
+	if activateResponse.Code != http.StatusForbidden {
+		t.Fatalf("multipart activation accepted a body-only CSRF token: %d", activateResponse.Code)
+	}
+	activateRequest = multipartTrialRequest("test_drive_activate", activateForm, true)
 	activateResponse = httptest.NewRecorder()
 	application.route(activateResponse, activateRequest)
 	if activateResponse.Code != http.StatusOK {

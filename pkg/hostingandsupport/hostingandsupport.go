@@ -1546,7 +1546,7 @@ func (store Store) ArchivePublicTrialSite(ctx context.Context, trialSiteID int64
 	if deletedAt.IsZero() {
 		deletedAt = time.Now()
 	}
-	_, err := store.DB.ExecContext(ctx, `UPDATE public_trial_sites SET status=CASE WHEN status='active' THEN 'deleted' ELSE 'expired' END,deleted_at=?,last_error='' WHERE id=? AND status IN ('active','private','email_pending','expiring')`,
+	_, err := store.DB.ExecContext(ctx, `UPDATE public_trial_sites SET status=CASE WHEN status='active' THEN 'deleted' ELSE 'expired' END,deleted_at=?,last_error='' WHERE id=? AND status IN ('active','private','email_pending','email_verified','expiring')`,
 		deletedAt.UTC().Format(time.RFC3339), trialSiteID)
 	return err
 }
