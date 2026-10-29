@@ -13631,6 +13631,80 @@ func TestDriveNameCheckRequiresCaptchaAfterSoftLimit(t *testing.T) {
 	}
 }
 
+func TestPrivateTestDriveStartsWithCaptchaOnPartitionedSiteDatabase(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	if err := application.withServerControlDatabaseWrite(context.Background(), "test-partitioned-trial-owner", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		if setErr := store.SetOwner(context.Background(), "sitebrush.example", "owner@sitebrush.example"); setErr != nil {
+			return setErr
+		}
+		return store.SaveRegistrationSettingsWithLimits(context.Background(), true, true, hostingandsupport.SiteSizeLimits{Registration: 1 << 30, TestDrive: 1 << 30})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	availabilityRequests := make(chan publicTrialAvailabilityRequest)
+	stopAvailability := make(chan struct{})
+	application.publicTrialAvailability = availabilityRequests
+	t.Cleanup(func() { close(stopAvailability) })
+	go func() {
+		for {
+			select {
+			case request := <-availabilityRequests:
+				request.reply <- publicTrialAvailability{Enabled: true}
+			case <-stopAvailability:
+				return
+			}
+		}
+	}()
+	formRequest := httptest.NewRequest(http.MethodGet, "https://sitebrush.example/?test_drive", nil)
+	formResponse := httptest.NewRecorder()
+	application.route(formResponse, formRequest)
+	if formResponse.Code != http.StatusOK {
+		t.Fatalf("form: %d %s", formResponse.Code, formResponse.Body.String())
+	}
+	var entryCookie *http.Cookie
+	for _, cookie := range formResponse.Result().Cookies() {
+		if cookie.Name == "sitebrush_trial_entry" {
+			entryCookie = cookie
+		}
+	}
+	if entryCookie == nil {
+		t.Fatal("entry session cookie missing")
+	}
+	checkRequest := httptest.NewRequest(http.MethodGet, "https://sitebrush.example/?trial_site_domain_check&subdomain=partitioned", nil)
+	checkRequest.AddCookie(entryCookie)
+	checkResponse := httptest.NewRecorder()
+	application.route(checkResponse, checkRequest)
+	if checkResponse.Code != http.StatusOK || !strings.Contains(checkResponse.Body.String(), `"available":true`) {
+		t.Fatalf("available name: %d %s", checkResponse.Code, checkResponse.Body.String())
+	}
+	challenge, err := captcha.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	startForm := url.Values{"subdomain": {"partitioned"}, "captcha_id": {challenge.Token}, "captcha": {challenge.Answer}}
+	startRequest := httptest.NewRequest(http.MethodPost, "https://sitebrush.example/?test_drive_start", strings.NewReader(startForm.Encode()))
+	startRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	startRequest.Header.Set("Origin", "https://sitebrush.example")
+	startRequest.AddCookie(entryCookie)
+	if err := application.withAccountMailTransaction(startRequest, "test-partitioned-captcha", func(transaction *sql.Tx) error {
+		_, saveErr := captcha.Save(transaction, challenge, accountClientIP(startRequest), "sitebrush.example", "trial_preview", time.Now().Add(-3*time.Second).UTC())
+		return saveErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+	startResponse := httptest.NewRecorder()
+	application.route(startResponse, startRequest)
+	if startResponse.Code != http.StatusOK || !strings.Contains(startResponse.Body.String(), "partitioned.sitebrush.example") {
+		t.Fatalf("start: %d %s", startResponse.Code, startResponse.Body.String())
+	}
+	checkAfterResponse := httptest.NewRecorder()
+	application.route(checkAfterResponse, checkRequest)
+	if checkAfterResponse.Code != http.StatusOK || !strings.Contains(checkAfterResponse.Body.String(), `"available":false`) {
+		t.Fatalf("occupied name: %d %s", checkAfterResponse.Code, checkAfterResponse.Body.String())
+	}
+}
+
 func TestPrivateTestDriveStartsBeforeEmailAndHandsOffOnce(t *testing.T) {
 	application := newRouterTestApplication(t)
 	controlDatabase := setupBillingOwnerForTest(t, application, "sitebrush.example", "owner@sitebrush.example", true)
@@ -18837,6 +18911,101 @@ func TestAccountRegistrationPasswordOnlyAfterSecureConfirmation(t *testing.T) {
 		if err := database.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&count); err != nil || count != 0 {
 			t.Fatalf("invalid password setup created administrator: count=%d error=%v", count, err)
 		}
+	}
+}
+
+func TestNewSiteConfirmationLogsInAndOpensRootEditor(t *testing.T) {
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
+	application := newPartitionedTestApplication(t)
+	confirmationContext, stopConfirmations := context.WithCancel(context.Background())
+	defer stopConfirmations()
+	application.registrationConfirmations = startEmailConfirmationMemoryWorker(confirmationContext)
+	const ownerDomain = "sitebrush.example"
+	const domain = "tttt.sitebrush.example"
+	const email = "owner@example.org"
+	if err := application.withServerControlDatabaseWrite(context.Background(), "test-new-site-owner", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		if setErr := store.SetOwner(context.Background(), ownerDomain, "admin@sitebrush.example"); setErr != nil {
+			return setErr
+		}
+		return store.SaveSettings(context.Background(), true)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	previousExternalIP := lookupServerExternalIP
+	previousInterfaceIPs := lookupServerInterfaceIPs
+	previousIPRecords := lookupIPRecords
+	lookupServerExternalIP = func(context.Context) (string, error) { return "8.8.8.8", nil }
+	lookupServerInterfaceIPs = func() ([]net.IP, error) { return nil, nil }
+	lookupIPRecords = func(string) ([]net.IP, error) { return []net.IP{net.ParseIP("8.8.8.8")}, nil }
+	defer func() {
+		lookupServerExternalIP = previousExternalIP
+		lookupServerInterfaceIPs = previousInterfaceIPs
+		lookupIPRecords = previousIPRecords
+	}()
+	confirmation := EmailConfirmation{
+		Token: "new-site-confirmation", FormToken: "new-site-form", Domain: domain,
+		Action: "register", Workflow: "new_site", Email: email, Code: "384219",
+		ReturnPath: "/?email_confirm=old-confirmation",
+		ExpiresAt:  time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+	}
+	if err := application.saveRegistrationConfirmation(context.Background(), confirmation); err != nil {
+		t.Fatal(err)
+	}
+	linkRequest := httptest.NewRequest(http.MethodGet, "https://"+domain+"/?email_confirm="+confirmation.Token, nil)
+	linkResponse := httptest.NewRecorder()
+	application.route(linkResponse, linkRequest)
+	if linkResponse.Code != http.StatusOK || !strings.Contains(linkResponse.Body.String(), `autocomplete="new-password"`) {
+		t.Fatalf("confirmation link: %d %s", linkResponse.Code, linkResponse.Body.String())
+	}
+	codeForm := url.Values{"registration_form_token": {confirmation.FormToken}, "registration_code": {confirmation.Code}}
+	codeRequest := httptest.NewRequest(http.MethodPost, "https://"+domain+"/?register&site_workflow=new_site", strings.NewReader(codeForm.Encode()))
+	codeRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	codeRequest.Header.Set("Origin", "https://"+domain)
+	codeResponse := httptest.NewRecorder()
+	application.route(codeResponse, codeRequest)
+	if codeResponse.Code != http.StatusOK || !strings.Contains(codeResponse.Body.String(), `autocomplete="new-password"`) {
+		t.Fatalf("confirmation code: %d %s", codeResponse.Code, codeResponse.Body.String())
+	}
+	passwordForm := url.Values{"password": {"new-password"}, "password_confirm": {"new-password"}}
+	passwordRequest := httptest.NewRequest(http.MethodPost, "https://"+domain+"/?email_confirm="+confirmation.Token, strings.NewReader(passwordForm.Encode()))
+	passwordRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	passwordRequest.Header.Set("Origin", "https://"+domain)
+	passwordResponse := httptest.NewRecorder()
+	application.route(passwordResponse, passwordRequest)
+	if passwordResponse.Code != http.StatusFound || passwordResponse.Header().Get("Location") != "/?edit" {
+		t.Fatalf("password completion: %d location=%q body=%s", passwordResponse.Code, passwordResponse.Header().Get("Location"), passwordResponse.Body.String())
+	}
+	var sessionCookie *http.Cookie
+	for _, cookie := range passwordResponse.Result().Cookies() {
+		if cookie.Name == "sitebrush_session" {
+			sessionCookie = cookie
+		}
+	}
+	if sessionCookie == nil || !sessionCookie.HttpOnly || !sessionCookie.Secure {
+		t.Fatalf("automatic login cookie missing: %#v", passwordResponse.Result().Cookies())
+	}
+	editorRequest := httptest.NewRequest(http.MethodGet, "https://"+domain+"/?edit", nil)
+	editorRequest = editorRequest.WithContext(contextWithDomain(editorRequest.Context(), domain))
+	editorRequest.AddCookie(sessionCookie)
+	editorResponse := httptest.NewRecorder()
+	application.route(editorResponse, editorRequest)
+	if editorResponse.Code != http.StatusOK || !strings.Contains(editorResponse.Body.String(), `id="visualEditorForm"`) || !strings.Contains(editorResponse.Body.String(), `action="/?save"`) {
+		t.Fatalf("root editor: %d %s", editorResponse.Code, editorResponse.Body.String())
+	}
+	if _, found := application.registrationConfirmationByToken(context.Background(), confirmation.Token); found {
+		t.Fatal("used registration confirmation remains active")
+	}
+}
+
+func TestConfirmationReturnPathRejectsUsedCredentials(t *testing.T) {
+	for _, returnPath := range []string{"/?email_confirm=old-confirmation", "/?registration_form_token=old-form"} {
+		if got := safeConfirmationReturnPath(returnPath); got != "/" {
+			t.Fatalf("used confirmation target %q returned %q", returnPath, got)
+		}
+	}
+	if got := safeConfirmationReturnPath("/docs?edit"); got != "/docs?edit" {
+		t.Fatalf("ordinary return target changed: %q", got)
 	}
 }
 

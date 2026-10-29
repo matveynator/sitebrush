@@ -17,6 +17,15 @@
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--theme-ring) 50%, transparent);
 }
 
+.test-drive-domain-input[data-state="available"] {
+  border-color: var(--theme-success);
+}
+
+.test-drive-domain-input[data-state="unavailable"],
+.test-drive-domain-input[data-state="invalid"] {
+  border-color: var(--theme-destructive);
+}
+
 .technical-page .test-drive-domain-input input[type="text"] {
   flex: 1;
   min-width: 0;
@@ -46,6 +55,26 @@
 
 .test-drive-address {
   display: block;
+  min-height: 20px;
+  overflow-wrap: anywhere;
+  color: var(--theme-muted-foreground);
+}
+
+.test-drive-address[data-state="available"],
+.test-drive-domain-status[data-state="available"] {
+  color: var(--theme-success);
+}
+
+.test-drive-address[data-state="unavailable"],
+.test-drive-address[data-state="invalid"],
+.test-drive-domain-status[data-state="unavailable"],
+.test-drive-domain-status[data-state="invalid"],
+.test-drive-domain-status[data-state="failed"],
+.test-drive-domain-status[data-state="limited"] {
+  color: var(--theme-destructive);
+}
+
+.test-drive-domain-status {
   min-height: 20px;
   overflow-wrap: anywhere;
   color: var(--theme-muted-foreground);

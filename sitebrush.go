@@ -18735,9 +18735,16 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		a.promoteFirstServerOwner(registrationContext, domain, email)
-		a.createSessionForDomain(w, r, registrationContext, domain, email)
+		if a.createSessionForDomain(w, r, registrationContext, domain, email) == "" {
+			httpsecurity.RedirectLocal(w, r, "/?login", http.StatusSeeOther)
+			return
+		}
 		a.recordMailMonitorEvent(registrationContext, registrationOutcome)
-		httpsecurity.RedirectLocal(w, r, safeConfirmationReturnPath(requestedReturnPath(r)), http.StatusSeeOther)
+		returnPath := safeConfirmationReturnPath(requestedReturnPath(r))
+		if r.FormValue("site_workflow") == "new_site" {
+			returnPath = "/?edit"
+		}
+		httpsecurity.RedirectLocal(w, r, returnPath, http.StatusSeeOther)
 		return
 	}
 	if a.trialPaidImportEstimate(r.Context(), domain).Pending && r.FormValue("paid_import_consent") != "1" {
@@ -33190,7 +33197,9 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 		}
 		a.observeAutomaticSSLRegistration(r, confirmation.Domain)
 		returnPath := safeConfirmationReturnPath(confirmation.ReturnPath)
-		if confirmation.Workflow == "trial_paid" {
+		if confirmation.Workflow == "new_site" {
+			returnPath = "/?edit"
+		} else if confirmation.Workflow == "trial_paid" {
 			returnPath = "/?trial_import_wait&return_path=" + url.QueryEscape(returnPath)
 		}
 		httpsecurity.RedirectLocal(w, r, returnPath, http.StatusFound)
@@ -33325,7 +33334,12 @@ func confirmationExpired(rawExpiresAt string, now time.Time) bool {
 }
 
 func safeConfirmationReturnPath(returnPath string) string {
-	return httpsecurity.LocalRedirectTarget(returnPath, "/")
+	safePath := httpsecurity.LocalRedirectTarget(returnPath, "/")
+	parsed, err := url.Parse(safePath)
+	if err != nil || parsed.Query().Has("email_confirm") || parsed.Query().Has("registration_form_token") {
+		return "/"
+	}
+	return safePath
 }
 
 func (a *App) renderEmailConfirmationStatus(w http.ResponseWriter, r *http.Request, statusCode int, status string) {
@@ -58452,14 +58466,21 @@ func (a *App) startPrivateTestDrive(w http.ResponseWriter, r *http.Request) {
 	domainContext := contextWithSiteDatabaseCreation(contextWithDomain(r.Context(), domain))
 	temporaryEmail := "trial-" + randomAccessToken() + "@sitebrush.invalid"
 	pageHTML := "<!doctype html><html><head><meta charset=\"utf-8\"><title>SiteBrush</title></head><body><h1>SiteBrush</h1></body></html>"
-	if err := a.siteContentTransaction(domainContext, func(transaction *sql.Tx) error {
-		if _, err := transaction.ExecContext(domainContext, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, temporaryEmail, randomAccessToken()); err != nil {
-			return err
-		}
-		_, err := transaction.ExecContext(domainContext, `INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,'SiteBrush',?,0)`, domain, "/", pageHTML)
-		return err
-	}, func(error) {}); err != nil {
+	// Site accounts and page content have separate owners on partitioned servers.
+	if err := a.accountTransaction(domainContext, func(transaction *sql.Tx) error {
+		_, insertErr := transaction.ExecContext(domainContext, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, temporaryEmail, randomAccessToken())
+		return insertErr
+	}); err != nil {
 		a.logTestDriveError("create-editor", 0, r, err)
+		_ = a.deleteDemoManagedSiteWithoutBackup(r.Context(), domain)
+		testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusServiceUnavailable)
+		return
+	}
+	if err := a.siteContentTransaction(domainContext, func(transaction *sql.Tx) error {
+		_, insertErr := transaction.ExecContext(domainContext, `INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,'SiteBrush',?,0)`, domain, "/", pageHTML)
+		return insertErr
+	}, func(error) {}); err != nil {
+		a.logTestDriveError("create-editor-page", 0, r, err)
 		_ = a.deleteDemoManagedSiteWithoutBackup(r.Context(), domain)
 		testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusServiceUnavailable)
 		return

@@ -19,6 +19,13 @@
       <span dir="ltr">.{{.ParentDomain}}</span>
     </div>
     <output class="test-drive-address" data-test-drive-address></output>
+    <p class="test-drive-domain-status" role="status" aria-live="polite" data-test-drive-domain-status
+       data-available="{{index .T "test_drive_address_available"}}"
+       data-checking="{{index .T "test_drive_address_checking"}}"
+       data-unavailable="{{index .T "public_trial_address_unavailable"}}"
+       data-invalid="{{index .T "public_trial_address_invalid"}}"
+       data-failed="{{index .T "public_trial_address_check_failed"}}"
+       data-limited="{{index .T "test_drive_limit_error"}}" hidden></p>
     {{if not .HumanVerified}}
     <div class="test-drive-captcha" data-test-drive-captcha>
       <label for="test-drive-captcha-answer">{{index .T "account_captcha_label"}}</label>
