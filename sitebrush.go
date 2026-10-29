@@ -22725,7 +22725,7 @@ func (a *App) publicTrialSiteDomainCheck(w http.ResponseWriter, r *http.Request)
 	}
 	label := r.URL.Query().Get("subdomain")
 	if !testDriveLabelValid(label) {
-		http.Error(w, "invalid site name", http.StatusBadRequest)
+		testDriveHTTPError(w, r, "public_trial_address_invalid", http.StatusBadRequest)
 		return
 	}
 	var parentDomain string
@@ -22780,7 +22780,7 @@ func (a *App) publicTrialSiteCaptcha(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) publicTrialSiteCreate(w http.ResponseWriter, r *http.Request) {
 	// Anonymous copies no longer become public before mailbox confirmation.
-	http.Error(w, "use the private Test Drive form", http.StatusGone)
+	testDriveHTTPError(w, r, "test_drive_use_private_form", http.StatusGone)
 }
 
 func publicTrialPendingAssets(preview publicTrialPreview, selectedResourceURLs map[string]struct{}) []string {
@@ -23397,7 +23397,7 @@ func (a *App) cleanupExpiredPublicTrialSite(ctx context.Context, trialSite hosti
 		return
 	}
 	deleteAfter, parseErr := time.Parse(time.RFC3339, strings.TrimSpace(trialSite.DeleteAfter))
-	if trialSite.Status != "active" && trialSite.Status != "private" && trialSite.Status != "email_pending" && trialSite.Status != "expiring" || parseErr != nil || now.Before(deleteAfter) {
+	if trialSite.Status != "active" && trialSite.Status != "private" && trialSite.Status != "email_pending" && trialSite.Status != "email_verified" && trialSite.Status != "expiring" || parseErr != nil || now.Before(deleteAfter) {
 		return
 	}
 	if trialSite.Status == "active" && (a.rawManagedSiteHasAdmin(ctx, domain) || a.registrationDomainClaimed(ctx, domain)) {
@@ -23407,10 +23407,10 @@ func (a *App) cleanupExpiredPublicTrialSite(ctx context.Context, trialSite hosti
 		})
 		return
 	}
-	if trialSite.Status == "private" || trialSite.Status == "email_pending" {
+	if trialSite.Status == "private" || trialSite.Status == "email_pending" || trialSite.Status == "email_verified" {
 		claimed := false
 		if err := a.withServerControlDatabaseWrite(ctx, "trial-cleanup-claim", func(database *sql.DB) error {
-			result, updateErr := database.ExecContext(ctx, `UPDATE public_trial_sites SET status='expiring' WHERE id=? AND status IN ('private','email_pending') AND delete_after<=?`, trialSite.ID, now.UTC().Format(time.RFC3339))
+			result, updateErr := database.ExecContext(ctx, `UPDATE public_trial_sites SET status='expiring' WHERE id=? AND status IN ('private','email_pending','email_verified') AND delete_after<=?`, trialSite.ID, now.UTC().Format(time.RFC3339))
 			if updateErr != nil {
 				return updateErr
 			}
@@ -23474,7 +23474,7 @@ func (a *App) cleanupExpiredPublicTrialSites(ctx context.Context, now time.Time)
 		}
 		for _, trialSite := range trialSites {
 			deleteAfter, parseErr := time.Parse(time.RFC3339, strings.TrimSpace(trialSite.DeleteAfter))
-			if (trialSite.Status == "active" || trialSite.Status == "private" || trialSite.Status == "email_pending" || trialSite.Status == "expiring") && parseErr == nil && !now.Before(deleteAfter) {
+			if (trialSite.Status == "active" || trialSite.Status == "private" || trialSite.Status == "email_pending" || trialSite.Status == "email_verified" || trialSite.Status == "expiring") && parseErr == nil && !now.Before(deleteAfter) {
 				expiredSites = append(expiredSites, trialSite)
 			}
 		}
@@ -55087,12 +55087,12 @@ func (a *App) serverUpdateDiagnosticPage(w http.ResponseWriter, r *http.Request,
 	translations := translationsForRequest(r)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusInternalServerError)
-	_, _ = fmt.Fprintf(w, `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><main style="font:16px/1.5 system-ui,sans-serif;max-width:40rem;margin:10vh auto;padding:1rem"><h1>%s</h1><p>%s</p><p>%s: %s</p></main>`, template.HTMLEscapeString(translations["update_title"]), template.HTMLEscapeString(translations["update_unavailable"]), template.HTMLEscapeString(translations["update_request_id_label"]), template.HTMLEscapeString(requestID))
+	_, _ = fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/p/static/technical_pages.css"><title>%s</title></head><body class="technical-page"><main class="container authentication-shell"><section class="authentication-card"><h1>%s</h1><p>%s</p><p>%s: %s</p></section></main></body></html>`, template.HTMLEscapeString(translations["update_title"]), template.HTMLEscapeString(translations["update_title"]), template.HTMLEscapeString(translations["update_unavailable"]), template.HTMLEscapeString(translations["update_request_id_label"]), template.HTMLEscapeString(requestID))
 }
 
 func (a *App) serverUpdateClientError(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost || !a.updateAuthorized(r) || !adminMutationSourceAllowed(r) {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		w.WriteHeader(http.StatusForbidden)
 		return
 	}
 	adminEmail, _ := a.currentAdminEmail(r)
@@ -58172,7 +58172,10 @@ func (a *App) privateTestDriveGate(w http.ResponseWriter, r *http.Request) bool 
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("X-Robots-Tag", "noindex, nofollow")
 	w.Header().Set("Referrer-Policy", "no-referrer")
-	if trial.Status == "private" || trial.Status == "email_pending" || trial.Status == "active" {
+	if testDriveSystemAsset(r) {
+		return false
+	}
+	if trial.Status == "private" || trial.Status == "email_pending" || trial.Status == "email_verified" || trial.Status == "active" {
 		expiry, err := time.Parse(time.RFC3339, trial.DeleteAfter)
 		if err == nil && !time.Now().UTC().Before(expiry) {
 			a.renderTestDriveNeutral(w, r)
@@ -58184,6 +58187,9 @@ func (a *App) privateTestDriveGate(w http.ResponseWriter, r *http.Request) bool 
 		return true
 	}
 	if hasQueryFlag(r, "test_drive_handoff") {
+		if a.publicBoundary {
+			return false
+		}
 		a.testDriveHandoff(w, r, trial)
 		return true
 	}
@@ -58192,6 +58198,9 @@ func (a *App) privateTestDriveGate(w http.ResponseWriter, r *http.Request) bool 
 		return true
 	}
 	if hasQueryFlag(r, "test_drive_email") || hasQueryFlag(r, "test_drive_verify") || hasQueryFlag(r, "test_drive_activate") || hasQueryFlag(r, "test_drive_status") || hasQueryFlag(r, "test_drive_captcha") || hasQueryFlag(r, "test_drive_ws") {
+		if a.publicBoundary {
+			return false
+		}
 		a.touchTestDrive(w, r, trial)
 		a.testDriveOwnerAction(w, r, trial)
 		return true
@@ -58212,6 +58221,18 @@ func (a *App) privateTestDriveGate(w http.ResponseWriter, r *http.Request) bool 
 		a.touchTestDrive(w, r, trial)
 	}
 	return false
+}
+
+func testDriveSystemAsset(r *http.Request) bool {
+	if !embeddedStaticRequest(r) {
+		return false
+	}
+	relative := safeRelativeAssetPath(strings.TrimPrefix(r.URL.Path, "/p/static/"))
+	switch relative {
+	case "technical_pages.css", "directory_listing.css", "admin_controls.css", "admin_theme.css":
+		return true
+	}
+	return strings.HasPrefix(relative, "fonts/") && strings.HasSuffix(relative, ".ttf")
 }
 
 func testDriveEditorMutation(r *http.Request) bool {
@@ -58279,7 +58300,7 @@ func (a *App) touchTestDrive(w http.ResponseWriter, r *http.Request, trial priva
 			}
 			historyJSON = string(encoded)
 		}
-		_, err := database.ExecContext(r.Context(), `UPDATE public_trial_sites SET last_active_at=?,last_ip=?,ip_history=?,delete_after=? WHERE id=? AND status IN ('private','email_pending')`, now.Format(time.RFC3339), ip, historyJSON, now.Add(idleDuration).Format(time.RFC3339), trial.ID)
+		_, err := database.ExecContext(r.Context(), `UPDATE public_trial_sites SET last_active_at=?,last_ip=?,ip_history=?,delete_after=? WHERE id=? AND status IN ('private','email_pending','email_verified')`, now.Format(time.RFC3339), ip, historyJSON, now.Add(idleDuration).Format(time.RFC3339), trial.ID)
 		return err
 	})
 	if cookie, err := r.Cookie("sitebrush_test_drive"); err == nil {
@@ -58485,7 +58506,7 @@ func (a *App) startPrivateTestDrive(w http.ResponseWriter, r *http.Request) {
 	}
 	continueLabel := translationOrDefault(translationsForRequest(r), "test_drive_continue", "Continue to Test Drive")
 	waitLabel := translationOrDefault(translationsForRequest(r), "test_drive_wait_https", "Preparing your private Test Drive address...")
-	_, _ = fmt.Fprintf(w, `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta name="viewport" content="width=device-width,initial-scale=1"><main style="font:16px/1.5 system-ui,sans-serif;max-width:36rem;margin:12vh auto;padding:1rem"><p>%s</p><form method="post" action="%s" data-test-drive-handoff data-local="%t"><input type="hidden" name="ticket" value="%s"><button type="submit">%s</button></form></main><script defer src="/p/static/test_drive_handoff.js"></script>`, template.HTMLEscapeString(waitLabel), template.HTMLEscapeString(endpoint), localAccountRequest(r), template.HTMLEscapeString(handoff), template.HTMLEscapeString(continueLabel))
+	_, _ = fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/p/static/technical_pages.css"><title>SiteBrush</title><script defer src="/p/static/test_drive_handoff.js"></script></head><body class="technical-page"><main class="container authentication-shell"><section class="authentication-card"><p>%s</p><form method="post" action="%s" data-test-drive-handoff data-local="%t"><input type="hidden" name="ticket" value="%s"><button class="btn btn-primary" type="submit">%s</button></form></section></main></body></html>`, template.HTMLEscapeString(waitLabel), template.HTMLEscapeString(endpoint), localAccountRequest(r), template.HTMLEscapeString(handoff), template.HTMLEscapeString(continueLabel))
 }
 
 func testDriveRequestHTTPSOrLocal(w http.ResponseWriter, r *http.Request) bool {
