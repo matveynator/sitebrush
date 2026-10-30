@@ -13619,6 +13619,17 @@ func TestServerIPHostRequiresBoundAddressAndBlocksRegistration(t *testing.T) {
 	if !application.serverHostBoundary(response, request) || response.Code != http.StatusForbidden {
 		t.Fatalf("remote IP registration: %d", response.Code)
 	}
+	for _, selector := range []string{"register", "site_request", "test_drive_start"} {
+		registrationRequest := httptest.NewRequest(http.MethodPost, "http://203.0.113.10/?"+selector, nil)
+		registrationResponse := httptest.NewRecorder()
+		if !application.serverHostBoundary(registrationResponse, registrationRequest) || registrationResponse.Code != http.StatusForbidden {
+			t.Fatalf("remote IP registration mutation %s: %d", selector, registrationResponse.Code)
+		}
+	}
+	loginRequest := httptest.NewRequest(http.MethodPost, "http://203.0.113.10/?login", nil)
+	if application.serverHostBoundary(httptest.NewRecorder(), loginRequest) {
+		t.Fatal("remote IP account login was rejected by the registration boundary")
+	}
 	controlDatabase := setupBillingOwnerForTest(t, application, "sitebrush.com", "owner@sitebrush.com", true)
 	defer controlDatabase.Close()
 	previousLookup := lookupIPRecords

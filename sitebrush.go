@@ -18894,9 +18894,6 @@ func requestIPMatchesListener(r *http.Request, requestIP net.IP) bool {
 }
 
 func remoteIPRegistrationRequest(r *http.Request) bool {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		return true
-	}
 	for _, flag := range []string{"register", "site_request", "email_confirm", "test_drive", "test_drive_start", "trial_site_create", "trial_site_domain_check", "trial_site_captcha"} {
 		if hasQueryFlag(r, flag) {
 			return true
