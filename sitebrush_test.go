@@ -13719,6 +13719,41 @@ func TestPrivateTestDriveStartsWithCaptchaOnPartitionedSiteDatabase(t *testing.T
 	if startResponse.Code != http.StatusOK || !strings.Contains(startResponse.Body.String(), "partitioned.sitebrush.example") {
 		t.Fatalf("start: %d %s", startResponse.Code, startResponse.Body.String())
 	}
+	ticketMatch := regexp.MustCompile(`name="ticket" value="([^"]+)"`).FindStringSubmatch(startResponse.Body.String())
+	if len(ticketMatch) != 2 {
+		t.Fatal("one-time handoff ticket missing")
+	}
+	handoffForm := url.Values{"ticket": {ticketMatch[1]}}
+	handoffRequest := httptest.NewRequest(http.MethodPost, "https://partitioned.sitebrush.example/?test_drive_handoff", strings.NewReader(handoffForm.Encode()))
+	handoffRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	handoffRequest.Header.Set("Origin", "https://sitebrush.example")
+	publicBoundary := &App{storagePath: application.storagePath, storageRealRoot: application.storageRealRoot, publicBoundary: true}
+	boundaryResponse := httptest.NewRecorder()
+	if publicBoundary.privateTestDriveGate(boundaryResponse, handoffRequest) || boundaryResponse.Body.Len() != 0 {
+		t.Fatalf("public boundary consumed the handoff: %d %s", boundaryResponse.Code, boundaryResponse.Body.String())
+	}
+	accountDatabase := application.db
+	application.db = nil
+	failedHandoffResponse := httptest.NewRecorder()
+	application.route(failedHandoffResponse, handoffRequest)
+	application.db = accountDatabase
+	if failedHandoffResponse.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unavailable account database: %d %s", failedHandoffResponse.Code, failedHandoffResponse.Body.String())
+	}
+	for _, cookie := range failedHandoffResponse.Result().Cookies() {
+		if cookie.Name == "sitebrush_session" || cookie.Name == "sitebrush_test_drive" {
+			t.Fatal("failed handoff granted an owner cookie")
+		}
+	}
+	trialAfterFailure, found, readErr := application.privateTestDrive(context.Background(), "partitioned.sitebrush.example")
+	if readErr != nil || !found || trialAfterFailure.HandoffHash != testDriveHash(ticketMatch[1]) || trialAfterFailure.SessionHash != "" {
+		t.Fatalf("failed handoff consumed the ticket: %+v %t %v", trialAfterFailure, found, readErr)
+	}
+	handoffResponse := httptest.NewRecorder()
+	application.route(handoffResponse, handoffRequest)
+	if handoffResponse.Code != http.StatusSeeOther || handoffResponse.Header().Get("Location") != "/?edit" {
+		t.Fatalf("handoff: %d %s", handoffResponse.Code, handoffResponse.Body.String())
+	}
 	checkAfterResponse := httptest.NewRecorder()
 	application.route(checkAfterResponse, checkRequest)
 	if checkAfterResponse.Code != http.StatusOK || !strings.Contains(checkAfterResponse.Body.String(), `"available":false`) {
@@ -13836,6 +13871,7 @@ func TestPrivateTestDriveStartsBeforeEmailAndHandsOffOnce(t *testing.T) {
 	handoffForm := url.Values{"ticket": {ticketMatch[1]}}
 	handoffRequest := httptest.NewRequest(http.MethodPost, "https://myproject.sitebrush.example/?test_drive_handoff", strings.NewReader(handoffForm.Encode()))
 	handoffRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	handoffRequest.Header.Set("Origin", "https://sitebrush.example")
 	publicBoundary := &App{storagePath: application.storagePath, storageRealRoot: application.storageRealRoot, publicBoundary: true, controlDatabase: dispatcher}
 	boundaryResponse := httptest.NewRecorder()
 	if publicBoundary.privateTestDriveGate(boundaryResponse, handoffRequest) || boundaryResponse.Body.Len() != 0 {
