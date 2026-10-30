@@ -167,22 +167,30 @@
         <section class="mt-4">
           <div id="server-update" class="mb-4">
             <h2>{{index $.T "update_title"}}</h2>
-            <iframe title="{{index $.T "update_title"}}" src="/?server_update&embedded" loading="lazy" style="width:100%;min-height:1000px;border:0" data-server-update-frame></iframe>
+            <p role="status" data-server-update-frame-loading>{{index $.T "update_connecting"}}</p>
+            <iframe title="{{index $.T "update_title"}}" src="/?server_update&embedded" style="width:100%;min-height:1000px;border:0" data-server-update-frame hidden></iframe>
             <p role="alert" class="alert alert-danger" data-server-update-frame-error hidden>{{index $.T "update_unavailable"}}</p>
             <script>
               (function checkEmbeddedUpdate() {
                 const frameElement = document.querySelector('[data-server-update-frame]');
                 const errorElement = document.querySelector('[data-server-update-frame-error]');
-                if (!frameElement || !errorElement) return;
-                const frameModel = {ready: false};
-                function renderFrameStatus() { errorElement.hidden = frameModel.ready; }
+                const loadingElement = document.querySelector('[data-server-update-frame-loading]');
+                if (!frameElement || !errorElement || !loadingElement) return;
+                const frameModel = {ready: false, diagnostic: false, loaded: false};
+                function renderFrameStatus() {
+                  loadingElement.hidden = frameModel.loaded;
+                  frameElement.hidden = !frameModel.ready && !frameModel.diagnostic;
+                  errorElement.hidden = !frameModel.loaded || frameModel.ready || frameModel.diagnostic;
+                }
                 frameElement.addEventListener('load', function showEmbeddedUpdateStatus() {
                   try {
                     frameModel.ready = Boolean(frameElement.contentDocument && frameElement.contentDocument.querySelector('[data-server-update]'));
-                  } catch (frameError) { frameModel.ready = false; }
+                    frameModel.diagnostic = Boolean(frameElement.contentDocument && frameElement.contentDocument.querySelector('[data-server-update-diagnostic]'));
+                  } catch (frameError) { frameModel.ready = false; frameModel.diagnostic = false; }
+                  frameModel.loaded = true;
                   renderFrameStatus();
                 });
-                frameElement.addEventListener('error', function showEmbeddedUpdateError() { frameModel.ready = false; renderFrameStatus(); });
+                frameElement.addEventListener('error', function showEmbeddedUpdateError() { frameModel.ready = false; frameModel.loaded = true; renderFrameStatus(); });
               })();
             </script>
           </div>

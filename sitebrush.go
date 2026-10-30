@@ -9442,7 +9442,7 @@ type adminResponseFramePolicyValues struct {
 }
 
 func adminResponseFramePolicy(r *http.Request) adminResponseFramePolicyValues {
-	if hasQueryFlag(r, "revision_preview") || hasQueryFlag(r, "ai_background") || hasQueryFlag(r, "register") && hasQueryFlag(r, "trial_embed") {
+	if hasQueryFlag(r, "revision_preview") || hasQueryFlag(r, "ai_background") || hasQueryFlag(r, "register") && hasQueryFlag(r, "trial_embed") || hasQueryFlag(r, "server_update") && hasQueryFlag(r, "embedded") && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
 		return adminResponseFramePolicyValues{
 			xFrameOptions:         "SAMEORIGIN",
 			contentSecurityPolicy: "frame-ancestors 'self'",
@@ -55109,7 +55109,7 @@ func (a *App) serverUpdateDiagnosticPage(w http.ResponseWriter, r *http.Request,
 	translations := translationsForRequest(r)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusInternalServerError)
-	_, _ = fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/p/static/technical_pages.css"><title>%s</title></head><body class="technical-page"><main class="container authentication-shell"><section class="authentication-card"><h1>%s</h1><p>%s</p><p>%s: %s</p></section></main></body></html>`, template.HTMLEscapeString(translations["update_title"]), template.HTMLEscapeString(translations["update_title"]), template.HTMLEscapeString(translations["update_unavailable"]), template.HTMLEscapeString(translations["update_request_id_label"]), template.HTMLEscapeString(requestID))
+	_, _ = fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/p/static/technical_pages.css"><title>%s</title></head><body class="technical-page"><main class="container authentication-shell"><section class="authentication-card" data-server-update-diagnostic><h1>%s</h1><p>%s</p><p>%s: %s</p></section></main></body></html>`, template.HTMLEscapeString(translations["update_title"]), template.HTMLEscapeString(translations["update_title"]), template.HTMLEscapeString(translations["update_unavailable"]), template.HTMLEscapeString(translations["update_request_id_label"]), template.HTMLEscapeString(requestID))
 }
 
 func (a *App) serverUpdateClientError(w http.ResponseWriter, r *http.Request) {
