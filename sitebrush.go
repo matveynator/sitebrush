@@ -18241,7 +18241,7 @@ func (a *App) renewAccountSession(w http.ResponseWriter, r *http.Request, domain
 		return true
 	}
 	if trialCookie, cookieErr := r.Cookie("sitebrush_test_drive"); cookieErr == nil && trialCookie.Value != "" && requestScheme(r) == "http" {
-		// The private trial gate owns this short-lived HTTP cookie's deadline.
+		// Trial activity renews the bounded editor cookie; activated HTTP grace never rolls.
 		return true
 	}
 	// A recent foreground request has already extended the durable idle deadline.
@@ -58805,18 +58805,24 @@ func (a *App) renderTestDriveWelcome(w http.ResponseWriter, r *http.Request, tri
 }
 
 func (a *App) touchTestDrive(w http.ResponseWriter, r *http.Request, trial privateTestDrive) {
+	if trial.Status != "private" && trial.Status != "email_pending" && trial.Status != "email_verified" || !testDriveOwner(r, trial) {
+		return
+	}
 	now := time.Now().UTC()
-	lastActive, _ := time.Parse(time.RFC3339, trial.DeleteAfter)
+	expiresAt, _ := time.Parse(time.RFC3339, trial.DeleteAfter)
 	idleDuration := testDriveIdleDuration(trial)
 	refreshInterval := idleDuration / 3
 	if refreshInterval > time.Minute {
 		refreshInterval = time.Minute
 	}
 	ip := accountClientIP(r)
-	if lastActive.After(now.Add(idleDuration-refreshInterval)) && ip == trial.LastIP {
+	if expiresAt.After(now.Add(idleDuration-refreshInterval)) && ip == trial.LastIP {
+		a.renewTestDriveEditorSession(w, r, trial, expiresAt)
 		return
 	}
-	_ = a.withServerControlDatabaseWrite(r.Context(), "test-drive-activity", func(database *sql.DB) error {
+	expiresAt = now.Add(idleDuration)
+	renewed := false
+	activityErr := a.withServerControlDatabaseWrite(r.Context(), "test-drive-activity", func(database *sql.DB) error {
 		var lastIP, historyJSON string
 		if err := database.QueryRowContext(r.Context(), `SELECT last_ip,ip_history FROM public_trial_sites WHERE id=?`, trial.ID).Scan(&lastIP, &historyJSON); err != nil {
 			return err
@@ -58836,11 +58842,55 @@ func (a *App) touchTestDrive(w http.ResponseWriter, r *http.Request, trial priva
 			}
 			historyJSON = string(encoded)
 		}
-		_, err := database.ExecContext(r.Context(), `UPDATE public_trial_sites SET last_active_at=?,last_ip=?,ip_history=?,delete_after=? WHERE id=? AND status IN ('private','email_pending','email_verified')`, now.Format(time.RFC3339), ip, historyJSON, now.Add(idleDuration).Format(time.RFC3339), trial.ID)
-		return err
+		result, updateErr := database.ExecContext(r.Context(), `UPDATE public_trial_sites SET last_active_at=?,last_ip=?,ip_history=?,delete_after=? WHERE id=? AND status IN ('private','email_pending','email_verified')`, now.Format(time.RFC3339), ip, historyJSON, expiresAt.Format(time.RFC3339), trial.ID)
+		if updateErr != nil {
+			return updateErr
+		}
+		count, countErr := result.RowsAffected()
+		renewed = count == 1
+		return countErr
 	})
+	if activityErr != nil {
+		a.logTestDriveError("activity", trial.ID, r, activityErr)
+		return
+	}
+	if !renewed {
+		return
+	}
+	a.renewTestDriveEditorSession(w, r, trial, expiresAt)
 	if cookie, err := r.Cookie("sitebrush_test_drive"); err == nil {
 		http.SetCookie(w, &http.Cookie{Name: "sitebrush_test_drive", Value: cookie.Value, Path: "/", HttpOnly: true, Secure: requestScheme(r) == "https", SameSite: http.SameSiteLaxMode, MaxAge: int(idleDuration.Seconds())})
+	}
+}
+
+// The private capability and editor authentication share one idle deadline.
+// Matching the temporary account prevents stale activity from extending an activated session.
+func (a *App) renewTestDriveEditorSession(w http.ResponseWriter, r *http.Request, trial privateTestDrive, expiresAt time.Time) {
+	if a.db == nil || trial.TemporaryAdmin == "" {
+		return
+	}
+	cookie, cookieErr := r.Cookie("sitebrush_session")
+	if cookieErr != nil || cookie.Value == "" || !expiresAt.After(time.Now()) {
+		return
+	}
+	renewed := false
+	domainContext := contextWithDomain(r.Context(), trial.Domain)
+	err := a.accountTransaction(domainContext, func(transaction *sql.Tx) error {
+		now := time.Now()
+		result, updateErr := transaction.ExecContext(domainContext, `UPDATE sessions SET last_used_at=? WHERE token=? AND user_email=? AND (last_used_at=0 OR last_used_at>?) AND last_used_at<=?`, now.Unix(), cookie.Value, trial.Domain+"|"+trial.TemporaryAdmin, now.Add(-accountauth.SessionTTL).Unix(), now.Unix())
+		if updateErr != nil {
+			return updateErr
+		}
+		count, countErr := result.RowsAffected()
+		renewed = count == 1
+		return countErr
+	})
+	if err != nil {
+		a.logTestDriveError("editor-session-renewal", trial.ID, r, err)
+		return
+	}
+	if renewed {
+		setTestDriveEditorCookie(w, r, cookie.Value, time.Until(expiresAt))
 	}
 }
 
@@ -59269,7 +59319,7 @@ func (a *App) testDriveSocket(w http.ResponseWriter, r *http.Request, trial priv
 		testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusForbidden)
 		return
 	}
-	websocket.Server{Handshake: func(*websocket.Config, *http.Request) error { return nil }, Handler: func(connection *websocket.Conn) {
+	websocket.Server{Config: websocket.Config{Header: w.Header().Clone()}, Handshake: func(*websocket.Config, *http.Request) error { return nil }, Handler: func(connection *websocket.Conn) {
 		defer connection.Close()
 		connection.MaxPayloadBytes = 4096
 		_ = connection.SetReadDeadline(time.Now().Add(30 * time.Second))

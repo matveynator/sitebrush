@@ -14087,6 +14087,177 @@ func TestPrivateTestDriveStartsWithCaptchaOnPartitionedSiteDatabase(t *testing.T
 	}
 }
 
+func TestPrivateTestDriveActivityRenewsBoundedEditorSession(t *testing.T) {
+	for _, scenario := range []struct {
+		name, status                           string
+		recent, ownerMissing, revoked, renewed bool
+	}{
+		{name: "private editing", status: "private", renewed: true},
+		{name: "pending email resend", status: "email_pending", renewed: true},
+		{name: "verified before activation", status: "email_verified", renewed: true},
+		{name: "recent public boundary touch", status: "email_pending", recent: true, renewed: true},
+		{name: "activated fixed grace", status: "activated"},
+		{name: "missing owner capability", status: "private", ownerMissing: true},
+		{name: "revoked editor session", status: "private", revoked: true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			application, database := newTestApplication(t)
+			const domain = "trial.example.org"
+			const temporaryEmail = "trial-secret@sitebrush.invalid"
+			ctx := contextWithDomain(context.Background(), domain)
+			if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, temporaryEmail, "temporary"); err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC().Truncate(time.Second)
+			lastActive := now.Add(-2 * time.Minute)
+			if scenario.recent {
+				lastActive = now.Add(-10 * time.Second)
+			}
+			deadline := lastActive.Add(testDriveHTTPGrace)
+			request := httptest.NewRequest(http.MethodGet, "http://"+domain+"/?edit", nil).WithContext(ctx)
+			request.Header.Set("Sec-Fetch-Dest", "document")
+			sessionToken, err := application.createSessionForDomainToken(request, ctx, domain, temporaryEmail, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: sessionToken})
+			ownerSecret := randomAccessToken()
+			if !scenario.ownerMissing {
+				request.AddCookie(&http.Cookie{Name: "sitebrush_test_drive", Value: ownerSecret})
+			}
+			lastUsed := now.Add(-14 * 24 * time.Hour).Unix()
+			if scenario.status == "activated" {
+				deadline = now.Add(20 * time.Minute)
+				lastUsed = deadline.Add(-accountauth.SessionTTL).Unix()
+				if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, "owner@example.org", "verified"); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := database.Exec(`UPDATE sessions SET user_email=? WHERE token=?`, domain+"|owner@example.org", sessionToken); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := database.Exec(`UPDATE sessions SET last_used_at=? WHERE token=?`, lastUsed, sessionToken); err != nil {
+				t.Fatal(err)
+			}
+			if scenario.revoked {
+				if _, err := database.Exec(`DELETE FROM sessions WHERE token=?`, sessionToken); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := application.withServerControlDatabaseWrite(ctx, "test-renew-trial", func(control *sql.DB) error {
+				_, insertErr := control.Exec(`INSERT INTO public_trial_sites(domain,source_url,status,created_at,last_active_at,delete_after,last_ip,session_hash,temporary_admin) VALUES(?,'',?,?,?,?,?,?,?)`, domain, scenario.status, now.Add(-time.Hour).Format(time.RFC3339), lastActive.Format(time.RFC3339), deadline.Format(time.RFC3339), accountClientIP(request), testDriveHash(ownerSecret), temporaryEmail)
+				return insertErr
+			}); err != nil {
+				t.Fatal(err)
+			}
+			trial, found, readErr := application.privateTestDrive(ctx, domain)
+			if readErr != nil || !found {
+				t.Fatalf("trial missing: %t %v", found, readErr)
+			}
+			response := httptest.NewRecorder()
+			application.touchTestDrive(response, request, trial)
+			if !scenario.ownerMissing && !application.enforceAdminIPAllowlist(response, request, domain) {
+				t.Fatal(response.Body.String())
+			}
+			if scenario.status == "activated" {
+				staleTrial := trial
+				staleTrial.Status = "email_pending"
+				application.renewTestDriveEditorSession(response, request, staleTrial, time.Now().Add(testDriveHTTPGrace))
+			}
+			var editorCookie *http.Cookie
+			for _, cookie := range response.Result().Cookies() {
+				if cookie.Name == "sitebrush_session" {
+					editorCookie = cookie
+				}
+			}
+			if (editorCookie != nil) != scenario.renewed {
+				t.Fatalf("editor cookie renewal=%t, expected %t", editorCookie != nil, scenario.renewed)
+			}
+			updatedTrial, _, readErr := application.privateTestDrive(ctx, domain)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			updatedDeadline, err := time.Parse(time.RFC3339, updatedTrial.DeleteAfter)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario.renewed {
+				if editorCookie.Value != sessionToken || !editorCookie.HttpOnly || editorCookie.Secure || editorCookie.SameSite != http.SameSiteLaxMode || editorCookie.MaxAge <= 0 || editorCookie.MaxAge > int(testDriveHTTPGrace.Seconds()) || editorCookie.Expires.After(updatedDeadline.Add(time.Second)) || editorCookie.Expires.Before(updatedDeadline.Add(-time.Second)) {
+					t.Fatalf("editor cookie not bounded by trial: %+v deadline=%s", editorCookie, updatedDeadline)
+				}
+				if !application.isAdminRequest(request) {
+					t.Fatal("renewal lost editor authentication")
+				}
+			}
+			if !scenario.revoked {
+				var observed int64
+				if err := database.QueryRow(`SELECT last_used_at FROM sessions WHERE token=?`, sessionToken).Scan(&observed); err != nil {
+					t.Fatal(err)
+				}
+				if (observed > lastUsed) != scenario.renewed {
+					t.Fatalf("durable editor renewal: before=%d after=%d", lastUsed, observed)
+				}
+				if scenario.status == "activated" && (!updatedDeadline.Equal(deadline) || accountauth.SessionActive(observed, deadline.Add(time.Second))) {
+					t.Fatal("activity extended the fixed activation grace")
+				}
+			}
+		})
+	}
+}
+
+func TestPrivateTestDriveSocketRenewsEditorCookieInHandshake(t *testing.T) {
+	application, database := newTestApplication(t)
+	const domain = "trial.example.org"
+	const temporaryEmail = "trial-secret@sitebrush.invalid"
+	ctx := contextWithDomain(context.Background(), domain)
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, temporaryEmail, "temporary"); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://"+domain+"/?test_drive_ws", nil).WithContext(ctx)
+	sessionToken, err := application.createSessionForDomainToken(request, ctx, domain, temporaryEmail, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerSecret := randomAccessToken()
+	now := time.Now().UTC()
+	if err := application.withServerControlDatabaseWrite(ctx, "test-socket-renewal", func(control *sql.DB) error {
+		_, insertErr := control.Exec(`INSERT INTO public_trial_sites(domain,source_url,status,created_at,last_active_at,delete_after,session_hash,temporary_admin) VALUES(?,'','email_pending',?,?,?,?,?)`, domain, now.Add(-time.Hour).Format(time.RFC3339), now.Add(-2*time.Minute).Format(time.RFC3339), now.Add(28*time.Minute).Format(time.RFC3339), testDriveHash(ownerSecret), temporaryEmail)
+		return insertErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, browserRequest *http.Request) {
+		application.route(writer, browserRequest.WithContext(contextWithDomain(browserRequest.Context(), domain)))
+	}))
+	defer server.Close()
+	browserRequest, err := http.NewRequest(http.MethodGet, server.URL+"/?test_drive_ws", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	browserRequest.Host = domain
+	browserRequest.Header.Set("Origin", "http://"+domain)
+	browserRequest.Header.Set("Connection", "Upgrade")
+	browserRequest.Header.Set("Upgrade", "websocket")
+	browserRequest.Header.Set("Sec-WebSocket-Version", "13")
+	browserRequest.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	browserRequest.AddCookie(&http.Cookie{Name: "sitebrush_test_drive", Value: ownerSecret})
+	browserRequest.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: sessionToken})
+	response, err := server.Client().Do(browserRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("handshake status=%d", response.StatusCode)
+	}
+	for _, cookie := range response.Cookies() {
+		if cookie.Name == "sitebrush_session" && cookie.Value == sessionToken && cookie.HttpOnly && cookie.MaxAge > 0 && cookie.MaxAge <= int(testDriveHTTPGrace.Seconds()) {
+			return
+		}
+	}
+	t.Fatal("WebSocket handshake lost the bounded editor cookie")
+}
+
 func TestPrivateTestDriveStartsWithEmailAndHandsOffOnce(t *testing.T) {
 	for _, scheme := range []string{"http", "https"} {
 		t.Run(scheme, func(t *testing.T) { testPrivateTestDriveOnboarding(t, scheme) })
