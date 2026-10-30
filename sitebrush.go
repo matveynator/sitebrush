@@ -18835,18 +18835,20 @@ func (a *App) serverDomainAlias(ctx context.Context, parentDomain, ownerDomain s
 	if parentDomain == ownerDomain {
 		return true
 	}
-	if a.db != nil {
-		var count int
-		err := a.db.QueryRowContext(contextWithDomain(ctx, ownerDomain), `SELECT COUNT(*) FROM domain_aliases WHERE primary_domain=? AND alias_domain=? AND is_verified=1 AND dns_a_ok=1`, ownerDomain, parentDomain).Scan(&count)
-		if err == nil && count > 0 {
-			return true
-		}
+	var count int
+	err := a.db.QueryRowContext(contextWithDomain(ctx, ownerDomain), `SELECT COUNT(*) FROM domain_aliases WHERE primary_domain=? AND alias_domain=? AND is_verified=1 AND dns_a_ok=1`, ownerDomain, parentDomain).Scan(&count)
+	return err == nil && count > 0
+}
+
+func (a *App) publicServerDomainAlias(ctx context.Context, parentDomain, ownerDomain string) bool {
+	if parentDomain == ownerDomain {
+		return true
 	}
-	if a.publicCatalog != nil {
-		decision := a.publicCatalog.LookupRequest(publicsite.Lookup{Host: parentDomain}, ctx.Done())
-		return decision.Found && normalizeDomainName(decision.Domain) == ownerDomain
+	if a.publicCatalog == nil {
+		return false
 	}
-	return false
+	decision := a.publicCatalog.LookupRequest(publicsite.Lookup{Host: parentDomain}, ctx.Done())
+	return decision.Found && normalizeDomainName(decision.Domain) == ownerDomain
 }
 
 func (a *App) reservedServerSubdomain(ctx context.Context, domain string) bool {
@@ -18914,7 +18916,20 @@ func (a *App) serverHostBoundary(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	label, parentDomain, found := strings.Cut(host, ".")
-	if !found || label != "www" || !a.reservedServerSubdomain(r.Context(), host) {
+	if !found || label != "www" {
+		return false
+	}
+	ownerDomain := a.serverOwnerDomain(r.Context())
+	if ownerDomain == "" {
+		return false
+	}
+	serverAlias := false
+	if a.publicBoundary {
+		serverAlias = a.publicServerDomainAlias(r.Context(), parentDomain, ownerDomain)
+	} else {
+		serverAlias = a.serverDomainAlias(r.Context(), parentDomain, ownerDomain)
+	}
+	if !serverAlias {
 		return false
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
