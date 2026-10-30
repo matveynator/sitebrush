@@ -14059,6 +14059,7 @@ func TestPrivateTestDriveStartsWithEmailAndHandsOffOnce(t *testing.T) {
 		t.Fatalf("unverified site leaked: %d", privateResponse.Code)
 	}
 	socketServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		request.RemoteAddr = startRequest.RemoteAddr
 		if hasQueryFlag(request, "test_drive_entry_ws") {
 			request.Host = "sitebrush.example"
 			request.AddCookie(entryCookie)
