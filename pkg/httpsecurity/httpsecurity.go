@@ -118,16 +118,32 @@ func SameOriginMutationAllowed(r *http.Request) bool {
 	if r == nil {
 		return false
 	}
-	requestHost := strings.TrimSpace(r.Host)
-	if requestHost == "" {
+	requestScheme := "http"
+	if UsesHTTPS(r) {
+		requestScheme = "https"
+	}
+	requestURL, err := url.Parse(requestScheme + "://" + strings.TrimSpace(r.Host))
+	if err != nil || requestURL.Hostname() == "" {
 		return false
+	}
+	defaultPort := "80"
+	if requestScheme == "https" {
+		defaultPort = "443"
+	}
+	requestPort := requestURL.Port()
+	if requestPort == "" {
+		requestPort = defaultPort
 	}
 	validateSource := func(rawURL string) bool {
 		sourceURL, err := url.Parse(strings.TrimSpace(rawURL))
-		if err != nil || sourceURL == nil || sourceURL.Host == "" {
+		if err != nil || sourceURL == nil || sourceURL.Hostname() == "" || sourceURL.User != nil || !strings.EqualFold(sourceURL.Scheme, requestScheme) {
 			return false
 		}
-		return strings.EqualFold(sourceURL.Host, requestHost)
+		sourcePort := sourceURL.Port()
+		if sourcePort == "" {
+			sourcePort = defaultPort
+		}
+		return strings.EqualFold(strings.TrimSuffix(sourceURL.Hostname(), "."), strings.TrimSuffix(requestURL.Hostname(), ".")) && sourcePort == requestPort
 	}
 	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
 		return validateSource(origin)
