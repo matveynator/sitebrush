@@ -21516,6 +21516,8 @@ func TestSecurityBoundaryAdminResponsesCannotBeFramedOrCached(t *testing.T) {
 		{name: "account", path: "/?profile", cookie: true, frameHeader: "DENY", framePolicy: "frame-ancestors 'none'"},
 		{name: "editor", path: "/?visual", cookie: true, frameHeader: "DENY", framePolicy: "frame-ancestors 'none'"},
 		{name: "revision preview", path: "/?revision_preview&id=1", cookie: true, frameHeader: "SAMEORIGIN", framePolicy: "frame-ancestors 'self'"},
+		{name: "embedded update", path: "/?server_update&embedded", cookie: true, frameHeader: "SAMEORIGIN", framePolicy: "frame-ancestors 'self'"},
+		{name: "ordinary update", path: "/?server_update", cookie: true, frameHeader: "DENY", framePolicy: "frame-ancestors 'none'"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			request := httptest.NewRequest(http.MethodGet, "http://localhost:8080"+testCase.path, nil)
@@ -24909,7 +24911,7 @@ func TestServerUpdateFailureShowsAdministratorDiagnostic(t *testing.T) {
 	if response.Code != http.StatusInternalServerError {
 		t.Fatalf("diagnostic status=%d", response.Code)
 	}
-	if !strings.Contains(response.Body.String(), "update-test-17") || strings.Contains(response.Body.String(), "private updater failure") {
+	if !strings.Contains(response.Body.String(), "update-test-17") || !strings.Contains(response.Body.String(), "data-server-update-diagnostic") || strings.Contains(response.Body.String(), "private updater failure") {
 		t.Fatalf("unsafe or missing administrator diagnostic: %s", response.Body.String())
 	}
 }
