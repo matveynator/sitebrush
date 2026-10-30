@@ -43480,6 +43480,16 @@ func (a *App) createSessionForDomain(w http.ResponseWriter, r *http.Request, ctx
 }
 
 func (a *App) createSessionForDomainWithIPTrust(w http.ResponseWriter, r *http.Request, ctx context.Context, domain string, email string, trustIP bool) string {
+	token, sessionErr := a.createSessionForDomainToken(r, ctx, domain, email, trustIP)
+	if sessionErr != nil {
+		return ""
+	}
+	a.storeProfileSessionDetails(r.WithContext(ctx), token)
+	setAccountSessionCookie(w, r, token, time.Now())
+	return token
+}
+
+func (a *App) createSessionForDomainToken(r *http.Request, ctx context.Context, domain string, email string, trustIP bool) (string, error) {
 	sessionDomain := normalizeDomainName(domain)
 	if sessionDomain == "" {
 		sessionDomain = "localhost"
@@ -43499,11 +43509,9 @@ func (a *App) createSessionForDomainWithIPTrust(w http.ResponseWriter, r *http.R
 		return err
 	})
 	if sessionErr != nil {
-		return ""
+		return "", sessionErr
 	}
-	a.storeProfileSessionDetails(r.WithContext(ctx), token)
-	setAccountSessionCookie(w, r, token, time.Now())
-	return token
+	return token, nil
 }
 
 func (a *App) isAdminRequest(r *http.Request) bool {
@@ -58340,6 +58348,7 @@ func (a *App) testDriveEntrySession(w http.ResponseWriter, r *http.Request) (str
 		_, err := database.ExecContext(r.Context(), `INSERT INTO test_drive_entry_sessions(session_hash,created_at,last_used_at,human_verified) VALUES(?,?,?,0)`, hash, now, now)
 		return err
 	}); err != nil {
+		a.logTestDriveError("entry-session", 0, r, err)
 		return "", false
 	}
 	http.SetCookie(w, &http.Cookie{Name: "sitebrush_trial_entry", Value: secret, Path: "/", HttpOnly: true, Secure: !localAccountRequest(r), SameSite: http.SameSiteLaxMode})
@@ -58379,7 +58388,12 @@ func (a *App) startPrivateTestDrive(w http.ResponseWriter, r *http.Request) {
 	if !testDriveRequestHTTPSOrLocal(w, r) {
 		return
 	}
-	if r.Method != http.MethodPost || !a.publicTrialAllowed(r) || !adminMutationSourceAllowed(r) {
+	if r.Method != http.MethodPost || !a.publicTrialAllowed(r) {
+		testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusForbidden)
+		return
+	}
+	if !adminMutationSourceAllowed(r) {
+		a.logTestDriveError("start-source", 0, r, errors.New("request source rejected"))
 		testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusForbidden)
 		return
 	}
@@ -58404,6 +58418,7 @@ func (a *App) startPrivateTestDrive(w http.ResponseWriter, r *http.Request) {
 			_, err := database.ExecContext(r.Context(), `UPDATE test_drive_entry_sessions SET human_verified=1,last_used_at=? WHERE session_hash=?`, time.Now().Unix(), entryHash)
 			return err
 		}); err != nil {
+			a.logTestDriveError("human-verified", 0, r, err)
 			testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusServiceUnavailable)
 			return
 		}
@@ -58550,6 +58565,14 @@ func (a *App) testDriveHandoff(w http.ResponseWriter, r *http.Request, trial pri
 		a.renderTestDriveNeutral(w, r)
 		return
 	}
+	// Prepare the account session before spending the one-use handoff ticket.
+	domainContext := contextWithDomain(r.Context(), trial.Domain)
+	sessionToken, sessionErr := a.createSessionForDomainToken(r, domainContext, trial.Domain, trial.TemporaryAdmin, true)
+	if sessionErr != nil {
+		a.logTestDriveError("handoff-session", trial.ID, r, sessionErr)
+		testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusServiceUnavailable)
+		return
+	}
 	secret := randomAccessToken() + randomAccessToken()
 	err := a.withServerControlDatabaseWrite(r.Context(), "test-drive-handoff", func(database *sql.DB) error {
 		result, err := database.ExecContext(r.Context(), `UPDATE public_trial_sites SET session_hash=?,handoff_hash='' WHERE id=? AND handoff_hash=?`, testDriveHash(secret), trial.ID, trial.HandoffHash)
@@ -58566,15 +58589,14 @@ func (a *App) testDriveHandoff(w http.ResponseWriter, r *http.Request, trial pri
 		return nil
 	})
 	if err != nil {
+		_, _ = a.db.ExecContext(domainContext, `DELETE FROM sessions WHERE token=?`, sessionToken)
 		a.logTestDriveError("handoff", trial.ID, r, err)
 		a.renderTestDriveNeutral(w, r)
 		return
 	}
 	http.SetCookie(w, &http.Cookie{Name: "sitebrush_test_drive", Value: secret, Path: "/", HttpOnly: true, Secure: !localAccountRequest(r), SameSite: http.SameSiteLaxMode, MaxAge: int(testDriveIdleDuration(trial).Seconds())})
-	if a.createSessionForDomain(w, r, contextWithDomain(r.Context(), trial.Domain), trial.Domain, trial.TemporaryAdmin) == "" {
-		testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusServiceUnavailable)
-		return
-	}
+	a.storeProfileSessionDetails(r.WithContext(domainContext), sessionToken)
+	setAccountSessionCookie(w, r, sessionToken, time.Now())
 	http.Redirect(w, r, "/?edit", http.StatusSeeOther)
 }
 
@@ -59143,7 +59165,10 @@ func (a *App) logTestDriveError(endpoint string, trialID int64, r *http.Request,
 	if requestID == "" {
 		requestID = randomAccessToken()
 	}
-	adminEmail, _ := a.currentAdminEmail(r)
+	adminEmail := ""
+	if a.db != nil && hasSitebrushSessionCookie(r) {
+		adminEmail, _ = a.currentAdminEmail(r)
+	}
 	log.Printf("TEST_DRIVE error endpoint=%s trial_id=%d request_id=%s admin=%s at=%s error=%s", endpoint, trialID, diagnosticlog.SafeLogValue(requestID), diagnosticlog.SafeLogValue(adminEmail), time.Now().UTC().Format(time.RFC3339), diagnosticlog.SafeLogValue(err.Error()))
 }
 
