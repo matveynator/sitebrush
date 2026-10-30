@@ -1152,7 +1152,7 @@ if (visualEditorThemeMediaQuery) {
 connectSaveHotkey(visualHtmlEditor);
 </script>
 {{if .PrivateTestDrive}}
-{{.TestDriveConfirmationHTML}}
+{{template "test_drive_confirmation.html" .}}
 {{end}}
 </body>
 </html>

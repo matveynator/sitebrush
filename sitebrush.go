@@ -46181,13 +46181,6 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, templateName string
 			}
 			envelope["TestDriveOpenedAt"] = openedAt
 			envelope["TestDriveID"] = trial.ID
-			confirmationHTML, confirmationErr := testDriveConfirmationHTML(envelope)
-			if confirmationErr != nil {
-				a.logTestDriveError("render-confirmation", trial.ID, r, confirmationErr)
-				testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusInternalServerError)
-				return
-			}
-			envelope["TestDriveConfirmationHTML"] = confirmationHTML
 		}
 	}
 	if templateName == "edit.html" {
@@ -46218,7 +46211,7 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, templateName string
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	parsedTemplate, err := template.New(templateName).Parse(string(fileBytes))
+	parsedTemplate, err := parseEmbeddedPageTemplate(templateName, fileBytes)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -46232,20 +46225,24 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, templateName string
 	_ = parsedTemplate.Execute(w, envelope)
 }
 
-func testDriveConfirmationHTML(envelope map[string]any) (template.HTML, error) {
+// Associated templates share html/template's escaping context instead of trusting rendered HTML.
+func parseEmbeddedPageTemplate(templateName string, source []byte) (*template.Template, error) {
+	parsedTemplate, err := template.New(templateName).Parse(string(source))
+	if err != nil {
+		return nil, err
+	}
+	if templateName != "edit.html" && templateName != "test_drive_welcome.html" {
+		return parsedTemplate, nil
+	}
 	fragment, err := fs.ReadFile(embeddedWebFiles, "web/test_drive_confirmation.html")
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	parsed, err := template.New("test_drive_confirmation.html").Parse(string(fragment))
+	_, err = parsedTemplate.New("test_drive_confirmation.html").Parse(string(fragment))
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	var rendered bytes.Buffer
-	if err := parsed.Execute(&rendered, envelope); err != nil {
-		return "", err
-	}
-	return template.HTML(rendered.String()), nil
+	return parsedTemplate, nil
 }
 
 func startRenderTemplateProcess(stop <-chan struct{}) chan renderTemplateRequest {
@@ -46260,7 +46257,7 @@ func startRenderTemplateProcess(stop <-chan struct{}) chan renderTemplateRequest
 			parseErrors[templateName] = readErr
 			continue
 		}
-		parsedTemplate, parseErr := template.New(templateName).Parse(string(fileBytes))
+		parsedTemplate, parseErr := parseEmbeddedPageTemplate(templateName, fileBytes)
 		if parseErr != nil {
 			parseErrors[templateName] = parseErr
 			continue
@@ -59711,7 +59708,7 @@ func (a *App) logTestDriveError(endpoint string, trialID int64, r *http.Request,
 
 func (a *App) logTestDriveEvent(event string, trialID int64, r *http.Request, outcome string, status int) {
 	requestID := testDriveRequestID(r)
-	log.Printf("TEST_DRIVE event=%s outcome=%s status=%d trial_id=%d host=%s method=%s ip=%s request_id=%s at=%s", diagnosticlog.SafeLogValue(event), diagnosticlog.SafeLogValue(outcome), status, trialID, diagnosticlog.SafeLogValue(domainFromRequest(r)), r.Method, diagnosticlog.SafeLogValue(accountClientIP(r)), diagnosticlog.SafeLogValue(requestID), time.Now().UTC().Format(time.RFC3339))
+	log.Printf("TEST_DRIVE event=%s outcome=%s status=%s trial_id=%s host=%s method=%s ip=%s request_id=%s at=%s", diagnosticlog.SafeLogValue(event), diagnosticlog.SafeLogValue(outcome), diagnosticlog.SafeLogValue(strconv.Itoa(status)), diagnosticlog.SafeLogValue(strconv.FormatInt(trialID, 10)), diagnosticlog.SafeLogValue(domainFromRequest(r)), diagnosticlog.SafeLogValue(r.Method), diagnosticlog.SafeLogValue(accountClientIP(r)), diagnosticlog.SafeLogValue(requestID), time.Now().UTC().Format(time.RFC3339))
 }
 
 // A request keeps one identifier across its Test Drive stages and errors.

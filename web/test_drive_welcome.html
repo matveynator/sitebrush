@@ -20,7 +20,7 @@
     </div>
   </section>
 </main>
-{{if .PrivateTestDrive}}{{.TestDriveConfirmationHTML}}{{end}}
+{{if .PrivateTestDrive}}{{template "test_drive_confirmation.html" .}}{{end}}
 <script defer src="/p/static/site_copy.js"></script>
 <script defer src="/p/static/test_drive_welcome.js"></script>
 </body>

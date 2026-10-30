@@ -13427,6 +13427,69 @@ func TestPublicTrialRegistrationOverlayCoversPagesUntilAdminConfirms(t *testing.
 	}
 }
 
+func TestPrivateTestDriveConfirmationEscapesUntrustedFields(t *testing.T) {
+	translations := make(map[string]string)
+	for key, translation := range translationsForLanguageCode("en") {
+		translations[key] = translation
+	}
+	untrustedText := `"><img src=x onerror="alert(1)">`
+	translations["test_drive_save_title"] = untrustedText
+	envelope := map[string]any{
+		"T": translations, "PrivateTestDrive": true,
+		"AccountCSRF": untrustedText, "TestDriveID": untrustedText,
+		"TestDriveOpenedAt": untrustedText, "LanguageCode": "en", "TextDirection": "ltr",
+	}
+	stop := make(chan struct{})
+	requests := startRenderTemplateProcess(stop)
+	defer close(stop)
+	for _, templateName := range []string{"edit.html", "test_drive_welcome.html"} {
+		source, readErr := fs.ReadFile(embeddedWebFiles, "web/"+templateName)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		parsedTemplate, parseErr := parseEmbeddedPageTemplate(templateName, source)
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		var directHTML bytes.Buffer
+		if renderErr := parsedTemplate.Execute(&directHTML, envelope); renderErr != nil {
+			t.Fatal(renderErr)
+		}
+		reply := make(chan renderTemplateResponse, 1)
+		requests <- renderTemplateRequest{name: templateName, envelope: envelope, reply: reply}
+		response := <-reply
+		if response.err != nil {
+			t.Fatal(response.err)
+		}
+		for _, renderedHTML := range []string{directHTML.String(), string(response.html)} {
+			if strings.Contains(renderedHTML, "<img src=x") || !strings.Contains(renderedHTML, "&lt;img") {
+				t.Fatalf("confirmation escaped incorrectly in %s", templateName)
+			}
+			if !strings.Contains(renderedHTML, "data-test-drive-save") || !strings.Contains(renderedHTML, "/p/static/test_drive_editor.js") {
+				t.Fatalf("confirmation was not composed into %s", templateName)
+			}
+		}
+	}
+}
+
+func TestPrivateTestDriveEventLogEscapesRequestFields(t *testing.T) {
+	var output bytes.Buffer
+	previousWriter := log.Writer()
+	log.SetOutput(&output)
+	defer log.SetOutput(previousWriter)
+	request := httptest.NewRequest(http.MethodGet, "https://sitebrush.example/", nil)
+	request.Method = "GET\nforged-method"
+	request.Header.Set("X-Request-ID", "request\r\nforged-id")
+	application := &App{}
+	application.logTestDriveEvent("event\nforged-event", 42, request, "outcome\r\nforged-outcome", http.StatusOK)
+	if strings.Count(output.String(), "\n") != 1 || strings.Contains(output.String(), "\r") {
+		t.Fatalf("request fields created extra log entries: %q", output.String())
+	}
+	if !strings.Contains(output.String(), "status=200 trial_id=42") {
+		t.Fatalf("structured numeric fields changed: %q", output.String())
+	}
+}
+
 func TestPrivateTestDriveRequiresCreatingBrowserSession(t *testing.T) {
 	application := newRouterTestApplication(t)
 	controlDatabase := setupBillingOwnerForTest(t, application, "sitebrush.example", "owner@sitebrush.example", true)
