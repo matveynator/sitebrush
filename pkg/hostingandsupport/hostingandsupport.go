@@ -97,6 +97,7 @@ type Site struct {
 	Domain               string
 	IsDemo               bool
 	IsMainDomain         bool
+	ServerNameConflict   bool
 	Aliases              string
 	URL                  string
 	UsedBytes            int64

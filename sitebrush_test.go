@@ -13568,6 +13568,152 @@ func TestDriveLabelAndConfirmationCodeAreStrict(t *testing.T) {
 	}
 }
 
+func TestServerReservedSubdomainsAndWWWRedirect(t *testing.T) {
+	application, database := newTestApplication(t)
+	ctx := context.Background()
+	controlDatabase := setupBillingOwnerForTest(t, application, "sitebrush.com", "owner@sitebrush.com", true)
+	defer controlDatabase.Close()
+	if _, err := database.ExecContext(ctx, `INSERT INTO domain_aliases(primary_domain,alias_domain,is_verified,dns_a_ok) VALUES(?,?,1,1)`, "sitebrush.com", "sitebrush.ru"); err != nil {
+		t.Fatal(err)
+	}
+	certificateCandidates := application.listAutomaticSSLDomainCandidates(ctx)
+	for _, parentDomain := range []string{"sitebrush.com", "sitebrush.ru"} {
+		if !slices.Contains(certificateCandidates, "www."+parentDomain) || !application.domainIsAutomaticSSLCandidate(contextWithDomain(ctx, parentDomain), "www."+parentDomain) {
+			t.Fatalf("www certificate candidate missing for %s", parentDomain)
+		}
+		if storageDomain := application.systemWWWStorageDomain(ctx, "www."+parentDomain); storageDomain != "sitebrush.com" {
+			t.Fatalf("www certificate storage for %s: %s", parentDomain, storageDomain)
+		}
+		for _, label := range []string{"www", "sitebrush", "admin", "auth", "login", "account", "download", "install", "support", "security", "demo", "WWW", "Admin"} {
+			if !application.reservedServerSubdomain(ctx, label+"."+parentDomain) {
+				t.Fatalf("system address %s.%s was not reserved", label, parentDomain)
+			}
+		}
+		request := httptest.NewRequest(http.MethodGet, "http://www."+parentDomain+"/docs?q=1", nil)
+		response := httptest.NewRecorder()
+		if !application.serverHostBoundary(response, request) || response.Code != http.StatusPermanentRedirect || response.Header().Get("Location") != "http://"+parentDomain+"/docs?q=1" {
+			t.Fatalf("www redirect for %s: %d %s", parentDomain, response.Code, response.Header().Get("Location"))
+		}
+	}
+	publicBoundary := &App{storagePath: application.storagePath, storageRealRoot: application.storageRealRoot, publicBoundary: true}
+	boundaryRequest := httptest.NewRequest(http.MethodGet, "http://www.sitebrush.com/private", nil)
+	boundaryResponse := httptest.NewRecorder()
+	if !publicBoundary.serverHostBoundary(boundaryResponse, boundaryRequest) || boundaryResponse.Header().Get("Location") != "http://sitebrush.com/private" {
+		t.Fatalf("public boundary did not redirect www: %d %s", boundaryResponse.Code, boundaryResponse.Header().Get("Location"))
+	}
+	if !application.newSiteSubdomainAllowed(ctx, "project.sitebrush.com") || application.newSiteSubdomainAllowed(ctx, "admin.sitebrush.com") {
+		t.Fatal("new-site admission did not reserve the system label")
+	}
+	registerRequest := httptest.NewRequest(http.MethodGet, "http://admin.sitebrush.com/?register", nil)
+	registerResponse := httptest.NewRecorder()
+	application.registerPage(registerResponse, registerRequest)
+	if registerResponse.Code != http.StatusConflict {
+		t.Fatalf("direct registration of system name: %d", registerResponse.Code)
+	}
+}
+
+func TestServerIPHostRequiresBoundAddressAndBlocksRegistration(t *testing.T) {
+	application, _ := newTestApplication(t)
+	request := httptest.NewRequest(http.MethodGet, "http://203.0.113.10/?register", nil)
+	response := httptest.NewRecorder()
+	if !application.serverHostBoundary(response, request) || response.Code != http.StatusForbidden {
+		t.Fatalf("remote IP registration: %d", response.Code)
+	}
+	for _, selector := range []string{"register", "site_request", "test_drive_start"} {
+		registrationRequest := httptest.NewRequest(http.MethodPost, "http://203.0.113.10/?"+selector, nil)
+		registrationResponse := httptest.NewRecorder()
+		if !application.serverHostBoundary(registrationResponse, registrationRequest) || registrationResponse.Code != http.StatusForbidden {
+			t.Fatalf("remote IP registration mutation %s: %d", selector, registrationResponse.Code)
+		}
+	}
+	loginRequest := httptest.NewRequest(http.MethodPost, "http://203.0.113.10/?login", nil)
+	if application.serverHostBoundary(httptest.NewRecorder(), loginRequest) {
+		t.Fatal("remote IP account login was rejected by the registration boundary")
+	}
+	controlDatabase := setupBillingOwnerForTest(t, application, "sitebrush.com", "owner@sitebrush.com", true)
+	defer controlDatabase.Close()
+	previousLookup := lookupIPRecords
+	lookupIPRecords = func(domain string) ([]net.IP, error) {
+		if domain != "sitebrush.com" {
+			return nil, errors.New("unexpected domain")
+		}
+		return []net.IP{net.ParseIP("203.0.113.10")}, nil
+	}
+	t.Cleanup(func() { lookupIPRecords = previousLookup })
+	request = httptest.NewRequest(http.MethodGet, "http://203.0.113.10/docs?q=1", nil)
+	response = httptest.NewRecorder()
+	if application.serverHostBoundary(response, request) {
+		t.Fatal("unbound IP was redirected")
+	}
+	bound := context.WithValue(request.Context(), http.LocalAddrContextKey, &net.TCPAddr{IP: net.ParseIP("203.0.113.10"), Port: 80})
+	request = request.WithContext(bound)
+	response = httptest.NewRecorder()
+	if !application.serverHostBoundary(response, request) || response.Code != http.StatusFound || response.Header().Get("Location") != "http://sitebrush.com/docs?q=1" {
+		t.Fatalf("bound IP redirect: %d %s", response.Code, response.Header().Get("Location"))
+	}
+}
+
+func TestServerWWWAliasSSLUsesOwnerDatabase(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	application.automaticSSLAvailable = true
+	ctx := context.Background()
+	ownerDomain := "sitebrush.com"
+	aliasDomain := "sitebrush.ru"
+	certificateDomain := "www." + aliasDomain
+	ownerContext := contextWithDomain(ctx, ownerDomain)
+	if err := application.withServerControlDatabaseWrite(ctx, "test-www-owner", func(database *sql.DB) error {
+		return (hostingandsupport.Store{DB: database}).SetOwner(ctx, ownerDomain, "owner@sitebrush.com")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.db.ExecContext(contextWithSiteDatabaseCreation(ownerContext), `INSERT INTO domain_aliases(primary_domain,alias_domain,is_verified,dns_a_ok) VALUES(?,?,1,1)`, ownerDomain, aliasDomain); err != nil {
+		t.Fatal(err)
+	}
+	previousIPLookup := lookupIPRecords
+	previousExternalLookup := lookupServerExternalIP
+	previousInterfaceLookup := lookupServerInterfaceIPs
+	t.Cleanup(func() {
+		lookupIPRecords = previousIPLookup
+		lookupServerExternalIP = previousExternalLookup
+		lookupServerInterfaceIPs = previousInterfaceLookup
+	})
+	serverIP := net.ParseIP("8.8.8.8")
+	lookupIPRecords = func(domain string) ([]net.IP, error) {
+		if domain != certificateDomain {
+			return nil, fmt.Errorf("unexpected DNS lookup: %s", domain)
+		}
+		return []net.IP{serverIP}, nil
+	}
+	lookupServerExternalIP = func(context.Context) (string, error) { return serverIP.String(), nil }
+	lookupServerInterfaceIPs = func() ([]net.IP, error) { return nil, nil }
+	issuer := automaticSSLIssuerFunc(func(_ context.Context, domain string) channelacme.IssueResult {
+		if domain != certificateDomain {
+			t.Fatalf("unexpected certificate request: %s", domain)
+		}
+		return channelacme.IssueResult{Certificate: &tls.Certificate{}, ExpiresAt: time.Now().Add(90 * 24 * time.Hour)}
+	})
+	result := application.prepareAutomaticSSLDomain(issuer, certificateDomain, []net.IP{serverIP})
+	if result.state != "ready" || result.err != nil {
+		t.Fatalf("www alias certificate preparation: %+v", result)
+	}
+	for _, hostPolicy := range []func(context.Context, string) error{application.autoCertPreparedHostPolicy, application.autoCertHostPolicy} {
+		if err := hostPolicy(ctx, certificateDomain); err != nil {
+			t.Fatalf("www alias host policy: %v", err)
+		}
+	}
+	application.setDomainAutomaticSSLManual(ownerContext, certificateDomain, false)
+	for _, hostPolicy := range []func(context.Context, string) error{application.autoCertPreparedHostPolicy, application.autoCertHostPolicy} {
+		if err := hostPolicy(ctx, certificateDomain); err == nil {
+			t.Fatal("www alias host policy ignored the owner's manual SSL disable")
+		}
+	}
+	for _, domain := range []string{aliasDomain, certificateDomain} {
+		if _, err := os.Stat(siteDatabaseFile(siteDatabaseRootPath(application.dbPath), domain)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("www alias unexpectedly owns a separate database: %s: %v", domain, err)
+		}
+	}
+}
+
 func TestDriveNameCheckRequiresCaptchaAfterSoftLimit(t *testing.T) {
 	application := newRouterTestApplication(t)
 	controlDatabase := setupBillingOwnerForTest(t, application, "sitebrush.example", "owner@sitebrush.example", true)
