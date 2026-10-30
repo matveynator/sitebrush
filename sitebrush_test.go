@@ -2074,8 +2074,14 @@ func TestServiceMailRelayRegistrationStoresAttachedHostingSnapshot(t *testing.T)
 	}
 }
 
-func TestSitebrushNetChanRegistrationStoresInstalledServer(t *testing.T) {
+func TestSitebrushNetChanRegistrationWithMailRelayDisabled(t *testing.T) {
 	application, _ := newTestApplication(t)
+	if err := application.withServerControlDatabaseWrite(context.Background(), "test-disable-relay", func(database *sql.DB) error {
+		return (hostingandsupport.Store{DB: database}).SaveServiceMailSettings(context.Background(), false)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
 	request := serviceMailRequest{
 		Version:      1,
 		CodeKind:     "installation_register",
@@ -2112,6 +2118,29 @@ func TestSitebrushNetChanRegistrationStoresInstalledServer(t *testing.T) {
 	}
 	if hostings[0].InstallationID != request.InstallationID || hostings[0].ServerIP != request.HostingSnapshot.ServerIP {
 		t.Fatalf("installed server was not stored from netchan registration: %#v", hostings[0])
+	}
+
+	mailRequest := request
+	mailRequest.CodeKind = "login_code"
+	mailRequest.Recipient = "owner@example.com"
+	mailRequest.SecretValue = "123456"
+	if err := application.signServiceMailRequest(context.Background(), &mailRequest); err != nil {
+		t.Fatal(err)
+	}
+	mailPayload, err := json.Marshal(mailRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mailResponse := application.handleSitebrushNetChanPayload(context.Background(), mailPayload); mailResponse.StatusCode != http.StatusForbidden || !strings.Contains(mailResponse.Status, "disabled") {
+		t.Fatalf("disabled mail relay accepted delivery: %+v", mailResponse)
+	}
+	request.HostingSnapshot.ServerDomain = "forged.example.com"
+	forgedPayload, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if forgedResponse := application.handleSitebrushNetChanPayload(context.Background(), forgedPayload); forgedResponse.StatusCode != http.StatusForbidden {
+		t.Fatalf("registration accepted an invalid signature: %+v", forgedResponse)
 	}
 }
 
@@ -4772,26 +4801,10 @@ func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
 	confirmResponse := httptest.NewRecorder()
 	prepareAccountMailCaptchaForTest(t, application, confirmRequest)
 	application.route(confirmResponse, confirmRequest)
-	if confirmResponse.Code != http.StatusOK || !strings.Contains(confirmResponse.Body.String(), `autocomplete="new-password"`) {
-		t.Fatalf("verified local email should open password setup: status=%d body=%q", confirmResponse.Code, confirmResponse.Body.String())
-	}
-	secureSetupRequest := httptest.NewRequest(http.MethodGet, "https://localhost/?email_confirm="+url.QueryEscape(pendingToken), nil)
-	secureSetupResponse := httptest.NewRecorder()
-	application.route(secureSetupResponse, secureSetupRequest)
-	if secureSetupResponse.Code != http.StatusOK || !strings.Contains(secureSetupResponse.Body.String(), `autocomplete="new-password"`) {
-		t.Fatal("verified email should open password setup on HTTPS")
-	}
-	passwordForm := url.Values{"password": {"secret"}, "password_confirm": {"secret"}}
-	passwordRequest := httptest.NewRequest(http.MethodPost, "https://localhost/?email_confirm="+url.QueryEscape(pendingToken), strings.NewReader(passwordForm.Encode()))
-	passwordRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	passwordRequest.RemoteAddr = "198.51.100.45:4567"
-	confirmResponse = httptest.NewRecorder()
-	prepareAccountMailCaptchaForTest(t, application, passwordRequest)
-	application.route(confirmResponse, passwordRequest)
 	if confirmResponse.Code != http.StatusFound {
-		t.Fatalf("confirm status = %d, body=%q", confirmResponse.Code, confirmResponse.Body.String())
+		t.Fatalf("code did not complete registration: status=%d body=%q", confirmResponse.Code, confirmResponse.Body.String())
 	}
-	_ = rawDB.QueryRow(`SELECT COUNT(1) FROM users WHERE domain=? AND email=? AND password=? AND is_admin=1`, "localhost", "admin@example.com", "secret").Scan(&userCount)
+	_ = rawDB.QueryRow(`SELECT COUNT(1) FROM users WHERE domain=? AND email=? AND is_admin=1`, "localhost", "admin@example.com").Scan(&userCount)
 	if userCount != 1 {
 		t.Fatalf("confirmed admin count = %d, want 1", userCount)
 	}
@@ -5298,11 +5311,8 @@ func TestRegisterCreatesSiteDatabaseOnlyAfterConfirmedVerifiedDomain(t *testing.
 	}
 	select {
 	case sslRequest := <-application.automaticSSL:
-		if sslRequest.action != "registration_confirmed" || sslRequest.domain != domain {
-			t.Fatalf("automatic SSL request = %+v, want confirmed registration for %s", sslRequest, domain)
-		}
+		t.Fatalf("email link GET requested a certificate before account completion: %+v", sslRequest)
 	default:
-		t.Fatal("email confirmation did not start automatic SSL before account setup continued")
 	}
 	if _, err := os.Stat(siteDatabasePath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("confirmation page created site database before account setup: %v", err)
@@ -13578,6 +13588,32 @@ func TestPrivateTestDriveRequiresCreatingBrowserSession(t *testing.T) {
 			}
 		}
 	}
+	challengeBackend := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/.well-known/acme-challenge/registered-token" {
+			_, _ = io.WriteString(writer, "registered-token.thumbprint")
+			return
+		}
+		http.NotFound(writer, request)
+	}))
+	defer challengeBackend.Close()
+	if err := publicFront.Set(strings.TrimPrefix(challengeBackend.URL, "http://"), false); err != nil {
+		t.Fatal(err)
+	}
+	for _, challenge := range []struct {
+		token  string
+		status int
+		body   string
+	}{
+		{"registered-token", http.StatusOK, "registered-token.thumbprint"},
+		{"unknown-token", http.StatusNotFound, "404 page not found\n"},
+	} {
+		challengeRequest := httptest.NewRequest(http.MethodGet, "http://"+domain+"/.well-known/acme-challenge/"+challenge.token, nil)
+		challengeResponse := httptest.NewRecorder()
+		publicFront.ServeHTTP(challengeResponse, challengeRequest)
+		if challengeResponse.Code != challenge.status || challengeResponse.Body.String() != challenge.body {
+			t.Fatalf("HTTP-01 was blocked by the private gate: %d %s", challengeResponse.Code, challengeResponse.Body.String())
+		}
+	}
 	if err := application.withServerControlDatabaseWrite(context.Background(), "test-expire-trial", func(database *sql.DB) error {
 		_, err := database.Exec(`UPDATE public_trial_sites SET status='email_verified',verified_email=?,delete_after=? WHERE domain=?`, "creator@example.com", now.Add(-time.Minute).Format(time.RFC3339), domain)
 		return err
@@ -13730,6 +13766,9 @@ func TestServerWWWAliasSSLUsesOwnerDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := application.db.ExecContext(contextWithSiteDatabaseCreation(ownerContext), `INSERT INTO domain_aliases(primary_domain,alias_domain,is_verified,dns_a_ok) VALUES(?,?,1,1)`, ownerDomain, aliasDomain); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.db.ExecContext(ownerContext, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, ownerDomain, "owner@sitebrush.com", "verified-owner"); err != nil {
 		t.Fatal(err)
 	}
 	previousIPLookup := lookupIPRecords
@@ -14049,8 +14088,14 @@ func TestPrivateTestDriveStartsWithCaptchaOnPartitionedSiteDatabase(t *testing.T
 }
 
 func TestPrivateTestDriveStartsWithEmailAndHandsOffOnce(t *testing.T) {
+	for _, scheme := range []string{"http", "https"} {
+		t.Run(scheme, func(t *testing.T) { testPrivateTestDriveOnboarding(t, scheme) })
+	}
+}
+
+func testPrivateTestDriveOnboarding(t *testing.T, scheme string) {
 	application := newRouterTestApplication(t)
-	controlDatabase := setupBillingOwnerForTest(t, application, "sitebrush.example", "owner@sitebrush.example", true)
+	controlDatabase := setupBillingOwnerForTest(t, application, "sitebrush.com", "owner@sitebrush.com", true)
 	store := hostingandsupport.Store{DB: controlDatabase}
 	if err := store.SaveRegistrationSettingsWithLimits(context.Background(), true, true, hostingandsupport.SiteSizeLimits{Registration: 1 << 30, TestDrive: 1 << 30}); err != nil {
 		t.Fatal(err)
@@ -14083,7 +14128,7 @@ func TestPrivateTestDriveStartsWithEmailAndHandsOffOnce(t *testing.T) {
 			}
 		}
 	}()
-	formRequest := httptest.NewRequest(http.MethodGet, "https://sitebrush.example/?test_drive", nil)
+	formRequest := httptest.NewRequest(http.MethodGet, scheme+"://sitebrush.com/?test_drive", nil)
 	formRequest.Header.Set("Accept-Language", "ru")
 	formResponse := httptest.NewRecorder()
 	application.route(formResponse, formRequest)
@@ -14105,18 +14150,19 @@ func TestPrivateTestDriveStartsWithEmailAndHandsOffOnce(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	application.automaticSSL = make(chan automaticSSLRequest, 8)
 	form := url.Values{"subdomain": {"myproject"}, "email": {"creator@example.com"}}
-	startRequest := httptest.NewRequest(http.MethodPost, "https://sitebrush.example/?test_drive_start", strings.NewReader(form.Encode()))
+	startRequest := httptest.NewRequest(http.MethodPost, scheme+"://sitebrush.com/?test_drive_start", strings.NewReader(form.Encode()))
 	startRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	startRequest.Header.Set("Origin", "https://sitebrush.example")
+	startRequest.Header.Set("Origin", scheme+"://sitebrush.com")
 	startRequest.Header.Set("Accept-Language", "ru")
 	startRequest.AddCookie(entryCookie)
 	startResponse := httptest.NewRecorder()
 	application.route(startResponse, startRequest)
-	if startResponse.Code != http.StatusOK || !strings.Contains(startResponse.Body.String(), "myproject.sitebrush.example") {
+	if startResponse.Code != http.StatusOK || !strings.Contains(startResponse.Body.String(), "myproject.sitebrush.com") {
 		t.Fatalf("start: %d %s", startResponse.Code, startResponse.Body.String())
 	}
-	trial, found, err := application.privateTestDrive(context.Background(), "myproject.sitebrush.example")
+	trial, found, err := application.privateTestDrive(context.Background(), "myproject.sitebrush.com")
 	if err != nil || !found || trial.Status != "email_pending" || trial.PendingEmail != "creator@example.com" || trial.ID == 0 {
 		t.Fatalf("trial: %+v %t %v", trial, found, err)
 	}
@@ -14125,8 +14171,8 @@ func TestPrivateTestDriveStartsWithEmailAndHandsOffOnce(t *testing.T) {
 	}
 	trialCreatedAt, _ := time.Parse(time.RFC3339, trial.CreatedAt)
 	trialExpiry, _ := time.Parse(time.RFC3339, trial.DeleteAfter)
-	if trialExpiry.Sub(trialCreatedAt) != 21*time.Minute {
-		t.Fatalf("configured idle TTL not applied: %s", trialExpiry.Sub(trialCreatedAt))
+	if trialExpiry.Sub(trialCreatedAt) != testDriveCodeTime {
+		t.Fatalf("pending site expires before its confirmation code: %s", trialExpiry.Sub(trialCreatedAt))
 	}
 	var handoffCookie *http.Cookie
 	for _, cookie := range startResponse.Result().Cookies() {
@@ -14134,26 +14180,26 @@ func TestPrivateTestDriveStartsWithEmailAndHandsOffOnce(t *testing.T) {
 			handoffCookie = cookie
 		}
 	}
-	if handoffCookie == nil || !handoffCookie.HttpOnly || !handoffCookie.Secure {
+	if handoffCookie == nil || !handoffCookie.HttpOnly || handoffCookie.Secure != (scheme == "https") {
 		t.Fatal("resumable handoff cookie missing or unprotected")
 	}
-	repeatRequest := httptest.NewRequest(http.MethodPost, "https://sitebrush.example/?test_drive_start", strings.NewReader(form.Encode()))
+	repeatRequest := httptest.NewRequest(http.MethodPost, scheme+"://sitebrush.com/?test_drive_start", strings.NewReader(form.Encode()))
 	repeatRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	repeatRequest.Header.Set("Origin", "https://sitebrush.example")
+	repeatRequest.Header.Set("Origin", scheme+"://sitebrush.com")
 	repeatRequest.AddCookie(entryCookie)
 	repeatRequest.AddCookie(handoffCookie)
 	repeatResponse := httptest.NewRecorder()
 	application.route(repeatResponse, repeatRequest)
-	if repeatResponse.Code != http.StatusOK || !strings.Contains(repeatResponse.Body.String(), "myproject.sitebrush.example") {
+	if repeatResponse.Code != http.StatusOK || !strings.Contains(repeatResponse.Body.String(), "myproject.sitebrush.com") {
 		t.Fatalf("repeat start did not resume the same handoff: %d %s", repeatResponse.Code, repeatResponse.Body.String())
 	}
-	if !strings.Contains(repeatResponse.Body.String(), " disabled>") {
-		t.Fatal("handoff was enabled before the HTTPS address was checked")
+	if strings.Contains(repeatResponse.Body.String(), " disabled>") || !strings.Contains(repeatResponse.Body.String(), `action="http://myproject.sitebrush.com/?test_drive_handoff"`) {
+		t.Fatal("private handoff still depends on a certificate")
 	}
 	limitForm := url.Values{"subdomain": {"another-project"}, "email": {"creator@example.com"}}
-	limitRequest := httptest.NewRequest(http.MethodPost, "https://sitebrush.example/?test_drive_start", strings.NewReader(limitForm.Encode()))
+	limitRequest := httptest.NewRequest(http.MethodPost, scheme+"://sitebrush.com/?test_drive_start", strings.NewReader(limitForm.Encode()))
 	limitRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	limitRequest.Header.Set("Origin", "https://sitebrush.example")
+	limitRequest.Header.Set("Origin", scheme+"://sitebrush.com")
 	limitRequest.AddCookie(entryCookie)
 	limitResponse := httptest.NewRecorder()
 	application.route(limitResponse, limitRequest)
@@ -14180,15 +14226,15 @@ func TestPrivateTestDriveStartsWithEmailAndHandsOffOnce(t *testing.T) {
 		t.Fatal("one-time handoff ticket missing")
 	}
 	handoffForm := url.Values{"ticket": {ticketMatch[1]}}
-	handoffRequest := httptest.NewRequest(http.MethodPost, "https://myproject.sitebrush.example/?test_drive_handoff", strings.NewReader(handoffForm.Encode()))
+	handoffRequest := httptest.NewRequest(http.MethodPost, scheme+"://myproject.sitebrush.com/?test_drive_handoff", strings.NewReader(handoffForm.Encode()))
 	handoffRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	handoffRequest.Header.Set("Origin", "https://sitebrush.example")
+	handoffRequest.Header.Set("Origin", scheme+"://sitebrush.com")
 	publicBoundary := &App{storagePath: application.storagePath, storageRealRoot: application.storageRealRoot, publicBoundary: true, controlDatabase: dispatcher}
 	boundaryResponse := httptest.NewRecorder()
 	if publicBoundary.privateTestDriveGate(boundaryResponse, handoffRequest) || boundaryResponse.Body.Len() != 0 {
 		t.Fatalf("public boundary consumed the handoff: %d %s", boundaryResponse.Code, boundaryResponse.Body.String())
 	}
-	beforeHandoff, found, err := application.privateTestDrive(context.Background(), "myproject.sitebrush.example")
+	beforeHandoff, found, err := application.privateTestDrive(context.Background(), "myproject.sitebrush.com")
 	if err != nil || !found || beforeHandoff.HandoffHash == "" {
 		t.Fatalf("public boundary changed the handoff ticket: %+v %t %v", beforeHandoff, found, err)
 	}
@@ -14206,10 +14252,10 @@ func TestPrivateTestDriveStartsWithEmailAndHandsOffOnce(t *testing.T) {
 			editorCookie = cookie
 		}
 	}
-	if trialCookie == nil || editorCookie == nil || !trialCookie.HttpOnly || !trialCookie.Secure {
+	if trialCookie == nil || editorCookie == nil || !trialCookie.HttpOnly || trialCookie.Secure != (scheme == "https") {
 		t.Fatalf("trial cookies: %#v", handoffResponse.Result().Cookies())
 	}
-	boundaryStatusRequest := httptest.NewRequest(http.MethodGet, "https://myproject.sitebrush.example/?test_drive_status", nil)
+	boundaryStatusRequest := httptest.NewRequest(http.MethodGet, scheme+"://myproject.sitebrush.com/?test_drive_status", nil)
 	boundaryStatusRequest.AddCookie(trialCookie)
 	boundaryStatusResponse := httptest.NewRecorder()
 	if publicBoundary.privateTestDriveGate(boundaryStatusResponse, boundaryStatusRequest) || boundaryStatusResponse.Body.Len() != 0 {
@@ -14220,8 +14266,8 @@ func TestPrivateTestDriveStartsWithEmailAndHandsOffOnce(t *testing.T) {
 	if secondResponse.Code != http.StatusForbidden {
 		t.Fatalf("ticket reused: %d", secondResponse.Code)
 	}
-	ownerRequest := httptest.NewRequest(http.MethodGet, "https://myproject.sitebrush.example/?edit", nil)
-	ownerRequest = ownerRequest.WithContext(contextWithDomain(ownerRequest.Context(), "myproject.sitebrush.example"))
+	ownerRequest := httptest.NewRequest(http.MethodGet, scheme+"://myproject.sitebrush.com/?edit", nil)
+	ownerRequest = ownerRequest.WithContext(contextWithDomain(ownerRequest.Context(), "myproject.sitebrush.com"))
 	ownerRequest.AddCookie(trialCookie)
 	ownerRequest.AddCookie(editorCookie)
 	trialCSRF := accountCSRF(ownerRequest)
@@ -14238,9 +14284,9 @@ func TestPrivateTestDriveStartsWithEmailAndHandsOffOnce(t *testing.T) {
 		if closeErr := formWriter.Close(); closeErr != nil {
 			t.Fatal(closeErr)
 		}
-		request := httptest.NewRequest(http.MethodPost, "https://myproject.sitebrush.example/?"+action, &body)
+		request := httptest.NewRequest(http.MethodPost, scheme+"://myproject.sitebrush.com/?"+action, &body)
 		request.Header.Set("Content-Type", formWriter.FormDataContentType())
-		request.Header.Set("Origin", "https://myproject.sitebrush.example")
+		request.Header.Set("Origin", scheme+"://myproject.sitebrush.com")
 		if csrfHeader {
 			request.Header.Set("X-SiteBrush-CSRF", trialCSRF)
 		}
@@ -14253,7 +14299,7 @@ func TestPrivateTestDriveStartsWithEmailAndHandsOffOnce(t *testing.T) {
 	if ownerResponse.Code != http.StatusOK || !strings.Contains(ownerResponse.Body.String(), "data-test-drive-save") {
 		t.Fatalf("private editor: %d %s", ownerResponse.Code, ownerResponse.Body.String())
 	}
-	welcomeRequest := httptest.NewRequest(http.MethodGet, "https://myproject.sitebrush.example/?test_drive_welcome", nil)
+	welcomeRequest := httptest.NewRequest(http.MethodGet, scheme+"://myproject.sitebrush.com/?test_drive_welcome", nil)
 	welcomeRequest.AddCookie(trialCookie)
 	welcomeRequest.AddCookie(editorCookie)
 	welcomeResponse := httptest.NewRecorder()
@@ -14261,7 +14307,7 @@ func TestPrivateTestDriveStartsWithEmailAndHandsOffOnce(t *testing.T) {
 	if welcomeResponse.Code != http.StatusOK || !strings.Contains(welcomeResponse.Body.String(), "data-test-drive-copy") || !strings.Contains(welcomeResponse.Body.String(), "data-test-drive-save") {
 		t.Fatalf("private welcome: %d %s", welcomeResponse.Code, welcomeResponse.Body.String())
 	}
-	privateVisitor := httptest.NewRequest(http.MethodGet, "https://myproject.sitebrush.example/", nil)
+	privateVisitor := httptest.NewRequest(http.MethodGet, scheme+"://myproject.sitebrush.com/", nil)
 	privateResponse := httptest.NewRecorder()
 	application.route(privateResponse, privateVisitor)
 	if privateResponse.Code != http.StatusForbidden {
@@ -14270,10 +14316,10 @@ func TestPrivateTestDriveStartsWithEmailAndHandsOffOnce(t *testing.T) {
 	socketServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		request.RemoteAddr = startRequest.RemoteAddr
 		if hasQueryFlag(request, "test_drive_entry_ws") {
-			request.Host = "sitebrush.example"
+			request.Host = "sitebrush.com"
 			request.AddCookie(entryCookie)
 		} else {
-			request.Host = "myproject.sitebrush.example"
+			request.Host = "myproject.sitebrush.com"
 			if hasQueryFlag(request, "test_drive_handoff_ready") {
 				request.TLS = &tls.ConnectionState{}
 			} else {
@@ -14299,19 +14345,19 @@ func TestPrivateTestDriveStartsWithEmailAndHandsOffOnce(t *testing.T) {
 		}
 		return reply
 	}
-	socketReply := sendSocketCommand("test_drive_ws", "myproject.sitebrush.example", testDriveSocketCommand{ID: 1, Action: "status"})
+	socketReply := sendSocketCommand("test_drive_ws", "myproject.sitebrush.com", testDriveSocketCommand{ID: 1, Action: "status"})
 	if socketReply.Status != http.StatusOK || !bytes.Contains(socketReply.Payload, []byte(`"status":"email_pending"`)) || !bytes.Contains(socketReply.Payload, []byte(`"code_sent":true`)) {
 		t.Fatalf("Test Drive WebSocket reply: %+v", socketReply)
 	}
-	availabilityReply := sendSocketCommand("test_drive_entry_ws", "sitebrush.example", testDriveSocketCommand{ID: 2, Action: "domain_check", Subdomain: "myproject"})
+	availabilityReply := sendSocketCommand("test_drive_entry_ws", "sitebrush.com", testDriveSocketCommand{ID: 2, Action: "domain_check", Subdomain: "myproject"})
 	if availabilityReply.Status != http.StatusOK || !bytes.Contains(availabilityReply.Payload, []byte(`"available":false`)) {
 		t.Fatalf("entry domain check: %+v", availabilityReply)
 	}
-	captchaReply := sendSocketCommand("test_drive_entry_ws", "sitebrush.example", testDriveSocketCommand{ID: 3, Action: "captcha"})
+	captchaReply := sendSocketCommand("test_drive_entry_ws", "sitebrush.com", testDriveSocketCommand{ID: 3, Action: "captcha"})
 	if captchaReply.Status != http.StatusOK || !bytes.Contains(captchaReply.Payload, []byte(`"image":"data:image/png;base64,`)) {
 		t.Fatalf("entry CAPTCHA: %+v", captchaReply)
 	}
-	readinessConnection, dialErr := websocket.Dial("ws"+strings.TrimPrefix(socketServer.URL, "http")+"/?test_drive_handoff_ready", "", "http://sitebrush.example")
+	readinessConnection, dialErr := websocket.Dial("ws"+strings.TrimPrefix(socketServer.URL, "http")+"/?test_drive_handoff_ready", "", "http://sitebrush.com")
 	if dialErr != nil {
 		t.Fatal(dialErr)
 	}
@@ -14321,13 +14367,30 @@ func TestPrivateTestDriveStartsWithEmailAndHandsOffOnce(t *testing.T) {
 	if readinessErr != nil || !readinessReply["ready"] || len(readinessReply) != 1 {
 		t.Fatalf("neutral readiness probe: %+v %v", readinessReply, readinessErr)
 	}
-	csrfReply := sendSocketCommand("test_drive_ws", "myproject.sitebrush.example", testDriveSocketCommand{ID: 4, Action: "verify", Code: "invalid", CSRF: "wrong"})
+	csrfReply := sendSocketCommand("test_drive_ws", "myproject.sitebrush.com", testDriveSocketCommand{ID: 4, Action: "verify", Code: "invalid", CSRF: "wrong"})
 	if csrfReply.Status != http.StatusForbidden {
 		t.Fatalf("WebSocket verification bypassed CSRF: %+v", csrfReply)
 	}
-	invalidCodeReply := sendSocketCommand("test_drive_ws", "myproject.sitebrush.example", testDriveSocketCommand{ID: 5, Action: "verify", Code: "invalid", CSRF: trialCSRF})
+	invalidCodeReply := sendSocketCommand("test_drive_ws", "myproject.sitebrush.com", testDriveSocketCommand{ID: 5, Action: "verify", Code: "invalid", CSRF: trialCSRF})
 	if invalidCodeReply.Status != http.StatusBadRequest {
 		t.Fatalf("WebSocket verification did not reach code validation: %+v", invalidCodeReply)
+	}
+	select {
+	case unexpected := <-application.automaticSSL:
+		t.Fatalf("private trial requested a certificate: %+v", unexpected)
+	default:
+	}
+	indexingRequest := httptest.NewRequest(http.MethodGet, scheme+"://myproject.sitebrush.com/?indexing_review", nil)
+	indexingRequest = indexingRequest.WithContext(contextWithDomain(indexingRequest.Context(), trial.Domain))
+	indexingRequest.AddCookie(trialCookie)
+	indexingRequest.AddCookie(editorCookie)
+	indexingResponse := httptest.NewRecorder()
+	application.route(indexingResponse, indexingRequest)
+	if indexingResponse.Code != http.StatusOK || !strings.Contains(indexingResponse.Body.String(), `"indexing_decision_required":false`) {
+		t.Fatalf("private copy offered a public indexing decision: %d %s", indexingResponse.Code, indexingResponse.Body.String())
+	}
+	if reviewID, reviewErr := application.beginIndexingReview(ownerRequest.Context(), trial.Domain); reviewErr != nil || reviewID != "" {
+		t.Fatalf("private import created an indexing prompt: %q %v", reviewID, reviewErr)
 	}
 	var message mailout.Message
 	select {
@@ -14336,7 +14399,7 @@ func TestPrivateTestDriveStartsWithEmailAndHandsOffOnce(t *testing.T) {
 	default:
 		t.Fatal("confirmation message not queued")
 	}
-	if message.To != "creator@example.com" || message.Subject != translationsForLanguageCode("ru")["test_drive_mail_subject"] || strings.Contains(message.Body, "myproject.sitebrush.example") || strings.Contains(message.Body, "http") || !strings.Contains(message.HTMLBody, `lang="ru"`) || strings.Contains(message.HTMLBody, "myproject.sitebrush.example") || strings.Contains(message.HTMLBody, "http") {
+	if message.To != "creator@example.com" || message.Subject != translationsForLanguageCode("ru")["test_drive_mail_subject"] || strings.Contains(message.Body, "myproject.sitebrush.com") || strings.Contains(message.Body, "http") || !strings.Contains(message.HTMLBody, `lang="ru"`) || strings.Contains(message.HTMLBody, "myproject.sitebrush.com") || strings.Contains(message.HTMLBody, "http") {
 		t.Fatalf("non-neutral confirmation: %+v", message)
 	}
 	codeMatch := regexp.MustCompile(`[0-9]{6}`).FindString(message.Body)
@@ -14348,9 +14411,9 @@ func TestPrivateTestDriveStartsWithEmailAndHandsOffOnce(t *testing.T) {
 	}
 	sendAlternateEmail := func(email string) (int, string) {
 		formBody := url.Values{"email": {email}, "account_csrf": {trialCSRF}}
-		request := httptest.NewRequest(http.MethodPost, "https://myproject.sitebrush.example/?test_drive_email", strings.NewReader(formBody.Encode()))
+		request := httptest.NewRequest(http.MethodPost, scheme+"://myproject.sitebrush.com/?test_drive_email", strings.NewReader(formBody.Encode()))
 		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		request.Header.Set("Origin", "https://myproject.sitebrush.example")
+		request.Header.Set("Origin", scheme+"://myproject.sitebrush.com")
 		request.AddCookie(trialCookie)
 		request.AddCookie(editorCookie)
 		response := httptest.NewRecorder()
@@ -14381,9 +14444,9 @@ func TestPrivateTestDriveStartsWithEmailAndHandsOffOnce(t *testing.T) {
 		t.Fatalf("second address: status=%d code=%q", responseCode, secondCode)
 	}
 	oldCodeForm := url.Values{"code": {codeMatch}, "account_csrf": {trialCSRF}}
-	oldCodeRequest := httptest.NewRequest(http.MethodPost, "https://myproject.sitebrush.example/?test_drive_verify", strings.NewReader(oldCodeForm.Encode()))
+	oldCodeRequest := httptest.NewRequest(http.MethodPost, scheme+"://myproject.sitebrush.com/?test_drive_verify", strings.NewReader(oldCodeForm.Encode()))
 	oldCodeRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	oldCodeRequest.Header.Set("Origin", "https://myproject.sitebrush.example")
+	oldCodeRequest.Header.Set("Origin", scheme+"://myproject.sitebrush.com")
 	oldCodeRequest.AddCookie(trialCookie)
 	oldCodeRequest.AddCookie(editorCookie)
 	oldCodeResponse := httptest.NewRecorder()
@@ -14421,10 +14484,10 @@ func TestPrivateTestDriveStartsWithEmailAndHandsOffOnce(t *testing.T) {
 	}
 	codeMatch = thirdCode
 	verifyForm := url.Values{"code": {codeMatch}, "account_csrf": {trialCSRF}}
-	verifyRequest := httptest.NewRequest(http.MethodPost, "https://myproject.sitebrush.example/?test_drive_verify", strings.NewReader(verifyForm.Encode()))
+	verifyRequest := httptest.NewRequest(http.MethodPost, scheme+"://myproject.sitebrush.com/?test_drive_verify", strings.NewReader(verifyForm.Encode()))
 	verifyRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	verifyRequest.Header.Set("Origin", "https://myproject.sitebrush.example")
-	verifyRequest = verifyRequest.WithContext(contextWithDomain(verifyRequest.Context(), "myproject.sitebrush.example"))
+	verifyRequest.Header.Set("Origin", scheme+"://myproject.sitebrush.com")
+	verifyRequest = verifyRequest.WithContext(contextWithDomain(verifyRequest.Context(), "myproject.sitebrush.com"))
 	verifyRequest.AddCookie(trialCookie)
 	verifyRequest.AddCookie(editorCookie)
 	verifyResponse := httptest.NewRecorder()
@@ -14471,8 +14534,39 @@ func TestPrivateTestDriveStartsWithEmailAndHandsOffOnce(t *testing.T) {
 	if email, authenticated := application.currentAdminEmail(ownerRequest); !authenticated || email != "third@example.com" {
 		t.Fatalf("open editor did not become the verified owner: %s %t", email, authenticated)
 	}
-	visitorRequest := httptest.NewRequest(http.MethodGet, "https://myproject.sitebrush.example/", nil)
-	visitorRequest = visitorRequest.WithContext(contextWithDomain(visitorRequest.Context(), "myproject.sitebrush.example"))
+	select {
+	case sslRequest := <-application.automaticSSL:
+		if sslRequest.action != "registration_confirmed" || sslRequest.domain != trial.Domain {
+			t.Fatalf("activation SSL request: %+v", sslRequest)
+		}
+	default:
+		t.Fatal("completed registration did not schedule TLS")
+	}
+	if scheme == "http" {
+		secureRequest := httptest.NewRequest(http.MethodGet, "https://myproject.sitebrush.com/?edit", nil)
+		secureRequest = secureRequest.WithContext(contextWithDomain(secureRequest.Context(), trial.Domain))
+		secureRequest.AddCookie(trialCookie)
+		secureRequest.AddCookie(editorCookie)
+		secureResponse := httptest.NewRecorder()
+		application.route(secureResponse, secureRequest)
+		if secureResponse.Code != http.StatusOK || !strings.Contains(secureResponse.Body.String(), `id="visualEditorForm"`) {
+			t.Fatalf("HTTPS upgrade lost editor: %d %s", secureResponse.Code, secureResponse.Body.String())
+		}
+		var secureSession *http.Cookie
+		for _, cookie := range secureResponse.Result().Cookies() {
+			if cookie.Name == "sitebrush_session" {
+				secureSession = cookie
+			}
+		}
+		if secureSession == nil || !secureSession.Secure || secureSession.Value == editorCookie.Value {
+			t.Fatal("HTTP capability was not rotated into a Secure account session")
+		}
+		if _, authenticated := application.currentAdminEmail(ownerRequest); authenticated {
+			t.Fatal("retired HTTP account session remains usable")
+		}
+	}
+	visitorRequest := httptest.NewRequest(http.MethodGet, scheme+"://myproject.sitebrush.com/", nil)
+	visitorRequest = visitorRequest.WithContext(contextWithDomain(visitorRequest.Context(), "myproject.sitebrush.com"))
 	visitorResponse := httptest.NewRecorder()
 	application.route(visitorResponse, visitorRequest)
 	if visitorResponse.Code != http.StatusOK || !strings.Contains(visitorResponse.Body.String(), "SiteBrush") {
@@ -16032,7 +16126,10 @@ func TestAutomaticSSLDefaultsOnForResolvingDomainAndHonorsManualOff(t *testing.T
 }
 
 func TestAutoCertHostPolicyRequiresAutomaticSSLSettingAndPorts(t *testing.T) {
-	application, _ := newTestApplication(t)
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "example.com", "owner@example.com", "verified"); err != nil {
+		t.Fatal(err)
+	}
 	previousIPLookup := lookupIPRecords
 	previousExternalIPLookup := lookupServerExternalIP
 	previousInterfaceLookup := lookupServerInterfaceIPs
@@ -16424,8 +16521,121 @@ func TestPrepareAutomaticSSLDomainIgnoresUnmanagedSNIWithoutDNS(t *testing.T) {
 	}
 }
 
+func TestAutomaticSSLRequiresCompletedRegistration(t *testing.T) {
+	application, database := newTestApplication(t)
+	application.automaticSSLAvailable = true
+	application.automaticSSL = make(chan automaticSSLRequest, 8)
+	const domain = "trial.example.com"
+	ctx := contextWithDomain(context.Background(), domain)
+	if _, err := database.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?, '/', 'Trial', '<h1>Trial</h1>',1)`, domain); err != nil {
+		t.Fatal(err)
+	}
+	originalLookup := lookupIPRecords
+	defer func() { lookupIPRecords = originalLookup }()
+	lookupIPRecords = func(string) ([]net.IP, error) {
+		t.Fatal("incomplete registration performed ACME DNS lookup")
+		return nil, os.ErrInvalid
+	}
+	issuer := automaticSSLIssuerFunc(func(context.Context, string) channelacme.IssueResult {
+		t.Fatal("incomplete registration requested a certificate")
+		return channelacme.IssueResult{}
+	})
+	request := httptest.NewRequest(http.MethodGet, "https://"+domain+"/", nil)
+	checkDenied := func(t *testing.T) {
+		t.Helper()
+		if application.automaticSSLRegistrationComplete(ctx, domain) {
+			t.Fatal("incomplete registration eligible for TLS")
+		}
+		application.observeAutomaticSSLRegistration(request, domain)
+		select {
+		case unexpected := <-application.automaticSSL:
+			t.Fatalf("premature issuance queued: %+v", unexpected)
+		default:
+		}
+		if err := application.autoCertHostPolicy(ctx, domain); err == nil {
+			t.Fatal("SNI allowed premature issuance")
+		}
+		if err := application.autoCertPreparedHostPolicy(ctx, domain); err == nil {
+			t.Fatal("prepared host policy allowed premature issuance")
+		}
+		for _, force := range []bool{false, true} {
+			result := application.prepareAutomaticSSLDomainWithPolicy(issuer, domain, []net.IP{net.ParseIP("8.8.8.8")}, force)
+			if result.state != "awaiting_registration" {
+				t.Fatalf("premature preparation: %+v", result)
+			}
+		}
+	}
+	t.Run("no account", checkDenied)
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, "trial-random@sitebrush.invalid", "temporary"); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("temporary editor", checkDenied)
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, "owner@example.org", "verified"); err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range []string{"private", "email_pending", "email_verified", "blocked", "expiring"} {
+		if err := application.withServerControlDatabaseWrite(ctx, "test-private-tls-state", func(controlDatabase *sql.DB) error {
+			if _, err := controlDatabase.Exec(`DELETE FROM public_trial_sites WHERE domain=?`, domain); err != nil {
+				return err
+			}
+			_, err := controlDatabase.Exec(`INSERT INTO public_trial_sites(domain,source_url,status,created_at,delete_after) VALUES(?,'',?,?,?)`, domain, status, time.Now().UTC().Format(time.RFC3339), time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		t.Run(status, checkDenied)
+	}
+	if err := application.withServerControlDatabaseWrite(ctx, "test-activated-tls", func(controlDatabase *sql.DB) error {
+		_, err := controlDatabase.Exec(`UPDATE public_trial_sites SET status='activated',verified_email='owner@example.org' WHERE domain=?`, domain)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !application.automaticSSLRegistrationComplete(ctx, domain) {
+		t.Fatal("completed registration cannot obtain TLS")
+	}
+}
+
+func TestAutomaticSSLReusesPersistedCertificateBeforeIssuance(t *testing.T) {
+	application, database := newTestApplication(t)
+	const domain = "existing.example.com"
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, "owner@example.org", "verified"); err != nil {
+		t.Fatal(err)
+	}
+	writeCachedAutoCertForTest(t, application, domain, time.Now().Add(-time.Hour), time.Now().Add(80*24*time.Hour))
+	issuer := automaticSSLIssuerFunc(func(context.Context, string) channelacme.IssueResult {
+		t.Fatal("persisted valid certificate was requested again")
+		return channelacme.IssueResult{}
+	})
+	result := application.prepareAutomaticSSLDomain(issuer, domain, []net.IP{net.ParseIP("8.8.8.8")})
+	if result.state != "ready" || result.certificate == nil {
+		t.Fatalf("cached certificate was not reused after restart: %+v", result)
+	}
+}
+
+func TestRegistrationAndTestDriveCodesLastOneDay(t *testing.T) {
+	now := time.Now()
+	if registrationConfirmationTTL != 24*time.Hour || testDriveCodeTime != 24*time.Hour || !mailExpirationForKind("email_confirm", now).Equal(now.Add(24*time.Hour)) {
+		t.Fatal("registration code expires before one day")
+	}
+	for language, translations := range translationCatalog {
+		message := mailout.Message{Kind: "email_confirm", To: "owner@example.org"}
+		formatAccountMail(&message, language, "example.org", "https://example.org/?email_confirm=token", "", "123456", "192.0.2.1", now.UTC().Format(time.RFC3339), nil)
+		if !strings.Contains(message.Body, translations["mail_registration_ignore"]) || !strings.Contains(message.HTMLBody, "123456") {
+			t.Fatalf("%s registration mail has an outdated expiration", language)
+		}
+		if !strings.Contains(strings.NewReplacer("۲", "2", "۴", "4").Replace(translations["test_drive_mail_body"]), "24") || !strings.Contains(strings.NewReplacer("۲", "2", "۴", "4").Replace(translations["mail_registration_ignore"]), "24") {
+			t.Fatalf("%s has outdated code lifetime", language)
+		}
+	}
+}
+
 func TestConfirmedRegistrationQueuesAutomaticSSLRecheck(t *testing.T) {
-	application := &App{automaticSSL: make(chan automaticSSLRequest, 1)}
+	application, database := newTestApplication(t)
+	application.automaticSSL = make(chan automaticSSLRequest, 1)
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('a.sitebrush.com','owner@example.com','verified',1)`); err != nil {
+		t.Fatal(err)
+	}
 	request := httptest.NewRequest(http.MethodPost, "https://a.sitebrush.com/?email_confirm=token", nil)
 
 	application.observeAutomaticSSLRegistration(request, "a.sitebrush.com")
@@ -16471,6 +16681,9 @@ func TestPrepareAutomaticSSLDomainDoesNotIssueCertificateWhenDNSDiffersFromExter
 	if _, err := rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "customer.example.com", "/", "Home", "<h1>Home</h1>"); err != nil {
 		t.Fatalf("insert managed page: %v", err)
 	}
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('customer.example.com','owner@example.com','verified',1)`); err != nil {
+		t.Fatal(err)
+	}
 	previousIPLookup := lookupIPRecords
 	defer func() {
 		lookupIPRecords = previousIPLookup
@@ -16498,6 +16711,9 @@ func TestForcedAutomaticSSLPreparationDoesNotReuseValidCachedCertificate(t *test
 	certificateDomain := "renew.sitebrush.org"
 	if _, err := rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, certificateDomain, "/", "Home", "<h1>Home</h1>"); err != nil {
 		t.Fatalf("insert managed page: %v", err)
+	}
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, certificateDomain, "owner@example.com", "verified"); err != nil {
+		t.Fatal(err)
 	}
 	application.setDomainAutomaticSSLManual(contextWithDomain(context.Background(), certificateDomain), certificateDomain, true)
 
@@ -16726,6 +16942,9 @@ func TestTLSHandshakeNoiseAggregateBoundsSourceGroups(t *testing.T) {
 
 func TestAutoCertHostPolicyRechecksExpiringCachedCertificate(t *testing.T) {
 	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "expiring.example.com", "owner@example.com", "verified"); err != nil {
+		t.Fatal(err)
+	}
 	application.automaticSSLAvailable = true
 	writeCachedAutoCertForTest(t, application, "expiring.example.com", time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
 	if _, err := rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "expiring.example.com", "/", "Home", "<h1>Home</h1>"); err != nil {
@@ -19238,7 +19457,7 @@ func TestAccountSessionSurvivesAddressChange(t *testing.T) {
 	}
 }
 
-func TestAccountRegistrationWaitsForTrustedHTTPS(t *testing.T) {
+func TestAccountRegistrationHTTPLinkDoesNotCreateAccount(t *testing.T) {
 	application, _ := newTestApplication(t)
 	confirmation := EmailConfirmation{Token: "mail-secret", FormToken: "form-handle", Domain: "example.org", Action: "register", Email: "owner@example.org", Code: "123456", ExpiresAt: time.Now().Add(15 * time.Minute).UTC().Format(time.RFC3339)}
 	if err := application.saveRegistrationConfirmation(context.Background(), confirmation); err != nil {
@@ -19250,8 +19469,8 @@ func TestAccountRegistrationWaitsForTrustedHTTPS(t *testing.T) {
 	if response.Code != http.StatusOK || response.Header().Get("Location") != "" {
 		t.Fatalf("untrusted HTTPS redirect: %d %s", response.Code, response.Header().Get("Location"))
 	}
-	if !strings.Contains(response.Body.String(), "http-equiv=\"refresh\"") || strings.Contains(response.Body.String(), "type=\"password\"") {
-		t.Fatal("HTTP confirmation did not wait safely")
+	if !strings.Contains(response.Body.String(), "data-account-auto-confirm") || strings.Contains(response.Body.String(), `type="password"`) {
+		t.Fatal("HTTP confirmation did not offer password-free confirmation")
 	}
 	if application.hasAdmin(context.Background(), "example.org") {
 		t.Fatal("HTTP link created administrator")
@@ -19261,7 +19480,7 @@ func TestAccountRegistrationWaitsForTrustedHTTPS(t *testing.T) {
 	}
 }
 
-func TestAccountRegistrationPasswordOnlyAfterSecureConfirmation(t *testing.T) {
+func TestAccountRegistrationUsesCodeWithoutPassword(t *testing.T) {
 	application, database := newTestApplication(t)
 	confirmation := EmailConfirmation{Token: "mail-secret", FormToken: "form-handle", Domain: "localhost", Action: "register", Email: "owner@example.org", Code: "123456", ExpiresAt: time.Now().Add(15 * time.Minute).UTC().Format(time.RFC3339)}
 	if err := application.saveRegistrationConfirmation(context.Background(), confirmation); err != nil {
@@ -19269,15 +19488,15 @@ func TestAccountRegistrationPasswordOnlyAfterSecureConfirmation(t *testing.T) {
 	}
 	response := httptest.NewRecorder()
 	application.confirmEmailToken(response, httptest.NewRequest(http.MethodGet, "https://localhost/?email_confirm=mail-secret", nil))
-	if !strings.Contains(response.Body.String(), "autocomplete=\"new-password\"") {
-		t.Fatal("secure confirmation lacks password setup")
+	if strings.Contains(response.Body.String(), `type="password"`) || !strings.Contains(response.Body.String(), "data-account-auto-confirm") {
+		t.Fatal("confirmation still requires password setup")
 	}
 	var count int
 	database.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&count)
 	if count != 0 {
 		t.Fatal("GET mutated account")
 	}
-	for _, form := range []string{"", "password=one&password_confirm=two"} {
+	for _, form := range []string{"password=one&password_confirm=two"} {
 		request := httptest.NewRequest(http.MethodPost, "https://localhost/?email_confirm=mail-secret", strings.NewReader(form))
 		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		response := httptest.NewRecorder()
@@ -19292,6 +19511,12 @@ func TestAccountRegistrationPasswordOnlyAfterSecureConfirmation(t *testing.T) {
 }
 
 func TestNewSiteConfirmationLogsInAndOpensRootEditor(t *testing.T) {
+	for _, scheme := range []string{"http", "https"} {
+		t.Run(scheme, func(t *testing.T) { testNewSiteConfirmation(t, scheme) })
+	}
+}
+
+func testNewSiteConfirmation(t *testing.T, scheme string) {
 	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
 	application := newPartitionedTestApplication(t)
 	confirmationContext, stopConfirmations := context.WithCancel(context.Background())
@@ -19329,38 +19554,45 @@ func TestNewSiteConfirmationLogsInAndOpensRootEditor(t *testing.T) {
 	if err := application.saveRegistrationConfirmation(context.Background(), confirmation); err != nil {
 		t.Fatal(err)
 	}
-	linkRequest := httptest.NewRequest(http.MethodGet, "https://"+domain+"/?email_confirm="+confirmation.Token, nil)
+	linkRequest := httptest.NewRequest(http.MethodGet, scheme+"://"+domain+"/?email_confirm="+confirmation.Token, nil)
 	linkResponse := httptest.NewRecorder()
 	application.route(linkResponse, linkRequest)
-	if linkResponse.Code != http.StatusOK || !strings.Contains(linkResponse.Body.String(), `autocomplete="new-password"`) {
+	if linkResponse.Code != http.StatusOK || !strings.Contains(linkResponse.Body.String(), `data-account-auto-confirm`) || strings.Contains(linkResponse.Body.String(), `type="password"`) {
 		t.Fatalf("confirmation link: %d %s", linkResponse.Code, linkResponse.Body.String())
 	}
 	codeForm := url.Values{"registration_form_token": {confirmation.FormToken}, "registration_code": {confirmation.Code}}
-	codeRequest := httptest.NewRequest(http.MethodPost, "https://"+domain+"/?register&site_workflow=new_site", strings.NewReader(codeForm.Encode()))
+	codeRequest := httptest.NewRequest(http.MethodPost, scheme+"://"+domain+"/?register&site_workflow=new_site", strings.NewReader(codeForm.Encode()))
 	codeRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	codeRequest.Header.Set("Origin", "https://"+domain)
+	codeRequest.Header.Set("Origin", scheme+"://"+domain)
 	codeResponse := httptest.NewRecorder()
 	application.route(codeResponse, codeRequest)
-	if codeResponse.Code != http.StatusOK || !strings.Contains(codeResponse.Body.String(), `autocomplete="new-password"`) {
-		t.Fatalf("confirmation code: %d %s", codeResponse.Code, codeResponse.Body.String())
+	if scheme == "http" {
+		if codeResponse.Code != http.StatusOK || !application.hasAdmin(contextWithDomain(context.Background(), domain), domain) {
+			t.Fatalf("HTTP code did not complete registration: %d %s", codeResponse.Code, codeResponse.Body.String())
+		}
+		for _, cookie := range codeResponse.Result().Cookies() {
+			if cookie.Name == "sitebrush_session" && cookie.Value != "" {
+				t.Fatal("permanent session issued over HTTP")
+			}
+		}
+		if _, found := application.registrationConfirmationByToken(context.Background(), confirmation.Token); !found {
+			t.Fatal("HTTP completion consumed HTTPS continuation")
+		}
+		secureRequest := httptest.NewRequest(http.MethodGet, "https://"+domain+"/?email_confirm="+confirmation.Token, nil)
+		codeResponse = httptest.NewRecorder()
+		application.route(codeResponse, secureRequest)
 	}
-	passwordForm := url.Values{"password": {"new-password"}, "password_confirm": {"new-password"}}
-	passwordRequest := httptest.NewRequest(http.MethodPost, "https://"+domain+"/?email_confirm="+confirmation.Token, strings.NewReader(passwordForm.Encode()))
-	passwordRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	passwordRequest.Header.Set("Origin", "https://"+domain)
-	passwordResponse := httptest.NewRecorder()
-	application.route(passwordResponse, passwordRequest)
-	if passwordResponse.Code != http.StatusFound || passwordResponse.Header().Get("Location") != "/?edit" {
-		t.Fatalf("password completion: %d location=%q body=%s", passwordResponse.Code, passwordResponse.Header().Get("Location"), passwordResponse.Body.String())
+	if (codeResponse.Code != http.StatusFound && codeResponse.Code != http.StatusSeeOther) || codeResponse.Header().Get("Location") != "/?edit" {
+		t.Fatalf("code completion: %d location=%q body=%s", codeResponse.Code, codeResponse.Header().Get("Location"), codeResponse.Body.String())
 	}
 	var sessionCookie *http.Cookie
-	for _, cookie := range passwordResponse.Result().Cookies() {
+	for _, cookie := range codeResponse.Result().Cookies() {
 		if cookie.Name == "sitebrush_session" {
 			sessionCookie = cookie
 		}
 	}
 	if sessionCookie == nil || !sessionCookie.HttpOnly || !sessionCookie.Secure {
-		t.Fatalf("automatic login cookie missing: %#v", passwordResponse.Result().Cookies())
+		t.Fatalf("automatic login cookie missing: %#v", codeResponse.Result().Cookies())
 	}
 	editorRequest := httptest.NewRequest(http.MethodGet, "https://"+domain+"/?edit", nil)
 	editorRequest = editorRequest.WithContext(contextWithDomain(editorRequest.Context(), domain))

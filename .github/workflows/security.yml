@@ -103,6 +103,12 @@ jobs:
         run: >-
           go test -count=1 -timeout=180s .
           -run '^Test(PrivateTestDrive|DriveNameCheck|DriveLabel)'
+      - name: Test HTTP onboarding, certificate admission and server registration
+        env:
+          SITEBRUSH_SERVICE_MAIL_MODE: local
+        run: >-
+          go test -count=1 -timeout=180s .
+          -run '^Test(AutomaticSSLRequiresCompletedRegistration|AutomaticSSLReusesPersistedCertificate|RegistrationAndTestDriveCodes|AccountRegistration|NewSiteConfirmation|SitebrushNetChanRegistration|ServerWWWAliasSSL|ConfirmedRegistrationQueues)'
       - name: Test concise mail journal and transport attribution
         run: >-
           go test -count=1 -timeout=180s -covermode=atomic
