@@ -57612,7 +57612,10 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 func newPublicHTTPFront(application *App, secret string, stop <-chan struct{}) *publicsite.Front {
 	var front *publicsite.Front
 	publicHandler := func(w http.ResponseWriter, r *http.Request, paused bool) bool {
-		if !testDriveEntryAction(r) && application.privateTestDriveGate(w, r) {
+		if testDriveEntryAction(r) {
+			return false
+		}
+		if application.privateTestDriveGate(w, r) {
 			return true
 		}
 		if hasQueryFlag(r, "sitebrush_menu_ws") && paused {
