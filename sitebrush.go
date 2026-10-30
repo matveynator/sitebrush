@@ -161,7 +161,7 @@ const guestStaticHTMLCacheQueueSize = 4096
 const authIPFailureCacheQueueSize = 4096
 const emailConfirmationTTL = 15 * time.Minute
 const profilePasswordCodeTTL = 15 * time.Minute
-const registrationConfirmationTTL = 12 * time.Hour
+const registrationConfirmationTTL = 24 * time.Hour
 const sitebrushHTTPReadTimeout = 10 * time.Second
 const sitebrushHTTPWriteTimeout = 0
 const sitebrushHTTPIdleTimeout = 65 * time.Second
@@ -12273,6 +12273,9 @@ func (a *App) autoCertHostPolicy(ctx context.Context, host string) error {
 		a.logDomainEvent(certificateDomain, "AUTOCERT host policy accepted host=%s from existing certificate cache with more than %s remaining", host, automaticSSLCertificateRenewBefore)
 		return nil
 	}
+	if !a.automaticSSLRegistrationComplete(domainContext, certificateDomain) {
+		return fmt.Errorf("automatic SSL waits for completed registration for %q", certificateDomain)
+	}
 	if err := autoCertDomainEligibilityError(certificateDomain); err != nil {
 		a.recordDomainAutomaticSSLFailure(domainContext, certificateDomain, err.Error(), automaticSSLRetryDelayEligibility)
 		a.logDomainEvent(certificateDomain, "AUTOCERT host policy rejected host=%s error=%v", host, err)
@@ -13293,7 +13296,7 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if requestWithSensitiveCookieRequiresHTTPS(r) {
+	if requestWithSensitiveCookieRequiresHTTPS(r) && !a.httpTestDriveOwnerAllowed(r) && !registrationEmailEntryRequest(r) {
 		// Dispatch the password-free boundary explicitly so mixed query flags cannot bypass HTTPS.
 		if registrationCaptchaRequest(r) {
 			a.captchaImage(w, r)
@@ -18237,6 +18240,10 @@ func (a *App) renewAccountSession(w http.ResponseWriter, r *http.Request, domain
 		r.Method == http.MethodGet && r.Header.Get("Sec-Fetch-Dest") != "" && r.Header.Get("Sec-Fetch-Dest") != "document" || strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 		return true
 	}
+	if trialCookie, cookieErr := r.Cookie("sitebrush_test_drive"); cookieErr == nil && trialCookie.Value != "" && requestScheme(r) == "http" {
+		// Trial activity renews the bounded editor cookie; activated HTTP grace never rolls.
+		return true
+	}
 	// A recent foreground request has already extended the durable idle deadline.
 	// Avoid a SQLite write and WAL sync for every click during an active visit.
 	if lastUsed > now.Add(-time.Minute).Unix() && lastUsed <= now.Unix() {
@@ -18985,7 +18992,7 @@ func (a *App) confirmRegistrationCode(w http.ResponseWriter, r *http.Request) {
 	query.Set("email_confirm", confirmation.Token)
 	confirmationURL.RawQuery = query.Encode()
 	confirmationRequest.URL = &confirmationURL
-	confirmationRequest.Method = http.MethodGet
+	confirmationRequest.Method = http.MethodPost
 	a.confirmEmailToken(w, confirmationRequest)
 }
 
@@ -21379,6 +21386,25 @@ func requestWithSensitiveCookieRequiresHTTPS(r *http.Request) bool {
 	return false
 }
 
+// Registration transports only a mailbox challenge before an account exists.
+func registrationEmailEntryRequest(r *http.Request) bool {
+	if !hasQueryFlag(r, "register") && !hasQueryFlag(r, "site_request") && !hasQueryFlag(r, "captcha") {
+		return false
+	}
+	for flag := range r.URL.Query() {
+		if sitebrushControlQueryFlag(flag) && flag != "register" && flag != "site_request" && flag != "captcha" {
+			return false
+		}
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		return false
+	}
+	if strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "multipart/") {
+		return false
+	}
+	return r.FormValue("password") == "" && r.FormValue("password_confirm") == ""
+}
+
 func requestedReturnTarget(r *http.Request) string {
 	returnPath := r.URL.Path
 	if strings.TrimSpace(returnPath) == "" {
@@ -22208,6 +22234,13 @@ func grabImportResultResponse(importResult grabImportResult) map[string]any {
 // The latest review owns the site-wide search policy. Older import responses
 // cannot undo a newer import's pending decision.
 func (a *App) beginIndexingReview(ctx context.Context, domain string) (string, error) {
+	trial, found, readErr := a.privateTestDrive(ctx, domain)
+	if readErr != nil {
+		return "", readErr
+	}
+	if found && trial.Status != "activated" {
+		return "", nil
+	}
 	reviewID := randomAccessToken()
 	ctx = contextWithDomain(ctx, domain)
 	err := a.siteContentTransaction(ctx, func(transaction *sql.Tx) error {
@@ -22298,6 +22331,11 @@ func (a *App) indexingReviewEndpoint(w http.ResponseWriter, r *http.Request) {
 	}
 	domain := a.siteDomain(r.Context(), r)
 	if r.Method == http.MethodGet {
+		if trial, found, _ := a.privateTestDrive(r.Context(), domain); found && trial.Status != "activated" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"indexing_decision_required": false, "indexing_state": "private"})
+			return
+		}
 		var reviewID, state string
 		err := a.db.QueryRowContext(r.Context(), `SELECT review_id,state FROM site_indexing_state WHERE domain=?`, domain).Scan(&reviewID, &state)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -33232,6 +33270,9 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 		a.renderEmailConfirmationStatus(w, r, http.StatusNotFound, translationOrDefault(translations, "email_confirmation_status_invalid", "Invalid link"))
 		return
 	}
+	if confirmation.Action == "register" && a.resumeRegisteredEmailConfirmation(w, r, confirmation) {
+		return
+	}
 	if confirmation.Action == "register" {
 		a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{FlowID: mailMonitorFlowID(token), Kind: "registration", Stage: "registration_verified", Domain: confirmation.Domain, Recipient: confirmation.Email})
 		if err := a.confirmRegistrationDomain(r, confirmation); err != nil {
@@ -33240,17 +33281,14 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if !httpsecurity.UsesHTTPS(r) && !httpsecurity.IsLocalRequest(r) {
-		if confirmation.Action == "register" && !a.accountHTTPSReady(confirmation.Domain) {
-			_ = a.finishRegistrationAttempt(mailMonitorFlowID(token), "technical")
-		}
+	if confirmation.Action != "register" && !httpsecurity.UsesHTTPS(r) && !httpsecurity.IsLocalRequest(r) {
 		a.awaitAccountHTTPS(w, r)
 		return
 	}
 	if r.Method == http.MethodGet {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		a.render(w, r, "account-confirm.html", map[string]any{"Domain": confirmation.Domain, "Email": confirmation.Email, "CurrentEmail": confirmation.CurrentEmail, "Token": token, "AcceptEmail": confirmation.Action == "profile", "AutoConfirm": confirmation.Action == "register" && (confirmation.Workflow == "trial" || confirmation.Workflow == "trial_paid"), "SetPassword": confirmation.Action == "register" && confirmation.Password == "" && confirmation.Workflow != "trial" && confirmation.Workflow != "trial_paid"})
+		a.render(w, r, "account-confirm.html", map[string]any{"Domain": confirmation.Domain, "Email": confirmation.Email, "CurrentEmail": confirmation.CurrentEmail, "Token": token, "AcceptEmail": confirmation.Action == "profile", "AutoConfirm": confirmation.Action == "register"})
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -33263,7 +33301,7 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 			a.renderEmailConfirmationStatus(w, r, http.StatusConflict, "Confirm the paid import estimate before registering this site.")
 			return
 		}
-		if confirmation.Password == "" && confirmation.Workflow != "trial" && confirmation.Workflow != "trial_paid" {
+		if confirmation.Password == "" && r.FormValue("password") != "" {
 			password := r.FormValue("password")
 			status := ""
 			if password == "" {
@@ -33277,6 +33315,9 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			confirmation.Password = password
+		}
+		if confirmation.Password == "" {
+			confirmation.Password = randomAccessToken() + randomAccessToken()
 		}
 		confirmationContext := contextWithDomain(r.Context(), confirmation.Domain)
 		if a.reservedServerSubdomain(confirmationContext, confirmation.Domain) {
@@ -33344,8 +33385,11 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 			log.Printf("MAIL registration cooldown reset failed error_type=%T", resetErr)
 		}
 		a.activatePublicTrialAfterAdminRegistration(registerContext, confirmation.Domain, confirmation.Workflow)
-		a.deleteRegistrationConfirmation(registerContext, token)
-		if a.controlDatabase != nil {
+		secureCompletion := httpsecurity.UsesHTTPS(r) || httpsecurity.IsLocalRequest(r)
+		if secureCompletion {
+			a.deleteRegistrationConfirmation(registerContext, token)
+		}
+		if secureCompletion && a.controlDatabase != nil {
 			_ = a.withServerControlDatabaseWrite(registerContext, "complete-domain-reservation", func(db *sql.DB) error {
 				_, err := db.ExecContext(registerContext, `UPDATE domain_registration_claims SET token='' WHERE domain=? AND token=?`, confirmation.Domain, token)
 				return err
@@ -33364,6 +33408,11 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 		// A verified mailbox clears password throttling for the device that
 		// followed the link, including a phone on a different network.
 		a.clearFailedLoginAttempts(registerContext, confirmation.Domain, clientIPAddress(r))
+		if !secureCompletion {
+			a.observeAutomaticSSLRegistration(r, confirmation.Domain)
+			a.awaitAccountHTTPS(w, r)
+			return
+		}
 		if a.createSessionForDomain(w, r, registerContext, confirmation.Domain, confirmation.Email) == "" {
 			httpsecurity.RedirectLocal(w, r, "/?login", http.StatusSeeOther)
 			return
@@ -33397,8 +33446,55 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// An HTTP code verification may finish account creation before TLS is available.
+// Its original one-use confirmation remains until the HTTPS browser session is installed.
+func (a *App) resumeRegisteredEmailConfirmation(w http.ResponseWriter, r *http.Request, confirmation EmailConfirmation) bool {
+	ctx := contextWithDomain(r.Context(), confirmation.Domain)
+	var ownerCount int
+	if a.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE domain=? AND email=? AND is_admin=1`, confirmation.Domain, confirmation.Email).Scan(&ownerCount) != nil || ownerCount != 1 {
+		return false
+	}
+	var claimCount int
+	err := a.withServerControlDatabaseRead(ctx, "resume-registered-confirmation", func(database *sql.DB) error {
+		return database.QueryRowContext(ctx, `SELECT COUNT(*) FROM domain_registration_claims WHERE domain=? AND token=? AND kind='registration' AND COALESCE(confirmed_at,'')<>''`, confirmation.Domain, confirmation.Token).Scan(&claimCount)
+	})
+	if err != nil || claimCount != 1 {
+		return false
+	}
+	if !httpsecurity.UsesHTTPS(r) && !httpsecurity.IsLocalRequest(r) {
+		a.observeAutomaticSSLRegistration(r, confirmation.Domain)
+		a.awaitAccountHTTPS(w, r)
+		return true
+	}
+	if a.createSessionForDomain(w, r, ctx, confirmation.Domain, confirmation.Email) == "" {
+		testDriveHTTPError(w, r, "test_drive_activation_retry", http.StatusServiceUnavailable)
+		return true
+	}
+	clearErr := a.withServerControlDatabaseWrite(ctx, "finish-registration-session", func(database *sql.DB) error {
+		_, clearErr := database.ExecContext(ctx, `UPDATE domain_registration_claims SET token='' WHERE domain=? AND token=?`, confirmation.Domain, confirmation.Token)
+		return clearErr
+	})
+	if clearErr != nil {
+		a.logTestDriveError("registration-session", 0, r, clearErr)
+		testDriveHTTPError(w, r, "test_drive_activation_retry", http.StatusServiceUnavailable)
+		return true
+	}
+	a.deleteRegistrationConfirmation(ctx, confirmation.Token)
+	returnPath := safeConfirmationReturnPath(confirmation.ReturnPath)
+	if confirmation.Workflow == "new_site" {
+		returnPath = "/?edit"
+	} else if confirmation.Workflow == "trial_paid" {
+		returnPath = "/?trial_import_wait&return_path=" + url.QueryEscape(returnPath)
+	}
+	httpsecurity.RedirectLocal(w, r, returnPath, http.StatusSeeOther)
+	return true
+}
+
 func (a *App) observeAutomaticSSLRegistration(r *http.Request, domain string) {
 	if a.automaticSSL == nil || autoCertDomainEligibilityError(domain) != nil {
+		return
+	}
+	if !a.automaticSSLRegistrationComplete(contextWithDomain(r.Context(), domain), domain) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
@@ -34451,7 +34547,9 @@ func mailExpirationForKind(kind string, now time.Time) time.Time {
 	switch strings.TrimSpace(kind) {
 	case "password_change_code", "login_code", "account_login_code":
 		return now.Add(profilePasswordCodeTTL)
-	case "email_confirm", "email_change", "email_change_confirm", "owner_invite":
+	case "email_confirm":
+		return now.Add(registrationConfirmationTTL)
+	case "email_change", "email_change_confirm", "owner_invite":
 		return now.Add(emailConfirmationTTL)
 	default:
 		return now.Add(mailout.DefaultRetention)
@@ -35315,7 +35413,7 @@ func (reportLog *hostingSnapshotReportLog) record(now time.Time, reportErr error
 		if reportLog.failedAttempts == 0 {
 			return ""
 		}
-		message := fmt.Sprintf("MAIL monitoring sync restored at=%q failed_attempts=%d", now.Local().Format("02 Jan 2006 15:04:05 -07:00"), reportLog.failedAttempts)
+		message := fmt.Sprintf("SERVER_REGISTRY sync restored at=%q failed_attempts=%d", now.Local().Format("02 Jan 2006 15:04:05 -07:00"), reportLog.failedAttempts)
 		*reportLog = hostingSnapshotReportLog{}
 		return message
 	}
@@ -35325,7 +35423,7 @@ func (reportLog *hostingSnapshotReportLog) record(now time.Time, reportErr error
 		return ""
 	}
 	reportLog.reason, reportLog.reportedAt = reason, now
-	return fmt.Sprintf("MAIL monitoring sync pending at=%q failed_attempts=%d reason=%q", now.Local().Format("02 Jan 2006 15:04:05 -07:00"), reportLog.failedAttempts, reason)
+	return fmt.Sprintf("SERVER_REGISTRY sync pending at=%q failed_attempts=%d reason=%q", now.Local().Format("02 Jan 2006 15:04:05 -07:00"), reportLog.failedAttempts, reason)
 }
 
 func (a *App) reportHostingSnapshotWithTimeout(ctx context.Context) error {
@@ -35458,12 +35556,13 @@ func (a *App) sendHostingSnapshotWithRegistration(ctx context.Context, snapshotU
 }
 
 func (a *App) reportHostingSnapshot(ctx context.Context) error {
-	if err := a.reportHostingSnapshotNetChan(ctx); err == nil {
+	netChanErr := a.reportHostingSnapshotNetChan(ctx)
+	if netChanErr == nil {
 		return nil
-	} else if errors.Is(err, errMailMonitorLegacyPeer) {
-		return err
+	} else if errors.Is(netChanErr, errMailMonitorLegacyPeer) {
+		return netChanErr
 	} else {
-		mailDiagnosticLog("hosting snapshot netchan report skipped: %s", diagnosticlog.SafeLogValue(err.Error()))
+		mailDiagnosticLog("hosting snapshot netchan report skipped: %s", diagnosticlog.SafeLogValue(netChanErr.Error()))
 	}
 	snapshotURLs := centralHostingSnapshotURLs()
 	encryptedSnapshotURLs := make([]string, 0, len(snapshotURLs))
@@ -35477,7 +35576,7 @@ func (a *App) reportHostingSnapshot(ctx context.Context) error {
 		encryptedSnapshotURLs = append(encryptedSnapshotURLs, snapshotURL)
 	}
 	if len(encryptedSnapshotURLs) == 0 {
-		return fmt.Errorf("hosting snapshot encryption key is not configured for %s", serviceMailRelayDomainFromURL(firstNonEmpty(snapshotURLs...)))
+		return errors.Join(fmt.Errorf("NetChan registry: %w", netChanErr), fmt.Errorf("HTTPS registry encryption key is not configured for %s", serviceMailRelayDomainFromURL(firstNonEmpty(snapshotURLs...))))
 	}
 	snapshot, err := a.buildHostingSnapshot(ctx)
 	if err != nil {
@@ -35512,7 +35611,7 @@ func (a *App) reportHostingSnapshot(ctx context.Context) error {
 		})
 	}
 	if lastErr != nil {
-		return lastErr
+		return errors.Join(fmt.Errorf("NetChan registry: %w", netChanErr), fmt.Errorf("HTTPS registry: %w", lastErr))
 	}
 	return errors.New("hosting snapshot url is empty")
 }
@@ -37917,10 +38016,6 @@ func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request
 				_ = (mailmonitor.Store{DB: database}).RejectRate(ctx, dimension, identity, time.Now())
 			}
 		}
-		if !store.ServiceMailRelayEnabled(ctx) {
-			fail("service mail relay is disabled", http.StatusForbidden)
-			return nil
-		}
 		knownPublicKey, installationFound := store.ServiceMailInstallationPublicKey(ctx, request.InstallationID)
 		if installationFound && strings.TrimSpace(knownPublicKey) != strings.TrimSpace(request.PublicKey) {
 			fail("installation public key changed", http.StatusForbidden)
@@ -37940,6 +38035,10 @@ func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request
 				return nil
 			}
 			responseMessage, responseStatus = "registered", http.StatusOK
+			return nil
+		}
+		if !store.ServiceMailRelayEnabled(ctx) {
+			fail("service mail relay is disabled", http.StatusForbidden)
 			return nil
 		}
 		if !installationFound {
@@ -39228,6 +39327,10 @@ func formatAccountMail(message *mailout.Message, language, domain, secret, link,
 	}
 	if content.Code == "" {
 		content.Expiry = translations["auth_link_expiry"]
+	}
+	if message.Kind == "email_confirm" {
+		content.Expiry = translations["mail_registration_ignore"]
+		content.Ignore = ""
 	}
 	if message.Kind == "account_login_code" && content.Code != "" && content.Link != "" {
 		if loginURL, err := url.Parse(content.Link); err == nil {
@@ -46173,7 +46276,7 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, templateName string
 	envelope := map[string]any{"Domain": domain, "T": translations, "CompileVersion": CompileVersion, "LanguageCode": languageCode, "TextDirection": textDirection, "AccountCSRF": accountCSRF(r)}
 	mergeTemplateData(envelope, templateData)
 	if templateName == "edit.html" || templateName == "test_drive_welcome.html" {
-		if trial, found, _ := a.privateTestDrive(r.Context(), domain); found && testDriveOwner(r, trial) {
+		if trial, found, _ := a.privateTestDrive(r.Context(), domain); found && trial.Status != "activated" && testDriveOwner(r, trial) {
 			envelope["PrivateTestDrive"] = true
 			openedAt := trial.FirstOpenedAt
 			if openedAt == "" {
@@ -50376,7 +50479,7 @@ func (a *App) runAutomaticSSLProcessWithIPDetection(stop <-chan struct{}, certif
 			return
 		}
 		inFlight[domain] = true
-		setProgress(domain, "checking_dns", time.Time{}, nil)
+		setProgress(domain, "queued", time.Time{}, nil)
 		forceRenewal := forcePending[domain]
 		delete(forcePending, domain)
 		currentServerIPs := append([]net.IP(nil), serverIPs...)
@@ -50728,12 +50831,17 @@ func (a *App) prepareAutomaticSSLDomainWithProgress(certificateManager automatic
 		return result
 	}
 	now := time.Now()
-	_, currentExpiresAt, _ := a.autoCertCachedCertificateFromMemory(certificateDomain, now, 0)
-	if certificate, expiresAt, ok := a.autoCertCachedCertificateFromMemory(certificateDomain, now, automaticSSLCertificateRenewBefore); ok && !forceRenewal {
+	_, currentExpiresAt, _ := a.autoCertCachedCertificate(certificateDomain, now, 0)
+	if certificate, expiresAt, ok := a.autoCertCachedCertificate(certificateDomain, now, automaticSSLCertificateRenewBefore); ok && !forceRenewal {
 		result.state = "ready"
 		result.certificate = certificate
 		result.expiresAt = expiresAt
 		result.retryAfter = now.Add(automaticSSLNextCheckDelay(expiresAt, now))
+		return result
+	}
+	if !a.automaticSSLRegistrationComplete(domainContext, certificateDomain) {
+		result.state = "awaiting_registration"
+		result.retryAfter = now.Add(automaticSSLRefreshInterval)
 		return result
 	}
 	if retryAfter, delayed := automaticSSLRetryAfter(setting, now); delayed {
@@ -50756,8 +50864,7 @@ func (a *App) prepareAutomaticSSLDomainWithProgress(certificateManager automatic
 	a.clearDomainAutomaticSSLFailure(domainContext, certificateDomain)
 	attemptedAt := time.Now().UTC()
 	if _, err := a.db.ExecContext(domainContext, `UPDATE domain_ssl_settings SET last_acme_attempt_at=?,retry_after=? WHERE domain=?`, attemptedAt.Format(time.RFC3339), attemptedAt.Add(5*time.Minute).Format(time.RFC3339), certificateDomain); err != nil {
-		// Confirmed registrations can obtain TLS before their site database exists.
-		// The durable registration and certificate cache own this bootstrap stage.
+		// Registered owners retain their durable ACME retry deadline in the site database.
 		if !errors.Is(err, errSiteDatabaseMissing) || !a.pendingRegistrationDomain(domainContext, certificateDomain) {
 			result.state, result.err, result.retryAfter = "storage_error", err, time.Now().Add(time.Minute)
 			return result
@@ -50828,6 +50935,9 @@ func (a *App) autoCertPreparedHostPolicy(ctx context.Context, host string) error
 	}
 	if a.autoCertCachedCertificateValid(certificateDomain, time.Now()) {
 		return nil
+	}
+	if !a.automaticSSLRegistrationComplete(domainContext, certificateDomain) {
+		return fmt.Errorf("automatic SSL waits for completed registration for %q", certificateDomain)
 	}
 	if !a.domainIsAutomaticSSLCandidate(domainContext, certificateDomain) {
 		return fmt.Errorf("automatic SSL domain %q is not managed by Sitebrush", certificateDomain)
@@ -50985,6 +51095,25 @@ UNION SELECT domain FROM domain_ssl_settings WHERE domain=?
 )`
 	err := a.db.QueryRowContext(ctx, query, certificateDomain, certificateDomain, certificateDomain, certificateDomain, certificateDomain).Scan(&domainCount)
 	return err == nil && domainCount > 0
+}
+
+// TLS issuance requires a completed account, including for explicit renewal requests.
+// A private trial's temporary editor account never grants certificate eligibility.
+func (a *App) automaticSSLRegistrationComplete(ctx context.Context, domain string) bool {
+	if a == nil || a.db == nil {
+		return false
+	}
+	trial, found, readErr := a.privateTestDrive(ctx, domain)
+	if readErr != nil || found && trial.Status != "activated" && !(trial.Status == "active" && trial.VerifiedEmail != "") {
+		return false
+	}
+	storageDomain := domain
+	if ownerDomain := a.systemWWWStorageDomain(ctx, domain); ownerDomain != "" {
+		storageDomain = ownerDomain
+	}
+	var registered int
+	err := a.db.QueryRowContext(contextWithDomain(ctx, storageDomain), `SELECT COUNT(*) FROM users WHERE is_admin=1 AND email NOT LIKE ? AND (domain=? OR domain IN (SELECT primary_domain FROM domain_aliases WHERE alias_domain=? AND is_verified=1 AND dns_a_ok=1))`, "%@sitebrush.invalid", storageDomain, storageDomain).Scan(&registered)
+	return err == nil && registered > 0
 }
 
 func (a *App) precheckDomainAutomaticSSL(ctx context.Context, domain string, serverIPs []net.IP) (DomainAutomaticSSLSetting, error) {
@@ -57844,6 +57973,10 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 func newPublicHTTPFront(application *App, secret string, stop <-chan struct{}) *publicsite.Front {
 	var front *publicsite.Front
 	publicHandler := func(w http.ResponseWriter, r *http.Request, paused bool) bool {
+		if strings.HasPrefix(r.URL.Path, "/.well-known/acme-challenge/") {
+			// Only the ACME owner's registered token handler may answer this path.
+			return false
+		}
 		if application.serverHostBoundary(w, r) {
 			return true
 		}
@@ -58342,7 +58475,8 @@ func (a *App) pullPublicObservations(stop <-chan struct{}) {
 }
 
 // Private Test Drive keeps unverified site content behind its creator session.
-const testDriveCodeTime = 10 * time.Minute
+const testDriveCodeTime = 24 * time.Hour
+const testDriveHTTPGrace = 30 * time.Minute
 
 func testDriveLabelValid(label string) bool {
 	if len(label) < 1 || len(label) > 24 || label[0] == '-' || label[len(label)-1] == '-' {
@@ -58411,7 +58545,7 @@ func testDriveEntryAction(r *http.Request) bool {
 func (a *App) privateTestDrive(ctx context.Context, domain string) (privateTestDrive, bool, error) {
 	var trial privateTestDrive
 	err := a.withServerControlDatabaseRead(ctx, "test-drive-read", func(database *sql.DB) error {
-		return database.QueryRowContext(ctx, `SELECT id,domain,status,entry_hash,session_hash,handoff_hash,temporary_admin,pending_email,verified_email,email_history,code_hash,code_expires_at,code_attempts,mail_count,last_mail_at,delete_after,created_at,COALESCE(first_opened_at,''),COALESCE(last_active_at,''),COALESCE(last_ip,''),human_verified FROM public_trial_sites WHERE domain=? AND status IN ('private','email_pending','email_verified','expiring','blocked','active') ORDER BY id DESC LIMIT 1`, domain).Scan(&trial.ID, &trial.Domain, &trial.Status, &trial.EntryHash, &trial.SessionHash, &trial.HandoffHash, &trial.TemporaryAdmin, &trial.PendingEmail, &trial.VerifiedEmail, &trial.EmailHistory, &trial.CodeHash, &trial.CodeExpiresAt, &trial.CodeAttempts, &trial.MailCount, &trial.LastMailAt, &trial.DeleteAfter, &trial.CreatedAt, &trial.FirstOpenedAt, &trial.LastActiveAt, &trial.LastIP, &trial.HumanVerified)
+		return database.QueryRowContext(ctx, `SELECT id,domain,status,entry_hash,session_hash,handoff_hash,temporary_admin,pending_email,verified_email,email_history,code_hash,code_expires_at,code_attempts,mail_count,last_mail_at,delete_after,created_at,COALESCE(first_opened_at,''),COALESCE(last_active_at,''),COALESCE(last_ip,''),human_verified FROM public_trial_sites WHERE domain=? AND (status IN ('private','email_pending','email_verified','expiring','blocked','active') OR status='activated' AND session_hash<>'') ORDER BY id DESC LIMIT 1`, domain).Scan(&trial.ID, &trial.Domain, &trial.Status, &trial.EntryHash, &trial.SessionHash, &trial.HandoffHash, &trial.TemporaryAdmin, &trial.PendingEmail, &trial.VerifiedEmail, &trial.EmailHistory, &trial.CodeHash, &trial.CodeExpiresAt, &trial.CodeAttempts, &trial.MailCount, &trial.LastMailAt, &trial.DeleteAfter, &trial.CreatedAt, &trial.FirstOpenedAt, &trial.LastActiveAt, &trial.LastIP, &trial.HumanVerified)
 	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return privateTestDrive{}, false, nil
@@ -58420,11 +58554,40 @@ func (a *App) privateTestDrive(ctx context.Context, domain string) (privateTestD
 }
 
 func testDriveOwner(r *http.Request, trial privateTestDrive) bool {
+	if trial.DeleteAfter != "" {
+		expires, expiryErr := time.Parse(time.RFC3339, trial.DeleteAfter)
+		if expiryErr != nil || !time.Now().Before(expires) {
+			return false
+		}
+	}
 	cookie, err := r.Cookie("sitebrush_test_drive")
 	if err != nil || trial.SessionHash == "" {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(testDriveHash(cookie.Value)), []byte(trial.SessionHash)) == 1
+}
+
+// HTTP editing is confined to a live trial capability; account and public actions keep HTTPS.
+func (a *App) httpTestDriveOwnerAllowed(r *http.Request) bool {
+	if requestScheme(r) != "http" {
+		return false
+	}
+	if cookie, cookieErr := r.Cookie("sitebrush_test_drive"); cookieErr != nil || cookie.Value == "" {
+		return false
+	}
+	trial, found, readErr := a.privateTestDrive(r.Context(), domainFromRequest(r))
+	if readErr != nil || !found || !testDriveOwner(r, trial) || trial.Status == "blocked" || trial.Status == "expiring" {
+		return false
+	}
+	expires, expiryErr := time.Parse(time.RFC3339, trial.DeleteAfter)
+	if expiryErr != nil || !time.Now().Before(expires) || testDriveExternalAction(r) {
+		return false
+	}
+	return r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodPost && testDriveEditorMutation(r)
+}
+
+func setTestDriveEditorCookie(w http.ResponseWriter, r *http.Request, token string, lifetime time.Duration) {
+	http.SetCookie(w, &http.Cookie{Name: "sitebrush_session", Value: token, Path: "/", HttpOnly: true, Secure: requestScheme(r) == "https", SameSite: http.SameSiteLaxMode, MaxAge: int(lifetime.Seconds()), Expires: time.Now().Add(lifetime).UTC()})
 }
 
 func testDriveIdleDuration(trial privateTestDrive) time.Duration {
@@ -58449,8 +58612,8 @@ func (a *App) privateTestDriveGate(w http.ResponseWriter, r *http.Request) bool 
 		testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusServiceUnavailable)
 		return true
 	}
-	if !found || trial.Status == "active" && trial.VerifiedEmail != "" {
-		return false
+	if !found || (trial.Status == "active" || trial.Status == "activated") && trial.VerifiedEmail != "" {
+		return found && trial.Status == "activated" && testDriveOwner(r, trial) && !a.publicBoundary && a.completeTestDriveHTTPSUpgrade(w, r, trial)
 	}
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("X-Robots-Tag", "noindex, nofollow")
@@ -58531,6 +58694,61 @@ func (a *App) privateTestDriveGate(w http.ResponseWriter, r *http.Request) bool 
 	return false
 }
 
+// HTTP capabilities expire quickly after activation and are rotated before secure account use.
+func (a *App) completeTestDriveHTTPSUpgrade(w http.ResponseWriter, r *http.Request, trial privateTestDrive) bool {
+	if r.Method != http.MethodGet || r.Header.Get("Upgrade") != "" {
+		return false
+	}
+	if requestScheme(r) != "https" {
+		if a.accountHTTPSReady(trial.Domain) {
+			a.redirectHTTPS(w, r, http.StatusSeeOther)
+			return true
+		}
+		return false
+	}
+	domainContext := contextWithDomain(r.Context(), trial.Domain)
+	secureToken := a.createSessionForDomain(w, r, domainContext, trial.Domain, trial.VerifiedEmail)
+	if secureToken == "" {
+		testDriveHTTPError(w, r, "test_drive_activation_retry", http.StatusServiceUnavailable)
+		return true
+	}
+	if oldSession, cookieErr := r.Cookie("sitebrush_session"); cookieErr == nil {
+		cleanupErr := a.accountTransaction(domainContext, func(transaction *sql.Tx) error {
+			_, deleteErr := transaction.Exec(`DELETE FROM sessions WHERE token=? AND user_email=?`, oldSession.Value, trial.Domain+"|"+trial.VerifiedEmail)
+			return deleteErr
+		})
+		if cleanupErr != nil {
+			a.logTestDriveError("secure-session-retire", trial.ID, r, cleanupErr)
+			testDriveHTTPError(w, r, "test_drive_activation_retry", http.StatusServiceUnavailable)
+			return true
+		}
+	}
+	clearErr := a.withServerControlDatabaseWrite(r.Context(), "test-drive-secure-session", func(database *sql.DB) error {
+		_, clearErr := database.ExecContext(r.Context(), `UPDATE public_trial_sites SET session_hash='',delete_after='' WHERE id=? AND status='activated'`, trial.ID)
+		return clearErr
+	})
+	if clearErr != nil {
+		a.logTestDriveError("secure-session-complete", trial.ID, r, clearErr)
+		testDriveHTTPError(w, r, "test_drive_activation_retry", http.StatusServiceUnavailable)
+		return true
+	}
+	browserCookies := r.Cookies()
+	r.Header.Del("Cookie")
+	for _, browserCookie := range browserCookies {
+		if browserCookie.Name == "sitebrush_session" {
+			continue
+		}
+		r.AddCookie(browserCookie)
+	}
+	r.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: secureToken})
+	http.SetCookie(w, &http.Cookie{Name: "sitebrush_test_drive", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
+	if hasQueryFlag(r, "test_drive_welcome") {
+		httpsecurity.RedirectLocal(w, r, "/?edit", http.StatusSeeOther)
+		return true
+	}
+	return false
+}
+
 func testDriveSystemAsset(r *http.Request) bool {
 	if !embeddedStaticRequest(r) {
 		return false
@@ -58557,7 +58775,7 @@ func testDriveExternalAction(r *http.Request) bool {
 	for flag := range r.URL.Query() {
 		if sitebrushControlQueryFlag(flag) {
 			allowed := false
-			for _, editorFlag := range []string{"edit", "visual", "text", "save", "delete", "files", "tree", "revisions", "revision_preview", "revision_restore", "revision_delete", "revision_toggle", "template_events", "grab", "grab_preview", "grab_retry", "grab_cancel", "grab_ws", "grab_events", "test_drive_status"} {
+			for _, editorFlag := range []string{"edit", "visual", "text", "save", "delete", "files", "tree", "revisions", "revision_preview", "revision_restore", "revision_delete", "revision_toggle", "template_events", "grab", "grab_preview", "grab_retry", "grab_cancel", "grab_ws", "grab_events", "test_drive_status", "indexing_review"} {
 				if flag == editorFlag {
 					allowed = true
 					break
@@ -58587,18 +58805,24 @@ func (a *App) renderTestDriveWelcome(w http.ResponseWriter, r *http.Request, tri
 }
 
 func (a *App) touchTestDrive(w http.ResponseWriter, r *http.Request, trial privateTestDrive) {
+	if trial.Status != "private" && trial.Status != "email_pending" && trial.Status != "email_verified" || !testDriveOwner(r, trial) {
+		return
+	}
 	now := time.Now().UTC()
-	lastActive, _ := time.Parse(time.RFC3339, trial.DeleteAfter)
+	expiresAt, _ := time.Parse(time.RFC3339, trial.DeleteAfter)
 	idleDuration := testDriveIdleDuration(trial)
 	refreshInterval := idleDuration / 3
 	if refreshInterval > time.Minute {
 		refreshInterval = time.Minute
 	}
 	ip := accountClientIP(r)
-	if lastActive.After(now.Add(idleDuration-refreshInterval)) && ip == trial.LastIP {
+	if expiresAt.After(now.Add(idleDuration-refreshInterval)) && ip == trial.LastIP {
+		a.renewTestDriveEditorSession(w, r, trial, expiresAt)
 		return
 	}
-	_ = a.withServerControlDatabaseWrite(r.Context(), "test-drive-activity", func(database *sql.DB) error {
+	expiresAt = now.Add(idleDuration)
+	renewed := false
+	activityErr := a.withServerControlDatabaseWrite(r.Context(), "test-drive-activity", func(database *sql.DB) error {
 		var lastIP, historyJSON string
 		if err := database.QueryRowContext(r.Context(), `SELECT last_ip,ip_history FROM public_trial_sites WHERE id=?`, trial.ID).Scan(&lastIP, &historyJSON); err != nil {
 			return err
@@ -58618,11 +58842,55 @@ func (a *App) touchTestDrive(w http.ResponseWriter, r *http.Request, trial priva
 			}
 			historyJSON = string(encoded)
 		}
-		_, err := database.ExecContext(r.Context(), `UPDATE public_trial_sites SET last_active_at=?,last_ip=?,ip_history=?,delete_after=? WHERE id=? AND status IN ('private','email_pending','email_verified')`, now.Format(time.RFC3339), ip, historyJSON, now.Add(idleDuration).Format(time.RFC3339), trial.ID)
-		return err
+		result, updateErr := database.ExecContext(r.Context(), `UPDATE public_trial_sites SET last_active_at=?,last_ip=?,ip_history=?,delete_after=? WHERE id=? AND status IN ('private','email_pending','email_verified')`, now.Format(time.RFC3339), ip, historyJSON, expiresAt.Format(time.RFC3339), trial.ID)
+		if updateErr != nil {
+			return updateErr
+		}
+		count, countErr := result.RowsAffected()
+		renewed = count == 1
+		return countErr
 	})
+	if activityErr != nil {
+		a.logTestDriveError("activity", trial.ID, r, activityErr)
+		return
+	}
+	if !renewed {
+		return
+	}
+	a.renewTestDriveEditorSession(w, r, trial, expiresAt)
 	if cookie, err := r.Cookie("sitebrush_test_drive"); err == nil {
-		http.SetCookie(w, &http.Cookie{Name: "sitebrush_test_drive", Value: cookie.Value, Path: "/", HttpOnly: true, Secure: !localAccountRequest(r), SameSite: http.SameSiteLaxMode, MaxAge: int(idleDuration.Seconds())})
+		http.SetCookie(w, &http.Cookie{Name: "sitebrush_test_drive", Value: cookie.Value, Path: "/", HttpOnly: true, Secure: requestScheme(r) == "https", SameSite: http.SameSiteLaxMode, MaxAge: int(idleDuration.Seconds())})
+	}
+}
+
+// The private capability and editor authentication share one idle deadline.
+// Matching the temporary account prevents stale activity from extending an activated session.
+func (a *App) renewTestDriveEditorSession(w http.ResponseWriter, r *http.Request, trial privateTestDrive, expiresAt time.Time) {
+	if a.db == nil || trial.TemporaryAdmin == "" {
+		return
+	}
+	cookie, cookieErr := r.Cookie("sitebrush_session")
+	if cookieErr != nil || cookie.Value == "" || !expiresAt.After(time.Now()) {
+		return
+	}
+	renewed := false
+	domainContext := contextWithDomain(r.Context(), trial.Domain)
+	err := a.accountTransaction(domainContext, func(transaction *sql.Tx) error {
+		now := time.Now()
+		result, updateErr := transaction.ExecContext(domainContext, `UPDATE sessions SET last_used_at=? WHERE token=? AND user_email=? AND (last_used_at=0 OR last_used_at>?) AND last_used_at<=?`, now.Unix(), cookie.Value, trial.Domain+"|"+trial.TemporaryAdmin, now.Add(-accountauth.SessionTTL).Unix(), now.Unix())
+		if updateErr != nil {
+			return updateErr
+		}
+		count, countErr := result.RowsAffected()
+		renewed = count == 1
+		return countErr
+	})
+	if err != nil {
+		a.logTestDriveError("editor-session-renewal", trial.ID, r, err)
+		return
+	}
+	if renewed {
+		setTestDriveEditorCookie(w, r, cookie.Value, time.Until(expiresAt))
 	}
 }
 
@@ -58647,14 +58915,11 @@ func (a *App) testDriveEntrySession(w http.ResponseWriter, r *http.Request) (str
 		a.logTestDriveError("entry-session", 0, r, err)
 		return "", false
 	}
-	http.SetCookie(w, &http.Cookie{Name: "sitebrush_trial_entry", Value: secret, Path: "/", HttpOnly: true, Secure: !localAccountRequest(r), SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: "sitebrush_trial_entry", Value: secret, Path: "/", HttpOnly: true, Secure: requestScheme(r) == "https", SameSite: http.SameSiteLaxMode})
 	return hash, false
 }
 
 func (a *App) testDriveForm(w http.ResponseWriter, r *http.Request) {
-	if !testDriveRequestHTTPSOrLocal(w, r) {
-		return
-	}
 	if r.Method != http.MethodGet || !a.publicTrialAllowed(r) {
 		testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusForbidden)
 		return
@@ -58681,9 +58946,6 @@ func (a *App) renderTestDriveForm(w http.ResponseWriter, r *http.Request, entryH
 }
 
 func (a *App) startPrivateTestDrive(w http.ResponseWriter, r *http.Request) {
-	if !testDriveRequestHTTPSOrLocal(w, r) {
-		return
-	}
 	if r.Method != http.MethodPost || !a.publicTrialAllowed(r) {
 		testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusForbidden)
 		return
@@ -58876,8 +59138,7 @@ func (a *App) startPrivateTestDrive(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	a.refreshHostingAndSupportPanel()
-	a.observeAutomaticSSLRegistration(r, domain)
-	http.SetCookie(w, &http.Cookie{Name: "sitebrush_trial_handoff", Value: domain + "|" + handoff, Path: "/", HttpOnly: true, Secure: !localAccountRequest(r), SameSite: http.SameSiteLaxMode, MaxAge: int(idleDuration.Seconds())})
+	http.SetCookie(w, &http.Cookie{Name: "sitebrush_trial_handoff", Value: domain + "|" + handoff, Path: "/", HttpOnly: true, Secure: requestScheme(r) == "https", SameSite: http.SameSiteLaxMode, MaxAge: int(testDriveCodeTime.Seconds())})
 	a.renderTestDriveHandoff(w, r, domain, handoff)
 }
 
@@ -58907,14 +59168,9 @@ func (a *App) renderTestDriveHandoff(w http.ResponseWriter, r *http.Request, dom
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	endpoint := "https://" + domain + "/?test_drive_handoff"
-	if localAccountRequest(r) {
-		endpoint = "http://" + domain + "/?test_drive_handoff"
-	}
+	endpoint := "http://" + domain + "/?test_drive_handoff"
 	continueLabel := translationOrDefault(translationsForRequest(r), "test_drive_continue", "Continue to Test Drive")
-	waitLabel := translationOrDefault(translationsForRequest(r), "test_drive_wait_https", "Preparing your private Test Drive address...")
-	pendingLabel := translationOrDefault(translationsForRequest(r), "test_drive_secure_address_pending", waitLabel)
-	_, _ = fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/p/static/technical_pages.css"><title>SiteBrush</title><script defer src="/p/static/test_drive_handoff.js"></script></head><body class="technical-page"><main class="container authentication-shell"><section class="authentication-card"><p data-test-drive-handoff-status data-pending="%s">%s</p><form method="post" action="%s" data-test-drive-handoff data-local="%t"><input type="hidden" name="ticket" value="%s"><button class="btn btn-primary" type="submit" disabled>%s</button></form></section></main></body></html>`, template.HTMLEscapeString(pendingLabel), template.HTMLEscapeString(waitLabel), template.HTMLEscapeString(endpoint), localAccountRequest(r), template.HTMLEscapeString(handoff), template.HTMLEscapeString(continueLabel))
+	_, _ = fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/p/static/technical_pages.css"><title>SiteBrush</title><script defer src="/p/static/test_drive_handoff.js?v=%s"></script></head><body class="technical-page"><main class="container authentication-shell"><section class="authentication-card"><form method="post" action="%s" data-test-drive-handoff><input type="hidden" name="ticket" value="%s"><button class="btn btn-primary" type="submit">%s</button></form></section></main></body></html>`, template.HTMLEscapeString(CompileVersion), template.HTMLEscapeString(endpoint), template.HTMLEscapeString(handoff), template.HTMLEscapeString(continueLabel))
 }
 
 // This public probe confirms TLS readiness without exposing site content or spending a ticket.
@@ -58931,17 +59187,8 @@ func (a *App) testDriveHandoffReadySocket(w http.ResponseWriter, r *http.Request
 	}}.ServeHTTP(w, r)
 }
 
-func testDriveRequestHTTPSOrLocal(w http.ResponseWriter, r *http.Request) bool {
-	if httpRequestHTTPSOrLocal(r) {
-		return true
-	}
-	target := "https://" + r.Host + r.URL.RequestURI()
-	http.Redirect(w, r, target, http.StatusTemporaryRedirect)
-	return false
-}
-
 func (a *App) testDriveHandoff(w http.ResponseWriter, r *http.Request, trial privateTestDrive) {
-	if r.Method != http.MethodPost || trial.HandoffHash == "" || !httpRequestHTTPSOrLocal(r) || subtle.ConstantTimeCompare([]byte(testDriveHash(r.FormValue("ticket"))), []byte(trial.HandoffHash)) != 1 {
+	if r.Method != http.MethodPost || trial.HandoffHash == "" || subtle.ConstantTimeCompare([]byte(testDriveHash(r.FormValue("ticket"))), []byte(trial.HandoffHash)) != 1 {
 		a.logTestDriveEvent("handoff", trial.ID, r, "ticket_rejected", http.StatusForbidden)
 		a.renderTestDriveNeutral(w, r)
 		return
@@ -58975,9 +59222,9 @@ func (a *App) testDriveHandoff(w http.ResponseWriter, r *http.Request, trial pri
 		a.renderTestDriveNeutral(w, r)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: "sitebrush_test_drive", Value: secret, Path: "/", HttpOnly: true, Secure: !localAccountRequest(r), SameSite: http.SameSiteLaxMode, MaxAge: int(testDriveIdleDuration(trial).Seconds())})
+	http.SetCookie(w, &http.Cookie{Name: "sitebrush_test_drive", Value: secret, Path: "/", HttpOnly: true, Secure: requestScheme(r) == "https", SameSite: http.SameSiteLaxMode, MaxAge: int(testDriveIdleDuration(trial).Seconds())})
 	a.storeProfileSessionDetails(r.WithContext(domainContext), sessionToken)
-	setAccountSessionCookie(w, r, sessionToken, time.Now())
+	setTestDriveEditorCookie(w, r, sessionToken, testDriveIdleDuration(trial))
 	a.logTestDriveEvent("handoff", trial.ID, r, "owner_session_ready", http.StatusSeeOther)
 	http.Redirect(w, r, "/?test_drive_welcome", http.StatusSeeOther)
 }
@@ -59072,7 +59319,7 @@ func (a *App) testDriveSocket(w http.ResponseWriter, r *http.Request, trial priv
 		testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusForbidden)
 		return
 	}
-	websocket.Server{Handshake: func(*websocket.Config, *http.Request) error { return nil }, Handler: func(connection *websocket.Conn) {
+	websocket.Server{Config: websocket.Config{Header: w.Header().Clone()}, Handshake: func(*websocket.Config, *http.Request) error { return nil }, Handler: func(connection *websocket.Conn) {
 		defer connection.Close()
 		connection.MaxPayloadBytes = 4096
 		_ = connection.SetReadDeadline(time.Now().Add(30 * time.Second))
@@ -59504,7 +59751,7 @@ func (a *App) sendTestDriveCode(w http.ResponseWriter, r *http.Request, trial pr
 		if err != nil {
 			return err
 		}
-		if _, err = database.ExecContext(r.Context(), `UPDATE public_trial_sites SET pending_email=?,email_history=?,code_hash=?,code_expires_at=?,code_attempts=0,last_mail_at=?,mail_count=mail_count+1,status='email_pending' WHERE id=? AND status IN ('private','email_pending')`, email, string(history), testDriveCodeDigest(code, salt), now.Add(testDriveCodeTime).Format(time.RFC3339), now.Format(time.RFC3339), trial.ID); err != nil {
+		if _, err = database.ExecContext(r.Context(), `UPDATE public_trial_sites SET pending_email=?,email_history=?,code_hash=?,code_expires_at=?,code_attempts=0,last_mail_at=?,mail_count=mail_count+1,status='email_pending',delete_after=? WHERE id=? AND status IN ('private','email_pending')`, email, string(history), testDriveCodeDigest(code, salt), now.Add(testDriveCodeTime).Format(time.RFC3339), now.Format(time.RFC3339), now.Add(testDriveCodeTime).Format(time.RFC3339), trial.ID); err != nil {
 			return err
 		}
 		if _, err = database.ExecContext(r.Context(), `INSERT INTO test_drive_mail_events(trial_id,recipient,client_ip,session_hash,sent_at) VALUES(?,?,?,?,?)`, trial.ID, email, ip, mailSessionHash, now.Unix()); err != nil {
@@ -59644,7 +59891,11 @@ func (a *App) activatePrivateTestDrive(w http.ResponseWriter, r *http.Request, t
 	}
 	err = a.accountTransaction(domainContext, func(transaction *sql.Tx) error {
 		now := time.Now()
-		result, updateErr := transaction.ExecContext(domainContext, `UPDATE sessions SET user_email=?,last_used_at=? WHERE token=? AND user_email IN (?,?) AND (last_used_at=0 OR last_used_at>?) AND last_used_at<=?`, trial.Domain+"|"+trial.VerifiedEmail, now.Unix(), sessionCookie.Value, trial.Domain+"|"+trial.TemporaryAdmin, trial.Domain+"|"+trial.VerifiedEmail, now.Add(-accountauth.SessionTTL).Unix(), now.Unix())
+		sessionActiveAt := now
+		if requestScheme(r) == "http" && !localAccountRequest(r) {
+			sessionActiveAt = now.Add(-accountauth.SessionTTL + testDriveHTTPGrace)
+		}
+		result, updateErr := transaction.ExecContext(domainContext, `UPDATE sessions SET user_email=?,last_used_at=? WHERE token=? AND user_email IN (?,?) AND (last_used_at=0 OR last_used_at>?) AND last_used_at<=?`, trial.Domain+"|"+trial.VerifiedEmail, sessionActiveAt.Unix(), sessionCookie.Value, trial.Domain+"|"+trial.TemporaryAdmin, trial.Domain+"|"+trial.VerifiedEmail, now.Add(-accountauth.SessionTTL).Unix(), now.Unix())
 		if updateErr != nil {
 			return updateErr
 		}
@@ -59662,14 +59913,21 @@ func (a *App) activatePrivateTestDrive(w http.ResponseWriter, r *http.Request, t
 		testDriveHTTPError(w, r, "test_drive_activation_retry", http.StatusServiceUnavailable)
 		return
 	}
-	setAccountSessionCookie(w, r, sessionCookie.Value, time.Now())
+	bootstrapSessionHash, bootstrapExpiry := "", ""
+	if requestScheme(r) == "http" && !localAccountRequest(r) {
+		bootstrapSessionHash = trial.SessionHash
+		bootstrapExpiry = time.Now().Add(testDriveHTTPGrace).UTC().Format(time.RFC3339)
+		setTestDriveEditorCookie(w, r, sessionCookie.Value, testDriveHTTPGrace)
+	} else {
+		setAccountSessionCookie(w, r, sessionCookie.Value, time.Now())
+	}
 	err = a.withServerControlDatabaseWrite(r.Context(), "test-drive-activate", func(database *sql.DB) error {
 		transaction, err := database.BeginTx(r.Context(), nil)
 		if err != nil {
 			return err
 		}
 		defer transaction.Rollback()
-		if _, err := transaction.ExecContext(r.Context(), `UPDATE public_trial_sites SET status='activated',session_hash='',handoff_hash='',temporary_admin='',last_active_at=?,delete_after='' WHERE id=? AND status='email_verified'`, time.Now().UTC().Format(time.RFC3339), trial.ID); err != nil {
+		if _, err := transaction.ExecContext(r.Context(), `UPDATE public_trial_sites SET status='activated',session_hash=?,handoff_hash='',temporary_admin='',last_active_at=?,delete_after=? WHERE id=? AND status='email_verified'`, bootstrapSessionHash, time.Now().UTC().Format(time.RFC3339), bootstrapExpiry, trial.ID); err != nil {
 			return err
 		}
 		if _, err := transaction.ExecContext(r.Context(), `DELETE FROM domain_registration_claims WHERE domain=? AND kind='trial'`, trial.Domain); err != nil {
@@ -59690,7 +59948,12 @@ func (a *App) activatePrivateTestDrive(w http.ResponseWriter, r *http.Request, t
 		_, err := transaction.ExecContext(domainContext, `DELETE FROM users WHERE domain=? AND email=?`, trial.Domain, trial.TemporaryAdmin)
 		return err
 	})
-	http.SetCookie(w, &http.Cookie{Name: "sitebrush_test_drive", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: !localAccountRequest(r), SameSite: http.SameSiteLaxMode})
+	if bootstrapSessionHash == "" {
+		http.SetCookie(w, &http.Cookie{Name: "sitebrush_test_drive", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: requestScheme(r) == "https", SameSite: http.SameSiteLaxMode})
+	} else if ownerCookie, ownerCookieErr := r.Cookie("sitebrush_test_drive"); ownerCookieErr == nil {
+		http.SetCookie(w, &http.Cookie{Name: "sitebrush_test_drive", Value: ownerCookie.Value, Path: "/", MaxAge: int(testDriveHTTPGrace.Seconds()), HttpOnly: true, Secure: requestScheme(r) == "https", SameSite: http.SameSiteLaxMode})
+	}
+	a.observeAutomaticSSLRegistration(r, trial.Domain)
 	a.logTestDriveEvent("activate", trial.ID, r, "public_site_ready", http.StatusOK)
 	a.refreshHostingAndSupportPanel()
 	w.Header().Set("Content-Type", "application/json")
