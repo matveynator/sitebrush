@@ -101,7 +101,7 @@
         csrf: rootElement.dataset.csrf
       });
     }
-    // Activation must use HTTP so the browser accepts the new HttpOnly session cookie.
+    // Activation uses HTTP so the browser can renew its HttpOnly session cookie.
     formBody.set('account_csrf', rootElement.dataset.csrf);
     return fetch('/?' + queryFlag, {method: 'POST', body: formBody, credentials: 'same-origin', headers: {'X-SiteBrush-CSRF': rootElement.dataset.csrf}})
       .then(function readAction(response) {

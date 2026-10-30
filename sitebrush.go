@@ -59415,10 +59415,33 @@ func (a *App) activatePrivateTestDrive(w http.ResponseWriter, r *http.Request, t
 		testDriveHTTPError(w, r, "test_drive_activation_retry", http.StatusServiceUnavailable)
 		return
 	}
-	if a.createSessionForDomain(w, r, domainContext, trial.Domain, trial.VerifiedEmail) == "" {
+	// Preserve the randomized editor session so already-open forms retain their CSRF token.
+	sessionCookie, cookieErr := r.Cookie("sitebrush_session")
+	if cookieErr != nil || sessionCookie.Value == "" {
 		testDriveHTTPError(w, r, "test_drive_activation_retry", http.StatusServiceUnavailable)
 		return
 	}
+	err = a.accountTransaction(domainContext, func(transaction *sql.Tx) error {
+		now := time.Now()
+		result, updateErr := transaction.ExecContext(domainContext, `UPDATE sessions SET user_email=?,last_used_at=? WHERE token=? AND user_email IN (?,?) AND (last_used_at=0 OR last_used_at>?) AND last_used_at<=?`, trial.Domain+"|"+trial.VerifiedEmail, now.Unix(), sessionCookie.Value, trial.Domain+"|"+trial.TemporaryAdmin, trial.Domain+"|"+trial.VerifiedEmail, now.Add(-accountauth.SessionTTL).Unix(), now.Unix())
+		if updateErr != nil {
+			return updateErr
+		}
+		count, countErr := result.RowsAffected()
+		if countErr != nil {
+			return countErr
+		}
+		if count != 1 {
+			return errors.New("Test Drive editor session is unavailable")
+		}
+		return accountauth.RememberAddress(domainContext, transaction, trial.Domain, trial.VerifiedEmail, accountClientIP(r), now)
+	})
+	if err != nil {
+		a.logTestDriveError("activate-session", trial.ID, r, err)
+		testDriveHTTPError(w, r, "test_drive_activation_retry", http.StatusServiceUnavailable)
+		return
+	}
+	setAccountSessionCookie(w, r, sessionCookie.Value, time.Now())
 	err = a.withServerControlDatabaseWrite(r.Context(), "test-drive-activate", func(database *sql.DB) error {
 		transaction, err := database.BeginTx(r.Context(), nil)
 		if err != nil {

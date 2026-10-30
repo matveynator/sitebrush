@@ -14227,11 +14227,17 @@ func TestPrivateTestDriveStartsWithEmailAndHandsOffOnce(t *testing.T) {
 	activatedSession := false
 	for _, cookie := range verifyResponse.Result().Cookies() {
 		if cookie.Name == "sitebrush_session" && cookie.Value != "" && cookie.HttpOnly {
+			if cookie.Value != editorCookie.Value {
+				t.Fatal("activation invalidated CSRF tokens in the open editor")
+			}
 			activatedSession = true
 		}
 	}
 	if !activatedSession {
 		t.Fatal("confirmation did not preserve an authenticated editor session")
+	}
+	if email, authenticated := application.currentAdminEmail(ownerRequest); !authenticated || email != "third@example.com" {
+		t.Fatalf("open editor did not become the verified owner: %s %t", email, authenticated)
 	}
 	visitorRequest := httptest.NewRequest(http.MethodGet, "https://myproject.sitebrush.example/", nil)
 	visitorRequest = visitorRequest.WithContext(contextWithDomain(visitorRequest.Context(), "myproject.sitebrush.example"))
