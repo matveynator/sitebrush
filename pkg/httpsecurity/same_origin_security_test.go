@@ -12,9 +12,13 @@ func TestSecurityBoundarySameOriginMutationAllowed(t *testing.T) {
 		origin  string
 		referer string
 		fetch   string
+		host    string
 		allowed bool
 	}{
 		{name: "same origin", origin: "https://example.com", allowed: true},
+		{name: "default HTTPS port", origin: "https://example.com", host: "example.com:443", allowed: true},
+		{name: "different HTTPS port", origin: "https://example.com:8443", allowed: false},
+		{name: "different scheme", origin: "http://example.com", allowed: false},
 		{name: "different origin", origin: "https://attacker.example", allowed: false},
 		{name: "same referer", referer: "https://example.com/settings", allowed: true},
 		{name: "different referer", referer: "https://attacker.example/form", allowed: false},
@@ -26,6 +30,9 @@ func TestSecurityBoundarySameOriginMutationAllowed(t *testing.T) {
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			request := httptest.NewRequest(http.MethodPost, "https://example.com/action", nil)
+			if testCase.host != "" {
+				request.Host = testCase.host
+			}
 			if testCase.origin != "" {
 				request.Header.Set("Origin", testCase.origin)
 			}

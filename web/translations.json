@@ -1,5 +1,6 @@
 {
   "en": {
+    "test_drive_form_expired": "This Test Drive form has expired. Please try again.",
     "test_drive_admin_id": "ID",
     "test_drive_admin_status": "Status",
     "test_drive_status_private": "Private",
@@ -1749,6 +1750,7 @@
     "auth_email_login": "Sign in with email"
   },
   "fr": {
+    "test_drive_form_expired": "Ce formulaire Test Drive a expiré. Veuillez réessayer.",
     "test_drive_admin_id": "ID",
     "test_drive_admin_status": "Statut",
     "test_drive_status_private": "Privé",
@@ -3262,6 +3264,7 @@
     "auth_email_login": "Se connecter par courriel"
   },
   "ru": {
+    "test_drive_form_expired": "Срок действия формы Test Drive истёк. Попробуйте ещё раз.",
     "test_drive_admin_id": "ID",
     "test_drive_admin_status": "Статус",
     "test_drive_status_private": "Приватный",
@@ -5011,6 +5014,7 @@
     "auth_email_login": "Войти по почте"
   },
   "ja": {
+    "test_drive_form_expired": "Test Drive フォームの有効期限が切れました。もう一度お試しください。",
     "test_drive_admin_id": "ID",
     "test_drive_admin_status": "状態",
     "test_drive_status_private": "非公開",
@@ -6520,6 +6524,7 @@
     "auth_email_login": "メールでログイン"
   },
   "it": {
+    "test_drive_form_expired": "Il modulo Test Drive è scaduto. Riprova.",
     "test_drive_admin_id": "ID",
     "test_drive_admin_status": "Stato",
     "test_drive_status_private": "Privato",
@@ -8029,6 +8034,7 @@
     "auth_email_login": "Accedi con l’email"
   },
   "sv": {
+    "test_drive_form_expired": "Test Drive-formuläret har gått ut. Försök igen.",
     "test_drive_admin_id": "ID",
     "test_drive_admin_status": "Status",
     "test_drive_status_private": "Privat",
@@ -9538,6 +9544,7 @@
     "auth_email_login": "Logga in med e-post"
   },
   "fi": {
+    "test_drive_form_expired": "Test Drive -lomake on vanhentunut. Yritä uudelleen.",
     "test_drive_admin_id": "ID",
     "test_drive_admin_status": "Tila",
     "test_drive_status_private": "Yksityinen",
@@ -11047,6 +11054,7 @@
     "auth_email_login": "Kirjaudu sähköpostilla"
   },
   "mn": {
+    "test_drive_form_expired": "Test Drive маягтын хугацаа дууссан. Дахин оролдоно уу.",
     "test_drive_admin_id": "ID",
     "test_drive_admin_status": "Төлөв",
     "test_drive_status_private": "Хувийн",
@@ -12556,6 +12564,7 @@
     "auth_email_login": "Имэйлээр нэвтрэх"
   },
   "zh": {
+    "test_drive_form_expired": "Test Drive 表单已过期。请重试。",
     "test_drive_admin_id": "ID",
     "test_drive_admin_status": "状态",
     "test_drive_status_private": "私人",
@@ -14065,6 +14074,7 @@
     "auth_email_login": "使用邮箱登录"
   },
   "he": {
+    "test_drive_form_expired": "תוקף טופס Test Drive פג. נסו שוב.",
     "test_drive_admin_id": "ID",
     "test_drive_admin_status": "סטטוס",
     "test_drive_status_private": "פרטי",
@@ -15574,6 +15584,7 @@
     "auth_email_login": "כניסה באמצעות דוא״ל"
   },
   "fa": {
+    "test_drive_form_expired": "اعتبار فرم Test Drive به پایان رسیده است. دوباره تلاش کنید.",
     "test_drive_admin_id": "ID",
     "test_drive_admin_status": "وضعیت",
     "test_drive_status_private": "خصوصی",
@@ -17083,6 +17094,7 @@
     "auth_email_login": "ورود با ایمیل"
   },
   "de": {
+    "test_drive_form_expired": "Das Test-Drive-Formular ist abgelaufen. Bitte versuchen Sie es erneut.",
     "test_drive_admin_id": "ID",
     "test_drive_admin_status": "Status",
     "test_drive_status_private": "Privat",
@@ -18592,6 +18604,7 @@
     "auth_email_login": "Mit E-Mail anmelden"
   },
   "tr": {
+    "test_drive_form_expired": "Test Drive formunun süresi doldu. Lütfen tekrar deneyin.",
     "test_drive_admin_id": "ID",
     "test_drive_admin_status": "Durum",
     "test_drive_status_private": "Özel",
@@ -20101,6 +20114,7 @@
     "auth_email_login": "E-posta ile giriş yap"
   },
   "kk": {
+    "test_drive_form_expired": "Test Drive пішінінің мерзімі аяқталды. Қайталап көріңіз.",
     "test_drive_admin_id": "ID",
     "test_drive_admin_status": "Күйі",
     "test_drive_status_private": "Жеке",
@@ -21610,6 +21624,7 @@
     "auth_email_login": "Электрондық поштамен кіру"
   },
   "es": {
+    "test_drive_form_expired": "El formulario de Test Drive ha caducado. Inténtalo de nuevo.",
     "test_drive_admin_id": "ID",
     "test_drive_admin_status": "Estado",
     "test_drive_status_private": "Privado",
@@ -23119,6 +23134,7 @@
     "auth_email_login": "Iniciar sesión con correo"
   },
   "pt": {
+    "test_drive_form_expired": "O formulário do Test Drive expirou. Tente novamente.",
     "test_drive_admin_id": "ID",
     "test_drive_admin_status": "Status",
     "test_drive_status_private": "Privado",

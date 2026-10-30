@@ -12,6 +12,7 @@
 <body class="technical-page">
 <main class="container authentication-shell">
   <form class="authentication-card SiteBrush-TestDrive-Form" method="post" action="/?test_drive_start" data-test-drive-form>
+    <input type="hidden" name="test_drive_csrf" value="{{.EntryCSRF}}">
     <h1>{{index .T "test_drive_title"}}</h1>
     <label for="test-drive-name">{{index .T "test_drive_name_label"}}</label>
     <div class="test-drive-domain-input">
