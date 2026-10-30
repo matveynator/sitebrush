@@ -9,6 +9,7 @@
   const parentDomain = domainFieldElement.querySelector('span').textContent.slice(1);
   const captchaImageElement = formElement.querySelector('[data-test-drive-captcha-image]');
   const captchaTokenElement = formElement.querySelector('[data-test-drive-captcha-id]');
+  const captchaRetryElement = formElement.querySelector('[data-test-drive-captcha-retry]');
   const errorElement = formElement.querySelector('[data-test-drive-error]');
   const submitElement = formElement.querySelector('button[type="submit"]');
   const domainInput = window.SiteBrushDomainNameInput;
@@ -20,7 +21,9 @@
     checkController: null,
     captchaImage: '',
     captchaID: '',
-    captchaFailed: false
+    captchaFailed: false,
+    captchaLoading: false,
+    captchaRetryTimer: 0
   };
 
   function render() {
@@ -34,7 +37,45 @@
     if (captchaImageElement && formModel.captchaImage) captchaImageElement.src = formModel.captchaImage;
     if (captchaTokenElement) captchaTokenElement.value = formModel.captchaID;
     errorElement.hidden = !formModel.captchaFailed;
-    submitElement.disabled = formModel.captchaFailed || !domainInput.valid(formModel.name) || formModel.domainState === 'checking' || formModel.domainState === 'unavailable';
+    if (captchaRetryElement) captchaRetryElement.disabled = formModel.captchaLoading;
+    submitElement.disabled = formModel.captchaFailed || Boolean(captchaImageElement && !formModel.captchaID) || !domainInput.valid(formModel.name) || formModel.domainState === 'checking' || formModel.domainState === 'unavailable';
+  }
+
+  function loadCaptcha() {
+    if (!captchaImageElement || formModel.captchaLoading) return;
+    formModel.captchaLoading = true;
+    formModel.captchaFailed = false;
+    render();
+    fetch('/?trial_site_captcha', {headers: {Accept: 'application/json'}, cache: 'no-store'})
+      .then(function readChallenge(response) {
+        if (response.status === 429) {
+          const retrySeconds = Number(response.headers.get('Retry-After')) || 60;
+          formModel.captchaRetryTimer = window.setTimeout(function retryCaptchaAfterLimit() {
+            formModel.captchaRetryTimer = 0;
+            loadCaptcha();
+          }, Math.max(1, retrySeconds) * 1000);
+        }
+        if (!response.ok) throw new Error();
+        return response.json();
+      })
+      .then(function showChallenge(challenge) {
+        formModel.captchaImage = challenge.image;
+        formModel.captchaID = challenge.captcha_id;
+        formModel.captchaFailed = false;
+        formModel.captchaLoading = false;
+        render();
+      })
+      .catch(function showChallengeError() {
+        if (!formModel.captchaRetryTimer) {
+          formModel.captchaRetryTimer = window.setTimeout(function retryCaptchaAfterFailure() {
+            formModel.captchaRetryTimer = 0;
+            loadCaptcha();
+          }, 3000);
+        }
+        formModel.captchaFailed = true;
+        formModel.captchaLoading = false;
+        render();
+      });
   }
 
   function checkDomainAvailability(name, sequence) {
@@ -95,18 +136,12 @@
   if (formModel.name && captchaImageElement) render();
   else scheduleDomainCheck();
   if (!captchaImageElement) return;
-  fetch('/?trial_site_captcha', {headers: {Accept: 'application/json'}})
-    .then(function readChallenge(response) {
-      if (!response.ok) throw new Error();
-      return response.json();
-    })
-    .then(function showChallenge(challenge) {
-      formModel.captchaImage = challenge.image;
-      formModel.captchaID = challenge.captcha_id;
-      render();
-    })
-    .catch(function showChallengeError() {
-      formModel.captchaFailed = true;
-      render();
-    });
+  captchaRetryElement.addEventListener('click', function requestNewCaptcha() {
+    if (formModel.captchaRetryTimer) {
+      window.clearTimeout(formModel.captchaRetryTimer);
+      formModel.captchaRetryTimer = 0;
+    }
+    loadCaptcha();
+  });
+  loadCaptcha();
 })();

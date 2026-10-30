@@ -74,7 +74,11 @@ func Save(transaction *sql.Tx, challenge Challenge, ip, domain, purpose string, 
 	if err := transaction.QueryRow(`SELECT COUNT(*) FROM account_captchas`).Scan(&total); err != nil {
 		return false, err
 	}
-	if issued >= 6 || total >= 10000 {
+	issueLimit := 6
+	if purpose == "trial_preview" || purpose == "test_drive" {
+		issueLimit = 60
+	}
+	if issued >= issueLimit || total >= 10000 {
 		return false, nil
 	}
 	if _, err := transaction.Exec(`INSERT INTO account_captcha_rates(client_ip,window_start,issued) VALUES(?,?,1) ON CONFLICT(client_ip) DO UPDATE SET issued=account_captcha_rates.issued+1`, ip, now.Unix()); err != nil {
@@ -87,7 +91,7 @@ func Save(transaction *sql.Tx, challenge Challenge, ip, domain, purpose string, 
 // Every attempt spends the challenge, including a wrong answer or identity.
 // Knowing the opaque cookie never provides or selects the expected answer.
 func Verify(transaction *sql.Tx, token, answer, ip, domain, purpose string, now time.Time) (verified bool, resultErr error) {
-	if purpose == "trial_preview" || purpose == "register" {
+	if purpose == "register" {
 		if _, err := transaction.Exec(`DELETE FROM account_captcha_fail_events WHERE failed_at<?`, now.Add(-24*time.Hour).Unix()); err != nil {
 			return false, err
 		}

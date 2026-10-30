@@ -859,6 +859,8 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 		migrations.SQL("trial-domain-index", `CREATE INDEX IF NOT EXISTS public_trial_sites_domain_status_idx ON public_trial_sites(domain,status)`),
 		migrations.SQL("mail-event-time-index", `CREATE INDEX IF NOT EXISTS test_drive_mail_events_time_idx ON test_drive_mail_events(sent_at)`),
 		migrations.SQL("check-event-time-index", `CREATE INDEX IF NOT EXISTS test_drive_check_events_time_idx ON test_drive_check_events(checked_at)`),
+		migrations.SQL("first-opened-at", `ALTER TABLE public_trial_sites ADD COLUMN first_opened_at TEXT NOT NULL DEFAULT ''`),
+		migrations.SQL("check-label-hash", `ALTER TABLE test_drive_check_events ADD COLUMN label_hash TEXT NOT NULL DEFAULT ''`),
 	}); err != nil {
 		return err
 	}

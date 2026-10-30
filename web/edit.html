@@ -1152,39 +1152,7 @@ if (visualEditorThemeMediaQuery) {
 connectSaveHotkey(visualHtmlEditor);
 </script>
 {{if .PrivateTestDrive}}
-<section class="test-drive-save" data-test-drive-save data-created-at="{{.TestDriveCreatedAt}}" data-csrf="{{.AccountCSRF}}">
-  <button type="button" class="SiteBrushAdminDialogNotice" data-trial-notice hidden>{{index .T "test_drive_save_title"}}</button>
-  <div class="SiteBrushAdminDialogOverlay" data-trial-overlay hidden>
-    <div class="SiteBrushAdminDialog" role="dialog" aria-modal="true" aria-labelledby="trial-save-title">
-      <div class="SiteBrushAdminDialogHeader">
-        <h2 class="SiteBrushAdminDialogTitle" id="trial-save-title">{{index .T "test_drive_save_title"}}</h2>
-        <button type="button" class="SiteBrushAdminDialogClose" data-trial-close aria-label="{{index .T "edit_cancel"}}">×</button>
-      </div>
-      <div class="SiteBrushAdminDialogBody">
-        <p class="SiteBrushAdminDialogHint">{{index .T "test_drive_save_hint"}}</p>
-        <p class="SiteBrushAdminDialogReason" data-trial-reason hidden>{{index .T "test_drive_publish_requires_email"}}</p>
-        <div class="SiteBrushAdminDialogCaptcha" data-trial-captcha hidden>
-          <label class="SiteBrushAdminDialogField">{{index .T "account_captcha_label"}}<img width="240" height="80" alt="{{index .T "recover_captcha_alt"}}" data-trial-captcha-image><input name="captcha" autocomplete="off"></label>
-          <input name="captcha_id" type="hidden" data-trial-captcha-id>
-        </div>
-        <form class="SiteBrushAdminDialogForm" data-trial-email-form>
-          <label class="SiteBrushAdminDialogField">{{index .T "test_drive_email_label"}}<input name="email" type="email" autocomplete="email" required></label>
-          <button class="SiteBrushAdminDialogButton primary" type="submit">{{index .T "test_drive_send_code"}}</button>
-        </form>
-        <div data-trial-code-stage hidden>
-          <p class="SiteBrushAdminDialogCurrentEmail" data-trial-current-email></p>
-          <form class="SiteBrushAdminDialogForm" data-trial-code-form><label class="SiteBrushAdminDialogField">{{index .T "test_drive_code_label"}}<input name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required autocomplete="one-time-code"></label><button class="SiteBrushAdminDialogButton primary" type="submit">{{index .T "test_drive_enter_code"}}</button></form>
-          <div class="SiteBrushAdminDialogActions"><button class="SiteBrushAdminDialogButton" type="button" data-trial-resend data-label="{{index .T "test_drive_resend"}}" data-wait="{{index .T "test_drive_resend_wait"}}">{{index .T "test_drive_resend"}}</button><button class="SiteBrushAdminDialogButton" type="button" data-trial-change>{{index .T "test_drive_change_email"}}</button></div>
-          <div class="SiteBrushAdminDialogMailLinks" data-trial-mail-links><a href="https://mail.google.com/" target="_blank" rel="noopener noreferrer">{{index .T "test_drive_open_gmail"}}</a><a href="https://outlook.live.com/mail/" target="_blank" rel="noopener noreferrer">{{index .T "test_drive_open_outlook"}}</a><a href="https://mail.yahoo.com/" target="_blank" rel="noopener noreferrer">{{index .T "test_drive_open_yahoo"}}</a></div>
-        </div>
-        <form class="SiteBrushAdminDialogForm" data-trial-activate-form hidden><button class="SiteBrushAdminDialogButton primary" type="submit">{{index .T "test_drive_activate_site"}}</button></form>
-        <p class="SiteBrushAdminDialogError" role="alert" data-trial-error hidden>{{index .T "test_drive_generic_error"}}</p>
-      </div>
-    </div>
-  </div>
-</section>
-<script defer src="/p/static/test_drive_session.js"></script>
-<script defer src="/p/static/test_drive_editor.js"></script>
+{{.TestDriveConfirmationHTML}}
 {{end}}
 </body>
 </html>

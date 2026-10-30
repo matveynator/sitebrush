@@ -13609,16 +13609,25 @@ func TestDriveNameCheckRequiresCaptchaAfterSoftLimit(t *testing.T) {
 		request.AddCookie(entryCookie)
 		response := httptest.NewRecorder()
 		admitted := application.admitTestDriveNameCheck(response, request)
-		if attempt == 10 {
+		if !admitted || response.Header().Get("X-SiteBrush-Captcha-Required") == "1" {
+			t.Fatalf("repeated check revoked trusted CAPTCHA: attempt=%d status=%d headers=%v", attempt, response.Code, response.Header())
+		}
+	}
+	for attempt := 0; attempt < 11; attempt++ {
+		request := httptest.NewRequest(http.MethodGet, fmt.Sprintf("https://sitebrush.example/?trial_site_domain_check&subdomain=name%d", attempt), nil)
+		request.AddCookie(entryCookie)
+		response := httptest.NewRecorder()
+		admitted := application.admitTestDriveNameCheck(response, request)
+		if attempt == 9 {
 			if !admitted || response.Header().Get("X-SiteBrush-Captcha-Required") != "1" {
-				t.Fatalf("successful check did not signal revoked CAPTCHA trust: admitted=%t headers=%v", admitted, response.Header())
+				t.Fatalf("distinct-name scan did not revoke CAPTCHA trust: admitted=%t headers=%v", admitted, response.Header())
 			}
-		} else if attempt == 11 {
+		} else if attempt == 10 {
 			if admitted || response.Code != http.StatusTooManyRequests || response.Header().Get("X-SiteBrush-Captcha-Required") != "1" {
-				t.Fatalf("soft limit did not require CAPTCHA: admitted=%t status=%d headers=%v", admitted, response.Code, response.Header())
+				t.Fatalf("distinct-name scan was not limited: admitted=%t status=%d headers=%v", admitted, response.Code, response.Header())
 			}
 		} else if !admitted {
-			t.Fatalf("request %d rejected before soft limit: %d %s", attempt, response.Code, response.Body.String())
+			t.Fatalf("distinct-name request %d rejected early: %d %s", attempt, response.Code, response.Body.String())
 		}
 	}
 	availabilityRequests := make(chan publicTrialAvailabilityRequest)
@@ -13642,10 +13651,11 @@ func TestDriveNameCheckRequiresCaptchaAfterSoftLimit(t *testing.T) {
 	if reloadResponse.Code != http.StatusOK || !strings.Contains(reloadResponse.Body.String(), `value="hello"`) || !strings.Contains(reloadResponse.Body.String(), `data-test-drive-captcha`) {
 		t.Fatalf("revoked browser form did not restore CAPTCHA: %d %s", reloadResponse.Code, reloadResponse.Body.String())
 	}
-	startForm := url.Values{"subdomain": {"hello"}}
+	startForm := url.Values{"subdomain": {"hello"}, "email": {"creator@example.com"}}
 	startRequest := httptest.NewRequest(http.MethodPost, "https://sitebrush.example/?test_drive_start", strings.NewReader(startForm.Encode()))
 	startRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	startRequest.Header.Set("Origin", "https://sitebrush.example")
+	startRequest.Header.Set("Accept-Language", "ru")
 	startRequest.AddCookie(entryCookie)
 	startResponse := httptest.NewRecorder()
 	application.route(startResponse, startRequest)
@@ -13688,6 +13698,7 @@ func TestDriveNameCheckRequiresCaptchaAfterSoftLimit(t *testing.T) {
 
 func TestPrivateTestDriveStartsWithCaptchaOnPartitionedSiteDatabase(t *testing.T) {
 	application := newPartitionedTestApplication(t)
+	application.emailDelivery = make(chan mailout.DeliveryJob, 4)
 	if err := application.withServerControlDatabaseWrite(context.Background(), "test-partitioned-trial-owner", func(database *sql.DB) error {
 		store := hostingandsupport.Store{DB: database}
 		if setErr := store.SetOwner(context.Background(), "sitebrush.example", "owner@sitebrush.example"); setErr != nil {
@@ -13712,6 +13723,7 @@ func TestPrivateTestDriveStartsWithCaptchaOnPartitionedSiteDatabase(t *testing.T
 		}
 	}()
 	formRequest := httptest.NewRequest(http.MethodGet, "https://sitebrush.example/?test_drive", nil)
+	formRequest.Header.Set("Accept-Language", "ru")
 	formResponse := httptest.NewRecorder()
 	application.route(formResponse, formRequest)
 	if formResponse.Code != http.StatusOK {
@@ -13725,6 +13737,23 @@ func TestPrivateTestDriveStartsWithCaptchaOnPartitionedSiteDatabase(t *testing.T
 	}
 	if entryCookie == nil {
 		t.Fatal("entry session cookie missing")
+	}
+	captchaRequest := httptest.NewRequest(http.MethodGet, "https://sitebrush.example/?trial_site_captcha", nil)
+	captchaRequest.AddCookie(entryCookie)
+	if err := application.withAccountMailTransaction(captchaRequest, "test-captcha-mail-block", func(transaction *sql.Tx) error {
+		return mailguard.SetBlock(transaction, accountClientIP(captchaRequest), "test", time.Now().Add(time.Hour))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	captchaResponse := httptest.NewRecorder()
+	application.route(captchaResponse, captchaRequest)
+	if captchaResponse.Code != http.StatusOK || !strings.Contains(captchaResponse.Body.String(), `"image":"data:image/png;base64,`) {
+		t.Fatalf("first CAPTCHA image under mail block: %d %s", captchaResponse.Code, captchaResponse.Body.String())
+	}
+	if err := application.withAccountMailTransaction(captchaRequest, "test-captcha-mail-unblock", func(transaction *sql.Tx) error {
+		return mailguard.Unblock(transaction, accountClientIP(captchaRequest))
+	}); err != nil {
+		t.Fatal(err)
 	}
 	formTokenMatch := regexp.MustCompile(`name="test_drive_csrf" value="([^"]+)"`).FindStringSubmatch(formResponse.Body.String())
 	if len(formTokenMatch) != 2 {
@@ -13752,7 +13781,7 @@ func TestPrivateTestDriveStartsWithCaptchaOnPartitionedSiteDatabase(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	startForm := url.Values{"subdomain": {"partitioned"}, "captcha_id": {challenge.Token}, "captcha": {challenge.Answer}, "test_drive_csrf": {formTokenMatch[1]}}
+	startForm := url.Values{"subdomain": {"partitioned"}, "email": {"creator@example.com"}, "captcha_id": {challenge.Token}, "captcha": {challenge.Answer}, "test_drive_csrf": {formTokenMatch[1]}}
 	startRequest := httptest.NewRequest(http.MethodPost, "https://sitebrush.example/?test_drive_start", strings.NewReader(startForm.Encode()))
 	startRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	startRequest.Header.Set("Origin", "null")
@@ -13800,7 +13829,7 @@ func TestPrivateTestDriveStartsWithCaptchaOnPartitionedSiteDatabase(t *testing.T
 	}
 	handoffResponse := httptest.NewRecorder()
 	application.route(handoffResponse, handoffRequest)
-	if handoffResponse.Code != http.StatusSeeOther || handoffResponse.Header().Get("Location") != "/?edit" {
+	if handoffResponse.Code != http.StatusSeeOther || handoffResponse.Header().Get("Location") != "/?test_drive_welcome" {
 		t.Fatalf("handoff: %d %s", handoffResponse.Code, handoffResponse.Body.String())
 	}
 	checkAfterResponse := httptest.NewRecorder()
@@ -13810,7 +13839,7 @@ func TestPrivateTestDriveStartsWithCaptchaOnPartitionedSiteDatabase(t *testing.T
 	}
 }
 
-func TestPrivateTestDriveStartsBeforeEmailAndHandsOffOnce(t *testing.T) {
+func TestPrivateTestDriveStartsWithEmailAndHandsOffOnce(t *testing.T) {
 	application := newRouterTestApplication(t)
 	controlDatabase := setupBillingOwnerForTest(t, application, "sitebrush.example", "owner@sitebrush.example", true)
 	store := hostingandsupport.Store{DB: controlDatabase}
@@ -13846,6 +13875,7 @@ func TestPrivateTestDriveStartsBeforeEmailAndHandsOffOnce(t *testing.T) {
 		}
 	}()
 	formRequest := httptest.NewRequest(http.MethodGet, "https://sitebrush.example/?test_drive", nil)
+	formRequest.Header.Set("Accept-Language", "ru")
 	formResponse := httptest.NewRecorder()
 	application.route(formResponse, formRequest)
 	if formResponse.Code != http.StatusOK || !strings.Contains(formResponse.Body.String(), translationsForLanguageCode("ru")["test_drive_name_label"]) {
@@ -13866,10 +13896,11 @@ func TestPrivateTestDriveStartsBeforeEmailAndHandsOffOnce(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	form := url.Values{"subdomain": {"myproject"}}
+	form := url.Values{"subdomain": {"myproject"}, "email": {"creator@example.com"}}
 	startRequest := httptest.NewRequest(http.MethodPost, "https://sitebrush.example/?test_drive_start", strings.NewReader(form.Encode()))
 	startRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	startRequest.Header.Set("Origin", "https://sitebrush.example")
+	startRequest.Header.Set("Accept-Language", "ru")
 	startRequest.AddCookie(entryCookie)
 	startResponse := httptest.NewRecorder()
 	application.route(startResponse, startRequest)
@@ -13877,7 +13908,7 @@ func TestPrivateTestDriveStartsBeforeEmailAndHandsOffOnce(t *testing.T) {
 		t.Fatalf("start: %d %s", startResponse.Code, startResponse.Body.String())
 	}
 	trial, found, err := application.privateTestDrive(context.Background(), "myproject.sitebrush.example")
-	if err != nil || !found || trial.Status != "private" || trial.ID == 0 {
+	if err != nil || !found || trial.Status != "email_pending" || trial.PendingEmail != "creator@example.com" || trial.ID == 0 {
 		t.Fatalf("trial: %+v %t %v", trial, found, err)
 	}
 	if trial.VerifiedEmail != "" {
@@ -13888,7 +13919,29 @@ func TestPrivateTestDriveStartsBeforeEmailAndHandsOffOnce(t *testing.T) {
 	if trialExpiry.Sub(trialCreatedAt) != 21*time.Minute {
 		t.Fatalf("configured idle TTL not applied: %s", trialExpiry.Sub(trialCreatedAt))
 	}
-	limitForm := url.Values{"subdomain": {"another-project"}}
+	var handoffCookie *http.Cookie
+	for _, cookie := range startResponse.Result().Cookies() {
+		if cookie.Name == "sitebrush_trial_handoff" {
+			handoffCookie = cookie
+		}
+	}
+	if handoffCookie == nil || !handoffCookie.HttpOnly || !handoffCookie.Secure {
+		t.Fatal("resumable handoff cookie missing or unprotected")
+	}
+	repeatRequest := httptest.NewRequest(http.MethodPost, "https://sitebrush.example/?test_drive_start", strings.NewReader(form.Encode()))
+	repeatRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	repeatRequest.Header.Set("Origin", "https://sitebrush.example")
+	repeatRequest.AddCookie(entryCookie)
+	repeatRequest.AddCookie(handoffCookie)
+	repeatResponse := httptest.NewRecorder()
+	application.route(repeatResponse, repeatRequest)
+	if repeatResponse.Code != http.StatusOK || !strings.Contains(repeatResponse.Body.String(), "myproject.sitebrush.example") {
+		t.Fatalf("repeat start did not resume the same handoff: %d %s", repeatResponse.Code, repeatResponse.Body.String())
+	}
+	if !strings.Contains(repeatResponse.Body.String(), " disabled>") {
+		t.Fatal("handoff was enabled before the HTTPS address was checked")
+	}
+	limitForm := url.Values{"subdomain": {"another-project"}, "email": {"creator@example.com"}}
 	limitRequest := httptest.NewRequest(http.MethodPost, "https://sitebrush.example/?test_drive_start", strings.NewReader(limitForm.Encode()))
 	limitRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	limitRequest.Header.Set("Origin", "https://sitebrush.example")
@@ -13898,16 +13951,16 @@ func TestPrivateTestDriveStartsBeforeEmailAndHandsOffOnce(t *testing.T) {
 	if limitResponse.Code != http.StatusTooManyRequests {
 		t.Fatalf("second active Test Drive should be limited: %d %s", limitResponse.Code, limitResponse.Body.String())
 	}
-	if !strings.Contains(limitResponse.Body.String(), "data-test-drive-captcha") {
-		t.Fatal("creation limit did not show a new CAPTCHA")
+	if strings.Contains(limitResponse.Body.String(), "data-test-drive-captcha") {
+		t.Fatal("ordinary creation limit unexpectedly revoked CAPTCHA trust")
 	}
 	if err := application.withServerControlDatabaseRead(context.Background(), "test-create-captcha-reset", func(database *sql.DB) error {
 		var trusted bool
 		if readErr := database.QueryRow(`SELECT human_verified FROM test_drive_entry_sessions WHERE session_hash=?`, testDriveHash(entryCookie.Value)).Scan(&trusted); readErr != nil {
 			return readErr
 		}
-		if trusted {
-			return errors.New("creation limit did not reset CAPTCHA trust")
+		if !trusted {
+			return errors.New("ordinary creation limit revoked CAPTCHA trust")
 		}
 		return nil
 	}); err != nil {
@@ -13932,7 +13985,7 @@ func TestPrivateTestDriveStartsBeforeEmailAndHandsOffOnce(t *testing.T) {
 	}
 	handoffResponse := httptest.NewRecorder()
 	application.route(handoffResponse, handoffRequest)
-	if handoffResponse.Code != http.StatusSeeOther || handoffResponse.Header().Get("Location") != "/?edit" {
+	if handoffResponse.Code != http.StatusSeeOther || handoffResponse.Header().Get("Location") != "/?test_drive_welcome" {
 		t.Fatalf("handoff: %d %s", handoffResponse.Code, handoffResponse.Body.String())
 	}
 	var trialCookie, editorCookie *http.Cookie
@@ -13991,6 +14044,20 @@ func TestPrivateTestDriveStartsBeforeEmailAndHandsOffOnce(t *testing.T) {
 	if ownerResponse.Code != http.StatusOK || !strings.Contains(ownerResponse.Body.String(), "data-test-drive-save") {
 		t.Fatalf("private editor: %d %s", ownerResponse.Code, ownerResponse.Body.String())
 	}
+	welcomeRequest := httptest.NewRequest(http.MethodGet, "https://myproject.sitebrush.example/?test_drive_welcome", nil)
+	welcomeRequest.AddCookie(trialCookie)
+	welcomeRequest.AddCookie(editorCookie)
+	welcomeResponse := httptest.NewRecorder()
+	application.route(welcomeResponse, welcomeRequest)
+	if welcomeResponse.Code != http.StatusOK || !strings.Contains(welcomeResponse.Body.String(), "data-test-drive-copy") || !strings.Contains(welcomeResponse.Body.String(), "data-test-drive-save") {
+		t.Fatalf("private welcome: %d %s", welcomeResponse.Code, welcomeResponse.Body.String())
+	}
+	privateVisitor := httptest.NewRequest(http.MethodGet, "https://myproject.sitebrush.example/", nil)
+	privateResponse := httptest.NewRecorder()
+	application.route(privateResponse, privateVisitor)
+	if privateResponse.Code != http.StatusForbidden {
+		t.Fatalf("unverified site leaked: %d", privateResponse.Code)
+	}
 	socketServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		request.Host = "myproject.sitebrush.example"
 		request.AddCookie(trialCookie)
@@ -14014,12 +14081,8 @@ func TestPrivateTestDriveStartsBeforeEmailAndHandsOffOnce(t *testing.T) {
 		return reply
 	}
 	socketReply := sendSocketCommand(testDriveSocketCommand{ID: 1, Action: "status"})
-	if socketReply.Status != http.StatusOK || !bytes.Contains(socketReply.Payload, []byte(`"status":"private"`)) {
+	if socketReply.Status != http.StatusOK || !bytes.Contains(socketReply.Payload, []byte(`"status":"email_pending"`)) || !bytes.Contains(socketReply.Payload, []byte(`"code_sent":true`)) {
 		t.Fatalf("Test Drive WebSocket reply: %+v", socketReply)
-	}
-	emailReply := sendSocketCommand(testDriveSocketCommand{ID: 1, Action: "email", Email: "creator@example.com", CSRF: trialCSRF})
-	if emailReply.Status != http.StatusOK || !bytes.Contains(emailReply.Payload, []byte(`"retry_after":65`)) {
-		t.Fatalf("email WebSocket reply: %+v", emailReply)
 	}
 	var message mailout.Message
 	select {
@@ -14028,12 +14091,15 @@ func TestPrivateTestDriveStartsBeforeEmailAndHandsOffOnce(t *testing.T) {
 	default:
 		t.Fatal("confirmation message not queued")
 	}
-	if message.To != "creator@example.com" || strings.Contains(message.Body, "myproject.sitebrush.example") || strings.Contains(message.Body, "http") {
+	if message.To != "creator@example.com" || message.Subject != translationsForLanguageCode("ru")["test_drive_mail_subject"] || strings.Contains(message.Body, "myproject.sitebrush.example") || strings.Contains(message.Body, "http") || !strings.Contains(message.HTMLBody, `lang="ru"`) || strings.Contains(message.HTMLBody, "myproject.sitebrush.example") || strings.Contains(message.HTMLBody, "http") {
 		t.Fatalf("non-neutral confirmation: %+v", message)
 	}
 	codeMatch := regexp.MustCompile(`[0-9]{6}`).FindString(message.Body)
 	if codeMatch == "" {
 		t.Fatalf("confirmation code missing: %q", message.Body)
+	}
+	if !strings.Contains(message.HTMLBody, codeMatch) {
+		t.Fatal("HTML confirmation omitted the code")
 	}
 	sendAlternateEmail := func(email string) (int, string) {
 		formBody := url.Values{"email": {email}, "account_csrf": {trialCSRF}}
@@ -14137,68 +14203,22 @@ func TestPrivateTestDriveStartsBeforeEmailAndHandsOffOnce(t *testing.T) {
 		t.Fatalf("verify: %d %s", verifyResponse.Code, verifyResponse.Body.String())
 	}
 	var status, verifiedEmail string
-	if err := application.withServerControlDatabaseRead(context.Background(), "test-email-verified", func(database *sql.DB) error {
-		return database.QueryRow(`SELECT status,verified_email FROM public_trial_sites WHERE id=?`, trial.ID).Scan(&status, &verifiedEmail)
+	if err := application.withServerControlDatabaseRead(context.Background(), "test-activation", func(database *sql.DB) error {
+		return database.QueryRow("SELECT status,verified_email FROM public_trial_sites WHERE id=?", trial.ID).Scan(&status, &verifiedEmail)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if status != "email_verified" || verifiedEmail != "third@example.com" {
-		t.Fatalf("verification status=%s email=%s", status, verifiedEmail)
-	}
-	privateVisitor := httptest.NewRequest(http.MethodGet, "https://myproject.sitebrush.example/", nil)
-	privateResponse := httptest.NewRecorder()
-	application.route(privateResponse, privateVisitor)
-	if privateResponse.Code != http.StatusForbidden {
-		t.Fatalf("verified but inactive site leaked: %d", privateResponse.Code)
-	}
-	if err := application.withServerControlDatabaseWrite(context.Background(), "test-reset-captcha-before-activation", func(database *sql.DB) error {
-		_, writeErr := database.Exec(`UPDATE public_trial_sites SET human_verified=0 WHERE id=?`, trial.ID)
-		return writeErr
-	}); err != nil {
-		t.Fatal(err)
-	}
-	activateForm := url.Values{"account_csrf": {trialCSRF}}
-	activateRequest := httptest.NewRequest(http.MethodPost, "https://myproject.sitebrush.example/?test_drive_activate", strings.NewReader(activateForm.Encode()))
-	activateRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	activateRequest.Header.Set("Origin", "https://myproject.sitebrush.example")
-	activateRequest.AddCookie(trialCookie)
-	activateRequest.AddCookie(editorCookie)
-	activateResponse := httptest.NewRecorder()
-	application.route(activateResponse, activateRequest)
-	if activateResponse.Code != http.StatusForbidden {
-		t.Fatalf("activation bypassed reset CAPTCHA: %d", activateResponse.Code)
-	}
-	activateChallenge := saveTrialCaptcha(activateRequest)
-	activateForm.Set("captcha", activateChallenge.Answer)
-	activateForm.Set("captcha_id", activateChallenge.Token)
-	activateRequest = multipartTrialRequest("test_drive_activate", activateForm, false)
-	activateResponse = httptest.NewRecorder()
-	application.route(activateResponse, activateRequest)
-	if activateResponse.Code != http.StatusForbidden {
-		t.Fatalf("multipart activation accepted a body-only CSRF token: %d", activateResponse.Code)
-	}
-	activateRequest = multipartTrialRequest("test_drive_activate", activateForm, true)
-	activateResponse = httptest.NewRecorder()
-	application.route(activateResponse, activateRequest)
-	if activateResponse.Code != http.StatusOK {
-		t.Fatalf("activate: %d %s", activateResponse.Code, activateResponse.Body.String())
+	if status != "activated" || verifiedEmail != "third@example.com" {
+		t.Fatalf("verification did not activate the site: status=%s email=%s", status, verifiedEmail)
 	}
 	activatedSession := false
-	for _, cookie := range activateResponse.Result().Cookies() {
+	for _, cookie := range verifyResponse.Result().Cookies() {
 		if cookie.Name == "sitebrush_session" && cookie.Value != "" && cookie.HttpOnly {
 			activatedSession = true
 		}
 	}
 	if !activatedSession {
-		t.Fatal("activation did not preserve an authenticated editor session")
-	}
-	if err := application.withServerControlDatabaseRead(context.Background(), "test-activation", func(database *sql.DB) error {
-		return database.QueryRow(`SELECT status FROM public_trial_sites WHERE id=?`, trial.ID).Scan(&status)
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if status != "activated" {
-		t.Fatalf("activation status=%s", status)
+		t.Fatal("confirmation did not preserve an authenticated editor session")
 	}
 	visitorRequest := httptest.NewRequest(http.MethodGet, "https://myproject.sitebrush.example/", nil)
 	visitorRequest = visitorRequest.WithContext(contextWithDomain(visitorRequest.Context(), "myproject.sitebrush.example"))

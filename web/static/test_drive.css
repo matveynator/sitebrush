@@ -94,6 +94,17 @@
   max-width: 320px;
 }
 
+.SiteBrush-TestDrive-Welcome {
+  display: grid;
+  gap: 14px;
+}
+
+.test-drive-welcome-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
 @media (max-width: 380px) {
   .test-drive-domain-input {
     font-size: 13px;
