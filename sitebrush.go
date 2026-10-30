@@ -13192,6 +13192,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.confirmTestDriveNameCheckCaptcha(w, r)
 		return
 	}
+	if hasQueryFlag(r, "test_drive_entry_ws") {
+		a.testDriveEntrySocket(w, r)
+		return
+	}
 	if a.privateTestDriveGate(w, r) {
 		return
 	}
@@ -22434,10 +22438,6 @@ func (a *App) verifyPublicTrialCaptcha(r *http.Request) bool {
 	}
 	verified := false
 	err := a.withAccountMailTransaction(r, "trial-preview-captcha", func(transaction *sql.Tx) error {
-		blocked, blockErr := mailguard.Blocked(transaction, accountClientIP(r), time.Now().UTC())
-		if blockErr != nil || blocked {
-			return blockErr
-		}
 		var verifyErr error
 		verified, verifyErr = captcha.Verify(transaction, challengeToken, r.FormValue("captcha"), accountClientIP(r), a.siteDomain(r.Context(), r), "trial_preview", time.Now().UTC())
 		return verifyErr
@@ -22910,33 +22910,39 @@ func (a *App) publicTrialSiteDomainCheck(w http.ResponseWriter, r *http.Request)
 
 func (a *App) publicTrialSiteCaptcha(w http.ResponseWriter, r *http.Request) {
 	if !a.publicTrialAllowed(r) || r.Method != http.MethodGet {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusForbidden)
 		return
 	}
 	challenge, err := captcha.New()
 	if err != nil {
-		http.Error(w, "CAPTCHA is unavailable", http.StatusServiceUnavailable)
+		a.logTestDriveError("entry-captcha-create", 0, r, err)
+		testDriveHTTPError(w, r, "public_trial_captcha_unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	allowed := false
 	err = a.withAccountMailTransaction(r, "trial-captcha-issue", func(transaction *sql.Tx) error {
-		blocked, readErr := mailguard.Blocked(transaction, accountClientIP(r), time.Now().UTC())
-		if readErr != nil || blocked {
-			return readErr
-		}
-		allowed, readErr = captcha.Save(transaction, challenge, accountClientIP(r), a.siteDomain(r.Context(), r), "trial_preview", time.Now().UTC())
-		return readErr
+		var saveErr error
+		allowed, saveErr = captcha.Save(transaction, challenge, accountClientIP(r), a.siteDomain(r.Context(), r), "trial_preview", time.Now().UTC())
+		return saveErr
 	})
-	if err != nil || !allowed {
+	if err != nil {
+		a.logTestDriveError("entry-captcha-save", 0, r, err)
+		testDriveHTTPError(w, r, "public_trial_captcha_unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if !allowed {
+		a.logTestDriveEvent("entry-captcha", 0, r, "image_limit", http.StatusTooManyRequests)
 		w.Header().Set("Retry-After", "60")
-		http.Error(w, "too many CAPTCHA requests", http.StatusTooManyRequests)
+		testDriveHTTPError(w, r, "test_drive_limit_error", http.StatusTooManyRequests)
 		return
 	}
 	imageBytes, err := captcha.Render(challenge.Answer)
 	if err != nil {
-		http.Error(w, "CAPTCHA is unavailable", http.StatusServiceUnavailable)
+		a.logTestDriveError("entry-captcha-render", 0, r, err)
+		testDriveHTTPError(w, r, "public_trial_captcha_unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	a.logTestDriveEvent("entry-captcha", 0, r, "image_issued", http.StatusOK)
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"captcha_id": challenge.Token, "image": "data:image/png;base64," + base64.StdEncoding.EncodeToString(imageBytes)})
@@ -46166,11 +46172,18 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, templateName string
 	}
 	envelope := map[string]any{"Domain": domain, "T": translations, "CompileVersion": CompileVersion, "LanguageCode": languageCode, "TextDirection": textDirection, "AccountCSRF": accountCSRF(r)}
 	mergeTemplateData(envelope, templateData)
-	if templateName == "edit.html" {
+	if templateName == "edit.html" || templateName == "test_drive_welcome.html" {
 		if trial, found, _ := a.privateTestDrive(r.Context(), domain); found && testDriveOwner(r, trial) {
 			envelope["PrivateTestDrive"] = true
-			envelope["TestDriveCreatedAt"] = trial.CreatedAt
+			openedAt := trial.FirstOpenedAt
+			if openedAt == "" {
+				openedAt = trial.CreatedAt
+			}
+			envelope["TestDriveOpenedAt"] = openedAt
+			envelope["TestDriveID"] = trial.ID
 		}
+	}
+	if templateName == "edit.html" {
 		assetVersion, err := visualEditorAssetVersion()
 		if err != nil {
 			http.Error(w, "editor assets unavailable", http.StatusInternalServerError)
@@ -46198,7 +46211,7 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, templateName string
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	parsedTemplate, err := template.New(templateName).Parse(string(fileBytes))
+	parsedTemplate, err := parseEmbeddedPageTemplate(templateName, fileBytes)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -46210,6 +46223,26 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, templateName string
 		return
 	}
 	_ = parsedTemplate.Execute(w, envelope)
+}
+
+// Associated templates share html/template's escaping context instead of trusting rendered HTML.
+func parseEmbeddedPageTemplate(templateName string, source []byte) (*template.Template, error) {
+	parsedTemplate, err := template.New(templateName).Parse(string(source))
+	if err != nil {
+		return nil, err
+	}
+	if templateName != "edit.html" && templateName != "test_drive_welcome.html" {
+		return parsedTemplate, nil
+	}
+	fragment, err := fs.ReadFile(embeddedWebFiles, "web/test_drive_confirmation.html")
+	if err != nil {
+		return nil, err
+	}
+	_, err = parsedTemplate.New("test_drive_confirmation.html").Parse(string(fragment))
+	if err != nil {
+		return nil, err
+	}
+	return parsedTemplate, nil
 }
 
 func startRenderTemplateProcess(stop <-chan struct{}) chan renderTemplateRequest {
@@ -46224,7 +46257,7 @@ func startRenderTemplateProcess(stop <-chan struct{}) chan renderTemplateRequest
 			parseErrors[templateName] = readErr
 			continue
 		}
-		parsedTemplate, parseErr := template.New(templateName).Parse(string(fileBytes))
+		parsedTemplate, parseErr := parseEmbeddedPageTemplate(templateName, fileBytes)
 		if parseErr != nil {
 			parseErrors[templateName] = parseErr
 			continue
@@ -52195,7 +52228,7 @@ func (a *App) unfreezeSocket(w http.ResponseWriter, r *http.Request) {
 			Digest string `json:"digest"`
 			Offset int    `json:"offset"`
 		}
-		if err := websocket.JSON.Receive(connection, &command); err != nil {
+		if receiveErr := websocket.JSON.Receive(connection, &command); receiveErr != nil {
 			return
 		}
 		if subtle.ConstantTimeCompare([]byte(command.CSRF), []byte(accountCSRF(r))) != 1 {
@@ -57588,7 +57621,7 @@ func sitebrushControlQueryFlag(flag string) bool {
 		"trial_site_ws", "trial_site_events", "trial_site_texts", "trial_site_preview",
 		"trial_site_preview_status", "trial_site_preview_cancel", "trial_site_preview_frame",
 		"trial_site_create", "trial_site_indexing", "trial_site_suggest", "trial_site_captcha", "trial_site_domain_check",
-		"test_drive", "test_drive_start", "test_drive_handoff", "test_drive_status", "test_drive_email", "test_drive_verify", "test_drive_activate", "test_drive_captcha", "test_drive_check_captcha", "test_drive_ws",
+		"test_drive", "test_drive_start", "test_drive_handoff", "test_drive_handoff_ready", "test_drive_welcome", "test_drive_status", "test_drive_email", "test_drive_verify", "test_drive_activate", "test_drive_captcha", "test_drive_check_captcha", "test_drive_ws", "test_drive_entry_ws",
 		"demo_grab_preview", "demo_grab_refresh", "site_request",
 		"backup", "backup_import", "backup_download", "native_pick_files", "native_save_backup",
 		"hosting_and_support", "expenses", "billing", "hosting_invoice", "billing_schedule",
@@ -58329,6 +58362,7 @@ type privateTestDrive struct {
 	ID             int64
 	Domain         string
 	Status         string
+	EntryHash      string
 	SessionHash    string
 	HandoffHash    string
 	TemporaryAdmin string
@@ -58342,6 +58376,7 @@ type privateTestDrive struct {
 	LastMailAt     string
 	DeleteAfter    string
 	CreatedAt      string
+	FirstOpenedAt  string
 	LastActiveAt   string
 	LastIP         string
 	HumanVerified  bool
@@ -58365,7 +58400,7 @@ func testDriveFormTokenValid(r *http.Request, entryHash string) bool {
 }
 
 func testDriveEntryAction(r *http.Request) bool {
-	for _, flag := range []string{"test_drive", "test_drive_start", "test_drive_check_captcha", "trial_site_captcha", "trial_site_domain_check"} {
+	for _, flag := range []string{"test_drive", "test_drive_start", "test_drive_check_captcha", "test_drive_entry_ws", "trial_site_captcha", "trial_site_domain_check"} {
 		if hasQueryFlag(r, flag) {
 			return true
 		}
@@ -58376,7 +58411,7 @@ func testDriveEntryAction(r *http.Request) bool {
 func (a *App) privateTestDrive(ctx context.Context, domain string) (privateTestDrive, bool, error) {
 	var trial privateTestDrive
 	err := a.withServerControlDatabaseRead(ctx, "test-drive-read", func(database *sql.DB) error {
-		return database.QueryRowContext(ctx, `SELECT id,domain,status,session_hash,handoff_hash,temporary_admin,pending_email,verified_email,email_history,code_hash,code_expires_at,code_attempts,mail_count,last_mail_at,delete_after,created_at,COALESCE(last_active_at,''),COALESCE(last_ip,''),human_verified FROM public_trial_sites WHERE domain=? AND status IN ('private','email_pending','email_verified','expiring','blocked','active') ORDER BY id DESC LIMIT 1`, domain).Scan(&trial.ID, &trial.Domain, &trial.Status, &trial.SessionHash, &trial.HandoffHash, &trial.TemporaryAdmin, &trial.PendingEmail, &trial.VerifiedEmail, &trial.EmailHistory, &trial.CodeHash, &trial.CodeExpiresAt, &trial.CodeAttempts, &trial.MailCount, &trial.LastMailAt, &trial.DeleteAfter, &trial.CreatedAt, &trial.LastActiveAt, &trial.LastIP, &trial.HumanVerified)
+		return database.QueryRowContext(ctx, `SELECT id,domain,status,entry_hash,session_hash,handoff_hash,temporary_admin,pending_email,verified_email,email_history,code_hash,code_expires_at,code_attempts,mail_count,last_mail_at,delete_after,created_at,COALESCE(first_opened_at,''),COALESCE(last_active_at,''),COALESCE(last_ip,''),human_verified FROM public_trial_sites WHERE domain=? AND status IN ('private','email_pending','email_verified','expiring','blocked','active') ORDER BY id DESC LIMIT 1`, domain).Scan(&trial.ID, &trial.Domain, &trial.Status, &trial.EntryHash, &trial.SessionHash, &trial.HandoffHash, &trial.TemporaryAdmin, &trial.PendingEmail, &trial.VerifiedEmail, &trial.EmailHistory, &trial.CodeHash, &trial.CodeExpiresAt, &trial.CodeAttempts, &trial.MailCount, &trial.LastMailAt, &trial.DeleteAfter, &trial.CreatedAt, &trial.FirstOpenedAt, &trial.LastActiveAt, &trial.LastIP, &trial.HumanVerified)
 	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return privateTestDrive{}, false, nil
@@ -58434,7 +58469,15 @@ func (a *App) privateTestDriveGate(w http.ResponseWriter, r *http.Request) bool 
 		a.renderTestDriveNeutral(w, r)
 		return true
 	}
+	if hasQueryFlag(r, "test_drive_handoff_ready") {
+		a.testDriveHandoffReadySocket(w, r, trial.ID)
+		return true
+	}
 	if hasQueryFlag(r, "test_drive_handoff") {
+		if testDriveOwner(r, trial) {
+			http.Redirect(w, r, "/?test_drive_welcome", http.StatusSeeOther)
+			return true
+		}
 		if a.publicBoundary {
 			return false
 		}
@@ -58442,7 +58485,22 @@ func (a *App) privateTestDriveGate(w http.ResponseWriter, r *http.Request) bool 
 		return true
 	}
 	if !testDriveOwner(r, trial) {
+		if !testDriveSystemAsset(r) {
+			a.logTestDriveEvent("private-gate", trial.ID, r, "owner_cookie_missing", http.StatusForbidden)
+		}
 		a.renderTestDriveNeutral(w, r)
+		return true
+	}
+	if hasQueryFlag(r, "test_drive_welcome") {
+		if a.publicBoundary {
+			return false
+		}
+		if r.Method != http.MethodGet {
+			testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusMethodNotAllowed)
+			return true
+		}
+		a.touchTestDrive(w, r, trial)
+		a.renderTestDriveWelcome(w, r, trial)
 		return true
 	}
 	if hasQueryFlag(r, "test_drive_email") || hasQueryFlag(r, "test_drive_verify") || hasQueryFlag(r, "test_drive_activate") || hasQueryFlag(r, "test_drive_status") || hasQueryFlag(r, "test_drive_captcha") || hasQueryFlag(r, "test_drive_ws") {
@@ -58458,10 +58516,12 @@ func (a *App) privateTestDriveGate(w http.ResponseWriter, r *http.Request) bool 
 		return true
 	}
 	if r.Method == http.MethodPost && !testDriveEditorMutation(r) {
+		a.logTestDriveEvent("private-gate", trial.ID, r, "mutation_requires_email", http.StatusForbidden)
 		testDriveHTTPError(w, r, "test_drive_publish_requires_email", http.StatusForbidden)
 		return true
 	}
 	if testDriveExternalAction(r) {
+		a.logTestDriveEvent("private-gate", trial.ID, r, "public_action_requires_email", http.StatusForbidden)
 		testDriveHTTPError(w, r, "test_drive_publish_requires_email", http.StatusForbidden)
 		return true
 	}
@@ -58489,14 +58549,15 @@ func testDriveEditorMutation(r *http.Request) bool {
 			return true
 		}
 	}
-	return false
+	revisionID, err := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("delete")))
+	return err == nil && revisionID > 0
 }
 
 func testDriveExternalAction(r *http.Request) bool {
 	for flag := range r.URL.Query() {
 		if sitebrushControlQueryFlag(flag) {
 			allowed := false
-			for _, editorFlag := range []string{"edit", "visual", "text", "save", "files", "tree", "revisions", "revision_preview", "revision_restore", "revision_delete", "revision_toggle", "template_events", "grab", "grab_preview", "grab_retry", "grab_cancel", "grab_ws", "grab_events", "test_drive_status"} {
+			for _, editorFlag := range []string{"edit", "visual", "text", "save", "delete", "files", "tree", "revisions", "revision_preview", "revision_restore", "revision_delete", "revision_toggle", "template_events", "grab", "grab_preview", "grab_retry", "grab_cancel", "grab_ws", "grab_events", "test_drive_status"} {
 				if flag == editorFlag {
 					allowed = true
 					break
@@ -58514,6 +58575,15 @@ func (a *App) renderTestDriveNeutral(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusForbidden)
 	a.render(w, r, "test_drive_neutral.html", nil)
+}
+
+func (a *App) renderTestDriveWelcome(w http.ResponseWriter, r *http.Request, trial privateTestDrive) {
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	a.render(w, r, "test_drive_welcome.html", map[string]any{
+		"SiteCopyConfigJSON": siteCopyMenuConfigJSON("/", translationsForRequest(r)),
+		"PendingEmail":       trial.PendingEmail,
+	})
 }
 
 func (a *App) touchTestDrive(w http.ResponseWriter, r *http.Request, trial privateTestDrive) {
@@ -58607,7 +58677,7 @@ func (a *App) renderTestDriveForm(w http.ResponseWriter, r *http.Request, entryH
 	if !testDriveLabelValid(chosenName) {
 		chosenName = ""
 	}
-	a.render(w, r, "test_drive.html", map[string]any{"ParentDomain": a.hostingAndSupportMainDomain(r.Context()), "HumanVerified": trusted, "ChosenName": chosenName, "FormError": formError, "EntryCSRF": testDriveFormToken(entryHash)})
+	a.render(w, r, "test_drive.html", map[string]any{"ParentDomain": a.hostingAndSupportMainDomain(r.Context()), "HumanVerified": trusted, "ChosenName": chosenName, "ChosenEmail": strings.TrimSpace(r.FormValue("email")), "FormError": formError, "EntryCSRF": testDriveFormToken(entryHash)})
 }
 
 func (a *App) startPrivateTestDrive(w http.ResponseWriter, r *http.Request) {
@@ -58641,11 +58711,25 @@ func (a *App) startPrivateTestDrive(w http.ResponseWriter, r *http.Request) {
 	label := r.FormValue("subdomain")
 	if !testDriveLabelValid(label) {
 		a.recordTestDriveSuspicion(r.Context(), entryHash, 0, "invalid_name")
+		a.logTestDriveEvent("start", 0, r, "invalid_name", http.StatusBadRequest)
 		testDriveHTTPError(w, r, "public_trial_address_invalid", http.StatusBadRequest)
+		return
+	}
+	email, validEmail := testDriveEmailAddress(r.FormValue("email"))
+	if !validEmail {
+		a.logTestDriveEvent("start", 0, r, "invalid_email", http.StatusBadRequest)
+		w.WriteHeader(http.StatusBadRequest)
+		a.renderTestDriveForm(w, r, entryHash, trusted, translationsForRequest(r)["test_drive_invalid_email"])
+		return
+	}
+	parentDomain := a.hostingAndSupportMainDomain(r.Context())
+	domain := label + "." + parentDomain
+	if a.resumeTestDriveHandoff(w, r, entryHash, domain, email) {
 		return
 	}
 	if !trusted {
 		if !a.verifyPublicTrialCaptcha(r) {
+			a.logTestDriveEvent("start", 0, r, "captcha_required", http.StatusForbidden)
 			w.WriteHeader(http.StatusForbidden)
 			a.renderTestDriveForm(w, r, entryHash, false, translationsForRequest(r)["test_drive_captcha_required"])
 			return
@@ -58659,10 +58743,16 @@ func (a *App) startPrivateTestDrive(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		trusted = true
+		a.logTestDriveEvent("captcha", 0, r, "verified", http.StatusOK)
 	}
-	parentDomain := a.hostingAndSupportMainDomain(r.Context())
-	domain := label + "." + parentDomain
+	if !a.testDriveInitialMailAllowed(r, email, entryHash) {
+		a.logTestDriveEvent("start", 0, r, "mail_limit", http.StatusTooManyRequests)
+		w.WriteHeader(http.StatusTooManyRequests)
+		a.renderTestDriveForm(w, r, entryHash, trusted, translationsForRequest(r)["test_drive_limit_error"])
+		return
+	}
 	if !a.newSiteSubdomainAllowed(r.Context(), domain) || !a.publicTrialDomainAvailable(r.Context(), domain) {
+		a.logTestDriveEvent("start", 0, r, "domain_unavailable", http.StatusConflict)
 		testDriveHTTPError(w, r, "public_trial_address_unavailable", http.StatusConflict)
 		return
 	}
@@ -58691,16 +58781,14 @@ func (a *App) startPrivateTestDrive(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	if limitErr != nil || activeIP >= maxActiveIP || recentIP >= maxRecentIP || activeSession >= maxActiveSession || recentSession >= maxRecentSession {
+		a.logTestDriveEvent("start", 0, r, "creation_limit", http.StatusTooManyRequests)
 		if limitErr != nil {
 			a.logTestDriveError("create-limit", 0, r, limitErr)
 		}
 		a.recordTestDriveSuspicion(r.Context(), entryHash, 0, "create_limit")
-		_ = a.withServerControlDatabaseWrite(r.Context(), "test-drive-create-reset-captcha", func(database *sql.DB) error {
-			_, err := database.ExecContext(r.Context(), `UPDATE test_drive_entry_sessions SET human_verified=0 WHERE session_hash=?`, entryHash)
-			return err
-		})
+		_, trusted = a.testDriveEntrySession(w, r)
 		w.WriteHeader(http.StatusTooManyRequests)
-		a.renderTestDriveForm(w, r, entryHash, false, translationsForRequest(r)["test_drive_limit_error"])
+		a.renderTestDriveForm(w, r, entryHash, trusted, translationsForRequest(r)["test_drive_limit_error"])
 		return
 	}
 	claim := randomAccessToken()
@@ -58745,6 +58833,7 @@ func (a *App) startPrivateTestDrive(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 	idleDuration := time.Duration(a.testDriveSetting(r.Context(), "test_drive_idle_minutes", 30)) * time.Minute
 	handoff := randomAccessToken() + randomAccessToken()
+	emailHistory, _ := json.Marshal([]string{email})
 	if err := a.withServerControlDatabaseWrite(r.Context(), "test-drive-record", func(database *sql.DB) error {
 		plan, hasPlan := (hostingandsupport.Store{DB: database}).DefaultPlan(r.Context())
 		transaction, err := database.BeginTx(r.Context(), nil)
@@ -58761,7 +58850,7 @@ func (a *App) startPrivateTestDrive(w http.ResponseWriter, r *http.Request) {
 		if len(userAgent) > 256 {
 			userAgent = userAgent[:256]
 		}
-		_, err = transaction.ExecContext(r.Context(), `INSERT INTO public_trial_sites(domain,source_url,status,created_at,last_active_at,delete_after,client_ip,last_ip,user_agent,temporary_admin,handoff_hash,human_verified,ip_history,entry_hash) VALUES(?,'','private',?,?,?,?,?,?,?, ?,1,?,?)`, domain, now.Format(time.RFC3339), now.Format(time.RFC3339), now.Add(idleDuration).Format(time.RFC3339), ip, ip, userAgent, temporaryEmail, testDriveHash(handoff), fmt.Sprintf(`[{"ip":%q,"at":%q}]`, ip, now.Format(time.RFC3339)), entryHash)
+		_, err = transaction.ExecContext(r.Context(), `INSERT INTO public_trial_sites(domain,source_url,status,created_at,last_active_at,delete_after,client_ip,last_ip,user_agent,temporary_admin,handoff_hash,human_verified,ip_history,entry_hash,pending_email,email_history) VALUES(?,'','private',?,?,?,?,?,?,?, ?,1,?,?,?,?)`, domain, now.Format(time.RFC3339), now.Format(time.RFC3339), now.Add(idleDuration).Format(time.RFC3339), ip, ip, userAgent, temporaryEmail, testDriveHash(handoff), fmt.Sprintf(`[{"ip":%q,"at":%q}]`, ip, now.Format(time.RFC3339)), entryHash, email, string(emailHistory))
 		if err != nil {
 			return err
 		}
@@ -58773,8 +58862,48 @@ func (a *App) startPrivateTestDrive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	created = true
+	a.logTestDriveEvent("start", 0, r, "private_site_created", http.StatusOK)
+	trial, found, trialErr := a.privateTestDrive(r.Context(), domain)
+	if trialErr != nil || !found {
+		a.logTestDriveError("initial-mail-load", 0, r, errors.Join(trialErr, errors.New("trial record unavailable after creation")))
+	} else {
+		mailResponse := &testDriveResponseBuffer{headers: make(http.Header)}
+		a.sendTestDriveCode(mailResponse, r, trial)
+		if mailResponse.status >= http.StatusBadRequest {
+			a.logTestDriveEvent("initial-mail", trial.ID, r, "retry_required", mailResponse.status)
+		} else {
+			a.logTestDriveEvent("initial-mail", trial.ID, r, "queued", http.StatusOK)
+		}
+	}
 	a.refreshHostingAndSupportPanel()
 	a.observeAutomaticSSLRegistration(r, domain)
+	http.SetCookie(w, &http.Cookie{Name: "sitebrush_trial_handoff", Value: domain + "|" + handoff, Path: "/", HttpOnly: true, Secure: !localAccountRequest(r), SameSite: http.SameSiteLaxMode, MaxAge: int(idleDuration.Seconds())})
+	a.renderTestDriveHandoff(w, r, domain, handoff)
+}
+
+func (a *App) resumeTestDriveHandoff(w http.ResponseWriter, r *http.Request, entryHash, domain, email string) bool {
+	cookie, err := r.Cookie("sitebrush_trial_handoff")
+	if err != nil {
+		return false
+	}
+	cookieDomain, ticket, found := strings.Cut(cookie.Value, "|")
+	if !found || cookieDomain != domain || len(ticket) < 32 {
+		return false
+	}
+	trial, found, err := a.privateTestDrive(r.Context(), domain)
+	if err != nil || !found || trial.EntryHash != entryHash || trial.PendingEmail != email || trial.HandoffHash == "" || trial.SessionHash != "" || trial.Status != "private" && trial.Status != "email_pending" {
+		return false
+	}
+	expires, err := time.Parse(time.RFC3339, trial.DeleteAfter)
+	if err != nil || !time.Now().UTC().Before(expires) || subtle.ConstantTimeCompare([]byte(testDriveHash(ticket)), []byte(trial.HandoffHash)) != 1 {
+		return false
+	}
+	a.logTestDriveEvent("start", trial.ID, r, "existing_private_site_resumed", http.StatusOK)
+	a.renderTestDriveHandoff(w, r, domain, ticket)
+	return true
+}
+
+func (a *App) renderTestDriveHandoff(w http.ResponseWriter, r *http.Request, domain, handoff string) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -58784,7 +58913,22 @@ func (a *App) startPrivateTestDrive(w http.ResponseWriter, r *http.Request) {
 	}
 	continueLabel := translationOrDefault(translationsForRequest(r), "test_drive_continue", "Continue to Test Drive")
 	waitLabel := translationOrDefault(translationsForRequest(r), "test_drive_wait_https", "Preparing your private Test Drive address...")
-	_, _ = fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/p/static/technical_pages.css"><title>SiteBrush</title><script defer src="/p/static/test_drive_handoff.js"></script></head><body class="technical-page"><main class="container authentication-shell"><section class="authentication-card"><p>%s</p><form method="post" action="%s" data-test-drive-handoff data-local="%t"><input type="hidden" name="ticket" value="%s"><button class="btn btn-primary" type="submit">%s</button></form></section></main></body></html>`, template.HTMLEscapeString(waitLabel), template.HTMLEscapeString(endpoint), localAccountRequest(r), template.HTMLEscapeString(handoff), template.HTMLEscapeString(continueLabel))
+	pendingLabel := translationOrDefault(translationsForRequest(r), "test_drive_secure_address_pending", waitLabel)
+	_, _ = fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/p/static/technical_pages.css"><title>SiteBrush</title><script defer src="/p/static/test_drive_handoff.js"></script></head><body class="technical-page"><main class="container authentication-shell"><section class="authentication-card"><p data-test-drive-handoff-status data-pending="%s">%s</p><form method="post" action="%s" data-test-drive-handoff data-local="%t"><input type="hidden" name="ticket" value="%s"><button class="btn btn-primary" type="submit" disabled>%s</button></form></section></main></body></html>`, template.HTMLEscapeString(pendingLabel), template.HTMLEscapeString(waitLabel), template.HTMLEscapeString(endpoint), localAccountRequest(r), template.HTMLEscapeString(handoff), template.HTMLEscapeString(continueLabel))
+}
+
+// This public probe confirms TLS readiness without exposing site content or spending a ticket.
+func (a *App) testDriveHandoffReadySocket(w http.ResponseWriter, r *http.Request, trialID int64) {
+	if r.Method != http.MethodGet || !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") || !httpRequestHTTPSOrLocal(r) {
+		a.renderTestDriveNeutral(w, r)
+		return
+	}
+	websocket.Server{Handshake: func(*websocket.Config, *http.Request) error { return nil }, Handler: func(connection *websocket.Conn) {
+		defer connection.Close()
+		a.logTestDriveEvent("handoff-readiness", trialID, r, "secure_address_ready", http.StatusSwitchingProtocols)
+		_ = connection.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		_ = websocket.JSON.Send(connection, map[string]bool{"ready": true})
+	}}.ServeHTTP(w, r)
 }
 
 func testDriveRequestHTTPSOrLocal(w http.ResponseWriter, r *http.Request) bool {
@@ -58798,6 +58942,7 @@ func testDriveRequestHTTPSOrLocal(w http.ResponseWriter, r *http.Request) bool {
 
 func (a *App) testDriveHandoff(w http.ResponseWriter, r *http.Request, trial privateTestDrive) {
 	if r.Method != http.MethodPost || trial.HandoffHash == "" || !httpRequestHTTPSOrLocal(r) || subtle.ConstantTimeCompare([]byte(testDriveHash(r.FormValue("ticket"))), []byte(trial.HandoffHash)) != 1 {
+		a.logTestDriveEvent("handoff", trial.ID, r, "ticket_rejected", http.StatusForbidden)
 		a.renderTestDriveNeutral(w, r)
 		return
 	}
@@ -58811,7 +58956,7 @@ func (a *App) testDriveHandoff(w http.ResponseWriter, r *http.Request, trial pri
 	}
 	secret := randomAccessToken() + randomAccessToken()
 	err := a.withServerControlDatabaseWrite(r.Context(), "test-drive-handoff", func(database *sql.DB) error {
-		result, err := database.ExecContext(r.Context(), `UPDATE public_trial_sites SET session_hash=?,handoff_hash='' WHERE id=? AND handoff_hash=?`, testDriveHash(secret), trial.ID, trial.HandoffHash)
+		result, err := database.ExecContext(r.Context(), `UPDATE public_trial_sites SET session_hash=?,handoff_hash='',first_opened_at=? WHERE id=? AND handoff_hash=?`, testDriveHash(secret), time.Now().UTC().Format(time.RFC3339), trial.ID, trial.HandoffHash)
 		if err != nil {
 			return err
 		}
@@ -58833,7 +58978,8 @@ func (a *App) testDriveHandoff(w http.ResponseWriter, r *http.Request, trial pri
 	http.SetCookie(w, &http.Cookie{Name: "sitebrush_test_drive", Value: secret, Path: "/", HttpOnly: true, Secure: !localAccountRequest(r), SameSite: http.SameSiteLaxMode, MaxAge: int(testDriveIdleDuration(trial).Seconds())})
 	a.storeProfileSessionDetails(r.WithContext(domainContext), sessionToken)
 	setAccountSessionCookie(w, r, sessionToken, time.Now())
-	http.Redirect(w, r, "/?edit", http.StatusSeeOther)
+	a.logTestDriveEvent("handoff", trial.ID, r, "owner_session_ready", http.StatusSeeOther)
+	http.Redirect(w, r, "/?test_drive_welcome", http.StatusSeeOther)
 }
 
 func httpRequestHTTPSOrLocal(r *http.Request) bool {
@@ -58860,7 +59006,7 @@ func (a *App) testDriveOwnerAction(w http.ResponseWriter, r *http.Request, trial
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"status": trial.Status, "email": trial.PendingEmail, "verified_email": trial.VerifiedEmail, "mail_count": trial.MailCount, "human_verified": trial.HumanVerified, "retry_after": retryAfter})
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": trial.Status, "email": trial.PendingEmail, "verified_email": trial.VerifiedEmail, "mail_count": trial.MailCount, "code_sent": trial.Status == "email_pending" && trial.CodeHash != "", "human_verified": trial.HumanVerified, "retry_after": retryAfter})
 		return
 	}
 	if r.Method != http.MethodPost || !adminMutationSourceAllowed(r) || !sessionCSRFMutationAllowed(r) {
@@ -58885,6 +59031,7 @@ func (a *App) testDriveOwnerAction(w http.ResponseWriter, r *http.Request, trial
 type testDriveSocketCommand struct {
 	ID        int    `json:"id"`
 	Action    string `json:"action"`
+	Subdomain string `json:"subdomain"`
 	Email     string `json:"email"`
 	Code      string `json:"code"`
 	Captcha   string `json:"captcha"`
@@ -58893,11 +59040,12 @@ type testDriveSocketCommand struct {
 }
 
 type testDriveSocketReply struct {
-	ID         int             `json:"id"`
-	Status     int             `json:"status"`
-	Payload    json.RawMessage `json:"payload,omitempty"`
-	Error      string          `json:"error,omitempty"`
-	RetryAfter string          `json:"retry_after,omitempty"`
+	ID              int             `json:"id"`
+	Status          int             `json:"status"`
+	Payload         json.RawMessage `json:"payload,omitempty"`
+	Error           string          `json:"error,omitempty"`
+	RetryAfter      string          `json:"retry_after,omitempty"`
+	CaptchaRequired bool            `json:"captcha_required,omitempty"`
 }
 
 type testDriveResponseBuffer struct {
@@ -58920,7 +59068,7 @@ func (response *testDriveResponseBuffer) Write(content []byte) (int, error) {
 // The WebSocket adapts browser commands to the existing Test Drive action boundary.
 func (a *App) testDriveSocket(w http.ResponseWriter, r *http.Request, trial privateTestDrive) {
 	origin, err := url.Parse(r.Header.Get("Origin"))
-	if err != nil || origin.Scheme != requestScheme(r) || origin.Host != r.Host || origin.User != nil || origin.Path != "" {
+	if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") || err != nil || origin.Scheme != requestScheme(r) || origin.Host != r.Host || origin.User != nil || origin.Path != "" {
 		testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusForbidden)
 		return
 	}
@@ -58944,7 +59092,7 @@ func (a *App) testDriveSocket(w http.ResponseWriter, r *http.Request, trial priv
 		actionRequest.PostForm = actionRequest.Form
 		if command.Action == "status" || command.Action == "captcha" {
 			actionRequest.Method = http.MethodGet
-		} else if command.Action == "email" && command.CSRF != "" && subtle.ConstantTimeCompare([]byte(command.CSRF), []byte(accountCSRF(r))) == 1 {
+		} else if (command.Action == "email" || command.Action == "verify" || command.Action == "activate") && command.CSRF != "" && subtle.ConstantTimeCompare([]byte(command.CSRF), []byte(accountCSRF(r))) == 1 {
 			actionRequest.Method = http.MethodPost
 		} else {
 			testDriveHTTPError(response, r, "test_drive_generic_error", http.StatusForbidden)
@@ -58953,21 +59101,62 @@ func (a *App) testDriveSocket(w http.ResponseWriter, r *http.Request, trial priv
 			actionRequest.URL.RawQuery = "test_drive_" + command.Action
 			a.testDriveOwnerAction(response, actionRequest, trial)
 		}
-		reply := testDriveSocketReply{ID: command.ID, Status: response.status, RetryAfter: response.Header().Get("Retry-After")}
-		if reply.Status == 0 {
-			reply.Status = http.StatusOK
-		}
-		if reply.Status >= http.StatusBadRequest {
-			reply.Error = strings.TrimSpace(response.body.String())
-		} else if json.Valid(response.body.Bytes()) {
-			reply.Payload = append([]byte(nil), response.body.Bytes()...)
-		} else {
-			reply.Status = http.StatusInternalServerError
-			reply.Error = translationsForRequest(r)["test_drive_generic_error"]
-		}
+		reply := testDriveSocketResponse(command.ID, response, r)
 		_ = connection.SetWriteDeadline(time.Now().Add(10 * time.Second))
 		_ = websocket.JSON.Send(connection, reply)
 	}}.ServeHTTP(w, r)
+}
+
+// Entry commands reuse admission and CAPTCHA checks without transferring account cookies.
+func (a *App) testDriveEntrySocket(w http.ResponseWriter, r *http.Request) {
+	origin, err := url.Parse(r.Header.Get("Origin"))
+	if r.Method != http.MethodGet || !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") || !a.publicTrialAllowed(r) || err != nil || origin.Scheme != requestScheme(r) || origin.Host != r.Host || origin.User != nil || origin.Path != "" {
+		testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusForbidden)
+		return
+	}
+	websocket.Server{Handshake: func(*websocket.Config, *http.Request) error { return nil }, Handler: func(connection *websocket.Conn) {
+		defer connection.Close()
+		connection.MaxPayloadBytes = 4096
+		_ = connection.SetReadDeadline(time.Now().Add(30 * time.Second))
+		var command testDriveSocketCommand
+		if err := websocket.JSON.Receive(connection, &command); err != nil {
+			return
+		}
+		response := &testDriveResponseBuffer{headers: make(http.Header)}
+		actionRequest := r.Clone(r.Context())
+		query := make(url.Values)
+		switch command.Action {
+		case "captcha":
+			query.Set("trial_site_captcha", "")
+			actionRequest.URL.RawQuery = query.Encode()
+			a.publicTrialSiteCaptcha(response, actionRequest)
+		case "domain_check":
+			query.Set("trial_site_domain_check", "")
+			query.Set("subdomain", command.Subdomain)
+			actionRequest.URL.RawQuery = query.Encode()
+			a.publicTrialSiteDomainCheck(response, actionRequest)
+		default:
+			testDriveHTTPError(response, r, "test_drive_generic_error", http.StatusBadRequest)
+		}
+		_ = connection.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		_ = websocket.JSON.Send(connection, testDriveSocketResponse(command.ID, response, r))
+	}}.ServeHTTP(w, r)
+}
+
+func testDriveSocketResponse(commandID int, response *testDriveResponseBuffer, r *http.Request) testDriveSocketReply {
+	reply := testDriveSocketReply{ID: commandID, Status: response.status, RetryAfter: response.Header().Get("Retry-After"), CaptchaRequired: response.Header().Get("X-SiteBrush-Captcha-Required") == "1"}
+	if reply.Status == 0 {
+		reply.Status = http.StatusOK
+	}
+	if reply.Status >= http.StatusBadRequest {
+		reply.Error = strings.TrimSpace(response.body.String())
+	} else if json.Valid(response.body.Bytes()) {
+		reply.Payload = append([]byte(nil), response.body.Bytes()...)
+	} else {
+		reply.Status = http.StatusInternalServerError
+		reply.Error = translationsForRequest(r)["test_drive_generic_error"]
+	}
+	return reply
 }
 
 func (a *App) confirmTestDriveNameCheckCaptcha(w http.ResponseWriter, r *http.Request) {
@@ -59093,7 +59282,8 @@ func (a *App) admitTestDriveNameCheck(w http.ResponseWriter, r *http.Request) bo
 		return false
 	}
 	clientIP := accountClientIP(r)
-	var count, softLimit, hardLimit int
+	var count, distinctNames, softLimit, hardLimit int
+	labelHash := testDriveHash(strings.ToLower(strings.TrimSpace(r.URL.Query().Get("subdomain"))))
 	err := a.withServerControlDatabaseWrite(r.Context(), "test-drive-name-check-limit", func(database *sql.DB) error {
 		now := time.Now().Unix()
 		softLimit = a.testDriveLimit(r.Context(), database, "test_drive_name_checks_soft_minute", 10)
@@ -59104,10 +59294,20 @@ func (a *App) admitTestDriveNameCheck(w http.ResponseWriter, r *http.Request) bo
 		if err := database.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM test_drive_check_events WHERE (client_ip=? OR session_hash=?) AND checked_at>?`, clientIP, entryHash, now-60).Scan(&count); err != nil {
 			return err
 		}
-		if _, err := database.ExecContext(r.Context(), `INSERT INTO test_drive_check_events(client_ip,session_hash,checked_at) VALUES(?,?,?)`, clientIP, entryHash, now); err != nil {
+		if err := database.QueryRowContext(r.Context(), `SELECT COUNT(DISTINCT label_hash) FROM test_drive_check_events WHERE session_hash=? AND checked_at>?`, entryHash, now-60).Scan(&distinctNames); err != nil {
 			return err
 		}
-		if count >= softLimit || count >= hardLimit {
+		var sameName int
+		if err := database.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM test_drive_check_events WHERE session_hash=? AND label_hash=? AND checked_at>?`, entryHash, labelHash, now-60).Scan(&sameName); err != nil {
+			return err
+		}
+		if sameName == 0 {
+			distinctNames++
+		}
+		if _, err := database.ExecContext(r.Context(), `INSERT INTO test_drive_check_events(client_ip,session_hash,checked_at,label_hash) VALUES(?,?,?,?)`, clientIP, entryHash, now, labelHash); err != nil {
+			return err
+		}
+		if distinctNames > softLimit || count >= hardLimit {
 			_, err := database.ExecContext(r.Context(), `UPDATE test_drive_entry_sessions SET human_verified=0 WHERE session_hash=?`, entryHash)
 			return err
 		}
@@ -59117,15 +59317,15 @@ func (a *App) admitTestDriveNameCheck(w http.ResponseWriter, r *http.Request) bo
 		testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusServiceUnavailable)
 		return false
 	}
-	if !trusted || count >= softLimit || count >= hardLimit {
+	if !trusted || distinctNames > softLimit || count >= hardLimit {
 		w.Header().Set("X-SiteBrush-Captcha-Required", "1")
 	}
-	if count >= hardLimit || count >= softLimit && !trusted {
+	if count >= hardLimit || distinctNames > softLimit && !trusted {
 		w.Header().Set("Retry-After", "60")
 		testDriveHTTPError(w, r, "test_drive_limit_error", http.StatusTooManyRequests)
 		return false
 	}
-	if count >= softLimit/2 {
+	if distinctNames >= softLimit/2 {
 		timer := time.NewTimer(500 * time.Millisecond)
 		defer timer.Stop()
 		select {
@@ -59157,6 +59357,69 @@ func testDriveCodeMatches(stored, submitted string) bool {
 	return subtle.ConstantTimeCompare([]byte(stored), []byte(testDriveCodeDigest(submitted, parts[0]))) == 1
 }
 
+func testDriveEmailAddress(raw string) (string, bool) {
+	email := strings.ToLower(strings.TrimSpace(raw))
+	address, err := stdmail.ParseAddress(email)
+	return email, err == nil && address.Address == email && !strings.ContainsAny(email, "<>\r\n")
+}
+
+func testDriveMailHTML(languageCode, subject, body, code string) string {
+	beforeCode, afterCode, found := strings.Cut(body, code)
+	if !found {
+		beforeCode = body
+		afterCode = ""
+	}
+	direction := "ltr"
+	if languageCode == "he" || languageCode == "fa" {
+		direction = "rtl"
+	}
+	escape := template.HTMLEscapeString
+	return `<!doctype html><html lang="` + escape(languageCode) + `" dir="` + direction + `"><body style="margin:0;background:#f4f7f8;font-family:Arial,sans-serif;color:#607078"><div style="max-width:600px;margin:0 auto;padding:28px 16px"><div style="background:#fff;border:1px solid #d9e2e5;border-radius:14px;padding:28px"><p style="margin:0;color:#087f8c;font-size:20px;font-weight:700">SiteBrush</p><h1 style="font-size:23px;color:#172126;line-height:1.3">` + escape(subject) + `</h1><p style="line-height:1.6">` + escape(strings.TrimSpace(beforeCode)) + `</p><p dir="ltr" style="margin:18px 0;padding:14px;border-radius:9px;background:#f4f7f8;text-align:center"><strong style="font-size:36px;line-height:1.4;font-weight:800;letter-spacing:4px;color:#172126">` + escape(code) + `</strong></p><p style="font-size:13px;line-height:1.6">` + escape(strings.TrimSpace(afterCode)) + `</p></div></div></body></html>`
+}
+
+// Mail admission precedes site creation so a throttled sender cannot reserve names.
+func (a *App) testDriveInitialMailAllowed(r *http.Request, email, entryHash string) bool {
+	ip := accountClientIP(r)
+	allowed := false
+	err := a.withServerControlDatabaseRead(r.Context(), "test-drive-initial-mail-limit", func(database *sql.DB) error {
+		blocked, blockErr := mailguard.Blocked(database, ip, time.Now().UTC())
+		if blockErr != nil {
+			return blockErr
+		}
+		if blocked {
+			a.logTestDriveEvent("initial-mail-limit", 0, r, "blocked_ip", http.StatusTooManyRequests)
+			return nil
+		}
+		now := time.Now().Add(-time.Hour).Unix()
+		checks := []struct {
+			query string
+			key   string
+			arg   string
+			limit int
+		}{
+			{`SELECT COUNT(*) FROM test_drive_mail_events WHERE recipient=? AND sent_at>?`, "email", email, a.testDriveLimit(r.Context(), database, "test_drive_mail_per_email_hour", 5)},
+			{`SELECT COUNT(*) FROM test_drive_mail_events WHERE client_ip=? AND sent_at>?`, "ip", ip, a.testDriveLimit(r.Context(), database, "test_drive_mail_per_ip_hour", 10)},
+			{`SELECT COUNT(*) FROM test_drive_mail_events WHERE session_hash=? AND sent_at>?`, "session", entryHash, a.testDriveLimit(r.Context(), database, "test_drive_mail_per_session_hour", 8)},
+		}
+		for _, check := range checks {
+			var count int
+			if err := database.QueryRowContext(r.Context(), check.query, check.arg, now).Scan(&count); err != nil {
+				return err
+			}
+			if count >= check.limit {
+				a.logTestDriveEvent("initial-mail-limit", 0, r, check.key, http.StatusTooManyRequests)
+				return nil
+			}
+		}
+		allowed = true
+		return nil
+	})
+	if err != nil {
+		a.logTestDriveError("initial-mail-limit", 0, r, err)
+	}
+	return allowed && err == nil
+}
+
 func (a *App) sendTestDriveCode(w http.ResponseWriter, r *http.Request, trial privateTestDrive) {
 	if trial.Status != "private" && trial.Status != "email_pending" {
 		testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusConflict)
@@ -59166,9 +59429,8 @@ func (a *App) sendTestDriveCode(w http.ResponseWriter, r *http.Request, trial pr
 		testDriveHTTPError(w, r, "test_drive_captcha_required", http.StatusForbidden)
 		return
 	}
-	email := strings.ToLower(strings.TrimSpace(r.FormValue("email")))
-	address, addressErr := stdmail.ParseAddress(email)
-	if addressErr != nil || address.Address != email || strings.ContainsAny(email, "<>\r\n") {
+	email, validEmail := testDriveEmailAddress(r.FormValue("email"))
+	if !validEmail {
 		testDriveHTTPError(w, r, "test_drive_invalid_email", http.StatusBadRequest)
 		return
 	}
@@ -59180,6 +59442,10 @@ func (a *App) sendTestDriveCode(w http.ResponseWriter, r *http.Request, trial pr
 	salt := randomAccessToken()
 	now := time.Now().UTC()
 	ip := accountClientIP(r)
+	mailSessionHash := trial.EntryHash
+	if mailSessionHash == "" {
+		mailSessionHash = trial.SessionHash
+	}
 	var admitted bool
 	resendSeconds := 60
 	err = a.withServerControlDatabaseWrite(r.Context(), "test-drive-mail-admit", func(database *sql.DB) error {
@@ -59217,7 +59483,7 @@ func (a *App) sendTestDriveCode(w http.ResponseWriter, r *http.Request, trial pr
 		}{
 			{`SELECT COUNT(*) FROM test_drive_mail_events WHERE recipient=? AND sent_at>?`, []any{email, now.Add(-time.Hour).Unix()}, a.testDriveLimit(r.Context(), database, "test_drive_mail_per_email_hour", 5)},
 			{`SELECT COUNT(*) FROM test_drive_mail_events WHERE client_ip=? AND sent_at>?`, []any{ip, now.Add(-time.Hour).Unix()}, a.testDriveLimit(r.Context(), database, "test_drive_mail_per_ip_hour", 10)},
-			{`SELECT COUNT(*) FROM test_drive_mail_events WHERE session_hash=? AND sent_at>?`, []any{trial.SessionHash, now.Add(-time.Hour).Unix()}, a.testDriveLimit(r.Context(), database, "test_drive_mail_per_session_hour", 8)},
+			{`SELECT COUNT(*) FROM test_drive_mail_events WHERE session_hash=? AND sent_at>?`, []any{mailSessionHash, now.Add(-time.Hour).Unix()}, a.testDriveLimit(r.Context(), database, "test_drive_mail_per_session_hour", 8)},
 		}
 		for _, check := range checks {
 			var count int
@@ -59241,7 +59507,7 @@ func (a *App) sendTestDriveCode(w http.ResponseWriter, r *http.Request, trial pr
 		if _, err = database.ExecContext(r.Context(), `UPDATE public_trial_sites SET pending_email=?,email_history=?,code_hash=?,code_expires_at=?,code_attempts=0,last_mail_at=?,mail_count=mail_count+1,status='email_pending' WHERE id=? AND status IN ('private','email_pending')`, email, string(history), testDriveCodeDigest(code, salt), now.Add(testDriveCodeTime).Format(time.RFC3339), now.Format(time.RFC3339), trial.ID); err != nil {
 			return err
 		}
-		if _, err = database.ExecContext(r.Context(), `INSERT INTO test_drive_mail_events(trial_id,recipient,client_ip,session_hash,sent_at) VALUES(?,?,?,?,?)`, trial.ID, email, ip, trial.SessionHash, now.Unix()); err != nil {
+		if _, err = database.ExecContext(r.Context(), `INSERT INTO test_drive_mail_events(trial_id,recipient,client_ip,session_hash,sent_at) VALUES(?,?,?,?,?)`, trial.ID, email, ip, mailSessionHash, now.Unix()); err != nil {
 			return err
 		}
 		admitted = true
@@ -59251,23 +59517,27 @@ func (a *App) sendTestDriveCode(w http.ResponseWriter, r *http.Request, trial pr
 		if err != nil {
 			a.logTestDriveError("mail-admit", trial.ID, r, err)
 		}
-		a.recordTestDriveSuspicion(r.Context(), trial.SessionHash, trial.ID, "mail_limit")
+		a.recordTestDriveSuspicion(r.Context(), mailSessionHash, trial.ID, "mail_limit")
+		a.logTestDriveEvent("mail", trial.ID, r, "rate_limited", http.StatusTooManyRequests)
 		w.Header().Set("Retry-After", strconv.Itoa(resendSeconds))
 		testDriveHTTPError(w, r, "test_drive_limit_error", http.StatusTooManyRequests)
 		return
 	}
 	translations := translationsForRequest(r)
-	message := mailout.Message{Kind: "email_confirm", From: a.emailFromAddress(a.hostingAndSupportMainDomain(r.Context())), To: email, Subject: translations["test_drive_mail_subject"], Body: fmt.Sprintf(translations["test_drive_mail_body"], code), MonitorDomain: trial.Domain, MonitorClientIP: ip, MonitorFlowID: fmt.Sprintf("test-drive-%d", trial.ID)}
+	languageCode := preferredLanguageCode(r.Header.Get("Accept-Language"))
+	mailBody := fmt.Sprintf(translations["test_drive_mail_body"], code)
+	message := mailout.Message{Kind: "email_confirm", From: a.emailFromAddress(a.hostingAndSupportMainDomain(r.Context())), To: email, Subject: translations["test_drive_mail_subject"], Body: mailBody, HTMLBody: testDriveMailHTML(languageCode, translations["test_drive_mail_subject"], mailBody, code), MonitorDomain: trial.Domain, MonitorClientIP: ip, MonitorFlowID: fmt.Sprintf("test-drive-%d", trial.ID)}
 	if err := a.enqueueEmail(r.Context(), message); err != nil {
 		a.logTestDriveError("mail-enqueue", trial.ID, r, err)
 		_ = a.withServerControlDatabaseWrite(r.Context(), "test-drive-mail-rollback", func(database *sql.DB) error {
 			_, _ = database.ExecContext(r.Context(), `DELETE FROM test_drive_mail_events WHERE trial_id=? AND recipient=? AND sent_at=?`, trial.ID, email, now.Unix())
-			_, rollbackErr := database.ExecContext(r.Context(), `UPDATE public_trial_sites SET code_hash='',code_expires_at='',mail_count=mail_count-1 WHERE id=? AND code_hash=?`, trial.ID, testDriveCodeDigest(code, salt))
+			_, rollbackErr := database.ExecContext(r.Context(), `UPDATE public_trial_sites SET code_hash='',code_expires_at='',last_mail_at='',mail_count=mail_count-1,status='private' WHERE id=? AND code_hash=?`, trial.ID, testDriveCodeDigest(code, salt))
 			return rollbackErr
 		})
 		testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusServiceUnavailable)
 		return
 	}
+	a.logTestDriveEvent("mail", trial.ID, r, "queued", http.StatusOK)
 	a.refreshHostingAndSupportPanel()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"email": email, "status": "email_pending", "retry_after": resendSeconds})
@@ -59279,8 +59549,8 @@ func (a *App) verifyTestDriveCode(w http.ResponseWriter, r *http.Request, trial 
 		return
 	}
 	if trial.Status == "email_verified" {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"status": "email_verified", "email": trial.VerifiedEmail})
+		trial.HumanVerified = true
+		a.activatePrivateTestDrive(w, r, trial)
 		return
 	}
 	if trial.Status != "email_pending" {
@@ -59310,11 +59580,15 @@ func (a *App) verifyTestDriveCode(w http.ResponseWriter, r *http.Request, trial 
 		return
 	}
 	if !updated {
+		a.logTestDriveEvent("verify", trial.ID, r, "code_invalid_or_expired", http.StatusBadRequest)
 		testDriveHTTPError(w, r, "test_drive_invalid_code", http.StatusBadRequest)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"status": "email_verified", "email": trial.PendingEmail})
+	trial.Status = "email_verified"
+	trial.VerifiedEmail = trial.PendingEmail
+	trial.HumanVerified = true
+	a.logTestDriveEvent("verify", trial.ID, r, "code_accepted", http.StatusOK)
+	a.activatePrivateTestDrive(w, r, trial)
 }
 
 func (a *App) activatePrivateTestDrive(w http.ResponseWriter, r *http.Request, trial privateTestDrive) {
@@ -59362,10 +59636,33 @@ func (a *App) activatePrivateTestDrive(w http.ResponseWriter, r *http.Request, t
 		testDriveHTTPError(w, r, "test_drive_activation_retry", http.StatusServiceUnavailable)
 		return
 	}
-	if a.createSessionForDomain(w, r, domainContext, trial.Domain, trial.VerifiedEmail) == "" {
+	// Preserve the randomized editor session so already-open forms retain their CSRF token.
+	sessionCookie, cookieErr := r.Cookie("sitebrush_session")
+	if cookieErr != nil || sessionCookie.Value == "" {
 		testDriveHTTPError(w, r, "test_drive_activation_retry", http.StatusServiceUnavailable)
 		return
 	}
+	err = a.accountTransaction(domainContext, func(transaction *sql.Tx) error {
+		now := time.Now()
+		result, updateErr := transaction.ExecContext(domainContext, `UPDATE sessions SET user_email=?,last_used_at=? WHERE token=? AND user_email IN (?,?) AND (last_used_at=0 OR last_used_at>?) AND last_used_at<=?`, trial.Domain+"|"+trial.VerifiedEmail, now.Unix(), sessionCookie.Value, trial.Domain+"|"+trial.TemporaryAdmin, trial.Domain+"|"+trial.VerifiedEmail, now.Add(-accountauth.SessionTTL).Unix(), now.Unix())
+		if updateErr != nil {
+			return updateErr
+		}
+		count, countErr := result.RowsAffected()
+		if countErr != nil {
+			return countErr
+		}
+		if count != 1 {
+			return errors.New("Test Drive editor session is unavailable")
+		}
+		return accountauth.RememberAddress(domainContext, transaction, trial.Domain, trial.VerifiedEmail, accountClientIP(r), now)
+	})
+	if err != nil {
+		a.logTestDriveError("activate-session", trial.ID, r, err)
+		testDriveHTTPError(w, r, "test_drive_activation_retry", http.StatusServiceUnavailable)
+		return
+	}
+	setAccountSessionCookie(w, r, sessionCookie.Value, time.Now())
 	err = a.withServerControlDatabaseWrite(r.Context(), "test-drive-activate", func(database *sql.DB) error {
 		transaction, err := database.BeginTx(r.Context(), nil)
 		if err != nil {
@@ -59394,22 +59691,34 @@ func (a *App) activatePrivateTestDrive(w http.ResponseWriter, r *http.Request, t
 		return err
 	})
 	http.SetCookie(w, &http.Cookie{Name: "sitebrush_test_drive", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: !localAccountRequest(r), SameSite: http.SameSiteLaxMode})
+	a.logTestDriveEvent("activate", trial.ID, r, "public_site_ready", http.StatusOK)
 	a.refreshHostingAndSupportPanel()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"status": "activated", "domain": trial.Domain})
 }
 
 func (a *App) logTestDriveError(endpoint string, trialID int64, r *http.Request, err error) {
-	// The request identifier is generated at the boundary and never appears in public responses.
-	requestID := r.Header.Get("X-Request-ID")
-	if requestID == "" {
-		requestID = randomAccessToken()
-	}
+	requestID := testDriveRequestID(r)
 	adminEmail := ""
 	if a.db != nil && hasSitebrushSessionCookie(r) {
 		adminEmail, _ = a.currentAdminEmail(r)
 	}
 	log.Printf("TEST_DRIVE error endpoint=%s trial_id=%d request_id=%s admin=%s at=%s error=%s", endpoint, trialID, diagnosticlog.SafeLogValue(requestID), diagnosticlog.SafeLogValue(adminEmail), time.Now().UTC().Format(time.RFC3339), diagnosticlog.SafeLogValue(err.Error()))
+}
+
+func (a *App) logTestDriveEvent(event string, trialID int64, r *http.Request, outcome string, status int) {
+	requestID := testDriveRequestID(r)
+	log.Printf("TEST_DRIVE event=%s outcome=%s status=%s trial_id=%s host=%s method=%s ip=%s request_id=%s at=%s", diagnosticlog.SafeLogValue(event), diagnosticlog.SafeLogValue(outcome), diagnosticlog.SafeLogValue(strconv.Itoa(status)), diagnosticlog.SafeLogValue(strconv.FormatInt(trialID, 10)), diagnosticlog.SafeLogValue(domainFromRequest(r)), diagnosticlog.SafeLogValue(r.Method), diagnosticlog.SafeLogValue(accountClientIP(r)), diagnosticlog.SafeLogValue(requestID), time.Now().UTC().Format(time.RFC3339))
+}
+
+// A request keeps one identifier across its Test Drive stages and errors.
+func testDriveRequestID(r *http.Request) string {
+	requestID := r.Header.Get("X-Request-ID")
+	if requestID == "" {
+		requestID = randomAccessToken()
+		r.Header.Set("X-Request-ID", requestID)
+	}
+	return requestID
 }
 
 func testDriveHTTPError(w http.ResponseWriter, r *http.Request, key string, status int) {

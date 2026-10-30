@@ -85,6 +85,10 @@
   gap: 8px;
 }
 
+.test-drive-captcha[hidden] {
+  display: none;
+}
+
 .test-drive-captcha img {
   max-width: 100%;
   height: auto;
@@ -92,6 +96,17 @@
 
 .test-drive-captcha input {
   max-width: 320px;
+}
+
+.SiteBrush-TestDrive-Welcome {
+  display: grid;
+  gap: 14px;
+}
+
+.test-drive-welcome-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
 }
 
 @media (max-width: 380px) {

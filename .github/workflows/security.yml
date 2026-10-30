@@ -97,6 +97,12 @@ jobs:
         run: >-
           go test -count=1 -timeout=300s .
           -run '^Test(AccountMailGuard|AccountCaptcha|Register|RegistrationCooldown|Recover|Recovery|SiteRequestStores|LocalhostWithoutSiteDatabase|UnknownAndDeletedHostnames)'
+      - name: Test private Test Drive ownership and verification
+        env:
+          SITEBRUSH_SERVICE_MAIL_MODE: local
+        run: >-
+          go test -count=1 -timeout=180s .
+          -run '^Test(PrivateTestDrive|DriveNameCheck|DriveLabel)'
       - name: Test concise mail journal and transport attribution
         run: >-
           go test -count=1 -timeout=180s -covermode=atomic

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="{{.LanguageCode}}" dir="{{.TextDirection}}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{{index .T "test_drive_welcome_title"}}</title>
+  <link rel="stylesheet" href="/p/static/technical_pages.css">
+  <link rel="stylesheet" href="/p/static/test_drive.css">
+  <link rel="stylesheet" href="/p/static/admin_dialog.css">
+</head>
+<body class="technical-page">
+<main class="container authentication-shell" data-test-drive-welcome data-copy-config="{{.SiteCopyConfigJSON}}" data-csrf="{{.AccountCSRF}}">
+  <section class="authentication-card SiteBrush-TestDrive-Welcome">
+    <h1>{{index .T "test_drive_welcome_title"}}</h1>
+    <p>{{index .T "test_drive_private_hint"}}</p>
+    <p>{{index .T "test_drive_welcome_prompt"}}</p>
+    <div class="test-drive-welcome-actions">
+      <button type="button" class="btn btn-primary" data-test-drive-copy>{{index .T "test_drive_copy_site"}}</button>
+      <a class="btn" href="/?edit">{{index .T "test_drive_open_editor"}}</a>
+    </div>
+  </section>
+</main>
+{{if .PrivateTestDrive}}{{template "test_drive_confirmation.html" .}}{{end}}
+<script defer src="/p/static/site_copy.js"></script>
+<script defer src="/p/static/test_drive_welcome.js"></script>
+</body>
+</html>

@@ -127,3 +127,29 @@ func TestChallengeImageIsRasterAndIssuanceIsBounded(t *testing.T) {
 		}
 	}
 }
+
+func TestTrialCaptchaAllowsHumanRetriesAfterWrongAnswers(t *testing.T) {
+	database := captchaDatabase(t)
+	now := time.Now()
+	for attempt := 0; attempt < 14; attempt++ {
+		challenge, err := New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !captchaTransaction(t, database, func(transaction *sql.Tx) (bool, error) {
+			return Save(transaction, challenge, "192.0.2.11", "sitebrush.example", "trial_preview", now)
+		}) {
+			t.Fatalf("trial CAPTCHA image %d was limited", attempt)
+		}
+		answer := "WRONG1"
+		if attempt == 13 {
+			answer = challenge.Answer
+		}
+		verified := captchaTransaction(t, database, func(transaction *sql.Tx) (bool, error) {
+			return Verify(transaction, challenge.Token, answer, "192.0.2.11", "sitebrush.example", "trial_preview", now.Add(3*time.Second))
+		})
+		if verified != (attempt == 13) {
+			t.Fatalf("trial CAPTCHA attempt %d verified=%t", attempt, verified)
+		}
+	}
+}
