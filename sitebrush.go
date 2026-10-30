@@ -9442,7 +9442,7 @@ type adminResponseFramePolicyValues struct {
 }
 
 func adminResponseFramePolicy(r *http.Request) adminResponseFramePolicyValues {
-	if hasQueryFlag(r, "revision_preview") || hasQueryFlag(r, "ai_background") || hasQueryFlag(r, "register") && hasQueryFlag(r, "trial_embed") {
+	if hasQueryFlag(r, "revision_preview") || hasQueryFlag(r, "ai_background") || hasQueryFlag(r, "register") && hasQueryFlag(r, "trial_embed") || hasQueryFlag(r, "server_update") && hasQueryFlag(r, "embedded") && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
 		return adminResponseFramePolicyValues{
 			xFrameOptions:         "SAMEORIGIN",
 			contentSecurityPolicy: "frame-ancestors 'self'",
@@ -55305,7 +55305,7 @@ func (a *App) serverUpdateDiagnosticPage(w http.ResponseWriter, r *http.Request,
 	translations := translationsForRequest(r)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusInternalServerError)
-	_, _ = fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/p/static/technical_pages.css"><title>%s</title></head><body class="technical-page"><main class="container authentication-shell"><section class="authentication-card"><h1>%s</h1><p>%s</p><p>%s: %s</p></section></main></body></html>`, template.HTMLEscapeString(translations["update_title"]), template.HTMLEscapeString(translations["update_title"]), template.HTMLEscapeString(translations["update_unavailable"]), template.HTMLEscapeString(translations["update_request_id_label"]), template.HTMLEscapeString(requestID))
+	_, _ = fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/p/static/technical_pages.css"><title>%s</title></head><body class="technical-page"><main class="container authentication-shell"><section class="authentication-card" data-server-update-diagnostic><h1>%s</h1><p>%s</p><p>%s: %s</p></section></main></body></html>`, template.HTMLEscapeString(translations["update_title"]), template.HTMLEscapeString(translations["update_title"]), template.HTMLEscapeString(translations["update_unavailable"]), template.HTMLEscapeString(translations["update_request_id_label"]), template.HTMLEscapeString(requestID))
 }
 
 func (a *App) serverUpdateClientError(w http.ResponseWriter, r *http.Request) {
@@ -57817,6 +57817,9 @@ func newPublicHTTPFront(application *App, secret string, stop <-chan struct{}) *
 		if application.serverHostBoundary(w, r) {
 			return true
 		}
+		if testDriveEntryAction(r) {
+			return false
+		}
 		if application.privateTestDriveGate(w, r) {
 			return true
 		}
@@ -58352,6 +58355,27 @@ func testDriveHash(secret string) string {
 	return hex.EncodeToString(digest[:])
 }
 
+func testDriveFormToken(entryHash string) string {
+	return testDriveHash("test-drive-start:" + entryHash)
+}
+
+func testDriveFormTokenValid(r *http.Request, entryHash string) bool {
+	provided := strings.TrimSpace(r.FormValue("test_drive_csrf"))
+	if provided == "" || entryHash == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(provided), []byte(testDriveFormToken(entryHash))) == 1
+}
+
+func testDriveEntryAction(r *http.Request) bool {
+	for _, flag := range []string{"test_drive", "test_drive_start", "test_drive_check_captcha", "trial_site_captcha", "trial_site_domain_check"} {
+		if hasQueryFlag(r, flag) {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *App) privateTestDrive(ctx context.Context, domain string) (privateTestDrive, bool, error) {
 	var trial privateTestDrive
 	err := a.withServerControlDatabaseRead(ctx, "test-drive-read", func(database *sql.DB) error {
@@ -58575,10 +58599,10 @@ func (a *App) testDriveForm(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
-	a.renderTestDriveForm(w, r, trusted, "")
+	a.renderTestDriveForm(w, r, hash, trusted, "")
 }
 
-func (a *App) renderTestDriveForm(w http.ResponseWriter, r *http.Request, trusted bool, formError string) {
+func (a *App) renderTestDriveForm(w http.ResponseWriter, r *http.Request, entryHash string, trusted bool, formError string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
@@ -58586,7 +58610,7 @@ func (a *App) renderTestDriveForm(w http.ResponseWriter, r *http.Request, truste
 	if !testDriveLabelValid(chosenName) {
 		chosenName = ""
 	}
-	a.render(w, r, "test_drive.html", map[string]any{"ParentDomain": a.hostingAndSupportMainDomain(r.Context()), "HumanVerified": trusted, "ChosenName": chosenName, "FormError": formError})
+	a.render(w, r, "test_drive.html", map[string]any{"ParentDomain": a.hostingAndSupportMainDomain(r.Context()), "HumanVerified": trusted, "ChosenName": chosenName, "FormError": formError, "EntryCSRF": testDriveFormToken(entryHash)})
 }
 
 func (a *App) startPrivateTestDrive(w http.ResponseWriter, r *http.Request) {
@@ -58597,14 +58621,24 @@ func (a *App) startPrivateTestDrive(w http.ResponseWriter, r *http.Request) {
 		testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusForbidden)
 		return
 	}
-	if !adminMutationSourceAllowed(r) {
-		a.logTestDriveError("start-source", 0, r, errors.New("request source rejected"))
-		testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusForbidden)
-		return
-	}
 	entryHash, trusted := a.testDriveEntrySession(w, r)
 	if entryHash == "" {
 		testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusServiceUnavailable)
+		return
+	}
+	formToken := strings.TrimSpace(r.FormValue("test_drive_csrf"))
+	validFormToken := testDriveFormTokenValid(r, entryHash)
+	if formToken != "" && !validFormToken {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.WriteHeader(http.StatusForbidden)
+		a.renderTestDriveForm(w, r, entryHash, trusted, translationsForRequest(r)["test_drive_form_expired"])
+		return
+	}
+	if !adminMutationSourceAllowed(r) && !validFormToken {
+		a.logTestDriveError("start-source", 0, r, errors.New("request source and entry token rejected"))
+		testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusForbidden)
 		return
 	}
 	label := r.FormValue("subdomain")
@@ -58616,7 +58650,7 @@ func (a *App) startPrivateTestDrive(w http.ResponseWriter, r *http.Request) {
 	if !trusted {
 		if !a.verifyPublicTrialCaptcha(r) {
 			w.WriteHeader(http.StatusForbidden)
-			a.renderTestDriveForm(w, r, false, translationsForRequest(r)["test_drive_captcha_required"])
+			a.renderTestDriveForm(w, r, entryHash, false, translationsForRequest(r)["test_drive_captcha_required"])
 			return
 		}
 		if err := a.withServerControlDatabaseWrite(r.Context(), "test-drive-human-verified", func(database *sql.DB) error {
@@ -58669,7 +58703,7 @@ func (a *App) startPrivateTestDrive(w http.ResponseWriter, r *http.Request) {
 			return err
 		})
 		w.WriteHeader(http.StatusTooManyRequests)
-		a.renderTestDriveForm(w, r, false, translationsForRequest(r)["test_drive_limit_error"])
+		a.renderTestDriveForm(w, r, entryHash, false, translationsForRequest(r)["test_drive_limit_error"])
 		return
 	}
 	claim := randomAccessToken()

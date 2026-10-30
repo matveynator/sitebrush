@@ -13481,6 +13481,40 @@ func TestPrivateTestDriveRequiresCreatingBrowserSession(t *testing.T) {
 			}
 		})
 	}
+	stopPublicFront := make(chan struct{})
+	defer close(stopPublicFront)
+	publicCatalog := publicsite.NewCatalog(application.storagePath, stopPublicFront)
+	if err := publicsite.Write(application.storagePath, publicsite.Policy{Domain: domain}); err != nil {
+		t.Fatal(err)
+	}
+	if err := publicCatalog.SetMemory(true); err != nil {
+		t.Fatal(err)
+	}
+	publicBoundary := &App{storagePath: application.storagePath, storageRealRoot: application.storageRealRoot, publicBoundary: true, publicCatalog: publicCatalog, publicStreamer: publicsite.NewStreamer()}
+	publicFront := newPublicHTTPFront(publicBoundary, "private-trial-fixture", stopPublicFront)
+	if err := publicFront.Set("127.0.0.1:1", true); err != nil {
+		t.Fatal(err)
+	}
+	publishedProbe := httptest.NewRecorder()
+	if !publicBoundary.servePublicPublished(publishedProbe, httptest.NewRequest(http.MethodGet, "https://"+domain+"/", nil), true) || !strings.Contains(publishedProbe.Body.String(), content) {
+		t.Fatal("paused public content fixture is unavailable")
+	}
+	for _, trialStatus := range []string{"private", "blocked", "expiring"} {
+		if err := application.withServerControlDatabaseWrite(context.Background(), "test-private-front-state", func(database *sql.DB) error {
+			_, updateErr := database.Exec(`UPDATE public_trial_sites SET status=? WHERE domain=?`, trialStatus, domain)
+			return updateErr
+		}); err != nil {
+			t.Fatal(err)
+		}
+		for _, mixedQuery := range []string{"?test_drive&edit", "?trial_site_domain_check&visual"} {
+			request := httptest.NewRequest(http.MethodGet, "https://"+domain+"/"+mixedQuery, nil)
+			response := httptest.NewRecorder()
+			publicFront.ServeHTTP(response, request)
+			if strings.Contains(response.Body.String(), content) || response.Code == http.StatusOK {
+				t.Fatalf("paused public front exposed %s on %s: status=%d body=%q", trialStatus, mixedQuery, response.Code, response.Body.String())
+			}
+		}
+	}
 	if err := application.withServerControlDatabaseWrite(context.Background(), "test-expire-trial", func(database *sql.DB) error {
 		_, err := database.Exec(`UPDATE public_trial_sites SET status='email_verified',verified_email=?,delete_after=? WHERE domain=?`, "creator@example.com", now.Add(-time.Minute).Format(time.RFC3339), domain)
 		return err
@@ -13827,6 +13861,21 @@ func TestPrivateTestDriveStartsWithCaptchaOnPartitionedSiteDatabase(t *testing.T
 	if entryCookie == nil {
 		t.Fatal("entry session cookie missing")
 	}
+	formTokenMatch := regexp.MustCompile(`name="test_drive_csrf" value="([^"]+)"`).FindStringSubmatch(formResponse.Body.String())
+	if len(formTokenMatch) != 2 {
+		t.Fatal("entry form token missing")
+	}
+	foreignForm := url.Values{"subdomain": {"partitioned"}, "test_drive_csrf": {"invalid"}}
+	foreignRequest := httptest.NewRequest(http.MethodPost, "https://sitebrush.example/?test_drive_start", strings.NewReader(foreignForm.Encode()))
+	foreignRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	foreignRequest.Header.Set("Origin", "null")
+	foreignRequest.Header.Set("Accept-Language", "ru")
+	foreignRequest.AddCookie(entryCookie)
+	foreignResponse := httptest.NewRecorder()
+	application.route(foreignResponse, foreignRequest)
+	if foreignResponse.Code != http.StatusForbidden || !strings.Contains(foreignResponse.Body.String(), translationsForLanguageCode("ru")["test_drive_form_expired"]) {
+		t.Fatalf("invalid form token: %d %s", foreignResponse.Code, foreignResponse.Body.String())
+	}
 	checkRequest := httptest.NewRequest(http.MethodGet, "https://sitebrush.example/?trial_site_domain_check&subdomain=partitioned", nil)
 	checkRequest.AddCookie(entryCookie)
 	checkResponse := httptest.NewRecorder()
@@ -13838,10 +13887,10 @@ func TestPrivateTestDriveStartsWithCaptchaOnPartitionedSiteDatabase(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	startForm := url.Values{"subdomain": {"partitioned"}, "captcha_id": {challenge.Token}, "captcha": {challenge.Answer}}
+	startForm := url.Values{"subdomain": {"partitioned"}, "captcha_id": {challenge.Token}, "captcha": {challenge.Answer}, "test_drive_csrf": {formTokenMatch[1]}}
 	startRequest := httptest.NewRequest(http.MethodPost, "https://sitebrush.example/?test_drive_start", strings.NewReader(startForm.Encode()))
 	startRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	startRequest.Header.Set("Origin", "https://sitebrush.example")
+	startRequest.Header.Set("Origin", "null")
 	startRequest.AddCookie(entryCookie)
 	if err := application.withAccountMailTransaction(startRequest, "test-partitioned-captcha", func(transaction *sql.Tx) error {
 		_, saveErr := captcha.Save(transaction, challenge, accountClientIP(startRequest), "sitebrush.example", "trial_preview", time.Now().Add(-3*time.Second).UTC())
@@ -21651,6 +21700,8 @@ func TestSecurityBoundaryAdminResponsesCannotBeFramedOrCached(t *testing.T) {
 		{name: "account", path: "/?profile", cookie: true, frameHeader: "DENY", framePolicy: "frame-ancestors 'none'"},
 		{name: "editor", path: "/?visual", cookie: true, frameHeader: "DENY", framePolicy: "frame-ancestors 'none'"},
 		{name: "revision preview", path: "/?revision_preview&id=1", cookie: true, frameHeader: "SAMEORIGIN", framePolicy: "frame-ancestors 'self'"},
+		{name: "embedded update", path: "/?server_update&embedded", cookie: true, frameHeader: "SAMEORIGIN", framePolicy: "frame-ancestors 'self'"},
+		{name: "ordinary update", path: "/?server_update", cookie: true, frameHeader: "DENY", framePolicy: "frame-ancestors 'none'"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			request := httptest.NewRequest(http.MethodGet, "http://localhost:8080"+testCase.path, nil)
@@ -25044,7 +25095,7 @@ func TestServerUpdateFailureShowsAdministratorDiagnostic(t *testing.T) {
 	if response.Code != http.StatusInternalServerError {
 		t.Fatalf("diagnostic status=%d", response.Code)
 	}
-	if !strings.Contains(response.Body.String(), "update-test-17") || strings.Contains(response.Body.String(), "private updater failure") {
+	if !strings.Contains(response.Body.String(), "update-test-17") || !strings.Contains(response.Body.String(), "data-server-update-diagnostic") || strings.Contains(response.Body.String(), "private updater failure") {
 		t.Fatalf("unsafe or missing administrator diagnostic: %s", response.Body.String())
 	}
 }
