@@ -1795,6 +1795,7 @@
               {{if $site.HasSiteRequest}}<button type="button" class="billing-request-badge" data-bs-toggle="modal" data-bs-target="#siteRequestDetailsModal{{$siteIndex}}">через заявку</button>{{end}}
             </div>
             {{if $site.Aliases}}<div class="text-muted small">{{index $.T "billing_aliases_label"}} {{$site.Aliases}}</div>{{end}}
+            {{if $site.ServerNameConflict}}<div class="alert alert-danger" role="alert">{{index $.T "billing_server_name_conflict"}}</div>{{end}}
             {{if $site.AdminEmails}}<div class="text-muted small">{{index $.T "billing_admins_label"}} {{$site.AdminEmails}}</div>{{end}}
             {{if $site.IsDemo}}<div class="text-muted small">{{index $.T "billing_demo_site_no_billing"}}</div>{{end}}
             {{if not $site.IsDemo}}<div class="text-muted small">{{index $.T "billing_delete_will_remove"}} {{$site.DeletionSizeLabel}}</div>{{end}}

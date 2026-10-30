@@ -13169,6 +13169,9 @@ func (a *App) refreshAIProviderRange(source aiingress.Source, stop <-chan struct
 }
 
 func (a *App) route(w http.ResponseWriter, r *http.Request) {
+	if a.serverHostBoundary(w, r) {
+		return
+	}
 	if hasQueryFlag(r, "server_update_client_error") {
 		a.serverUpdateClientError(w, r)
 		return
@@ -18687,6 +18690,10 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 		httpsecurity.RedirectLocal(w, r, "/", http.StatusFound)
 		return
 	}
+	if a.reservedServerSubdomain(r.Context(), domain) {
+		a.renderReservedDomain(w, r, translationsForRequest(r)["public_trial_address_unavailable"], http.StatusConflict)
+		return
+	}
 	email := strings.TrimSpace(r.FormValue("email"))
 	// Registration never accepts a password before the mail and TLS handoff.
 	password := ""
@@ -18800,7 +18807,125 @@ func (a *App) newSiteSubdomainAllowed(ctx context.Context, domain string) bool {
 		return false
 	}
 	label := strings.TrimSuffix(domain, "."+parentDomain)
-	return label != "" && !strings.Contains(label, ".") && safePublicTrialLabel(label) == label
+	return label != "" && !strings.Contains(label, ".") && !reservedServerLabel(label) && safePublicTrialLabel(label) == label
+}
+
+func reservedServerLabel(label string) bool {
+	switch strings.ToLower(strings.TrimSpace(label)) {
+	case "www", "sitebrush", "admin", "auth", "login", "account", "download", "install", "support", "security", "demo":
+		return true
+	}
+	return false
+}
+
+func (a *App) serverOwnerDomain(ctx context.Context) string {
+	var ownerDomain string
+	_ = a.withServerControlDatabaseRead(ctx, "server-owner-domain", func(database *sql.DB) error {
+		ownerDomain, _ = (hostingandsupport.Store{DB: database}).OwnerDomain(ctx)
+		return nil
+	})
+	ownerDomain = normalizeDomainName(ownerDomain)
+	if !strings.Contains(ownerDomain, ".") || net.ParseIP(ownerDomain) != nil {
+		return ""
+	}
+	return ownerDomain
+}
+
+func (a *App) serverDomainAlias(ctx context.Context, parentDomain, ownerDomain string) bool {
+	if parentDomain == ownerDomain {
+		return true
+	}
+	if a.db != nil {
+		var count int
+		err := a.db.QueryRowContext(contextWithDomain(ctx, ownerDomain), `SELECT COUNT(*) FROM domain_aliases WHERE primary_domain=? AND alias_domain=? AND is_verified=1 AND dns_a_ok=1`, ownerDomain, parentDomain).Scan(&count)
+		if err == nil && count > 0 {
+			return true
+		}
+	}
+	if a.publicCatalog != nil {
+		decision := a.publicCatalog.LookupRequest(publicsite.Lookup{Host: parentDomain}, ctx.Done())
+		return decision.Found && normalizeDomainName(decision.Domain) == ownerDomain
+	}
+	return false
+}
+
+func (a *App) reservedServerSubdomain(ctx context.Context, domain string) bool {
+	domain = normalizeDomainName(domain)
+	label, parentDomain, found := strings.Cut(domain, ".")
+	if !found || !reservedServerLabel(label) {
+		return false
+	}
+	ownerDomain := a.serverOwnerDomain(ctx)
+	return ownerDomain != "" && a.serverDomainAlias(ctx, parentDomain, ownerDomain)
+}
+
+func (a *App) systemWWWParent(ctx context.Context, domain string) string {
+	label, parentDomain, found := strings.Cut(normalizeDomainName(domain), ".")
+	if found && label == "www" && a.reservedServerSubdomain(ctx, domain) {
+		return parentDomain
+	}
+	return ""
+}
+
+func requestIPMatchesListener(r *http.Request, requestIP net.IP) bool {
+	listener, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr)
+	if !ok || listener == nil {
+		return false
+	}
+	listenerHost, _, err := net.SplitHostPort(listener.String())
+	if err != nil {
+		return false
+	}
+	listenerIP := net.ParseIP(listenerHost)
+	return listenerIP != nil && requestIP.Equal(listenerIP)
+}
+
+func remoteIPRegistrationRequest(r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return true
+	}
+	for _, flag := range []string{"register", "site_request", "email_confirm", "test_drive", "test_drive_start", "trial_site_create", "trial_site_domain_check", "trial_site_captcha"} {
+		if hasQueryFlag(r, flag) {
+			return true
+		}
+	}
+	return false
+}
+
+// Canonical server hosts are handled before trial and public-site lookup so a
+// former www site can never serve content under the server's service address.
+func (a *App) serverHostBoundary(w http.ResponseWriter, r *http.Request) bool {
+	host := normalizeDomainName(domainFromRequest(r))
+	if requestIP := net.ParseIP(host); requestIP != nil {
+		if !requestIP.IsLoopback() && !requestIP.IsPrivate() && requestIP.IsGlobalUnicast() && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+			ownerDomain := a.serverOwnerDomain(r.Context())
+			if ownerDomain != "" && requestIPMatchesListener(r, requestIP) && domainARecordMatches(ownerDomain, host) {
+				redirectURL := *r.URL
+				redirectURL.Scheme = requestScheme(r)
+				redirectURL.Host = hostingAndSupportRedirectHost(ownerDomain, r.Host)
+				httpsecurity.RedirectExternal(w, r, &redirectURL, http.StatusFound)
+				return true
+			}
+		}
+		if !localAccountRequest(r) && remoteIPRegistrationRequest(r) {
+			testDriveHTTPError(w, r, "public_trial_address_unavailable", http.StatusForbidden)
+			return true
+		}
+		return false
+	}
+	label, parentDomain, found := strings.Cut(host, ".")
+	if !found || label != "www" || !a.reservedServerSubdomain(r.Context(), host) {
+		return false
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		testDriveHTTPError(w, r, "public_trial_address_unavailable", http.StatusForbidden)
+		return true
+	}
+	redirectURL := *r.URL
+	redirectURL.Scheme = requestScheme(r)
+	redirectURL.Host = hostingAndSupportRedirectHost(parentDomain, r.Host)
+	httpsecurity.RedirectExternal(w, r, &redirectURL, http.StatusPermanentRedirect)
+	return true
 }
 
 func (a *App) confirmRegistrationCode(w http.ResponseWriter, r *http.Request) {
@@ -19038,6 +19163,10 @@ func (a *App) registerPage(w http.ResponseWriter, r *http.Request) {
 		httpsecurity.RedirectLocal(w, r, loginURLForRequest(r), http.StatusFound)
 		return
 	}
+	if a.reservedServerSubdomain(r.Context(), domain) {
+		a.renderReservedDomain(w, r, translationsForRequest(r)["public_trial_address_unavailable"], http.StatusConflict)
+		return
+	}
 	if !localAccountRequest(r) && a.serverOwnerExists(r.Context()) && !a.serverAutomaticRegistrationAllowed(r.Context()) {
 		a.renderSiteRequestPage(w, r, domain, "", "", "", "", 0)
 		return
@@ -19166,6 +19295,10 @@ func (a *App) siteRequestPage(w http.ResponseWriter, r *http.Request) {
 	domain := a.siteDomain(r.Context(), r)
 	if a.hasAdmin(r.Context(), domain) {
 		httpsecurity.RedirectLocal(w, r, loginURLForRequest(r), http.StatusFound)
+		return
+	}
+	if a.reservedServerSubdomain(r.Context(), domain) {
+		a.renderReservedDomain(w, r, translationsForRequest(r)["public_trial_address_unavailable"], http.StatusConflict)
 		return
 	}
 	if !a.serverOwnerExists(r.Context()) || a.serverAutomaticRegistrationAllowed(r.Context()) {
@@ -24230,7 +24363,7 @@ func randomPublicTrialSubdomain() string {
 
 func (a *App) publicTrialDomainAvailable(ctx context.Context, domain string) bool {
 	domain = normalizeDomainName(domain)
-	if domain == "" {
+	if domain == "" || a.reservedServerSubdomain(ctx, domain) {
 		return false
 	}
 	if a.pendingRegistrationDomain(ctx, domain) {
@@ -27847,6 +27980,12 @@ func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, control
 		return hostingAndSupportPanelSnapshot{}, err
 	}
 	siteRows = visibleHostingAndSupportLocalSites(siteRows, demoSettings)
+	for siteIndex := range siteRows {
+		label, parentDomain, found := strings.Cut(normalizeDomainName(siteRows[siteIndex].Domain), ".")
+		if found && label == "www" && a.serverDomainAlias(ctx, parentDomain, normalizeDomainName(mainDomain)) {
+			siteRows[siteIndex].ServerNameConflict = true
+		}
+	}
 	demoDomains := make([]string, 0, 4)
 	demoEmails := make([]string, 0, 8)
 	protectedEmails := make([]string, 0, 16)
@@ -33110,6 +33249,10 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 			confirmation.Password = password
 		}
 		confirmationContext := contextWithDomain(r.Context(), confirmation.Domain)
+		if a.reservedServerSubdomain(confirmationContext, confirmation.Domain) {
+			a.renderEmailConfirmationStatus(w, r, http.StatusConflict, confirmationTranslations["public_trial_address_unavailable"])
+			return
+		}
 		if a.hasAdmin(confirmationContext, confirmation.Domain) {
 			_ = a.finishRegistrationAttempt(mailMonitorFlowID(token), "rejected")
 			a.deleteRegistrationConfirmation(r.Context(), token)
@@ -50497,7 +50640,11 @@ func (a *App) prepareAutomaticSSLDomainWithProgress(certificateManager automatic
 		result.retryAfter = time.Now().Add(automaticSSLRetryDelayEligibility)
 		return result
 	}
-	domainContext := contextWithDomain(context.Background(), certificateDomain)
+	storageDomain := certificateDomain
+	if parentDomain := a.systemWWWParent(context.Background(), certificateDomain); parentDomain != "" {
+		storageDomain = parentDomain
+	}
+	domainContext := contextWithDomain(context.Background(), storageDomain)
 	if a.siteDatabaseRouter != nil {
 		_, err := a.siteDatabaseRouter.databaseForContext(domainContext)
 		if err != nil {
@@ -50613,7 +50760,11 @@ func (a *App) autoCertPreparedHostPolicy(ctx context.Context, host string) error
 	if !a.automaticSSLAvailable {
 		return errors.New("automatic SSL listeners are unavailable")
 	}
-	domainContext := contextWithDomain(ctx, certificateDomain)
+	storageDomain := certificateDomain
+	if parentDomain := a.systemWWWParent(ctx, certificateDomain); parentDomain != "" {
+		storageDomain = parentDomain
+	}
+	domainContext := contextWithDomain(ctx, storageDomain)
 	setting := a.domainAutomaticSSLSetting(domainContext, certificateDomain)
 	if setting.ManuallyDisabled {
 		return fmt.Errorf("automatic SSL domain %q is manually disabled", certificateDomain)
@@ -50659,6 +50810,21 @@ func (a *App) listAutomaticSSLDomainCandidates(ctx context.Context) []string {
 
 	for _, databaseDomain := range databaseDomains {
 		a.collectAutomaticSSLDomainCandidates(contextWithDomain(ctx, databaseDomain), seenDomains)
+	}
+	if ownerDomain := a.serverOwnerDomain(ctx); ownerDomain != "" {
+		seenDomains["www."+ownerDomain] = struct{}{}
+		if a.db != nil {
+			rows, err := a.db.QueryContext(contextWithDomain(ctx, ownerDomain), `SELECT alias_domain FROM domain_aliases WHERE primary_domain=? AND is_verified=1 AND dns_a_ok=1`, ownerDomain)
+			if err == nil {
+				for rows.Next() {
+					var aliasDomain string
+					if rows.Scan(&aliasDomain) == nil && normalizeDomainName(aliasDomain) != "" {
+						seenDomains["www."+normalizeDomainName(aliasDomain)] = struct{}{}
+					}
+				}
+				rows.Close()
+			}
+		}
 	}
 	// Cached certificates remain reusable, but do not establish site ownership
 	// or authorize background renewal after their site has been removed.
@@ -50741,6 +50907,9 @@ func (a *App) domainIsAutomaticSSLCandidate(ctx context.Context, domain string) 
 	certificateDomain := normalizeDomainName(domain)
 	if certificateDomain == "" {
 		return false
+	}
+	if a.systemWWWParent(ctx, certificateDomain) != "" {
+		return true
 	}
 	if a.pendingRegistrationDomain(ctx, certificateDomain) {
 		return true
@@ -55633,6 +55802,9 @@ func serverReleaseCatalog(releaseKey ed25519.PublicKey) (appupdate.Catalog, erro
 
 // Confirmation reserves identity without accepting credentials over HTTP.
 func (a *App) confirmRegistrationDomain(r *http.Request, confirmation EmailConfirmation) error {
+	if a.reservedServerSubdomain(r.Context(), confirmation.Domain) && !a.hasAdmin(contextWithDomain(r.Context(), confirmation.Domain), confirmation.Domain) {
+		return domainregistration.ErrTaken
+	}
 	if a.controlDatabase == nil {
 		if r.Method == http.MethodGet {
 			a.observeAutomaticSSLRegistration(r, confirmation.Domain)
@@ -55694,6 +55866,9 @@ func (a *App) registrationDomainClaimed(ctx context.Context, domain string) bool
 }
 
 func (a *App) claimTrialDomain(ctx context.Context, domain, token string) error {
+	if a.reservedServerSubdomain(ctx, domain) {
+		return domainregistration.ErrTaken
+	}
 	if a.controlDatabase == nil {
 		return nil
 	}
@@ -57612,6 +57787,9 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 func newPublicHTTPFront(application *App, secret string, stop <-chan struct{}) *publicsite.Front {
 	var front *publicsite.Front
 	publicHandler := func(w http.ResponseWriter, r *http.Request, paused bool) bool {
+		if application.serverHostBoundary(w, r) {
+			return true
+		}
 		if application.privateTestDriveGate(w, r) {
 			return true
 		}
@@ -59084,6 +59262,10 @@ func (a *App) verifyTestDriveCode(w http.ResponseWriter, r *http.Request, trial 
 func (a *App) activatePrivateTestDrive(w http.ResponseWriter, r *http.Request, trial privateTestDrive) {
 	if trial.Status != "email_verified" || trial.VerifiedEmail == "" {
 		testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusConflict)
+		return
+	}
+	if a.reservedServerSubdomain(r.Context(), trial.Domain) {
+		testDriveHTTPError(w, r, "public_trial_address_unavailable", http.StatusConflict)
 		return
 	}
 	if !trial.HumanVerified && !a.verifyTestDriveCaptcha(r, trial) {
