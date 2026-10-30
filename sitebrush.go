@@ -18835,6 +18835,9 @@ func (a *App) serverDomainAlias(ctx context.Context, parentDomain, ownerDomain s
 	if parentDomain == ownerDomain {
 		return true
 	}
+	if a.db == nil {
+		return false
+	}
 	var count int
 	err := a.db.QueryRowContext(contextWithDomain(ctx, ownerDomain), `SELECT COUNT(*) FROM domain_aliases WHERE primary_domain=? AND alias_domain=? AND is_verified=1 AND dns_a_ok=1`, ownerDomain, parentDomain).Scan(&count)
 	return err == nil && count > 0
@@ -18861,10 +18864,14 @@ func (a *App) reservedServerSubdomain(ctx context.Context, domain string) bool {
 	return ownerDomain != "" && a.serverDomainAlias(ctx, parentDomain, ownerDomain)
 }
 
-func (a *App) systemWWWParent(ctx context.Context, domain string) string {
+func (a *App) systemWWWStorageDomain(ctx context.Context, domain string) string {
 	label, parentDomain, found := strings.Cut(normalizeDomainName(domain), ".")
-	if found && label == "www" && a.reservedServerSubdomain(ctx, domain) {
-		return parentDomain
+	if !found || label != "www" {
+		return ""
+	}
+	ownerDomain := a.serverOwnerDomain(ctx)
+	if ownerDomain != "" && a.serverDomainAlias(ctx, parentDomain, ownerDomain) {
+		return ownerDomain
 	}
 	return ""
 }
@@ -18897,7 +18904,7 @@ func remoteIPRegistrationRequest(r *http.Request) bool {
 // Canonical server hosts are handled before trial and public-site lookup so a
 // former www site can never serve content under the server's service address.
 func (a *App) serverHostBoundary(w http.ResponseWriter, r *http.Request) bool {
-	host := normalizeDomainName(domainFromRequest(r))
+	host := domainFromRequest(r)
 	if requestIP := net.ParseIP(host); requestIP != nil {
 		if !requestIP.IsLoopback() && !requestIP.IsPrivate() && requestIP.IsGlobalUnicast() && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
 			ownerDomain := a.serverOwnerDomain(r.Context())
@@ -18915,6 +18922,7 @@ func (a *App) serverHostBoundary(w http.ResponseWriter, r *http.Request) bool {
 		}
 		return false
 	}
+	host = normalizeDomainName(host)
 	label, parentDomain, found := strings.Cut(host, ".")
 	if !found || label != "www" {
 		return false
@@ -50656,8 +50664,8 @@ func (a *App) prepareAutomaticSSLDomainWithProgress(certificateManager automatic
 		return result
 	}
 	storageDomain := certificateDomain
-	if parentDomain := a.systemWWWParent(context.Background(), certificateDomain); parentDomain != "" {
-		storageDomain = parentDomain
+	if ownerDomain := a.systemWWWStorageDomain(context.Background(), certificateDomain); ownerDomain != "" {
+		storageDomain = ownerDomain
 	}
 	domainContext := contextWithDomain(context.Background(), storageDomain)
 	if a.siteDatabaseRouter != nil {
@@ -50776,8 +50784,8 @@ func (a *App) autoCertPreparedHostPolicy(ctx context.Context, host string) error
 		return errors.New("automatic SSL listeners are unavailable")
 	}
 	storageDomain := certificateDomain
-	if parentDomain := a.systemWWWParent(ctx, certificateDomain); parentDomain != "" {
-		storageDomain = parentDomain
+	if ownerDomain := a.systemWWWStorageDomain(ctx, certificateDomain); ownerDomain != "" {
+		storageDomain = ownerDomain
 	}
 	domainContext := contextWithDomain(ctx, storageDomain)
 	setting := a.domainAutomaticSSLSetting(domainContext, certificateDomain)
@@ -50923,7 +50931,7 @@ func (a *App) domainIsAutomaticSSLCandidate(ctx context.Context, domain string) 
 	if certificateDomain == "" {
 		return false
 	}
-	if a.systemWWWParent(ctx, certificateDomain) != "" {
+	if a.systemWWWStorageDomain(ctx, certificateDomain) != "" {
 		return true
 	}
 	if a.pendingRegistrationDomain(ctx, certificateDomain) {

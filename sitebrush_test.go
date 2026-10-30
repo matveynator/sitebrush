@@ -13548,6 +13548,9 @@ func TestServerReservedSubdomainsAndWWWRedirect(t *testing.T) {
 		if !slices.Contains(certificateCandidates, "www."+parentDomain) || !application.domainIsAutomaticSSLCandidate(contextWithDomain(ctx, parentDomain), "www."+parentDomain) {
 			t.Fatalf("www certificate candidate missing for %s", parentDomain)
 		}
+		if storageDomain := application.systemWWWStorageDomain(ctx, "www."+parentDomain); storageDomain != "sitebrush.com" {
+			t.Fatalf("www certificate storage for %s: %s", parentDomain, storageDomain)
+		}
 		for _, label := range []string{"www", "sitebrush", "admin", "auth", "login", "account", "download", "install", "support", "security", "demo", "WWW", "Admin"} {
 			if !application.reservedServerSubdomain(ctx, label+"."+parentDomain) {
 				t.Fatalf("system address %s.%s was not reserved", label, parentDomain)
