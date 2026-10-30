@@ -13481,6 +13481,40 @@ func TestPrivateTestDriveRequiresCreatingBrowserSession(t *testing.T) {
 			}
 		})
 	}
+	stopPublicFront := make(chan struct{})
+	defer close(stopPublicFront)
+	publicCatalog := publicsite.NewCatalog(application.storagePath, stopPublicFront)
+	if err := publicsite.Write(application.storagePath, publicsite.Policy{Domain: domain}); err != nil {
+		t.Fatal(err)
+	}
+	if err := publicCatalog.SetMemory(true); err != nil {
+		t.Fatal(err)
+	}
+	publicBoundary := &App{storagePath: application.storagePath, storageRealRoot: application.storageRealRoot, publicBoundary: true, publicCatalog: publicCatalog, publicStreamer: publicsite.NewStreamer()}
+	publicFront := newPublicHTTPFront(publicBoundary, "private-trial-fixture", stopPublicFront)
+	if err := publicFront.Set("127.0.0.1:1", true); err != nil {
+		t.Fatal(err)
+	}
+	publishedProbe := httptest.NewRecorder()
+	if !publicBoundary.servePublicPublished(publishedProbe, httptest.NewRequest(http.MethodGet, "https://"+domain+"/", nil), true) || !strings.Contains(publishedProbe.Body.String(), content) {
+		t.Fatal("paused public content fixture is unavailable")
+	}
+	for _, trialStatus := range []string{"private", "blocked", "expiring"} {
+		if err := application.withServerControlDatabaseWrite(context.Background(), "test-private-front-state", func(database *sql.DB) error {
+			_, updateErr := database.Exec(`UPDATE public_trial_sites SET status=? WHERE domain=?`, trialStatus, domain)
+			return updateErr
+		}); err != nil {
+			t.Fatal(err)
+		}
+		for _, mixedQuery := range []string{"?test_drive&edit", "?trial_site_domain_check&visual"} {
+			request := httptest.NewRequest(http.MethodGet, "https://"+domain+"/"+mixedQuery, nil)
+			response := httptest.NewRecorder()
+			publicFront.ServeHTTP(response, request)
+			if strings.Contains(response.Body.String(), content) || response.Code == http.StatusOK {
+				t.Fatalf("paused public front exposed %s on %s: status=%d body=%q", trialStatus, mixedQuery, response.Code, response.Body.String())
+			}
+		}
+	}
 	if err := application.withServerControlDatabaseWrite(context.Background(), "test-expire-trial", func(database *sql.DB) error {
 		_, err := database.Exec(`UPDATE public_trial_sites SET status='email_verified',verified_email=?,delete_after=? WHERE domain=?`, "creator@example.com", now.Add(-time.Minute).Format(time.RFC3339), domain)
 		return err
