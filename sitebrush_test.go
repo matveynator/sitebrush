@@ -13506,7 +13506,7 @@ func TestPrivateTestDriveRequiresCreatingBrowserSession(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		for _, mixedQuery := range []string{"?test_drive&edit", "?trial_site_domain_check&visual"} {
+		for _, mixedQuery := range []string{"?test_drive&edit", "?trial_site_domain_check&visual", "?test_drive_entry_ws&edit"} {
 			request := httptest.NewRequest(http.MethodGet, "https://"+domain+"/"+mixedQuery, nil)
 			response := httptest.NewRecorder()
 			publicFront.ServeHTTP(response, request)
@@ -13648,7 +13648,7 @@ func TestDriveNameCheckRequiresCaptchaAfterSoftLimit(t *testing.T) {
 	reloadRequest.AddCookie(entryCookie)
 	reloadResponse := httptest.NewRecorder()
 	application.route(reloadResponse, reloadRequest)
-	if reloadResponse.Code != http.StatusOK || !strings.Contains(reloadResponse.Body.String(), `value="hello"`) || !strings.Contains(reloadResponse.Body.String(), `data-test-drive-captcha`) {
+	if reloadResponse.Code != http.StatusOK || !strings.Contains(reloadResponse.Body.String(), `value="hello"`) || !strings.Contains(reloadResponse.Body.String(), `data-human-verified="false"`) {
 		t.Fatalf("revoked browser form did not restore CAPTCHA: %d %s", reloadResponse.Code, reloadResponse.Body.String())
 	}
 	startForm := url.Values{"subdomain": {"hello"}, "email": {"creator@example.com"}}
@@ -13659,7 +13659,7 @@ func TestDriveNameCheckRequiresCaptchaAfterSoftLimit(t *testing.T) {
 	startRequest.AddCookie(entryCookie)
 	startResponse := httptest.NewRecorder()
 	application.route(startResponse, startRequest)
-	if startResponse.Code != http.StatusForbidden || !strings.HasPrefix(startResponse.Header().Get("Content-Type"), "text/html") || !strings.Contains(startResponse.Body.String(), `value="hello"`) || !strings.Contains(startResponse.Body.String(), `data-test-drive-captcha`) || !strings.Contains(startResponse.Body.String(), translationsForRequest(startRequest)["test_drive_captcha_required"]) {
+	if startResponse.Code != http.StatusForbidden || !strings.HasPrefix(startResponse.Header().Get("Content-Type"), "text/html") || !strings.Contains(startResponse.Body.String(), `value="hello"`) || !strings.Contains(startResponse.Body.String(), `data-human-verified="false"`) || !strings.Contains(startResponse.Body.String(), translationsForRequest(startRequest)["test_drive_captcha_required"]) {
 		t.Fatalf("revoked browser did not receive retry form: %d %s", startResponse.Code, startResponse.Body.String())
 	}
 	challenge, err := captcha.New()
@@ -13951,7 +13951,7 @@ func TestPrivateTestDriveStartsWithEmailAndHandsOffOnce(t *testing.T) {
 	if limitResponse.Code != http.StatusTooManyRequests {
 		t.Fatalf("second active Test Drive should be limited: %d %s", limitResponse.Code, limitResponse.Body.String())
 	}
-	if strings.Contains(limitResponse.Body.String(), "data-test-drive-captcha") {
+	if !strings.Contains(limitResponse.Body.String(), `data-human-verified="true"`) {
 		t.Fatal("ordinary creation limit unexpectedly revoked CAPTCHA trust")
 	}
 	if err := application.withServerControlDatabaseRead(context.Background(), "test-create-captcha-reset", func(database *sql.DB) error {
@@ -14059,14 +14059,19 @@ func TestPrivateTestDriveStartsWithEmailAndHandsOffOnce(t *testing.T) {
 		t.Fatalf("unverified site leaked: %d", privateResponse.Code)
 	}
 	socketServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		request.Host = "myproject.sitebrush.example"
-		request.AddCookie(trialCookie)
-		request.AddCookie(editorCookie)
+		if hasQueryFlag(request, "test_drive_entry_ws") {
+			request.Host = "sitebrush.example"
+			request.AddCookie(entryCookie)
+		} else {
+			request.Host = "myproject.sitebrush.example"
+			request.AddCookie(trialCookie)
+			request.AddCookie(editorCookie)
+		}
 		application.route(writer, request)
 	}))
 	defer socketServer.Close()
-	sendSocketCommand := func(command testDriveSocketCommand) testDriveSocketReply {
-		connection, dialErr := websocket.Dial("ws"+strings.TrimPrefix(socketServer.URL, "http")+"/?test_drive_ws", "", "http://myproject.sitebrush.example")
+	sendSocketCommand := func(selector, host string, command testDriveSocketCommand) testDriveSocketReply {
+		connection, dialErr := websocket.Dial("ws"+strings.TrimPrefix(socketServer.URL, "http")+"/?"+selector, "", "http://"+host)
 		if dialErr != nil {
 			t.Fatal(dialErr)
 		}
@@ -14080,9 +14085,17 @@ func TestPrivateTestDriveStartsWithEmailAndHandsOffOnce(t *testing.T) {
 		}
 		return reply
 	}
-	socketReply := sendSocketCommand(testDriveSocketCommand{ID: 1, Action: "status"})
+	socketReply := sendSocketCommand("test_drive_ws", "myproject.sitebrush.example", testDriveSocketCommand{ID: 1, Action: "status"})
 	if socketReply.Status != http.StatusOK || !bytes.Contains(socketReply.Payload, []byte(`"status":"email_pending"`)) || !bytes.Contains(socketReply.Payload, []byte(`"code_sent":true`)) {
 		t.Fatalf("Test Drive WebSocket reply: %+v", socketReply)
+	}
+	availabilityReply := sendSocketCommand("test_drive_entry_ws", "sitebrush.example", testDriveSocketCommand{ID: 2, Action: "domain_check", Subdomain: "myproject"})
+	if availabilityReply.Status != http.StatusOK || !bytes.Contains(availabilityReply.Payload, []byte(`"available":false`)) {
+		t.Fatalf("entry domain check: %+v", availabilityReply)
+	}
+	captchaReply := sendSocketCommand("test_drive_entry_ws", "sitebrush.example", testDriveSocketCommand{ID: 3, Action: "captcha"})
+	if captchaReply.Status != http.StatusOK || !bytes.Contains(captchaReply.Payload, []byte(`"image":"data:image/png;base64,`)) {
+		t.Fatalf("entry CAPTCHA: %+v", captchaReply)
 	}
 	var message mailout.Message
 	select {

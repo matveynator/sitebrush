@@ -1,9 +1,10 @@
 (function initializeTestDriveSessionChannel() {
   'use strict';
 
-  window.SiteBrushTestDriveSessionCommand = function sendTestDriveSessionCommand(action, fields) {
+  window.SiteBrushTestDriveSessionCommand = function sendTestDriveSessionCommand(action, fields, commandEndpoint) {
     return new Promise(function exchangeTestDriveCommand(resolve, reject) {
-      const socketURL = new URL('/?test_drive_ws', window.location.href);
+      const socketURL = new URL('/', window.location.href);
+      socketURL.searchParams.set(commandEndpoint || 'test_drive_ws', '');
       socketURL.protocol = socketURL.protocol === 'https:' ? 'wss:' : 'ws:';
       const connection = new WebSocket(socketURL.href);
       let settled = false;
@@ -35,9 +36,15 @@
           const error = new Error(reply.error || '');
           error.status = reply.status;
           error.retryAfter = Number(reply.retry_after) || 0;
+          error.captchaRequired = Boolean(reply.captcha_required);
           finish(error);
           return;
         }
+        if (!reply.payload || typeof reply.payload !== 'object') {
+          finish(new Error());
+          return;
+        }
+        if (reply.captcha_required) reply.payload.captcha_required = true;
         finish(null, reply.payload);
       });
       connection.addEventListener('error', function reportSocketError() {

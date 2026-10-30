@@ -85,6 +85,10 @@
   gap: 8px;
 }
 
+.test-drive-captcha[hidden] {
+  display: none;
+}
+
 .test-drive-captcha img {
   max-width: 100%;
   height: auto;

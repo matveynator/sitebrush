@@ -7,11 +7,12 @@
   <link rel="stylesheet" href="/p/static/technical_pages.css">
   <link rel="stylesheet" href="/p/static/test_drive.css">
   <script defer src="/p/static/domain_name_input.js"></script>
+  <script defer src="/p/static/test_drive_session.js"></script>
   <script defer src="/p/static/test_drive_form.js"></script>
 </head>
 <body class="technical-page">
 <main class="container authentication-shell">
-  <form class="authentication-card SiteBrush-TestDrive-Form" method="post" action="/?test_drive_start" data-test-drive-form>
+  <form class="authentication-card SiteBrush-TestDrive-Form" method="post" action="/?test_drive_start" data-test-drive-form data-human-verified="{{.HumanVerified}}">
     <input type="hidden" name="test_drive_csrf" value="{{.EntryCSRF}}">
     <h1>{{index .T "test_drive_title"}}</h1>
     <label for="test-drive-name">{{index .T "test_drive_name_label"}}</label>
@@ -29,15 +30,13 @@
        data-limited="{{index .T "test_drive_limit_error"}}" hidden></p>
     <label for="test-drive-email">{{index .T "test_drive_email_label"}}</label>
     <input id="test-drive-email" name="email" type="email" value="{{.ChosenEmail}}" autocomplete="email" required>
-    {{if not .HumanVerified}}
-    <div class="test-drive-captcha" data-test-drive-captcha>
+    <div class="test-drive-captcha" data-test-drive-captcha {{if .HumanVerified}}hidden{{end}}>
       <label for="test-drive-captcha-answer">{{index .T "account_captcha_label"}}</label>
       <img width="240" height="80" alt="{{index .T "account_captcha_label"}}" data-test-drive-captcha-image>
-      <input id="test-drive-captcha-answer" name="captcha" required autocomplete="off">
+      <input id="test-drive-captcha-answer" name="captcha" {{if not .HumanVerified}}required{{end}} autocomplete="off">
       <input type="hidden" name="captcha_id" data-test-drive-captcha-id>
       <button type="button" class="btn" data-test-drive-captcha-retry>{{index .T "test_drive_new_captcha"}}</button>
     </div>
-    {{end}}
     {{if .FormError}}<p role="alert">{{.FormError}}</p>{{end}}
     <p role="alert" data-test-drive-error hidden>{{index .T "public_trial_captcha_unavailable"}}</p>
     <button type="submit" class="btn btn-primary">{{index .T "test_drive_create"}}</button>

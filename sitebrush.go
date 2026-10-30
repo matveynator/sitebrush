@@ -13185,6 +13185,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.confirmTestDriveNameCheckCaptcha(w, r)
 		return
 	}
+	if hasQueryFlag(r, "test_drive_entry_ws") {
+		a.testDriveEntrySocket(w, r)
+		return
+	}
 	if a.privateTestDriveGate(w, r) {
 		return
 	}
@@ -52034,7 +52038,7 @@ func (a *App) unfreezeSocket(w http.ResponseWriter, r *http.Request) {
 			Digest string `json:"digest"`
 			Offset int    `json:"offset"`
 		}
-		if err := websocket.JSON.Receive(connection, &command); err != nil {
+		if receiveErr := websocket.JSON.Receive(connection, &command); receiveErr != nil {
 			return
 		}
 		if subtle.ConstantTimeCompare([]byte(command.CSRF), []byte(accountCSRF(r))) != 1 {
@@ -57421,7 +57425,7 @@ func sitebrushControlQueryFlag(flag string) bool {
 		"trial_site_ws", "trial_site_events", "trial_site_texts", "trial_site_preview",
 		"trial_site_preview_status", "trial_site_preview_cancel", "trial_site_preview_frame",
 		"trial_site_create", "trial_site_indexing", "trial_site_suggest", "trial_site_captcha", "trial_site_domain_check",
-		"test_drive", "test_drive_start", "test_drive_handoff", "test_drive_welcome", "test_drive_status", "test_drive_email", "test_drive_verify", "test_drive_activate", "test_drive_captcha", "test_drive_check_captcha", "test_drive_ws",
+		"test_drive", "test_drive_start", "test_drive_handoff", "test_drive_welcome", "test_drive_status", "test_drive_email", "test_drive_verify", "test_drive_activate", "test_drive_captcha", "test_drive_check_captcha", "test_drive_ws", "test_drive_entry_ws",
 		"demo_grab_preview", "demo_grab_refresh", "site_request",
 		"backup", "backup_import", "backup_download", "native_pick_files", "native_save_backup",
 		"hosting_and_support", "expenses", "billing", "hosting_invoice", "billing_schedule",
@@ -58197,7 +58201,7 @@ func testDriveFormTokenValid(r *http.Request, entryHash string) bool {
 }
 
 func testDriveEntryAction(r *http.Request) bool {
-	for _, flag := range []string{"test_drive", "test_drive_start", "test_drive_check_captcha", "trial_site_captcha", "trial_site_domain_check"} {
+	for _, flag := range []string{"test_drive", "test_drive_start", "test_drive_check_captcha", "test_drive_entry_ws", "trial_site_captcha", "trial_site_domain_check"} {
 		if hasQueryFlag(r, flag) {
 			return true
 		}
@@ -58810,6 +58814,7 @@ func (a *App) testDriveOwnerAction(w http.ResponseWriter, r *http.Request, trial
 type testDriveSocketCommand struct {
 	ID        int    `json:"id"`
 	Action    string `json:"action"`
+	Subdomain string `json:"subdomain"`
 	Email     string `json:"email"`
 	Code      string `json:"code"`
 	Captcha   string `json:"captcha"`
@@ -58818,11 +58823,12 @@ type testDriveSocketCommand struct {
 }
 
 type testDriveSocketReply struct {
-	ID         int             `json:"id"`
-	Status     int             `json:"status"`
-	Payload    json.RawMessage `json:"payload,omitempty"`
-	Error      string          `json:"error,omitempty"`
-	RetryAfter string          `json:"retry_after,omitempty"`
+	ID              int             `json:"id"`
+	Status          int             `json:"status"`
+	Payload         json.RawMessage `json:"payload,omitempty"`
+	Error           string          `json:"error,omitempty"`
+	RetryAfter      string          `json:"retry_after,omitempty"`
+	CaptchaRequired bool            `json:"captcha_required,omitempty"`
 }
 
 type testDriveResponseBuffer struct {
@@ -58878,21 +58884,62 @@ func (a *App) testDriveSocket(w http.ResponseWriter, r *http.Request, trial priv
 			actionRequest.URL.RawQuery = "test_drive_" + command.Action
 			a.testDriveOwnerAction(response, actionRequest, trial)
 		}
-		reply := testDriveSocketReply{ID: command.ID, Status: response.status, RetryAfter: response.Header().Get("Retry-After")}
-		if reply.Status == 0 {
-			reply.Status = http.StatusOK
-		}
-		if reply.Status >= http.StatusBadRequest {
-			reply.Error = strings.TrimSpace(response.body.String())
-		} else if json.Valid(response.body.Bytes()) {
-			reply.Payload = append([]byte(nil), response.body.Bytes()...)
-		} else {
-			reply.Status = http.StatusInternalServerError
-			reply.Error = translationsForRequest(r)["test_drive_generic_error"]
-		}
+		reply := testDriveSocketResponse(command.ID, response, r)
 		_ = connection.SetWriteDeadline(time.Now().Add(10 * time.Second))
 		_ = websocket.JSON.Send(connection, reply)
 	}}.ServeHTTP(w, r)
+}
+
+// Entry commands reuse admission and CAPTCHA checks without transferring account cookies.
+func (a *App) testDriveEntrySocket(w http.ResponseWriter, r *http.Request) {
+	origin, err := url.Parse(r.Header.Get("Origin"))
+	if r.Method != http.MethodGet || !a.publicTrialAllowed(r) || err != nil || origin.Scheme != requestScheme(r) || origin.Host != r.Host || origin.User != nil || origin.Path != "" {
+		testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusForbidden)
+		return
+	}
+	websocket.Server{Handshake: func(*websocket.Config, *http.Request) error { return nil }, Handler: func(connection *websocket.Conn) {
+		defer connection.Close()
+		connection.MaxPayloadBytes = 4096
+		_ = connection.SetReadDeadline(time.Now().Add(30 * time.Second))
+		var command testDriveSocketCommand
+		if err := websocket.JSON.Receive(connection, &command); err != nil {
+			return
+		}
+		response := &testDriveResponseBuffer{headers: make(http.Header)}
+		actionRequest := r.Clone(r.Context())
+		query := make(url.Values)
+		switch command.Action {
+		case "captcha":
+			query.Set("trial_site_captcha", "")
+			actionRequest.URL.RawQuery = query.Encode()
+			a.publicTrialSiteCaptcha(response, actionRequest)
+		case "domain_check":
+			query.Set("trial_site_domain_check", "")
+			query.Set("subdomain", command.Subdomain)
+			actionRequest.URL.RawQuery = query.Encode()
+			a.publicTrialSiteDomainCheck(response, actionRequest)
+		default:
+			testDriveHTTPError(response, r, "test_drive_generic_error", http.StatusBadRequest)
+		}
+		_ = connection.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		_ = websocket.JSON.Send(connection, testDriveSocketResponse(command.ID, response, r))
+	}}.ServeHTTP(w, r)
+}
+
+func testDriveSocketResponse(commandID int, response *testDriveResponseBuffer, r *http.Request) testDriveSocketReply {
+	reply := testDriveSocketReply{ID: commandID, Status: response.status, RetryAfter: response.Header().Get("Retry-After"), CaptchaRequired: response.Header().Get("X-SiteBrush-Captcha-Required") == "1"}
+	if reply.Status == 0 {
+		reply.Status = http.StatusOK
+	}
+	if reply.Status >= http.StatusBadRequest {
+		reply.Error = strings.TrimSpace(response.body.String())
+	} else if json.Valid(response.body.Bytes()) {
+		reply.Payload = append([]byte(nil), response.body.Bytes()...)
+	} else {
+		reply.Status = http.StatusInternalServerError
+		reply.Error = translationsForRequest(r)["test_drive_generic_error"]
+	}
+	return reply
 }
 
 func (a *App) confirmTestDriveNameCheckCaptcha(w http.ResponseWriter, r *http.Request) {
