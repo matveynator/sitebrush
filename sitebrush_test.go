@@ -13537,9 +13537,8 @@ func TestDriveLabelAndConfirmationCodeAreStrict(t *testing.T) {
 func TestServerReservedSubdomainsAndWWWRedirect(t *testing.T) {
 	application, database := newTestApplication(t)
 	ctx := context.Background()
-	if err := (hostingandsupport.Store{DB: database}).SetOwner(ctx, "sitebrush.com", "owner@sitebrush.com"); err != nil {
-		t.Fatal(err)
-	}
+	controlDatabase := setupBillingOwnerForTest(t, application, "sitebrush.com", "owner@sitebrush.com", true)
+	defer controlDatabase.Close()
 	if _, err := database.ExecContext(ctx, `INSERT INTO domain_aliases(primary_domain,alias_domain,is_verified,dns_a_ok) VALUES(?,?,1,1)`, "sitebrush.com", "sitebrush.ru"); err != nil {
 		t.Fatal(err)
 	}
@@ -13580,15 +13579,14 @@ func TestServerReservedSubdomainsAndWWWRedirect(t *testing.T) {
 }
 
 func TestServerIPHostRequiresBoundAddressAndBlocksRegistration(t *testing.T) {
-	application, database := newTestApplication(t)
+	application, _ := newTestApplication(t)
 	request := httptest.NewRequest(http.MethodGet, "http://203.0.113.10/?register", nil)
 	response := httptest.NewRecorder()
 	if !application.serverHostBoundary(response, request) || response.Code != http.StatusForbidden {
 		t.Fatalf("remote IP registration: %d", response.Code)
 	}
-	if err := (hostingandsupport.Store{DB: database}).SetOwner(context.Background(), "sitebrush.com", "owner@sitebrush.com"); err != nil {
-		t.Fatal(err)
-	}
+	controlDatabase := setupBillingOwnerForTest(t, application, "sitebrush.com", "owner@sitebrush.com", true)
+	defer controlDatabase.Close()
 	previousLookup := lookupIPRecords
 	lookupIPRecords = func(domain string) ([]net.IP, error) {
 		if domain != "sitebrush.com" {
@@ -13607,6 +13605,67 @@ func TestServerIPHostRequiresBoundAddressAndBlocksRegistration(t *testing.T) {
 	response = httptest.NewRecorder()
 	if !application.serverHostBoundary(response, request) || response.Code != http.StatusFound || response.Header().Get("Location") != "http://sitebrush.com/docs?q=1" {
 		t.Fatalf("bound IP redirect: %d %s", response.Code, response.Header().Get("Location"))
+	}
+}
+
+func TestServerWWWAliasSSLUsesOwnerDatabase(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	application.automaticSSLAvailable = true
+	ctx := context.Background()
+	ownerDomain := "sitebrush.com"
+	aliasDomain := "sitebrush.ru"
+	certificateDomain := "www." + aliasDomain
+	ownerContext := contextWithDomain(ctx, ownerDomain)
+	if err := application.withServerControlDatabaseWrite(ctx, "test-www-owner", func(database *sql.DB) error {
+		return (hostingandsupport.Store{DB: database}).SetOwner(ctx, ownerDomain, "owner@sitebrush.com")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.db.ExecContext(contextWithSiteDatabaseCreation(ownerContext), `INSERT INTO domain_aliases(primary_domain,alias_domain,is_verified,dns_a_ok) VALUES(?,?,1,1)`, ownerDomain, aliasDomain); err != nil {
+		t.Fatal(err)
+	}
+	previousIPLookup := lookupIPRecords
+	previousExternalLookup := lookupServerExternalIP
+	previousInterfaceLookup := lookupServerInterfaceIPs
+	t.Cleanup(func() {
+		lookupIPRecords = previousIPLookup
+		lookupServerExternalIP = previousExternalLookup
+		lookupServerInterfaceIPs = previousInterfaceLookup
+	})
+	serverIP := net.ParseIP("8.8.8.8")
+	lookupIPRecords = func(domain string) ([]net.IP, error) {
+		if domain != certificateDomain {
+			return nil, fmt.Errorf("unexpected DNS lookup: %s", domain)
+		}
+		return []net.IP{serverIP}, nil
+	}
+	lookupServerExternalIP = func(context.Context) (string, error) { return serverIP.String(), nil }
+	lookupServerInterfaceIPs = func() ([]net.IP, error) { return nil, nil }
+	issuer := automaticSSLIssuerFunc(func(_ context.Context, domain string) channelacme.IssueResult {
+		if domain != certificateDomain {
+			t.Fatalf("unexpected certificate request: %s", domain)
+		}
+		return channelacme.IssueResult{Certificate: &tls.Certificate{}, ExpiresAt: time.Now().Add(90 * 24 * time.Hour)}
+	})
+	result := application.prepareAutomaticSSLDomain(issuer, certificateDomain, []net.IP{serverIP})
+	if result.state != "ready" || result.err != nil {
+		t.Fatalf("www alias certificate preparation: %+v", result)
+	}
+	for _, hostPolicy := range []func(context.Context, string) error{application.autoCertPreparedHostPolicy, application.autoCertHostPolicy} {
+		if err := hostPolicy(ctx, certificateDomain); err != nil {
+			t.Fatalf("www alias host policy: %v", err)
+		}
+	}
+	application.setDomainAutomaticSSLManual(ownerContext, certificateDomain, false)
+	for _, hostPolicy := range []func(context.Context, string) error{application.autoCertPreparedHostPolicy, application.autoCertHostPolicy} {
+		if err := hostPolicy(ctx, certificateDomain); err == nil {
+			t.Fatal("www alias host policy ignored the owner's manual SSL disable")
+		}
+	}
+	for _, domain := range []string{aliasDomain, certificateDomain} {
+		if _, err := os.Stat(siteDatabaseFile(siteDatabaseRootPath(application.dbPath), domain)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("www alias unexpectedly owns a separate database: %s: %v", domain, err)
+		}
 	}
 }
 

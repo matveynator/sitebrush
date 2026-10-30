@@ -12252,7 +12252,11 @@ func (a *App) autoCertHostPolicy(ctx context.Context, host string) error {
 		a.logDomainEvent("localhost", "AUTOCERT host policy rejected host=%s error=%v", host, err)
 		return err
 	}
-	domainContext := contextWithDomain(ctx, certificateDomain)
+	storageDomain := certificateDomain
+	if ownerDomain := a.systemWWWStorageDomain(ctx, certificateDomain); ownerDomain != "" {
+		storageDomain = ownerDomain
+	}
+	domainContext := contextWithDomain(ctx, storageDomain)
 	if !a.automaticSSLAvailable {
 		err := fmt.Errorf("automatic SSL is unavailable because Sitebrush is not listening on ports 80 and 443")
 		a.logDomainEvent(certificateDomain, "AUTOCERT host policy rejected host=%s error=%v", host, err)
