@@ -108,7 +108,7 @@ jobs:
           if-no-files-found: error
 
   prepare_macos_sdk:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Package the installed Xcode SDK
         shell: bash
@@ -164,7 +164,7 @@ jobs:
 
   build_desktop_macos:
     needs: [prepare_release, build_desktop_macos_binaries]
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
