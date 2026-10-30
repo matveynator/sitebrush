@@ -41,6 +41,7 @@
     statusElement.textContent = statusElement.dataset[formModel.domainState] || '';
     statusElement.hidden = !statusElement.textContent;
     domainFieldElement.dataset.state = formModel.domainState;
+    formElement.dataset.humanVerified = String(formModel.humanVerified);
     captchaElement.hidden = formModel.humanVerified;
     captchaAnswerElement.required = !formModel.humanVerified;
     if (captchaImageElement && formModel.captchaImage) captchaImageElement.src = formModel.captchaImage;

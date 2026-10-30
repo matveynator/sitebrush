@@ -57425,7 +57425,7 @@ func sitebrushControlQueryFlag(flag string) bool {
 		"trial_site_ws", "trial_site_events", "trial_site_texts", "trial_site_preview",
 		"trial_site_preview_status", "trial_site_preview_cancel", "trial_site_preview_frame",
 		"trial_site_create", "trial_site_indexing", "trial_site_suggest", "trial_site_captcha", "trial_site_domain_check",
-		"test_drive", "test_drive_start", "test_drive_handoff", "test_drive_welcome", "test_drive_status", "test_drive_email", "test_drive_verify", "test_drive_activate", "test_drive_captcha", "test_drive_check_captcha", "test_drive_ws", "test_drive_entry_ws",
+		"test_drive", "test_drive_start", "test_drive_handoff", "test_drive_handoff_ready", "test_drive_welcome", "test_drive_status", "test_drive_email", "test_drive_verify", "test_drive_activate", "test_drive_captcha", "test_drive_check_captcha", "test_drive_ws", "test_drive_entry_ws",
 		"demo_grab_preview", "demo_grab_refresh", "site_request",
 		"backup", "backup_import", "backup_download", "native_pick_files", "native_save_backup",
 		"hosting_and_support", "expenses", "billing", "hosting_invoice", "billing_schedule",
@@ -58270,6 +58270,10 @@ func (a *App) privateTestDriveGate(w http.ResponseWriter, r *http.Request) bool 
 		a.renderTestDriveNeutral(w, r)
 		return true
 	}
+	if hasQueryFlag(r, "test_drive_handoff_ready") {
+		a.testDriveHandoffReadySocket(w, r, trial.ID)
+		return true
+	}
 	if hasQueryFlag(r, "test_drive_handoff") {
 		if testDriveOwner(r, trial) {
 			http.Redirect(w, r, "/?test_drive_welcome", http.StatusSeeOther)
@@ -58714,6 +58718,20 @@ func (a *App) renderTestDriveHandoff(w http.ResponseWriter, r *http.Request, dom
 	_, _ = fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/p/static/technical_pages.css"><title>SiteBrush</title><script defer src="/p/static/test_drive_handoff.js"></script></head><body class="technical-page"><main class="container authentication-shell"><section class="authentication-card"><p data-test-drive-handoff-status data-pending="%s">%s</p><form method="post" action="%s" data-test-drive-handoff data-local="%t"><input type="hidden" name="ticket" value="%s"><button class="btn btn-primary" type="submit" disabled>%s</button></form></section></main></body></html>`, template.HTMLEscapeString(pendingLabel), template.HTMLEscapeString(waitLabel), template.HTMLEscapeString(endpoint), localAccountRequest(r), template.HTMLEscapeString(handoff), template.HTMLEscapeString(continueLabel))
 }
 
+// This public probe confirms TLS readiness without exposing site content or spending a ticket.
+func (a *App) testDriveHandoffReadySocket(w http.ResponseWriter, r *http.Request, trialID int64) {
+	if r.Method != http.MethodGet || !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") || !httpRequestHTTPSOrLocal(r) {
+		a.renderTestDriveNeutral(w, r)
+		return
+	}
+	websocket.Server{Handshake: func(*websocket.Config, *http.Request) error { return nil }, Handler: func(connection *websocket.Conn) {
+		defer connection.Close()
+		a.logTestDriveEvent("handoff-readiness", trialID, r, "secure_address_ready", http.StatusSwitchingProtocols)
+		_ = connection.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		_ = websocket.JSON.Send(connection, map[string]bool{"ready": true})
+	}}.ServeHTTP(w, r)
+}
+
 func testDriveRequestHTTPSOrLocal(w http.ResponseWriter, r *http.Request) bool {
 	if httpRequestHTTPSOrLocal(r) {
 		return true
@@ -58851,7 +58869,7 @@ func (response *testDriveResponseBuffer) Write(content []byte) (int, error) {
 // The WebSocket adapts browser commands to the existing Test Drive action boundary.
 func (a *App) testDriveSocket(w http.ResponseWriter, r *http.Request, trial privateTestDrive) {
 	origin, err := url.Parse(r.Header.Get("Origin"))
-	if err != nil || origin.Scheme != requestScheme(r) || origin.Host != r.Host || origin.User != nil || origin.Path != "" {
+	if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") || err != nil || origin.Scheme != requestScheme(r) || origin.Host != r.Host || origin.User != nil || origin.Path != "" {
 		testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusForbidden)
 		return
 	}
@@ -58875,7 +58893,7 @@ func (a *App) testDriveSocket(w http.ResponseWriter, r *http.Request, trial priv
 		actionRequest.PostForm = actionRequest.Form
 		if command.Action == "status" || command.Action == "captcha" {
 			actionRequest.Method = http.MethodGet
-		} else if command.Action == "email" && command.CSRF != "" && subtle.ConstantTimeCompare([]byte(command.CSRF), []byte(accountCSRF(r))) == 1 {
+		} else if (command.Action == "email" || command.Action == "verify" || command.Action == "activate") && command.CSRF != "" && subtle.ConstantTimeCompare([]byte(command.CSRF), []byte(accountCSRF(r))) == 1 {
 			actionRequest.Method = http.MethodPost
 		} else {
 			testDriveHTTPError(response, r, "test_drive_generic_error", http.StatusForbidden)
@@ -58893,7 +58911,7 @@ func (a *App) testDriveSocket(w http.ResponseWriter, r *http.Request, trial priv
 // Entry commands reuse admission and CAPTCHA checks without transferring account cookies.
 func (a *App) testDriveEntrySocket(w http.ResponseWriter, r *http.Request) {
 	origin, err := url.Parse(r.Header.Get("Origin"))
-	if r.Method != http.MethodGet || !a.publicTrialAllowed(r) || err != nil || origin.Scheme != requestScheme(r) || origin.Host != r.Host || origin.User != nil || origin.Path != "" {
+	if r.Method != http.MethodGet || !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") || !a.publicTrialAllowed(r) || err != nil || origin.Scheme != requestScheme(r) || origin.Host != r.Host || origin.User != nil || origin.Path != "" {
 		testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusForbidden)
 		return
 	}

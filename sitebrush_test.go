@@ -13506,7 +13506,7 @@ func TestPrivateTestDriveRequiresCreatingBrowserSession(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		for _, mixedQuery := range []string{"?test_drive&edit", "?trial_site_domain_check&visual", "?test_drive_entry_ws&edit"} {
+		for _, mixedQuery := range []string{"?test_drive&edit", "?trial_site_domain_check&visual", "?test_drive_entry_ws&edit", "?test_drive_handoff_ready&edit"} {
 			request := httptest.NewRequest(http.MethodGet, "https://"+domain+"/"+mixedQuery, nil)
 			response := httptest.NewRecorder()
 			publicFront.ServeHTTP(response, request)
@@ -14064,8 +14064,12 @@ func TestPrivateTestDriveStartsWithEmailAndHandsOffOnce(t *testing.T) {
 			request.AddCookie(entryCookie)
 		} else {
 			request.Host = "myproject.sitebrush.example"
-			request.AddCookie(trialCookie)
-			request.AddCookie(editorCookie)
+			if hasQueryFlag(request, "test_drive_handoff_ready") {
+				request.TLS = &tls.ConnectionState{}
+			} else {
+				request.AddCookie(trialCookie)
+				request.AddCookie(editorCookie)
+			}
 		}
 		application.route(writer, request)
 	}))
@@ -14096,6 +14100,24 @@ func TestPrivateTestDriveStartsWithEmailAndHandsOffOnce(t *testing.T) {
 	captchaReply := sendSocketCommand("test_drive_entry_ws", "sitebrush.example", testDriveSocketCommand{ID: 3, Action: "captcha"})
 	if captchaReply.Status != http.StatusOK || !bytes.Contains(captchaReply.Payload, []byte(`"image":"data:image/png;base64,`)) {
 		t.Fatalf("entry CAPTCHA: %+v", captchaReply)
+	}
+	readinessConnection, dialErr := websocket.Dial("ws"+strings.TrimPrefix(socketServer.URL, "http")+"/?test_drive_handoff_ready", "", "http://sitebrush.example")
+	if dialErr != nil {
+		t.Fatal(dialErr)
+	}
+	var readinessReply map[string]bool
+	readinessErr := websocket.JSON.Receive(readinessConnection, &readinessReply)
+	_ = readinessConnection.Close()
+	if readinessErr != nil || !readinessReply["ready"] || len(readinessReply) != 1 {
+		t.Fatalf("neutral readiness probe: %+v %v", readinessReply, readinessErr)
+	}
+	csrfReply := sendSocketCommand("test_drive_ws", "myproject.sitebrush.example", testDriveSocketCommand{ID: 4, Action: "verify", Code: "invalid", CSRF: "wrong"})
+	if csrfReply.Status != http.StatusForbidden {
+		t.Fatalf("WebSocket verification bypassed CSRF: %+v", csrfReply)
+	}
+	invalidCodeReply := sendSocketCommand("test_drive_ws", "myproject.sitebrush.example", testDriveSocketCommand{ID: 5, Action: "verify", Code: "invalid", CSRF: trialCSRF})
+	if invalidCodeReply.Status != http.StatusBadRequest {
+		t.Fatalf("WebSocket verification did not reach code validation: %+v", invalidCodeReply)
 	}
 	var message mailout.Message
 	select {

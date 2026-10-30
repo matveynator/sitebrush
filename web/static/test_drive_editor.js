@@ -93,21 +93,13 @@
       formBody.set('captcha', trialModel.captchaAnswer);
       formBody.set('captcha_id', trialModel.captchaID);
     }
-    if (queryFlag === 'test_drive_email') {
-      return window.SiteBrushTestDriveSessionCommand('email', {
-        email: String(formBody.get('email') || ''),
-        captcha: String(formBody.get('captcha') || ''),
-        captcha_id: String(formBody.get('captcha_id') || ''),
-        csrf: rootElement.dataset.csrf
-      });
-    }
-    // Activation uses HTTP so the browser can renew its HttpOnly session cookie.
-    formBody.set('account_csrf', rootElement.dataset.csrf);
-    return fetch('/?' + queryFlag, {method: 'POST', body: formBody, credentials: 'same-origin', headers: {'X-SiteBrush-CSRF': rootElement.dataset.csrf}})
-      .then(function readAction(response) {
-        if (!response.ok) return response.text().then(function reportActionError(body) { throw new Error(body.trim() || defaultErrorText); });
-        return response.json();
-      });
+    return window.SiteBrushTestDriveSessionCommand(queryFlag.slice('test_drive_'.length), {
+      email: String(formBody.get('email') || ''),
+      code: String(formBody.get('code') || ''),
+      captcha: String(formBody.get('captcha') || ''),
+      captcha_id: String(formBody.get('captcha_id') || ''),
+      csrf: rootElement.dataset.csrf
+    });
   }
 
   emailFormElement.elements.email.addEventListener('input', function updateEmailDraft() {
