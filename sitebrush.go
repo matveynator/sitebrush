@@ -2591,7 +2591,8 @@ func (r *perSiteDBRouter) run(siteDatabaseRootDir string, migrate siteDBMigrator
 	databasesByDomain := make(map[string]*siteFileDatabase)
 	primaryDomainsByAlias := make(map[string]string)
 	aliasPrimaryDomains := make(map[string]string)
-	aliasIndexExpiresAt := time.Time{}
+	aliasIndexRefresh := time.NewTicker(siteAliasIndexCacheTTL)
+	defer aliasIndexRefresh.Stop()
 	startupMigrationFinished := false
 	migratedDomains := make(map[string]bool)
 	degradedDomains := make(map[string]error)
@@ -2620,9 +2621,23 @@ func (r *perSiteDBRouter) run(siteDatabaseRootDir string, migrate siteDBMigrator
 					log.Printf("%sDB MIGRATION%s ignored unregistered path=%s domain=%s", terminalCyan(), terminalReset(), event.path, event.domain)
 				}
 			case "summary":
+				aliasPrimaryDomains = loadActivePrimaryDomainAliasIndex(
+					siteDatabaseRootDir,
+					databasesByDomain,
+					migratedDomains,
+				)
 				startupMigrationFinished = true
 				log.Printf("%sDB MIGRATION%s startup summary total=%d applied=%d skipped=%d failed=%d", terminalCyan(), terminalReset(), event.total, event.applied, event.skipped, event.failed)
 			}
+		case <-aliasIndexRefresh.C:
+			if startupMigrationFinished {
+				aliasPrimaryDomains = loadActivePrimaryDomainAliasIndex(
+					siteDatabaseRootDir,
+					databasesByDomain,
+					migratedDomains,
+				)
+			}
+
 		case statusRequest := <-r.migrationStatusRequests:
 			domain := normalizeDomainName(statusRequest.domain)
 			if domain == "" {
@@ -2667,8 +2682,11 @@ func (r *perSiteDBRouter) run(siteDatabaseRootDir string, migrate siteDBMigrator
 					delete(primaryDomainsByAlias, aliasDomain)
 				}
 			}
-			aliasPrimaryDomains = make(map[string]string)
-			aliasIndexExpiresAt = time.Time{}
+			for aliasDomain, primaryDomain := range aliasPrimaryDomains {
+				if aliasDomain == domain || primaryDomain == domain {
+					delete(aliasPrimaryDomains, aliasDomain)
+				}
+			}
 			forgetRequest.response <- closeErr
 		case request := <-r.requests:
 			startedAt := time.Now()
@@ -2695,34 +2713,67 @@ func (r *perSiteDBRouter) run(siteDatabaseRootDir string, migrate siteDBMigrator
 			}
 			databaseDomain := domain
 			aliasDomain := ""
-			if primaryDomain := primaryDomainsByAlias[domain]; primaryDomain != "" {
-				database, err := r.databaseForDomain(siteDatabaseRootDir, databasesByDomain, migratedDomains, degradedDomains, primaryDomain, request.createIfMissing, migrate)
-				if err != nil {
+
+			// A registered primary site is already known in memory.
+			// Never perform alias SQLite lookups for it.
+			if !migratedDomains[domain] {
+				if primaryDomain := primaryDomainsByAlias[domain]; primaryDomain != "" {
+					database, err := r.databaseForDomain(
+						siteDatabaseRootDir,
+						databasesByDomain,
+						migratedDomains,
+						degradedDomains,
+						primaryDomain,
+						request.createIfMissing,
+						migrate,
+					)
+					if err != nil {
+						request.response <- siteDBResponse{err: err}
+						continue
+					}
+
+					// Positive aliases remain revalidated against their one
+					// owning database. Random bot hosts never reach this path.
+					if activePrimaryDomainForAlias(database, domain) == primaryDomain {
+						r.logRouterResolved(
+							domain,
+							primaryDomain,
+							domain,
+							time.Since(startedAt),
+							nil,
+						)
+						request.response <- siteDBResponse{db: database}
+						continue
+					}
+
+					delete(primaryDomainsByAlias, domain)
+					delete(aliasPrimaryDomains, domain)
+				}
+
+				// O(1) lookup. No database scan and no filesystem scan.
+				if primaryDomain := findActivePrimaryDomainForAlias(
+					aliasPrimaryDomains,
+					domain,
+				); primaryDomain != "" {
+					primaryDomainsByAlias[domain] = primaryDomain
+					databaseDomain = primaryDomain
+					aliasDomain = domain
+				} else if !request.createIfMissing {
+					// This is the important bot path:
+					// unknown Host -> immediate miss.
+					err := errSiteDatabaseMissing
+					r.logRouterResolved(
+						domain,
+						databaseDomain,
+						aliasDomain,
+						time.Since(startedAt),
+						err,
+					)
 					request.response <- siteDBResponse{err: err}
 					continue
 				}
-				if activePrimaryDomainForAlias(database, domain) == primaryDomain {
-					r.logRouterResolved(domain, primaryDomain, domain, time.Since(startedAt), nil)
-					request.response <- siteDBResponse{db: database}
-					continue
-				}
-				delete(primaryDomainsByAlias, domain)
-				delete(aliasPrimaryDomains, domain)
 			}
 
-			// Build one complete alias -> primaryDomain index at most once per TTL.
-			// Unknown/random Host headers therefore become O(1) map misses instead
-			// of reopening every site's SQLite control database.
-			if !time.Now().Before(aliasIndexExpiresAt) {
-				aliasPrimaryDomains = loadActivePrimaryDomainAliasIndex(siteDatabaseRootDir, databasesByDomain)
-				aliasIndexExpiresAt = time.Now().Add(siteAliasIndexCacheTTL)
-			}
-
-			if primaryDomain := findActivePrimaryDomainForAlias(databasesByDomain, aliasPrimaryDomains, domain); primaryDomain != "" {
-				primaryDomainsByAlias[domain] = primaryDomain
-				databaseDomain = primaryDomain
-				aliasDomain = domain
-			}
 			if err := degradedDomains[databaseDomain]; err != nil {
 				request.response <- siteDBResponse{err: siteDatabaseDegradedError{domain: databaseDomain, err: err}}
 				continue
@@ -3019,51 +3070,54 @@ func (r *perSiteDBRouter) databaseForDomain(siteDatabaseRootDir string, database
 	return siteDatabase, nil
 }
 
-func findActivePrimaryDomainForAlias(databasesByDomain map[string]*siteFileDatabase, indexedAliases map[string]string, aliasDomain string) string {
+func findActivePrimaryDomainForAlias(indexedAliases map[string]string, aliasDomain string) string {
 	aliasDomain = normalizeDomainName(aliasDomain)
 	if aliasDomain == "" {
 		return ""
 	}
-
-	// Open databases are authoritative and are cheap to query. This also makes
-	// alias edits on an active site visible immediately without waiting for TTL.
-	for _, database := range databasesByDomain {
-		if primaryDomain := activePrimaryDomainForAlias(database, aliasDomain); primaryDomain != "" {
-			return primaryDomain
-		}
-	}
-
-	primaryDomain := indexedAliases[aliasDomain]
-	if primaryDomain == "" {
-		return ""
-	}
-
-	// If this primary database has become active since the index was built,
-	// the live check above is authoritative. Do not resurrect a stale alias.
-	if databasesByDomain[primaryDomain] != nil {
-		return ""
-	}
-	return primaryDomain
+	return indexedAliases[aliasDomain]
 }
 
-func loadActivePrimaryDomainAliasIndex(siteDatabaseRootDir string, databasesByDomain map[string]*siteFileDatabase) map[string]string {
+func loadActivePrimaryDomainAliasIndex(
+	siteDatabaseRootDir string,
+	databasesByDomain map[string]*siteFileDatabase,
+	migratedDomains map[string]bool,
+) map[string]string {
 	index := make(map[string]string)
 
-	candidates, err := registeredSiteDatabaseCandidates(siteDatabaseRootDir)
-	if err != nil {
-		return index
-	}
+	const query = `SELECT alias_domain, primary_domain
+		FROM domain_aliases
+		WHERE is_verified=1 AND dns_a_ok=1`
 
-	for _, candidate := range candidates {
-		if siteDatabasePathAlreadyOpen(databasesByDomain, candidate.path) {
+	for domain, migrated := range migratedDomains {
+		if !migrated {
 			continue
 		}
 
-		// Partitioned sites keep aliases in control.db. Legacy sites keep the
-		// same table in their single database file.
-		databasePath := candidate.path
+		// Prefer an already-open control DB. PRELOAD normally means this
+		// path is used for every active site, so SQLite schemas are not
+		// reopened and reparsed.
+		if database := databasesByDomain[domain]; database != nil {
+			control := database.subsystem("control")
+			if control == nil {
+				continue
+			}
+
+			rows, err := control.QueryContext(context.Background(), query)
+			if err != nil {
+				continue
+			}
+			addActivePrimaryDomainAliasRows(index, rows)
+			continue
+		}
+
+		// Startup fallback for a migrated site that has not been preloaded.
+		databasePath := siteDatabaseFile(siteDatabaseRootDir, domain)
 		if filepath.Base(databasePath) == "content.db" {
-			databasePath = filepath.Join(filepath.Dir(databasePath), "control.db")
+			databasePath = filepath.Join(
+				filepath.Dir(databasePath),
+				"control.db",
+			)
 		}
 
 		database, err := openSiteDatabaseReadHandle(databasePath)
@@ -3071,41 +3125,51 @@ func loadActivePrimaryDomainAliasIndex(siteDatabaseRootDir string, databasesByDo
 			continue
 		}
 
-		rows, err := database.QueryContext(
+		rows, queryErr := database.QueryContext(
 			context.Background(),
-			`SELECT alias_domain, primary_domain
-			 FROM domain_aliases
-			 WHERE is_verified=1 AND dns_a_ok=1`,
+			query,
 		)
-		if err != nil {
-			_ = database.Close()
-			continue
+		if queryErr == nil {
+			addActivePrimaryDomainAliasRows(index, rows)
 		}
 
-		for rows.Next() {
-			var rawAliasDomain, rawPrimaryDomain string
-			if rows.Scan(&rawAliasDomain, &rawPrimaryDomain) != nil {
-				continue
-			}
-
-			aliasDomain := normalizeDomainName(rawAliasDomain)
-			primaryDomain := normalizeDomainName(rawPrimaryDomain)
-			if aliasDomain == "" || primaryDomain == "" || aliasDomain == primaryDomain {
-				continue
-			}
-
-			// Preserve the old deterministic "first matching database wins"
-			// behaviour if broken data contains duplicate aliases.
-			if _, exists := index[aliasDomain]; !exists {
-				index[aliasDomain] = primaryDomain
-			}
-		}
-
-		_ = rows.Close()
 		_ = database.Close()
 	}
 
 	return index
+}
+
+func addActivePrimaryDomainAliasRows(
+	index map[string]string,
+	rows *sql.Rows,
+) {
+	if rows == nil {
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var rawAliasDomain string
+		var rawPrimaryDomain string
+
+		if rows.Scan(&rawAliasDomain, &rawPrimaryDomain) != nil {
+			continue
+		}
+
+		aliasDomain := normalizeDomainName(rawAliasDomain)
+		primaryDomain := normalizeDomainName(rawPrimaryDomain)
+
+		if aliasDomain == "" ||
+			primaryDomain == "" ||
+			aliasDomain == primaryDomain {
+			continue
+		}
+
+		// Keep first owner if corrupt/duplicate data exists.
+		if _, exists := index[aliasDomain]; !exists {
+			index[aliasDomain] = primaryDomain
+		}
+	}
 }
 
 func siteDatabasePathAlreadyOpen(databasesByDomain map[string]*siteFileDatabase, databasePath string) bool {
