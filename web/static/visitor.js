@@ -80,63 +80,47 @@
     }, {capture: true});
   }
 
+  function loadTestDriveAsset(tagName, attributes) {
+    return new Promise(function installAsset(resolve, reject) {
+      const selector = attributes.href ? 'link[href="' + attributes.href + '"]' : 'script[src="' + attributes.src + '"]';
+      if (document.querySelector(selector)) { resolve(); return; }
+      const asset = document.createElement(tagName);
+      Object.keys(attributes).forEach(function setAttribute(name) { asset.setAttribute(name, attributes[name]); });
+      asset.dataset.sitebrushOwned = 'true';
+      asset.onload = resolve;
+      asset.onerror = reject;
+      (document.head || document.documentElement).appendChild(asset);
+    });
+  }
+
   function installTestDrivePageActions() {
     const pageQuery = new URLSearchParams(window.location.search);
-    if (pageQuery.has('visual') || pageQuery.has('edit') || pageQuery.has('text') || document.querySelector('[data-test-drive-page-actions]')) return;
-    if (typeof WebSocket !== 'function') return;
-    const socketURL = new URL('/', window.location.href);
-    socketURL.searchParams.set('test_drive_ws', '');
-    socketURL.protocol = socketURL.protocol === 'https:' ? 'wss:' : 'ws:';
-    let statusSocket;
-    try { statusSocket = new WebSocket(socketURL.href); }
-    catch (socketError) { return; }
-    const deadline = window.setTimeout(function expireTestDriveStatus() { statusSocket.close(); }, 4000);
-    statusSocket.addEventListener('open', function requestTestDriveStatus() {
-      statusSocket.send(JSON.stringify({id: 1, action: 'status'}));
-    });
-    statusSocket.addEventListener('message', function showTestDriveActions(statusEvent) {
-      let reply;
-      try { reply = JSON.parse(statusEvent.data); }
-      catch (replyError) { statusSocket.close(); return; }
-      statusSocket.close();
-      if (reply.status !== 200 || !reply.payload || reply.payload.status === 'activated') return;
-      const language = String(document.documentElement.lang || navigator.language || 'en').toLowerCase();
-      const russian = language === 'ru' || language.startsWith('ru-');
-      const labels = russian ? {
-        hint: 'Редактирование: правый клик мышью или долгое нажатие на телефоне.',
-        copy: 'Скопировать другой сайт',
-        save: 'Сохранить Test Drive'
-      } : {
-        hint: 'Edit: right-click on desktop or long-press on mobile.',
-        copy: 'Copy another site',
-        save: 'Save Test Drive'
-      };
-      const stylesheet = document.createElement('link');
-      stylesheet.rel = 'stylesheet';
-      stylesheet.href = '/p/static/test_drive_page_actions.css';
-      stylesheet.dataset.sitebrushOwned = 'true';
-      (document.head || document.documentElement).appendChild(stylesheet);
-      const actions = document.createElement('aside');
-      actions.className = 'SiteBrushTestDrivePageActions';
-      actions.dataset.testDrivePageActions = 'true';
-      actions.dataset.sitebrushOwned = 'true';
-      actions.setAttribute('aria-label', 'SiteBrush Test Drive');
-      const hint = document.createElement('p');
-      hint.className = 'SiteBrushTestDrivePageActionsHint';
-      hint.textContent = labels.hint;
-      const copyLink = document.createElement('a');
-      copyLink.className = 'SiteBrushTestDrivePageAction';
-      copyLink.href = '/?visual#test-drive-copy';
-      copyLink.textContent = labels.copy;
-      const saveLink = document.createElement('a');
-      saveLink.className = 'SiteBrushTestDrivePageAction primary';
-      saveLink.href = '/?visual#activation';
-      saveLink.textContent = labels.save;
-      actions.append(hint, copyLink, saveLink);
-      (document.body || document.documentElement).appendChild(actions);
-    });
-    statusSocket.addEventListener('close', function finishTestDriveStatus() { window.clearTimeout(deadline); });
-    statusSocket.addEventListener('error', function ignoreNonTestDrivePage() {});
+    if (pageQuery.has('visual') || pageQuery.has('edit') || pageQuery.has('text') || pageQuery.has('test_drive_welcome') || document.querySelector('[data-test-drive-save]')) return;
+    fetch('/?test_drive_welcome', {credentials: 'same-origin', cache: 'no-store', headers: {Accept: 'text/html'}})
+      .then(function readTestDriveWelcome(response) {
+        if (!response.ok) return '';
+        return response.text();
+      })
+      .then(function installTestDriveControls(html) {
+        if (!html || document.querySelector('[data-test-drive-save]')) return;
+        const welcomeDocument = new DOMParser().parseFromString(html, 'text/html');
+        const remoteControls = welcomeDocument.querySelector('[data-test-drive-save]');
+        if (!remoteControls) return;
+        const controls = document.importNode(remoteControls, true);
+        controls.dataset.sitebrushOwned = 'true';
+        (document.body || document.documentElement).appendChild(controls);
+        return Promise.all([
+          loadTestDriveAsset('link', {rel: 'stylesheet', href: '/p/static/admin_dialog.css'}),
+          loadTestDriveAsset('link', {rel: 'stylesheet', href: '/p/static/test_drive_page_actions.css'})
+        ]).then(function loadTestDriveScripts() {
+          return loadTestDriveAsset('script', {src: '/p/static/site_copy.js'});
+        }).then(function loadSessionScript() {
+          return loadTestDriveAsset('script', {src: '/p/static/test_drive_session.js'});
+        }).then(function loadEditorScript() {
+          return loadTestDriveAsset('script', {src: '/p/static/test_drive_editor.js'});
+        });
+      })
+      .catch(function ignoreNonTestDrivePage() {});
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', installTestDrivePageActions, {once: true});
