@@ -3,6 +3,13 @@
   const formElement = document.querySelector('[data-test-drive-form]');
   if (!formElement) return;
   const nameElement = formElement.querySelector('[data-test-drive-name]');
+  const sourceElement = formElement.querySelector('[data-test-drive-source]');
+  const sourceStepElement = formElement.querySelector('[data-test-drive-source-step]');
+  const captchaStepElement = formElement.querySelector('[data-test-drive-captcha-step]');
+  const detailsStepElement = formElement.querySelector('[data-test-drive-details-step]');
+  const nextElement = formElement.querySelector('[data-test-drive-next]');
+  const backElement = formElement.querySelector('[data-test-drive-back]');
+  const sourceBackElement = formElement.querySelector('[data-test-drive-source-back]');
   const emailElement = formElement.elements.email;
   const addressElement = formElement.querySelector('[data-test-drive-address]');
   const statusElement = formElement.querySelector('[data-test-drive-domain-status]');
@@ -13,10 +20,13 @@
   const captchaAnswerElement = captchaElement.querySelector('input[name="captcha"]');
   const captchaTokenElement = formElement.querySelector('[data-test-drive-captcha-id]');
   const captchaRetryElement = formElement.querySelector('[data-test-drive-captcha-retry]');
+  const captchaConfirmElement = formElement.querySelector('[data-test-drive-captcha-confirm]');
   const errorElement = formElement.querySelector('[data-test-drive-error]');
   const submitElement = formElement.querySelector('button[type="submit"]');
   const domainInput = window.SiteBrushDomainNameInput;
   const formModel = {
+    sourceURL: sourceElement.value,
+    step: formElement.dataset.showDetails === 'true' ? (formElement.dataset.humanVerified === 'true' ? 'details' : 'captcha') : 'source',
     name: domainInput.normalize(nameElement.value),
     email: emailElement.value,
     captchaAnswer: '',
@@ -32,6 +42,11 @@
   };
 
   function render() {
+    sourceElement.value = formModel.sourceURL;
+    sourceStepElement.hidden = formModel.step !== 'source';
+    captchaStepElement.hidden = formModel.step !== 'captcha';
+    detailsStepElement.hidden = formModel.step !== 'details';
+    nextElement.disabled = !sourceURLValid(formModel.sourceURL);
     nameElement.value = formModel.name;
     emailElement.value = formModel.email;
     captchaAnswerElement.value = formModel.captchaAnswer;
@@ -42,13 +57,36 @@
     statusElement.hidden = !statusElement.textContent;
     domainFieldElement.dataset.state = formModel.domainState;
     formElement.dataset.humanVerified = String(formModel.humanVerified);
-    captchaElement.hidden = formModel.humanVerified;
-    captchaAnswerElement.required = !formModel.humanVerified;
+    captchaAnswerElement.required = formModel.step === 'captcha';
     if (captchaImageElement && formModel.captchaImage) captchaImageElement.src = formModel.captchaImage;
     if (captchaTokenElement) captchaTokenElement.value = formModel.captchaID;
     errorElement.hidden = formModel.humanVerified || !formModel.captchaFailed;
     if (captchaRetryElement) captchaRetryElement.disabled = formModel.captchaLoading;
-    submitElement.disabled = !formModel.humanVerified && (formModel.captchaFailed || !formModel.captchaID) || !domainInput.valid(formModel.name) || formModel.domainState === 'checking' || formModel.domainState === 'unavailable';
+    captchaConfirmElement.disabled = formModel.captchaLoading || formModel.captchaFailed || !formModel.captchaID || !formModel.captchaAnswer.trim();
+    submitElement.disabled = formModel.step !== 'details' || !formModel.humanVerified || !domainInput.valid(formModel.name) || formModel.domainState === 'checking' || formModel.domainState === 'unavailable';
+  }
+
+  function sourceURLValid(sourceURL) {
+    try {
+      const candidateURL = sourceURL.includes('://') ? sourceURL : 'https://' + sourceURL;
+      const parsedURL = new URL(candidateURL);
+      return (parsedURL.protocol === 'http:' || parsedURL.protocol === 'https:') && Boolean(parsedURL.hostname) && !parsedURL.username && !parsedURL.password;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function suggestedDomainName(sourceURL) {
+    let sourceHost;
+    try {
+      const candidateURL = sourceURL.includes('://') ? sourceURL : 'https://' + sourceURL;
+      sourceHost = new URL(candidateURL).hostname.toLowerCase().replace(/^www\./, '');
+    } catch (error) {
+      return '';
+    }
+    const hostLabels = sourceHost.split('.');
+    const proposedLabel = hostLabels[0];
+    return proposedLabel.replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '').slice(0, 24).replace(/-+$/g, '');
   }
 
   function loadCaptcha() {
@@ -82,6 +120,7 @@
   function restoreCaptcha(required) {
     if (!required || !formModel.humanVerified) return;
     formModel.humanVerified = false;
+    formModel.step = 'captcha';
     loadCaptcha();
   }
 
@@ -123,6 +162,28 @@
     formModel.name = domainInput.normalize(nameElement.value);
     scheduleDomainCheck();
   });
+  sourceElement.addEventListener('input', function updateSource() {
+    formModel.sourceURL = sourceElement.value;
+    render();
+  });
+  nextElement.addEventListener('click', function showCaptchaStep() {
+    if (!sourceElement.reportValidity() || !sourceURLValid(formModel.sourceURL)) return;
+    if (!formModel.name) formModel.name = suggestedDomainName(formModel.sourceURL);
+    formModel.step = formModel.humanVerified ? 'details' : 'captcha';
+    if (formModel.step === 'captcha') loadCaptcha();
+    else scheduleDomainCheck();
+    render();
+  });
+  backElement.addEventListener('click', function showSourceStep() {
+    formModel.step = 'source';
+    render();
+    sourceElement.focus();
+  });
+  sourceBackElement.addEventListener('click', function showPreviousSourceStep() {
+    formModel.step = 'source';
+    render();
+    sourceElement.focus();
+  });
   emailElement.addEventListener('input', function updateEmail() {
     formModel.email = emailElement.value;
     render();
@@ -131,10 +192,29 @@
     formModel.captchaAnswer = captchaAnswerElement.value;
     render();
   });
-  formElement.addEventListener('submit', function validateDomainBeforeStart(event) {
-    if (submitElement.disabled) event.preventDefault();
+  captchaConfirmElement.addEventListener('click', function confirmCaptcha() {
+    if (captchaConfirmElement.disabled) return;
+    captchaConfirmElement.disabled = true;
+    window.SiteBrushTestDriveSessionCommand('confirm_captcha', {captcha_id: formModel.captchaID, captcha: formModel.captchaAnswer}, 'test_drive_entry_ws')
+      .then(function showAddressAfterCaptcha() {
+        formModel.humanVerified = true;
+        formModel.step = 'details';
+        formModel.captchaFailed = false;
+        scheduleDomainCheck();
+        nameElement.focus();
+      })
+      .catch(function showCaptchaFailure() {
+        formModel.captchaFailed = true;
+        formModel.captchaID = '';
+        formModel.captchaAnswer = '';
+        render();
+        loadCaptcha();
+      });
   });
-  scheduleDomainCheck();
+  formElement.addEventListener('submit', function validateDomainBeforeStart(event) {
+    if (formModel.step !== 'details' || submitElement.disabled) event.preventDefault();
+  });
+  if (formModel.step === 'details') scheduleDomainCheck();
   captchaRetryElement.addEventListener('click', function requestNewCaptcha() {
     if (formModel.captchaRetryTimer) {
       window.clearTimeout(formModel.captchaRetryTimer);
@@ -142,5 +222,6 @@
     }
     loadCaptcha();
   });
-  loadCaptcha();
+  if (formModel.step === 'captcha') loadCaptcha();
+  render();
 })();

@@ -48,6 +48,27 @@
   gap: 12px;
 }
 
+.test-drive-step {
+  display: grid;
+  gap: 12px;
+}
+
+.test-drive-step[hidden] {
+  display: none;
+}
+
+.test-drive-ip-quota {
+  border: 1px solid var(--theme-input);
+  border-radius: calc(var(--theme-radius) - 2px);
+  padding: 10px 12px;
+  overflow-wrap: anywhere;
+}
+
+.test-drive-source-summary {
+  overflow-wrap: anywhere;
+  color: var(--theme-muted-foreground);
+}
+
 .SiteBrush-TestDrive-Form label,
 .SiteBrush-TestDrive-Form p {
   margin: 0;

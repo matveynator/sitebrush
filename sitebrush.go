@@ -4064,12 +4064,19 @@ func requestLogDomain(r *http.Request) string {
 		return "localhost"
 	}
 	if contextDomain, ok := r.Context().Value(siteDomainContextKey{}).(string); ok {
+		if address := net.ParseIP(contextDomain); address != nil {
+			return address.String()
+		}
 		normalizedContextDomain := normalizeDomainName(contextDomain)
 		if normalizedContextDomain != "" {
 			return normalizedContextDomain
 		}
 	}
-	requestDomain := normalizeDomainName(domainFromRequest(r))
+	requestHost := domainFromRequest(r)
+	if address := net.ParseIP(requestHost); address != nil {
+		return address.String()
+	}
+	requestDomain := normalizeDomainName(requestHost)
 	if requestDomain == "" {
 		return "localhost"
 	}
@@ -12746,6 +12753,12 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 
 func (a *App) siteDynamicHTTPCore(router http.Handler) http.Handler {
 	queryRouter := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && !localAccountRequest(r) && !remoteIPRegistrationRequest(r) {
+			if requestIP := net.ParseIP(domainFromRequest(r)); requestIP != nil && a.serverOwnerDomain(r.Context()) != "" && requestIPMatchesListener(r, requestIP) {
+				http.NotFound(w, r)
+				return
+			}
+		}
 		if siteAITransportRequest(r) {
 			cloned := r.Clone(r.Context())
 			cloned.Header.Set("X-SiteBrush-Workspace-Epoch", strconv.FormatUint(a.workspace.Generation(a.siteDomain(r.Context(), r)), 10))
@@ -48572,7 +48585,7 @@ const automaticSSLIPFreshForIssuance = 15 * time.Minute
 const automaticSSLSchedulerInterval = 5 * time.Second
 const automaticSSLCertificateRenewBefore = 30 * 24 * time.Hour
 const automaticSSLRetryDelayEligibility = 24 * time.Hour
-const automaticSSLRetryDelayDNS = time.Minute
+const automaticSSLRetryDelayDNS = 15 * time.Minute
 const automaticSSLRetryDelayChallenge = time.Hour
 const automaticSSLRetryDelayACME = 2 * time.Minute
 const automaticSSLObservedDomainTTL = 24 * time.Hour
@@ -50857,8 +50870,11 @@ func (a *App) prepareAutomaticSSLDomainWithProgress(certificateManager automatic
 	if err != nil || !setting.Enabled {
 		result.state = "waiting_dns"
 		result.err = err
-		retryDelay := min(automaticSSLRetryDelayDNS, automaticSSLNextCheckDelay(currentExpiresAt, time.Now()))
-		result.retryAfter = time.Now().Add(retryDelay)
+		if retryAfter, delayed := automaticSSLRetryAfter(a.domainAutomaticSSLSetting(domainContext, certificateDomain), time.Now()); delayed {
+			result.retryAfter = retryAfter
+		} else {
+			result.retryAfter = time.Now().Add(automaticSSLRetryDelayDNS)
+		}
 		return result
 	}
 	a.clearDomainAutomaticSSLFailure(domainContext, certificateDomain)
@@ -51133,7 +51149,7 @@ func (a *App) precheckDomainAutomaticSSL(ctx context.Context, domain string, ser
 		setting.Enabled = false
 		setting.LastCheckedAt = time.Now().UTC().Format(time.RFC3339)
 		a.upsertDomainAutomaticSSLSetting(ctx, setting)
-		a.recordDomainAutomaticSSLFailure(ctx, setting.Domain, fmt.Sprintf("DNS lookup failed: %v", err), automaticSSLRetryDelayDNS)
+		a.recordDomainAutomaticSSLFailure(ctx, setting.Domain, fmt.Sprintf("DNS lookup failed: %v", err), automaticSSLDNSRetryDelay(setting))
 		return setting, fmt.Errorf("automatic SSL DNS lookup failed for %q: %w", setting.Domain, err)
 	}
 	publicRecords := publicAutoCertIPRecords(ipRecords)
@@ -51156,7 +51172,7 @@ func (a *App) precheckDomainAutomaticSSL(ctx context.Context, domain string, ser
 	}
 	if !setting.Enabled {
 		err := fmt.Errorf("automatic SSL domain %q does not point to this server", setting.Domain)
-		a.recordDomainAutomaticSSLFailure(ctx, setting.Domain, err.Error(), automaticSSLRetryDelayDNS)
+		a.recordDomainAutomaticSSLFailure(ctx, setting.Domain, err.Error(), automaticSSLDNSRetryDelay(setting))
 		return setting, err
 	}
 	if !a.automaticSSLAvailable {
@@ -51360,6 +51376,29 @@ func (a *App) upsertDomainAutomaticSSLSetting(ctx context.Context, setting Domai
 VALUES(?,?,?,?)
 ON CONFLICT(domain) DO UPDATE SET auto_ssl_enabled=excluded.auto_ssl_enabled,manually_disabled=excluded.manually_disabled,last_checked_at=excluded.last_checked_at`,
 		setting.Domain, boolToInt(setting.Enabled), boolToInt(setting.ManuallyDisabled), setting.LastCheckedAt)
+}
+
+func automaticSSLDNSRetryDelay(setting DomainAutomaticSSLSetting) time.Duration {
+	previousDNSFailure := strings.Contains(setting.LastFailureReason, "DNS lookup failed") || strings.Contains(setting.LastFailureReason, "does not point to this server")
+	if !previousDNSFailure {
+		return automaticSSLRetryDelayDNS
+	}
+	failedAt, failedErr := time.Parse(time.RFC3339, setting.LastFailedAt)
+	retryAt, retryErr := time.Parse(time.RFC3339, setting.RetryAfter)
+	if failedErr != nil || retryErr != nil {
+		return automaticSSLRetryDelayDNS
+	}
+	previousDelay := retryAt.Sub(failedAt)
+	switch {
+	case previousDelay < 15*time.Minute:
+		return 15 * time.Minute
+	case previousDelay < time.Hour:
+		return time.Hour
+	case previousDelay < 6*time.Hour:
+		return 6 * time.Hour
+	default:
+		return 24 * time.Hour
+	}
 }
 
 func (a *App) recordDomainAutomaticSSLFailure(ctx context.Context, domain string, reason string, retryDelay time.Duration) {
@@ -58495,6 +58534,7 @@ func testDriveLabelValid(label string) bool {
 type privateTestDrive struct {
 	ID             int64
 	Domain         string
+	SourceURL      string
 	Status         string
 	EntryHash      string
 	SessionHash    string
@@ -58545,7 +58585,7 @@ func testDriveEntryAction(r *http.Request) bool {
 func (a *App) privateTestDrive(ctx context.Context, domain string) (privateTestDrive, bool, error) {
 	var trial privateTestDrive
 	err := a.withServerControlDatabaseRead(ctx, "test-drive-read", func(database *sql.DB) error {
-		return database.QueryRowContext(ctx, `SELECT id,domain,status,entry_hash,session_hash,handoff_hash,temporary_admin,pending_email,verified_email,email_history,code_hash,code_expires_at,code_attempts,mail_count,last_mail_at,delete_after,created_at,COALESCE(first_opened_at,''),COALESCE(last_active_at,''),COALESCE(last_ip,''),human_verified FROM public_trial_sites WHERE domain=? AND (status IN ('private','email_pending','email_verified','expiring','blocked','active') OR status='activated' AND session_hash<>'') ORDER BY id DESC LIMIT 1`, domain).Scan(&trial.ID, &trial.Domain, &trial.Status, &trial.EntryHash, &trial.SessionHash, &trial.HandoffHash, &trial.TemporaryAdmin, &trial.PendingEmail, &trial.VerifiedEmail, &trial.EmailHistory, &trial.CodeHash, &trial.CodeExpiresAt, &trial.CodeAttempts, &trial.MailCount, &trial.LastMailAt, &trial.DeleteAfter, &trial.CreatedAt, &trial.FirstOpenedAt, &trial.LastActiveAt, &trial.LastIP, &trial.HumanVerified)
+		return database.QueryRowContext(ctx, `SELECT id,domain,COALESCE(source_url,''),status,entry_hash,session_hash,handoff_hash,temporary_admin,pending_email,verified_email,email_history,code_hash,code_expires_at,code_attempts,mail_count,last_mail_at,delete_after,created_at,COALESCE(first_opened_at,''),COALESCE(last_active_at,''),COALESCE(last_ip,''),human_verified FROM public_trial_sites WHERE domain=? AND (status IN ('private','email_pending','email_verified','expiring','blocked','active') OR status='activated' AND session_hash<>'') ORDER BY id DESC LIMIT 1`, domain).Scan(&trial.ID, &trial.Domain, &trial.SourceURL, &trial.Status, &trial.EntryHash, &trial.SessionHash, &trial.HandoffHash, &trial.TemporaryAdmin, &trial.PendingEmail, &trial.VerifiedEmail, &trial.EmailHistory, &trial.CodeHash, &trial.CodeExpiresAt, &trial.CodeAttempts, &trial.MailCount, &trial.LastMailAt, &trial.DeleteAfter, &trial.CreatedAt, &trial.FirstOpenedAt, &trial.LastActiveAt, &trial.LastIP, &trial.HumanVerified)
 	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return privateTestDrive{}, false, nil
@@ -58798,9 +58838,12 @@ func (a *App) renderTestDriveNeutral(w http.ResponseWriter, r *http.Request) {
 func (a *App) renderTestDriveWelcome(w http.ResponseWriter, r *http.Request, trial privateTestDrive) {
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	copyConfiguration := map[string]any{"path": "/", "texts": siteCopyMenuTexts(translationsForRequest(r)), "sourceURL": trial.SourceURL}
+	configurationJSON, _ := json.Marshal(copyConfiguration)
 	a.render(w, r, "test_drive_welcome.html", map[string]any{
-		"SiteCopyConfigJSON": siteCopyMenuConfigJSON("/", translationsForRequest(r)),
+		"SiteCopyConfigJSON": string(configurationJSON),
 		"PendingEmail":       trial.PendingEmail,
+		"SourceURL":          trial.SourceURL,
 	})
 }
 
@@ -58942,7 +58985,132 @@ func (a *App) renderTestDriveForm(w http.ResponseWriter, r *http.Request, entryH
 	if !testDriveLabelValid(chosenName) {
 		chosenName = ""
 	}
-	a.render(w, r, "test_drive.html", map[string]any{"ParentDomain": a.hostingAndSupportMainDomain(r.Context()), "HumanVerified": trusted, "ChosenName": chosenName, "ChosenEmail": strings.TrimSpace(r.FormValue("email")), "FormError": formError, "EntryCSRF": testDriveFormToken(entryHash)})
+	_, validSourceURL := testDriveSourceURL(r.FormValue("source_url"))
+	a.render(w, r, "test_drive.html", map[string]any{"ParentDomain": a.hostingAndSupportMainDomain(r.Context()), "HumanVerified": trusted, "ChosenName": chosenName, "ChosenEmail": strings.TrimSpace(r.FormValue("email")), "ChosenSourceURL": strings.TrimSpace(r.FormValue("source_url")), "ShowDetails": validSourceURL && (chosenName != "" || formError != ""), "FormError": formError, "EntryCSRF": testDriveFormToken(entryHash), "IPQuota": a.testDriveIPQuota(r, entryHash)})
+}
+
+func testDriveSourceURL(rawSourceURL string) (string, bool) {
+	sourceURL, err := demo.NormalizeSourceURL(rawSourceURL)
+	if err != nil || sourceURL == "" || len(sourceURL) > 2048 {
+		return "", false
+	}
+	parsedURL, err := url.Parse(sourceURL)
+	if err != nil || outboundhttp.RequirePublicURL(parsedURL) != nil {
+		return "", false
+	}
+	return sourceURL, true
+}
+
+type testDriveCreationQuota struct {
+	ActiveSession, ActiveIP, RecentSession, RecentIP             int
+	MaxActiveSession, MaxActiveIP, MaxRecentSession, MaxRecentIP int
+	ActiveIPUntil, RecentIPUntil                                 time.Time
+	AdminIP                                                      bool
+}
+
+// Only a recent successful administrator login on this installation can exempt its recorded IP.
+func (a *App) testDriveTrustedAdminIP(r *http.Request) bool {
+	if a.db == nil {
+		return false
+	}
+	ip := canonicalAccountIP(accountClientIP(r))
+	domain := a.hostingAndSupportMainDomain(r.Context())
+	if ip == "" || domain == "" {
+		return false
+	}
+	ctx := contextWithDomain(r.Context(), domain)
+	rows, err := a.db.QueryContext(ctx, `SELECT trusted.email FROM account_trusted_ips trusted JOIN users administrator ON administrator.domain=trusted.domain AND administrator.email=trusted.email WHERE trusted.domain=? AND trusted.client_ip=? AND trusted.last_login>? AND administrator.is_admin=1`, domain, ip, time.Now().Add(-accountauth.TrustTTL).Unix())
+	if err != nil {
+		return false
+	}
+	adminEmails := make([]string, 0, 2)
+	for rows.Next() {
+		var email string
+		if rows.Scan(&email) != nil {
+			_ = rows.Close()
+			return false
+		}
+		adminEmails = append(adminEmails, email)
+	}
+	rowsErr := rows.Err()
+	closeErr := rows.Close()
+	if rowsErr != nil || closeErr != nil {
+		return false
+	}
+	for _, email := range adminEmails {
+		if !a.adminIPLoginBlocked(ctx, domain, ip, email) {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *App) readTestDriveCreationQuota(r *http.Request, entryHash string) (testDriveCreationQuota, error) {
+	var quota testDriveCreationQuota
+	quota.AdminIP = a.testDriveTrustedAdminIP(r)
+	ip := accountClientIP(r)
+	now := time.Now().UTC()
+	err := a.withServerControlDatabaseRead(r.Context(), "test-drive-create-limits", func(database *sql.DB) error {
+		quota.MaxActiveSession = a.testDriveLimit(r.Context(), database, "test_drive_active_per_session", 1)
+		quota.MaxActiveIP = a.testDriveLimit(r.Context(), database, "test_drive_active_per_ip", 2)
+		quota.MaxRecentSession = a.testDriveLimit(r.Context(), database, "test_drive_daily_per_session", 3)
+		quota.MaxRecentIP = a.testDriveLimit(r.Context(), database, "test_drive_daily_per_ip", 5)
+		activeDeadline := now.Format(time.RFC3339)
+		recentDeadline := now.Add(-24 * time.Hour).Format(time.RFC3339)
+		checks := []struct {
+			query    string
+			argument string
+			deadline string
+			count    *int
+		}{
+			{`SELECT COUNT(*) FROM public_trial_sites WHERE entry_hash=? AND status IN ('private','email_pending','email_verified') AND delete_after>?`, entryHash, activeDeadline, &quota.ActiveSession},
+			{`SELECT COUNT(*) FROM public_trial_sites WHERE client_ip=? AND status IN ('private','email_pending','email_verified') AND delete_after>?`, ip, activeDeadline, &quota.ActiveIP},
+			{`SELECT COUNT(*) FROM public_trial_sites WHERE entry_hash=? AND created_at>?`, entryHash, recentDeadline, &quota.RecentSession},
+			{`SELECT COUNT(*) FROM public_trial_sites WHERE client_ip=? AND created_at>?`, ip, recentDeadline, &quota.RecentIP},
+		}
+		for _, check := range checks {
+			if err := database.QueryRowContext(r.Context(), check.query, check.argument, check.deadline).Scan(check.count); err != nil {
+				return err
+			}
+		}
+		var activeUntil, recentUntil sql.NullString
+		if err := database.QueryRowContext(r.Context(), `SELECT MIN(delete_after) FROM public_trial_sites WHERE client_ip=? AND status IN ('private','email_pending','email_verified') AND delete_after>?`, ip, activeDeadline).Scan(&activeUntil); err != nil {
+			return err
+		}
+		if err := database.QueryRowContext(r.Context(), `SELECT MIN(created_at) FROM public_trial_sites WHERE client_ip=? AND created_at>?`, ip, recentDeadline).Scan(&recentUntil); err != nil {
+			return err
+		}
+		quota.ActiveIPUntil, _ = time.Parse(time.RFC3339, activeUntil.String)
+		quota.RecentIPUntil, _ = time.Parse(time.RFC3339, recentUntil.String)
+		if !quota.RecentIPUntil.IsZero() {
+			quota.RecentIPUntil = quota.RecentIPUntil.Add(24 * time.Hour)
+		}
+		return nil
+	})
+	return quota, err
+}
+
+func (a *App) testDriveIPQuota(r *http.Request, entryHash string) string {
+	quota, err := a.readTestDriveCreationQuota(r, entryHash)
+	if err != nil {
+		return ""
+	}
+	translations := translationsForRequest(r)
+	if quota.AdminIP {
+		return translations["test_drive_admin_ip_unlimited"]
+	}
+	message := fmt.Sprintf(translations["test_drive_ip_quota"], quota.ActiveIP, quota.MaxActiveIP, quota.RecentIP, quota.MaxRecentIP)
+	var availableAt time.Time
+	if quota.ActiveIP >= quota.MaxActiveIP {
+		availableAt = quota.ActiveIPUntil
+	}
+	if quota.RecentIP >= quota.MaxRecentIP && quota.RecentIPUntil.After(availableAt) {
+		availableAt = quota.RecentIPUntil
+	}
+	if !availableAt.IsZero() {
+		message += " " + fmt.Sprintf(translations["test_drive_ip_quota_reset"], availableAt.UTC().Format("2006-01-02 15:04 UTC"))
+	}
+	return message
 }
 
 func (a *App) startPrivateTestDrive(w http.ResponseWriter, r *http.Request) {
@@ -58984,9 +59152,16 @@ func (a *App) startPrivateTestDrive(w http.ResponseWriter, r *http.Request) {
 		a.renderTestDriveForm(w, r, entryHash, trusted, translationsForRequest(r)["test_drive_invalid_email"])
 		return
 	}
+	sourceURL, validSourceURL := testDriveSourceURL(r.FormValue("source_url"))
+	if !validSourceURL {
+		a.logTestDriveEvent("start", 0, r, "invalid_source", http.StatusBadRequest)
+		w.WriteHeader(http.StatusBadRequest)
+		a.renderTestDriveForm(w, r, entryHash, trusted, translationsForRequest(r)["test_drive_invalid_source"])
+		return
+	}
 	parentDomain := a.hostingAndSupportMainDomain(r.Context())
 	domain := label + "." + parentDomain
-	if a.resumeTestDriveHandoff(w, r, entryHash, domain, email) {
+	if a.resumeTestDriveHandoff(w, r, entryHash, domain, email, sourceURL) {
 		return
 	}
 	if !trusted {
@@ -59007,10 +59182,12 @@ func (a *App) startPrivateTestDrive(w http.ResponseWriter, r *http.Request) {
 		trusted = true
 		a.logTestDriveEvent("captcha", 0, r, "verified", http.StatusOK)
 	}
-	if !a.testDriveInitialMailAllowed(r, email, entryHash) {
-		a.logTestDriveEvent("start", 0, r, "mail_limit", http.StatusTooManyRequests)
-		w.WriteHeader(http.StatusTooManyRequests)
-		a.renderTestDriveForm(w, r, entryHash, trusted, translationsForRequest(r)["test_drive_limit_error"])
+	adminIP := a.testDriveTrustedAdminIP(r)
+	mailAllowed, mailLimitMessage, mailLimitStatus := a.testDriveInitialMailAllowed(r, email, entryHash, adminIP)
+	if !mailAllowed {
+		a.logTestDriveEvent("start", 0, r, "mail_limit", mailLimitStatus)
+		w.WriteHeader(mailLimitStatus)
+		a.renderTestDriveForm(w, r, entryHash, trusted, mailLimitMessage)
 		return
 	}
 	if !a.newSiteSubdomainAllowed(r.Context(), domain) || !a.publicTrialDomainAvailable(r.Context(), domain) {
@@ -59019,39 +59196,33 @@ func (a *App) startPrivateTestDrive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ip := accountClientIP(r)
-	var activeSession, activeIP, recentSession, recentIP int
-	var maxActiveSession, maxActiveIP, maxRecentSession, maxRecentIP int
-	limitErr := a.withServerControlDatabaseRead(r.Context(), "test-drive-create-limits", func(database *sql.DB) error {
-		maxActiveSession = a.testDriveLimit(r.Context(), database, "test_drive_active_per_session", 1)
-		maxActiveIP = a.testDriveLimit(r.Context(), database, "test_drive_active_per_ip", 2)
-		maxRecentSession = a.testDriveLimit(r.Context(), database, "test_drive_daily_per_session", 3)
-		maxRecentIP = a.testDriveLimit(r.Context(), database, "test_drive_daily_per_ip", 5)
-		for _, count := range []struct {
-			query  string
-			args   []any
-			target *int
-		}{
-			{`SELECT COUNT(*) FROM public_trial_sites WHERE entry_hash=? AND status IN ('private','email_pending','email_verified')`, []any{entryHash}, &activeSession},
-			{`SELECT COUNT(*) FROM public_trial_sites WHERE client_ip=? AND status IN ('private','email_pending','email_verified')`, []any{ip}, &activeIP},
-			{`SELECT COUNT(*) FROM public_trial_sites WHERE entry_hash=? AND created_at>?`, []any{entryHash, time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339)}, &recentSession},
-			{`SELECT COUNT(*) FROM public_trial_sites WHERE client_ip=? AND created_at>?`, []any{ip, time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339)}, &recentIP},
-		} {
-			if err := database.QueryRowContext(r.Context(), count.query, count.args...).Scan(count.target); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	if limitErr != nil || activeIP >= maxActiveIP || recentIP >= maxRecentIP || activeSession >= maxActiveSession || recentSession >= maxRecentSession {
-		a.logTestDriveEvent("start", 0, r, "creation_limit", http.StatusTooManyRequests)
-		if limitErr != nil {
-			a.logTestDriveError("create-limit", 0, r, limitErr)
-		}
-		a.recordTestDriveSuspicion(r.Context(), entryHash, 0, "create_limit")
-		_, trusted = a.testDriveEntrySession(w, r)
-		w.WriteHeader(http.StatusTooManyRequests)
-		a.renderTestDriveForm(w, r, entryHash, trusted, translationsForRequest(r)["test_drive_limit_error"])
+	creationQuota, limitErr := a.readTestDriveCreationQuota(r, entryHash)
+	if limitErr != nil {
+		a.logTestDriveError("create-limit", 0, r, limitErr)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		a.renderTestDriveForm(w, r, entryHash, trusted, translationsForRequest(r)["test_drive_generic_error"])
 		return
+	}
+	if !adminIP {
+		translations := translationsForRequest(r)
+		limitKey := ""
+		count, maximum := 0, 0
+		switch {
+		case creationQuota.ActiveSession >= creationQuota.MaxActiveSession:
+			limitKey, count, maximum = "test_drive_limit_active_session", creationQuota.ActiveSession, creationQuota.MaxActiveSession
+		case creationQuota.ActiveIP >= creationQuota.MaxActiveIP:
+			limitKey, count, maximum = "test_drive_limit_active_ip", creationQuota.ActiveIP, creationQuota.MaxActiveIP
+		case creationQuota.RecentSession >= creationQuota.MaxRecentSession:
+			limitKey, count, maximum = "test_drive_limit_daily_session", creationQuota.RecentSession, creationQuota.MaxRecentSession
+		case creationQuota.RecentIP >= creationQuota.MaxRecentIP:
+			limitKey, count, maximum = "test_drive_limit_daily_ip", creationQuota.RecentIP, creationQuota.MaxRecentIP
+		}
+		if limitKey != "" {
+			a.logTestDriveEvent("start", 0, r, fmt.Sprintf("creation_limit_%s_%d_of_%d", limitKey, count, maximum), http.StatusTooManyRequests)
+			w.WriteHeader(http.StatusTooManyRequests)
+			a.renderTestDriveForm(w, r, entryHash, trusted, fmt.Sprintf(translations[limitKey], count, maximum))
+			return
+		}
 	}
 	claim := randomAccessToken()
 	if err := a.claimTrialDomain(r.Context(), domain, claim); err != nil {
@@ -59094,7 +59265,7 @@ func (a *App) startPrivateTestDrive(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().UTC()
 	idleDuration := time.Duration(a.testDriveSetting(r.Context(), "test_drive_idle_minutes", 30)) * time.Minute
-	handoff := randomAccessToken() + randomAccessToken()
+	handoff := newTestDriveHandoffToken()
 	emailHistory, _ := json.Marshal([]string{email})
 	if err := a.withServerControlDatabaseWrite(r.Context(), "test-drive-record", func(database *sql.DB) error {
 		plan, hasPlan := (hostingandsupport.Store{DB: database}).DefaultPlan(r.Context())
@@ -59112,7 +59283,7 @@ func (a *App) startPrivateTestDrive(w http.ResponseWriter, r *http.Request) {
 		if len(userAgent) > 256 {
 			userAgent = userAgent[:256]
 		}
-		_, err = transaction.ExecContext(r.Context(), `INSERT INTO public_trial_sites(domain,source_url,status,created_at,last_active_at,delete_after,client_ip,last_ip,user_agent,temporary_admin,handoff_hash,human_verified,ip_history,entry_hash,pending_email,email_history) VALUES(?,'','private',?,?,?,?,?,?,?, ?,1,?,?,?,?)`, domain, now.Format(time.RFC3339), now.Format(time.RFC3339), now.Add(idleDuration).Format(time.RFC3339), ip, ip, userAgent, temporaryEmail, testDriveHash(handoff), fmt.Sprintf(`[{"ip":%q,"at":%q}]`, ip, now.Format(time.RFC3339)), entryHash, email, string(emailHistory))
+		_, err = transaction.ExecContext(r.Context(), `INSERT INTO public_trial_sites(domain,source_url,status,created_at,last_active_at,delete_after,client_ip,last_ip,user_agent,temporary_admin,handoff_hash,human_verified,ip_history,entry_hash,pending_email,email_history) VALUES(?,?,'private',?,?,?,?,?,?,?, ?,1,?,?,?,?)`, domain, sourceURL, now.Format(time.RFC3339), now.Format(time.RFC3339), now.Add(idleDuration).Format(time.RFC3339), ip, ip, userAgent, temporaryEmail, testDriveHash(handoff), fmt.Sprintf(`[{"ip":%q,"at":%q}]`, ip, now.Format(time.RFC3339)), entryHash, email, string(emailHistory))
 		if err != nil {
 			return err
 		}
@@ -59142,24 +59313,64 @@ func (a *App) startPrivateTestDrive(w http.ResponseWriter, r *http.Request) {
 	a.renderTestDriveHandoff(w, r, domain, handoff)
 }
 
-func (a *App) resumeTestDriveHandoff(w http.ResponseWriter, r *http.Request, entryHash, domain, email string) bool {
-	cookie, err := r.Cookie("sitebrush_trial_handoff")
-	if err != nil {
+func newTestDriveHandoffToken() string {
+	return strconv.FormatInt(time.Now().Add(5*time.Minute).Unix(), 10) + "." + randomAccessToken() + randomAccessToken()
+}
+
+func testDriveHandoffTokenCurrent(ticket string) bool {
+	expiryText, secret, found := strings.Cut(ticket, ".")
+	if !found || len(secret) < 48 {
 		return false
 	}
-	cookieDomain, ticket, found := strings.Cut(cookie.Value, "|")
-	if !found || cookieDomain != domain || len(ticket) < 32 {
-		return false
-	}
+	expiry, err := strconv.ParseInt(expiryText, 10, 64)
+	return err == nil && time.Now().Unix() < expiry && expiry <= time.Now().Add(5*time.Minute).Unix()+1
+}
+
+func (a *App) resumeTestDriveHandoff(w http.ResponseWriter, r *http.Request, entryHash, domain, email, sourceURL string) bool {
 	trial, found, err := a.privateTestDrive(r.Context(), domain)
-	if err != nil || !found || trial.EntryHash != entryHash || trial.PendingEmail != email || trial.HandoffHash == "" || trial.SessionHash != "" || trial.Status != "private" && trial.Status != "email_pending" {
+	if err != nil || !found || trial.EntryHash != entryHash || trial.PendingEmail != email || trial.SourceURL != "" && trial.SourceURL != sourceURL || trial.Status != "private" && trial.Status != "email_pending" && trial.Status != "email_verified" {
 		return false
 	}
 	expires, err := time.Parse(time.RFC3339, trial.DeleteAfter)
-	if err != nil || !time.Now().UTC().Before(expires) || subtle.ConstantTimeCompare([]byte(testDriveHash(ticket)), []byte(trial.HandoffHash)) != 1 {
+	if err != nil || !time.Now().UTC().Before(expires) {
 		return false
 	}
-	a.logTestDriveEvent("start", trial.ID, r, "existing_private_site_resumed", http.StatusOK)
+	if trial.SourceURL == "" {
+		if err := a.withServerControlDatabaseWrite(r.Context(), "test-drive-legacy-source", func(database *sql.DB) error {
+			_, updateErr := database.ExecContext(r.Context(), `UPDATE public_trial_sites SET source_url=? WHERE id=? AND entry_hash=? AND (source_url='' OR source_url IS NULL)`, sourceURL, trial.ID, entryHash)
+			return updateErr
+		}); err != nil {
+			a.logTestDriveError("legacy-source", trial.ID, r, err)
+			return false
+		}
+	}
+	if cookie, cookieErr := r.Cookie("sitebrush_trial_handoff"); cookieErr == nil {
+		cookieDomain, ticket, hasTicket := strings.Cut(cookie.Value, "|")
+		if hasTicket && cookieDomain == domain && testDriveHandoffTokenCurrent(ticket) && trial.HandoffHash != "" && subtle.ConstantTimeCompare([]byte(testDriveHash(ticket)), []byte(trial.HandoffHash)) == 1 {
+			a.logTestDriveEvent("start", trial.ID, r, "existing_private_site_resumed", http.StatusOK)
+			a.renderTestDriveHandoff(w, r, domain, ticket)
+			return true
+		}
+	}
+	// The entry capability can renew a spent or expired handoff without creating another site.
+	ticket := newTestDriveHandoffToken()
+	err = a.withServerControlDatabaseWrite(r.Context(), "test-drive-handoff-renew", func(database *sql.DB) error {
+		result, updateErr := database.ExecContext(r.Context(), `UPDATE public_trial_sites SET handoff_hash=? WHERE id=? AND entry_hash=? AND status IN ('private','email_pending','email_verified') AND delete_after>?`, testDriveHash(ticket), trial.ID, entryHash, time.Now().UTC().Format(time.RFC3339))
+		if updateErr != nil {
+			return updateErr
+		}
+		updated, updateErr := result.RowsAffected()
+		if updateErr != nil || updated != 1 {
+			return errors.New("private handoff is unavailable")
+		}
+		return nil
+	})
+	if err != nil {
+		a.logTestDriveError("handoff-renew", trial.ID, r, err)
+		return false
+	}
+	http.SetCookie(w, &http.Cookie{Name: "sitebrush_trial_handoff", Value: domain + "|" + ticket, Path: "/", HttpOnly: true, Secure: requestScheme(r) == "https", SameSite: http.SameSiteLaxMode, MaxAge: 300})
+	a.logTestDriveEvent("start", trial.ID, r, "existing_private_site_handoff_renewed", http.StatusOK)
 	a.renderTestDriveHandoff(w, r, domain, ticket)
 	return true
 }
@@ -59168,9 +59379,9 @@ func (a *App) renderTestDriveHandoff(w http.ResponseWriter, r *http.Request, dom
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	endpoint := "http://" + domain + "/?test_drive_handoff"
+	endpoint := "http://" + domain + "/?test_drive_handoff&handoff_token=" + url.QueryEscape(handoff)
 	continueLabel := translationOrDefault(translationsForRequest(r), "test_drive_continue", "Continue to Test Drive")
-	_, _ = fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/p/static/technical_pages.css"><title>SiteBrush</title><script defer src="/p/static/test_drive_handoff.js?v=%s"></script></head><body class="technical-page"><main class="container authentication-shell"><section class="authentication-card"><form method="post" action="%s" data-test-drive-handoff><input type="hidden" name="ticket" value="%s"><button class="btn btn-primary" type="submit">%s</button></form></section></main></body></html>`, template.HTMLEscapeString(CompileVersion), template.HTMLEscapeString(endpoint), template.HTMLEscapeString(handoff), template.HTMLEscapeString(continueLabel))
+	_, _ = fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/p/static/technical_pages.css"><title>SiteBrush</title><script defer src="/p/static/test_drive_handoff.js?v=%s"></script></head><body class="technical-page"><main class="container authentication-shell"><section class="authentication-card"><a class="btn btn-primary" href="%s" data-test-drive-handoff>%s</a></section></main></body></html>`, template.HTMLEscapeString(CompileVersion), template.HTMLEscapeString(endpoint), template.HTMLEscapeString(continueLabel))
 }
 
 // This public probe confirms TLS readiness without exposing site content or spending a ticket.
@@ -59188,7 +59399,14 @@ func (a *App) testDriveHandoffReadySocket(w http.ResponseWriter, r *http.Request
 }
 
 func (a *App) testDriveHandoff(w http.ResponseWriter, r *http.Request, trial privateTestDrive) {
-	if r.Method != http.MethodPost || trial.HandoffHash == "" || subtle.ConstantTimeCompare([]byte(testDriveHash(r.FormValue("ticket"))), []byte(trial.HandoffHash)) != 1 {
+	ticket := r.URL.Query().Get("handoff_token")
+	prefetch := strings.Contains(strings.ToLower(r.Header.Get("Purpose")), "prefetch") || strings.Contains(strings.ToLower(r.Header.Get("Sec-Purpose")), "prefetch")
+	validMethod := r.Method == http.MethodGet && testDriveHandoffTokenCurrent(ticket) && !prefetch
+	if r.Method == http.MethodPost {
+		ticket = r.FormValue("ticket")
+		validMethod = !strings.Contains(ticket, ".") || testDriveHandoffTokenCurrent(ticket)
+	}
+	if !validMethod || trial.HandoffHash == "" || subtle.ConstantTimeCompare([]byte(testDriveHash(ticket)), []byte(trial.HandoffHash)) != 1 {
 		a.logTestDriveEvent("handoff", trial.ID, r, "ticket_rejected", http.StatusForbidden)
 		a.renderTestDriveNeutral(w, r)
 		return
@@ -59382,6 +59600,12 @@ func (a *App) testDriveEntrySocket(w http.ResponseWriter, r *http.Request) {
 			query.Set("subdomain", command.Subdomain)
 			actionRequest.URL.RawQuery = query.Encode()
 			a.publicTrialSiteDomainCheck(response, actionRequest)
+		case "confirm_captcha":
+			actionRequest.Method = http.MethodPost
+			actionRequest.Form = url.Values{"captcha_id": {command.CaptchaID}, "captcha": {command.Captcha}}
+			actionRequest.PostForm = actionRequest.Form
+			actionRequest.URL.RawQuery = "test_drive_check_captcha"
+			a.confirmTestDriveNameCheckCaptcha(response, actionRequest)
 		default:
 			testDriveHTTPError(response, r, "test_drive_generic_error", http.StatusBadRequest)
 		}
@@ -59569,7 +59793,7 @@ func (a *App) admitTestDriveNameCheck(w http.ResponseWriter, r *http.Request) bo
 	}
 	if count >= hardLimit || distinctNames > softLimit && !trusted {
 		w.Header().Set("Retry-After", "60")
-		testDriveHTTPError(w, r, "test_drive_limit_error", http.StatusTooManyRequests)
+		testDriveHTTPError(w, r, "test_drive_name_check_limit", http.StatusTooManyRequests)
 		return false
 	}
 	if distinctNames >= softLimit/2 {
@@ -59625,9 +59849,11 @@ func testDriveMailHTML(languageCode, subject, body, code string) string {
 }
 
 // Mail admission precedes site creation so a throttled sender cannot reserve names.
-func (a *App) testDriveInitialMailAllowed(r *http.Request, email, entryHash string) bool {
+func (a *App) testDriveInitialMailAllowed(r *http.Request, email, entryHash string, adminIP bool) (bool, string, int) {
 	ip := accountClientIP(r)
 	allowed := false
+	message := ""
+	translations := translationsForRequest(r)
 	err := a.withServerControlDatabaseRead(r.Context(), "test-drive-initial-mail-limit", func(database *sql.DB) error {
 		blocked, blockErr := mailguard.Blocked(database, ip, time.Now().UTC())
 		if blockErr != nil {
@@ -59635,6 +59861,7 @@ func (a *App) testDriveInitialMailAllowed(r *http.Request, email, entryHash stri
 		}
 		if blocked {
 			a.logTestDriveEvent("initial-mail-limit", 0, r, "blocked_ip", http.StatusTooManyRequests)
+			message = translations["test_drive_mail_blocked"]
 			return nil
 		}
 		now := time.Now().Add(-time.Hour).Unix()
@@ -59649,12 +59876,19 @@ func (a *App) testDriveInitialMailAllowed(r *http.Request, email, entryHash stri
 			{`SELECT COUNT(*) FROM test_drive_mail_events WHERE session_hash=? AND sent_at>?`, "session", entryHash, a.testDriveLimit(r.Context(), database, "test_drive_mail_per_session_hour", 8)},
 		}
 		for _, check := range checks {
+			if adminIP && check.key != "email" {
+				continue
+			}
 			var count int
-			if err := database.QueryRowContext(r.Context(), check.query, check.arg, now).Scan(&count); err != nil {
+			var firstSent sql.NullInt64
+			query := strings.Replace(check.query, "SELECT COUNT(*)", "SELECT COUNT(*),MIN(sent_at)", 1)
+			if err := database.QueryRowContext(r.Context(), query, check.arg, now).Scan(&count, &firstSent); err != nil {
 				return err
 			}
 			if count >= check.limit {
 				a.logTestDriveEvent("initial-mail-limit", 0, r, check.key, http.StatusTooManyRequests)
+				retryAt := time.Unix(firstSent.Int64, 0).Add(time.Hour).UTC().Format("2006-01-02 15:04 UTC")
+				message = fmt.Sprintf(translations["test_drive_mail_limit"], translations["test_drive_mail_scope_"+check.key], count, check.limit, retryAt)
 				return nil
 			}
 		}
@@ -59663,8 +59897,12 @@ func (a *App) testDriveInitialMailAllowed(r *http.Request, email, entryHash stri
 	})
 	if err != nil {
 		a.logTestDriveError("initial-mail-limit", 0, r, err)
+		return false, translations["test_drive_generic_error"], http.StatusServiceUnavailable
 	}
-	return allowed && err == nil
+	if !allowed {
+		return false, message, http.StatusTooManyRequests
+	}
+	return true, "", http.StatusOK
 }
 
 func (a *App) sendTestDriveCode(w http.ResponseWriter, r *http.Request, trial privateTestDrive) {
