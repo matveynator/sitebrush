@@ -120,6 +120,8 @@ function visualEditorDocumentEnvelope(htmlText) {
    callbacks can be skipped after the iframe has owned the touch sequence.
    Intercept only the save icon at touch-end and call the same save routine. */
 (function installVisualEditorMobileSaveFallback() {
+  if (typeof document === 'undefined') return;
+
   function isSaveToolbarControl(eventTarget) {
     if (!eventTarget || typeof eventTarget.closest !== 'function') return false;
     const toolbarButton = eventTarget.closest('.jodit-toolbar-button');
