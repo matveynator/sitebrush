@@ -246,6 +246,30 @@ func TestSinglePageResourceLimitStopsBeforeNetwork(t *testing.T) {
 	}
 }
 
+func TestSinglePageImportRetainsParentContextForServiceDocuments(t *testing.T) {
+	parentContext, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sourceURL, err := url.Parse("https://example.org/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	spider, _ := prepareSinglePageImport(grabImportRequest{
+		Domain:          "trial.example.org",
+		PagePath:        "/",
+		SourceURL:       sourceURL.String(),
+		RemoteSourceURL: sourceURL,
+		HTML:            "<html><body></body></html>",
+		Context:         parentContext,
+	}, nil)
+	if spider.context() != parentContext || spider.context().Err() != nil {
+		t.Fatal("service-document requests lost their live parent context")
+	}
+	cancel()
+	if spider.context().Err() != context.Canceled {
+		t.Fatal("service-document requests no longer follow parent cancellation")
+	}
+}
+
 func TestDecodeImportedResourceBytesConvertsJavaScriptToUTF8(t *testing.T) {
 	sourceText := `var title = "Текущее время";`
 	sourceBytes, encodeErr := charmap.Windows1251.NewEncoder().Bytes([]byte(sourceText))

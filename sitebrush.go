@@ -25368,7 +25368,12 @@ func prepareSinglePageImport(importRequest grabImportRequest, tracker *grabProgr
 		parentContext = context.Background()
 	}
 	resourceContext, stopResources := context.WithTimeout(parentContext, 3*time.Minute)
-	defer stopResources()
+	// Service documents are imported by the caller after page discovery returns.
+	// Restore its live parent before closing the bounded resource request window.
+	defer func() {
+		spider.setContext(parentContext)
+		stopResources()
+	}()
 	spider.preserveFailedReferences = importRequest.PreserveFailedReferences
 	spider.currentPagePath = cleanPath(importRequest.PagePath)
 	spider.setContext(resourceContext)
@@ -58947,7 +58952,7 @@ func (a *App) changeTestDriveSource(w http.ResponseWriter, r *http.Request, tria
 		_ = json.NewEncoder(w).Encode(map[string]string{"source_url": sourceURL})
 		return
 	}
-	lease, leaseErr := a.workspace.Enter(trial.Domain, 0, false, r.Context().Done())
+	lease, leaseErr := a.workspace.Enter(trial.Domain, 0, true, r.Context().Done())
 	if leaseErr != nil {
 		a.logTestDriveError("source-workspace", trial.ID, r, leaseErr)
 		testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusConflict)
