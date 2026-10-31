@@ -14,7 +14,13 @@
     <h1>{{index .T "test_drive_welcome_title"}}</h1>
     <p>{{index .T "test_drive_private_hint"}}</p>
     <p>{{index .T "test_drive_welcome_prompt"}}</p>
-    {{if .SourceURL}}<p class="test-drive-source-summary" dir="ltr">{{.SourceURL}}</p>{{end}}
+    <form class="SiteBrush-TestDrive-Form" data-test-drive-source-form data-error-text="{{index .T "test_drive_generic_error"}}">
+      <label for="test-drive-source-url">{{index .T "test_drive_source_label"}}</label>
+      <input id="test-drive-source-url" name="source_url" type="text" inputmode="url" required value="{{.SourceURL}}" autocomplete="url" spellcheck="false">
+      <p>{{index .T "test_drive_change_source_hint"}}</p>
+      <p data-test-drive-source-error role="alert" hidden></p>
+      <button type="submit" class="btn btn-secondary">{{index .T "test_drive_change_source"}}</button>
+    </form>
     <div class="test-drive-welcome-actions">
       <button type="button" class="btn btn-primary" data-test-drive-copy>{{index .T "test_drive_copy_site"}}</button>
     </div>

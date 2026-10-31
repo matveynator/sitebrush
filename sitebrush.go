@@ -13453,6 +13453,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.cancelGrabImport(w, r)
 		return
 	}
+	if hasQueryFlag(r, "grab_finish") {
+		a.finishGrabImport(w, r)
+		return
+	}
 	if hasQueryFlag(r, "indexing_review") {
 		a.indexingReviewEndpoint(w, r)
 		return
@@ -22391,6 +22395,27 @@ func (a *App) cancelGrabImport(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "canceled": canceled})
 }
 
+func (a *App) finishGrabImport(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) || r.Method != http.MethodPost || !adminMutationSourceAllowed(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	domain := a.siteDomain(r.Context(), r)
+	pagePath := grabRequestTargetPath(r)
+	lease, leaseErr := a.workspace.Enter(domain, 0, false, r.Context().Done())
+	if leaseErr != nil {
+		http.Error(w, leaseErr.Error(), http.StatusConflict)
+		return
+	}
+	defer lease.Close(false)
+	if err := crawler.DiscardPartialImportFrontiers(r.Context(), a.db, domain, pagePath); err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
 // === Public trial site preparation ===
 
 func (a *App) publicTrialSitePreview(w http.ResponseWriter, r *http.Request) {
@@ -24632,7 +24657,7 @@ func (a *App) grabPreview(w http.ResponseWriter, r *http.Request) {
 		importedPages = wholeSitePreview.ImportedPages
 		previewSpider = wholeSitePreview.Spider
 	} else {
-		previewSpider, importedHTML := prepareSinglePageImport(grabImportRequest{Domain: domain, PagePath: pagePath, SourceURL: sourceURL, RemoteSourceURL: remoteSourceURL, HTML: string(htmlBytes), ProgressToken: progressToken, SourceOptions: sourceOptions}, a.grabTracker)
+		previewSpider, importedHTML := prepareSinglePageImport(grabImportRequest{Domain: domain, PagePath: pagePath, SourceURL: sourceURL, RemoteSourceURL: remoteSourceURL, HTML: string(htmlBytes), Context: r.Context(), ProgressToken: progressToken, SourceOptions: sourceOptions}, a.grabTracker)
 		resources = previewResourcesFromSpider(previewSpider, map[string]struct{}{sourceURL: {}})
 		importedPages = []wholeSiteImportedPage{{SourceURL: sourceURL, LocalPath: pagePath, HTML: importedHTML}}
 	}
@@ -25320,7 +25345,11 @@ func (a *App) estimateImportQuota(ctx context.Context, domain string, importedPa
 }
 
 func previewGrabResources(pageURL *url.URL, htmlSource string, tracker *grabProgressTracker, progressToken string, sourceOptions grabSourceOptions) []grabResourcePreview {
-	spider := newPreviewPageSpider("", pageURL, grabResourceMaxDepth, tracker, progressToken, sourceOptions)
+	spider := newPreviewPageSpider("", pageURL, 8, tracker, progressToken, sourceOptions)
+	spider.maxResources = 512
+	previewContext, stopPreview := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer stopPreview()
+	spider.setContext(previewContext)
 	rootResource := &mirroredResource{url: pageURL.String(), content: []byte(htmlSource)}
 	spider.resources[pageURL.String()] = rootResource
 	spider.collectPreviewNestedResources(rootResource, 0, "text/html")
@@ -25332,10 +25361,17 @@ func previewGrabResources(pageURL *url.URL, htmlSource string, tracker *grabProg
 }
 
 func prepareSinglePageImport(importRequest grabImportRequest, tracker *grabProgressTracker) (*pageSpider, string) {
-	spider := newPageSpider(importRequest.Domain, importRequest.RemoteSourceURL, grabResourceMaxDepth, tracker, importRequest.ProgressToken, importRequest.SourceOptions)
+	spider := newPageSpider(importRequest.Domain, importRequest.RemoteSourceURL, 8, tracker, importRequest.ProgressToken, importRequest.SourceOptions)
+	spider.maxResources = 512
+	parentContext := importRequest.Context
+	if parentContext == nil {
+		parentContext = context.Background()
+	}
+	resourceContext, stopResources := context.WithTimeout(parentContext, 3*time.Minute)
+	defer stopResources()
 	spider.preserveFailedReferences = importRequest.PreserveFailedReferences
 	spider.currentPagePath = cleanPath(importRequest.PagePath)
-	spider.setContext(importRequest.Context)
+	spider.setContext(resourceContext)
 	spider.setDownloadPlan(importRequest.DownloadTotal, importRequest.DownloadTotalBytes)
 	spider.selectedResourceURLs = importRequest.SelectedResourceURLs
 	spider.documentURLRewriter = func(normalizedURL string) (string, bool) {
@@ -44555,6 +44591,7 @@ func siteCopyMenuTexts(translations map[string]string) map[string]string {
 		"finishImport":              translationOrDefault(translations, "site_copy_finish_import", "Finish import"),
 		"openSite":                  translationOrDefault(translations, "site_copy_open_site", "Open site"),
 		"interruptImport":           translationOrDefault(translations, "site_copy_interrupt_import", "Interrupt import"),
+		"useFound":                  translationOrDefault(translations, "site_copy_use_found", "Use downloaded content"),
 		"interruptingImport":        translationOrDefault(translations, "site_copy_interrupting_import", "Stopping import..."),
 		"importInterrupted":         translationOrDefault(translations, "site_copy_import_interrupted", "Import interrupted."),
 		"retryingAutomatically":     translationOrDefault(translations, "site_copy_retrying_automatically", "Retrying temporary errors"),
@@ -46760,6 +46797,7 @@ type pageSpider struct {
 	domain                    string
 	pageURL                   *url.URL
 	maxDepth                  int
+	maxResources              int
 	client                    *http.Client
 	ctx                       context.Context
 	sourceOptions             grabSourceOptions
@@ -46874,6 +46912,7 @@ func newPageSpider(domain string, pageURL *url.URL, maxDepth int, tracker *grabP
 		domain:                 domain,
 		pageURL:                pageURL,
 		maxDepth:               maxDepth,
+		maxResources:           4096,
 		client:                 grabImportHTTPClient(newGrabHTTPClientForSourceOptions(pageURL.Hostname(), sourceOptions)),
 		ctx:                    context.Background(),
 		sourceOptions:          sourceOptions,
@@ -47052,6 +47091,9 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 			}
 		}
 		return existing, nil
+	}
+	if spider.maxResources > 0 && len(spider.resources) >= spider.maxResources {
+		return nil, errors.New("resource discovery limit reached")
 	}
 	spider.foundTotal++
 	spider.publishProgress("found", normalizedURL, 0)
@@ -47826,6 +47868,9 @@ func (spider *pageSpider) collectPreviewResource(normalizedURL string, depth int
 	if depth > spider.maxDepth || spider.previewLimitReached {
 		return
 	}
+	if spider.shouldSkipMirrorResource(normalizedURL) || spider.maxResources > 0 && len(spider.resources) >= spider.maxResources || spider.contextCanceled() {
+		return
+	}
 	if _, found := spider.resources[normalizedURL]; found {
 		return
 	}
@@ -47981,12 +48026,31 @@ func (spider *pageSpider) fetchPreviewResourceBody(normalizedURL string) ([]byte
 }
 
 func (spider *pageSpider) shouldSkipMirrorResource(resourceURL string) bool {
+	if len(resourceURL) > 2048 {
+		return true
+	}
 	parsedURL, err := url.Parse(resourceURL)
 	if err != nil {
 		return true
 	}
 	hostName := strings.ToLower(strings.TrimSpace(parsedURL.Hostname()))
 	pathName := strings.ToLower(strings.TrimSpace(parsedURL.Path))
+	previousSegment := ""
+	repeatedSegments := 0
+	for _, segment := range strings.Split(pathName, "/") {
+		if segment == "" {
+			continue
+		}
+		if segment == previousSegment {
+			repeatedSegments++
+			if repeatedSegments >= 3 {
+				return true
+			}
+		} else {
+			previousSegment = segment
+			repeatedSegments = 1
+		}
+	}
 	if hostName == "" {
 		return false
 	}
@@ -57789,12 +57853,12 @@ func sitebrushControlQueryFlag(flag string) bool {
 		"revision_preview", "revision_restore", "revision_delete", "revision_toggle", "tree",
 		"freeze", "unfreeze", "unfreeze_ws", "publish", "publish_events", "publish_preview",
 		"page_password", "page_password_unlock", "captcha", "security_incident_report", "indexing_review",
-		"grab", "grab_preview", "grab_retry", "grab_cancel", "grab_ws", "grab_events", "template_events",
+		"grab", "grab_preview", "grab_retry", "grab_cancel", "grab_finish", "grab_ws", "grab_events", "template_events",
 		"copy", "site_copy", "trial_import_wait", "trial_import_status", "trial_registration_status",
 		"trial_site_ws", "trial_site_events", "trial_site_texts", "trial_site_preview",
 		"trial_site_preview_status", "trial_site_preview_cancel", "trial_site_preview_frame",
 		"trial_site_create", "trial_site_indexing", "trial_site_suggest", "trial_site_captcha", "trial_site_domain_check",
-		"test_drive", "test_drive_start", "test_drive_handoff", "test_drive_handoff_ready", "test_drive_welcome", "test_drive_activation", "test_drive_status", "test_drive_email", "test_drive_verify", "test_drive_activate", "test_drive_captcha", "test_drive_check_captcha", "test_drive_ws", "test_drive_entry_ws",
+		"test_drive", "test_drive_start", "test_drive_handoff", "test_drive_handoff_ready", "test_drive_welcome", "test_drive_source", "test_drive_activation", "test_drive_status", "test_drive_email", "test_drive_verify", "test_drive_activate", "test_drive_captcha", "test_drive_check_captcha", "test_drive_ws", "test_drive_entry_ws",
 		"demo_grab_preview", "demo_grab_refresh", "site_request",
 		"backup", "backup_import", "backup_download", "native_pick_files", "native_save_backup",
 		"hosting_and_support", "expenses", "billing", "hosting_invoice", "billing_schedule",
@@ -58726,7 +58790,7 @@ func (a *App) privateTestDriveGate(w http.ResponseWriter, r *http.Request) bool 
 		a.renderTestDriveWelcome(w, r, trial)
 		return true
 	}
-	if hasQueryFlag(r, "test_drive_email") || hasQueryFlag(r, "test_drive_verify") || hasQueryFlag(r, "test_drive_activate") || hasQueryFlag(r, "test_drive_status") || hasQueryFlag(r, "test_drive_captcha") || hasQueryFlag(r, "test_drive_ws") {
+	if hasQueryFlag(r, "test_drive_source") || hasQueryFlag(r, "test_drive_email") || hasQueryFlag(r, "test_drive_verify") || hasQueryFlag(r, "test_drive_activate") || hasQueryFlag(r, "test_drive_status") || hasQueryFlag(r, "test_drive_captcha") || hasQueryFlag(r, "test_drive_ws") {
 		if a.publicBoundary {
 			return false
 		}
@@ -58822,7 +58886,7 @@ func testDriveSystemAsset(r *http.Request) bool {
 }
 
 func testDriveEditorMutation(r *http.Request) bool {
-	for _, flag := range []string{"save", "files", "grab", "grab_preview", "grab_retry", "grab_cancel", "revision_restore", "revision_delete", "revision_toggle"} {
+	for _, flag := range []string{"save", "files", "grab", "grab_preview", "grab_retry", "grab_cancel", "grab_finish", "revision_restore", "revision_delete", "revision_toggle"} {
 		if hasQueryFlag(r, flag) {
 			return true
 		}
@@ -58835,7 +58899,7 @@ func testDriveExternalAction(r *http.Request) bool {
 	for flag := range r.URL.Query() {
 		if sitebrushControlQueryFlag(flag) {
 			allowed := false
-			for _, editorFlag := range []string{"edit", "visual", "text", "save", "delete", "files", "tree", "revisions", "revision_preview", "revision_restore", "revision_delete", "revision_toggle", "template_events", "grab", "grab_preview", "grab_retry", "grab_cancel", "grab_ws", "grab_events", "test_drive_status", "indexing_review"} {
+			for _, editorFlag := range []string{"edit", "visual", "text", "save", "delete", "files", "tree", "revisions", "revision_preview", "revision_restore", "revision_delete", "revision_toggle", "template_events", "grab", "grab_preview", "grab_retry", "grab_cancel", "grab_finish", "grab_ws", "grab_events", "test_drive_status", "indexing_review"} {
 				if flag == editorFlag {
 					allowed = true
 					break
@@ -58861,13 +58925,62 @@ func (a *App) renderTestDriveNeutral(w http.ResponseWriter, r *http.Request) {
 func (a *App) renderTestDriveWelcome(w http.ResponseWriter, r *http.Request, trial privateTestDrive) {
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	copyConfiguration := map[string]any{"path": "/", "texts": siteCopyMenuTexts(translationsForRequest(r)), "sourceURL": trial.SourceURL}
+	copyConfiguration := map[string]any{"path": "/", "texts": siteCopyMenuTexts(translationsForRequest(r)), "sourceURL": trial.SourceURL, "sourceEditable": trial.SourceURL == ""}
 	configurationJSON, _ := json.Marshal(copyConfiguration)
 	a.render(w, r, "test_drive_welcome.html", map[string]any{
 		"SiteCopyConfigJSON": string(configurationJSON),
 		"PendingEmail":       trial.PendingEmail,
 		"SourceURL":          trial.SourceURL,
 	})
+}
+
+// A private trial owns a disposable site workspace; changing its source resets
+// that workspace while retaining the reservation and email verification state.
+func (a *App) changeTestDriveSource(w http.ResponseWriter, r *http.Request, trial privateTestDrive) {
+	sourceURL, valid := testDriveSourceURL(r.FormValue("source_url"))
+	if !valid {
+		testDriveHTTPError(w, r, "test_drive_source_invalid", http.StatusBadRequest)
+		return
+	}
+	if sourceURL == trial.SourceURL {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"source_url": sourceURL})
+		return
+	}
+	lease, leaseErr := a.workspace.Enter(trial.Domain, 0, false, r.Context().Done())
+	if leaseErr != nil {
+		a.logTestDriveError("source-workspace", trial.ID, r, leaseErr)
+		testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusConflict)
+		return
+	}
+	defer lease.Close(false)
+	current, found, readErr := a.privateTestDrive(r.Context(), trial.Domain)
+	if readErr != nil || !found || current.ID != trial.ID || !testDriveOwner(r, current) || current.Status != "private" && current.Status != "email_pending" && current.Status != "email_verified" {
+		testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusForbidden)
+		return
+	}
+	domainContext := contextWithDomain(r.Context(), trial.Domain)
+	if err := crawler.DiscardPartialImportFrontiers(domainContext, a.db, trial.Domain, "/"); err != nil {
+		a.logTestDriveError("source-frontier", trial.ID, r, err)
+		testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusServiceUnavailable)
+		return
+	}
+	if err := a.clearDemoSiteContent(domainContext, trial.Domain); err != nil {
+		a.logTestDriveError("source-reset", trial.ID, r, err)
+		testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusServiceUnavailable)
+		return
+	}
+	if err := a.withServerControlDatabaseWrite(r.Context(), "test-drive-source", func(database *sql.DB) error {
+		_, updateErr := database.ExecContext(r.Context(), `UPDATE public_trial_sites SET source_url=? WHERE id=? AND status IN ('private','email_pending','email_verified')`, sourceURL, trial.ID)
+		return updateErr
+	}); err != nil {
+		a.logTestDriveError("source-update", trial.ID, r, err)
+		testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusServiceUnavailable)
+		return
+	}
+	a.logTestDriveEvent("source", trial.ID, r, "changed", http.StatusOK)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"source_url": sourceURL})
 }
 
 func (a *App) touchTestDrive(w http.ResponseWriter, r *http.Request, trial privateTestDrive) {
@@ -59503,6 +59616,10 @@ func (a *App) testDriveOwnerAction(w http.ResponseWriter, r *http.Request, trial
 	}
 	if hasQueryFlag(r, "test_drive_email") {
 		a.sendTestDriveCode(w, r, trial)
+		return
+	}
+	if hasQueryFlag(r, "test_drive_source") {
+		a.changeTestDriveSource(w, r, trial)
 		return
 	}
 	if hasQueryFlag(r, "test_drive_verify") {

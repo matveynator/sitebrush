@@ -288,14 +288,23 @@
     } else {
       completedPercent = Math.round(completedTotal * 100 / downloadProgressModel.totalTargets);
     }
-    if (progressPayload.stage === 'done' || progressPayload.stage === 'partial') {
+    if (progressPayload.stage === 'done') {
       completedTotal = downloadProgressModel.totalTargets;
       completedPercent = 100;
     }
+    const discoveredTotal = Math.max(downloadProgressModel.totalTargets, Number(progressPayload.found_total) || 0);
+    if (progressPayload.stage !== 'done' && discoveredTotal > downloadProgressModel.totalTargets) {
+      const downloadedTotal = Math.max(completedTotal, Number(progressPayload.downloaded_total) || 0);
+      return {
+        completedTotal: downloadedTotal,
+        foundTotal: discoveredTotal,
+        completedPercent: Math.min(99, Math.round(downloadedTotal * 100 / discoveredTotal))
+      };
+    }
     return {
       completedTotal: completedTotal,
-      foundTotal: downloadProgressModel.totalTargets,
-      completedPercent: Math.max(0, Math.min(100, completedPercent))
+      foundTotal: discoveredTotal,
+      completedPercent: progressPayload.stage === 'done' ? 100 : Math.max(0, Math.min(99, completedPercent))
     };
   }
 
@@ -443,6 +452,7 @@
     const downloadQuery = String(configuration && configuration.downloadQuery ? configuration.downloadQuery : 'grab');
     const retryQuery = String(configuration && configuration.retryQuery ? configuration.retryQuery : 'grab_retry');
     const cancelQuery = String(configuration && configuration.cancelQuery ? configuration.cancelQuery : 'grab_cancel');
+    const finishQuery = String(configuration && configuration.finishQuery ? configuration.finishQuery : 'grab_finish');
     const webSocketQuery = String(configuration && configuration.webSocketQuery ? configuration.webSocketQuery : 'grab_ws');
     const publicTrialMode = Boolean(configuration && configuration.publicTrial);
     const overlayElement = createElement('div', 'SiteBrushCopySiteOverlay');
@@ -494,6 +504,7 @@
     sourceUrlElement.required = true;
     sourceUrlElement.placeholder = textFromConfig(configuration, 'sourceURLPlaceholder', 'https://example.com/');
     sourceUrlElement.value = String(configuration && configuration.sourceURL ? configuration.sourceURL : '');
+    sourceUrlElement.readOnly = Boolean(configuration && configuration.sourceEditable === false);
     const submitButtonElement = createElement('button', 'SiteBrushCopySiteButton');
     submitButtonElement.type = 'submit';
     const submitIconElement = document.createElement('img');
@@ -561,9 +572,12 @@
     const actionRowElement = createElement('div', 'SiteBrushCopySiteActions');
     const cancelButtonElement = createElement('button', 'SiteBrushCopySiteSecondaryButton', textFromConfig(configuration, 'cancelButton', 'Cancel'));
     cancelButtonElement.type = 'button';
+    const useFoundButtonElement = createElement('button', 'SiteBrushCopySiteButton SiteBrushCopySiteHidden', textFromConfig(configuration, 'useFound', textFromConfig(configuration, 'finishImport', '')));
+    useFoundButtonElement.type = 'button';
     const continueButtonElement = createElement('button', 'SiteBrushCopySiteButton SiteBrushCopySiteContinueButton SiteBrushCopySiteHidden', textFromConfig(configuration, 'continueButton', 'Continue'));
     continueButtonElement.type = 'button';
     actionRowElement.appendChild(cancelButtonElement);
+    actionRowElement.appendChild(useFoundButtonElement);
     actionRowElement.appendChild(continueButtonElement);
 
     formElement.appendChild(primaryRowElement);
@@ -623,7 +637,9 @@
     let activeDownloadEndpoint = '?grab';
     let activeGrabToken = '';
     let downloadCancelRequested = false;
+    let finishAfterCancel = false;
     let activeDownloadController = null;
+    let activeRequestIsPreview = false;
     let modalClosed = false;
 
     function refreshPublicTrialCaptcha() {
@@ -735,7 +751,7 @@
     function closeModal() {
       modalClosed = true;
       if (requestIsRunning && activeGrabToken !== '') {
-        if (publicTrialMode && activeDownloadController) {
+        if (activeDownloadController && (publicTrialMode || activeRequestIsPreview)) {
           activeDownloadController.abort();
         }
         const cancelRequestBody = new URLSearchParams();
@@ -763,11 +779,25 @@
     function finishPartialImport() {
       closeProgressWebSocket();
       stopRetryCountdown();
-      if (importedRedirectPath !== '') {
-        window.location.href = importedRedirectPath;
-      } else {
-        closeModal();
+      if (publicTrialMode) {
+        if (importedRedirectPath !== '') window.location.href = importedRedirectPath;
+        else closeModal();
+        return;
       }
+      const finishBody = new URLSearchParams();
+      finishBody.set('path', targetPath);
+      if (configuration && configuration.csrfToken) finishBody.set('account_csrf', configuration.csrfToken);
+      fetch(configuredEndpoint(configuration, finishQuery), { method: 'POST', body: finishBody, headers: { Accept: 'application/json', 'X-SiteBrush-CSRF': String(configuration && configuration.csrfToken || '') } })
+        .then(function checkFinishResponse(response) {
+          if (!response.ok) throw new Error(textFromConfig(configuration, 'loadPageFailed', ''));
+          clearPendingImport();
+          if (importedRedirectPath !== '') window.location.href = importedRedirectPath;
+          else closeModal();
+        })
+        .catch(function showFinishError(error) {
+          useFoundButtonElement.disabled = false;
+          setCopySiteStatus(statusElement, error.message, 'error');
+        });
     }
 
     function requestActiveDownloadCancel() {
@@ -777,6 +807,10 @@
       downloadCancelRequested = true;
       cancelButtonElement.disabled = true;
       setCopySiteStatus(statusElement, textFromConfig(configuration, 'interruptingImport', 'Stopping import...'), 'warning');
+      if (activeRequestIsPreview && activeDownloadController) {
+        activeDownloadController.abort();
+        return;
+      }
       if (publicTrialMode && activeDownloadController) {
         activeDownloadController.abort();
         return;
@@ -784,8 +818,14 @@
       const cancelRequestBody = new URLSearchParams();
       cancelRequestBody.append('progress_token', activeGrabToken);
       fetch(configuredEndpoint(configuration, cancelQuery), { method: 'POST', body: cancelRequestBody, headers: { Accept: 'application/json' } })
-        .catch(function ignoreCancelError() {
+        .then(function checkCancelResponse(response) {
+          if (!response.ok) throw new Error(textFromConfig(configuration, 'importInterrupted', ''));
+        })
+        .catch(function showCancelError(error) {
+          downloadCancelRequested = false;
           cancelButtonElement.disabled = false;
+          useFoundButtonElement.disabled = false;
+          setCopySiteStatus(statusElement, error.message, 'error');
         });
     }
 
@@ -1164,6 +1204,7 @@
       previewTokenFieldElement.value = '';
       activeGrabToken = progressToken;
       downloadCancelRequested = false;
+      finishAfterCancel = false;
       previewPayload = null;
       downloadProgressModel = null;
       failedResourceURLs = new Set();
@@ -1183,7 +1224,9 @@
       submitButtonElement.disabled = true;
       connectProgressWebSocket(progressToken, function submitPreviewRequest() {
         requestIsRunning = true;
-        fetch(configuredEndpoint(configuration, previewQuery), { method: 'POST', body: formRequestBody(formElement), headers: { Accept: 'application/json' } })
+        activeRequestIsPreview = true;
+        activeDownloadController = new AbortController();
+        fetch(configuredEndpoint(configuration, previewQuery), { method: 'POST', body: formRequestBody(formElement), headers: { Accept: 'application/json' }, signal: activeDownloadController.signal })
           .then(function parsePreviewResponse(previewResponse) {
             if (!previewResponse.ok) {
               return previewResponse.text().then(function throwPreviewError(errorText) {
@@ -1197,6 +1240,8 @@
               return;
             }
             requestIsRunning = false;
+            activeRequestIsPreview = false;
+            activeDownloadController = null;
             activeGrabToken = '';
             submitButtonElement.disabled = false;
             closeProgressWebSocket();
@@ -1208,13 +1253,18 @@
               return;
             }
             requestIsRunning = false;
+            activeRequestIsPreview = false;
+            activeDownloadController = null;
             activeGrabToken = '';
             submitButtonElement.disabled = false;
+            cancelButtonElement.disabled = false;
             closeProgressWebSocket();
             if (captchaImageElement) {
               refreshPublicTrialCaptcha();
             }
-            setCopySiteStatus(statusElement, previewError.message || textFromConfig(configuration, 'previewErrorDefault', 'Preview failed.'), 'error');
+            setCopySiteStatus(statusElement, previewError.name === 'AbortError'
+              ? textFromConfig(configuration, 'importInterrupted', '')
+              : previewError.message || textFromConfig(configuration, 'previewErrorDefault', 'Preview failed.'), 'error');
           });
       }, false);
     }
@@ -1237,6 +1287,7 @@
       tokenFieldElement.value = progressToken;
       activeGrabToken = progressToken;
       downloadCancelRequested = false;
+      finishAfterCancel = false;
       downloadFinishedWithErrors = false;
       const continuingWholeSiteImport = resumeImportID !== '';
       if (continuingWholeSiteImport) {
@@ -1257,6 +1308,7 @@
       continueButtonElement.classList.add('SiteBrushCopySiteHidden');
       submitButtonElement.disabled = true;
       cancelButtonElement.disabled = false;
+      if (!publicTrialMode) useFoundButtonElement.classList.remove('SiteBrushCopySiteHidden');
       closeButtonElement.classList.add('SiteBrushCopySiteHidden');
       setActiveImportButtonMode();
       setProgress(progressBarElement, 0);
@@ -1301,6 +1353,10 @@
               closeProgressWebSocket();
               renderFailedResources();
               setCopySiteStatus(statusElement, textFromConfig(configuration, 'importInterrupted', 'Import interrupted.'), 'warning');
+              if (finishAfterCancel) {
+                finishPartialImport();
+                return;
+              }
               offerIndexingDecision(downloadPayload);
               return;
             }
@@ -1340,6 +1396,10 @@
             setFinishImportButtonMode(false);
             closeButtonElement.classList.remove('SiteBrushCopySiteHidden');
             closeProgressWebSocket();
+            if (finishAfterCancel) {
+              finishPartialImport();
+              return;
+            }
             setCopySiteStatus(statusElement, downloadError.name === 'AbortError'
               ? textFromConfig(configuration, 'importInterrupted', 'Import interrupted.')
               : downloadError.message || textFromConfig(configuration, 'loadPageFailed', 'Load failed.'), 'error');
@@ -1358,6 +1418,15 @@
         return;
       }
       closeModal();
+    });
+    useFoundButtonElement.addEventListener('click', function onUseFoundClick() {
+      useFoundButtonElement.disabled = true;
+      if (requestIsRunning && activeGrabToken !== '') {
+        finishAfterCancel = true;
+        requestActiveDownloadCancel();
+        return;
+      }
+      finishPartialImport();
     });
     continueButtonElement.addEventListener('click', startDownload);
     sourceUrlElement.addEventListener('input', function onSourceURLChange() {
