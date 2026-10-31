@@ -10,5 +10,10 @@
   }
   copyButtonElement.addEventListener('click', openPrivateCopy);
   const initialConfiguration = JSON.parse(welcomeElement.dataset.copyConfig);
+  if (window.location.hash === '#activation') {
+    const activationButtonElement = document.querySelector('[data-trial-open]');
+    if (activationButtonElement) activationButtonElement.click();
+    return;
+  }
   if (initialConfiguration.sourceURL) openPrivateCopy();
 })();

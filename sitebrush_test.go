@@ -13563,6 +13563,34 @@ func TestPrivateTestDriveRequiresCreatingBrowserSession(t *testing.T) {
 	if err := publicCatalog.SetMemory(true); err != nil {
 		t.Fatal(err)
 	}
+	application.publicCatalog = publicCatalog
+	applicationHandler := application.siteHTTPHandler(http.HandlerFunc(application.route))
+	for _, browserSession := range []string{"", "unrelated-session"} {
+		request := httptest.NewRequest(http.MethodGet, "https://"+domain+"/", nil)
+		request.RemoteAddr = "203.0.113.50:12345"
+		request.Header.Set("Accept-Language", "fr")
+		if browserSession != "" {
+			request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: browserSession})
+		}
+		response := httptest.NewRecorder()
+		applicationHandler.ServeHTTP(response, request)
+		if response.Code != http.StatusForbidden || strings.Contains(response.Body.String(), content) || !strings.Contains(response.Body.String(), translationsForLanguageCode("fr")["test_drive_not_activated"]) || !strings.Contains(response.Body.String(), `href="/?test_drive_activation"`) {
+			t.Fatalf("application catalog exposed private content to %q: status=%d body=%q", browserSession, response.Code, response.Body.String())
+		}
+	}
+	activationRequest := httptest.NewRequest(http.MethodGet, "https://"+domain+"/?test_drive_activation", nil)
+	activationResponse := httptest.NewRecorder()
+	applicationHandler.ServeHTTP(activationResponse, activationRequest)
+	if activationResponse.Code != http.StatusForbidden || strings.Contains(activationResponse.Body.String(), content) || !strings.Contains(activationResponse.Body.String(), translationsForLanguageCode("ru")["test_drive_activation_guide"]) {
+		t.Fatalf("another browser accessed activation: status=%d body=%q", activationResponse.Code, activationResponse.Body.String())
+	}
+	activationRequest = httptest.NewRequest(http.MethodGet, "https://"+domain+"/?test_drive_activation", nil)
+	activationRequest.AddCookie(&http.Cookie{Name: "sitebrush_test_drive", Value: secret})
+	activationResponse = httptest.NewRecorder()
+	applicationHandler.ServeHTTP(activationResponse, activationRequest)
+	if activationResponse.Code != http.StatusSeeOther || activationResponse.Header().Get("Location") != "/?test_drive_welcome#activation" {
+		t.Fatalf("creator activation route: status=%d location=%q", activationResponse.Code, activationResponse.Header().Get("Location"))
+	}
 	publicBoundary := &App{storagePath: application.storagePath, storageRealRoot: application.storageRealRoot, publicBoundary: true, publicCatalog: publicCatalog, publicStreamer: publicsite.NewStreamer()}
 	publicFront := newPublicHTTPFront(publicBoundary, "private-trial-fixture", stopPublicFront)
 	if err := publicFront.Set("127.0.0.1:1", true); err != nil {
@@ -13572,19 +13600,22 @@ func TestPrivateTestDriveRequiresCreatingBrowserSession(t *testing.T) {
 	if !publicBoundary.servePublicPublished(publishedProbe, httptest.NewRequest(http.MethodGet, "https://"+domain+"/", nil), true) || !strings.Contains(publishedProbe.Body.String(), content) {
 		t.Fatal("paused public content fixture is unavailable")
 	}
-	for _, trialStatus := range []string{"private", "blocked", "expiring"} {
+	for _, trialStatus := range []string{"private", "email_pending", "email_verified", "blocked", "expiring"} {
 		if err := application.withServerControlDatabaseWrite(context.Background(), "test-private-front-state", func(database *sql.DB) error {
 			_, updateErr := database.Exec(`UPDATE public_trial_sites SET status=? WHERE domain=?`, trialStatus, domain)
 			return updateErr
 		}); err != nil {
 			t.Fatal(err)
 		}
-		for _, mixedQuery := range []string{"?test_drive&edit", "?trial_site_domain_check&visual", "?test_drive_entry_ws&edit", "?test_drive_handoff_ready&edit"} {
+		for _, mixedQuery := range []string{"", "?test_drive&edit", "?trial_site_domain_check&visual", "?test_drive_entry_ws&edit", "?test_drive_handoff_ready&edit"} {
 			request := httptest.NewRequest(http.MethodGet, "https://"+domain+"/"+mixedQuery, nil)
 			response := httptest.NewRecorder()
 			publicFront.ServeHTTP(response, request)
 			if strings.Contains(response.Body.String(), content) || response.Code == http.StatusOK {
 				t.Fatalf("paused public front exposed %s on %s: status=%d body=%q", trialStatus, mixedQuery, response.Code, response.Body.String())
+			}
+			if mixedQuery == "" && response.Code != http.StatusForbidden {
+				t.Fatalf("paused public front did not render neutral page for %s: status=%d body=%q", trialStatus, response.Code, response.Body.String())
 			}
 		}
 	}

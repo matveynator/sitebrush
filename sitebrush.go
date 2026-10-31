@@ -12719,6 +12719,10 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 			return
 		}
 		if a.publicCatalog != nil && publicOrdinaryRequest(r) {
+			// The application catalog can serve files before the dynamic trial router.
+			if a.privateTestDriveGate(w, r) {
+				return
+			}
 			decision := a.publicRequestDecision(r)
 			if decision.Found {
 				public.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), publicDecisionContextKey{}, decision)))
@@ -57789,7 +57793,7 @@ func sitebrushControlQueryFlag(flag string) bool {
 		"trial_site_ws", "trial_site_events", "trial_site_texts", "trial_site_preview",
 		"trial_site_preview_status", "trial_site_preview_cancel", "trial_site_preview_frame",
 		"trial_site_create", "trial_site_indexing", "trial_site_suggest", "trial_site_captcha", "trial_site_domain_check",
-		"test_drive", "test_drive_start", "test_drive_handoff", "test_drive_handoff_ready", "test_drive_welcome", "test_drive_status", "test_drive_email", "test_drive_verify", "test_drive_activate", "test_drive_captcha", "test_drive_check_captcha", "test_drive_ws", "test_drive_entry_ws",
+		"test_drive", "test_drive_start", "test_drive_handoff", "test_drive_handoff_ready", "test_drive_welcome", "test_drive_activation", "test_drive_status", "test_drive_email", "test_drive_verify", "test_drive_activate", "test_drive_captcha", "test_drive_check_captcha", "test_drive_ws", "test_drive_entry_ws",
 		"demo_grab_preview", "demo_grab_refresh", "site_request",
 		"backup", "backup_import", "backup_download", "native_pick_files", "native_save_backup",
 		"hosting_and_support", "expenses", "billing", "hosting_invoice", "billing_schedule",
@@ -58672,6 +58676,21 @@ func (a *App) privateTestDriveGate(w http.ResponseWriter, r *http.Request) bool 
 		a.renderTestDriveNeutral(w, r)
 		return true
 	}
+	if hasQueryFlag(r, "test_drive_activation") {
+		if r.Method != http.MethodGet {
+			testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusMethodNotAllowed)
+			return true
+		}
+		if !testDriveOwner(r, trial) {
+			a.renderTestDriveNeutral(w, r)
+			return true
+		}
+		if a.publicBoundary {
+			return false
+		}
+		http.Redirect(w, r, "/?test_drive_welcome#activation", http.StatusSeeOther)
+		return true
+	}
 	if hasQueryFlag(r, "test_drive_handoff_ready") {
 		a.testDriveHandoffReadySocket(w, r, trial.ID)
 		return true
@@ -58830,9 +58849,12 @@ func testDriveExternalAction(r *http.Request) bool {
 }
 
 func (a *App) renderTestDriveNeutral(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("X-Robots-Tag", "noindex, nofollow")
+	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusForbidden)
-	a.render(w, r, "test_drive_neutral.html", nil)
+	a.render(w, r, "test_drive_neutral.html", map[string]any{"ActivationGuide": hasQueryFlag(r, "test_drive_activation")})
 }
 
 func (a *App) renderTestDriveWelcome(w http.ResponseWriter, r *http.Request, trial privateTestDrive) {
