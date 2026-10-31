@@ -115,3 +115,25 @@ function visualEditorDocumentEnvelope(htmlText) {
     bodyHTML: htmlText.slice(contentStart, contentEnd)
   };
 }
+
+/* Jodit's toolbar visually receives taps in iOS Safari, but custom button
+   callbacks can be skipped after the iframe has owned the touch sequence.
+   Intercept only the save icon at touch-end and call the same save routine. */
+(function installVisualEditorMobileSaveFallback() {
+  function isSaveToolbarControl(eventTarget) {
+    if (!eventTarget || typeof eventTarget.closest !== 'function') return false;
+    const toolbarButton = eventTarget.closest('.jodit-toolbar-button');
+    if (!toolbarButton) return false;
+    if (toolbarButton.classList.contains('jodit-toolbar-button_savePageHtml')) return true;
+    const saveImage = toolbarButton.querySelector('img[src*="save-page.png"]');
+    return Boolean(saveImage);
+  }
+
+  document.addEventListener('touchend', function saveOnMobileTouch(touchEvent) {
+    if (!isSaveToolbarControl(touchEvent.target)) return;
+    if (typeof submitVisualEditorForm !== 'function' || typeof visualHtmlEditor === 'undefined') return;
+    touchEvent.preventDefault();
+    touchEvent.stopImmediatePropagation();
+    submitVisualEditorForm(visualHtmlEditor);
+  }, {capture: true, passive: false});
+})();
