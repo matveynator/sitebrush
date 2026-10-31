@@ -15,6 +15,11 @@
   display: none !important;
 }
 
+/* Test Drive actions belong to the rendered site, not inside ?visual. */
+#visualEditorForm ~ .test-drive-save {
+  display: none !important;
+}
+
 .SiteBrushAdminDialog {
   box-sizing: border-box;
   width: min(100%, 480px);
