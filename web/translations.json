@@ -1780,7 +1780,11 @@
     "auth_resend_confirmation_button": "Resend confirmation link",
     "auth_return_to_login": "Go to sign in",
     "auth_create_another_site": "Create another site",
-    "auth_email_login": "Sign in with email"
+    "auth_email_login": "Sign in with email",
+    "test_drive_change_source": "Change source website",
+    "test_drive_change_source_hint": "Changing the source clears the current private draft, including downloaded pages and files. Your address and email verification stay in place.",
+    "test_drive_source_invalid": "Enter a valid public website address.",
+    "site_copy_use_found": "Use downloaded content"
   },
   "fr": {
     "test_drive_form_expired": "Ce formulaire Test Drive a expiré. Veuillez réessayer.",
@@ -3327,7 +3331,11 @@
     "auth_resend_confirmation_button": "Renvoyer le lien de confirmation",
     "auth_return_to_login": "Se connecter",
     "auth_create_another_site": "Créer un autre site",
-    "auth_email_login": "Se connecter par courriel"
+    "auth_email_login": "Se connecter par courriel",
+    "test_drive_change_source": "Changer de site source",
+    "test_drive_change_source_hint": "Changer de source efface le brouillon privé actuel, y compris les pages et fichiers téléchargés. Votre adresse et la vérification de votre e-mail sont conservées.",
+    "test_drive_source_invalid": "Saisissez une adresse de site public valide.",
+    "site_copy_use_found": "Utiliser le contenu téléchargé"
   },
   "ru": {
     "test_drive_form_expired": "Срок действия формы Test Drive истёк. Попробуйте ещё раз.",
@@ -5110,7 +5118,11 @@
     "auth_resend_confirmation_button": "Отправить ссылку повторно",
     "auth_return_to_login": "Перейти ко входу",
     "auth_create_another_site": "Создать другой сайт",
-    "auth_email_login": "Войти по почте"
+    "auth_email_login": "Войти по почте",
+    "test_drive_change_source": "Изменить исходный сайт",
+    "test_drive_change_source_hint": "При смене источника текущий приватный черновик, включая скачанные страницы и файлы, будет удалён. Адрес сайта и подтверждение e-mail сохранятся.",
+    "test_drive_source_invalid": "Введите корректный адрес общедоступного сайта.",
+    "site_copy_use_found": "Использовать скачанное"
   },
   "ja": {
     "test_drive_form_expired": "Test Drive フォームの有効期限が切れました。もう一度お試しください。",
@@ -6653,7 +6665,11 @@
     "auth_resend_confirmation_button": "確認リンクを再送信",
     "auth_return_to_login": "ログインへ",
     "auth_create_another_site": "別のサイトを作成",
-    "auth_email_login": "メールでログイン"
+    "auth_email_login": "メールでログイン",
+    "test_drive_change_source": "コピー元のサイトを変更",
+    "test_drive_change_source_hint": "コピー元を変更すると、ダウンロードしたページやファイルを含む現在の非公開下書きが消去されます。サイトのアドレスとメール認証は維持されます。",
+    "test_drive_source_invalid": "有効な公開ウェブサイトのアドレスを入力してください。",
+    "site_copy_use_found": "ダウンロード済みの内容を使用"
   },
   "it": {
     "test_drive_form_expired": "Il modulo Test Drive è scaduto. Riprova.",
@@ -8196,7 +8212,11 @@
     "auth_resend_confirmation_button": "Invia di nuovo il link",
     "auth_return_to_login": "Vai all’accesso",
     "auth_create_another_site": "Crea un altro sito",
-    "auth_email_login": "Accedi con l’email"
+    "auth_email_login": "Accedi con l’email",
+    "test_drive_change_source": "Cambia sito di origine",
+    "test_drive_change_source_hint": "Cambiare origine elimina la bozza privata corrente, comprese pagine e file scaricati. L’indirizzo e la verifica e-mail rimangono validi.",
+    "test_drive_source_invalid": "Inserisci un indirizzo valido di un sito pubblico.",
+    "site_copy_use_found": "Usa i contenuti scaricati"
   },
   "sv": {
     "test_drive_form_expired": "Test Drive-formuläret har gått ut. Försök igen.",
@@ -9739,7 +9759,11 @@
     "auth_resend_confirmation_button": "Skicka bekräftelselänken igen",
     "auth_return_to_login": "Gå till inloggning",
     "auth_create_another_site": "Skapa en annan webbplats",
-    "auth_email_login": "Logga in med e-post"
+    "auth_email_login": "Logga in med e-post",
+    "test_drive_change_source": "Byt källwebbplats",
+    "test_drive_change_source_hint": "När du byter källa raderas det nuvarande privata utkastet, inklusive hämtade sidor och filer. Din adress och e-postverifiering behålls.",
+    "test_drive_source_invalid": "Ange en giltig adress till en offentlig webbplats.",
+    "site_copy_use_found": "Använd hämtat innehåll"
   },
   "fi": {
     "test_drive_form_expired": "Test Drive -lomake on vanhentunut. Yritä uudelleen.",
@@ -11282,7 +11306,11 @@
     "auth_resend_confirmation_button": "Lähetä vahvistuslinkki uudelleen",
     "auth_return_to_login": "Siirry kirjautumaan",
     "auth_create_another_site": "Luo toinen sivusto",
-    "auth_email_login": "Kirjaudu sähköpostilla"
+    "auth_email_login": "Kirjaudu sähköpostilla",
+    "test_drive_change_source": "Vaihda lähdesivusto",
+    "test_drive_change_source_hint": "Lähteen vaihtaminen poistaa nykyisen yksityisen luonnoksen sekä ladatut sivut ja tiedostot. Osoitteesi ja sähköpostivahvistuksesi säilyvät.",
+    "test_drive_source_invalid": "Anna julkisen verkkosivuston kelvollinen osoite.",
+    "site_copy_use_found": "Käytä ladattua sisältöä"
   },
   "mn": {
     "test_drive_form_expired": "Test Drive маягтын хугацаа дууссан. Дахин оролдоно уу.",
@@ -12825,7 +12853,11 @@
     "auth_resend_confirmation_button": "Баталгаажуулах холбоос дахин илгээх",
     "auth_return_to_login": "Нэвтрэх хэсэг рүү",
     "auth_create_another_site": "Өөр сайт үүсгэх",
-    "auth_email_login": "Имэйлээр нэвтрэх"
+    "auth_email_login": "Имэйлээр нэвтрэх",
+    "test_drive_change_source": "Эх сайтыг өөрчлөх",
+    "test_drive_change_source_hint": "Эх сайтыг өөрчилбөл татсан хуудас, файлуудтай нь одоогийн хувийн ноорог устна. Сайтын хаяг болон и-мэйл баталгаажуулалт хэвээр үлдэнэ.",
+    "test_drive_source_invalid": "Нийтэд нээлттэй сайтын зөв хаяг оруулна уу.",
+    "site_copy_use_found": "Татсан агуулгыг ашиглах"
   },
   "zh": {
     "test_drive_form_expired": "Test Drive 表单已过期。请重试。",
@@ -14368,7 +14400,11 @@
     "auth_resend_confirmation_button": "重新发送确认链接",
     "auth_return_to_login": "前往登录",
     "auth_create_another_site": "创建其他网站",
-    "auth_email_login": "使用邮箱登录"
+    "auth_email_login": "使用邮箱登录",
+    "test_drive_change_source": "更换来源网站",
+    "test_drive_change_source_hint": "更换来源会清除当前的私人草稿，包括已下载的页面和文件。您的网站地址和邮箱验证状态将保留。",
+    "test_drive_source_invalid": "请输入有效的公开网站地址。",
+    "site_copy_use_found": "使用已下载的内容"
   },
   "he": {
     "test_drive_form_expired": "תוקף טופס Test Drive פג. נסו שוב.",
@@ -15911,7 +15947,11 @@
     "auth_resend_confirmation_button": "שליחה חוזרת של קישור האימות",
     "auth_return_to_login": "מעבר לכניסה",
     "auth_create_another_site": "יצירת אתר אחר",
-    "auth_email_login": "כניסה באמצעות דוא״ל"
+    "auth_email_login": "כניסה באמצעות דוא״ל",
+    "test_drive_change_source": "שינוי אתר המקור",
+    "test_drive_change_source_hint": "שינוי המקור ימחק את הטיוטה הפרטית הנוכחית, כולל דפים וקבצים שהורדו. כתובת האתר ואימות הדוא״ל יישמרו.",
+    "test_drive_source_invalid": "יש להזין כתובת תקינה של אתר ציבורי.",
+    "site_copy_use_found": "שימוש בתוכן שהורד"
   },
   "fa": {
     "test_drive_form_expired": "اعتبار فرم Test Drive به پایان رسیده است. دوباره تلاش کنید.",
@@ -17454,7 +17494,11 @@
     "auth_resend_confirmation_button": "ارسال دوباره پیوند تأیید",
     "auth_return_to_login": "رفتن به ورود",
     "auth_create_another_site": "ساخت سایت دیگر",
-    "auth_email_login": "ورود با ایمیل"
+    "auth_email_login": "ورود با ایمیل",
+    "test_drive_change_source": "تغییر وب‌سایت مبدأ",
+    "test_drive_change_source_hint": "با تغییر مبدأ، پیش‌نویس خصوصی فعلی همراه با صفحه‌ها و فایل‌های دریافت‌شده پاک می‌شود. نشانی سایت و تأیید ایمیل شما حفظ می‌شود.",
+    "test_drive_source_invalid": "نشانی معتبر یک وب‌سایت عمومی را وارد کنید.",
+    "site_copy_use_found": "استفاده از محتوای دریافت‌شده"
   },
   "de": {
     "test_drive_form_expired": "Das Test-Drive-Formular ist abgelaufen. Bitte versuchen Sie es erneut.",
@@ -18997,7 +19041,11 @@
     "auth_resend_confirmation_button": "Bestätigungslink erneut senden",
     "auth_return_to_login": "Zur Anmeldung",
     "auth_create_another_site": "Andere Website erstellen",
-    "auth_email_login": "Mit E-Mail anmelden"
+    "auth_email_login": "Mit E-Mail anmelden",
+    "test_drive_change_source": "Quellwebsite ändern",
+    "test_drive_change_source_hint": "Beim Ändern der Quelle wird der aktuelle private Entwurf einschließlich heruntergeladener Seiten und Dateien gelöscht. Adresse und E-Mail-Bestätigung bleiben erhalten.",
+    "test_drive_source_invalid": "Geben Sie eine gültige Adresse einer öffentlichen Website ein.",
+    "site_copy_use_found": "Heruntergeladene Inhalte verwenden"
   },
   "tr": {
     "test_drive_form_expired": "Test Drive formunun süresi doldu. Lütfen tekrar deneyin.",
@@ -20540,7 +20588,11 @@
     "auth_resend_confirmation_button": "Doğrulama bağlantısını yeniden gönder",
     "auth_return_to_login": "Girişe git",
     "auth_create_another_site": "Başka site oluştur",
-    "auth_email_login": "E-posta ile giriş yap"
+    "auth_email_login": "E-posta ile giriş yap",
+    "test_drive_change_source": "Kaynak siteyi değiştir",
+    "test_drive_change_source_hint": "Kaynak değiştirildiğinde indirilen sayfalar ve dosyalar dahil mevcut özel taslak silinir. Site adresiniz ve e-posta doğrulamanız korunur.",
+    "test_drive_source_invalid": "Geçerli bir herkese açık site adresi girin.",
+    "site_copy_use_found": "İndirilen içeriği kullan"
   },
   "kk": {
     "test_drive_form_expired": "Test Drive пішінінің мерзімі аяқталды. Қайталап көріңіз.",
@@ -22083,7 +22135,11 @@
     "auth_resend_confirmation_button": "Растау сілтемесін қайта жіберу",
     "auth_return_to_login": "Кіруге өту",
     "auth_create_another_site": "Басқа сайт жасау",
-    "auth_email_login": "Электрондық поштамен кіру"
+    "auth_email_login": "Электрондық поштамен кіру",
+    "test_drive_change_source": "Бастапқы сайтты өзгерту",
+    "test_drive_change_source_hint": "Дереккөзді өзгерткенде жүктелген беттер мен файлдарды қоса алғанда, ағымдағы жеке жоба жойылады. Сайт мекенжайы мен e-mail растауы сақталады.",
+    "test_drive_source_invalid": "Жалпыға қолжетімді сайттың дұрыс мекенжайын енгізіңіз.",
+    "site_copy_use_found": "Жүктелген мазмұнды пайдалану"
   },
   "es": {
     "test_drive_form_expired": "El formulario de Test Drive ha caducado. Inténtalo de nuevo.",
@@ -23626,7 +23682,11 @@
     "auth_resend_confirmation_button": "Reenviar enlace de confirmación",
     "auth_return_to_login": "Ir a iniciar sesión",
     "auth_create_another_site": "Crear otro sitio",
-    "auth_email_login": "Iniciar sesión con correo"
+    "auth_email_login": "Iniciar sesión con correo",
+    "test_drive_change_source": "Cambiar sitio de origen",
+    "test_drive_change_source_hint": "Al cambiar el origen se borra el borrador privado actual, incluidas las páginas y los archivos descargados. Se conservan la dirección y la verificación del correo.",
+    "test_drive_source_invalid": "Introduce una dirección válida de un sitio web público.",
+    "site_copy_use_found": "Usar el contenido descargado"
   },
   "pt": {
     "test_drive_form_expired": "O formulário do Test Drive expirou. Tente novamente.",
@@ -25169,6 +25229,10 @@
     "auth_resend_confirmation_button": "Reenviar ligação de confirmação",
     "auth_return_to_login": "Iniciar sessão",
     "auth_create_another_site": "Criar outro site",
-    "auth_email_login": "Iniciar sessão por email"
+    "auth_email_login": "Iniciar sessão por email",
+    "test_drive_change_source": "Alterar site de origem",
+    "test_drive_change_source_hint": "Alterar a origem apaga o rascunho privado atual, incluindo páginas e ficheiros descarregados. O endereço e a confirmação do e-mail são mantidos.",
+    "test_drive_source_invalid": "Introduza um endereço válido de um site público.",
+    "site_copy_use_found": "Usar o conteúdo descarregado"
   }
 }

@@ -220,6 +220,56 @@ func TestEffectiveGrabResourceContentTypeTrustsJavaScriptExtension(t *testing.T)
 	}
 }
 
+func TestImportResourceDiscoveryRejectsRecursivePaths(t *testing.T) {
+	spider := &pageSpider{}
+	for _, resourceURL := range []string{
+		"https://github.com/inorganik/countUp.js/dist/dist/dist/countUp.min.js",
+		"https://example.org/" + strings.Repeat("segment/", 300) + "app.js",
+	} {
+		if !spider.shouldSkipMirrorResource(resourceURL) {
+			t.Fatalf("recursive resource was admitted: %s", resourceURL)
+		}
+	}
+	if spider.shouldSkipMirrorResource("https://example.org/assets/dist/countUp.min.js") {
+		t.Fatal("ordinary resource was rejected")
+	}
+}
+
+func TestSinglePageResourceLimitStopsBeforeNetwork(t *testing.T) {
+	spider := &pageSpider{maxDepth: 8, maxResources: 2, resources: map[string]*mirroredResource{
+		"https://example.org/":        {url: "https://example.org/"},
+		"https://example.org/one.css": {url: "https://example.org/one.css"},
+	}}
+	_, err := spider.fetchResource("https://example.org/two.css", nil, 0, false)
+	if err == nil || !strings.Contains(err.Error(), "resource discovery limit") {
+		t.Fatalf("new resource was admitted after limit: %v", err)
+	}
+}
+
+func TestSinglePageImportRetainsParentContextForServiceDocuments(t *testing.T) {
+	parentContext, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sourceURL, err := url.Parse("https://example.org/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	spider, _ := prepareSinglePageImport(grabImportRequest{
+		Domain:          "trial.example.org",
+		PagePath:        "/",
+		SourceURL:       sourceURL.String(),
+		RemoteSourceURL: sourceURL,
+		HTML:            "<html><body></body></html>",
+		Context:         parentContext,
+	}, nil)
+	if spider.context() != parentContext || spider.context().Err() != nil {
+		t.Fatal("service-document requests lost their live parent context")
+	}
+	cancel()
+	if spider.context().Err() != context.Canceled {
+		t.Fatal("service-document requests no longer follow parent cancellation")
+	}
+}
+
 func TestDecodeImportedResourceBytesConvertsJavaScriptToUTF8(t *testing.T) {
 	sourceText := `var title = "Текущее время";`
 	sourceBytes, encodeErr := charmap.Windows1251.NewEncoder().Bytes([]byte(sourceText))
