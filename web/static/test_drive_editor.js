@@ -2,6 +2,7 @@
   'use strict';
   const rootElement = document.querySelector('[data-test-drive-save]');
   if (!rootElement) return;
+  const actionsElement = rootElement.querySelector('[data-trial-actions]');
   const openButtonElement = rootElement.querySelector('[data-trial-open]');
   const copyButtonElement = rootElement.querySelector('[data-trial-copy]');
   const overlayElement = rootElement.querySelector('[data-trial-overlay]');
@@ -28,8 +29,7 @@
   const trialModel = {email: '', emailDraft: '', changingEmail: false, codeSent: false, status: 'private', open: false, required: false, humanVerified: true, retryUntil: 0, error: '', captchaImage: '', captchaID: '', captchaAnswer: '', captchaIssuedAt: 0, captchaLoading: false, prompted: alreadyPrompted};
 
   function render() {
-    openButtonElement.hidden = trialModel.status === 'activated' || trialModel.open || Date.now() - openedAt < 60000;
-    copyButtonElement.hidden = trialModel.status === 'activated';
+    actionsElement.hidden = trialModel.status === 'activated';
     overlayElement.hidden = !trialModel.open || trialModel.status === 'activated';
     emailFormElement.hidden = trialModel.status === 'email_verified' || trialModel.email !== '' && !trialModel.changingEmail;
     captchaElement.hidden = trialModel.humanVerified;

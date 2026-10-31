@@ -24103,7 +24103,7 @@ func (a *App) downloadPublicTrialSourceHTML(ctx context.Context, sourceURL, prog
 		Delay:       1500 * time.Millisecond,
 		ShouldRetry: shouldRetryGrabSourceHTMLDownload,
 		OnAttempt: func(attempt, total int, pageURL *url.URL) {
-			a.publishPublicTrialSourceAttempt(progressToken, "source_attempt", pageURL, attempt, total, 0)
+			a.publishPublicTrialSourceAttempt(progressToken, "source_attempt", pageURL, attempt, total, 0, "")
 		},
 		OnRetry: func(attempt, total int, pageURL *url.URL, retryErr error, delay time.Duration) {
 			a.publishPublicTrialSourceRetry(progressToken, pageURL, attempt, total, retryErr, delay)
@@ -24135,7 +24135,7 @@ func (a *App) downloadPublicTrialSourceHTML(ctx context.Context, sourceURL, prog
 			Delay:       1500 * time.Millisecond,
 			ShouldRetry: shouldRetryGrabSourceHTMLDownload,
 			OnAttempt: func(attempt, total int, pageURL *url.URL) {
-				a.publishPublicTrialSourceAttempt(progressToken, "source_attempt", pageURL, attempt, total, 0)
+				a.publishPublicTrialSourceAttempt(progressToken, "source_attempt", pageURL, attempt, total, 0, "")
 			},
 			OnRetry: func(attempt, total int, pageURL *url.URL, retryErr error, delay time.Duration) {
 				a.publishPublicTrialSourceRetry(progressToken, pageURL, attempt, total, retryErr, delay)
@@ -24162,7 +24162,7 @@ func (a *App) downloadPublicTrialSourceHTML(ctx context.Context, sourceURL, prog
 	return nil, nil, errors.New("source page did not return a public HTML page")
 }
 
-func (a *App) publishPublicTrialSourceAttempt(progressToken, stage string, pageURL *url.URL, attempt, total int, retryDelaySeconds int) {
+func (a *App) publishPublicTrialSourceAttempt(progressToken, stage string, pageURL *url.URL, attempt, total, retryDelaySeconds int, retryReason string) {
 	if a == nil || a.grabTracker == nil || strings.TrimSpace(progressToken) == "" {
 		return
 	}
@@ -24179,6 +24179,7 @@ func (a *App) publishPublicTrialSourceAttempt(progressToken, stage string, pageU
 		RetryTotal:        total,
 		RetryDelaySeconds: retryDelaySeconds,
 		CurrentURL:        currentURL,
+		CurrentError:      retryReason,
 		CompletedPercent:  5,
 	})
 }
@@ -24208,7 +24209,7 @@ func (a *App) publishPublicTrialSourceRetry(progressToken string, pageURL *url.U
 		CurrentError:      crawler.ErrorReason(retryErr),
 		CompletedPercent:  5,
 	})
-	a.publishPublicTrialSourceAttempt(progressToken, "retry_wait", pageURL, attempt, total-1, delaySeconds)
+	a.publishPublicTrialSourceAttempt(progressToken, "retry_wait", pageURL, attempt, total-1, delaySeconds, crawler.ErrorReason(retryErr))
 }
 
 func (a *App) smallestPublicTrialPlan(ctx context.Context, requiredBytes int64) (publicTrialPlanView, publicTrialPlanView, bool) {
@@ -25003,7 +25004,7 @@ func grabSourceHTMLRetryOptions(tracker *grabProgressTracker, progressToken stri
 			}
 			tracker.publish(grabProgressEvent{
 				Token: progressToken, Stage: "retry_wait", RetryAttempt: attempt, RetryTotal: total,
-				RetryDelaySeconds: int(delay.Seconds()), CurrentURL: pageURL.String(), CurrentError: retryErr.Error(),
+				RetryDelaySeconds: int(delay.Seconds()), CurrentURL: pageURL.String(), CurrentError: crawler.ErrorReason(retryErr),
 			})
 		},
 	}
@@ -26843,11 +26844,11 @@ func (spider *pageSpider) downloadWholeSitePageHTMLWithRetries(client *http.Clie
 	}, crawler.HTMLDownloadRetryOptions{
 		Attempts: max(1, retries+1), Delay: grabImportFailedResourceRetryDelay, ShouldRetry: shouldRetryGrabSourceHTMLDownload,
 		OnRetry: func(attempt, total int, currentURL *url.URL, retryErr error, delay time.Duration) {
-			spider.publishRetryProgress("retry_wait", currentURL.String(), attempt, total-1, delay)
+			spider.publishRetryProgress("retry_wait", currentURL.String(), attempt, total-1, delay, crawler.ErrorReason(retryErr))
 		},
 		OnAttempt: func(attempt, total int, currentURL *url.URL) {
 			if attempt > 1 {
-				spider.publishRetryProgress("retrying", currentURL.String(), attempt-1, total-1, 0)
+				spider.publishRetryProgress("retrying", currentURL.String(), attempt-1, total-1, 0, "")
 			}
 		},
 	})
@@ -44651,6 +44652,7 @@ func siteCopyMenuTexts(translations map[string]string) map[string]string {
 		"interruptingImport":        translationOrDefault(translations, "site_copy_interrupting_import", "Stopping import..."),
 		"importInterrupted":         translationOrDefault(translations, "site_copy_import_interrupted", "Import interrupted."),
 		"retryingAutomatically":     translationOrDefault(translations, "site_copy_retrying_automatically", "Retrying temporary errors"),
+		"sourceSlowDown":            translationOrDefault(translations, "site_copy_source_slow_down", "The source website returned HTTP 429 and asked us to slow down. SiteBrush must wait before retrying; please wait."),
 		"closeButton":               translationOrDefault(translations, "tree_close", "Close"),
 		"failedResourcesTitle":      translationOrDefault(translations, "site_copy_failed_resources_title", "Failed resources:"),
 		"failedResourceBadge":       translationOrDefault(translations, "site_copy_failed_resource_badge", "failed"),
@@ -47333,7 +47335,7 @@ func (spider *pageSpider) publishResourceProgress(stage, currentURL string, curr
 	})
 }
 
-func (spider *pageSpider) publishRetryProgress(stage, currentURL string, attempt, total int, delay time.Duration) {
+func (spider *pageSpider) publishRetryProgress(stage, currentURL string, attempt, total int, delay time.Duration, retryReason string) {
 	if spider.tracker == nil || strings.TrimSpace(spider.progressToken) == "" {
 		return
 	}
@@ -47361,6 +47363,7 @@ func (spider *pageSpider) publishRetryProgress(stage, currentURL string, attempt
 		RetryTotal:         total,
 		RetryDelaySeconds:  delaySeconds,
 		CurrentURL:         currentURL,
+		CurrentError:       retryReason,
 		CompletedPercent:   completedPercent,
 	})
 }
@@ -47384,7 +47387,7 @@ func (spider *pageSpider) finalProgressEvent(token, stage string) grabProgressEv
 
 func (spider *pageSpider) waitBeforeRetry(currentURL string, attempt, total int) {
 	if spider.tracker != nil && strings.TrimSpace(spider.progressToken) != "" {
-		spider.publishRetryProgress("retry_wait", currentURL, attempt, total, grabImportFailedResourceRetryDelay)
+		spider.publishRetryProgress("retry_wait", currentURL, attempt, total, grabImportFailedResourceRetryDelay, spider.failedResourceErrors[currentURL])
 	}
 	select {
 	case <-spider.context().Done():
@@ -47478,6 +47481,12 @@ func (spider *pageSpider) retryFailedResources(baseURL *url.URL, attempts int) {
 		if len(failedURLs) > 0 {
 			currentRetryURL = failedURLs[0]
 		}
+		for _, failedURL := range failedURLs {
+			if spider.failedResourceErrors[failedURL] == "429" {
+				currentRetryURL = failedURL
+				break
+			}
+		}
 		spider.waitBeforeRetry(currentRetryURL, attempt, attempts)
 		if spider.contextCanceled() {
 			return
@@ -47496,7 +47505,7 @@ func (spider *pageSpider) retryFailedResources(baseURL *url.URL, attempts int) {
 				continue
 			}
 			delete(spider.resources, failedURL)
-			spider.publishRetryProgress("retrying", failedURL, attempt, attempts, 0)
+			spider.publishRetryProgress("retrying", failedURL, attempt, attempts, 0, "")
 			_, _ = spider.fetchResource(failedURL, baseURL, 0, true)
 		}
 	}
