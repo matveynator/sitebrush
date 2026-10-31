@@ -33,6 +33,10 @@
 .SiteBrushCopySiteField{color:var(--copy-muted);}
 .SiteBrushCopySiteActions{margin-top:0;padding-top:16px;border-top:1px solid var(--copy-border);}
 .SiteBrushCopySiteResources{max-height:min(300px,34dvh);}
+.SiteBrushCopySiteClose:disabled,.SiteBrushCopySiteSecondaryButton:disabled{opacity:.5;cursor:default;}
+.SiteBrushCopySiteAdvancedOptions{display:grid;gap:10px;border:1px solid var(--copy-border);border-radius:var(--copy-radius);padding:10px;}
+.SiteBrushCopySiteAdvancedOptions summary{color:var(--copy-primary);cursor:pointer;font-weight:500;}
+.SiteBrushCopySiteAdvancedOptions[open] > :not(summary){margin-top:10px;}
 @media(max-width:900px),(hover:none) and (pointer:coarse){
   .SiteBrushCopySiteOverlay{padding:12px;align-items:center;}
   .SiteBrushCopySiteDialog{width:100%;max-height:calc(100dvh - 24px);padding:16px;}
@@ -455,6 +459,7 @@
     const finishQuery = String(configuration && configuration.finishQuery ? configuration.finishQuery : 'grab_finish');
     const webSocketQuery = String(configuration && configuration.webSocketQuery ? configuration.webSocketQuery : 'grab_ws');
     const publicTrialMode = Boolean(configuration && configuration.publicTrial);
+    const privateTestDriveMode = Boolean(configuration && configuration.privateTestDrive);
     const overlayElement = createElement('div', 'SiteBrushCopySiteOverlay');
     overlayElement.setAttribute('data-sitebrush-owned', 'true');
     const dialogElement = createElement('div', 'SiteBrushCopySiteDialog');
@@ -504,7 +509,7 @@
     sourceUrlElement.required = true;
     sourceUrlElement.placeholder = textFromConfig(configuration, 'sourceURLPlaceholder', 'https://example.com/');
     sourceUrlElement.value = String(configuration && configuration.sourceURL ? configuration.sourceURL : '');
-    sourceUrlElement.readOnly = Boolean(configuration && configuration.sourceEditable === false);
+    sourceUrlElement.readOnly = Boolean(configuration && configuration.sourceEditable === false && !privateTestDriveMode);
     const submitButtonElement = createElement('button', 'SiteBrushCopySiteButton');
     submitButtonElement.type = 'submit';
     const submitIconElement = document.createElement('img');
@@ -581,10 +586,20 @@
     actionRowElement.appendChild(continueButtonElement);
 
     formElement.appendChild(primaryRowElement);
-    formElement.appendChild(secondaryGridElement);
-    formElement.appendChild(wholeSiteLabelElement);
-    formElement.appendChild(automaticTemplateDisabledFieldElement);
-    formElement.appendChild(automaticTemplateOptionElement);
+    if (privateTestDriveMode) {
+      const advancedOptionsElement = createElement('details', 'SiteBrushCopySiteAdvancedOptions');
+      advancedOptionsElement.appendChild(createElement('summary', '', textFromConfig(configuration, 'advancedOptions', '')));
+      advancedOptionsElement.appendChild(secondaryGridElement);
+      advancedOptionsElement.appendChild(wholeSiteLabelElement);
+      advancedOptionsElement.appendChild(automaticTemplateDisabledFieldElement);
+      advancedOptionsElement.appendChild(automaticTemplateOptionElement);
+      formElement.appendChild(advancedOptionsElement);
+    } else {
+      formElement.appendChild(secondaryGridElement);
+      formElement.appendChild(wholeSiteLabelElement);
+      formElement.appendChild(automaticTemplateDisabledFieldElement);
+      formElement.appendChild(automaticTemplateOptionElement);
+    }
     let captchaImageElement = null;
     let captchaAnswerElement = null;
     let captchaTokenElement = null;
@@ -641,6 +656,7 @@
     let activeDownloadController = null;
     let activeRequestIsPreview = false;
     let modalClosed = false;
+    let sourceChangeRunning = false;
 
     function refreshPublicTrialCaptcha() {
       if (!captchaImageElement) return;
@@ -749,6 +765,7 @@
     }
 
     function closeModal() {
+      if (sourceChangeRunning) return;
       modalClosed = true;
       if (requestIsRunning && activeGrabToken !== '') {
         if (activeDownloadController && (publicTrialMode || activeRequestIsPreview)) {
@@ -1145,7 +1162,8 @@
       setContinueButtonPrimaryAction(true);
       continueButtonElement.textContent = singlePageRequired
         ? textFromConfig(configuration, 'copyFirstPage', 'Copy first page')
-        : requiresVerification ? (String(document.documentElement.lang || '').startsWith('ru') ? 'Открыть частично импортированный сайт' : 'Open partially imported site')
+        : requiresVerification ? textFromConfig(configuration, 'openSite', '')
+        : privateTestDriveMode ? textFromConfig(configuration, 'copyButton', 'Copy')
         : textFromConfig(configuration, 'continueButton', 'Continue');
       continueButtonElement.classList.remove('SiteBrushCopySiteHidden');
       continueButtonElement.disabled = hostingTooLarge;
@@ -1194,6 +1212,49 @@
         return;
       }
       if (!formElement.reportValidity()) {
+        return;
+      }
+      if (privateTestDriveMode && sourceUrlElement.value.trim() !== String(configuration.sourceURL || '')) {
+        if (sourceChangeRunning) return;
+        sourceChangeRunning = true;
+        submitButtonElement.disabled = true;
+        closeButtonElement.disabled = true;
+        cancelButtonElement.disabled = true;
+        setCopySiteStatus(statusElement, textFromConfig(configuration, 'sourceChangeWarning', ''), 'warning');
+        const sourceRequestBody = new URLSearchParams();
+        sourceRequestBody.set('source_url', sourceUrlElement.value.trim());
+        sourceRequestBody.set('account_csrf', String(configuration.csrfToken || ''));
+        fetch(configuredEndpoint(configuration, 'test_drive_source'), {
+          method: 'POST', body: sourceRequestBody,
+          headers: {'Accept': 'application/json', 'X-SiteBrush-CSRF': String(configuration.csrfToken || '')}
+        })
+          .then(function readChangedSource(response) {
+            if (response.status === 400) {
+              const sourceValidationError = new Error(textFromConfig(configuration, 'sourceChangeInvalid', ''));
+              sourceValidationError.sourceInvalid = true;
+              throw sourceValidationError;
+            }
+            if (!response.ok) {
+              window.location.replace('/?edit');
+              return null;
+            }
+            return response.json();
+          })
+          .then(function useChangedSource(changedSource) {
+            if (!changedSource) return;
+            window.location.replace('/?edit#test-drive-copy');
+          })
+          .catch(function reportChangedSourceError(error) {
+            if (!error.sourceInvalid) {
+              window.location.replace('/?edit');
+              return;
+            }
+            sourceChangeRunning = false;
+            submitButtonElement.disabled = false;
+            closeButtonElement.disabled = false;
+            cancelButtonElement.disabled = false;
+            setCopySiteStatus(statusElement, error.message, 'error');
+          });
         return;
       }
       const progressToken = randomProgressToken();
@@ -1434,6 +1495,9 @@
         clearPendingImport();
       }
       invalidatePreview();
+      if (privateTestDriveMode && sourceUrlElement.value.trim() !== String(configuration.sourceURL || '')) {
+        setCopySiteStatus(statusElement, textFromConfig(configuration, 'sourceChangeWarning', ''), 'warning');
+      }
     });
     sourceIPElement.addEventListener('input', invalidatePreview);
     sourceLanguageElement.addEventListener('change', invalidatePreview);
@@ -1451,6 +1515,7 @@
       requestPreview();
     });
     restorePendingImport();
+    if (configuration && configuration.autoPreview && sourceUrlElement.value !== '' && resumeImportID === '') requestPreview();
     sourceUrlElement.focus();
     if (sourceUrlElement.value !== '') {
       sourceUrlElement.select();
@@ -1534,7 +1599,7 @@
     let subdomainEdited = false;
     function renderTrialAddress() {
       if (!suggestedDomainElement || !subdomainInputElement) return;
-      const label = String(subdomainInputElement.value || '').toLowerCase().trim();
+      const label = window.SiteBrushDomainNameInput.normalize(subdomainInputElement.value);
       suggestedDomainElement.textContent = label && parentDomain ? publicTrialText(publicTrialConfiguration, 'suggestedAddress', 'Your site address') + ': ' + label + '.' + parentDomain : '';
     }
     function requestTrialDomain(sourceURL) {
@@ -1563,7 +1628,7 @@
     if (subdomainInputElement) {
       subdomainInputElement.addEventListener('input', function changeTrialAddress() {
         subdomainEdited = true;
-        subdomainInputElement.value = subdomainInputElement.value.toLowerCase();
+        subdomainInputElement.value = window.SiteBrushDomainNameInput.normalize(subdomainInputElement.value);
         renderTrialAddress();
       });
     }
@@ -1584,7 +1649,7 @@
           if (!subdomainEdited && subdomainInputElement && suggestion.domain) {
             subdomainInputElement.value = suggestion.domain.slice(0, -parentDomain.length - 1);
           }
-          const subdomainName = String(subdomainInputElement && subdomainInputElement.value || '').toLowerCase().trim();
+          const subdomainName = window.SiteBrushDomainNameInput.normalize(subdomainInputElement && subdomainInputElement.value);
           if (!/^[a-z0-9](?:[a-z0-9-]{0,22}[a-z0-9])?$/.test(subdomainName) || !parentDomain) {
             throw new Error(publicTrialText(publicTrialConfiguration, 'newSiteInvalid', 'Enter a valid subdomain name.'));
           }
@@ -1653,11 +1718,14 @@
     }
     function renderNewSiteAddress() {
       if (!domainPreviewElement || !subdomainInputElement) return;
-      const label = domainInput.normalize(subdomainInputElement.value).trim();
+      const label = domainInput.normalize(subdomainInputElement.value);
       const address = domainInput.address(label, String(configuration.parentDomain || ''));
       domainPreviewElement.textContent = address ? publicTrialText(configuration, 'suggestedAddress', 'Your site address') + ': ' + address : '';
     }
-    if (subdomainInputElement) subdomainInputElement.addEventListener('input', renderNewSiteAddress);
+    if (subdomainInputElement) subdomainInputElement.addEventListener('input', function normalizeNewSiteAddress() {
+      subdomainInputElement.value = domainInput.normalize(subdomainInputElement.value);
+      renderNewSiteAddress();
+    });
     renderNewSiteAddress();
     renderNewSiteState();
 
@@ -1678,7 +1746,8 @@
 
     function checkNewSiteDomain() {
       const subdomainInput = formElement.querySelector('input[name="subdomain"]');
-      const subdomainName = domainInput.normalize(subdomainInput.value).trim();
+      const subdomainName = domainInput.normalize(subdomainInput.value);
+      subdomainInput.value = subdomainName;
       const parentDomain = String(configuration && configuration.parentDomain || '').toLowerCase().trim();
       if (!domainInput.valid(subdomainName) || !parentDomain) {
         subdomainInput.setCustomValidity(publicTrialText(configuration, 'newSiteInvalid', 'Enter a valid subdomain name.'));

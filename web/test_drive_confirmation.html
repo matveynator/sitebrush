@@ -1,5 +1,8 @@
-<section class="test-drive-save" data-test-drive-save data-opened-at="{{.TestDriveOpenedAt}}" data-trial-id="{{.TestDriveID}}" data-csrf="{{.AccountCSRF}}">
-  <button type="button" class="SiteBrushAdminDialogNotice" data-trial-open>{{index .T "test_drive_save_title"}}</button>
+<section class="test-drive-save" data-test-drive-save data-opened-at="{{.TestDriveOpenedAt}}" data-trial-id="{{.TestDriveID}}" data-csrf="{{.AccountCSRF}}" data-copy-config="{{.SiteCopyConfigJSON}}">
+  <div class="SiteBrushTestDriveActions">
+    <button type="button" class="SiteBrushAdminDialogButton" data-trial-copy>{{index .T "test_drive_copy_site"}}</button>
+    <button type="button" class="SiteBrushAdminDialogNotice" data-trial-open>{{index .T "test_drive_save_title"}}</button>
+  </div>
   <div class="SiteBrushAdminDialogOverlay" data-trial-overlay hidden>
     <div class="SiteBrushAdminDialog" role="dialog" aria-modal="true" aria-labelledby="trial-save-title">
       <div class="SiteBrushAdminDialogHeader">
@@ -30,5 +33,6 @@
     </div>
   </div>
 </section>
+<script defer src="/p/static/site_copy.js"></script>
 <script defer src="/p/static/test_drive_session.js"></script>
 <script defer src="/p/static/test_drive_editor.js"></script>

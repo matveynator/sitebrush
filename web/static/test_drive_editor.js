@@ -3,6 +3,7 @@
   const rootElement = document.querySelector('[data-test-drive-save]');
   if (!rootElement) return;
   const openButtonElement = rootElement.querySelector('[data-trial-open]');
+  const copyButtonElement = rootElement.querySelector('[data-trial-copy]');
   const overlayElement = rootElement.querySelector('[data-trial-overlay]');
   const emailFormElement = rootElement.querySelector('[data-trial-email-form]');
   const codeFormElement = rootElement.querySelector('[data-trial-code-form]');
@@ -20,12 +21,15 @@
   const defaultErrorText = errorElement.textContent;
   const openedAt = Date.parse(rootElement.dataset.openedAt) || Date.now();
   const promptStorageKey = 'sitebrush.test-drive.prompt.' + rootElement.dataset.trialId;
+  const copyConfiguration = JSON.parse(rootElement.dataset.copyConfig || '{}');
+  copyConfiguration.csrfToken = rootElement.dataset.csrf;
   let alreadyPrompted = false;
   try { alreadyPrompted = window.sessionStorage.getItem(promptStorageKey) === '1'; } catch (storageError) { alreadyPrompted = false; }
   const trialModel = {email: '', emailDraft: '', changingEmail: false, codeSent: false, status: 'private', open: false, required: false, humanVerified: true, retryUntil: 0, error: '', captchaImage: '', captchaID: '', captchaAnswer: '', captchaIssuedAt: 0, captchaLoading: false, prompted: alreadyPrompted};
 
   function render() {
-    openButtonElement.hidden = trialModel.status === 'activated' || trialModel.open;
+    openButtonElement.hidden = trialModel.status === 'activated' || trialModel.open || Date.now() - openedAt < 60000;
+    copyButtonElement.hidden = trialModel.status === 'activated';
     overlayElement.hidden = !trialModel.open || trialModel.status === 'activated';
     emailFormElement.hidden = trialModel.status === 'email_verified' || trialModel.email !== '' && !trialModel.changingEmail;
     captchaElement.hidden = trialModel.humanVerified;
@@ -85,6 +89,15 @@
     try { window.sessionStorage.setItem(promptStorageKey, '1'); } catch (storageError) { /* A private browser may disable session storage. */ }
     ensureCaptcha();
     render();
+  }
+
+  function openPrivateCopy(automaticPreview) {
+    if (!window.SiteBrushCopySite) {
+      showError(new Error(defaultErrorText));
+      return;
+    }
+    copyConfiguration.autoPreview = Boolean(automaticPreview);
+    window.SiteBrushCopySite.open(copyConfiguration);
   }
 
   function submitAction(queryFlag, formElement) {
@@ -153,6 +166,7 @@
     render();
   });
   openButtonElement.addEventListener('click', function openFromButton() { openSaveDialog(false); });
+  copyButtonElement.addEventListener('click', function copyFromButton() { openPrivateCopy(false); });
   document.addEventListener('click', function requireEmailForExternalAction(event) {
     if (trialModel.status === 'activated') return;
     const actionElement = event.target.closest('[data-sitebrush-action]');
@@ -165,7 +179,7 @@
   }, true);
   window.setInterval(function updateTrialReminder() {
     if (trialModel.status === 'activated') return;
-    if (Date.now() - openedAt >= 60000 && !trialModel.open && !trialModel.prompted) {
+    if (Date.now() - openedAt >= 180000 && !trialModel.open && !trialModel.prompted && !document.querySelector('.SiteBrushCopySiteOverlay')) {
       openSaveDialog(false);
     }
     render();
@@ -173,4 +187,11 @@
   window.SiteBrushRequireTestDriveEmail = function requireTestDriveEmail() { openSaveDialog(true); };
   refreshStatus().catch(showError);
   render();
+  if (window.location.hash === '#activation') {
+    window.history.replaceState(null, '', window.location.pathname + window.location.search);
+    openSaveDialog(false);
+  } else if (window.location.hash === '#test-drive-copy') {
+    window.history.replaceState(null, '', window.location.pathname + window.location.search);
+    openPrivateCopy(true);
+  }
 })();

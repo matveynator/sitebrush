@@ -143,7 +143,7 @@ const publicTrialPreviewStallTimeout = 45 * time.Second
 const publicTrialConcurrentJobs = 2
 const publicTrialDailyJobsPerIP = 2
 const publicTrialTemporaryStorageBytes int64 = 2 << 30
-const publicTrialAnonymousSiteLimit = 8
+const publicTrialAnonymousSiteLimit = 100
 
 type publicTrialCapacityError struct{}
 
@@ -22973,20 +22973,52 @@ func (a *App) publicTrialSiteDomainCheck(w http.ResponseWriter, r *http.Request)
 		testDriveHTTPError(w, r, "public_trial_address_invalid", http.StatusBadRequest)
 		return
 	}
-	var parentDomain string
-	err := a.withServerControlDatabaseRead(r.Context(), "public-trial-domain-check", func(database *sql.DB) error {
-		parentDomain, _ = (hostingandsupport.Store{DB: database}).OwnerDomain(r.Context())
-		return nil
-	})
-	if err != nil || parentDomain == "" {
-		http.Error(w, "subdomain lookup is unavailable", http.StatusServiceUnavailable)
+	domain, err := a.testDriveDomain(r.Context(), label)
+	if err != nil {
+		a.logTestDriveError("domain-check", 0, r, err)
+		testDriveHTTPError(w, r, "public_trial_address_check_failed", http.StatusServiceUnavailable)
 		return
 	}
-	domain := label + "." + normalizeDomainName(parentDomain)
-	available := a.newSiteSubdomainAllowed(r.Context(), domain) && a.publicTrialDomainAvailable(r.Context(), domain)
+	available, err := a.publicTrialDomainAvailability(r.Context(), domain)
+	if err != nil {
+		a.logTestDriveError("domain-check", 0, r, err)
+		testDriveHTTPError(w, r, "public_trial_address_check_failed", http.StatusServiceUnavailable)
+		return
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"domain": domain, "available": available})
+}
+
+func (a *App) testDriveDomain(ctx context.Context, label string) (string, error) {
+	if !testDriveLabelValid(label) {
+		return "", errors.New("invalid Test Drive hostname label")
+	}
+	ownerDomain, err := a.testDriveParentDomain(ctx)
+	if err != nil {
+		return "", err
+	}
+	return label + "." + ownerDomain, nil
+}
+
+func (a *App) testDriveParentDomain(ctx context.Context) (string, error) {
+	var ownerDomain string
+	err := a.withServerControlDatabaseRead(ctx, "test-drive-owner-domain", func(database *sql.DB) error {
+		var found bool
+		ownerDomain, found = (hostingandsupport.Store{DB: database}).OwnerDomain(ctx)
+		if !found {
+			return errors.New("Test Drive owner domain unavailable")
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	ownerDomain = normalizeDomainName(ownerDomain)
+	if ownerDomain == "" || net.ParseIP(ownerDomain) != nil {
+		return "", errors.New("Test Drive owner domain unavailable")
+	}
+	return ownerDomain, nil
 }
 
 func (a *App) publicTrialSiteCaptcha(w http.ResponseWriter, r *http.Request) {
@@ -24473,33 +24505,49 @@ func randomPublicTrialSubdomain() string {
 }
 
 func (a *App) publicTrialDomainAvailable(ctx context.Context, domain string) bool {
+	available, err := a.publicTrialDomainAvailability(ctx, domain)
+	return err == nil && available
+}
+
+func (a *App) publicTrialDomainAvailability(ctx context.Context, domain string) (bool, error) {
 	domain = normalizeDomainName(domain)
 	if domain == "" || a.reservedServerSubdomain(ctx, domain) {
-		return false
+		return false, nil
 	}
 	if a.pendingRegistrationDomain(ctx, domain) {
-		return false
+		return false, nil
 	}
 	if a.controlDatabase != nil {
 		var count int
 		err := a.withServerControlDatabaseRead(ctx, "available-trial-domain", func(db *sql.DB) error {
 			return db.QueryRowContext(ctx, `SELECT COUNT(*) FROM domain_registration_claims WHERE domain=? AND `+domainregistration.ActiveClaimSQL, domain, time.Now().UTC().Add(-domainregistration.UnfinishedTTL).Format(time.RFC3339)).Scan(&count)
 		})
-		if err != nil || count > 0 {
-			return false
+		if err != nil {
+			return false, err
+		}
+		if count > 0 {
+			return false, nil
 		}
 	}
 	databasePath := siteDatabaseFile(siteDatabaseRootPath(a.serverControlDBPath()), domain)
 	realDatabasePath, pathErr := a.writablePathInsideStorage(databasePath)
 	if pathErr != nil {
-		return false
+		return false, pathErr
 	}
-	if _, err := os.Stat(realDatabasePath); err == nil || !errors.Is(err, os.ErrNotExist) {
-		return false
+	if _, err := os.Stat(realDatabasePath); err == nil {
+		return false, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, err
 	}
 	var userCount int
 	err := a.db.QueryRowContext(contextWithDomain(ctx, domain), `SELECT COUNT(1) FROM users WHERE domain=?`, domain).Scan(&userCount)
-	return (err == nil || errors.Is(err, errSiteDatabaseMissing) || errors.Is(err, sql.ErrNoRows)) && userCount == 0
+	if errors.Is(err, errSiteDatabaseMissing) || errors.Is(err, sql.ErrNoRows) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return userCount == 0, nil
 }
 
 func (a *App) createManagedSiteWithoutAdmin(ctx context.Context, domain string, quotaBytes int64) error {
@@ -44568,6 +44616,9 @@ func siteCopyMenuTexts(translations map[string]string) map[string]string {
 		"sourceLanguageLabel":       translationOrDefault(translations, "missing_source_language_label", "Preferred language:"),
 		"sourceLanguageAuto":        translationOrDefault(translations, "missing_source_language_auto", "Auto"),
 		"copyButton":                translationOrDefault(translations, "missing_copy_button", "Copy"),
+		"advancedOptions":           translationOrDefault(translations, "test_drive_copy_options", "More import options"),
+		"sourceChangeWarning":       translationOrDefault(translations, "test_drive_source_change_warning", "Copying a different website replaces this private draft."),
+		"sourceChangeInvalid":       translationOrDefault(translations, "test_drive_source_invalid", "Enter a valid public website address."),
 		"copyWholeSite":             translationOrDefault(translations, "missing_copy_whole_site", "Copy entire website"),
 		"templateLabel":             translationOrDefault(translations, "site_copy_auto_detect_template", "Auto-detect SiteBrush-Template"),
 		"templateHelpLink":          translationOrDefault(translations, "site_copy_template_help_link", "What is SiteBrush-Template?"),
@@ -46335,7 +46386,7 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, templateName string
 	}
 	envelope := map[string]any{"Domain": domain, "T": translations, "CompileVersion": CompileVersion, "LanguageCode": languageCode, "TextDirection": textDirection, "AccountCSRF": accountCSRF(r)}
 	mergeTemplateData(envelope, templateData)
-	if templateName == "edit.html" || templateName == "test_drive_welcome.html" {
+	if templateName == "edit.html" {
 		if trial, found, _ := a.privateTestDrive(r.Context(), domain); found && trial.Status != "activated" && testDriveOwner(r, trial) {
 			envelope["PrivateTestDrive"] = true
 			openedAt := trial.FirstOpenedAt
@@ -46344,6 +46395,16 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, templateName string
 			}
 			envelope["TestDriveOpenedAt"] = openedAt
 			envelope["TestDriveID"] = trial.ID
+			copyConfiguration := map[string]any{
+				"path": "/", "texts": siteCopyMenuTexts(translations),
+				"sourceURL": trial.SourceURL, "privateTestDrive": true,
+			}
+			configurationJSON, err := json.Marshal(copyConfiguration)
+			if err != nil {
+				a.logTestDriveError("copy-configuration", trial.ID, r, err)
+			} else {
+				envelope["SiteCopyConfigJSON"] = string(configurationJSON)
+			}
 		}
 	}
 	if templateName == "edit.html" {
@@ -46394,7 +46455,7 @@ func parseEmbeddedPageTemplate(templateName string, source []byte) (*template.Te
 	if err != nil {
 		return nil, err
 	}
-	if templateName != "edit.html" && templateName != "test_drive_welcome.html" {
+	if templateName != "edit.html" {
 		return parsedTemplate, nil
 	}
 	fragment, err := fs.ReadFile(embeddedWebFiles, "web/test_drive_confirmation.html")
@@ -56173,11 +56234,12 @@ func (a *App) claimTrialDomain(ctx context.Context, domain, token string) error 
 	}
 	return a.withServerControlDatabaseWrite(ctx, "claim-trial-domain", func(db *sql.DB) error {
 		maximumSites := publicTrialAnonymousSiteLimit
-		if configured, err := strconv.Atoi(hostingandsupport.SettingText(ctx, db, "public_trial_max_unverified_sites")); err == nil && configured >= 1 && configured <= 100 {
+		if configured, err := strconv.Atoi(hostingandsupport.SettingText(ctx, db, "public_trial_max_unverified_sites")); err == nil && configured >= 1 && configured <= 1000 {
 			maximumSites = configured
 		}
 		var claimedSites int
-		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM domain_registration_claims WHERE kind='trial'`).Scan(&claimedSites); err != nil {
+		now := time.Now().UTC()
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM domain_registration_claims WHERE kind='trial' AND (confirmed_at>? OR domain IN (SELECT domain FROM public_trial_sites WHERE status IN ('private','email_pending','email_verified','active') AND delete_after>?))`, now.Add(-5*time.Minute).Format(time.RFC3339), now.Format(time.RFC3339)).Scan(&claimedSites); err != nil {
 			return err
 		}
 		if claimedSites >= maximumSites {
@@ -58758,7 +58820,7 @@ func (a *App) privateTestDriveGate(w http.ResponseWriter, r *http.Request) bool 
 		if a.publicBoundary {
 			return false
 		}
-		http.Redirect(w, r, "/?test_drive_welcome#activation", http.StatusSeeOther)
+		http.Redirect(w, r, "/?edit#activation", http.StatusSeeOther)
 		return true
 	}
 	if hasQueryFlag(r, "test_drive_handoff_ready") {
@@ -58767,7 +58829,7 @@ func (a *App) privateTestDriveGate(w http.ResponseWriter, r *http.Request) bool 
 	}
 	if hasQueryFlag(r, "test_drive_handoff") {
 		if testDriveOwner(r, trial) {
-			http.Redirect(w, r, "/?test_drive_welcome", http.StatusSeeOther)
+			http.Redirect(w, r, "/?edit", http.StatusSeeOther)
 			return true
 		}
 		if a.publicBoundary {
@@ -58791,8 +58853,7 @@ func (a *App) privateTestDriveGate(w http.ResponseWriter, r *http.Request) bool 
 			testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusMethodNotAllowed)
 			return true
 		}
-		a.touchTestDrive(w, r, trial)
-		a.renderTestDriveWelcome(w, r, trial)
+		http.Redirect(w, r, "/?edit", http.StatusSeeOther)
 		return true
 	}
 	if hasQueryFlag(r, "test_drive_source") || hasQueryFlag(r, "test_drive_email") || hasQueryFlag(r, "test_drive_verify") || hasQueryFlag(r, "test_drive_activate") || hasQueryFlag(r, "test_drive_status") || hasQueryFlag(r, "test_drive_captcha") || hasQueryFlag(r, "test_drive_ws") {
@@ -58925,18 +58986,6 @@ func (a *App) renderTestDriveNeutral(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusForbidden)
 	a.render(w, r, "test_drive_neutral.html", map[string]any{"ActivationGuide": hasQueryFlag(r, "test_drive_activation")})
-}
-
-func (a *App) renderTestDriveWelcome(w http.ResponseWriter, r *http.Request, trial privateTestDrive) {
-	w.Header().Set("Cache-Control", "private, no-store")
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	copyConfiguration := map[string]any{"path": "/", "texts": siteCopyMenuTexts(translationsForRequest(r)), "sourceURL": trial.SourceURL, "sourceEditable": trial.SourceURL == ""}
-	configurationJSON, _ := json.Marshal(copyConfiguration)
-	a.render(w, r, "test_drive_welcome.html", map[string]any{
-		"SiteCopyConfigJSON": string(configurationJSON),
-		"PendingEmail":       trial.PendingEmail,
-		"SourceURL":          trial.SourceURL,
-	})
 }
 
 // A private trial owns a disposable site workspace; changing its source resets
@@ -59119,6 +59168,12 @@ func (a *App) testDriveForm(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) renderTestDriveForm(w http.ResponseWriter, r *http.Request, entryHash string, trusted bool, formError string) {
+	parentDomain, err := a.testDriveParentDomain(r.Context())
+	if err != nil {
+		a.logTestDriveError("form-domain", 0, r, err)
+		testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusServiceUnavailable)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
@@ -59127,7 +59182,7 @@ func (a *App) renderTestDriveForm(w http.ResponseWriter, r *http.Request, entryH
 		chosenName = ""
 	}
 	_, validSourceURL := testDriveSourceURL(r.FormValue("source_url"))
-	a.render(w, r, "test_drive.html", map[string]any{"ParentDomain": a.hostingAndSupportMainDomain(r.Context()), "HumanVerified": trusted, "ChosenName": chosenName, "ChosenEmail": strings.TrimSpace(r.FormValue("email")), "ChosenSourceURL": strings.TrimSpace(r.FormValue("source_url")), "ShowDetails": validSourceURL && (chosenName != "" || formError != ""), "FormError": formError, "EntryCSRF": testDriveFormToken(entryHash), "IPQuota": a.testDriveIPQuota(r, entryHash)})
+	a.render(w, r, "test_drive.html", map[string]any{"ParentDomain": parentDomain, "HumanVerified": trusted, "ChosenName": chosenName, "ChosenEmail": strings.TrimSpace(r.FormValue("email")), "ChosenSourceURL": strings.TrimSpace(r.FormValue("source_url")), "ShowDetails": validSourceURL && (chosenName != "" || formError != ""), "FormError": formError, "EntryCSRF": testDriveFormToken(entryHash), "IPQuota": a.testDriveIPQuota(r, entryHash)})
 }
 
 func testDriveSourceURL(rawSourceURL string) (string, bool) {
@@ -59300,8 +59355,12 @@ func (a *App) startPrivateTestDrive(w http.ResponseWriter, r *http.Request) {
 		a.renderTestDriveForm(w, r, entryHash, trusted, translationsForRequest(r)["test_drive_invalid_source"])
 		return
 	}
-	parentDomain := a.hostingAndSupportMainDomain(r.Context())
-	domain := label + "." + parentDomain
+	domain, domainErr := a.testDriveDomain(r.Context(), label)
+	if domainErr != nil {
+		a.logTestDriveError("start-domain", 0, r, domainErr)
+		testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusServiceUnavailable)
+		return
+	}
 	if a.resumeTestDriveHandoff(w, r, entryHash, domain, email, sourceURL) {
 		return
 	}
@@ -59331,7 +59390,13 @@ func (a *App) startPrivateTestDrive(w http.ResponseWriter, r *http.Request) {
 		a.renderTestDriveForm(w, r, entryHash, trusted, mailLimitMessage)
 		return
 	}
-	if !a.newSiteSubdomainAllowed(r.Context(), domain) || !a.publicTrialDomainAvailable(r.Context(), domain) {
+	available, availabilityErr := a.publicTrialDomainAvailability(r.Context(), domain)
+	if availabilityErr != nil {
+		a.logTestDriveError("start-domain-check", 0, r, availabilityErr)
+		testDriveHTTPError(w, r, "public_trial_address_check_failed", http.StatusServiceUnavailable)
+		return
+	}
+	if !available {
 		a.logTestDriveEvent("start", 0, r, "domain_unavailable", http.StatusConflict)
 		testDriveHTTPError(w, r, "public_trial_address_unavailable", http.StatusConflict)
 		return
@@ -59367,7 +59432,18 @@ func (a *App) startPrivateTestDrive(w http.ResponseWriter, r *http.Request) {
 	}
 	claim := randomAccessToken()
 	if err := a.claimTrialDomain(r.Context(), domain, claim); err != nil {
-		testDriveHTTPError(w, r, "public_trial_address_unavailable", http.StatusConflict)
+		var capacityErr publicTrialCapacityError
+		switch {
+		case errors.Is(err, domainregistration.ErrTaken):
+			a.logTestDriveEvent("start", 0, r, "domain_claimed", http.StatusConflict)
+			testDriveHTTPError(w, r, "public_trial_address_unavailable", http.StatusConflict)
+		case errors.As(err, &capacityErr):
+			a.logTestDriveEvent("start", 0, r, "server_capacity", http.StatusServiceUnavailable)
+			testDriveHTTPError(w, r, "test_drive_server_capacity", http.StatusServiceUnavailable)
+		default:
+			a.logTestDriveError("claim-domain", 0, r, err)
+			testDriveHTTPError(w, r, "test_drive_generic_error", http.StatusServiceUnavailable)
+		}
 		return
 	}
 	created := false
@@ -59585,7 +59661,7 @@ func (a *App) testDriveHandoff(w http.ResponseWriter, r *http.Request, trial pri
 	a.storeProfileSessionDetails(r.WithContext(domainContext), sessionToken)
 	setTestDriveEditorCookie(w, r, sessionToken, testDriveIdleDuration(trial))
 	a.logTestDriveEvent("handoff", trial.ID, r, "owner_session_ready", http.StatusSeeOther)
-	http.Redirect(w, r, "/?test_drive_welcome", http.StatusSeeOther)
+	http.Redirect(w, r, "/?edit#test-drive-copy", http.StatusSeeOther)
 }
 
 func httpRequestHTTPSOrLocal(r *http.Request) bool {

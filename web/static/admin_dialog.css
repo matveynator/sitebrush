@@ -197,6 +197,21 @@
   text-align: start;
 }
 
+.SiteBrushTestDriveActions {
+  position: fixed;
+  inset-inline-end: 16px;
+  bottom: 16px;
+  z-index: 2147483646;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: calc(100vw - 32px);
+}
+
+.SiteBrushTestDriveActions .SiteBrushAdminDialogNotice {
+  position: static;
+}
+
 @media (max-width: 620px) {
   .SiteBrushAdminDialogField input {
     font-size: 16px;
