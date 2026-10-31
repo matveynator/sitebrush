@@ -13497,12 +13497,13 @@ func TestPrivateTestDriveConfirmationEscapesUntrustedFields(t *testing.T) {
 	envelope := map[string]any{
 		"T": translations, "PrivateTestDrive": true,
 		"AccountCSRF": untrustedText, "TestDriveID": untrustedText,
-		"TestDriveOpenedAt": untrustedText, "LanguageCode": "en", "TextDirection": "ltr",
+		"TestDriveOpenedAt": untrustedText, "SiteCopyConfigJSON": untrustedText,
+		"LanguageCode": "en", "TextDirection": "ltr",
 	}
 	stop := make(chan struct{})
 	requests := startRenderTemplateProcess(stop)
 	defer close(stop)
-	for _, templateName := range []string{"edit.html", "test_drive_welcome.html"} {
+	for _, templateName := range []string{"edit.html"} {
 		source, readErr := fs.ReadFile(embeddedWebFiles, "web/"+templateName)
 		if readErr != nil {
 			t.Fatal(readErr)
@@ -13638,7 +13639,7 @@ func TestPrivateTestDriveRequiresCreatingBrowserSession(t *testing.T) {
 	activationRequest.AddCookie(&http.Cookie{Name: "sitebrush_test_drive", Value: secret})
 	activationResponse = httptest.NewRecorder()
 	applicationHandler.ServeHTTP(activationResponse, activationRequest)
-	if activationResponse.Code != http.StatusSeeOther || activationResponse.Header().Get("Location") != "/?test_drive_welcome#activation" {
+	if activationResponse.Code != http.StatusSeeOther || activationResponse.Header().Get("Location") != "/?edit#activation" {
 		t.Fatalf("creator activation route: status=%d location=%q", activationResponse.Code, activationResponse.Header().Get("Location"))
 	}
 	publicBoundary := &App{storagePath: application.storagePath, storageRealRoot: application.storageRealRoot, publicBoundary: true, publicCatalog: publicCatalog, publicStreamer: publicsite.NewStreamer()}
@@ -14155,7 +14156,7 @@ func TestPrivateTestDriveStartsWithCaptchaOnPartitionedSiteDatabase(t *testing.T
 	}
 	handoffResponse := httptest.NewRecorder()
 	application.route(handoffResponse, handoffRequest)
-	if handoffResponse.Code != http.StatusSeeOther || handoffResponse.Header().Get("Location") != "/?test_drive_welcome" {
+	if handoffResponse.Code != http.StatusSeeOther || handoffResponse.Header().Get("Location") != "/?edit#test-drive-copy" {
 		t.Fatalf("handoff: %d %s", handoffResponse.Code, handoffResponse.Body.String())
 	}
 	checkAfterResponse := httptest.NewRecorder()
@@ -14565,7 +14566,7 @@ func testPrivateTestDriveOnboarding(t *testing.T, scheme string) {
 	}
 	handoffResponse := httptest.NewRecorder()
 	application.route(handoffResponse, handoffRequest)
-	if handoffResponse.Code != http.StatusSeeOther || handoffResponse.Header().Get("Location") != "/?test_drive_welcome" {
+	if handoffResponse.Code != http.StatusSeeOther || handoffResponse.Header().Get("Location") != "/?edit#test-drive-copy" {
 		t.Fatalf("handoff: %d %s", handoffResponse.Code, handoffResponse.Body.String())
 	}
 	var trialCookie, editorCookie *http.Cookie
@@ -14629,8 +14630,8 @@ func testPrivateTestDriveOnboarding(t *testing.T, scheme string) {
 	welcomeRequest.AddCookie(editorCookie)
 	welcomeResponse := httptest.NewRecorder()
 	application.route(welcomeResponse, welcomeRequest)
-	if welcomeResponse.Code != http.StatusOK || !strings.Contains(welcomeResponse.Body.String(), "data-test-drive-copy") || !strings.Contains(welcomeResponse.Body.String(), "data-test-drive-save") {
-		t.Fatalf("private welcome: %d %s", welcomeResponse.Code, welcomeResponse.Body.String())
+	if welcomeResponse.Code != http.StatusSeeOther || welcomeResponse.Header().Get("Location") != "/?edit" {
+		t.Fatalf("legacy welcome redirect: %d %s", welcomeResponse.Code, welcomeResponse.Body.String())
 	}
 	privateVisitor := httptest.NewRequest(http.MethodGet, scheme+"://myproject.sitebrush.com/", nil)
 	privateResponse := httptest.NewRecorder()
@@ -14902,6 +14903,9 @@ func testPrivateTestDriveOnboarding(t *testing.T, scheme string) {
 func TestPublicTrialLimitsUnverifiedSiteClaims(t *testing.T) {
 	application := newRouterTestApplication(t)
 	controlDatabase := setupBillingOwnerForTest(t, application, "sitebrush.example", "owner@sitebrush.example", true)
+	if _, err := controlDatabase.Exec(`INSERT INTO server_settings(name,value,updated_at) VALUES(?,?,?)`, "public_trial_max_unverified_sites", "3", time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
 	if err := controlDatabase.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -14911,7 +14915,7 @@ func TestPublicTrialLimitsUnverifiedSiteClaims(t *testing.T) {
 	}
 	application.controlDatabase = dispatcher
 	t.Cleanup(func() { _ = dispatcher.Close() })
-	for index := 0; index < publicTrialAnonymousSiteLimit; index++ {
+	for index := 0; index < 3; index++ {
 		domain := fmt.Sprintf("trial%d.sitebrush.example", index)
 		if err := application.claimTrialDomain(context.Background(), domain, fmt.Sprintf("claim-%d", index)); err != nil {
 			t.Fatalf("claim %d: %v", index, err)
