@@ -56,6 +56,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -126,6 +127,7 @@ var importedHTMLHeadOpenPattern = regexp.MustCompile(`(?i)<head\b[^>]*>`)
 var importedHTMLHTMLOpenPattern = regexp.MustCompile(`(?i)<html\b[^>]*>`)
 var importedCSSCharsetAssignmentPattern = regexp.MustCompile(`(?i)^(\s*\x{feff}?\s*@charset\s+["'])[a-z0-9._:-]+(["']\s*;)`)
 var errReadLimitExceeded = errors.New("read limit exceeded")
+var publicHTTPInFlight atomic.Int64
 
 const storageAppName = "sitebrush"
 const defaultDBPath = "storage/db/sitebrush.db"
@@ -171,6 +173,10 @@ const currentSiteDatabaseSchemaVersion = 15
 const legacySiteDataSchemaVersion = 13
 const siteDatabaseStartupMigrationTimeout = 30 * time.Second
 const siteAliasIndexCacheTTL = 5 * time.Minute
+
+// Public static delivery must remain cheap during hostile bursts.
+// Trusted/site-admin traffic bypasses load shedding.
+const publicHTTPOverloadInFlightLimit int64 = 256
 const pagePasswordSessionTTL = time.Hour
 const serviceMailRelayPath = "/?service_mail_relay"
 const hostingSnapshotPath = "/?hosting_snapshot"
@@ -9401,7 +9407,7 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 		if domain == "" {
 			domain = normalizeDomainName(domainFromRequest(r))
 		}
-		trusted := decision.LoadTrusted || httpsecurity.IsLocalRequest(r) || (!decision.Found && !a.publicBoundary && a.sitebrushPeerRequestTrusted(r, now))
+		trusted := decision.AdminAllowed || decision.LoadTrusted || httpsecurity.IsLocalRequest(r) || (!decision.Found && !a.publicBoundary && a.sitebrushPeerRequestTrusted(r, now))
 		crawlerRead := httpsecurity.IsIndexingCrawlerRequest(r)
 		if !trusted && a.attackGuard != nil {
 			trusted = a.trustRecordedAdminIP(r, domain, clientIP, now)
@@ -9612,7 +9618,8 @@ func adminResponseIsolationRequired(r *http.Request) bool {
 
 func (a *App) trustRecordedAdminIP(r *http.Request, domain, clientIP string, now time.Time) bool {
 	if a.publicCatalog != nil && publicOrdinaryRequest(r) {
-		return a.publicRequestDecision(r).LoadTrusted
+		decision := a.publicRequestDecision(r)
+		return decision.AdminAllowed || decision.LoadTrusted
 	}
 	if a.attackGuard == nil || a.db == nil || domain == "" || clientIP == "" {
 		return false
@@ -12847,7 +12854,62 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 			fallback.ServeHTTP(w, r)
 		}
 	})))))
+	trustedPublic := a.securityResponseHeadersMiddleware(a.accessLogMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !a.servePublicPublished(w, r, false) {
+			fallback.ServeHTTP(w, r)
+		}
+	})))
+	unknownPublic := a.securityResponseHeadersMiddleware(a.accessLogMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	})))
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// SITEBRUSH PUBLIC FAST GATE
+		// publicCatalog is authoritative for ordinary public traffic.
+		// Host existence is resolved in memory; unknown hosts never reach DB.
+		if a.publicCatalog != nil && publicOrdinaryRequest(r) {
+			decision := a.publicRequestDecision(r)
+			r = withPublicRequestDecision(r, decision)
+
+			trustedPublicRequest := decision.AdminAllowed ||
+				decision.LoadTrusted ||
+				httpsecurity.IsLocalRequest(r)
+
+			// Untrusted traffic is shed before analytics, security workers,
+			// publication machinery and SQLite when concurrency is excessive.
+			if !trustedPublicRequest {
+				inFlight := publicHTTPInFlight.Add(1)
+				if inFlight > publicHTTPOverloadInFlightLimit {
+					publicHTTPInFlight.Add(-1)
+					w.Header().Set("Retry-After", "1")
+					w.Header().Set("Cache-Control", "no-store")
+					w.Header().Set("X-Sitebrush-Overload", "shed")
+					http.Error(
+						w,
+						"Request rate temporarily reduced. Retry shortly.",
+						http.StatusTooManyRequests,
+					)
+					return
+				}
+				defer publicHTTPInFlight.Add(-1)
+			}
+
+			// Unknown Host is terminal here.
+			// Never call publicPublicationRequest/writePublicPolicy/router/SQLite.
+			if !decision.Found {
+				unknownPublic.ServeHTTP(w, r)
+				return
+			}
+
+			// Administrator/trusted traffic bypasses AttackGuard,
+			// ThrottleGuard and request analytics. Published content is served
+			// directly from publicCatalog/disk.
+			if trustedPublicRequest {
+				trustedPublic.ServeHTTP(w, r)
+				return
+			}
+		}
+
 		if embeddedStaticRequest(r) {
 			embedded.ServeHTTP(w, r)
 			return
