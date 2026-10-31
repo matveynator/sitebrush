@@ -12719,8 +12719,9 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 			return
 		}
 		if a.publicCatalog != nil && publicOrdinaryRequest(r) {
-			// The application catalog can serve files before the dynamic trial router.
-			if a.privateTestDriveGate(w, r) {
+			// The application control database owner serializes trial reads.
+			// Bare catalog fixtures intentionally have no trial database.
+			if a.controlDatabase != nil && a.privateTestDriveGate(w, r) {
 				return
 			}
 			decision := a.publicRequestDecision(r)
