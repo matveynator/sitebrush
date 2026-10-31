@@ -944,6 +944,9 @@
       const retryTotal = Number(progressPayload.retry_total) || 0;
       const failedTotal = Number(progressPayload.failed_total) || failedResourceURLs.size;
       let statusText = textFromConfig(configuration, 'retryingAutomatically', 'Retrying temporary errors');
+      if (String(progressPayload.current_error || '').trim() === '429') {
+        statusText = textFromConfig(configuration, 'sourceSlowDown', '') + ' ' + statusText;
+      }
       if (retryAttempt > 0 && retryTotal > 0) {
         statusText += ' ' + retryAttempt + '/' + retryTotal;
       }

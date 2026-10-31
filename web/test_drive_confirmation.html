@@ -1,7 +1,8 @@
 <section class="test-drive-save" data-test-drive-save data-opened-at="{{.TestDriveOpenedAt}}" data-trial-id="{{.TestDriveID}}" data-csrf="{{.AccountCSRF}}" data-copy-config="{{.SiteCopyConfigJSON}}">
-  <div class="SiteBrushTestDriveActions">
+  <div class="SiteBrushTestDriveActions" data-trial-actions>
     <button type="button" class="SiteBrushAdminDialogButton" data-trial-copy>{{index .T "test_drive_copy_site"}}</button>
     <button type="button" class="SiteBrushAdminDialogNotice" data-trial-open>{{index .T "test_drive_save_title"}}</button>
+    <p class="SiteBrushTestDriveEditHint">{{index .T "test_drive_edit_menu_hint"}}</p>
   </div>
   <div class="SiteBrushAdminDialogOverlay" data-trial-overlay hidden>
     <div class="SiteBrushAdminDialog" role="dialog" aria-modal="true" aria-labelledby="trial-save-title">
