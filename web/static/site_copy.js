@@ -33,6 +33,7 @@
 .SiteBrushCopySiteField{color:var(--copy-muted);}
 .SiteBrushCopySiteActions{margin-top:0;padding-top:16px;border-top:1px solid var(--copy-border);}
 .SiteBrushCopySiteResources{max-height:min(300px,34dvh);}
+.SiteBrushCopySiteClose:disabled,.SiteBrushCopySiteSecondaryButton:disabled{opacity:.5;cursor:default;}
 .SiteBrushCopySiteAdvancedOptions{display:grid;gap:10px;border:1px solid var(--copy-border);border-radius:var(--copy-radius);padding:10px;}
 .SiteBrushCopySiteAdvancedOptions summary{color:var(--copy-primary);cursor:pointer;font-weight:500;}
 .SiteBrushCopySiteAdvancedOptions[open] > :not(summary){margin-top:10px;}
@@ -656,7 +657,6 @@
     let activeRequestIsPreview = false;
     let modalClosed = false;
     let sourceChangeRunning = false;
-    let sourceChangeController = null;
 
     function refreshPublicTrialCaptcha() {
       if (!captchaImageElement) return;
@@ -765,8 +765,8 @@
     }
 
     function closeModal() {
+      if (sourceChangeRunning) return;
       modalClosed = true;
-      if (sourceChangeController) sourceChangeController.abort();
       if (requestIsRunning && activeGrabToken !== '') {
         if (activeDownloadController && (publicTrialMode || activeRequestIsPreview)) {
           activeDownloadController.abort();
@@ -1218,35 +1218,42 @@
         if (sourceChangeRunning) return;
         sourceChangeRunning = true;
         submitButtonElement.disabled = true;
+        closeButtonElement.disabled = true;
+        cancelButtonElement.disabled = true;
         setCopySiteStatus(statusElement, textFromConfig(configuration, 'sourceChangeWarning', ''), 'warning');
         const sourceRequestBody = new URLSearchParams();
         sourceRequestBody.set('source_url', sourceUrlElement.value.trim());
         sourceRequestBody.set('account_csrf', String(configuration.csrfToken || ''));
-        sourceChangeController = new AbortController();
         fetch(configuredEndpoint(configuration, 'test_drive_source'), {
           method: 'POST', body: sourceRequestBody,
-          headers: {'Accept': 'application/json', 'X-SiteBrush-CSRF': String(configuration.csrfToken || '')},
-          signal: sourceChangeController.signal
+          headers: {'Accept': 'application/json', 'X-SiteBrush-CSRF': String(configuration.csrfToken || '')}
         })
           .then(function readChangedSource(response) {
-            if (!response.ok) throw new Error(textFromConfig(configuration, response.status === 400 ? 'sourceChangeInvalid' : 'sourceChangeFailed', ''));
+            if (response.status === 400) {
+              const sourceValidationError = new Error(textFromConfig(configuration, 'sourceChangeInvalid', ''));
+              sourceValidationError.sourceInvalid = true;
+              throw sourceValidationError;
+            }
+            if (!response.ok) {
+              window.location.replace('/?edit');
+              return null;
+            }
             return response.json();
           })
           .then(function useChangedSource(changedSource) {
-            sourceChangeRunning = false;
-            sourceChangeController = null;
-            if (modalClosed) return;
-            configuration.sourceURL = String(changedSource.source_url || '');
-            sourceUrlElement.value = configuration.sourceURL;
-            submitButtonElement.disabled = false;
-            requestPreview();
+            if (!changedSource) return;
+            window.location.replace('/?edit#test-drive-copy');
           })
           .catch(function reportChangedSourceError(error) {
+            if (!error.sourceInvalid) {
+              window.location.replace('/?edit');
+              return;
+            }
             sourceChangeRunning = false;
-            sourceChangeController = null;
-            if (modalClosed) return;
             submitButtonElement.disabled = false;
-            setCopySiteStatus(statusElement, error.message || textFromConfig(configuration, 'sourceChangeFailed', ''), 'error');
+            closeButtonElement.disabled = false;
+            cancelButtonElement.disabled = false;
+            setCopySiteStatus(statusElement, error.message, 'error');
           });
         return;
       }

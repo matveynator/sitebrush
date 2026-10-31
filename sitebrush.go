@@ -44618,7 +44618,6 @@ func siteCopyMenuTexts(translations map[string]string) map[string]string {
 		"copyButton":                translationOrDefault(translations, "missing_copy_button", "Copy"),
 		"advancedOptions":           translationOrDefault(translations, "test_drive_copy_options", "More import options"),
 		"sourceChangeWarning":       translationOrDefault(translations, "test_drive_source_change_warning", "Copying a different website replaces this private draft."),
-		"sourceChangeFailed":        translationOrDefault(translations, "test_drive_generic_error", "The request failed. Please try again."),
 		"sourceChangeInvalid":       translationOrDefault(translations, "test_drive_source_invalid", "Enter a valid public website address."),
 		"copyWholeSite":             translationOrDefault(translations, "missing_copy_whole_site", "Copy entire website"),
 		"templateLabel":             translationOrDefault(translations, "site_copy_auto_detect_template", "Auto-detect SiteBrush-Template"),
