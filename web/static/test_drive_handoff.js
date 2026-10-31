@@ -1,6 +1,6 @@
 (function enterPrivateTestDrive() {
   'use strict';
-  const handoffForm = document.querySelector('[data-test-drive-handoff]');
-  if (!handoffForm) return;
-  handoffForm.submit();
+  const handoffLink = document.querySelector('[data-test-drive-handoff]');
+  if (!handoffLink) return;
+  window.location.replace(handoffLink.href);
 })();

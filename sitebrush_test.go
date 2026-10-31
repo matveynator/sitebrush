@@ -13563,6 +13563,34 @@ func TestPrivateTestDriveRequiresCreatingBrowserSession(t *testing.T) {
 	if err := publicCatalog.SetMemory(true); err != nil {
 		t.Fatal(err)
 	}
+	application.publicCatalog = publicCatalog
+	applicationHandler := application.siteHTTPHandler(http.HandlerFunc(application.route))
+	for _, browserSession := range []string{"", "unrelated-session"} {
+		request := httptest.NewRequest(http.MethodGet, "https://"+domain+"/", nil)
+		request.RemoteAddr = "203.0.113.50:12345"
+		request.Header.Set("Accept-Language", "fr")
+		if browserSession != "" {
+			request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: browserSession})
+		}
+		response := httptest.NewRecorder()
+		applicationHandler.ServeHTTP(response, request)
+		if response.Code != http.StatusForbidden || strings.Contains(response.Body.String(), content) || !strings.Contains(response.Body.String(), translationsForLanguageCode("fr")["test_drive_not_activated"]) || !strings.Contains(response.Body.String(), `href="/?test_drive_activation"`) {
+			t.Fatalf("application catalog exposed private content to %q: status=%d body=%q", browserSession, response.Code, response.Body.String())
+		}
+	}
+	activationRequest := httptest.NewRequest(http.MethodGet, "https://"+domain+"/?test_drive_activation", nil)
+	activationResponse := httptest.NewRecorder()
+	applicationHandler.ServeHTTP(activationResponse, activationRequest)
+	if activationResponse.Code != http.StatusForbidden || strings.Contains(activationResponse.Body.String(), content) || !strings.Contains(activationResponse.Body.String(), translationsForLanguageCode("ru")["test_drive_activation_guide"]) {
+		t.Fatalf("another browser accessed activation: status=%d body=%q", activationResponse.Code, activationResponse.Body.String())
+	}
+	activationRequest = httptest.NewRequest(http.MethodGet, "https://"+domain+"/?test_drive_activation", nil)
+	activationRequest.AddCookie(&http.Cookie{Name: "sitebrush_test_drive", Value: secret})
+	activationResponse = httptest.NewRecorder()
+	applicationHandler.ServeHTTP(activationResponse, activationRequest)
+	if activationResponse.Code != http.StatusSeeOther || activationResponse.Header().Get("Location") != "/?test_drive_welcome#activation" {
+		t.Fatalf("creator activation route: status=%d location=%q", activationResponse.Code, activationResponse.Header().Get("Location"))
+	}
 	publicBoundary := &App{storagePath: application.storagePath, storageRealRoot: application.storageRealRoot, publicBoundary: true, publicCatalog: publicCatalog, publicStreamer: publicsite.NewStreamer()}
 	publicFront := newPublicHTTPFront(publicBoundary, "private-trial-fixture", stopPublicFront)
 	if err := publicFront.Set("127.0.0.1:1", true); err != nil {
@@ -13572,19 +13600,22 @@ func TestPrivateTestDriveRequiresCreatingBrowserSession(t *testing.T) {
 	if !publicBoundary.servePublicPublished(publishedProbe, httptest.NewRequest(http.MethodGet, "https://"+domain+"/", nil), true) || !strings.Contains(publishedProbe.Body.String(), content) {
 		t.Fatal("paused public content fixture is unavailable")
 	}
-	for _, trialStatus := range []string{"private", "blocked", "expiring"} {
+	for _, trialStatus := range []string{"private", "email_pending", "email_verified", "blocked", "expiring"} {
 		if err := application.withServerControlDatabaseWrite(context.Background(), "test-private-front-state", func(database *sql.DB) error {
 			_, updateErr := database.Exec(`UPDATE public_trial_sites SET status=? WHERE domain=?`, trialStatus, domain)
 			return updateErr
 		}); err != nil {
 			t.Fatal(err)
 		}
-		for _, mixedQuery := range []string{"?test_drive&edit", "?trial_site_domain_check&visual", "?test_drive_entry_ws&edit", "?test_drive_handoff_ready&edit"} {
+		for _, mixedQuery := range []string{"", "?test_drive&edit", "?trial_site_domain_check&visual", "?test_drive_entry_ws&edit", "?test_drive_handoff_ready&edit"} {
 			request := httptest.NewRequest(http.MethodGet, "https://"+domain+"/"+mixedQuery, nil)
 			response := httptest.NewRecorder()
 			publicFront.ServeHTTP(response, request)
 			if strings.Contains(response.Body.String(), content) || response.Code == http.StatusOK {
 				t.Fatalf("paused public front exposed %s on %s: status=%d body=%q", trialStatus, mixedQuery, response.Code, response.Body.String())
+			}
+			if mixedQuery == "" && response.Code != http.StatusForbidden {
+				t.Fatalf("paused public front did not render neutral page for %s: status=%d body=%q", trialStatus, response.Code, response.Body.String())
 			}
 		}
 	}
@@ -13899,7 +13930,7 @@ func TestDriveNameCheckRequiresCaptchaAfterSoftLimit(t *testing.T) {
 	if reloadResponse.Code != http.StatusOK || !strings.Contains(reloadResponse.Body.String(), `value="hello"`) || !strings.Contains(reloadResponse.Body.String(), `data-human-verified="false"`) {
 		t.Fatalf("revoked browser form did not restore CAPTCHA: %d %s", reloadResponse.Code, reloadResponse.Body.String())
 	}
-	startForm := url.Values{"subdomain": {"hello"}, "email": {"creator@example.com"}}
+	startForm := url.Values{"subdomain": {"hello"}, "email": {"creator@example.com"}, "source_url": {"https://source.example/"}}
 	startRequest := httptest.NewRequest(http.MethodPost, "https://sitebrush.example/?test_drive_start", strings.NewReader(startForm.Encode()))
 	startRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	startRequest.Header.Set("Origin", "https://sitebrush.example")
@@ -14029,7 +14060,7 @@ func TestPrivateTestDriveStartsWithCaptchaOnPartitionedSiteDatabase(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	startForm := url.Values{"subdomain": {"partitioned"}, "email": {"creator@example.com"}, "captcha_id": {challenge.Token}, "captcha": {challenge.Answer}, "test_drive_csrf": {formTokenMatch[1]}}
+	startForm := url.Values{"subdomain": {"partitioned"}, "email": {"creator@example.com"}, "source_url": {"https://source.example/"}, "captcha_id": {challenge.Token}, "captcha": {challenge.Answer}, "test_drive_csrf": {formTokenMatch[1]}}
 	startRequest := httptest.NewRequest(http.MethodPost, "https://sitebrush.example/?test_drive_start", strings.NewReader(startForm.Encode()))
 	startRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	startRequest.Header.Set("Origin", "null")
@@ -14045,14 +14076,11 @@ func TestPrivateTestDriveStartsWithCaptchaOnPartitionedSiteDatabase(t *testing.T
 	if startResponse.Code != http.StatusOK || !strings.Contains(startResponse.Body.String(), "partitioned.sitebrush.example") {
 		t.Fatalf("start: %d %s", startResponse.Code, startResponse.Body.String())
 	}
-	ticketMatch := regexp.MustCompile(`name="ticket" value="([^"]+)"`).FindStringSubmatch(startResponse.Body.String())
+	ticketMatch := regexp.MustCompile(`handoff_token=([^"&]+)`).FindStringSubmatch(startResponse.Body.String())
 	if len(ticketMatch) != 2 {
 		t.Fatal("one-time handoff ticket missing")
 	}
-	handoffForm := url.Values{"ticket": {ticketMatch[1]}}
-	handoffRequest := httptest.NewRequest(http.MethodPost, "https://partitioned.sitebrush.example/?test_drive_handoff", strings.NewReader(handoffForm.Encode()))
-	handoffRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	handoffRequest.Header.Set("Origin", "https://sitebrush.example")
+	handoffRequest := httptest.NewRequest(http.MethodGet, "https://partitioned.sitebrush.example/?test_drive_handoff&handoff_token="+ticketMatch[1], nil)
 	publicBoundary := &App{storagePath: application.storagePath, storageRealRoot: application.storageRealRoot, publicBoundary: true}
 	boundaryResponse := httptest.NewRecorder()
 	if publicBoundary.privateTestDriveGate(boundaryResponse, handoffRequest) || boundaryResponse.Body.Len() != 0 {
@@ -14258,6 +14286,85 @@ func TestPrivateTestDriveSocketRenewsEditorCookieInHandshake(t *testing.T) {
 	t.Fatal("WebSocket handshake lost the bounded editor cookie")
 }
 
+func TestTestDriveSourceAndHandoffTokens(t *testing.T) {
+	if sourceURL, valid := testDriveSourceURL("example.com/page"); !valid || sourceURL != "https://example.com/page" {
+		t.Fatalf("normalized source = %q, valid = %t", sourceURL, valid)
+	}
+	for _, sourceURL := range []string{"", "file:///etc/passwd", "http://127.0.0.1/", "https://user:pass@example.com/"} {
+		if _, valid := testDriveSourceURL(sourceURL); valid {
+			t.Fatalf("unsafe source accepted: %q", sourceURL)
+		}
+	}
+	ticket := newTestDriveHandoffToken()
+	if !testDriveHandoffTokenCurrent(ticket) || testDriveHandoffTokenCurrent("1."+strings.Repeat("a", 48)) || testDriveHandoffTokenCurrent("invalid") {
+		t.Fatal("handoff token lifetime check failed")
+	}
+}
+
+func TestAutomaticSSLDNSRetryDelayProgressesFromPersistedDeadline(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, check := range []struct {
+		previous, next time.Duration
+	}{
+		{0, 15 * time.Minute},
+		{time.Minute, 15 * time.Minute},
+		{15 * time.Minute, time.Hour},
+		{time.Hour, 6 * time.Hour},
+		{6 * time.Hour, 24 * time.Hour},
+	} {
+		setting := DomainAutomaticSSLSetting{LastFailureReason: "DNS lookup failed"}
+		if check.previous != 0 {
+			setting.LastFailedAt = now.Format(time.RFC3339)
+			setting.RetryAfter = now.Add(check.previous).Format(time.RFC3339)
+		}
+		if next := automaticSSLDNSRetryDelay(setting); next != check.next {
+			t.Fatalf("previous %s: next %s, want %s", check.previous, next, check.next)
+		}
+	}
+}
+
+func TestTestDriveAdminIPTrustAndExpiredQuota(t *testing.T) {
+	application := newRouterTestApplication(t)
+	controlDatabase := setupBillingOwnerForTest(t, application, "sitebrush.com", "owner@sitebrush.com", true)
+	now := time.Now().UTC()
+	for _, trial := range []struct{ domain, expires string }{
+		{"live.sitebrush.com", now.Add(time.Hour).Format(time.RFC3339)},
+		{"expired.sitebrush.com", now.Add(-time.Hour).Format(time.RFC3339)},
+	} {
+		if _, err := controlDatabase.Exec(`INSERT INTO public_trial_sites(domain,source_url,status,created_at,delete_after,client_ip,entry_hash) VALUES(?,'https://source.example/','email_pending',?,?,?,?)`, trial.domain, now.Add(-2*time.Hour).Format(time.RFC3339), trial.expires, "198.51.100.25", "browser-hash"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := controlDatabase.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher, err := startServerControlDatabaseDispatcher(application.serverControlDBPath(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.controlDatabase = dispatcher
+	t.Cleanup(func() { _ = dispatcher.Close() })
+	request := httptest.NewRequest(http.MethodGet, "https://sitebrush.com/?test_drive", nil)
+	request.RemoteAddr = "198.51.100.25:4321"
+	quota, err := application.readTestDriveCreationQuota(request, "browser-hash")
+	if err != nil || quota.ActiveIP != 1 || quota.RecentIP != 2 || quota.AdminIP {
+		t.Fatalf("trial quota = %+v, error = %v", quota, err)
+	}
+	rootContext := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), "sitebrush.com"))
+	for _, query := range []string{
+		`INSERT INTO users(domain,email,password,is_admin) VALUES('sitebrush.com','owner@sitebrush.com','hash',1)`,
+		`INSERT INTO account_trusted_ips(domain,email,client_ip,confirmed_at,last_login) VALUES('sitebrush.com','owner@sitebrush.com','198.51.100.25',1,` + strconv.FormatInt(now.Unix(), 10) + `)`,
+	} {
+		if _, err := application.db.ExecContext(rootContext, query); err != nil {
+			t.Fatal(err)
+		}
+	}
+	quota, err = application.readTestDriveCreationQuota(request, "browser-hash")
+	if err != nil || !quota.AdminIP || application.testDriveIPQuota(request, "browser-hash") == "" {
+		t.Fatalf("trusted administrator IP not exempt: %+v, %v", quota, err)
+	}
+}
+
 func TestPrivateTestDriveStartsWithEmailAndHandsOffOnce(t *testing.T) {
 	for _, scheme := range []string{"http", "https"} {
 		t.Run(scheme, func(t *testing.T) { testPrivateTestDriveOnboarding(t, scheme) })
@@ -14322,7 +14429,7 @@ func testPrivateTestDriveOnboarding(t *testing.T, scheme string) {
 		t.Fatal(err)
 	}
 	application.automaticSSL = make(chan automaticSSLRequest, 8)
-	form := url.Values{"subdomain": {"myproject"}, "email": {"creator@example.com"}}
+	form := url.Values{"subdomain": {"myproject"}, "email": {"creator@example.com"}, "source_url": {"https://source.example/"}}
 	startRequest := httptest.NewRequest(http.MethodPost, scheme+"://sitebrush.com/?test_drive_start", strings.NewReader(form.Encode()))
 	startRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	startRequest.Header.Set("Origin", scheme+"://sitebrush.com")
@@ -14364,10 +14471,10 @@ func testPrivateTestDriveOnboarding(t *testing.T, scheme string) {
 	if repeatResponse.Code != http.StatusOK || !strings.Contains(repeatResponse.Body.String(), "myproject.sitebrush.com") {
 		t.Fatalf("repeat start did not resume the same handoff: %d %s", repeatResponse.Code, repeatResponse.Body.String())
 	}
-	if strings.Contains(repeatResponse.Body.String(), " disabled>") || !strings.Contains(repeatResponse.Body.String(), `action="http://myproject.sitebrush.com/?test_drive_handoff"`) {
+	if strings.Contains(repeatResponse.Body.String(), " disabled>") || !strings.Contains(repeatResponse.Body.String(), `href="http://myproject.sitebrush.com/?test_drive_handoff&amp;handoff_token=`) {
 		t.Fatal("private handoff still depends on a certificate")
 	}
-	limitForm := url.Values{"subdomain": {"another-project"}, "email": {"creator@example.com"}}
+	limitForm := url.Values{"subdomain": {"another-project"}, "email": {"creator@example.com"}, "source_url": {"https://source.example/"}}
 	limitRequest := httptest.NewRequest(http.MethodPost, scheme+"://sitebrush.com/?test_drive_start", strings.NewReader(limitForm.Encode()))
 	limitRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	limitRequest.Header.Set("Origin", scheme+"://sitebrush.com")
@@ -14392,14 +14499,11 @@ func testPrivateTestDriveOnboarding(t *testing.T, scheme string) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	ticketMatch := regexp.MustCompile(`name="ticket" value="([^"]+)"`).FindStringSubmatch(startResponse.Body.String())
+	ticketMatch := regexp.MustCompile(`handoff_token=([^"&]+)`).FindStringSubmatch(startResponse.Body.String())
 	if len(ticketMatch) != 2 {
 		t.Fatal("one-time handoff ticket missing")
 	}
-	handoffForm := url.Values{"ticket": {ticketMatch[1]}}
-	handoffRequest := httptest.NewRequest(http.MethodPost, scheme+"://myproject.sitebrush.com/?test_drive_handoff", strings.NewReader(handoffForm.Encode()))
-	handoffRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	handoffRequest.Header.Set("Origin", scheme+"://sitebrush.com")
+	handoffRequest := httptest.NewRequest(http.MethodGet, scheme+"://myproject.sitebrush.com/?test_drive_handoff&handoff_token="+ticketMatch[1], nil)
 	publicBoundary := &App{storagePath: application.storagePath, storageRealRoot: application.storageRealRoot, publicBoundary: true, controlDatabase: dispatcher}
 	boundaryResponse := httptest.NewRecorder()
 	if publicBoundary.privateTestDriveGate(boundaryResponse, handoffRequest) || boundaryResponse.Body.Len() != 0 {

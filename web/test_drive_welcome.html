@@ -14,9 +14,9 @@
     <h1>{{index .T "test_drive_welcome_title"}}</h1>
     <p>{{index .T "test_drive_private_hint"}}</p>
     <p>{{index .T "test_drive_welcome_prompt"}}</p>
+    {{if .SourceURL}}<p class="test-drive-source-summary" dir="ltr">{{.SourceURL}}</p>{{end}}
     <div class="test-drive-welcome-actions">
       <button type="button" class="btn btn-primary" data-test-drive-copy>{{index .T "test_drive_copy_site"}}</button>
-      <a class="btn" href="/?edit">{{index .T "test_drive_open_editor"}}</a>
     </div>
   </section>
 </main>

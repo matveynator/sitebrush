@@ -10,6 +10,12 @@
   <main class="container authentication-shell">
     <section class="authentication-card">
       <h1>{{index .T "test_drive_not_activated"}}</h1>
+      <p>{{index .T "test_drive_neutral_hint"}}</p>
+      {{if .ActivationGuide}}
+      <p>{{index .T "test_drive_activation_guide"}}</p>
+      {{else}}
+      <p><a href="/?test_drive_activation">{{index .T "test_drive_activation_link"}}</a></p>
+      {{end}}
     </section>
   </main>
 </body>
