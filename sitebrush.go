@@ -10642,6 +10642,44 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 		return nonceErr
 	}
 	appHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// robots.txt must always appear in the SiteBrush access/domain log,
+		// regardless of whether it is served by publicCatalog, static fast path
+		// or the generated noindex override.
+		if r.URL.Path == "/robots.txt" &&
+			(r.Method == http.MethodGet || r.Method == http.MethodHead) {
+			startedAt := time.Now()
+			captured := &statusCapturingResponseWriter{
+				ResponseWriter: w,
+				statusCode:     http.StatusOK,
+			}
+			w = captured
+
+			defer func() {
+				requestDomain := domainFromRequest(r)
+				duration := time.Since(startedAt)
+
+				log.Printf(
+					"REQUEST [%s] method=%s path=%s status=%d remote=%s duration=%s",
+					diagnosticlog.SafeLogValue(requestDomain),
+					r.Method,
+					r.URL.Path,
+					captured.statusCode,
+					diagnosticlog.SafeLogValue(r.RemoteAddr),
+					duration,
+				)
+
+				application.writeDomainLog(
+					requestDomain,
+					"REQUEST [%s] method=%s path=%s status=%d remote=%s duration=%s",
+					requestDomain,
+					r.Method,
+					r.URL.Path,
+					captured.statusCode,
+					r.RemoteAddr,
+					duration,
+				)
+			}()
+		}
 		if r.URL.Path == "/_sitebrush/update-health" && r.Header.Get("X-SiteBrush-Update-Probe") == healthNonce && requestRemoteIsLoopback(r) {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -12864,6 +12902,30 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 	})))
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// SITEBRUSH UNKNOWN HOST GATE
+		//
+		// Non-ordinary requests (POST, control queries, WebSocket upgrades, etc.)
+		// do not enter the ordinary public fast path below. Reject unknown
+		// public hosts here, before dynamic/security middleware can touch
+		// SQLite or attempt to load per-site policy.
+		//
+		// Host-only Lookup is intentional: do not cache this decision in the
+		// request context because publicRequestDecision also contains path/file
+		// information for ordinary published requests.
+		if a.publicCatalog != nil && !publicOrdinaryRequest(r) && !httpsecurity.IsLocalRequest(r) {
+			host := domainFromRequest(r)
+			if host != "" {
+				hostDecision := a.publicCatalog.Lookup(publicsite.Lookup{
+					Host:     host,
+					ClientIP: accountClientIP(r),
+				})
+				if !hostDecision.Found && !hostDecision.Known {
+					unknownPublic.ServeHTTP(w, r)
+					return
+				}
+			}
+		}
+
 		// SITEBRUSH PUBLIC FAST GATE
 		// publicCatalog is authoritative for ordinary public traffic.
 		// Host existence is resolved in memory; unknown hosts never reach DB.
@@ -12908,6 +12970,19 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 				trustedPublic.ServeHTTP(w, r)
 				return
 			}
+
+			// decision was already resolved above and stored in the request
+			// context. Do not fall through to the ordinary public path, which
+			// would resolve the same host/catalog decision a second time.
+			//
+			// Keep the private test-drive gate before serving published content,
+			// matching the existing ordinary public path.
+			if a.controlDatabase != nil && a.privateTestDriveGate(w, r) {
+				return
+			}
+
+			public.ServeHTTP(w, r)
+			return
 		}
 
 		if embeddedStaticRequest(r) {
@@ -57810,7 +57885,11 @@ func (a *App) writePublicPolicy(domain string) error {
 		return err
 	}
 	policy.NoIndex = indexingState == "pending" || indexingState == "hidden"
-	policy.RobotsOverride = policy.NoIndex && robotsManual == 0
+	// Site indexing policy is authoritative while indexing is disabled.
+	// Even a manually edited/imported robots.txt is temporarily overridden.
+	// When indexing is enabled again, RobotsOverride becomes false and the
+	// site's original published robots.txt is served unchanged.
+	policy.RobotsOverride = policy.NoIndex
 	read := func(query string, visit func(*sql.Rows) error, queryDomain ...string) error {
 		storageDomain := domain
 		if len(queryDomain) > 0 {
@@ -58168,15 +58247,40 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 	}
 	if decision.NoIndex {
 		w.Header().Set("X-Robots-Tag", "noindex")
-		if decision.RobotsOverride && pagePath == "/robots.txt" && fileName == "" {
+		if pagePath == "/robots.txt" && fileName == "" {
 			baseURL := publicCrawlerBaseURL(r)
 			if baseURL == "" {
 				http.Error(w, "invalid request host", http.StatusBadRequest)
 				return true
 			}
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			w.Header().Set("Cache-Control", "public, max-age=300")
-			_, _ = io.WriteString(w, "User-agent: *\nAllow: /\nSitemap: "+baseURL+"/sitemap.xml\n")
+			// This robots.txt reflects a live indexing switch. Do not allow a
+			// reverse proxy/browser cache to hide requests from SiteBrush or
+			// serve the previous indexing state after the switch changes.
+			w.Header().Set("Cache-Control", "no-store")
+			robotsStartedAt := time.Now()
+			_, _ = io.WriteString(w, "User-agent: *\nDisallow: /\nSitemap: "+baseURL+"/sitemap.xml\n")
+
+			requestDomain := domainFromRequest(r)
+			duration := time.Since(robotsStartedAt)
+			log.Printf("STATIC [%s] method=%s path=%s status=%d remote=%s duration=%s",
+				diagnosticlog.SafeLogValue(requestDomain),
+				r.Method,
+				r.URL.Path,
+				http.StatusOK,
+				diagnosticlog.SafeLogValue(r.RemoteAddr),
+				duration,
+			)
+			a.writeDomainLog(
+				requestDomain,
+				"STATIC [%s] method=%s path=%s status=%d remote=%s duration=%s",
+				requestDomain,
+				r.Method,
+				r.URL.Path,
+				http.StatusOK,
+				r.RemoteAddr,
+				duration,
+			)
 			return true
 		}
 	}
