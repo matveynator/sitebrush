@@ -20,8 +20,8 @@
   src: url("/p/static/fonts/geist-600.ttf") format("truetype");
 }
 
-/* Keep the Test Drive chrome visually identical to ?visual without leaking
-   the administration theme into the customer's page. */
+/* The Test Drive chrome is rendered over an arbitrary customer site. Keep the
+   exact administration look isolated from whatever button/form CSS that site has. */
 .test-drive-save {
   --theme-foreground: #181b21;
   --theme-card: #ffffff;
@@ -38,7 +38,278 @@
   --theme-font-sans: Geist, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --theme-radius: 0.625rem;
   color-scheme: light;
-  font-family: var(--theme-font-sans);
+  font: 14px/1.4 var(--theme-font-sans) !important;
+  color: var(--theme-card-foreground) !important;
+}
+
+.test-drive-save *,
+.test-drive-save *::before,
+.test-drive-save *::after {
+  box-sizing: border-box;
+}
+
+.test-drive-save button,
+.test-drive-save input {
+  font-family: var(--theme-font-sans) !important;
+  text-transform: none !important;
+}
+
+.test-drive-save .SiteBrushAdminDialogOverlay {
+  position: fixed !important;
+  inset: 0 !important;
+  z-index: 2147483647 !important;
+  display: grid !important;
+  place-items: center !important;
+  padding: 16px !important;
+  background: rgb(7 15 28 / 55%) !important;
+}
+
+.test-drive-save .SiteBrushAdminDialogOverlay[hidden],
+.test-drive-save .SiteBrushAdminDialog [hidden],
+.test-drive-save .SiteBrushAdminDialogNotice[hidden] {
+  display: none !important;
+}
+
+.test-drive-save .SiteBrushAdminDialog {
+  box-sizing: border-box !important;
+  width: min(100%, 480px) !important;
+  max-width: 480px !important;
+  max-height: calc(100dvh - 32px) !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: visible !important;
+  border: 1px solid var(--theme-border) !important;
+  border-radius: var(--theme-radius) !important;
+  background: var(--theme-card) !important;
+  color: var(--theme-card-foreground) !important;
+  box-shadow: 0 20px 60px rgb(0 0 0 / 35%) !important;
+  font: 14px/1.4 var(--theme-font-sans) !important;
+  text-align: start !important;
+}
+
+.test-drive-save .SiteBrushAdminDialogHeader {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 12px !important;
+  padding: 12px 16px !important;
+  border: 0 !important;
+  border-bottom: 1px solid var(--theme-border) !important;
+  background: transparent !important;
+}
+
+.test-drive-save .SiteBrushAdminDialogTitle {
+  margin: 0 !important;
+  padding: 0 !important;
+  color: var(--theme-card-foreground) !important;
+  font: 600 18px/1.25 var(--theme-font-sans) !important;
+  letter-spacing: normal !important;
+  text-transform: none !important;
+}
+
+.test-drive-save .SiteBrushAdminDialogClose {
+  appearance: none !important;
+  flex: none !important;
+  width: 36px !important;
+  min-width: 36px !important;
+  height: 36px !important;
+  min-height: 36px !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: calc(var(--theme-radius) - 2px) !important;
+  background: transparent !important;
+  color: var(--theme-foreground) !important;
+  box-shadow: none !important;
+  font: 400 24px/1 var(--theme-font-sans) !important;
+  cursor: pointer !important;
+}
+
+.test-drive-save .SiteBrushAdminDialogClose:hover,
+.test-drive-save .SiteBrushAdminDialogButton:hover:not(:disabled) {
+  background: var(--theme-accent) !important;
+  color: var(--theme-accent-foreground) !important;
+}
+
+.test-drive-save .SiteBrushAdminDialogBody,
+.test-drive-save .SiteBrushAdminDialogForm,
+.test-drive-save .SiteBrushAdminDialogField,
+.test-drive-save .SiteBrushAdminDialogCaptcha {
+  display: grid !important;
+  gap: 8px !important;
+}
+
+.test-drive-save .SiteBrushAdminDialogBody {
+  margin: 0 !important;
+  padding: 16px !important;
+  background: transparent !important;
+}
+
+.test-drive-save .SiteBrushAdminDialogBody p {
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+.test-drive-save .SiteBrushAdminDialogBody [data-trial-code-stage] {
+  display: grid !important;
+  gap: 8px !important;
+}
+
+.test-drive-save .SiteBrushAdminDialogHint {
+  color: var(--theme-muted-foreground) !important;
+  font: 400 14px/1.4 var(--theme-font-sans) !important;
+}
+
+.test-drive-save .SiteBrushAdminDialogReason,
+.test-drive-save .SiteBrushAdminDialogField {
+  color: var(--theme-card-foreground) !important;
+  font: 500 14px/1.4 var(--theme-font-sans) !important;
+}
+
+.test-drive-save .SiteBrushAdminDialogReason {
+  color: var(--theme-destructive) !important;
+}
+
+.test-drive-save .SiteBrushAdminDialogField input {
+  appearance: none !important;
+  box-sizing: border-box !important;
+  width: 100% !important;
+  min-width: 0 !important;
+  min-height: 36px !important;
+  margin: 0 !important;
+  padding: 7px 12px !important;
+  border: 1px solid var(--theme-input) !important;
+  border-radius: calc(var(--theme-radius) - 2px) !important;
+  background: var(--theme-card) !important;
+  color: var(--theme-card-foreground) !important;
+  -webkit-text-fill-color: var(--theme-card-foreground) !important;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 5%) !important;
+  font: 400 14px/20px var(--theme-font-sans) !important;
+}
+
+.test-drive-save .SiteBrushAdminDialogField input[autocomplete="one-time-code"] {
+  font-size: 18px !important;
+  font-weight: 600 !important;
+  letter-spacing: .12em !important;
+  text-align: center !important;
+}
+
+.test-drive-save .SiteBrushAdminDialogButton,
+.test-drive-save .SiteBrushAdminDialogNotice {
+  appearance: none !important;
+  box-sizing: border-box !important;
+  width: auto !important;
+  min-width: 0 !important;
+  min-height: 36px !important;
+  height: auto !important;
+  margin: 0 !important;
+  padding: 7px 16px !important;
+  border: 1px solid var(--theme-border) !important;
+  border-radius: calc(var(--theme-radius) - 2px) !important;
+  background: var(--theme-card) !important;
+  color: var(--theme-card-foreground) !important;
+  -webkit-text-fill-color: currentColor !important;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 5%) !important;
+  font: 500 14px/20px var(--theme-font-sans) !important;
+  letter-spacing: normal !important;
+  text-align: center !important;
+  text-decoration: none !important;
+  white-space: nowrap !important;
+  cursor: pointer !important;
+}
+
+.test-drive-save .SiteBrushAdminDialogButton.primary,
+.test-drive-save .SiteBrushAdminDialogNotice {
+  border-color: var(--theme-primary) !important;
+  background: var(--theme-primary) !important;
+  color: var(--theme-primary-foreground) !important;
+}
+
+.test-drive-save .SiteBrushAdminDialogButton.primary:hover:not(:disabled),
+.test-drive-save .SiteBrushAdminDialogNotice:hover {
+  background: color-mix(in srgb, var(--theme-primary) 90%, transparent) !important;
+  color: var(--theme-primary-foreground) !important;
+}
+
+.test-drive-save .SiteBrushAdminDialogButton:disabled {
+  opacity: .5 !important;
+  cursor: default !important;
+}
+
+.test-drive-save .SiteBrushAdminDialog :is(button, input, a):focus-visible,
+.test-drive-save .SiteBrushAdminDialogNotice:focus-visible {
+  outline: 2px solid var(--theme-ring) !important;
+  outline-offset: 2px !important;
+}
+
+.test-drive-save .SiteBrushAdminDialogActions,
+.test-drive-save .SiteBrushAdminDialogMailLinks {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  align-items: center !important;
+  gap: 8px !important;
+}
+
+.test-drive-save .SiteBrushAdminDialogActions .SiteBrushAdminDialogButton {
+  padding-inline: 10px !important;
+}
+
+.test-drive-save .SiteBrushAdminDialogMailLinks a {
+  color: var(--theme-primary) !important;
+  font: 400 13px/1.4 var(--theme-font-sans) !important;
+  text-decoration: underline !important;
+}
+
+.test-drive-save .SiteBrushAdminDialogCurrentEmail {
+  color: var(--theme-card-foreground) !important;
+  overflow-wrap: anywhere !important;
+  font-weight: 600 !important;
+}
+
+.test-drive-save .SiteBrushAdminDialogError {
+  color: var(--theme-destructive) !important;
+}
+
+.test-drive-save .SiteBrushTestDriveActions {
+  position: fixed !important;
+  inset-inline-end: 16px !important;
+  bottom: 16px !important;
+  z-index: 2147483646 !important;
+  display: flex !important;
+  flex-wrap: wrap !important;
+  align-items: center !important;
+  gap: 8px !important;
+  width: auto !important;
+  max-width: calc(100vw - 32px) !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+}
+
+.test-drive-save .SiteBrushTestDriveActions[hidden] {
+  display: none !important;
+}
+
+.test-drive-save .SiteBrushTestDriveActions .SiteBrushAdminDialogNotice {
+  position: static !important;
+}
+
+.test-drive-save .SiteBrushTestDriveEditHint {
+  box-sizing: border-box !important;
+  width: auto !important;
+  max-width: 240px !important;
+  margin: 0 !important;
+  padding: 8px 10px !important;
+  border: 1px solid var(--theme-border) !important;
+  border-radius: calc(var(--theme-radius) - 2px) !important;
+  background: var(--theme-card) !important;
+  color: var(--theme-muted-foreground) !important;
+  box-shadow: none !important;
+  font: 400 12px/1.35 var(--theme-font-sans) !important;
+  letter-spacing: normal !important;
+  text-align: start !important;
+  text-transform: none !important;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -57,5 +328,38 @@
     --theme-ring: #88a8c9;
     --theme-radius: 0.5rem;
     color-scheme: dark;
+  }
+}
+
+@media (max-width: 620px) {
+  .test-drive-save .SiteBrushAdminDialogField input {
+    font-size: 16px !important;
+  }
+  .test-drive-save .SiteBrushTestDriveActions {
+    inset-inline: 10px !important;
+    bottom: max(10px, env(safe-area-inset-bottom)) !important;
+    max-width: none !important;
+  }
+}
+
+@media (max-height: 600px) {
+  .test-drive-save .SiteBrushAdminDialogHeader {
+    padding-block: 6px !important;
+  }
+  .test-drive-save .SiteBrushAdminDialogBody {
+    gap: 6px !important;
+    padding: 10px 14px !important;
+  }
+  .test-drive-save .SiteBrushAdminDialogForm,
+  .test-drive-save .SiteBrushAdminDialogField,
+  .test-drive-save .SiteBrushAdminDialogCaptcha {
+    gap: 5px !important;
+  }
+}
+
+@media (max-height: 540px) {
+  .test-drive-save .SiteBrushAdminDialogHint,
+  .test-drive-save .SiteBrushAdminDialogMailLinks {
+    display: none !important;
   }
 }
