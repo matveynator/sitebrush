@@ -2764,19 +2764,6 @@ func (r *perSiteDBRouter) run(siteDatabaseRootDir string, migrate siteDBMigrator
 					primaryDomainsByAlias[domain] = primaryDomain
 					databaseDomain = primaryDomain
 					aliasDomain = domain
-				} else if !request.createIfMissing {
-					// This is the important bot path:
-					// unknown Host -> immediate miss.
-					err := errSiteDatabaseMissing
-					r.logRouterResolved(
-						domain,
-						databaseDomain,
-						aliasDomain,
-						time.Since(startedAt),
-						err,
-					)
-					request.response <- siteDBResponse{err: err}
-					continue
 				}
 			}
 
@@ -2785,6 +2772,43 @@ func (r *perSiteDBRouter) run(siteDatabaseRootDir string, migrate siteDBMigrator
 				continue
 			}
 			database, err := r.databaseForDomain(siteDatabaseRootDir, databasesByDomain, migratedDomains, degradedDomains, databaseDomain, request.createIfMissing, migrate)
+			if errors.Is(err, errSiteDatabaseMissing) &&
+				!request.createIfMissing &&
+				aliasDomain == "" {
+				// A verified alias may have been added after the startup index
+				// was built. Refresh only after an exact primary DB miss.
+				aliasPrimaryDomains = loadActivePrimaryDomainAliasIndex(
+					siteDatabaseRootDir,
+					databasesByDomain,
+					migratedDomains,
+				)
+
+				if primaryDomain := findActivePrimaryDomainForAlias(
+					aliasPrimaryDomains,
+					domain,
+				); primaryDomain != "" {
+					primaryDomainsByAlias[domain] = primaryDomain
+					databaseDomain = primaryDomain
+					aliasDomain = domain
+
+					if degradedErr := degradedDomains[databaseDomain]; degradedErr != nil {
+						err = siteDatabaseDegradedError{
+							domain: databaseDomain,
+							err:    degradedErr,
+						}
+					} else {
+						database, err = r.databaseForDomain(
+							siteDatabaseRootDir,
+							databasesByDomain,
+							migratedDomains,
+							degradedDomains,
+							databaseDomain,
+							false,
+							migrate,
+						)
+					}
+				}
+			}
 			if err != nil {
 				r.logRouterResolved(domain, databaseDomain, aliasDomain, time.Since(startedAt), err)
 				request.response <- siteDBResponse{err: err}
