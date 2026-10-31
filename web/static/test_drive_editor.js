@@ -91,13 +91,91 @@
     render();
   }
 
-  function openPrivateCopy(automaticPreview) {
+  function installPrivateCopyScopeChoice() {
+    const copyOverlayElement = document.querySelector('.SiteBrushCopySiteOverlay');
+    if (!copyOverlayElement) return;
+    const advancedOptionsElement = copyOverlayElement.querySelector('.SiteBrushCopySiteAdvancedOptions');
+    const wholeSiteElement = copyOverlayElement.querySelector('input[name="copy_whole_site"]');
+    if (!advancedOptionsElement || !wholeSiteElement) return;
+
+    advancedOptionsElement.open = true;
+    if (!wholeSiteElement.checked) {
+      wholeSiteElement.checked = true;
+      wholeSiteElement.dispatchEvent(new Event('change', {bubbles: true}));
+    }
+
+    if (advancedOptionsElement.querySelector('[data-test-drive-copy-scope]')) return;
+    const originalWholeSiteLabel = wholeSiteElement.closest('label');
+    if (originalWholeSiteLabel) originalWholeSiteLabel.hidden = true;
+
+    const language = String(document.documentElement.lang || navigator.language || 'en').toLowerCase();
+    const russian = language === 'ru' || language.startsWith('ru-');
+    const scopeElement = document.createElement('div');
+    scopeElement.className = 'SiteBrushCopySiteField';
+    scopeElement.dataset.testDriveCopyScope = 'true';
+    scopeElement.setAttribute('role', 'radiogroup');
+    scopeElement.setAttribute('aria-label', russian ? 'Что копировать' : 'What to copy');
+    scopeElement.appendChild(document.createElement('span')).textContent = russian ? 'Что копировать' : 'What to copy';
+
+    const siteLabelElement = document.createElement('label');
+    siteLabelElement.className = 'SiteBrushCopySiteCheckbox';
+    const siteRadioElement = document.createElement('input');
+    siteRadioElement.type = 'radio';
+    siteRadioElement.name = 'sitebrush_test_drive_copy_scope';
+    siteRadioElement.value = 'site';
+    siteRadioElement.checked = true;
+    siteRadioElement.style.setProperty('appearance', 'auto', 'important');
+    siteRadioElement.style.setProperty('display', 'inline-block', 'important');
+    siteRadioElement.style.setProperty('width', '16px', 'important');
+    siteRadioElement.style.setProperty('height', '16px', 'important');
+    siteRadioElement.style.setProperty('opacity', '1', 'important');
+    siteLabelElement.appendChild(siteRadioElement);
+    siteLabelElement.appendChild(document.createElement('span')).textContent = russian ? 'Весь сайт' : 'Entire site';
+
+    const pageLabelElement = document.createElement('label');
+    pageLabelElement.className = 'SiteBrushCopySiteCheckbox';
+    const pageRadioElement = document.createElement('input');
+    pageRadioElement.type = 'radio';
+    pageRadioElement.name = 'sitebrush_test_drive_copy_scope';
+    pageRadioElement.value = 'page';
+    pageRadioElement.style.setProperty('appearance', 'auto', 'important');
+    pageRadioElement.style.setProperty('display', 'inline-block', 'important');
+    pageRadioElement.style.setProperty('width', '16px', 'important');
+    pageRadioElement.style.setProperty('height', '16px', 'important');
+    pageRadioElement.style.setProperty('opacity', '1', 'important');
+    pageLabelElement.appendChild(pageRadioElement);
+    pageLabelElement.appendChild(document.createElement('span')).textContent = russian ? 'Только 1 страницу' : 'Only this page';
+
+    function selectCopyScope(copyWholeSite) {
+      wholeSiteElement.checked = copyWholeSite;
+      wholeSiteElement.dispatchEvent(new Event('change', {bubbles: true}));
+    }
+    siteRadioElement.addEventListener('change', function selectWholeSite() {
+      if (siteRadioElement.checked) selectCopyScope(true);
+    });
+    pageRadioElement.addEventListener('change', function selectSinglePage() {
+      if (pageRadioElement.checked) selectCopyScope(false);
+    });
+
+    scopeElement.appendChild(siteLabelElement);
+    scopeElement.appendChild(pageLabelElement);
+    advancedOptionsElement.insertBefore(scopeElement, advancedOptionsElement.children[1] || null);
+  }
+
+  function openPrivateCopy(automaticPreview, attemptNumber) {
     if (!window.SiteBrushCopySite) {
+      const nextAttempt = Number(attemptNumber || 0) + 1;
+      if (nextAttempt <= 20) {
+        window.setTimeout(function retryPrivateCopy() { openPrivateCopy(automaticPreview, nextAttempt); }, 50);
+        return;
+      }
       showError(new Error(defaultErrorText));
       return;
     }
     copyConfiguration.autoPreview = Boolean(automaticPreview);
+    copyConfiguration.copyWholeSite = true;
     window.SiteBrushCopySite.open(copyConfiguration);
+    installPrivateCopyScopeChoice();
   }
 
   function submitAction(queryFlag, formElement) {
@@ -192,6 +270,6 @@
     openSaveDialog(false);
   } else if (window.location.hash === '#test-drive-copy') {
     window.history.replaceState(null, '', window.location.pathname + window.location.search);
-    openPrivateCopy(true);
+    openPrivateCopy(false);
   }
 })();
