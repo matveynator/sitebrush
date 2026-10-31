@@ -122,6 +122,61 @@
   overflow: auto;
 }
 
+/* Keep every Jodit popup/dialog field readable in both editor themes. */
+.jodit-dialog,
+.jodit-dialog__panel,
+.jodit-dialog__content,
+.jodit-popup,
+.jodit-popup__content,
+.jodit-form {
+  background: var(--surface) !important;
+  color: var(--text-main) !important;
+}
+
+.jodit-dialog label,
+.jodit-popup label,
+.jodit-form label,
+.jodit-dialog .jodit-ui-block,
+.jodit-popup .jodit-ui-block {
+  color: var(--text-main) !important;
+}
+
+.jodit-dialog :is(input:not([type="checkbox"]):not([type="radio"]), textarea, select),
+.jodit-popup :is(input:not([type="checkbox"]):not([type="radio"]), textarea, select),
+.jodit-form :is(input:not([type="checkbox"]):not([type="radio"]), textarea, select),
+.jodit-container .jodit-ui-input__input,
+.jodit-container .jodit-input,
+.jodit-container .jodit-ui-text-area__input {
+  background: var(--field-bg) !important;
+  color: var(--field-text) !important;
+  -webkit-text-fill-color: var(--field-text) !important;
+  caret-color: var(--field-text) !important;
+  border-color: var(--field-border) !important;
+  box-shadow: inset 0 0 0 1px transparent;
+}
+
+.jodit-dialog :is(input, textarea)::placeholder,
+.jodit-popup :is(input, textarea)::placeholder,
+.jodit-form :is(input, textarea)::placeholder,
+.jodit-container .jodit-ui-input__input::placeholder,
+.jodit-container .jodit-input::placeholder,
+.jodit-container .jodit-ui-text-area__input::placeholder {
+  color: var(--hint) !important;
+  -webkit-text-fill-color: var(--hint) !important;
+  opacity: 1 !important;
+}
+
+.jodit-dialog :is(input, textarea, select):focus,
+.jodit-popup :is(input, textarea, select):focus,
+.jodit-form :is(input, textarea, select):focus,
+.jodit-container .jodit-ui-input__input:focus,
+.jodit-container .jodit-input:focus,
+.jodit-container .jodit-ui-text-area__input:focus {
+  border-color: var(--theme-ring) !important;
+  outline: 2px solid color-mix(in srgb, var(--theme-ring) 45%, transparent) !important;
+  outline-offset: 1px;
+}
+
 /* Match the text editor while keeping scrolling inside Jodit's workspace. */
 .jodit-source .CodeMirror {
   width: 100%;

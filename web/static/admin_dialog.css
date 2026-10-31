@@ -15,6 +15,18 @@
   display: none !important;
 }
 
+/* A private Test Drive is operated from the rendered site page. This stylesheet
+   is loaded in its editor shell before the body, so keep that shell invisible
+   while test_drive_page_entry.js returns the browser to the site. */
+#visualEditorForm.editor-page {
+  visibility: hidden !important;
+}
+
+/* Test Drive actions belong to the rendered site, not inside ?visual. */
+#visualEditorForm ~ .test-drive-save {
+  display: none !important;
+}
+
 .SiteBrushAdminDialog {
   box-sizing: border-box;
   width: min(100%, 480px);

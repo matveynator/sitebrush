@@ -56,6 +56,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -126,6 +127,7 @@ var importedHTMLHeadOpenPattern = regexp.MustCompile(`(?i)<head\b[^>]*>`)
 var importedHTMLHTMLOpenPattern = regexp.MustCompile(`(?i)<html\b[^>]*>`)
 var importedCSSCharsetAssignmentPattern = regexp.MustCompile(`(?i)^(\s*\x{feff}?\s*@charset\s+["'])[a-z0-9._:-]+(["']\s*;)`)
 var errReadLimitExceeded = errors.New("read limit exceeded")
+var publicHTTPInFlight atomic.Int64
 
 const storageAppName = "sitebrush"
 const defaultDBPath = "storage/db/sitebrush.db"
@@ -170,6 +172,11 @@ const sitebrushHTTP10KeepAliveBufferLimit = 1024 * 1024
 const currentSiteDatabaseSchemaVersion = 15
 const legacySiteDataSchemaVersion = 13
 const siteDatabaseStartupMigrationTimeout = 30 * time.Second
+const siteAliasIndexCacheTTL = 5 * time.Minute
+
+// Public static delivery must remain cheap during hostile bursts.
+// Trusted/site-admin traffic bypasses load shedding.
+const publicHTTPOverloadInFlightLimit int64 = 256
 const pagePasswordSessionTTL = time.Hour
 const serviceMailRelayPath = "/?service_mail_relay"
 const hostingSnapshotPath = "/?hosting_snapshot"
@@ -2589,6 +2596,9 @@ func (r *perSiteDBRouter) run(siteDatabaseRootDir string, migrate siteDBMigrator
 	defer close(r.done)
 	databasesByDomain := make(map[string]*siteFileDatabase)
 	primaryDomainsByAlias := make(map[string]string)
+	aliasPrimaryDomains := make(map[string]string)
+	aliasIndexRefresh := time.NewTicker(siteAliasIndexCacheTTL)
+	defer aliasIndexRefresh.Stop()
 	startupMigrationFinished := false
 	migratedDomains := make(map[string]bool)
 	degradedDomains := make(map[string]error)
@@ -2617,9 +2627,23 @@ func (r *perSiteDBRouter) run(siteDatabaseRootDir string, migrate siteDBMigrator
 					log.Printf("%sDB MIGRATION%s ignored unregistered path=%s domain=%s", terminalCyan(), terminalReset(), event.path, event.domain)
 				}
 			case "summary":
+				aliasPrimaryDomains = loadActivePrimaryDomainAliasIndex(
+					siteDatabaseRootDir,
+					databasesByDomain,
+					migratedDomains,
+				)
 				startupMigrationFinished = true
 				log.Printf("%sDB MIGRATION%s startup summary total=%d applied=%d skipped=%d failed=%d", terminalCyan(), terminalReset(), event.total, event.applied, event.skipped, event.failed)
 			}
+		case <-aliasIndexRefresh.C:
+			if startupMigrationFinished {
+				aliasPrimaryDomains = loadActivePrimaryDomainAliasIndex(
+					siteDatabaseRootDir,
+					databasesByDomain,
+					migratedDomains,
+				)
+			}
+
 		case statusRequest := <-r.migrationStatusRequests:
 			domain := normalizeDomainName(statusRequest.domain)
 			if domain == "" {
@@ -2664,6 +2688,11 @@ func (r *perSiteDBRouter) run(siteDatabaseRootDir string, migrate siteDBMigrator
 					delete(primaryDomainsByAlias, aliasDomain)
 				}
 			}
+			for aliasDomain, primaryDomain := range aliasPrimaryDomains {
+				if aliasDomain == domain || primaryDomain == domain {
+					delete(aliasPrimaryDomains, aliasDomain)
+				}
+			}
 			forgetRequest.response <- closeErr
 		case request := <-r.requests:
 			startedAt := time.Now()
@@ -2690,29 +2719,96 @@ func (r *perSiteDBRouter) run(siteDatabaseRootDir string, migrate siteDBMigrator
 			}
 			databaseDomain := domain
 			aliasDomain := ""
-			if primaryDomain := primaryDomainsByAlias[domain]; primaryDomain != "" {
-				database, err := r.databaseForDomain(siteDatabaseRootDir, databasesByDomain, migratedDomains, degradedDomains, primaryDomain, request.createIfMissing, migrate)
-				if err != nil {
-					request.response <- siteDBResponse{err: err}
-					continue
+
+			// A registered primary site is already known in memory.
+			// Never perform alias SQLite lookups for it.
+			if !migratedDomains[domain] {
+				if primaryDomain := primaryDomainsByAlias[domain]; primaryDomain != "" {
+					database, err := r.databaseForDomain(
+						siteDatabaseRootDir,
+						databasesByDomain,
+						migratedDomains,
+						degradedDomains,
+						primaryDomain,
+						request.createIfMissing,
+						migrate,
+					)
+					if err != nil {
+						request.response <- siteDBResponse{err: err}
+						continue
+					}
+
+					// Positive aliases remain revalidated against their one
+					// owning database. Random bot hosts never reach this path.
+					if activePrimaryDomainForAlias(database, domain) == primaryDomain {
+						r.logRouterResolved(
+							domain,
+							primaryDomain,
+							domain,
+							time.Since(startedAt),
+							nil,
+						)
+						request.response <- siteDBResponse{db: database}
+						continue
+					}
+
+					delete(primaryDomainsByAlias, domain)
+					delete(aliasPrimaryDomains, domain)
 				}
-				if activePrimaryDomainForAlias(database, domain) == primaryDomain {
-					r.logRouterResolved(domain, primaryDomain, domain, time.Since(startedAt), nil)
-					request.response <- siteDBResponse{db: database}
-					continue
+
+				// O(1) lookup. No database scan and no filesystem scan.
+				if primaryDomain := findActivePrimaryDomainForAlias(
+					aliasPrimaryDomains,
+					domain,
+				); primaryDomain != "" {
+					primaryDomainsByAlias[domain] = primaryDomain
+					databaseDomain = primaryDomain
+					aliasDomain = domain
 				}
-				delete(primaryDomainsByAlias, domain)
 			}
-			if primaryDomain := findActivePrimaryDomainForAlias(siteDatabaseRootDir, databasesByDomain, domain); primaryDomain != "" {
-				primaryDomainsByAlias[domain] = primaryDomain
-				databaseDomain = primaryDomain
-				aliasDomain = domain
-			}
+
 			if err := degradedDomains[databaseDomain]; err != nil {
 				request.response <- siteDBResponse{err: siteDatabaseDegradedError{domain: databaseDomain, err: err}}
 				continue
 			}
 			database, err := r.databaseForDomain(siteDatabaseRootDir, databasesByDomain, migratedDomains, degradedDomains, databaseDomain, request.createIfMissing, migrate)
+			if errors.Is(err, errSiteDatabaseMissing) &&
+				!request.createIfMissing &&
+				aliasDomain == "" {
+				// A verified alias may have been added after the startup index
+				// was built. Refresh only after an exact primary DB miss.
+				aliasPrimaryDomains = loadActivePrimaryDomainAliasIndex(
+					siteDatabaseRootDir,
+					databasesByDomain,
+					migratedDomains,
+				)
+
+				if primaryDomain := findActivePrimaryDomainForAlias(
+					aliasPrimaryDomains,
+					domain,
+				); primaryDomain != "" {
+					primaryDomainsByAlias[domain] = primaryDomain
+					databaseDomain = primaryDomain
+					aliasDomain = domain
+
+					if degradedErr := degradedDomains[databaseDomain]; degradedErr != nil {
+						err = siteDatabaseDegradedError{
+							domain: databaseDomain,
+							err:    degradedErr,
+						}
+					} else {
+						database, err = r.databaseForDomain(
+							siteDatabaseRootDir,
+							databasesByDomain,
+							migratedDomains,
+							degradedDomains,
+							databaseDomain,
+							false,
+							migrate,
+						)
+					}
+				}
+			}
 			if err != nil {
 				r.logRouterResolved(domain, databaseDomain, aliasDomain, time.Since(startedAt), err)
 				request.response <- siteDBResponse{err: err}
@@ -3004,38 +3100,106 @@ func (r *perSiteDBRouter) databaseForDomain(siteDatabaseRootDir string, database
 	return siteDatabase, nil
 }
 
-func findActivePrimaryDomainForAlias(siteDatabaseRootDir string, databasesByDomain map[string]*siteFileDatabase, aliasDomain string) string {
+func findActivePrimaryDomainForAlias(indexedAliases map[string]string, aliasDomain string) string {
 	aliasDomain = normalizeDomainName(aliasDomain)
 	if aliasDomain == "" {
 		return ""
 	}
-	for _, database := range databasesByDomain {
-		if primaryDomain := activePrimaryDomainForAlias(database, aliasDomain); primaryDomain != "" {
-			return primaryDomain
-		}
-	}
-	candidates, err := registeredSiteDatabaseCandidates(siteDatabaseRootDir)
-	if err != nil {
-		return ""
-	}
-	for _, candidate := range candidates {
-		databasePath := candidate.path
-		if siteDatabasePathAlreadyOpen(databasesByDomain, databasePath) {
+	return indexedAliases[aliasDomain]
+}
+
+func loadActivePrimaryDomainAliasIndex(
+	siteDatabaseRootDir string,
+	databasesByDomain map[string]*siteFileDatabase,
+	migratedDomains map[string]bool,
+) map[string]string {
+	index := make(map[string]string)
+
+	const query = `SELECT alias_domain, primary_domain
+		FROM domain_aliases
+		WHERE is_verified=1 AND dns_a_ok=1`
+
+	for domain, migrated := range migratedDomains {
+		if !migrated {
 			continue
 		}
-		database, err := sql.Open("sqlite", "file:"+databasePath)
+
+		// Prefer an already-open control DB. PRELOAD normally means this
+		// path is used for every active site, so SQLite schemas are not
+		// reopened and reparsed.
+		if database := databasesByDomain[domain]; database != nil {
+			control := database.subsystem("control")
+			if control == nil {
+				continue
+			}
+
+			rows, err := control.QueryContext(context.Background(), query)
+			if err != nil {
+				continue
+			}
+			addActivePrimaryDomainAliasRows(index, rows)
+			continue
+		}
+
+		// Startup fallback for a migrated site that has not been preloaded.
+		databasePath := siteDatabaseFile(siteDatabaseRootDir, domain)
+		if filepath.Base(databasePath) == "content.db" {
+			databasePath = filepath.Join(
+				filepath.Dir(databasePath),
+				"control.db",
+			)
+		}
+
+		database, err := openSiteDatabaseReadHandle(databasePath)
 		if err != nil {
 			continue
 		}
-		database.SetMaxOpenConns(1)
-		database.SetMaxIdleConns(1)
-		primaryDomain := activePrimaryDomainForAliasRaw(database, aliasDomain)
+
+		rows, queryErr := database.QueryContext(
+			context.Background(),
+			query,
+		)
+		if queryErr == nil {
+			addActivePrimaryDomainAliasRows(index, rows)
+		}
+
 		_ = database.Close()
-		if primaryDomain != "" {
-			return primaryDomain
+	}
+
+	return index
+}
+
+func addActivePrimaryDomainAliasRows(
+	index map[string]string,
+	rows *sql.Rows,
+) {
+	if rows == nil {
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var rawAliasDomain string
+		var rawPrimaryDomain string
+
+		if rows.Scan(&rawAliasDomain, &rawPrimaryDomain) != nil {
+			continue
+		}
+
+		aliasDomain := normalizeDomainName(rawAliasDomain)
+		primaryDomain := normalizeDomainName(rawPrimaryDomain)
+
+		if aliasDomain == "" ||
+			primaryDomain == "" ||
+			aliasDomain == primaryDomain {
+			continue
+		}
+
+		// Keep first owner if corrupt/duplicate data exists.
+		if _, exists := index[aliasDomain]; !exists {
+			index[aliasDomain] = primaryDomain
 		}
 	}
-	return ""
 }
 
 func siteDatabasePathAlreadyOpen(databasesByDomain map[string]*siteFileDatabase, databasePath string) bool {
@@ -9267,7 +9431,7 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 		if domain == "" {
 			domain = normalizeDomainName(domainFromRequest(r))
 		}
-		trusted := decision.LoadTrusted || httpsecurity.IsLocalRequest(r) || (!decision.Found && !a.publicBoundary && a.sitebrushPeerRequestTrusted(r, now))
+		trusted := decision.AdminAllowed || decision.LoadTrusted || httpsecurity.IsLocalRequest(r) || (!decision.Found && !a.publicBoundary && a.sitebrushPeerRequestTrusted(r, now))
 		crawlerRead := httpsecurity.IsIndexingCrawlerRequest(r)
 		if !trusted && a.attackGuard != nil {
 			trusted = a.trustRecordedAdminIP(r, domain, clientIP, now)
@@ -9478,7 +9642,8 @@ func adminResponseIsolationRequired(r *http.Request) bool {
 
 func (a *App) trustRecordedAdminIP(r *http.Request, domain, clientIP string, now time.Time) bool {
 	if a.publicCatalog != nil && publicOrdinaryRequest(r) {
-		return a.publicRequestDecision(r).LoadTrusted
+		decision := a.publicRequestDecision(r)
+		return decision.AdminAllowed || decision.LoadTrusted
 	}
 	if a.attackGuard == nil || a.db == nil || domain == "" || clientIP == "" {
 		return false
@@ -10501,6 +10666,48 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 		return nonceErr
 	}
 	appHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// robots.txt must always appear in the SiteBrush access/domain log,
+		// regardless of whether it is served by publicCatalog, static fast path
+		// or the generated noindex override.
+		if r.URL.Path == "/robots.txt" &&
+			(r.Method == http.MethodGet || r.Method == http.MethodHead) {
+			startedAt := time.Now()
+			captured := &statusCapturingResponseWriter{
+				ResponseWriter: w,
+				statusCode:     http.StatusOK,
+			}
+			w = captured
+
+			defer func() {
+				logDomain := domainFromRequest(r)
+				safeDomain := diagnosticlog.SafeLogValue(logDomain)
+				safeRemote := diagnosticlog.SafeLogValue(r.RemoteAddr)
+				requestMethod := http.MethodGet
+				if r.Method == http.MethodHead {
+					requestMethod = http.MethodHead
+				}
+				duration := time.Since(startedAt)
+
+				log.Printf(
+					"REQUEST [%s] method=%s path=/robots.txt status=%d remote=%s duration=%s",
+					safeDomain,
+					requestMethod,
+					captured.statusCode,
+					safeRemote,
+					duration,
+				)
+
+				application.writeDomainLog(
+					logDomain,
+					"REQUEST [%s] method=%s path=/robots.txt status=%d remote=%s duration=%s",
+					safeDomain,
+					requestMethod,
+					captured.statusCode,
+					safeRemote,
+					duration,
+				)
+			}()
+		}
 		if r.URL.Path == "/_sitebrush/update-health" && r.Header.Get("X-SiteBrush-Update-Probe") == healthNonce && requestRemoteIsLoopback(r) {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -12713,11 +12920,112 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 			fallback.ServeHTTP(w, r)
 		}
 	})))))
+	trustedPublic := a.securityResponseHeadersMiddleware(a.accessLogMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !a.servePublicPublished(w, r, false) {
+			fallback.ServeHTTP(w, r)
+		}
+	})))
+	unknownPublic := a.securityResponseHeadersMiddleware(a.accessLogMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	})))
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Embedded SiteBrush application assets belong to the running
+		// application, not to an individual site's publication policy.
+		// They must remain available while the public catalog is warming,
+		// frozen, blocked, or has no entry for the request Host.
 		if embeddedStaticRequest(r) {
 			embedded.ServeHTTP(w, r)
 			return
 		}
+
+		// SITEBRUSH UNKNOWN HOST GATE
+		//
+		// Non-ordinary requests (POST, control queries, WebSocket upgrades, etc.)
+		// do not enter the ordinary public fast path below. Reject unknown
+		// public hosts here, before dynamic/security middleware can touch
+		// SQLite or attempt to load per-site policy.
+		//
+		// Host-only Lookup is intentional: do not cache this decision in the
+		// request context because publicRequestDecision also contains path/file
+		// information for ordinary published requests.
+		if a.publicCatalog != nil && !publicOrdinaryRequest(r) && !httpsecurity.IsLocalRequest(r) {
+			host := domainFromRequest(r)
+			if host != "" {
+				hostDecision := a.publicCatalog.Lookup(publicsite.Lookup{
+					Host:     host,
+					ClientIP: accountClientIP(r),
+				})
+				if !hostDecision.Found && !hostDecision.Known {
+					unknownPublic.ServeHTTP(w, r)
+					return
+				}
+			}
+		}
+
+		// SITEBRUSH PUBLIC FAST GATE
+		// publicCatalog is authoritative for ordinary public traffic.
+		// Host existence is resolved in memory; unknown hosts never reach DB.
+		if a.publicCatalog != nil &&
+			publicOrdinaryRequest(r) &&
+			!(r.URL.Path == "/" &&
+				canonicalLocalDomain(domainFromRequest(r)) == "localhost" &&
+				httpsecurity.IsLocalRequest(r)) {
+			decision := a.publicRequestDecision(r)
+			r = withPublicRequestDecision(r, decision)
+
+			trustedPublicRequest := decision.AdminAllowed ||
+				decision.LoadTrusted ||
+				httpsecurity.IsLocalRequest(r)
+
+			// Untrusted traffic is shed before analytics, security workers,
+			// publication machinery and SQLite when concurrency is excessive.
+			if !trustedPublicRequest {
+				inFlight := publicHTTPInFlight.Add(1)
+				if inFlight > publicHTTPOverloadInFlightLimit {
+					publicHTTPInFlight.Add(-1)
+					w.Header().Set("Retry-After", "1")
+					w.Header().Set("Cache-Control", "no-store")
+					w.Header().Set("X-Sitebrush-Overload", "shed")
+					http.Error(
+						w,
+						"Request rate temporarily reduced. Retry shortly.",
+						http.StatusTooManyRequests,
+					)
+					return
+				}
+				defer publicHTTPInFlight.Add(-1)
+			}
+
+			// Unknown Host is terminal here.
+			// Never call publicPublicationRequest/writePublicPolicy/router/SQLite.
+			if !decision.Found {
+				unknownPublic.ServeHTTP(w, r)
+				return
+			}
+
+			// Administrator/trusted traffic bypasses AttackGuard,
+			// ThrottleGuard and request analytics. Published content is served
+			// directly from publicCatalog/disk.
+			if trustedPublicRequest {
+				trustedPublic.ServeHTTP(w, r)
+				return
+			}
+
+			// decision was already resolved above and stored in the request
+			// context. Do not fall through to the ordinary public path, which
+			// would resolve the same host/catalog decision a second time.
+			//
+			// Keep the private test-drive gate before serving published content,
+			// matching the existing ordinary public path.
+			if a.controlDatabase != nil && a.privateTestDriveGate(w, r) {
+				return
+			}
+
+			public.ServeHTTP(w, r)
+			return
+		}
+
 		if a.publicCatalog != nil && publicOrdinaryRequest(r) {
 			// The application control database owner serializes trial reads.
 			// Bare catalog fixtures intentionally have no trial database.
@@ -57614,7 +57922,11 @@ func (a *App) writePublicPolicy(domain string) error {
 		return err
 	}
 	policy.NoIndex = indexingState == "pending" || indexingState == "hidden"
-	policy.RobotsOverride = policy.NoIndex && robotsManual == 0
+	// Site indexing policy is authoritative while indexing is disabled.
+	// Even a manually edited/imported robots.txt is temporarily overridden.
+	// When indexing is enabled again, RobotsOverride becomes false and the
+	// site's original published robots.txt is served unchanged.
+	policy.RobotsOverride = policy.NoIndex
 	read := func(query string, visit func(*sql.Rows) error, queryDomain ...string) error {
 		storageDomain := domain
 		if len(queryDomain) > 0 {
@@ -57972,15 +58284,18 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 	}
 	if decision.NoIndex {
 		w.Header().Set("X-Robots-Tag", "noindex")
-		if decision.RobotsOverride && pagePath == "/robots.txt" && fileName == "" {
+		if pagePath == "/robots.txt" && fileName == "" {
 			baseURL := publicCrawlerBaseURL(r)
 			if baseURL == "" {
 				http.Error(w, "invalid request host", http.StatusBadRequest)
 				return true
 			}
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			w.Header().Set("Cache-Control", "public, max-age=300")
-			_, _ = io.WriteString(w, "User-agent: *\nAllow: /\nSitemap: "+baseURL+"/sitemap.xml\n")
+			// This robots.txt reflects a live indexing switch. Do not allow a
+			// reverse proxy/browser cache to hide requests from SiteBrush or
+			// serve the previous indexing state after the switch changes.
+			w.Header().Set("Cache-Control", "no-store")
+			_, _ = io.WriteString(w, "User-agent: *\nDisallow: /\nSitemap: "+baseURL+"/sitemap.xml\n")
 			return true
 		}
 	}

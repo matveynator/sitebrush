@@ -79,6 +79,53 @@
       clickEvent.stopImmediatePropagation();
     }, {capture: true});
   }
+
+  function loadTestDriveAsset(tagName, attributes) {
+    return new Promise(function installAsset(resolve, reject) {
+      const selector = attributes.href ? 'link[href="' + attributes.href + '"]' : 'script[src="' + attributes.src + '"]';
+      if (document.querySelector(selector)) { resolve(); return; }
+      const asset = document.createElement(tagName);
+      Object.keys(attributes).forEach(function setAttribute(name) { asset.setAttribute(name, attributes[name]); });
+      asset.dataset.sitebrushOwned = 'true';
+      asset.onload = resolve;
+      asset.onerror = reject;
+      (document.head || document.documentElement).appendChild(asset);
+    });
+  }
+
+  function installTestDrivePageActions() {
+    const pageQuery = new URLSearchParams(window.location.search);
+    if (pageQuery.has('visual') || pageQuery.has('edit') || pageQuery.has('text') || pageQuery.has('test_drive_welcome') || document.querySelector('[data-test-drive-save]')) return;
+    fetch('/?test_drive_welcome', {credentials: 'same-origin', cache: 'no-store', headers: {Accept: 'text/html'}})
+      .then(function readTestDriveWelcome(response) {
+        if (!response.ok) return '';
+        return response.text();
+      })
+      .then(function installTestDriveControls(html) {
+        if (!html || document.querySelector('[data-test-drive-save]')) return;
+        const welcomeDocument = new DOMParser().parseFromString(html, 'text/html');
+        const remoteControls = welcomeDocument.querySelector('[data-test-drive-save]');
+        if (!remoteControls) return;
+        const controls = document.importNode(remoteControls, true);
+        controls.dataset.sitebrushOwned = 'true';
+        (document.body || document.documentElement).appendChild(controls);
+        return Promise.all([
+          loadTestDriveAsset('link', {rel: 'stylesheet', href: '/p/static/admin_dialog.css'}),
+          loadTestDriveAsset('link', {rel: 'stylesheet', href: '/p/static/test_drive_page_actions.css'})
+        ]).then(function loadTestDriveScripts() {
+          return loadTestDriveAsset('script', {src: '/p/static/site_copy.js'});
+        }).then(function loadSessionScript() {
+          return loadTestDriveAsset('script', {src: '/p/static/test_drive_session.js'});
+        }).then(function loadEditorScript() {
+          return loadTestDriveAsset('script', {src: '/p/static/test_drive_editor.js'});
+        });
+      })
+      .catch(function ignoreNonTestDrivePage() {});
+  }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', installTestDrivePageActions, {once: true});
+  else installTestDrivePageActions();
+
   function loadAnalytics() {
     if (window.SiteBrushAnalyticsStarted) return;
     const analyticsScript = document.createElement('script');
