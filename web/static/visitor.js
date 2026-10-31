@@ -79,6 +79,69 @@
       clickEvent.stopImmediatePropagation();
     }, {capture: true});
   }
+
+  function installTestDrivePageActions() {
+    const pageQuery = new URLSearchParams(window.location.search);
+    if (pageQuery.has('visual') || pageQuery.has('edit') || pageQuery.has('text') || document.querySelector('[data-test-drive-page-actions]')) return;
+    if (typeof WebSocket !== 'function') return;
+    const socketURL = new URL('/', window.location.href);
+    socketURL.searchParams.set('test_drive_ws', '');
+    socketURL.protocol = socketURL.protocol === 'https:' ? 'wss:' : 'ws:';
+    let statusSocket;
+    try { statusSocket = new WebSocket(socketURL.href); }
+    catch (socketError) { return; }
+    const deadline = window.setTimeout(function expireTestDriveStatus() { statusSocket.close(); }, 4000);
+    statusSocket.addEventListener('open', function requestTestDriveStatus() {
+      statusSocket.send(JSON.stringify({id: 1, action: 'status'}));
+    });
+    statusSocket.addEventListener('message', function showTestDriveActions(statusEvent) {
+      let reply;
+      try { reply = JSON.parse(statusEvent.data); }
+      catch (replyError) { statusSocket.close(); return; }
+      statusSocket.close();
+      if (reply.status !== 200 || !reply.payload || reply.payload.status === 'activated') return;
+      const language = String(document.documentElement.lang || navigator.language || 'en').toLowerCase();
+      const russian = language === 'ru' || language.startsWith('ru-');
+      const labels = russian ? {
+        hint: 'Редактирование: правый клик мышью или долгое нажатие на телефоне.',
+        copy: 'Скопировать другой сайт',
+        save: 'Сохранить Test Drive'
+      } : {
+        hint: 'Edit: right-click on desktop or long-press on mobile.',
+        copy: 'Copy another site',
+        save: 'Save Test Drive'
+      };
+      const stylesheet = document.createElement('link');
+      stylesheet.rel = 'stylesheet';
+      stylesheet.href = '/p/static/test_drive_page_actions.css';
+      stylesheet.dataset.sitebrushOwned = 'true';
+      (document.head || document.documentElement).appendChild(stylesheet);
+      const actions = document.createElement('aside');
+      actions.className = 'SiteBrushTestDrivePageActions';
+      actions.dataset.testDrivePageActions = 'true';
+      actions.dataset.sitebrushOwned = 'true';
+      actions.setAttribute('aria-label', 'SiteBrush Test Drive');
+      const hint = document.createElement('p');
+      hint.className = 'SiteBrushTestDrivePageActionsHint';
+      hint.textContent = labels.hint;
+      const copyLink = document.createElement('a');
+      copyLink.className = 'SiteBrushTestDrivePageAction';
+      copyLink.href = '/?visual#test-drive-copy';
+      copyLink.textContent = labels.copy;
+      const saveLink = document.createElement('a');
+      saveLink.className = 'SiteBrushTestDrivePageAction primary';
+      saveLink.href = '/?visual#activation';
+      saveLink.textContent = labels.save;
+      actions.append(hint, copyLink, saveLink);
+      (document.body || document.documentElement).appendChild(actions);
+    });
+    statusSocket.addEventListener('close', function finishTestDriveStatus() { window.clearTimeout(deadline); });
+    statusSocket.addEventListener('error', function ignoreNonTestDrivePage() {});
+  }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', installTestDrivePageActions, {once: true});
+  else installTestDrivePageActions();
+
   function loadAnalytics() {
     if (window.SiteBrushAnalyticsStarted) return;
     const analyticsScript = document.createElement('script');
