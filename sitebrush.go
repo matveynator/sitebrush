@@ -10655,27 +10655,31 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 			w = captured
 
 			defer func() {
-				requestDomain := domainFromRequest(r)
+				logDomain := domainFromRequest(r)
+				safeDomain := diagnosticlog.SafeLogValue(logDomain)
+				safeRemote := diagnosticlog.SafeLogValue(r.RemoteAddr)
+				requestMethod := http.MethodGet
+				if r.Method == http.MethodHead {
+					requestMethod = http.MethodHead
+				}
 				duration := time.Since(startedAt)
 
 				log.Printf(
-					"REQUEST [%s] method=%s path=%s status=%d remote=%s duration=%s",
-					diagnosticlog.SafeLogValue(requestDomain),
-					r.Method,
-					r.URL.Path,
+					"REQUEST [%s] method=%s path=/robots.txt status=%d remote=%s duration=%s",
+					safeDomain,
+					requestMethod,
 					captured.statusCode,
-					diagnosticlog.SafeLogValue(r.RemoteAddr),
+					safeRemote,
 					duration,
 				)
 
 				application.writeDomainLog(
-					requestDomain,
-					"REQUEST [%s] method=%s path=%s status=%d remote=%s duration=%s",
-					requestDomain,
-					r.Method,
-					r.URL.Path,
+					logDomain,
+					"REQUEST [%s] method=%s path=/robots.txt status=%d remote=%s duration=%s",
+					safeDomain,
+					requestMethod,
 					captured.statusCode,
-					r.RemoteAddr,
+					safeRemote,
 					duration,
 				)
 			}()
@@ -12902,6 +12906,15 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 	})))
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Embedded SiteBrush application assets belong to the running
+		// application, not to an individual site's publication policy.
+		// They must remain available while the public catalog is warming,
+		// frozen, blocked, or has no entry for the request Host.
+		if embeddedStaticRequest(r) {
+			embedded.ServeHTTP(w, r)
+			return
+		}
+
 		// SITEBRUSH UNKNOWN HOST GATE
 		//
 		// Non-ordinary requests (POST, control queries, WebSocket upgrades, etc.)
@@ -12929,7 +12942,11 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 		// SITEBRUSH PUBLIC FAST GATE
 		// publicCatalog is authoritative for ordinary public traffic.
 		// Host existence is resolved in memory; unknown hosts never reach DB.
-		if a.publicCatalog != nil && publicOrdinaryRequest(r) {
+		if a.publicCatalog != nil &&
+			publicOrdinaryRequest(r) &&
+			!(r.URL.Path == "/" &&
+				canonicalLocalDomain(domainFromRequest(r)) == "localhost" &&
+				httpsecurity.IsLocalRequest(r)) {
 			decision := a.publicRequestDecision(r)
 			r = withPublicRequestDecision(r, decision)
 
@@ -12985,10 +13002,6 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 			return
 		}
 
-		if embeddedStaticRequest(r) {
-			embedded.ServeHTTP(w, r)
-			return
-		}
 		if a.publicCatalog != nil && publicOrdinaryRequest(r) {
 			// The application control database owner serializes trial reads.
 			// Bare catalog fixtures intentionally have no trial database.
@@ -58258,29 +58271,7 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 			// reverse proxy/browser cache to hide requests from SiteBrush or
 			// serve the previous indexing state after the switch changes.
 			w.Header().Set("Cache-Control", "no-store")
-			robotsStartedAt := time.Now()
 			_, _ = io.WriteString(w, "User-agent: *\nDisallow: /\nSitemap: "+baseURL+"/sitemap.xml\n")
-
-			requestDomain := domainFromRequest(r)
-			duration := time.Since(robotsStartedAt)
-			log.Printf("STATIC [%s] method=%s path=%s status=%d remote=%s duration=%s",
-				diagnosticlog.SafeLogValue(requestDomain),
-				r.Method,
-				r.URL.Path,
-				http.StatusOK,
-				diagnosticlog.SafeLogValue(r.RemoteAddr),
-				duration,
-			)
-			a.writeDomainLog(
-				requestDomain,
-				"STATIC [%s] method=%s path=%s status=%d remote=%s duration=%s",
-				requestDomain,
-				r.Method,
-				r.URL.Path,
-				http.StatusOK,
-				r.RemoteAddr,
-				duration,
-			)
 			return true
 		}
 	}
