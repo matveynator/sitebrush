@@ -12954,21 +12954,33 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 				testDriveSessionRequest = true
 			}
 		}
+		// A matching Test Drive record is required before either exception can
+		// pass the catalog gates. Cookie names and ticket syntax alone are
+		// attacker-controlled and must not open the dynamic route on any host.
+		if a.publicCatalog != nil && (testDriveHandoffRequest || testDriveSessionRequest) {
+			if a.controlDatabase == nil {
+				testDriveHandoffRequest = false
+				testDriveSessionRequest = false
+			} else {
+				_, found, err := a.privateTestDrive(r.Context(), domainFromRequest(r))
+				if err != nil || !found {
+					testDriveHandoffRequest = false
+					testDriveSessionRequest = false
+				}
+			}
+		}
 
 		// SITEBRUSH UNKNOWN HOST GATE
 		//
 		// Non-ordinary requests (POST, control queries, WebSocket upgrades, etc.)
 		// do not enter the ordinary public fast path below. Reject unknown
-		// public hosts here, before dynamic/security middleware can touch
-		// SQLite or attempt to load per-site policy.
+		// public hosts here, before dynamic/security middleware can load
+		// per-site policy. Test Drive candidates above make one control read
+		// to prove their host exists before taking that exception.
 		//
 		// Host-only Lookup is intentional: do not cache this decision in the
 		// request context because publicRequestDecision also contains path/file
 		// information for ordinary published requests.
-		testDriveHandoffRequest = hasQueryFlag(r, "test_drive_handoff") &&
-			r.Method == http.MethodGet &&
-			testDriveHandoffTokenCurrent(r.URL.Query().Get("handoff_token"))
-
 		if a.publicCatalog != nil &&
 			!publicOrdinaryRequest(r) &&
 			!httpsecurity.IsLocalRequest(r) &&
@@ -13023,9 +13035,14 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 			}
 
 			// Unknown Host is terminal here.
-			// Never call publicPublicationRequest/writePublicPolicy/router/SQLite.
+			// Never call publicPublicationRequest/writePublicPolicy/router/SQLite
+			// after the catalog has rejected the host.
 			if !decision.Found {
-				unknownPublic.ServeHTTP(w, r)
+				if decision.Known {
+					http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+				} else {
+					unknownPublic.ServeHTTP(w, r)
+				}
 				return
 			}
 

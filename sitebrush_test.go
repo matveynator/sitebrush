@@ -14555,17 +14555,43 @@ func testPrivateTestDriveOnboarding(t *testing.T, scheme string) {
 		t.Fatal("one-time handoff ticket missing")
 	}
 	handoffRequest := httptest.NewRequest(http.MethodGet, scheme+"://myproject.sitebrush.com/?test_drive_handoff&handoff_token="+ticketMatch[1], nil)
+	stopCatalog := make(chan struct{})
+	t.Cleanup(func() { close(stopCatalog) })
+	application.publicCatalog = publicsite.NewCatalog(application.storagePath, stopCatalog)
+	if err := application.publicCatalog.SetMemory(true); err != nil {
+		t.Fatal(err)
+	}
+	applicationHandler := application.siteHTTPHandler(http.HandlerFunc(application.route))
+	forgedRequest := httptest.NewRequest(http.MethodGet, scheme+"://unknown.sitebrush.com/?edit", nil)
+	forgedRequest.AddCookie(&http.Cookie{Name: "sitebrush_test_drive", Value: "forged"})
+	forgedRequest.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "forged"})
+	forgedResponse := httptest.NewRecorder()
+	applicationHandler.ServeHTTP(forgedResponse, forgedRequest)
+	if forgedResponse.Code != http.StatusNotFound {
+		t.Fatalf("forged Test Drive cookies bypassed unknown-host gate: %d", forgedResponse.Code)
+	}
 	publicBoundary := &App{storagePath: application.storagePath, storageRealRoot: application.storageRealRoot, publicBoundary: true, controlDatabase: dispatcher}
 	boundaryResponse := httptest.NewRecorder()
 	if publicBoundary.privateTestDriveGate(boundaryResponse, handoffRequest) || boundaryResponse.Body.Len() != 0 {
 		t.Fatalf("public boundary consumed the handoff: %d %s", boundaryResponse.Code, boundaryResponse.Body.String())
+	}
+	publicBoundary.publicCatalog = application.publicCatalog
+	boundaryForwarded := false
+	boundaryHandler := publicBoundary.siteHTTPHandler(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		boundaryForwarded = true
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	boundaryResponse = httptest.NewRecorder()
+	boundaryHandler.ServeHTTP(boundaryResponse, handoffRequest)
+	if boundaryResponse.Code != http.StatusNoContent || !boundaryForwarded {
+		t.Fatalf("public boundary blocked the handoff: %d %s", boundaryResponse.Code, boundaryResponse.Body.String())
 	}
 	beforeHandoff, found, err := application.privateTestDrive(context.Background(), "myproject.sitebrush.com")
 	if err != nil || !found || beforeHandoff.HandoffHash == "" {
 		t.Fatalf("public boundary changed the handoff ticket: %+v %t %v", beforeHandoff, found, err)
 	}
 	handoffResponse := httptest.NewRecorder()
-	application.route(handoffResponse, handoffRequest)
+	applicationHandler.ServeHTTP(handoffResponse, handoffRequest)
 	if handoffResponse.Code != http.StatusSeeOther || handoffResponse.Header().Get("Location") != "/?edit#test-drive-copy" {
 		t.Fatalf("handoff: %d %s", handoffResponse.Code, handoffResponse.Body.String())
 	}
@@ -14580,6 +14606,15 @@ func testPrivateTestDriveOnboarding(t *testing.T, scheme string) {
 	}
 	if trialCookie == nil || editorCookie == nil || !trialCookie.HttpOnly || trialCookie.Secure != (scheme == "https") {
 		t.Fatalf("trial cookies: %#v", handoffResponse.Result().Cookies())
+	}
+	boundaryOwnerRequest := httptest.NewRequest(http.MethodGet, scheme+"://myproject.sitebrush.com/?edit", nil)
+	boundaryOwnerRequest.AddCookie(trialCookie)
+	boundaryOwnerRequest.AddCookie(editorCookie)
+	boundaryForwarded = false
+	boundaryOwnerResponse := httptest.NewRecorder()
+	boundaryHandler.ServeHTTP(boundaryOwnerResponse, boundaryOwnerRequest)
+	if boundaryOwnerResponse.Code != http.StatusNoContent || !boundaryForwarded {
+		t.Fatalf("public boundary blocked the owner editor: %d %s", boundaryOwnerResponse.Code, boundaryOwnerResponse.Body.String())
 	}
 	boundaryStatusRequest := httptest.NewRequest(http.MethodGet, scheme+"://myproject.sitebrush.com/?test_drive_status", nil)
 	boundaryStatusRequest.AddCookie(trialCookie)
@@ -14596,6 +14631,11 @@ func testPrivateTestDriveOnboarding(t *testing.T, scheme string) {
 	ownerRequest = ownerRequest.WithContext(contextWithDomain(ownerRequest.Context(), "myproject.sitebrush.com"))
 	ownerRequest.AddCookie(trialCookie)
 	ownerRequest.AddCookie(editorCookie)
+	ownerIngressResponse := httptest.NewRecorder()
+	applicationHandler.ServeHTTP(ownerIngressResponse, ownerRequest)
+	if ownerIngressResponse.Code != http.StatusOK || !strings.Contains(ownerIngressResponse.Body.String(), "data-test-drive-save") {
+		t.Fatalf("owner editor blocked by public gate: %d %s", ownerIngressResponse.Code, ownerIngressResponse.Body.String())
+	}
 	trialCSRF := accountCSRF(ownerRequest)
 	multipartTrialRequest := func(action string, fields url.Values, csrfHeader bool) *http.Request {
 		var body bytes.Buffer
@@ -32057,6 +32097,36 @@ func TestPublicFallbackObservesEachRequestOnce(t *testing.T) {
 				t.Fatalf("status=%d core calls=%d observations=%d", response.Code, calls, len(application.securityAnalytics))
 			}
 		})
+	}
+}
+
+func TestPublicFastGateKeepsBlockedSiteTemporary(t *testing.T) {
+	storage := t.TempDir()
+	stop := make(chan struct{})
+	defer close(stop)
+	catalog := publicsite.NewCatalog(storage, stop)
+	if err := publicsite.Write(storage, publicsite.Policy{Domain: "example.org"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.SetMemory(true); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.Block("example.org"); err != nil {
+		t.Fatal(err)
+	}
+	application := &App{publicCatalog: catalog}
+	handler := application.siteHTTPHandler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("blocked site reached dynamic routing")
+	}))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "https://example.org/page", nil))
+	if response.Code != http.StatusServiceUnavailable || response.Body.String() != "temporarily unavailable\n" {
+		t.Fatalf("blocked site: status=%d body=%q", response.Code, response.Body.String())
+	}
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "https://missing.example.org/page", nil))
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("unknown site: status=%d body=%q", response.Code, response.Body.String())
 	}
 }
 
