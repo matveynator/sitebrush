@@ -12939,6 +12939,22 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 			return
 		}
 
+		testDriveHandoffRequest := hasQueryFlag(r, "test_drive_handoff") &&
+			r.Method == http.MethodGet &&
+			testDriveHandoffTokenCurrent(r.URL.Query().Get("handoff_token"))
+
+		// A successful handoff installs both cookies on the unpublished
+		// Test Drive hostname. Let those requests reach privateTestDriveGate,
+		// which performs the real cryptographic/session validation.
+		testDriveSessionRequest := false
+		if trialCookie, trialErr := r.Cookie("sitebrush_test_drive"); trialErr == nil &&
+			trialCookie.Value != "" {
+			if sessionCookie, sessionErr := r.Cookie("sitebrush_session"); sessionErr == nil &&
+				sessionCookie.Value != "" {
+				testDriveSessionRequest = true
+			}
+		}
+
 		// SITEBRUSH UNKNOWN HOST GATE
 		//
 		// Non-ordinary requests (POST, control queries, WebSocket upgrades, etc.)
@@ -12949,7 +12965,15 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 		// Host-only Lookup is intentional: do not cache this decision in the
 		// request context because publicRequestDecision also contains path/file
 		// information for ordinary published requests.
-		if a.publicCatalog != nil && !publicOrdinaryRequest(r) && !httpsecurity.IsLocalRequest(r) {
+		testDriveHandoffRequest = hasQueryFlag(r, "test_drive_handoff") &&
+			r.Method == http.MethodGet &&
+			testDriveHandoffTokenCurrent(r.URL.Query().Get("handoff_token"))
+
+		if a.publicCatalog != nil &&
+			!publicOrdinaryRequest(r) &&
+			!httpsecurity.IsLocalRequest(r) &&
+			!testDriveHandoffRequest &&
+			!testDriveSessionRequest {
 			host := domainFromRequest(r)
 			if host != "" {
 				hostDecision := a.publicCatalog.Lookup(publicsite.Lookup{
@@ -12968,6 +12992,7 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 		// Host existence is resolved in memory; unknown hosts never reach DB.
 		if a.publicCatalog != nil &&
 			publicOrdinaryRequest(r) &&
+			!testDriveSessionRequest &&
 			!(r.URL.Path == "/" &&
 				canonicalLocalDomain(domainFromRequest(r)) == "localhost" &&
 				httpsecurity.IsLocalRequest(r)) {
