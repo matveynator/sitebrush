@@ -12939,17 +12939,53 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 			return
 		}
 
+		testDriveHandoffRequest := hasQueryFlag(r, "test_drive_handoff") &&
+			r.Method == http.MethodGet &&
+			testDriveHandoffTokenCurrent(r.URL.Query().Get("handoff_token"))
+
+		// A successful handoff installs both cookies on the unpublished
+		// Test Drive hostname. Let those requests reach privateTestDriveGate,
+		// which performs the real cryptographic/session validation.
+		testDriveSessionRequest := false
+		if trialCookie, trialErr := r.Cookie("sitebrush_test_drive"); trialErr == nil &&
+			trialCookie.Value != "" {
+			if sessionCookie, sessionErr := r.Cookie("sitebrush_session"); sessionErr == nil &&
+				sessionCookie.Value != "" {
+				testDriveSessionRequest = true
+			}
+		}
+		// A matching Test Drive record is required before either exception can
+		// pass the catalog gates. Cookie names and ticket syntax alone are
+		// attacker-controlled and must not open the dynamic route on any host.
+		if a.publicCatalog != nil && (testDriveHandoffRequest || testDriveSessionRequest) {
+			if a.controlDatabase == nil {
+				testDriveHandoffRequest = false
+				testDriveSessionRequest = false
+			} else {
+				_, found, err := a.privateTestDrive(r.Context(), domainFromRequest(r))
+				if err != nil || !found {
+					testDriveHandoffRequest = false
+					testDriveSessionRequest = false
+				}
+			}
+		}
+
 		// SITEBRUSH UNKNOWN HOST GATE
 		//
 		// Non-ordinary requests (POST, control queries, WebSocket upgrades, etc.)
 		// do not enter the ordinary public fast path below. Reject unknown
-		// public hosts here, before dynamic/security middleware can touch
-		// SQLite or attempt to load per-site policy.
+		// public hosts here, before dynamic/security middleware can load
+		// per-site policy. Test Drive candidates above make one control read
+		// to prove their host exists before taking that exception.
 		//
 		// Host-only Lookup is intentional: do not cache this decision in the
 		// request context because publicRequestDecision also contains path/file
 		// information for ordinary published requests.
-		if a.publicCatalog != nil && !publicOrdinaryRequest(r) && !httpsecurity.IsLocalRequest(r) {
+		if a.publicCatalog != nil &&
+			!publicOrdinaryRequest(r) &&
+			!httpsecurity.IsLocalRequest(r) &&
+			!testDriveHandoffRequest &&
+			!testDriveSessionRequest {
 			host := domainFromRequest(r)
 			if host != "" {
 				hostDecision := a.publicCatalog.Lookup(publicsite.Lookup{
@@ -12968,6 +13004,7 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 		// Host existence is resolved in memory; unknown hosts never reach DB.
 		if a.publicCatalog != nil &&
 			publicOrdinaryRequest(r) &&
+			!testDriveSessionRequest &&
 			!(r.URL.Path == "/" &&
 				canonicalLocalDomain(domainFromRequest(r)) == "localhost" &&
 				httpsecurity.IsLocalRequest(r)) {
@@ -12998,9 +13035,14 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 			}
 
 			// Unknown Host is terminal here.
-			// Never call publicPublicationRequest/writePublicPolicy/router/SQLite.
+			// Never call publicPublicationRequest/writePublicPolicy/router/SQLite
+			// after the catalog has rejected the host.
 			if !decision.Found {
-				unknownPublic.ServeHTTP(w, r)
+				if decision.Known {
+					http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+				} else {
+					unknownPublic.ServeHTTP(w, r)
+				}
 				return
 			}
 
