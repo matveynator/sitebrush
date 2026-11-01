@@ -19885,6 +19885,50 @@ func TestNewSiteConfirmationLogsInAndOpensRootEditor(t *testing.T) {
 	}
 }
 
+func TestNewSiteRegistrationPassesUnknownHostGate(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	if err := application.withServerControlDatabaseWrite(context.Background(), "test-new-site-owner", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		if setErr := store.SetOwner(context.Background(), "sitebrush.example", "admin@sitebrush.example"); setErr != nil {
+			return setErr
+		}
+		return store.SaveSettings(context.Background(), true)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stopCatalog := make(chan struct{})
+	t.Cleanup(func() { close(stopCatalog) })
+	application.publicCatalog = publicsite.NewCatalog(application.storagePath, stopCatalog)
+	if err := application.publicCatalog.SetMemory(true); err != nil {
+		t.Fatal(err)
+	}
+	handler := application.siteHTTPHandler(http.HandlerFunc(application.route))
+	for _, test := range []struct {
+		host, query string
+		want        int
+	}{
+		{"new.sitebrush.example", "?register&site_workflow=new_site", http.StatusOK},
+		{"new.sitebrush.example", "?edit", http.StatusNotFound},
+		{"new.other.example", "?register&site_workflow=new_site", http.StatusNotFound},
+		{"admin.sitebrush.example", "?register&site_workflow=new_site", http.StatusNotFound},
+	} {
+		request := httptest.NewRequest(http.MethodGet, "http://"+test.host+"/"+test.query, nil)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != test.want {
+			t.Errorf("%s%s: status=%d want=%d body=%s", test.host, test.query, response.Code, test.want, response.Body.String())
+		}
+	}
+	postRequest := httptest.NewRequest(http.MethodPost, "http://new.sitebrush.example/?register&site_workflow=new_site", strings.NewReader("site_workflow=new_site"))
+	postRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	postRequest.Header.Set("Origin", "http://new.sitebrush.example")
+	postResponse := httptest.NewRecorder()
+	handler.ServeHTTP(postResponse, postRequest)
+	if postResponse.Code != http.StatusBadRequest || !strings.Contains(postResponse.Body.String(), `site_workflow=new_site`) {
+		t.Fatalf("new-site form did not reach registration: status=%d body=%s", postResponse.Code, postResponse.Body.String())
+	}
+}
+
 func testNewSiteConfirmation(t *testing.T, scheme string) {
 	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
 	application := newPartitionedTestApplication(t)
@@ -19903,6 +19947,13 @@ func testNewSiteConfirmation(t *testing.T, scheme string) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	stopCatalog := make(chan struct{})
+	t.Cleanup(func() { close(stopCatalog) })
+	application.publicCatalog = publicsite.NewCatalog(application.storagePath, stopCatalog)
+	if err := application.publicCatalog.SetMemory(true); err != nil {
+		t.Fatal(err)
+	}
+	handler := application.siteHTTPHandler(http.HandlerFunc(application.route))
 	previousExternalIP := lookupServerExternalIP
 	previousInterfaceIPs := lookupServerInterfaceIPs
 	previousIPRecords := lookupIPRecords
@@ -19925,7 +19976,7 @@ func testNewSiteConfirmation(t *testing.T, scheme string) {
 	}
 	linkRequest := httptest.NewRequest(http.MethodGet, scheme+"://"+domain+"/?email_confirm="+confirmation.Token, nil)
 	linkResponse := httptest.NewRecorder()
-	application.route(linkResponse, linkRequest)
+	handler.ServeHTTP(linkResponse, linkRequest)
 	if linkResponse.Code != http.StatusOK || !strings.Contains(linkResponse.Body.String(), `data-account-auto-confirm`) || strings.Contains(linkResponse.Body.String(), `type="password"`) {
 		t.Fatalf("confirmation link: %d %s", linkResponse.Code, linkResponse.Body.String())
 	}
@@ -19934,7 +19985,7 @@ func testNewSiteConfirmation(t *testing.T, scheme string) {
 	codeRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	codeRequest.Header.Set("Origin", scheme+"://"+domain)
 	codeResponse := httptest.NewRecorder()
-	application.route(codeResponse, codeRequest)
+	handler.ServeHTTP(codeResponse, codeRequest)
 	if scheme == "http" {
 		if codeResponse.Code != http.StatusOK || !application.hasAdmin(contextWithDomain(context.Background(), domain), domain) {
 			t.Fatalf("HTTP code did not complete registration: %d %s", codeResponse.Code, codeResponse.Body.String())
@@ -19949,7 +20000,7 @@ func testNewSiteConfirmation(t *testing.T, scheme string) {
 		}
 		secureRequest := httptest.NewRequest(http.MethodGet, "https://"+domain+"/?email_confirm="+confirmation.Token, nil)
 		codeResponse = httptest.NewRecorder()
-		application.route(codeResponse, secureRequest)
+		handler.ServeHTTP(codeResponse, secureRequest)
 	}
 	if (codeResponse.Code != http.StatusFound && codeResponse.Code != http.StatusSeeOther) || codeResponse.Header().Get("Location") != "/?edit" {
 		t.Fatalf("code completion: %d location=%q body=%s", codeResponse.Code, codeResponse.Header().Get("Location"), codeResponse.Body.String())
