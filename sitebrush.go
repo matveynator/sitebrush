@@ -12992,7 +12992,7 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 					Host:     host,
 					ClientIP: accountClientIP(r),
 				})
-				if !hostDecision.Found && !hostDecision.Known {
+				if !hostDecision.Found && !hostDecision.Known && !a.newSiteOnboardingRequest(r, host) {
 					unknownPublic.ServeHTTP(w, r)
 					return
 				}
@@ -18527,6 +18527,15 @@ func (a *App) isRegistrationOnboardingRequest(r *http.Request, domain string) bo
 		return found && confirmation.Action == "register" && normalizeDomainName(confirmation.Domain) == domain
 	}
 	return hasQueryFlag(r, "register") || hasQueryFlag(r, "site_request") || registrationCaptchaRequest(r)
+}
+
+// The public catalog has no entry until registration creates the site. Only
+// the owner's eligible subdomains may pass its unknown-host gate for onboarding.
+func (a *App) newSiteOnboardingRequest(r *http.Request, domain string) bool {
+	if r.URL.Path != "/" || !hasQueryFlag(r, "register") && !hasQueryFlag(r, "email_confirm") && !registrationCaptchaRequest(r) {
+		return false
+	}
+	return a.newSiteSubdomainAllowed(r.Context(), domain) && a.isRegistrationOnboardingRequest(r, domain)
 }
 
 func registrationCaptchaRequest(r *http.Request) bool {
