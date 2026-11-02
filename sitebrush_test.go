@@ -20021,6 +20021,12 @@ func TestIgniteCreatesOnlyConfirmedNewSite(t *testing.T) {
 	if !application.publicCatalog.Lookup(publicsite.Lookup{Host: siteDomain}).Known {
 		t.Fatal("created site is blocked by the public unknown-host gate")
 	}
+	if _, err := application.findPage(contextWithDomain(request.Context(), siteDomain), siteDomain, "/"); err != nil {
+		t.Fatalf("created site has no starter homepage: %v", err)
+	}
+	if !application.publicCatalog.Lookup(publicsite.Lookup{Host: siteDomain, Path: "/"}).Found {
+		t.Fatal("created site has no published homepage")
+	}
 	again, err := application.invokeIgnite(request, ownerDomain, "ignite_complete", ignite.Arguments{Attempt: attempt, Code: "000000"})
 	if err != nil || again["domain"] != siteDomain {
 		t.Fatal("completed Ignite registration did not resume", again, err)

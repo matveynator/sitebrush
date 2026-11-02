@@ -61387,7 +61387,21 @@ func (a *App) igniteCreateSite(ctx context.Context, domain, email string, allowE
 	}); err != nil {
 		return err
 	}
-	return a.ensureImportedRobotsPage(siteContext, domain)
+	if err := a.ensureImportedRobotsPage(siteContext, domain); err != nil {
+		return err
+	}
+	return a.ensureIgniteStarterPage(siteContext, domain)
+}
+
+// A newly registered site needs a public root before its personal editor is connected.
+func (a *App) ensureIgniteStarterPage(ctx context.Context, domain string) error {
+	if _, err := a.findPage(ctx, domain, "/"); err == nil {
+		return nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	html := `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Site ready</title><main><h1>Site ready</h1><p>Your website is ready to edit.</p></main></html>`
+	return a.persistImportedPages(ctx, domain, "/", []wholeSiteImportedPage{{LocalPath: "/", HTML: html}}, nil, false)
 }
 
 func (a *App) igniteCreatedSite(domain string) map[string]any {
