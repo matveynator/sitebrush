@@ -61247,6 +61247,9 @@ func (a *App) igniteSendCode(r *http.Request, attemptSecret string, pending igni
 // Mail proof is durable before the domain claim and site-local account are created.
 func (a *App) igniteComplete(r *http.Request, attemptSecret string, pending igniteAttempt, code string) (map[string]any, error) {
 	if pending.status == "complete" {
+		if err := a.publicPublicationRequest("refresh", pending.domain); err != nil {
+			return nil, fmt.Errorf("site publication is unavailable: %w", err)
+		}
 		return a.igniteCreatedSite(pending.domain), nil
 	}
 	if pending.confirmationToken == "" || pending.status != "email_sent" && pending.status != "verified" {
@@ -61318,6 +61321,10 @@ func (a *App) igniteComplete(r *http.Request, attemptSecret string, pending igni
 	if err := a.igniteCreateSite(r.Context(), pending.domain, pending.email, ownClaim); err != nil {
 		return nil, err
 	}
+	// The public host gate must learn the new site before Ignite reports success.
+	if err := a.publicPublicationRequest("refresh", pending.domain); err != nil {
+		return nil, fmt.Errorf("site publication is unavailable: %w", err)
+	}
 	err = a.withServerControlDatabaseWrite(r.Context(), "ignite-finish", func(database *sql.DB) error {
 		transaction, beginErr := database.BeginTx(r.Context(), nil)
 		if beginErr != nil {
@@ -61384,7 +61391,7 @@ func (a *App) igniteCreateSite(ctx context.Context, domain, email string, allowE
 }
 
 func (a *App) igniteCreatedSite(domain string) map[string]any {
-	return map[string]any{"site_id": stableSiteID(domain), "domain": domain, "status": "created", "mcp_ready": a.accountHTTPSReady(domain), "mcp_endpoint": "https://" + domain + "/?mcp", "plugin_name": domain, "next_step": "When MCP is ready, add the personal MCP server in ChatGPT using this endpoint, then authorize it through the site's normal OAuth flow."}
+	return map[string]any{"site_id": stableSiteID(domain), "domain": domain, "status": "created", "mcp_ready": a.accountHTTPSReady(domain), "mcp_endpoint": "https://" + domain + "/?mcp", "plugin_name": domain, "next_step": "When MCP is ready, use Plugin Creator if available to create the user's private plugin from this endpoint. The owner installs it and authorizes site editing through OAuth. If Plugin Creator is unavailable, guide the owner through adding this MCP server manually."}
 }
 
 // The public agent exposes registration on sitebrush.com and forwards an

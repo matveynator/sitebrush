@@ -20001,12 +20001,25 @@ func TestIgniteCreatesOnlyConfirmedNewSite(t *testing.T) {
 	if _, err := application.invokeIgnite(request, ownerDomain, "ignite_complete", ignite.Arguments{Attempt: attempt, Code: "000000"}); err == nil {
 		t.Fatal("wrong email code accepted")
 	}
+	stopPublication := make(chan struct{})
+	application.publicCatalog = publicsite.NewCatalog(application.storagePath, stopPublication)
+	application.startPublicPublication(stopPublication)
+	t.Cleanup(func() { close(stopPublication); <-application.publicPublicationDone })
+	if err := application.publicCatalog.SetMemory(true); err != nil {
+		t.Fatal(err)
+	}
+	if application.publicCatalog.Lookup(publicsite.Lookup{Host: siteDomain}).Known {
+		t.Fatal("new site entered the public catalog before confirmation")
+	}
 	created, err := application.invokeIgnite(request, ownerDomain, "ignite_complete", ignite.Arguments{Attempt: attempt, Code: confirmation.Code})
 	if err != nil {
 		t.Fatal("complete:", err)
 	}
 	if created["domain"] != siteDomain || created["mcp_endpoint"] != "https://"+siteDomain+"/?mcp" || !application.hasAdmin(contextWithDomain(request.Context(), siteDomain), siteDomain) {
 		t.Fatal("created site is unavailable", created)
+	}
+	if !application.publicCatalog.Lookup(publicsite.Lookup{Host: siteDomain}).Known {
+		t.Fatal("created site is blocked by the public unknown-host gate")
 	}
 	again, err := application.invokeIgnite(request, ownerDomain, "ignite_complete", ignite.Arguments{Attempt: attempt, Code: "000000"})
 	if err != nil || again["domain"] != siteDomain {
