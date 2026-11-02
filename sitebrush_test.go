@@ -20026,6 +20026,32 @@ func TestIgniteCreatesOnlyConfirmedNewSite(t *testing.T) {
 	}
 }
 
+func TestIgniteSendCodeSharesBrowserSiteCreationLimit(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	const ownerDomain = "sitebrush.example"
+	const browserIP = "198.51.100.41"
+	const siteDomain = "shop.sitebrush.example"
+	request := httptest.NewRequest(http.MethodPost, "https://"+ownerDomain+"/?ignite", nil)
+	if err := application.withServerControlDatabaseWrite(request.Context(), "test-ignite-admission-owner", func(database *sql.DB) error {
+		return (hostingandsupport.Store{DB: database}).SetOwner(request.Context(), ownerDomain, "admin@sitebrush.example")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pending := igniteAttempt{domain: siteDomain, browserIP: browserIP, status: "captcha", captchaVerified: true}
+	if _, err := application.igniteSendCode(request, strings.Repeat("a", 64), pending, "owner@example.org"); err == nil {
+		t.Fatal("missing attempt was allowed to send email")
+	}
+	for _, domain := range []string{"first.sitebrush.example", "second.sitebrush.example"} {
+		allowed, _, err := application.reservePublicTrialIPAdmission(request.Context(), browserIP, "create", domain, 2)
+		if err != nil || !allowed {
+			t.Fatalf("failed to reserve browser site creation for %s: allowed=%v err=%v", domain, allowed, err)
+		}
+	}
+	if _, err := application.igniteSendCode(request, strings.Repeat("a", 64), pending, "owner@example.org"); err == nil || !strings.Contains(err.Error(), "site creation limit") {
+		t.Fatalf("Ignite bypassed the browser site creation limit: %v", err)
+	}
+}
+
 func TestIgniteEmailLinkReturnsToIgnite(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "https://sitebrush.example/?sitebrush_agent", nil)
 	request.Form = url.Values{"site_workflow": {"ignite"}}

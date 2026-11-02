@@ -61165,6 +61165,21 @@ func (a *App) igniteSendCode(r *http.Request, attemptSecret string, pending igni
 	if _, available, err := a.igniteName(r.Context(), ownerDomain, label); err != nil || !available {
 		return nil, errors.New("site name is unavailable")
 	}
+	// Creation admission belongs to the CAPTCHA browser, not the shared AI gateway.
+	admissionToken := igniteHash(attemptSecret)
+	allowed, retryAfter, admissionErr := a.reservePublicTrialIPAdmission(r.Context(), pending.browserIP, "create", admissionToken, 2)
+	if admissionErr != nil {
+		return nil, fmt.Errorf("site creation admission is unavailable: %w", admissionErr)
+	}
+	if !allowed {
+		return nil, fmt.Errorf("site creation limit for this IP was reached; retry after %d seconds", retryAfter)
+	}
+	admissionCommitted := false
+	defer func() {
+		if !admissionCommitted {
+			a.releasePublicTrialIPAdmission(context.WithoutCancel(r.Context()), "create", admissionToken)
+		}
+	}()
 	err = a.withServerControlDatabaseWrite(r.Context(), "ignite-claim-email-step", func(database *sql.DB) error {
 		result, updateErr := database.ExecContext(r.Context(), `UPDATE ignite_registrations SET status='sending' WHERE attempt_hash=? AND status='captcha' AND expires_at>?`, igniteHash(attemptSecret), time.Now().UTC().Format(time.RFC3339))
 		if updateErr != nil {
@@ -61225,6 +61240,7 @@ func (a *App) igniteSendCode(r *http.Request, attemptSecret string, pending igni
 	if err != nil {
 		return nil, err
 	}
+	admissionCommitted = true
 	return map[string]any{"domain": pending.domain, "status": "email_sent"}, nil
 }
 
