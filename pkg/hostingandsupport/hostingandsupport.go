@@ -1094,6 +1094,10 @@ func hostingSchemaSteps(ctx context.Context, repair bool) []migrations.Step {
 	}
 	// These columns were introduced after the mail journal was published.
 	steps = append(steps, hostingSchemaColumnSteps(ctx, repair, trialOnboardingColumns())...)
+	// Ignite keeps registration intent in the server control database before a site exists.
+	ignite := migrations.SQL("ignite-registration-001", `CREATE TABLE IF NOT EXISTS ignite_registrations(attempt_hash TEXT PRIMARY KEY,browser_hash TEXT NOT NULL UNIQUE,domain TEXT NOT NULL,browser_ip TEXT NOT NULL DEFAULT '',email TEXT NOT NULL DEFAULT '',confirmation_token TEXT NOT NULL DEFAULT '',captcha_verified INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL,created_at TEXT NOT NULL,expires_at TEXT NOT NULL)`)
+	ignite.Ensure = repair
+	steps = append(steps, ignite)
 	return steps
 }
 

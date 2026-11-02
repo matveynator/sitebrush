@@ -71,6 +71,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/geoip"
 	"github.com/matveynator/sitebrush/v2/pkg/hostingandsupport"
 	"github.com/matveynator/sitebrush/v2/pkg/httpsecurity"
+	"github.com/matveynator/sitebrush/v2/pkg/ignite"
 	"github.com/matveynator/sitebrush/v2/pkg/imageprepare"
 	"github.com/matveynator/sitebrush/v2/pkg/mailguard"
 	"github.com/matveynator/sitebrush/v2/pkg/mailmonitor"
@@ -19926,6 +19927,256 @@ func TestNewSiteRegistrationPassesUnknownHostGate(t *testing.T) {
 	handler.ServeHTTP(postResponse, postRequest)
 	if postResponse.Code != http.StatusBadRequest || !strings.Contains(postResponse.Body.String(), `site_workflow=new_site`) {
 		t.Fatalf("new-site form did not reach registration: status=%d body=%s", postResponse.Code, postResponse.Body.String())
+	}
+}
+
+func TestIgniteCreatesOnlyConfirmedNewSite(t *testing.T) {
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
+	application := newPartitionedTestApplication(t)
+	confirmationContext, stopConfirmations := context.WithCancel(context.Background())
+	defer stopConfirmations()
+	application.registrationConfirmations = startEmailConfirmationMemoryWorker(confirmationContext)
+	application.emailDelivery = make(chan mailout.DeliveryJob, mailout.DeliveryQueueSize)
+	const ownerDomain = "sitebrush.example"
+	const siteDomain = "shop.sitebrush.example"
+	const ownerEmail = "owner@example.org"
+	if err := application.withServerControlDatabaseWrite(context.Background(), "test-ignite-owner", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		if err := store.SetOwner(context.Background(), ownerDomain, "admin@sitebrush.example"); err != nil {
+			return err
+		}
+		return store.SaveSettings(context.Background(), true)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "https://"+ownerDomain+"/?ignite", nil)
+	request.RemoteAddr = "198.51.100.30:1234"
+	begin, err := application.invokeIgnite(request, ownerDomain, "ignite_begin", ignite.Arguments{Name: "shop"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt, _ := begin["attempt"].(string)
+	if attempt == "" || begin["domain"] != siteDomain || application.hasAdmin(contextWithDomain(request.Context(), siteDomain), siteDomain) {
+		t.Fatal("Ignite created a site before email confirmation", begin)
+	}
+	if _, err := application.invokeIgnite(request, ownerDomain, "ignite_send_code", ignite.Arguments{Attempt: attempt, Email: ownerEmail}); err == nil {
+		t.Fatal("email sent before browser CAPTCHA")
+	}
+	challenge, err := captcha.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	verificationURL, _ := begin["captcha_url"].(string)
+	verificationForm := url.Values{"captcha_id": {challenge.Token}, "captcha": {challenge.Answer}}
+	verificationRequest := httptest.NewRequest(http.MethodPost, verificationURL, strings.NewReader(verificationForm.Encode()))
+	verificationRequest.RemoteAddr = request.RemoteAddr
+	verificationRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if err := application.withAccountMailTransaction(verificationRequest, "test-ignite-captcha", func(transaction *sql.Tx) error {
+		_, saveErr := captcha.Save(transaction, challenge, "198.51.100.30", ownerDomain, "register", time.Now().Add(-3*time.Second).UTC())
+		return saveErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+	verificationResponse := httptest.NewRecorder()
+	application.siteHTTPHandler(http.HandlerFunc(application.route)).ServeHTTP(verificationResponse, verificationRequest)
+	if verificationResponse.Code != http.StatusOK || !strings.Contains(verificationResponse.Body.String(), "Human verification complete") {
+		t.Fatalf("CAPTCHA confirmation: status=%d body=%s", verificationResponse.Code, verificationResponse.Body.String())
+	}
+	if _, err := application.invokeIgnite(request, ownerDomain, "ignite_send_code", ignite.Arguments{Attempt: attempt, Email: ownerEmail}); err != nil {
+		t.Fatal("send code:", err)
+	}
+	if application.hasAdmin(contextWithDomain(request.Context(), siteDomain), siteDomain) {
+		t.Fatal("Ignite created a site before the email code")
+	}
+	var confirmationToken string
+	if err := application.withServerControlDatabaseRead(request.Context(), "test-ignite-code", func(database *sql.DB) error {
+		return database.QueryRow(`SELECT confirmation_token FROM ignite_registrations WHERE attempt_hash=?`, igniteHash(attempt)).Scan(&confirmationToken)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	confirmation, found := application.registrationConfirmationByToken(request.Context(), confirmationToken)
+	if !found || confirmation.Workflow != "ignite" {
+		t.Fatal("Ignite email confirmation missing")
+	}
+	if _, err := application.invokeIgnite(request, ownerDomain, "ignite_complete", ignite.Arguments{Attempt: attempt, Code: "000000"}); err == nil {
+		t.Fatal("wrong email code accepted")
+	}
+	created, err := application.invokeIgnite(request, ownerDomain, "ignite_complete", ignite.Arguments{Attempt: attempt, Code: confirmation.Code})
+	if err != nil {
+		t.Fatal("complete:", err)
+	}
+	if created["domain"] != siteDomain || created["mcp_endpoint"] != "https://"+siteDomain+"/?mcp" || !application.hasAdmin(contextWithDomain(request.Context(), siteDomain), siteDomain) {
+		t.Fatal("created site is unavailable", created)
+	}
+	again, err := application.invokeIgnite(request, ownerDomain, "ignite_complete", ignite.Arguments{Attempt: attempt, Code: "000000"})
+	if err != nil || again["domain"] != siteDomain {
+		t.Fatal("completed Ignite registration did not resume", again, err)
+	}
+	var administrators int
+	if err := application.db.QueryRowContext(contextWithDomain(request.Context(), siteDomain), `SELECT COUNT(*) FROM users WHERE domain=? AND email=? AND is_admin=1`, siteDomain, ownerEmail).Scan(&administrators); err != nil || administrators != 1 {
+		t.Fatalf("Ignite created %d site accounts, err=%v", administrators, err)
+	}
+	if err := application.withServerControlDatabaseWrite(request.Context(), "test-ignite-disable", func(database *sql.DB) error {
+		return (hostingandsupport.Store{DB: database}).SaveSettings(request.Context(), false)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.invokeIgnite(request, ownerDomain, "ignite_begin", ignite.Arguments{Name: "other"}); err == nil {
+		t.Fatal("Ignite ignored disabled self registration")
+	}
+}
+
+func TestIgniteEmailLinkReturnsToIgnite(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "https://sitebrush.example/?sitebrush_agent", nil)
+	request.Form = url.Values{"site_workflow": {"ignite"}}
+	link := emailConfirmationURL(request, "private-token")
+	parsed, err := url.Parse(link)
+	if err != nil || parsed.Host != "sitebrush.example" || !parsed.Query().Has("ignite") || parsed.Query().Get("email_confirm") != "private-token" {
+		t.Fatalf("Ignite email link = %q, err = %v", link, err)
+	}
+}
+
+func TestIgniteWrongCaptchaConsumesChallenge(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	if err := application.withServerControlDatabaseWrite(context.Background(), "test-ignite-captcha-owner", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		if err := store.SetOwner(context.Background(), "sitebrush.example", "owner@sitebrush.example"); err != nil {
+			return err
+		}
+		return store.SaveSettings(context.Background(), true)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "https://sitebrush.example/?ignite", nil)
+	request.RemoteAddr = "198.51.100.40:1234"
+	begin, err := application.invokeIgnite(request, "sitebrush.example", "ignite_begin", ignite.Arguments{Name: "shop"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	challenge, err := captcha.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	verificationURL, _ := begin["captcha_url"].(string)
+	verificationRequest := httptest.NewRequest(http.MethodPost, verificationURL, nil)
+	verificationRequest.RemoteAddr = request.RemoteAddr
+	if err := application.withAccountMailTransaction(verificationRequest, "test-ignite-captcha-save", func(transaction *sql.Tx) error {
+		_, saveErr := captcha.Save(transaction, challenge, "198.51.100.40", "sitebrush.example", "register", time.Now().Add(-3*time.Second).UTC())
+		return saveErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+	handler := application.siteHTTPHandler(http.HandlerFunc(application.route))
+	for _, answer := range []string{"WRONG1", challenge.Answer} {
+		form := url.Values{"captcha_id": {challenge.Token}, "captcha": {answer}}
+		attempt := httptest.NewRequest(http.MethodPost, verificationURL, strings.NewReader(form.Encode()))
+		attempt.RemoteAddr = request.RemoteAddr
+		attempt.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, attempt)
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("CAPTCHA answer %q accepted after wrong guess: status=%d", answer, response.Code)
+		}
+	}
+}
+
+func TestIgniteGatewayRequiresPublicServerDomain(t *testing.T) {
+	for _, input := range []string{"sitebrush.example", "https://sitebrush.example/"} {
+		if domain, err := igniteGatewayServer(input); err != nil || domain != "sitebrush.example" {
+			t.Fatalf("valid server %q: domain=%q err=%v", input, domain, err)
+		}
+	}
+	for _, input := range []string{"http://sitebrush.example", "https://127.0.0.1", "https://localhost", "https://sitebrush.example/path", "https://sitebrush.example:8443", "https://user@sitebrush.example", "https://sitebrush.example/?mcp"} {
+		if domain, err := igniteGatewayServer(input); err == nil {
+			t.Fatalf("unsafe server %q accepted as %q", input, domain)
+		}
+	}
+}
+
+func TestIgniteRouteUsesConfiguredMainHost(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	if err := application.withServerControlDatabaseWrite(context.Background(), "test-ignite-route-owner", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		if err := store.SetOwner(context.Background(), "sitebrush.example", "owner@example.org"); err != nil {
+			return err
+		}
+		return store.SaveSettings(context.Background(), true)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	handler := application.siteHTTPHandler(http.HandlerFunc(application.route))
+	for _, test := range []struct {
+		address string
+		status  int
+	}{
+		{"https://sitebrush.example/?ignite", http.StatusOK},
+		{"https://shop.sitebrush.example/?ignite", http.StatusForbidden},
+		{"http://sitebrush.example/?ignite", http.StatusForbidden},
+		{"https://sitebrush.example/?sitebrush_agent", http.StatusForbidden},
+	} {
+		request := httptest.NewRequest(http.MethodGet, test.address, nil)
+		request.Header.Set("Accept", "text/html")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != test.status {
+			t.Errorf("%s status=%d want=%d body=%s", test.address, response.Code, test.status, response.Body.String())
+		}
+	}
+}
+
+func TestIgniteGatewayDefaultsToConfiguredSiteBrushServer(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	if err := application.withServerControlDatabaseWrite(context.Background(), "test-ignite-gateway-owner", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		if err := store.SetOwner(context.Background(), "sitebrush.com", "owner@sitebrush.com"); err != nil {
+			return err
+		}
+		return store.SaveSettings(context.Background(), true)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "https://sitebrush.com/?sitebrush_agent", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ignite_check_name","arguments":{"name":"shop"}}}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json, text/event-stream")
+	request.Header.Set("MCP-Protocol-Version", "2025-11-25")
+	response := httptest.NewRecorder()
+	application.siteHTTPHandler(http.HandlerFunc(application.route)).ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `shop.sitebrush.com`) || !strings.Contains(response.Body.String(), `"server":"sitebrush.com"`) {
+		t.Fatalf("gateway default: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if err := application.withServerControlDatabaseWrite(context.Background(), "test-ignite-gateway-disable", func(database *sql.DB) error {
+		return (hostingandsupport.Store{DB: database}).SaveSettings(context.Background(), false)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	disabledRequest := httptest.NewRequest(http.MethodGet, "https://sitebrush.com/?sitebrush_agent", nil)
+	disabledResponse := httptest.NewRecorder()
+	application.siteHTTPHandler(http.HandlerFunc(application.route)).ServeHTTP(disabledResponse, disabledRequest)
+	if disabledResponse.Code != http.StatusForbidden {
+		t.Fatalf("disabled gateway status=%d", disabledResponse.Code)
+	}
+}
+
+func TestIgniteGatewayForwardsOnlyToSelectedServer(t *testing.T) {
+	called := false
+	remote := ignite.NewHandler("test", func(_ context.Context, operation string, arguments ignite.Arguments) (map[string]any, error) {
+		if operation != "ignite_check_name" || arguments.Name != "shop" || arguments.Server != "" {
+			t.Fatalf("unexpected forwarded call: operation=%q arguments=%+v", operation, arguments)
+		}
+		called = true
+		return map[string]any{"domain": "shop.other.example", "available": true}, nil
+	})
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Scheme != "https" || request.URL.Host != "other.example" || request.URL.RawQuery != "ignite" {
+			t.Fatalf("unexpected remote Ignite endpoint: %s", request.URL)
+		}
+		response := httptest.NewRecorder()
+		remote.ServeHTTP(response, request)
+		return response.Result(), nil
+	})}
+	result, err := callIgniteServer(context.Background(), client, "other.example", "ignite_check_name", ignite.Arguments{Server: "other.example", Name: "shop"})
+	if err != nil || !called || result["domain"] != "shop.other.example" || result["server"] != "other.example" {
+		t.Fatalf("remote Ignite result=%v called=%v err=%v", result, called, err)
 	}
 }
 

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "sitebrush_ignite": {
+      "type": "streamable-http",
+      "url": "https://sitebrush.com/?sitebrush_agent",
+      "extensions": {
+        "com.openai": {
+          "auth": {"type": "none"}
+        }
+      }
+    }
+  }
+}

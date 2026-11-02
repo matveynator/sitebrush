@@ -90,6 +90,13 @@ func TestSafeQueryRedactsAIPairingApproval(t *testing.T) {
 	}
 }
 
+func TestSafeQueryRedactsIgniteBrowserSecret(t *testing.T) {
+	query := SafeQuery("ignite&captcha=private-browser-secret")
+	if strings.Contains(query, "private-browser-secret") {
+		t.Fatalf("Ignite browser secret leaked: %q", query)
+	}
+}
+
 func TestSafeQueryRedactsOAuthAndAttachmentCredentials(t *testing.T) {
 	query := SafeQuery("code=private-code&state=private-state&code_challenge=private-challenge&download_url=private-attachment&resource=https%3A%2F%2Fexample.org%2F_sitebrush%2Fmcp")
 	for _, secret := range []string{"private-code", "private-state", "private-challenge", "private-attachment"} {
