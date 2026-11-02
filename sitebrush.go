@@ -86,6 +86,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/geoip"
 	"github.com/matveynator/sitebrush/v2/pkg/hostingandsupport"
 	"github.com/matveynator/sitebrush/v2/pkg/httpsecurity"
+	"github.com/matveynator/sitebrush/v2/pkg/ignite"
 	"github.com/matveynator/sitebrush/v2/pkg/imageprepare"
 	"github.com/matveynator/sitebrush/v2/pkg/mailguard"
 	"github.com/matveynator/sitebrush/v2/pkg/mailmonitor"
@@ -109,6 +110,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/systeminit"
 	"github.com/matveynator/sitebrush/v2/pkg/updateannounce"
 	"github.com/matveynator/sitebrush/v2/pkg/winservice"
+	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/skip2/go-qrcode"
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/html"
@@ -12930,6 +12932,11 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 	})))
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Registration services remain reachable when the main page is published.
+		if r.URL.Path == "/" && (hasQueryFlag(r, "ignite") || hasQueryFlag(r, "sitebrush_agent")) {
+			dynamic.ServeHTTP(w, r)
+			return
+		}
 		// Embedded SiteBrush application assets belong to the running
 		// application, not to an individual site's publication policy.
 		// They must remain available while the public catalog is warming,
@@ -13152,7 +13159,7 @@ func (a *App) siteDynamicHTTPCore(router http.Handler) http.Handler {
 			defer a.publicPublicationRequest(endAction, mutationDomain)
 		}
 		query := r.URL.Query()
-		if query.Has("mcp") || query.Has("oauth") || query.Has("ai") || query.Has("ai_token") || query.Has("ai_session") || query.Has("ai_authorize") || isBrowserAnalyticsRequest(r) {
+		if query.Has("mcp") || query.Has("ignite") || query.Has("sitebrush_agent") || query.Has("oauth") || query.Has("ai") || query.Has("ai_token") || query.Has("ai_session") || query.Has("ai_authorize") || isBrowserAnalyticsRequest(r) {
 			a.route(w, r)
 			return
 		}
@@ -13557,6 +13564,14 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	}
 	if hasQueryFlag(r, "test_drive_start") {
 		a.startPrivateTestDrive(w, r)
+		return
+	}
+	if r.URL.Path == "/" && hasQueryFlag(r, "ignite") {
+		a.igniteRoute(w, r)
+		return
+	}
+	if r.URL.Path == "/" && hasQueryFlag(r, "sitebrush_agent") {
+		a.igniteGatewayRoute(w, r)
 		return
 	}
 	if hasQueryFlag(r, "test_drive_check_captcha") {
@@ -33632,7 +33647,9 @@ func (a *App) createAndSendEmailConfirmationForLanguage(r *http.Request, action,
 		ExpiresAt:    expiresAt.Format(time.RFC3339),
 	}
 	if action == "register" {
-		if r.FormValue("site_workflow") == "new_site" {
+		if r.FormValue("site_workflow") == "ignite" {
+			confirmation.Workflow = "ignite"
+		} else if r.FormValue("site_workflow") == "new_site" {
 			confirmation.Workflow = "new_site"
 		} else if a.trialPaidImportEstimate(r.Context(), domain).Pending && r.FormValue("paid_import_consent") == "1" {
 			confirmation.Workflow = "trial_paid"
@@ -34286,6 +34303,9 @@ func emailConfirmationURL(r *http.Request, token string) string {
 	confirmationURL := url.URL{Scheme: scheme, Host: host, Path: cleanPath(r.URL.Path)}
 	queryValues := confirmationURL.Query()
 	queryValues.Set("email_confirm", token)
+	if r.FormValue("site_workflow") == "ignite" {
+		queryValues.Set("ignite", "")
+	}
 	confirmationURL.RawQuery = queryValues.Encode()
 	return confirmationURL.String()
 }
@@ -39236,7 +39256,7 @@ func runEmailConfirmationMemoryWorker(ctx context.Context, requests <-chan email
 			case "domain":
 				found := false
 				for _, confirmation := range confirmationsByToken {
-					if confirmation.Domain == request.token && confirmation.Action == "register" && confirmation.Workflow != "new_site" && !confirmationExpired(confirmation.ExpiresAt, now) {
+					if confirmation.Domain == request.token && confirmation.Action == "register" && confirmation.Workflow != "new_site" && confirmation.Workflow != "ignite" && !confirmationExpired(confirmation.ExpiresAt, now) {
 						found = true
 						break
 					}
@@ -39567,6 +39587,9 @@ func (a *App) registrationDomainAddressSetupView(ctx context.Context, siteDomain
 }
 
 func (a *App) registrationConfirmationDNSSetup(ctx context.Context, confirmation EmailConfirmation) (EmailDNSSetupView, bool) {
+	if confirmation.Workflow == "ignite" && a.newSiteSubdomainAllowed(ctx, confirmation.Domain) {
+		return EmailDNSSetupView{}, false
+	}
 	if (confirmation.Workflow == "trial" || confirmation.Workflow == "trial_paid") && a.pendingTrialRegistration(ctx, confirmation.Domain) {
 		// The owner already serves this managed wildcard domain and sends mail
 		// for it. A direct A-record match would reject reverse proxies.
@@ -51584,7 +51607,7 @@ func (a *App) pendingRegistrationDomain(ctx context.Context, domain string) bool
 	}
 	var count int
 	err := a.withServerControlDatabaseRead(ctx, "pending-registration-domain", func(database *sql.DB) error {
-		return database.QueryRowContext(ctx, `SELECT COUNT(1) FROM registration_confirmations WHERE domain=? AND action='register' AND COALESCE(workflow,'')<>'new_site' AND expires_at>?`, domain, time.Now().UTC().Format(time.RFC3339)).Scan(&count)
+		return database.QueryRowContext(ctx, `SELECT COUNT(1) FROM registration_confirmations WHERE domain=? AND action='register' AND COALESCE(workflow,'') NOT IN ('new_site','ignite') AND expires_at>?`, domain, time.Now().UTC().Format(time.RFC3339)).Scan(&count)
 	})
 	return err == nil && count > 0
 }
@@ -60825,4 +60848,612 @@ func testDriveHTTPError(w http.ResponseWriter, r *http.Request, key string, stat
 		message = translations["test_drive_generic_error"]
 	}
 	http.Error(w, message, status)
+}
+
+// Ignite keeps public registration separate from site-local MCP editing.
+
+type igniteAttempt struct {
+	domain            string
+	browserIP         string
+	email             string
+	confirmationToken string
+	status            string
+	captchaVerified   bool
+}
+
+type ignitePolicyResult struct {
+	ownerDomain string
+	allowed     bool
+}
+
+type igniteBrowserAttempt struct {
+	domain   string
+	verified bool
+}
+
+func igniteHash(secret string) string {
+	digest := sha256.Sum256([]byte(secret))
+	return hex.EncodeToString(digest[:])
+}
+
+// The configured owner domain is the sole authority for Ignite registration.
+func (a *App) ignitePolicy(ctx context.Context) (string, error) {
+	reply := make(chan ignitePolicyResult, 1)
+	err := a.withServerControlDatabaseRead(ctx, "ignite-policy", func(database *sql.DB) error {
+		ownerDomain, found := (hostingandsupport.Store{DB: database}).OwnerDomain(ctx)
+		if !found {
+			return errors.New("server owner domain is unavailable")
+		}
+		// A missing setting keeps the existing default; a failed read closes
+		// the public registration gate instead of guessing its current value.
+		var setting string
+		settingErr := database.QueryRowContext(ctx, `SELECT value FROM server_settings WHERE name='auto_registration_enabled'`).Scan(&setting)
+		if settingErr != nil && !errors.Is(settingErr, sql.ErrNoRows) {
+			return settingErr
+		}
+		reply <- ignitePolicyResult{
+			ownerDomain: ownerDomain,
+			allowed:     errors.Is(settingErr, sql.ErrNoRows) || strings.EqualFold(setting, "1") || strings.EqualFold(setting, "true") || strings.EqualFold(setting, "yes") || strings.EqualFold(setting, "on"),
+		}
+		return nil
+	})
+	if err != nil {
+		return "", errors.New("Ignite registration is unavailable")
+	}
+	policy := <-reply
+	ownerDomain := normalizeDomainName(policy.ownerDomain)
+	if !policy.allowed || ownerDomain == "" || net.ParseIP(ownerDomain) != nil {
+		return "", errors.New("Ignite registration is unavailable")
+	}
+	return ownerDomain, nil
+}
+
+func (a *App) igniteRoute(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	ownerDomain, err := a.ignitePolicy(r.Context())
+	if err != nil || requestScheme(r) != "https" || domainFromRequest(r) != ownerDomain {
+		http.Error(w, "Ignite registration is unavailable", http.StatusForbidden)
+		return
+	}
+	if browserSecret := r.URL.Query().Get("captcha"); browserSecret != "" {
+		a.igniteCaptchaPage(w, r, ownerDomain, browserSecret)
+		return
+	}
+	if r.URL.Query().Has("email_confirm") {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte("Return to your AI assistant and enter the six-digit code from this email."))
+		return
+	}
+	if r.Method == http.MethodGet && strings.Contains(r.Header.Get("Accept"), "text/html") {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = fmt.Fprintf(w, "<!doctype html><title>SiteBrush Ignite</title><h1>SiteBrush Ignite</h1><p>Connect an AI assistant to https://%s/?ignite to create a new site.</p>", template.HTMLEscapeString(ownerDomain))
+		return
+	}
+	invoke := func(ctx context.Context, operation string, arguments ignite.Arguments) (map[string]any, error) {
+		return a.invokeIgnite(r.WithContext(ctx), ownerDomain, operation, arguments)
+	}
+	ignite.NewHandler(CompileVersion, invoke).ServeHTTP(w, r)
+}
+
+func (a *App) igniteName(ctx context.Context, ownerDomain, label string) (string, bool, error) {
+	if label == "" || label != safePublicTrialLabel(label) || reservedServerLabel(label) {
+		return "", false, errors.New("invalid site name")
+	}
+	domain := label + "." + ownerDomain
+	if !a.newSiteSubdomainAllowed(ctx, domain) {
+		return "", false, errors.New("invalid site name")
+	}
+	available, err := a.publicTrialDomainAvailability(ctx, domain)
+	return domain, available, err
+}
+
+func (a *App) invokeIgnite(r *http.Request, ownerDomain, operation string, arguments ignite.Arguments) (map[string]any, error) {
+	if _, err := a.ignitePolicy(r.Context()); err != nil {
+		return nil, err
+	}
+	switch operation {
+	case "ignite_suggest_names":
+		base := safePublicTrialLabel(arguments.Name)
+		if base == "" {
+			return nil, errors.New("provide a short site name")
+		}
+		suggestions := make([]string, 0, 3)
+		for index := 0; index < 20 && len(suggestions) < 3; index++ {
+			label := base
+			if index > 0 {
+				label = fmt.Sprintf("%.20s%d", base, index+1)
+			}
+			domain, available, err := a.igniteName(r.Context(), ownerDomain, label)
+			if err == nil && available {
+				suggestions = append(suggestions, domain)
+			}
+		}
+		return map[string]any{"domains": suggestions}, nil
+	case "ignite_check_name":
+		domain, available, err := a.igniteName(r.Context(), ownerDomain, arguments.Name)
+		return map[string]any{"domain": domain, "available": available}, err
+	case "ignite_begin":
+		domain, available, err := a.igniteName(r.Context(), ownerDomain, arguments.Name)
+		if err != nil || !available {
+			return nil, errors.New("site name is unavailable")
+		}
+		attempt, browser := randomAccessToken()+randomAccessToken(), randomAccessToken()+randomAccessToken()
+		now := time.Now().UTC()
+		err = a.withServerControlDatabaseWrite(r.Context(), "ignite-begin", func(database *sql.DB) error {
+			_, err := database.ExecContext(r.Context(), `DELETE FROM ignite_registrations WHERE expires_at<?`, now.Format(time.RFC3339))
+			if err != nil {
+				return err
+			}
+			var pending int
+			if err := database.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM ignite_registrations WHERE domain=? AND status<>'complete'`, domain).Scan(&pending); err != nil {
+				return err
+			}
+			if pending >= 5 {
+				return errors.New("too many pending registrations for this name")
+			}
+			if err := database.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM ignite_registrations WHERE status<>'complete'`).Scan(&pending); err != nil {
+				return err
+			}
+			if pending >= 4096 {
+				return errors.New("registration capacity is temporarily full")
+			}
+			_, err = database.ExecContext(r.Context(), `INSERT INTO ignite_registrations(attempt_hash,browser_hash,domain,status,created_at,expires_at) VALUES(?,?,?,'pending',?,?)`, igniteHash(attempt), igniteHash(browser), domain, now.Format(time.RFC3339), now.Add(30*time.Minute).Format(time.RFC3339))
+			return err
+		})
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"attempt": attempt, "domain": domain, "captcha_url": "https://" + ownerDomain + "/?ignite&captcha=" + url.QueryEscape(browser), "status": "captcha_required"}, nil
+	case "ignite_status", "ignite_send_code", "ignite_complete":
+		pending, err := a.igniteAttempt(r.Context(), arguments.Attempt)
+		if err != nil {
+			return nil, err
+		}
+		if operation == "ignite_status" {
+			return map[string]any{"domain": pending.domain, "status": pending.status, "captcha_verified": pending.captchaVerified, "mcp_ready": pending.status == "complete" && a.accountHTTPSReady(pending.domain)}, nil
+		}
+		if operation == "ignite_send_code" {
+			return a.igniteSendCode(r, arguments.Attempt, pending, arguments.Email)
+		}
+		return a.igniteComplete(r, arguments.Attempt, pending, arguments.Code)
+	}
+	return nil, errors.New("unknown Ignite operation")
+}
+
+// Unverified registrations remain in the control database, before a site DB exists.
+func (a *App) igniteAttempt(ctx context.Context, secret string) (igniteAttempt, error) {
+	if len(secret) < 32 || len(secret) > 128 {
+		return igniteAttempt{}, errors.New("registration attempt is unavailable")
+	}
+	reply := make(chan igniteAttempt, 1)
+	err := a.withServerControlDatabaseRead(ctx, "ignite-attempt", func(database *sql.DB) error {
+		var attempt igniteAttempt
+		var verified int
+		if err := database.QueryRowContext(ctx, `SELECT domain,browser_ip,email,confirmation_token,status,captcha_verified FROM ignite_registrations WHERE attempt_hash=? AND expires_at>?`, igniteHash(secret), time.Now().UTC().Format(time.RFC3339)).Scan(&attempt.domain, &attempt.browserIP, &attempt.email, &attempt.confirmationToken, &attempt.status, &verified); err != nil {
+			return err
+		}
+		attempt.captchaVerified = verified == 1
+		reply <- attempt
+		return nil
+	})
+	if err != nil {
+		return igniteAttempt{}, errors.New("registration attempt is unavailable")
+	}
+	return <-reply, nil
+}
+
+// The browser secret proves a human challenge without exposing the AI attempt secret.
+func (a *App) igniteCaptchaPage(w http.ResponseWriter, r *http.Request, ownerDomain, browserSecret string) {
+	if len(browserSecret) < 32 || len(browserSecret) > 128 {
+		http.NotFound(w, r)
+		return
+	}
+	browserIP := accountClientIP(r)
+	if net.ParseIP(browserIP) == nil {
+		http.Error(w, "browser address is unavailable", http.StatusForbidden)
+		return
+	}
+	reply := make(chan igniteBrowserAttempt, 1)
+	err := a.withServerControlDatabaseRead(r.Context(), "ignite-browser-attempt", func(database *sql.DB) error {
+		var domain string
+		var verified int
+		if err := database.QueryRowContext(r.Context(), `SELECT domain,captcha_verified FROM ignite_registrations WHERE browser_hash=? AND expires_at>?`, igniteHash(browserSecret), time.Now().UTC().Format(time.RFC3339)).Scan(&domain, &verified); err != nil {
+			return err
+		}
+		reply <- igniteBrowserAttempt{domain: domain, verified: verified == 1}
+		return nil
+	})
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	browserAttempt := <-reply
+	if !a.newSiteSubdomainAllowed(r.Context(), browserAttempt.domain) {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if browserAttempt.verified {
+		_, _ = w.Write([]byte("<!doctype html><title>SiteBrush Ignite</title><p>Human verification complete. Return to your AI assistant.</p>"))
+		return
+	}
+	if r.Method == http.MethodPost {
+		r.Body = http.MaxBytesReader(w, r.Body, 4096)
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "invalid CAPTCHA form", http.StatusBadRequest)
+			return
+		}
+		verificationReply := make(chan bool, 1)
+		err := a.withAccountMailTransaction(r, "ignite-captcha-verify", func(transaction *sql.Tx) error {
+			passed, verifyErr := captcha.Verify(transaction, r.FormValue("captcha_id"), r.FormValue("captcha"), browserIP, ownerDomain, "register", time.Now().UTC())
+			if verifyErr != nil {
+				return verifyErr
+			}
+			verificationReply <- passed
+			return nil
+		})
+		if err != nil {
+			http.Error(w, "CAPTCHA is invalid or expired", http.StatusForbidden)
+			return
+		}
+		if !<-verificationReply {
+			http.Error(w, "CAPTCHA is invalid or expired", http.StatusForbidden)
+			return
+		}
+		err = a.withServerControlDatabaseWrite(r.Context(), "ignite-captcha-complete", func(database *sql.DB) error {
+			result, updateErr := database.ExecContext(r.Context(), `UPDATE ignite_registrations SET captcha_verified=1,browser_ip=?,status='captcha' WHERE browser_hash=? AND status='pending' AND expires_at>?`, browserIP, igniteHash(browserSecret), time.Now().UTC().Format(time.RFC3339))
+			if updateErr != nil {
+				return updateErr
+			}
+			count, countErr := result.RowsAffected()
+			if countErr != nil {
+				return countErr
+			}
+			if count != 1 {
+				return errors.New("registration attempt expired")
+			}
+			return nil
+		})
+		if err != nil {
+			http.Error(w, "registration temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte("<!doctype html><title>SiteBrush Ignite</title><p>Human verification complete. Return to your AI assistant.</p>"))
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	challenge, err := captcha.New()
+	if err != nil {
+		http.Error(w, "CAPTCHA unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	issuanceReply := make(chan bool, 1)
+	err = a.withAccountMailTransaction(r, "ignite-captcha-issue", func(transaction *sql.Tx) error {
+		allowed, saveErr := captcha.Save(transaction, challenge, browserIP, ownerDomain, "register", time.Now().UTC())
+		if saveErr != nil {
+			return saveErr
+		}
+		issuanceReply <- allowed
+		return nil
+	})
+	if err != nil || !<-issuanceReply {
+		http.Error(w, "CAPTCHA unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	encoded, err := captcha.Render(challenge.Answer)
+	if err != nil {
+		http.Error(w, "CAPTCHA unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	_, _ = fmt.Fprintf(w, `<!doctype html><meta name="viewport" content="width=device-width"><title>SiteBrush Ignite</title><h1>Confirm %s</h1><p>Enter the letters from the image, then return to your AI assistant.</p><form method="post"><img alt="CAPTCHA" src="data:image/png;base64,%s"><input type="hidden" name="captcha_id" value="%s"><label>Code <input name="captcha" autocomplete="off" required></label><button type="submit">Continue</button></form>`, template.HTMLEscapeString(browserAttempt.domain), base64.StdEncoding.EncodeToString(encoded), template.HTMLEscapeString(challenge.Token))
+}
+
+func (a *App) igniteSendCode(r *http.Request, attemptSecret string, pending igniteAttempt, address string) (map[string]any, error) {
+	parsed, err := stdmail.ParseAddress(strings.TrimSpace(address))
+	if err != nil || parsed.Address != address || len(address) > 254 || !pending.captchaVerified || pending.status != "captcha" || net.ParseIP(pending.browserIP) == nil {
+		return nil, errors.New("complete CAPTCHA and provide a valid email address")
+	}
+	label, ownerDomain, found := strings.Cut(pending.domain, ".")
+	if !found || ownerDomain == "" {
+		return nil, errors.New("site name is unavailable")
+	}
+	if _, available, err := a.igniteName(r.Context(), ownerDomain, label); err != nil || !available {
+		return nil, errors.New("site name is unavailable")
+	}
+	err = a.withServerControlDatabaseWrite(r.Context(), "ignite-claim-email-step", func(database *sql.DB) error {
+		result, updateErr := database.ExecContext(r.Context(), `UPDATE ignite_registrations SET status='sending' WHERE attempt_hash=? AND status='captcha' AND expires_at>?`, igniteHash(attemptSecret), time.Now().UTC().Format(time.RFC3339))
+		if updateErr != nil {
+			return updateErr
+		}
+		count, countErr := result.RowsAffected()
+		if countErr != nil {
+			return countErr
+		}
+		if count != 1 {
+			return errors.New("registration step is already in progress")
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	// The browser peer is the human who passed CAPTCHA. Mail throttling follows
+	// that peer rather than the shared AI gateway's outbound address.
+	mailRequest := r.Clone(r.Context())
+	mailRequest.RemoteAddr = net.JoinHostPort(pending.browserIP, "0")
+	mailRequest.Header = r.Header.Clone()
+	mailRequest.Header.Del("Forwarded")
+	mailRequest.Header.Del("X-Forwarded-For")
+	mailRequest.Header.Del("X-Real-IP")
+	mailRequest.Form = url.Values{"site_workflow": {"ignite"}}
+	mailRequest.PostForm = mailRequest.Form
+	confirmation := EmailConfirmation{}
+	err = a.createAndSendEmailConfirmationForLanguage(mailRequest, "register", pending.domain, "", address, "", "/", preferredLanguageCode(r.Header.Get("Accept-Language")), &confirmation)
+	// Mail may already be queued when the caller disconnects. Finish the durable
+	// state transition through the legacy SQL boundary before releasing the attempt.
+	finishContext, finishCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+	defer finishCancel()
+	if err != nil {
+		restoreErr := a.withServerControlDatabaseWrite(finishContext, "ignite-restore-email-step", func(database *sql.DB) error {
+			_, updateErr := database.ExecContext(finishContext, `UPDATE ignite_registrations SET status='captcha' WHERE attempt_hash=? AND status='sending'`, igniteHash(attemptSecret))
+			return updateErr
+		})
+		if restoreErr != nil {
+			return nil, fmt.Errorf("email delivery failed and registration could not be resumed: %w", restoreErr)
+		}
+		return nil, err
+	}
+	err = a.withServerControlDatabaseWrite(finishContext, "ignite-code-sent", func(database *sql.DB) error {
+		result, updateErr := database.ExecContext(finishContext, `UPDATE ignite_registrations SET email=?,confirmation_token=?,status='email_sent' WHERE attempt_hash=? AND status='sending'`, address, confirmation.Token, igniteHash(attemptSecret))
+		if updateErr != nil {
+			return updateErr
+		}
+		count, countErr := result.RowsAffected()
+		if countErr != nil {
+			return countErr
+		}
+		if count != 1 {
+			return errors.New("registration attempt expired")
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"domain": pending.domain, "status": "email_sent"}, nil
+}
+
+// Mail proof is durable before the domain claim and site-local account are created.
+func (a *App) igniteComplete(r *http.Request, attemptSecret string, pending igniteAttempt, code string) (map[string]any, error) {
+	if pending.status == "complete" {
+		return a.igniteCreatedSite(pending.domain), nil
+	}
+	if pending.confirmationToken == "" || pending.status != "email_sent" && pending.status != "verified" {
+		return nil, errors.New("email confirmation is required")
+	}
+	confirmation := EmailConfirmation{Token: pending.confirmationToken, Domain: pending.domain, Email: pending.email}
+	saved, found := a.registrationConfirmationByToken(r.Context(), pending.confirmationToken)
+	if pending.status == "email_sent" {
+		if !found || saved.Workflow != "ignite" || saved.Email != pending.email || saved.Domain != pending.domain {
+			return nil, errors.New("email code is invalid or expired")
+		}
+		var valid bool
+		confirmation, valid = a.registrationConfirmationForCode(r.Context(), pending.domain, saved.FormToken, code)
+		if !valid || confirmation.Token != pending.confirmationToken || confirmation.Workflow != "ignite" || confirmation.Email != pending.email {
+			return nil, errors.New("email code is invalid or expired")
+		}
+		err := a.withServerControlDatabaseWrite(r.Context(), "ignite-email-verified", func(database *sql.DB) error {
+			result, updateErr := database.ExecContext(r.Context(), `UPDATE ignite_registrations SET status='verified',expires_at=? WHERE attempt_hash=? AND confirmation_token=? AND status='email_sent' AND expires_at>?`, time.Now().UTC().Add(domainregistration.UnfinishedTTL).Format(time.RFC3339), igniteHash(attemptSecret), confirmation.Token, time.Now().UTC().Format(time.RFC3339))
+			if updateErr != nil {
+				return updateErr
+			}
+			count, countErr := result.RowsAffected()
+			if countErr != nil {
+				return countErr
+			}
+			if count != 1 {
+				return errors.New("registration attempt expired")
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, errors.New("registration attempt expired")
+		}
+	} else if found {
+		if saved.Workflow != "ignite" || saved.Email != pending.email || saved.Domain != pending.domain {
+			return nil, errors.New("email confirmation is unavailable")
+		}
+		confirmation = saved
+	}
+	if _, err := a.ignitePolicy(r.Context()); err != nil {
+		return nil, err
+	}
+	if !a.newSiteSubdomainAllowed(r.Context(), pending.domain) {
+		return nil, errors.New("site name is unavailable")
+	}
+	claimReply := make(chan bool, 1)
+	err := a.withServerControlDatabaseRead(r.Context(), "ignite-own-claim", func(database *sql.DB) error {
+		var count int
+		if err := database.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM domain_registration_claims WHERE domain=? AND token=? AND kind='registration'`, pending.domain, confirmation.Token).Scan(&count); err != nil {
+			return err
+		}
+		claimReply <- count == 1
+		return nil
+	})
+	if err != nil {
+		return nil, errors.New("site name is unavailable")
+	}
+	ownClaim := <-claimReply
+	if !ownClaim && !a.publicTrialDomainAvailable(r.Context(), pending.domain) {
+		return nil, errors.New("site name is unavailable")
+	}
+	err = a.withServerControlDatabaseWrite(r.Context(), "ignite-claim-domain", func(database *sql.DB) error {
+		_, claimErr := domainregistration.Claim(r.Context(), database, pending.domain, confirmation.Token, pending.email, "registration")
+		return claimErr
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := a.igniteCreateSite(r.Context(), pending.domain, pending.email, ownClaim); err != nil {
+		return nil, err
+	}
+	err = a.withServerControlDatabaseWrite(r.Context(), "ignite-finish", func(database *sql.DB) error {
+		transaction, beginErr := database.BeginTx(r.Context(), nil)
+		if beginErr != nil {
+			return beginErr
+		}
+		defer transaction.Rollback()
+		claim, updateErr := transaction.ExecContext(r.Context(), `UPDATE domain_registration_claims SET token='' WHERE domain=? AND token=?`, pending.domain, confirmation.Token)
+		if updateErr != nil {
+			return updateErr
+		}
+		claimCount, countErr := claim.RowsAffected()
+		if countErr != nil || claimCount != 1 {
+			return errors.New("site domain claim was lost")
+		}
+		attempt, updateErr := transaction.ExecContext(r.Context(), `UPDATE ignite_registrations SET status='complete' WHERE attempt_hash=? AND confirmation_token=? AND status='verified'`, igniteHash(attemptSecret), confirmation.Token)
+		if updateErr != nil {
+			return updateErr
+		}
+		attemptCount, countErr := attempt.RowsAffected()
+		if countErr != nil || attemptCount != 1 {
+			return errors.New("registration attempt was lost")
+		}
+		return transaction.Commit()
+	})
+	if err != nil {
+		return nil, err
+	}
+	a.deleteRegistrationConfirmation(r.Context(), confirmation.Token)
+	if finishErr := a.finishRegistrationAttempt(mailMonitorFlowID(confirmation.Token), "complete"); finishErr != nil {
+		log.Printf("MAIL Ignite registration cooldown reset failed error_type=%T", finishErr)
+	}
+	a.markServiceMailRecipientVerified(r.Context(), pending.domain, pending.email, confirmation.LanguageCode)
+	a.observeAutomaticSSLRegistration(r, pending.domain)
+	return a.igniteCreatedSite(pending.domain), nil
+}
+
+// Only the same unfinished domain claim may resume a partially created site.
+func (a *App) igniteCreateSite(ctx context.Context, domain, email string, allowExisting bool) error {
+	if !allowExisting && a.hasAdmin(contextWithDomain(ctx, domain), domain) {
+		return errors.New("site administrator already exists")
+	}
+	siteContext := contextWithSiteDatabaseCreation(contextWithDomain(ctx, domain))
+	if err := a.initializeRegistrationQuota(siteContext, domain, a.registrationCreationQuota(ctx)); err != nil {
+		return err
+	}
+	if err := a.accountTransaction(siteContext, func(transaction *sql.Tx) error {
+		var currentEmail string
+		err := transaction.QueryRowContext(siteContext, `SELECT email FROM users WHERE domain=? AND is_admin=1 LIMIT 1`, domain).Scan(&currentEmail)
+		if err == nil {
+			if allowExisting && strings.EqualFold(currentEmail, email) {
+				return nil
+			}
+			return errors.New("site administrator already exists")
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		_, err = transaction.ExecContext(siteContext, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, email, randomAccessToken()+randomAccessToken())
+		return err
+	}); err != nil {
+		return err
+	}
+	return a.ensureImportedRobotsPage(siteContext, domain)
+}
+
+func (a *App) igniteCreatedSite(domain string) map[string]any {
+	return map[string]any{"site_id": stableSiteID(domain), "domain": domain, "status": "created", "mcp_ready": a.accountHTTPSReady(domain), "mcp_endpoint": "https://" + domain + "/?mcp", "plugin_name": domain, "next_step": "When MCP is ready, add the personal MCP server in ChatGPT using this endpoint, then authorize it through the site's normal OAuth flow."}
+}
+
+// The public agent exposes registration on sitebrush.com and forwards an
+// explicit server choice without taking ownership of a site's MCP access.
+
+func (a *App) igniteGatewayRoute(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	ownerDomain, policyErr := a.ignitePolicy(r.Context())
+	if policyErr != nil || ownerDomain != "sitebrush.com" || domainFromRequest(r) != ownerDomain || requestScheme(r) != "https" {
+		http.Error(w, "SiteBrush agent is unavailable", http.StatusForbidden)
+		return
+	}
+	invoke := func(ctx context.Context, operation string, arguments ignite.Arguments) (map[string]any, error) {
+		serverDomain, err := igniteGatewayServer(arguments.Server)
+		if err != nil {
+			return nil, err
+		}
+		if serverDomain == ownerDomain {
+			result, err := a.invokeIgnite(r.WithContext(ctx), ownerDomain, operation, arguments)
+			if err == nil {
+				result["server"] = ownerDomain
+			}
+			return result, err
+		}
+		return forwardIgniteOperation(ctx, serverDomain, operation, arguments)
+	}
+	ignite.NewGatewayHandler(CompileVersion, invoke).ServeHTTP(w, r)
+}
+
+func igniteGatewayServer(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "sitebrush.com", nil
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+	target, err := url.Parse(raw)
+	if err != nil || target.Scheme != "https" || target.User != nil || target.Path != "" && target.Path != "/" || target.RawQuery != "" || target.Fragment != "" || target.Port() != "" {
+		return "", errors.New("provide a public HTTPS SiteBrush server domain")
+	}
+	serverDomain := normalizeDomainName(target.Hostname())
+	if serverDomain == "" || !strings.Contains(serverDomain, ".") || net.ParseIP(serverDomain) != nil || requirePublicOutboundURL(target) != nil {
+		return "", errors.New("provide a public HTTPS SiteBrush server domain")
+	}
+	return serverDomain, nil
+}
+
+func forwardIgniteOperation(ctx context.Context, serverDomain, operation string, arguments ignite.Arguments) (map[string]any, error) {
+	client := newPublicGrabHTTPClient("", "")
+	client.Timeout = 45 * time.Second
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return errors.New("Ignite redirects are unavailable") }
+	defer client.CloseIdleConnections()
+	return callIgniteServer(ctx, client, serverDomain, operation, arguments)
+}
+
+func callIgniteServer(ctx context.Context, client *http.Client, serverDomain, operation string, arguments ignite.Arguments) (map[string]any, error) {
+	connection, err := sdk.NewClient(&sdk.Implementation{Name: "SiteBrush agent", Version: CompileVersion}, nil).Connect(ctx, &sdk.StreamableClientTransport{Endpoint: "https://" + serverDomain + ignite.Path, HTTPClient: client}, nil)
+	if err != nil {
+		return nil, errors.New("selected SiteBrush server is unavailable")
+	}
+	defer connection.Close()
+	arguments.Server = ""
+	result, err := connection.CallTool(ctx, &sdk.CallToolParams{Name: operation, Arguments: arguments})
+	if err != nil {
+		return nil, errors.New("selected SiteBrush server is unavailable")
+	}
+	if result.IsError {
+		return nil, errors.New("selected SiteBrush server rejected the registration step")
+	}
+	if result.StructuredContent == nil {
+		return nil, errors.New("selected SiteBrush server returned no registration result")
+	}
+	encoded, err := json.Marshal(result.StructuredContent)
+	if err != nil {
+		return nil, err
+	}
+	decoded := map[string]any{}
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		return nil, err
+	}
+	if decoded == nil {
+		return nil, errors.New("selected SiteBrush server returned no registration result")
+	}
+	decoded["server"] = serverDomain
+	return decoded, nil
 }

@@ -210,6 +210,9 @@ func TestTrialOnboardingPreservesPublishedMailHistory(t *testing.T) {
 		t.Run(history.name, func(t *testing.T) {
 			var previous []migrations.Step
 			for _, step := range current {
+				if step.ID == "ignite-registration-001" {
+					continue
+				}
 				if step.ID == "mail-monitor-001" && history.onboardingBeforeMail {
 					for _, onboarding := range current {
 						if onboardingIDs[onboarding.ID] {

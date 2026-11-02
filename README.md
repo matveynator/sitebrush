@@ -92,6 +92,16 @@ The control database stores Test Drive status, timestamps, verification counts, 
 
 ---
 
+## Create a site with an AI assistant
+
+The main domain of a SiteBrush server serves `https://<server-domain>/?ignite` when **Allow self registration** is enabled. Ignite can suggest and check a third-level site name, open browser CAPTCHA, send a six-digit email code, verify that code, and create the new site. The server constructs the full domain from the selected name and its configured main domain. The same setting disables both browser self registration and Ignite.
+
+The ChatGPT SiteBrush integration in `integrations/chatgpt/` connects to `https://sitebrush.com/?sitebrush_agent` by default. The user may explicitly select another public HTTPS SiteBrush server; the gateway forwards only Ignite registration calls to that server's `/?ignite`. The selected server handles CAPTCHA, email verification, and site creation. The gateway never receives editing credentials.
+
+After creation, Ignite returns the site ID, domain, HTTPS readiness, and `https://<new-site>/?mcp`. The owner adds that address as a personal ChatGPT MCP connection named for the domain and approves its normal SiteBrush OAuth flow. The personal connection then edits the site through the existing MCP tools. Ignite has no tools for editing existing sites or connecting custom domains.
+
+---
+
 ## Before and after
 
 ### Before
