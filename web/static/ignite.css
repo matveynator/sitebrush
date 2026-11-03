@@ -32,6 +32,44 @@ body {
     box-shadow: 0 20px 55px rgba(23, 70, 78, .1);
 }
 
+.ignite-card--intro {
+    width: min(100%, 760px);
+}
+
+.ignite-options {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+    gap: 16px;
+}
+
+.ignite-option {
+    padding: 20px;
+    border: 1px solid #cce1e2;
+    border-radius: 12px;
+    background: #f6fbfb;
+}
+
+.ignite-option h2 {
+    margin: 0 0 12px;
+    color: #183034;
+    font-size: 18px;
+}
+
+.ignite-option p {
+    margin: 0 0 16px;
+    color: #526b70;
+    line-height: 1.5;
+}
+
+.ignite-option code {
+    color: #087f8c;
+    overflow-wrap: anywhere;
+}
+
+.ignite-after {
+    margin: 24px 0 0;
+}
+
 .ignite-brand {
     margin: 0 0 28px;
     color: #087f8c;
@@ -151,6 +189,10 @@ button:hover,
     :root { background: #0c1c21; color: #e9f4f3; }
     body { background: radial-gradient(circle at 10% 10%, #12363b, transparent 42%), #0c1c21; }
     .ignite-card { border-color: #34565c; background: #172b30; box-shadow: 0 20px 55px rgba(0, 0, 0, .25); }
+    .ignite-option { border-color: #34565c; background: #1d363c; }
+    .ignite-option h2 { color: #f1fbfa; }
+    .ignite-option p { color: #bfd1d2; }
+    .ignite-option code { color: #70d7dc; }
     .ignite-brand, .ignite-step, .ignite-domain { color: #70d7dc; }
     .ignite-brand span, .ignite-help, .ignite-footnote { color: #bfd1d2; }
     h1 { color: #f1fbfa; }

@@ -19974,6 +19974,14 @@ func TestIgniteCreatesOnlyConfirmedNewSite(t *testing.T) {
 	}
 	request := httptest.NewRequest(http.MethodPost, "https://"+ownerDomain+"/?ignite", nil)
 	request.RemoteAddr = "198.51.100.30:1234"
+	introduction, err := application.invokeIgnite(request, ownerDomain, "ignite_get_started", ignite.Arguments{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	choices, ok := introduction["choices"].([]map[string]string)
+	if !ok || len(choices) != 2 || choices[0]["domain_suffix"] != ownerDomain || choices[1]["download_url"] != "https://github.com/matveynator/sitebrush#downloads" || application.hasAdmin(contextWithDomain(request.Context(), siteDomain), siteDomain) {
+		t.Fatal("Ignite introduction did not explain both creation paths", introduction)
+	}
 	begin, err := application.invokeIgnite(request, ownerDomain, "ignite_begin", ignite.Arguments{Name: "shop"})
 	if err != nil {
 		t.Fatal(err)
@@ -20002,7 +20010,7 @@ func TestIgniteCreatesOnlyConfirmedNewSite(t *testing.T) {
 	}
 	verificationResponse := httptest.NewRecorder()
 	application.siteHTTPHandler(http.HandlerFunc(application.route)).ServeHTTP(verificationResponse, verificationRequest)
-	if verificationResponse.Code != http.StatusOK || !strings.Contains(verificationResponse.Body.String(), "Human verification complete") {
+	if verificationResponse.Code != http.StatusOK || !strings.Contains(verificationResponse.Body.String(), translationsForRequest(verificationRequest)["test_drive_admin_captcha"]) {
 		t.Fatalf("CAPTCHA confirmation: status=%d body=%s", verificationResponse.Code, verificationResponse.Body.String())
 	}
 	if _, err := application.invokeIgnite(request, ownerDomain, "ignite_send_code", ignite.Arguments{Attempt: attempt, Email: ownerEmail}); err != nil {
@@ -20231,6 +20239,26 @@ func TestIgniteRouteUsesConfiguredMainHost(t *testing.T) {
 		handler.ServeHTTP(response, request)
 		if response.Code != test.status {
 			t.Errorf("%s status=%d want=%d body=%s", test.address, response.Code, test.status, response.Body.String())
+		}
+	}
+}
+
+func TestIgniteIntroductionUsesEverySupportedLanguage(t *testing.T) {
+	for languageCode, translations := range translationCatalog {
+		for _, key := range []string{"ignite_intro_title", "ignite_intro_about", "ignite_intro_online_title", "ignite_intro_online", "ignite_intro_own_server_title", "ignite_intro_own_server", "ignite_intro_download", "ignite_intro_after", "ignite_intro_start", "ignite_captcha_title", "ignite_captcha_help", "ignite_captcha_return", "ignite_email_return"} {
+			if strings.TrimSpace(translations[key]) == "" {
+				t.Fatalf("%s is missing %s", languageCode, key)
+			}
+		}
+		request := httptest.NewRequest(http.MethodGet, "https://sitebrush.example/?ignite", nil)
+		request.Header.Set("Accept-Language", languageCode)
+		response := httptest.NewRecorder()
+		renderIgniteIntroduction(response, request, "sitebrush.example")
+		if !strings.Contains(response.Body.String(), `lang="`+languageCode+`"`) || !strings.Contains(response.Body.String(), translations["ignite_intro_title"]) || !strings.Contains(response.Body.String(), translations["ignite_intro_own_server_title"]) || !strings.Contains(response.Body.String(), "myshop.sitebrush.example") || !strings.Contains(response.Body.String(), "#downloads") {
+			t.Fatalf("%s introduction is incomplete", languageCode)
+		}
+		if (languageCode == "he" || languageCode == "fa") != strings.Contains(response.Body.String(), `dir="rtl"`) {
+			t.Fatalf("%s has the wrong text direction", languageCode)
 		}
 	}
 }

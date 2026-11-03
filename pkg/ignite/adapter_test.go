@@ -29,5 +29,11 @@ func TestIgniteMCPExposesRegistrationOnly(t *testing.T) {
 		if strings.Contains(test.body, `"method":"tools/list"`) && !strings.Contains(response.Body.String(), "Registration attempt UUID") {
 			t.Fatal("Ignite did not explain the server-issued attempt field")
 		}
+		if strings.Contains(test.body, `"method":"initialize"`) && (!strings.Contains(response.Body.String(), "user's own server") || !strings.Contains(response.Body.String(), "ignite_get_started")) {
+			t.Fatal("Ignite did not introduce the hosted and own-server choices")
+		}
+		if strings.Contains(test.body, `"method":"tools/list"`) && !strings.Contains(response.Body.String(), "ignite_get_started") {
+			t.Fatal("Ignite did not expose its introductory tool")
+		}
 	}
 }

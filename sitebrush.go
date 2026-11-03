@@ -60942,19 +60942,29 @@ func (a *App) igniteRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Query().Has("email_confirm") {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = w.Write([]byte("Return to your AI assistant and enter the six-digit code from this email."))
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		renderIgniteCaptchaState(w, r, ownerDomain, "auth_register_title", "ignite_email_return", "")
 		return
 	}
 	if r.Method == http.MethodGet && strings.Contains(r.Header.Get("Accept"), "text/html") {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = fmt.Fprintf(w, "<!doctype html><title>SiteBrush Ignite</title><h1>SiteBrush Ignite</h1><p>Connect an AI assistant to https://%s/?ignite to create a new site.</p>", template.HTMLEscapeString(ownerDomain))
+		renderIgniteIntroduction(w, r, ownerDomain)
 		return
 	}
 	invoke := func(ctx context.Context, operation string, arguments ignite.Arguments) (map[string]any, error) {
 		return a.invokeIgnite(r.WithContext(ctx), ownerDomain, operation, arguments)
 	}
 	ignite.NewHandler(CompileVersion, invoke).ServeHTTP(w, r)
+}
+
+func renderIgniteIntroduction(w http.ResponseWriter, r *http.Request, ownerDomain string) {
+	languageCode := preferredLanguageCode(r.Header.Get("Accept-Language"))
+	direction := igniteTextDirection(languageCode)
+	translations := translationsForLanguageCode(languageCode)
+	translated := func(key string) string {
+		return template.HTMLEscapeString(translations[key])
+	}
+	_, _ = fmt.Fprintf(w, `<!doctype html><html lang="%s" dir="%s"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SiteBrush Ignite</title><link rel="stylesheet" href="/p/static/ignite.css"></head><body><main class="ignite-shell"><section class="ignite-card ignite-card--intro"><p class="ignite-brand">SiteBrush <span>Ignite</span></p><h1>%s</h1><p class="ignite-help">%s</p><div class="ignite-options"><section class="ignite-option"><h2>%s</h2><p>%s</p><code>myshop.%s</code></section><section class="ignite-option"><h2>%s</h2><p>%s</p><a class="ignite-retry" href="https://github.com/matveynator/sitebrush#downloads" rel="noopener noreferrer">%s</a></section></div><p class="ignite-help ignite-after">%s</p><p class="ignite-footnote">%s</p></section></main></body></html>`, languageCode, direction, translated("ignite_intro_title"), translated("ignite_intro_about"), translated("ignite_intro_online_title"), translated("ignite_intro_online"), template.HTMLEscapeString(ownerDomain), translated("ignite_intro_own_server_title"), translated("ignite_intro_own_server"), translated("ignite_intro_download"), translated("ignite_intro_after"), translated("ignite_intro_start"))
 }
 
 func (a *App) igniteName(ctx context.Context, ownerDomain, label string) (string, bool, error) {
@@ -60974,6 +60984,15 @@ func (a *App) invokeIgnite(r *http.Request, ownerDomain, operation string, argum
 		return nil, err
 	}
 	switch operation {
+	case "ignite_get_started":
+		return map[string]any{
+			"product": "SiteBrush creates and edits websites. It can start a new site or copy an existing design.",
+			"choices": []map[string]string{
+				{"id": "hosted", "title": "Create on this server", "domain_suffix": ownerDomain, "description": "Ignite checks a site name, asks the user to pass CAPTCHA and confirm an email code, then creates a public site with a starter page."},
+				{"id": "own_server", "title": "Install on your own server", "description": "Download the SiteBrush server application, install it on a server you control, then create the site there with step-by-step guidance.", "download_url": "https://github.com/matveynator/sitebrush#downloads", "install_guide_url": "https://github.com/matveynator/sitebrush#install-the-server-version"},
+			},
+			"next_question": "Would you like to create the site here, or do you have your own server for SiteBrush?",
+		}, nil
 	case "ignite_suggest_names":
 		base := safePublicTrialLabel(arguments.Name)
 		if base == "" {
@@ -61100,14 +61119,14 @@ func (a *App) igniteCaptchaPage(w http.ResponseWriter, r *http.Request, ownerDom
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if browserAttempt.verified {
-		renderIgniteCaptchaState(w, browserAttempt.domain, "Human verification complete", "Return to your AI assistant to continue creating the site.", "")
+		renderIgniteCaptchaState(w, r, browserAttempt.domain, "test_drive_admin_captcha", "ignite_captcha_return", "")
 		return
 	}
 	if r.Method == http.MethodPost {
 		r.Body = http.MaxBytesReader(w, r.Body, 4096)
 		if err := r.ParseForm(); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
-			renderIgniteCaptchaState(w, browserAttempt.domain, "Verification failed", "The form was invalid. Reload the challenge and try again.", browserSecret)
+			renderIgniteCaptchaState(w, r, browserAttempt.domain, "recover_status_captcha_invalid", "account_captcha_help", browserSecret)
 			return
 		}
 		verificationReply := make(chan bool, 1)
@@ -61121,12 +61140,12 @@ func (a *App) igniteCaptchaPage(w http.ResponseWriter, r *http.Request, ownerDom
 		})
 		if err != nil {
 			w.WriteHeader(http.StatusForbidden)
-			renderIgniteCaptchaState(w, browserAttempt.domain, "Verification failed", "The image code is invalid or expired. Reload the challenge and try again.", browserSecret)
+			renderIgniteCaptchaState(w, r, browserAttempt.domain, "recover_status_captcha_invalid", "account_captcha_help", browserSecret)
 			return
 		}
 		if !<-verificationReply {
 			w.WriteHeader(http.StatusForbidden)
-			renderIgniteCaptchaState(w, browserAttempt.domain, "Verification failed", "The image code is invalid or expired. Reload the challenge and try again.", browserSecret)
+			renderIgniteCaptchaState(w, r, browserAttempt.domain, "recover_status_captcha_invalid", "account_captcha_help", browserSecret)
 			return
 		}
 		err = a.withServerControlDatabaseWrite(r.Context(), "ignite-captcha-complete", func(database *sql.DB) error {
@@ -61147,7 +61166,7 @@ func (a *App) igniteCaptchaPage(w http.ResponseWriter, r *http.Request, ownerDom
 			http.Error(w, "registration temporarily unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		renderIgniteCaptchaState(w, browserAttempt.domain, "Human verification complete", "Return to your AI assistant to continue creating the site.", "")
+		renderIgniteCaptchaState(w, r, browserAttempt.domain, "test_drive_admin_captcha", "ignite_captcha_return", "")
 		return
 	}
 	if r.Method != http.MethodGet {
@@ -61177,15 +61196,30 @@ func (a *App) igniteCaptchaPage(w http.ResponseWriter, r *http.Request, ownerDom
 		http.Error(w, "CAPTCHA unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	_, _ = fmt.Fprintf(w, `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Verify · SiteBrush Ignite</title><link rel="stylesheet" href="/p/static/ignite.css"></head><body><main class="ignite-shell"><section class="ignite-card"><p class="ignite-brand">SiteBrush <span>Ignite</span></p><div class="ignite-step">Step 1 of 2 · Human verification</div><h1>Confirm your site</h1><p class="ignite-domain">%s</p><p class="ignite-help">Enter the characters shown below. Your AI assistant will continue the registration after this step.</p><form method="post"><img class="ignite-image" width="320" height="100" alt="Six-character CAPTCHA challenge" src="data:image/png;base64,%s"><input type="hidden" name="captcha_id" value="%s"><label for="ignite-captcha">Characters from the image</label><input id="ignite-captcha" name="captcha" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" minlength="6" maxlength="6" pattern="[A-Za-z2-9]{6}" required autofocus><button type="submit">Verify and continue</button></form><p class="ignite-footnote">After verification, return to your AI assistant.</p></section></main></body></html>`, template.HTMLEscapeString(browserAttempt.domain), base64.StdEncoding.EncodeToString(encoded), template.HTMLEscapeString(challenge.Token))
+	languageCode := preferredLanguageCode(r.Header.Get("Accept-Language"))
+	direction := igniteTextDirection(languageCode)
+	translations := translationsForLanguageCode(languageCode)
+	translated := func(key string) string { return template.HTMLEscapeString(translations[key]) }
+	_, _ = fmt.Fprintf(w, `<!doctype html><html lang="%s" dir="%s"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SiteBrush Ignite</title><link rel="stylesheet" href="/p/static/ignite.css"></head><body><main class="ignite-shell"><section class="ignite-card"><p class="ignite-brand">SiteBrush <span>Ignite</span></p><h1>%s</h1><p class="ignite-domain">%s</p><p class="ignite-help">%s</p><form method="post"><img class="ignite-image" width="320" height="100" alt="%s" src="data:image/png;base64,%s"><input type="hidden" name="captcha_id" value="%s"><label for="ignite-captcha">%s</label><input id="ignite-captcha" name="captcha" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" minlength="6" maxlength="6" pattern="[A-Za-z2-9]{6}" required autofocus><button type="submit">%s</button></form><p class="ignite-footnote">%s</p></section></main></body></html>`, languageCode, direction, translated("ignite_captcha_title"), template.HTMLEscapeString(browserAttempt.domain), translated("ignite_captcha_help"), translated("recover_captcha_alt"), base64.StdEncoding.EncodeToString(encoded), template.HTMLEscapeString(challenge.Token), translated("account_captcha_label"), translated("test_drive_confirm_captcha"), translated("ignite_captcha_return"))
 }
 
-func renderIgniteCaptchaState(w http.ResponseWriter, domain, title, message, retrySecret string) {
+func renderIgniteCaptchaState(w http.ResponseWriter, r *http.Request, domain, titleKey, messageKey, retrySecret string) {
+	languageCode := preferredLanguageCode(r.Header.Get("Accept-Language"))
+	direction := igniteTextDirection(languageCode)
+	translations := translationsForLanguageCode(languageCode)
+	translated := func(key string) string { return template.HTMLEscapeString(translations[key]) }
 	retry := ""
 	if retrySecret != "" {
-		retry = `<a class="ignite-retry" href="/?ignite&amp;captcha=` + url.QueryEscape(retrySecret) + `">Reload challenge</a>`
+		retry = `<a class="ignite-retry" href="/?ignite&amp;captcha=` + url.QueryEscape(retrySecret) + `">` + translated("test_drive_new_captcha") + `</a>`
 	}
-	_, _ = fmt.Fprintf(w, `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>%s · SiteBrush Ignite</title><link rel="stylesheet" href="/p/static/ignite.css"></head><body><main class="ignite-shell"><section class="ignite-card"><p class="ignite-brand">SiteBrush <span>Ignite</span></p><p class="ignite-domain">%s</p><h1>%s</h1><p class="ignite-help" role="status">%s</p>%s</section></main></body></html>`, template.HTMLEscapeString(title), template.HTMLEscapeString(domain), template.HTMLEscapeString(title), template.HTMLEscapeString(message), retry)
+	_, _ = fmt.Fprintf(w, `<!doctype html><html lang="%s" dir="%s"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SiteBrush Ignite</title><link rel="stylesheet" href="/p/static/ignite.css"></head><body><main class="ignite-shell"><section class="ignite-card"><p class="ignite-brand">SiteBrush <span>Ignite</span></p><p class="ignite-domain">%s</p><h1>%s</h1><p class="ignite-help" role="status">%s</p>%s</section></main></body></html>`, languageCode, direction, template.HTMLEscapeString(domain), translated(titleKey), translated(messageKey), retry)
+}
+
+func igniteTextDirection(languageCode string) string {
+	if languageCode == "he" || languageCode == "fa" {
+		return "rtl"
+	}
+	return "ltr"
 }
 
 func (a *App) igniteSendCode(r *http.Request, attemptSecret string, pending igniteAttempt, address string) (map[string]any, error) {

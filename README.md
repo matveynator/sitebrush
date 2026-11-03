@@ -94,6 +94,8 @@ The control database stores Test Drive status, timestamps, verification counts, 
 
 ## Create a site with an AI assistant
 
+SiteBrush creates and edits websites, either from a new page or by copying an existing design. When someone asks the assistant to create a site, Ignite first explains two paths: create a public site on `sitebrush.com`, or [download the server application](#downloads) and install SiteBrush on a server they control. For the own-server path, the assistant asks about the server's operating system and architecture and guides the owner through installation and site creation. It does not claim to have installed anything without access to that server.
+
 The main domain of a SiteBrush server serves `https://<server-domain>/?ignite` when **Allow self registration** is enabled. Ignite can suggest and check a third-level site name, open browser CAPTCHA, send a six-digit email code, verify that code, and create the new site. The server constructs the full domain from the selected name and its configured main domain. The same setting disables both browser self registration and Ignite.
 
 The ChatGPT SiteBrush integration in `integrations/chatgpt/` connects to `https://sitebrush.com/?sitebrush_agent` by default. The user may explicitly select another public HTTPS SiteBrush server; the gateway forwards only Ignite registration calls to that server's `/?ignite`. The selected server handles CAPTCHA, email verification, and site creation. The gateway never receives editing credentials.
