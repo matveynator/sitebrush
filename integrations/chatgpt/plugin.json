@@ -2,17 +2,17 @@
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "sitebrush",
   "version": "0.2.0",
-  "description": "Create a SiteBrush site with Ignite, then connect its personal MCP plugin for editing.",
+  "description": "Create and edit websites with SiteBrush. Choose hosting on sitebrush.com or get help installing SiteBrush on your own server.",
   "homepage": "https://sitebrush.com",
   "repository": "https://github.com/matveynator/sitebrush",
   "extensions": {
     "com.openai": {
       "interface": {
         "displayName": "SiteBrush",
-        "shortDescription": "Create a site and connect its personal editor",
+        "shortDescription": "Create a site here or on your own server",
         "defaultPrompt": [
-          "Create a new SiteBrush website for me.",
-          "Check whether my preferred SiteBrush site name is available."
+          "Help me choose between creating a site on sitebrush.com and installing SiteBrush on my own server.",
+          "Help me install SiteBrush and create a site on my own server."
         ]
       }
     }

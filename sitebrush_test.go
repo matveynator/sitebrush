@@ -16990,13 +16990,36 @@ func TestRegistrationAndTestDriveCodesLastOneDay(t *testing.T) {
 	}
 	for language, translations := range translationCatalog {
 		message := mailout.Message{Kind: "email_confirm", To: "owner@example.org"}
-		formatAccountMail(&message, language, "example.org", "https://example.org/?email_confirm=token", "", "123456", "192.0.2.1", now.UTC().Format(time.RFC3339), nil)
+		formatAccountMail(&message, language, "example.org", "https://example.org/?email_confirm=token", "", "123456", "192.0.2.1", now.UTC().Format(time.RFC3339), nil, false)
 		if !strings.Contains(message.Body, translations["mail_registration_ignore"]) || !strings.Contains(message.HTMLBody, "123456") {
 			t.Fatalf("%s registration mail has an outdated expiration", language)
 		}
 		if !strings.Contains(strings.NewReplacer("۲", "2", "۴", "4").Replace(translations["test_drive_mail_body"]), "24") || !strings.Contains(strings.NewReplacer("۲", "2", "۴", "4").Replace(translations["mail_registration_ignore"]), "24") {
 			t.Fatalf("%s has outdated code lifetime", language)
 		}
+	}
+}
+
+func TestIgniteRegistrationMailOmitsReturnLink(t *testing.T) {
+	const confirmationURL = "https://sitebrush.com/?ignite&email_confirm=secret"
+	for _, test := range []struct {
+		name         string
+		noReturnLink bool
+		wantLink     bool
+	}{
+		{name: "Ignite", noReturnLink: true},
+		{name: "ordinary registration", wantLink: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			message := mailout.Message{Kind: "email_confirm", To: "owner@example.org"}
+			formatAccountMail(&message, "en", "shop.sitebrush.com", confirmationURL, "", "123456", "192.0.2.1", "now", nil, test.noReturnLink)
+			if !strings.Contains(message.Body, "123456") || !strings.Contains(message.HTMLBody, "123456") {
+				t.Fatal("registration code is missing")
+			}
+			if strings.Contains(message.Body, confirmationURL) != test.wantLink || strings.Contains(message.HTMLBody, "email_confirm=secret") != test.wantLink {
+				t.Fatal("registration return link has the wrong visibility")
+			}
+		})
 	}
 }
 
@@ -19951,12 +19974,20 @@ func TestIgniteCreatesOnlyConfirmedNewSite(t *testing.T) {
 	}
 	request := httptest.NewRequest(http.MethodPost, "https://"+ownerDomain+"/?ignite", nil)
 	request.RemoteAddr = "198.51.100.30:1234"
+	introduction, err := application.invokeIgnite(request, ownerDomain, "ignite_get_started", ignite.Arguments{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	choices, ok := introduction["choices"].([]map[string]string)
+	if !ok || len(choices) != 2 || choices[0]["domain_suffix"] != ownerDomain || choices[1]["download_url"] != "https://github.com/matveynator/sitebrush#downloads" || application.hasAdmin(contextWithDomain(request.Context(), siteDomain), siteDomain) {
+		t.Fatal("Ignite introduction did not explain both creation paths", introduction)
+	}
 	begin, err := application.invokeIgnite(request, ownerDomain, "ignite_begin", ignite.Arguments{Name: "shop"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	attempt, _ := begin["attempt"].(string)
-	if attempt == "" || begin["domain"] != siteDomain || application.hasAdmin(contextWithDomain(request.Context(), siteDomain), siteDomain) {
+	if len(attempt) != 36 || attempt[8] != '-' || attempt[13] != '-' || attempt[18] != '-' || attempt[23] != '-' || begin["domain"] != siteDomain || application.hasAdmin(contextWithDomain(request.Context(), siteDomain), siteDomain) {
 		t.Fatal("Ignite created a site before email confirmation", begin)
 	}
 	if _, err := application.invokeIgnite(request, ownerDomain, "ignite_send_code", ignite.Arguments{Attempt: attempt, Email: ownerEmail}); err == nil {
@@ -19967,6 +19998,13 @@ func TestIgniteCreatesOnlyConfirmedNewSite(t *testing.T) {
 		t.Fatal(err)
 	}
 	verificationURL, _ := begin["captcha_url"].(string)
+	challengeRequest := httptest.NewRequest(http.MethodGet, verificationURL, nil)
+	challengeRequest.RemoteAddr = request.RemoteAddr
+	challengeResponse := httptest.NewRecorder()
+	application.siteHTTPHandler(http.HandlerFunc(application.route)).ServeHTTP(challengeResponse, challengeRequest)
+	if challengeResponse.Code != http.StatusOK || !strings.Contains(challengeResponse.Body.String(), "data:image/png;base64,") || strings.Contains(challengeResponse.Body.String(), "#ZgotmplZ") {
+		t.Fatalf("CAPTCHA image is unavailable: status=%d body=%s", challengeResponse.Code, challengeResponse.Body.String())
+	}
 	verificationForm := url.Values{"captcha_id": {challenge.Token}, "captcha": {challenge.Answer}}
 	verificationRequest := httptest.NewRequest(http.MethodPost, verificationURL, strings.NewReader(verificationForm.Encode()))
 	verificationRequest.RemoteAddr = request.RemoteAddr
@@ -19979,11 +20017,22 @@ func TestIgniteCreatesOnlyConfirmedNewSite(t *testing.T) {
 	}
 	verificationResponse := httptest.NewRecorder()
 	application.siteHTTPHandler(http.HandlerFunc(application.route)).ServeHTTP(verificationResponse, verificationRequest)
-	if verificationResponse.Code != http.StatusOK || !strings.Contains(verificationResponse.Body.String(), "Human verification complete") {
+	if verificationResponse.Code != http.StatusOK || !strings.Contains(verificationResponse.Body.String(), translationsForRequest(verificationRequest)["test_drive_admin_captcha"]) {
 		t.Fatalf("CAPTCHA confirmation: status=%d body=%s", verificationResponse.Code, verificationResponse.Body.String())
 	}
 	if _, err := application.invokeIgnite(request, ownerDomain, "ignite_send_code", ignite.Arguments{Attempt: attempt, Email: ownerEmail}); err != nil {
 		t.Fatal("send code:", err)
+	}
+	select {
+	case delivery := <-application.emailDelivery:
+		if delivery.Message.Kind != "email_confirm" {
+			t.Fatal("unexpected Ignite email kind", delivery.Message.Kind)
+		}
+		if strings.Contains(delivery.Message.Body, "email_confirm=") || strings.Contains(delivery.Message.HTMLBody, "<a href=") {
+			t.Fatal("Ignite email links back to the browser")
+		}
+	default:
+		t.Fatal("Ignite confirmation email was not queued")
 	}
 	if application.hasAdmin(contextWithDomain(request.Context(), siteDomain), siteDomain) {
 		t.Fatal("Ignite created a site before the email code")
@@ -20027,9 +20076,41 @@ func TestIgniteCreatesOnlyConfirmedNewSite(t *testing.T) {
 	if !application.publicCatalog.Lookup(publicsite.Lookup{Host: siteDomain, Path: "/"}).Found {
 		t.Fatal("created site has no published homepage")
 	}
+	loginRequest := httptest.NewRequest(http.MethodGet, "https://"+siteDomain+"/?login", nil)
+	loginResponse := httptest.NewRecorder()
+	application.siteHTTPHandler(http.HandlerFunc(application.route)).ServeHTTP(loginResponse, loginRequest)
+	if loginResponse.Code != http.StatusOK || !strings.Contains(loginResponse.Body.String(), "login") {
+		t.Fatalf("created site's login is unavailable: status=%d body=%s", loginResponse.Code, loginResponse.Body.String())
+	}
 	again, err := application.invokeIgnite(request, ownerDomain, "ignite_complete", ignite.Arguments{Attempt: attempt, Code: "000000"})
 	if err != nil || again["domain"] != siteDomain {
 		t.Fatal("completed Ignite registration did not resume", again, err)
+	}
+	if _, err := application.db.ExecContext(contextWithDomain(request.Context(), siteDomain), `DELETE FROM pages WHERE domain=? AND path='/'`, siteDomain); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.db.ExecContext(contextWithDomain(request.Context(), siteDomain), `DELETE FROM published_pages WHERE domain=? AND path='/'`, siteDomain); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(publicsite.PolicyPath(application.storagePath, siteDomain)); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err := application.publicCatalog.SetMemory(true); err != nil {
+		t.Fatal(err)
+	}
+	if application.publicCatalog.Lookup(publicsite.Lookup{Host: siteDomain}).Known {
+		t.Fatal("legacy Ignite site still appears in the public catalog")
+	}
+	if err := application.repairCompletedIgniteSites(request.Context()); err != nil {
+		t.Fatal("recover earlier Ignite site:", err)
+	}
+	if !application.publicCatalog.Lookup(publicsite.Lookup{Host: siteDomain, Path: "/"}).Found {
+		t.Fatal("recovered Ignite site has no public homepage")
+	}
+	loginResponse = httptest.NewRecorder()
+	application.siteHTTPHandler(http.HandlerFunc(application.route)).ServeHTTP(loginResponse, loginRequest)
+	if loginResponse.Code != http.StatusOK {
+		t.Fatalf("recovered Ignite site's login is unavailable: status=%d body=%s", loginResponse.Code, loginResponse.Body.String())
 	}
 	var administrators int
 	if err := application.db.QueryRowContext(contextWithDomain(request.Context(), siteDomain), `SELECT COUNT(*) FROM users WHERE domain=? AND email=? AND is_admin=1`, siteDomain, ownerEmail).Scan(&administrators); err != nil || administrators != 1 {
@@ -20165,6 +20246,26 @@ func TestIgniteRouteUsesConfiguredMainHost(t *testing.T) {
 		handler.ServeHTTP(response, request)
 		if response.Code != test.status {
 			t.Errorf("%s status=%d want=%d body=%s", test.address, response.Code, test.status, response.Body.String())
+		}
+	}
+}
+
+func TestIgniteIntroductionUsesEverySupportedLanguage(t *testing.T) {
+	for languageCode, translations := range translationCatalog {
+		for _, key := range []string{"ignite_intro_title", "ignite_intro_about", "ignite_intro_online_title", "ignite_intro_online", "ignite_intro_own_server_title", "ignite_intro_own_server", "ignite_intro_download", "ignite_intro_after", "ignite_intro_start", "ignite_captcha_title", "ignite_captcha_help", "ignite_captcha_return", "ignite_email_return"} {
+			if strings.TrimSpace(translations[key]) == "" {
+				t.Fatalf("%s is missing %s", languageCode, key)
+			}
+		}
+		request := httptest.NewRequest(http.MethodGet, "https://sitebrush.example/?ignite", nil)
+		request.Header.Set("Accept-Language", languageCode)
+		response := httptest.NewRecorder()
+		renderIgniteIntroduction(response, request, "sitebrush.example")
+		if !strings.Contains(response.Body.String(), `lang="`+languageCode+`"`) || !strings.Contains(response.Body.String(), translations["ignite_intro_title"]) || !strings.Contains(response.Body.String(), translations["ignite_intro_own_server_title"]) || !strings.Contains(response.Body.String(), "myshop.sitebrush.example") || !strings.Contains(response.Body.String(), "#downloads") {
+			t.Fatalf("%s introduction is incomplete", languageCode)
+		}
+		if (languageCode == "he" || languageCode == "fa") != strings.Contains(response.Body.String(), `dir="rtl"`) {
+			t.Fatalf("%s has the wrong text direction", languageCode)
 		}
 	}
 }
@@ -20498,7 +20599,7 @@ func TestAccountDeliveryDiagnosticsExcludeMessageContent(t *testing.T) {
 func TestAccountMailPrefillsCodeOnlyInFragment(t *testing.T) {
 	for language, translations := range translationCatalog {
 		message := mailout.Message{Kind: "account_login_code", To: "owner@example.org"}
-		formatAccountMail(&message, language, "example.org", "123456", "https://example.org/?login&login_challenge=handle", "", "192.0.2.1", "now", nil)
+		formatAccountMail(&message, language, "example.org", "123456", "https://example.org/?login&login_challenge=handle", "", "192.0.2.1", "now", nil, false)
 		if !strings.Contains(message.Body, "#account-code=123456") || !strings.Contains(message.Body, translations["auth_login_automatically"]) {
 			t.Fatalf("missing code link in %s", language)
 		}
