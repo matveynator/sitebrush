@@ -20001,12 +20001,31 @@ func TestIgniteCreatesOnlyConfirmedNewSite(t *testing.T) {
 	if _, err := application.invokeIgnite(request, ownerDomain, "ignite_complete", ignite.Arguments{Attempt: attempt, Code: "000000"}); err == nil {
 		t.Fatal("wrong email code accepted")
 	}
+	stopPublication := make(chan struct{})
+	application.publicCatalog = publicsite.NewCatalog(application.storagePath, stopPublication)
+	application.startPublicPublication(stopPublication)
+	t.Cleanup(func() { close(stopPublication); <-application.publicPublicationDone })
+	if err := application.publicCatalog.SetMemory(true); err != nil {
+		t.Fatal(err)
+	}
+	if application.publicCatalog.Lookup(publicsite.Lookup{Host: siteDomain}).Known {
+		t.Fatal("new site entered the public catalog before confirmation")
+	}
 	created, err := application.invokeIgnite(request, ownerDomain, "ignite_complete", ignite.Arguments{Attempt: attempt, Code: confirmation.Code})
 	if err != nil {
 		t.Fatal("complete:", err)
 	}
 	if created["domain"] != siteDomain || created["mcp_endpoint"] != "https://"+siteDomain+"/?mcp" || !application.hasAdmin(contextWithDomain(request.Context(), siteDomain), siteDomain) {
 		t.Fatal("created site is unavailable", created)
+	}
+	if !application.publicCatalog.Lookup(publicsite.Lookup{Host: siteDomain}).Known {
+		t.Fatal("created site is blocked by the public unknown-host gate")
+	}
+	if _, err := application.findPage(contextWithDomain(request.Context(), siteDomain), siteDomain, "/"); err != nil {
+		t.Fatalf("created site has no starter homepage: %v", err)
+	}
+	if !application.publicCatalog.Lookup(publicsite.Lookup{Host: siteDomain, Path: "/"}).Found {
+		t.Fatal("created site has no published homepage")
 	}
 	again, err := application.invokeIgnite(request, ownerDomain, "ignite_complete", ignite.Arguments{Attempt: attempt, Code: "000000"})
 	if err != nil || again["domain"] != siteDomain {
@@ -20023,6 +20042,32 @@ func TestIgniteCreatesOnlyConfirmedNewSite(t *testing.T) {
 	}
 	if _, err := application.invokeIgnite(request, ownerDomain, "ignite_begin", ignite.Arguments{Name: "other"}); err == nil {
 		t.Fatal("Ignite ignored disabled self registration")
+	}
+}
+
+func TestIgniteSendCodeSharesBrowserSiteCreationLimit(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	const ownerDomain = "sitebrush.example"
+	const browserIP = "198.51.100.41"
+	const siteDomain = "shop.sitebrush.example"
+	request := httptest.NewRequest(http.MethodPost, "https://"+ownerDomain+"/?ignite", nil)
+	if err := application.withServerControlDatabaseWrite(request.Context(), "test-ignite-admission-owner", func(database *sql.DB) error {
+		return (hostingandsupport.Store{DB: database}).SetOwner(request.Context(), ownerDomain, "admin@sitebrush.example")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pending := igniteAttempt{domain: siteDomain, browserIP: browserIP, status: "captcha", captchaVerified: true}
+	if _, err := application.igniteSendCode(request, strings.Repeat("a", 64), pending, "owner@example.org"); err == nil {
+		t.Fatal("missing attempt was allowed to send email")
+	}
+	for _, domain := range []string{"first.sitebrush.example", "second.sitebrush.example"} {
+		allowed, _, err := application.reservePublicTrialIPAdmission(request.Context(), browserIP, "create", domain, 2)
+		if err != nil || !allowed {
+			t.Fatalf("failed to reserve browser site creation for %s: allowed=%v err=%v", domain, allowed, err)
+		}
+	}
+	if _, err := application.igniteSendCode(request, strings.Repeat("a", 64), pending, "owner@example.org"); err == nil || !strings.Contains(err.Error(), "site creation limit") {
+		t.Fatalf("Ignite bypassed the browser site creation limit: %v", err)
 	}
 }
 

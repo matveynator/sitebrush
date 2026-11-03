@@ -22,11 +22,11 @@ type Arguments struct {
 type Invoke func(context.Context, string, Arguments) (map[string]any, error)
 
 func NewHandler(version string, invoke Invoke) http.Handler {
-	return newHandler(version, "SiteBrush Ignite", "Create a new SiteBrush site on this server. Ask the user to confirm its name before beginning registration. The user must solve CAPTCHA in a browser and provide the email code. After creation, guide the user to add the returned personal MCP endpoint as a ChatGPT plugin and authorize it through OAuth. Ignite cannot edit sites.", invoke)
+	return newHandler(version, "SiteBrush Ignite", "Create a new SiteBrush site on this server. Ask the user to confirm its name before beginning registration. The user must solve CAPTCHA in a browser and provide the email code. After creation, use Plugin Creator when available to create the user's private personal plugin from the returned MCP endpoint; then let the owner install it and authorize editing through OAuth. Ignite cannot edit sites.", invoke)
 }
 
 func NewGatewayHandler(version string, invoke Invoke) http.Handler {
-	return newHandler(version, "SiteBrush", "Create a new site on sitebrush.com by default, or on another SiteBrush server explicitly chosen by the user. Pass the same server on every registration call. After creation, guide the user to add the returned personal MCP URL as a ChatGPT plugin and authorize it through OAuth. Editing belongs to that personal plugin.", invoke)
+	return newHandler(version, "SiteBrush", "Create a new site on sitebrush.com by default, or on another SiteBrush server explicitly chosen by the user. Pass the same server on every registration call. After creation, use Plugin Creator when available to create the user's private personal plugin from the returned MCP endpoint; then let the owner install it and authorize editing through OAuth. Editing belongs to that personal plugin.", invoke)
 }
 
 func newHandler(version, name, instructions string, invoke Invoke) http.Handler {

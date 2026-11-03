@@ -61165,6 +61165,21 @@ func (a *App) igniteSendCode(r *http.Request, attemptSecret string, pending igni
 	if _, available, err := a.igniteName(r.Context(), ownerDomain, label); err != nil || !available {
 		return nil, errors.New("site name is unavailable")
 	}
+	// Creation admission belongs to the CAPTCHA browser, not the shared AI gateway.
+	admissionToken := igniteHash(attemptSecret)
+	allowed, retryAfter, admissionErr := a.reservePublicTrialIPAdmission(r.Context(), pending.browserIP, "create", admissionToken, 2)
+	if admissionErr != nil {
+		return nil, fmt.Errorf("site creation admission is unavailable: %w", admissionErr)
+	}
+	if !allowed {
+		return nil, fmt.Errorf("site creation limit for this IP was reached; retry after %d seconds", retryAfter)
+	}
+	admissionCommitted := false
+	defer func() {
+		if !admissionCommitted {
+			a.releasePublicTrialIPAdmission(context.WithoutCancel(r.Context()), "create", admissionToken)
+		}
+	}()
 	err = a.withServerControlDatabaseWrite(r.Context(), "ignite-claim-email-step", func(database *sql.DB) error {
 		result, updateErr := database.ExecContext(r.Context(), `UPDATE ignite_registrations SET status='sending' WHERE attempt_hash=? AND status='captcha' AND expires_at>?`, igniteHash(attemptSecret), time.Now().UTC().Format(time.RFC3339))
 		if updateErr != nil {
@@ -61225,12 +61240,16 @@ func (a *App) igniteSendCode(r *http.Request, attemptSecret string, pending igni
 	if err != nil {
 		return nil, err
 	}
+	admissionCommitted = true
 	return map[string]any{"domain": pending.domain, "status": "email_sent"}, nil
 }
 
 // Mail proof is durable before the domain claim and site-local account are created.
 func (a *App) igniteComplete(r *http.Request, attemptSecret string, pending igniteAttempt, code string) (map[string]any, error) {
 	if pending.status == "complete" {
+		if err := a.publicPublicationRequest("refresh", pending.domain); err != nil {
+			return nil, fmt.Errorf("site publication is unavailable: %w", err)
+		}
 		return a.igniteCreatedSite(pending.domain), nil
 	}
 	if pending.confirmationToken == "" || pending.status != "email_sent" && pending.status != "verified" {
@@ -61302,6 +61321,10 @@ func (a *App) igniteComplete(r *http.Request, attemptSecret string, pending igni
 	if err := a.igniteCreateSite(r.Context(), pending.domain, pending.email, ownClaim); err != nil {
 		return nil, err
 	}
+	// The public host gate must learn the new site before Ignite reports success.
+	if err := a.publicPublicationRequest("refresh", pending.domain); err != nil {
+		return nil, fmt.Errorf("site publication is unavailable: %w", err)
+	}
 	err = a.withServerControlDatabaseWrite(r.Context(), "ignite-finish", func(database *sql.DB) error {
 		transaction, beginErr := database.BeginTx(r.Context(), nil)
 		if beginErr != nil {
@@ -61364,11 +61387,25 @@ func (a *App) igniteCreateSite(ctx context.Context, domain, email string, allowE
 	}); err != nil {
 		return err
 	}
-	return a.ensureImportedRobotsPage(siteContext, domain)
+	if err := a.ensureImportedRobotsPage(siteContext, domain); err != nil {
+		return err
+	}
+	return a.ensureIgniteStarterPage(siteContext, domain)
+}
+
+// A newly registered site needs a public root before its personal editor is connected.
+func (a *App) ensureIgniteStarterPage(ctx context.Context, domain string) error {
+	if _, err := a.findPage(ctx, domain, "/"); err == nil {
+		return nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	html := `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Site ready</title><main><h1>Site ready</h1><p>Your website is ready to edit.</p></main></html>`
+	return a.persistImportedPages(ctx, domain, "/", []wholeSiteImportedPage{{LocalPath: "/", HTML: html}}, nil, false)
 }
 
 func (a *App) igniteCreatedSite(domain string) map[string]any {
-	return map[string]any{"site_id": stableSiteID(domain), "domain": domain, "status": "created", "mcp_ready": a.accountHTTPSReady(domain), "mcp_endpoint": "https://" + domain + "/?mcp", "plugin_name": domain, "next_step": "When MCP is ready, add the personal MCP server in ChatGPT using this endpoint, then authorize it through the site's normal OAuth flow."}
+	return map[string]any{"site_id": stableSiteID(domain), "domain": domain, "status": "created", "mcp_ready": a.accountHTTPSReady(domain), "mcp_endpoint": "https://" + domain + "/?mcp", "plugin_name": domain, "next_step": "When MCP is ready, use Plugin Creator if available to create the user's private plugin from this endpoint. The owner installs it and authorizes site editing through OAuth. If Plugin Creator is unavailable, guide the owner through adding this MCP server manually."}
 }
 
 // The public agent exposes registration on sitebrush.com and forwards an
