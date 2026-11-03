@@ -19998,6 +19998,13 @@ func TestIgniteCreatesOnlyConfirmedNewSite(t *testing.T) {
 		t.Fatal(err)
 	}
 	verificationURL, _ := begin["captcha_url"].(string)
+	challengeRequest := httptest.NewRequest(http.MethodGet, verificationURL, nil)
+	challengeRequest.RemoteAddr = request.RemoteAddr
+	challengeResponse := httptest.NewRecorder()
+	application.siteHTTPHandler(http.HandlerFunc(application.route)).ServeHTTP(challengeResponse, challengeRequest)
+	if challengeResponse.Code != http.StatusOK || !strings.Contains(challengeResponse.Body.String(), "data:image/png;base64,") || strings.Contains(challengeResponse.Body.String(), "#ZgotmplZ") {
+		t.Fatalf("CAPTCHA image is unavailable: status=%d body=%s", challengeResponse.Code, challengeResponse.Body.String())
+	}
 	verificationForm := url.Values{"captcha_id": {challenge.Token}, "captcha": {challenge.Answer}}
 	verificationRequest := httptest.NewRequest(http.MethodPost, verificationURL, strings.NewReader(verificationForm.Encode()))
 	verificationRequest.RemoteAddr = request.RemoteAddr
