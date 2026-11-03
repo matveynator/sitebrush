@@ -16,11 +16,12 @@ const conversationGuide = "At the start of an Ignite conversation, explain in th
 	"The choices are: create a public site on this server with Ignite, or download the SiteBrush server application and create a site on the user's own server with your guidance. " +
 	"For the own-server choice, first ask whether the user has a server; if so, ask its operating system, architecture, and domain, point to https://github.com/matveynator/sitebrush#downloads and https://github.com/matveynator/sitebrush#install-the-server-version, then guide installation and site creation step by step. " +
 	"Do not claim to have server access or start registration on the own-server choice until a read-only name check verifies the selected server's Ignite endpoint. " +
-	"For hosted creation, explain the steps: choose an address, solve CAPTCHA in a browser, confirm an email code, then connect the new site's private editor. " +
+	"For hosted creation, explain the steps: choose an address, solve CAPTCHA in a browser, enter the email code on the returned SiteBrush confirmation page, then connect the new site's private editor. " +
 	"If the user selects an existing SiteBrush server, pass its domain in the server argument on every registration call and verify that ignite_check_name returns a domain under that server before beginning registration. " +
-	"A name check does not reserve a name, and a site does not exist until ignite_complete returns created. Explain what happened and what remains at each step. " +
+	"A name check does not reserve a name, and a site does not exist until ignite_complete returns created or ignite_status returns complete after browser confirmation. Explain what happened and what remains at each step. " +
+	"After ignite_send_code, give the user confirmation_url and ask them to enter the code there; then use ignite_status to confirm completion. Do not ask for the code in chat when this link is available. " +
 	"Never repeat an email code in a reply or ask the user to resend it after a blocked tool call. " +
-	"If completion is blocked or times out, check ignite_status for the same attempt and report the actual state before suggesting another action."
+	"If completion is blocked or times out, check ignite_status for the same attempt, offer its confirmation_url when available, and report the actual state before suggesting another action."
 
 type Arguments struct {
 	Server  string `json:"server,omitempty" jsonschema:"SiteBrush server explicitly selected by the user; keep the same server throughout registration"`
@@ -50,8 +51,8 @@ func newHandler(version, name, instructions string, invoke Invoke) http.Handler 
 		{"ignite_suggest_names", "Suggest available names for a new third-level site from a short name. No site is created."},
 		{"ignite_check_name", "Check whether a proposed third-level site name is available. This does not reserve the name or create a site."},
 		{"ignite_begin", "Begin online registration for the name the user confirmed. Returns a browser CAPTCHA link; no site is created yet."},
-		{"ignite_status", "Check whether the browser CAPTCHA is complete for this registration attempt."},
-		{"ignite_send_code", "Send a six-digit confirmation code to the user's email after CAPTCHA is complete. Pass the server-issued attempt identifier from ignite_begin. The site is still uncreated."},
+		{"ignite_status", "Check the registration attempt after CAPTCHA or browser email confirmation. When an email code is pending, returns a SiteBrush confirmation_url where the user can enter the code privately."},
+		{"ignite_send_code", "Send a six-digit confirmation code to the user's email after CAPTCHA is complete. Pass the server-issued attempt identifier from ignite_begin. Returns confirmation_url for private browser code entry; the site is still uncreated."},
 		{"ignite_complete", "Verify the email code and create the new site. Pass the server-issued attempt identifier from ignite_begin and the user's code. Returns its personal MCP URL only after creation."},
 	}
 	for _, tool := range tools {

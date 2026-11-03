@@ -17019,6 +17019,9 @@ func TestIgniteRegistrationMailOmitsReturnLink(t *testing.T) {
 			if strings.Contains(message.Body, confirmationURL) != test.wantLink || strings.Contains(message.HTMLBody, "email_confirm=secret") != test.wantLink {
 				t.Fatal("registration return link has the wrong visibility")
 			}
+				if test.noReturnLink && !strings.Contains(message.Body, translationCatalog["en"]["ignite_email_mail_reason"]) {
+					t.Fatal("Ignite mail does not explain where to enter the code")
+				}
 		})
 	}
 }
@@ -20020,8 +20023,13 @@ func TestIgniteCreatesOnlyConfirmedNewSite(t *testing.T) {
 	if verificationResponse.Code != http.StatusOK || !strings.Contains(verificationResponse.Body.String(), translationsForRequest(verificationRequest)["test_drive_admin_captcha"]) {
 		t.Fatalf("CAPTCHA confirmation: status=%d body=%s", verificationResponse.Code, verificationResponse.Body.String())
 	}
-	if _, err := application.invokeIgnite(request, ownerDomain, "ignite_send_code", ignite.Arguments{Attempt: attempt, Email: ownerEmail}); err != nil {
+	sent, err := application.invokeIgnite(request, ownerDomain, "ignite_send_code", ignite.Arguments{Attempt: attempt, Email: ownerEmail})
+	if err != nil {
 		t.Fatal("send code:", err)
+	}
+	status, err := application.invokeIgnite(request, ownerDomain, "ignite_status", ignite.Arguments{Attempt: attempt})
+	if err != nil || sent["confirmation_url"] != status["confirmation_url"] || !strings.HasPrefix(status["confirmation_url"].(string), "https://"+ownerDomain+"/?ignite&email_confirm=") {
+		t.Fatal("browser confirmation link is unavailable", sent, status, err)
 	}
 	select {
 	case delivery := <-application.emailDelivery:
@@ -20039,7 +20047,15 @@ func TestIgniteCreatesOnlyConfirmedNewSite(t *testing.T) {
 	}
 	var confirmationToken string
 	if err := application.withServerControlDatabaseRead(request.Context(), "test-ignite-code", func(database *sql.DB) error {
-		return database.QueryRow(`SELECT confirmation_token FROM ignite_registrations WHERE attempt_hash=?`, igniteHash(attempt)).Scan(&confirmationToken)
+		var expiresAt string
+		if err := database.QueryRow(`SELECT confirmation_token,expires_at FROM ignite_registrations WHERE attempt_hash=?`, igniteHash(attempt)).Scan(&confirmationToken, &expiresAt); err != nil {
+			return err
+		}
+		expiry, err := time.Parse(time.RFC3339, expiresAt)
+		if err != nil || time.Until(expiry) < 23*time.Hour {
+			return errors.New("Ignite attempt expires before the email code")
+		}
+		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -20162,6 +20178,83 @@ func TestIgniteEmailLinkReturnsToIgnite(t *testing.T) {
 	}
 }
 
+func TestIgniteBrowserCodeCreatesSite(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	confirmationContext, stopConfirmations := context.WithCancel(context.Background())
+	defer stopConfirmations()
+	application.registrationConfirmations = startEmailConfirmationMemoryWorker(confirmationContext)
+	const ownerDomain = "sitebrush.example"
+	const siteDomain = "browser.sitebrush.example"
+	const ownerEmail = "owner@example.org"
+	if err := application.withServerControlDatabaseWrite(context.Background(), "test-ignite-browser-owner", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		if err := store.SetOwner(context.Background(), ownerDomain, "admin@sitebrush.example"); err != nil {
+			return err
+		}
+		return store.SaveSettings(context.Background(), true)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := newIgniteAttemptID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := randomAccessToken()
+	confirmation := EmailConfirmation{Token: token, FormToken: randomAccessToken(), Domain: siteDomain, Action: "register", Workflow: "ignite", Email: ownerEmail, Code: "123456", ExpiresAt: time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)}
+	if err := application.saveRegistrationConfirmation(context.Background(), confirmation); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.withServerControlDatabaseWrite(context.Background(), "test-ignite-browser-attempt", func(database *sql.DB) error {
+		_, err := database.Exec(`INSERT INTO ignite_registrations(attempt_hash,browser_hash,domain,browser_ip,email,confirmation_token,status,captcha_verified,created_at,expires_at) VALUES(?,?,?,?,?,?,'email_sent',1,?,?)`, igniteHash(attempt), igniteHash("browser"), siteDomain, "198.51.100.60", ownerEmail, token, time.Now().UTC().Format(time.RFC3339), confirmation.ExpiresAt)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, pending, err := application.igniteAttemptByConfirmation(context.Background(), token); err != nil || pending.domain != siteDomain {
+		t.Fatalf("browser confirmation attempt is unavailable: domain=%q error=%v", pending.domain, err)
+	}
+	stopPublication := make(chan struct{})
+	application.publicCatalog = publicsite.NewCatalog(application.storagePath, stopPublication)
+	application.startPublicPublication(stopPublication)
+	t.Cleanup(func() { close(stopPublication); <-application.publicPublicationDone })
+	if err := application.publicCatalog.SetMemory(true); err != nil {
+		t.Fatal(err)
+	}
+	handler := application.siteHTTPHandler(http.HandlerFunc(application.route))
+	confirmationURL := igniteEmailConfirmationURL(ownerDomain, token)
+	formRequest := httptest.NewRequest(http.MethodGet, confirmationURL, nil)
+	formRequest.Header.Set("Accept", "text/html")
+	formResponse := httptest.NewRecorder()
+	handler.ServeHTTP(formResponse, formRequest)
+	if formResponse.Code != http.StatusOK || !strings.Contains(formResponse.Body.String(), `name="code"`) || application.hasAdmin(contextWithDomain(context.Background(), siteDomain), siteDomain) {
+		t.Fatalf("browser confirmation form: status=%d body=%s", formResponse.Code, formResponse.Body.String())
+	}
+	for _, test := range []struct {
+		code   string
+		status int
+	}{
+		{"000000", http.StatusBadRequest},
+		{confirmation.Code, http.StatusOK},
+	} {
+		postRequest := httptest.NewRequest(http.MethodPost, confirmationURL, strings.NewReader(url.Values{"code": {test.code}}.Encode()))
+		postRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		postRequest.Header.Set("Origin", "https://"+ownerDomain)
+		postResponse := httptest.NewRecorder()
+		handler.ServeHTTP(postResponse, postRequest)
+		if postResponse.Code != test.status {
+			t.Fatalf("browser code %q: status=%d body=%s", test.code, postResponse.Code, postResponse.Body.String())
+		}
+	}
+	if !application.hasAdmin(contextWithDomain(context.Background(), siteDomain), siteDomain) || !application.publicCatalog.Lookup(publicsite.Lookup{Host: siteDomain, Path: "/"}).Found {
+		t.Fatal("browser confirmation did not create a public site")
+	}
+	statusRequest := httptest.NewRequest(http.MethodPost, "https://"+ownerDomain+"/?ignite", nil)
+	status, err := application.invokeIgnite(statusRequest, ownerDomain, "ignite_status", ignite.Arguments{Attempt: attempt})
+	if err != nil || status["status"] != "complete" {
+		t.Fatal("Ignite did not report browser completion", status, err)
+	}
+}
+
 func TestIgniteWrongCaptchaConsumesChallenge(t *testing.T) {
 	application := newPartitionedTestApplication(t)
 	if err := application.withServerControlDatabaseWrite(context.Background(), "test-ignite-captcha-owner", func(database *sql.DB) error {
@@ -20252,7 +20345,7 @@ func TestIgniteRouteUsesConfiguredMainHost(t *testing.T) {
 
 func TestIgniteIntroductionUsesEverySupportedLanguage(t *testing.T) {
 	for languageCode, translations := range translationCatalog {
-		for _, key := range []string{"ignite_intro_title", "ignite_intro_about", "ignite_intro_online_title", "ignite_intro_online", "ignite_intro_own_server_title", "ignite_intro_own_server", "ignite_intro_download", "ignite_intro_after", "ignite_intro_start", "ignite_captcha_title", "ignite_captcha_help", "ignite_captcha_return", "ignite_email_return"} {
+		for _, key := range []string{"ignite_intro_title", "ignite_intro_about", "ignite_intro_online_title", "ignite_intro_online", "ignite_intro_own_server_title", "ignite_intro_own_server", "ignite_intro_download", "ignite_intro_after", "ignite_intro_start", "ignite_captcha_title", "ignite_captcha_help", "ignite_captcha_return", "ignite_email_return", "ignite_email_browser_help", "ignite_email_browser_submit", "ignite_email_browser_created", "ignite_email_mail_reason"} {
 			if strings.TrimSpace(translations[key]) == "" {
 				t.Fatalf("%s is missing %s", languageCode, key)
 			}

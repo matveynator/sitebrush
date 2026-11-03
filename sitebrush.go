@@ -39807,6 +39807,7 @@ func formatAccountMail(message *mailout.Message, language, domain, secret, link,
 	}
 	if message.Kind == "email_confirm" && noReturnLink {
 		content.Link = ""
+		content.Reason = translations["ignite_email_mail_reason"]
 	}
 	if change != nil {
 		content.Previous = change.Current
@@ -60870,6 +60871,11 @@ type igniteAttempt struct {
 	captchaVerified   bool
 }
 
+type igniteConfirmationAttempt struct {
+	hash    string
+	pending igniteAttempt
+}
+
 type ignitePolicyResult struct {
 	ownerDomain string
 	allowed     bool
@@ -60943,7 +60949,7 @@ func (a *App) igniteRoute(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Query().Has("email_confirm") {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		renderIgniteCaptchaState(w, r, ownerDomain, "auth_register_title", "ignite_email_return", "")
+		a.igniteEmailConfirmationPage(w, r, ownerDomain)
 		return
 	}
 	if r.Method == http.MethodGet && strings.Contains(r.Header.Get("Accept"), "text/html") {
@@ -60972,6 +60978,84 @@ func renderIgniteIntroduction(w http.ResponseWriter, r *http.Request, ownerDomai
 	}{languageCode, direction, ownerDomain, translations["ignite_intro_title"], translations["ignite_intro_about"], translations["ignite_intro_online_title"], translations["ignite_intro_online"], translations["ignite_intro_own_server_title"], translations["ignite_intro_own_server"], translations["ignite_intro_download"], translations["ignite_intro_after"], translations["ignite_intro_start"]}
 	const source = `<!doctype html><html lang="{{.LanguageCode}}" dir="{{.Direction}}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SiteBrush Ignite</title><link rel="stylesheet" href="/p/static/ignite.css"></head><body><main class="ignite-shell"><section class="ignite-card ignite-card--intro"><p class="ignite-brand">SiteBrush <span>Ignite</span></p><h1>{{.Title}}</h1><p class="ignite-help">{{.About}}</p><div class="ignite-options"><section class="ignite-option"><h2>{{.OnlineTitle}}</h2><p>{{.Online}}</p><code>myshop.{{.OwnerDomain}}</code></section><section class="ignite-option"><h2>{{.OwnServerTitle}}</h2><p>{{.OwnServer}}</p><a class="ignite-retry" href="https://github.com/matveynator/sitebrush#downloads" rel="noopener noreferrer">{{.Download}}</a></section></div><p class="ignite-help ignite-after">{{.After}}</p><p class="ignite-footnote">{{.Start}}</p></section></main></body></html>`
 	_ = template.Must(template.New("ignite-introduction").Parse(source)).Execute(w, page)
+}
+
+func igniteEmailConfirmationURL(ownerDomain, token string) string {
+	return "https://" + ownerDomain + "/?ignite&email_confirm=" + url.QueryEscape(token)
+}
+
+func (a *App) igniteEmailConfirmationPage(w http.ResponseWriter, r *http.Request, ownerDomain string) {
+	token := strings.TrimSpace(r.URL.Query().Get("email_confirm"))
+	attemptHash, pending, err := a.igniteAttemptByConfirmation(r.Context(), token)
+	_, pendingOwnerDomain, validDomain := strings.Cut(pending.domain, ".")
+	if err != nil || !validDomain || pendingOwnerDomain != ownerDomain {
+		http.NotFound(w, r)
+		return
+	}
+	if pending.status == "complete" {
+		renderIgniteEmailSiteCreated(w, r, pending.domain, a.accountHTTPSReady(pending.domain))
+		return
+	}
+	if pending.status != "email_sent" && pending.status != "verified" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method == http.MethodGet {
+		renderIgniteEmailCodeForm(w, r, pending.domain, token, "")
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if origin := r.Header.Get("Origin"); origin != "" && origin != "https://"+ownerDomain {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 2048)
+	if err := r.ParseForm(); err != nil || !isSixDigitCode(r.PostFormValue("code")) {
+		w.WriteHeader(http.StatusBadRequest)
+		renderIgniteEmailCodeForm(w, r, pending.domain, token, translationsForRequest(r)["test_drive_invalid_code"])
+		return
+	}
+	result, err := a.igniteComplete(r, attemptHash, pending, r.PostFormValue("code"))
+	if err != nil {
+		status := http.StatusServiceUnavailable
+		message := translationsForRequest(r)["test_drive_activation_retry"]
+		if strings.Contains(err.Error(), "email code is invalid or expired") {
+			status = http.StatusBadRequest
+			message = translationsForRequest(r)["test_drive_invalid_code"]
+		}
+		w.WriteHeader(status)
+		renderIgniteEmailCodeForm(w, r, pending.domain, token, message)
+		return
+	}
+	mcpReady, _ := result["mcp_ready"].(bool)
+	renderIgniteEmailSiteCreated(w, r, pending.domain, mcpReady)
+}
+
+func renderIgniteEmailCodeForm(w http.ResponseWriter, r *http.Request, domain, token, errorMessage string) {
+	languageCode := preferredLanguageCode(r.Header.Get("Accept-Language"))
+	translations := translationsForLanguageCode(languageCode)
+	page := struct {
+		LanguageCode, Direction, Domain, Title, Help, Label, Submit, Error, Action string
+	}{languageCode, igniteTextDirection(languageCode), domain, translations["auth_register_title"], translations["ignite_email_browser_help"], translations["test_drive_code_label"], translations["ignite_email_browser_submit"], errorMessage, "/?ignite&email_confirm=" + url.QueryEscape(token)}
+	const source = `<!doctype html><html lang="{{.LanguageCode}}" dir="{{.Direction}}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SiteBrush Ignite</title><link rel="stylesheet" href="/p/static/ignite.css"></head><body><main class="ignite-shell"><section class="ignite-card"><p class="ignite-brand">SiteBrush <span>Ignite</span></p><h1>{{.Title}}</h1><p class="ignite-domain">{{.Domain}}</p><p class="ignite-help">{{.Help}}</p>{{if .Error}}<p class="ignite-help" role="alert">{{.Error}}</p>{{end}}<form method="post" action="{{.Action}}"><label for="ignite-email-code">{{.Label}}</label><input id="ignite-email-code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" minlength="6" maxlength="6" required autofocus><button type="submit">{{.Submit}}</button></form></section></main></body></html>`
+	_ = template.Must(template.New("ignite-email-code").Parse(source)).Execute(w, page)
+}
+
+func renderIgniteEmailSiteCreated(w http.ResponseWriter, r *http.Request, domain string, mcpReady bool) {
+	languageCode := preferredLanguageCode(r.Header.Get("Accept-Language"))
+	translations := translationsForLanguageCode(languageCode)
+	scheme := "http://"
+	if mcpReady {
+		scheme = "https://"
+	}
+	page := struct {
+		LanguageCode, Direction, Domain, Title, Message, OpenSite, SiteURL string
+	}{languageCode, igniteTextDirection(languageCode), domain, translations["mail_monitor_stage_registration_complete"], translations["ignite_email_browser_created"], translations["site_copy_open_site"], scheme + domain + "/"}
+	const source = `<!doctype html><html lang="{{.LanguageCode}}" dir="{{.Direction}}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SiteBrush Ignite</title><link rel="stylesheet" href="/p/static/ignite.css"></head><body><main class="ignite-shell"><section class="ignite-card"><p class="ignite-brand">SiteBrush <span>Ignite</span></p><h1>{{.Title}}</h1><p class="ignite-domain">{{.Domain}}</p><p class="ignite-help" role="status">{{.Message}}</p><a class="ignite-retry" href="{{.SiteURL}}">{{.OpenSite}}</a></section></main></body></html>`
+	_ = template.Must(template.New("ignite-email-created").Parse(source)).Execute(w, page)
 }
 
 func (a *App) igniteName(ctx context.Context, ownerDomain, label string) (string, bool, error) {
@@ -61062,12 +61146,16 @@ func (a *App) invokeIgnite(r *http.Request, ownerDomain, operation string, argum
 			return nil, err
 		}
 		if operation == "ignite_status" {
-			return map[string]any{"domain": pending.domain, "status": pending.status, "captcha_verified": pending.captchaVerified, "mcp_ready": pending.status == "complete" && a.accountHTTPSReady(pending.domain)}, nil
+			result := map[string]any{"domain": pending.domain, "status": pending.status, "captcha_verified": pending.captchaVerified, "mcp_ready": pending.status == "complete" && a.accountHTTPSReady(pending.domain)}
+			if pending.confirmationToken != "" && (pending.status == "email_sent" || pending.status == "verified") {
+				result["confirmation_url"] = igniteEmailConfirmationURL(ownerDomain, pending.confirmationToken)
+			}
+			return result, nil
 		}
 		if operation == "ignite_send_code" {
 			return a.igniteSendCode(r, arguments.Attempt, pending, arguments.Email)
 		}
-		return a.igniteComplete(r, arguments.Attempt, pending, arguments.Code)
+		return a.igniteComplete(r, igniteHash(arguments.Attempt), pending, arguments.Code)
 	}
 	return nil, errors.New("unknown Ignite operation")
 }
@@ -61092,6 +61180,28 @@ func (a *App) igniteAttempt(ctx context.Context, secret string) (igniteAttempt, 
 		return igniteAttempt{}, errors.New("registration attempt is unavailable")
 	}
 	return <-reply, nil
+}
+
+func (a *App) igniteAttemptByConfirmation(ctx context.Context, token string) (string, igniteAttempt, error) {
+	if len(token) < 24 || len(token) > 128 {
+		return "", igniteAttempt{}, errors.New("registration attempt is unavailable")
+	}
+	reply := make(chan igniteConfirmationAttempt, 1)
+	err := a.withServerControlDatabaseRead(ctx, "ignite-email-attempt", func(database *sql.DB) error {
+		var result igniteConfirmationAttempt
+		var verified int
+		if err := database.QueryRowContext(ctx, `SELECT attempt_hash,domain,browser_ip,email,confirmation_token,status,captcha_verified FROM ignite_registrations WHERE confirmation_token=? AND expires_at>? LIMIT 1`, token, time.Now().UTC().Format(time.RFC3339)).Scan(&result.hash, &result.pending.domain, &result.pending.browserIP, &result.pending.email, &result.pending.confirmationToken, &result.pending.status, &verified); err != nil {
+			return err
+		}
+		result.pending.captchaVerified = verified == 1
+		reply <- result
+		return nil
+	})
+	if err != nil {
+		return "", igniteAttempt{}, errors.New("registration attempt is unavailable")
+	}
+	result := <-reply
+	return result.hash, result.pending, nil
 }
 
 // The browser secret proves a human challenge without exposing the AI attempt secret.
@@ -61305,7 +61415,7 @@ func (a *App) igniteSendCode(r *http.Request, attemptSecret string, pending igni
 		return nil, err
 	}
 	err = a.withServerControlDatabaseWrite(finishContext, "ignite-code-sent", func(database *sql.DB) error {
-		result, updateErr := database.ExecContext(finishContext, `UPDATE ignite_registrations SET email=?,confirmation_token=?,status='email_sent' WHERE attempt_hash=? AND status='sending'`, address, confirmation.Token, igniteHash(attemptSecret))
+		result, updateErr := database.ExecContext(finishContext, `UPDATE ignite_registrations SET email=?,confirmation_token=?,status='email_sent',expires_at=? WHERE attempt_hash=? AND status='sending'`, address, confirmation.Token, time.Now().UTC().Add(registrationConfirmationTTL).Format(time.RFC3339), igniteHash(attemptSecret))
 		if updateErr != nil {
 			return updateErr
 		}
@@ -61322,11 +61432,11 @@ func (a *App) igniteSendCode(r *http.Request, attemptSecret string, pending igni
 		return nil, err
 	}
 	admissionCommitted = true
-	return map[string]any{"domain": pending.domain, "status": "email_sent"}, nil
+	return map[string]any{"domain": pending.domain, "status": "email_sent", "confirmation_url": igniteEmailConfirmationURL(ownerDomain, confirmation.Token)}, nil
 }
 
 // Mail proof is durable before the domain claim and site-local account are created.
-func (a *App) igniteComplete(r *http.Request, attemptSecret string, pending igniteAttempt, code string) (map[string]any, error) {
+func (a *App) igniteComplete(r *http.Request, attemptHash string, pending igniteAttempt, code string) (map[string]any, error) {
 	if pending.status == "complete" {
 		if err := a.ensureIgniteStarterPage(contextWithDomain(r.Context(), pending.domain), pending.domain); err != nil {
 			return nil, fmt.Errorf("site starter page is unavailable: %w", err)
@@ -61351,7 +61461,7 @@ func (a *App) igniteComplete(r *http.Request, attemptSecret string, pending igni
 			return nil, errors.New("email code is invalid or expired")
 		}
 		err := a.withServerControlDatabaseWrite(r.Context(), "ignite-email-verified", func(database *sql.DB) error {
-			result, updateErr := database.ExecContext(r.Context(), `UPDATE ignite_registrations SET status='verified',expires_at=? WHERE attempt_hash=? AND confirmation_token=? AND status='email_sent' AND expires_at>?`, time.Now().UTC().Add(domainregistration.UnfinishedTTL).Format(time.RFC3339), igniteHash(attemptSecret), confirmation.Token, time.Now().UTC().Format(time.RFC3339))
+			result, updateErr := database.ExecContext(r.Context(), `UPDATE ignite_registrations SET status='verified',expires_at=? WHERE attempt_hash=? AND confirmation_token=? AND status='email_sent' AND expires_at>?`, time.Now().UTC().Add(domainregistration.UnfinishedTTL).Format(time.RFC3339), attemptHash, confirmation.Token, time.Now().UTC().Format(time.RFC3339))
 			if updateErr != nil {
 				return updateErr
 			}
@@ -61423,7 +61533,7 @@ func (a *App) igniteComplete(r *http.Request, attemptSecret string, pending igni
 		if countErr != nil || claimCount != 1 {
 			return errors.New("site domain claim was lost")
 		}
-		attempt, updateErr := transaction.ExecContext(r.Context(), `UPDATE ignite_registrations SET status='complete' WHERE attempt_hash=? AND confirmation_token=? AND status='verified'`, igniteHash(attemptSecret), confirmation.Token)
+		attempt, updateErr := transaction.ExecContext(r.Context(), `UPDATE ignite_registrations SET status='complete' WHERE attempt_hash=? AND confirmation_token=? AND status='verified'`, attemptHash, confirmation.Token)
 		if updateErr != nil {
 			return updateErr
 		}
