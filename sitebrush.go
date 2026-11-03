@@ -12566,6 +12566,9 @@ func (a *App) autoCertCachedCertificateFromDisk(certificateDomain string, now ti
 		return nil, time.Time{}, false
 	}
 	defer cacheRoot.Close()
+	// RSA and ECDSA cache files may be renewed at different times.
+	var newestCertificate *tls.Certificate
+	var newestExpiry time.Time
 	for _, cacheEntry := range cacheEntries {
 		if !cacheEntry.Type().IsRegular() || !automaticSSLCertificateCacheNameMatchesDomain(cacheEntry.Name(), certificateDomain) {
 			continue
@@ -12582,10 +12585,16 @@ func (a *App) autoCertCachedCertificateFromDisk(certificateDomain string, now ti
 		if err != nil {
 			continue
 		}
-		a.rememberAutoCertCachedCertificate(certificateDomain, &certificate, expiresAt)
-		return &certificate, expiresAt, true
+		if expiresAt.After(newestExpiry) {
+			newestCertificate = &certificate
+			newestExpiry = expiresAt
+		}
 	}
-	return nil, time.Time{}, false
+	if newestCertificate == nil {
+		return nil, time.Time{}, false
+	}
+	a.rememberAutoCertCachedCertificate(certificateDomain, newestCertificate, newestExpiry)
+	return newestCertificate, newestExpiry, true
 }
 
 func (a *App) openAutomaticSSLCertificateCache(certificateCacheDir string) (*os.Root, []os.DirEntry, error) {
@@ -12815,7 +12824,9 @@ func preloadAutoCertCertificatesFromDisk(certificateCacheDir string) map[string]
 		if keyPairErr != nil {
 			continue
 		}
-		certificatesByDomain[certificateDomain] = autoCertCertificateCacheResponse{certificate: &certificate, expiresAt: expiresAt, found: true}
+		if current := certificatesByDomain[certificateDomain]; !current.found || expiresAt.After(current.expiresAt) {
+			certificatesByDomain[certificateDomain] = autoCertCertificateCacheResponse{certificate: &certificate, expiresAt: expiresAt, found: true}
+		}
 	}
 	log.Printf("%sPRELOAD%s autocert certificates=%d cache=%s", terminalGreen(), terminalReset(), len(certificatesByDomain), certificateCacheDir)
 	return certificatesByDomain
