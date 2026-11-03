@@ -26,5 +26,8 @@ func TestIgniteMCPExposesRegistrationOnly(t *testing.T) {
 		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), test.expected) || strings.Contains(response.Body.String(), "sitebrush_publish") {
 			t.Fatalf("Ignite response: status=%d body=%s", response.Code, response.Body.String())
 		}
+		if strings.Contains(test.body, `"method":"tools/list"`) && !strings.Contains(response.Body.String(), "Registration attempt UUID") {
+			t.Fatal("Ignite did not explain the server-issued attempt field")
+		}
 	}
 }

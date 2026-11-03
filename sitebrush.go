@@ -482,6 +482,7 @@ type serviceMailRequest struct {
 	RequestIP        string                             `json:"request_ip,omitempty"`
 	RequestedAt      string                             `json:"requested_at,omitempty"`
 	RegistrationCode string                             `json:"registration_code,omitempty"`
+	NoReturnLink     bool                               `json:"no_return_link,omitempty"`
 	EmailChange      *emailChangeMail                   `json:"email_change,omitempty"`
 	Version          int                                `json:"version"`
 	MessageID        string                             `json:"message_id,omitempty"`
@@ -11166,6 +11167,9 @@ func (a *App) runStartupPreload(ctx context.Context, siteDatabaseRootDir string)
 		a.siteDatabaseRouter.Preload(ctx)
 	}
 	a.recoverFreezeCheckpoints(ctx)
+	if err := a.repairCompletedIgniteSites(ctx); err != nil {
+		log.Printf("IGNITE starter page recovery unavailable: %v", err)
+	}
 	a.refreshAllPublicPolicies()
 	staticStats := startupStaticPreloadStats{}
 	if a.publicStreamer == nil {
@@ -34130,7 +34134,8 @@ func (a *App) enqueueServiceEmailContent(ctx context.Context, r *http.Request, c
 	}
 	requestIP := accountClientIP(r)
 	requestedAt := time.Now().UTC().Format(time.RFC3339)
-	formatAccountMail(&message, languageCode, domain, secretValue, actionURL, registrationCode, requestIP, requestedAt, change)
+	noReturnLink := codeKind == "email_confirm" && r.FormValue("site_workflow") == "ignite"
+	formatAccountMail(&message, languageCode, domain, secretValue, actionURL, registrationCode, requestIP, requestedAt, change, noReturnLink)
 	a.setMailOrigin(ctx, &message, requestIP, requestedAt)
 	if err := a.mailInitiatorAllowed(ctx, message); err != nil {
 		return err
@@ -34147,6 +34152,7 @@ func (a *App) enqueueServiceEmailContent(ctx context.Context, r *http.Request, c
 		RequestedAt:      requestedAt,
 		EmailChange:      change,
 		RegistrationCode: registrationCode,
+		NoReturnLink:     noReturnLink,
 		Version:          1,
 		SourceDomain:     normalizeDomainName(domain),
 		Recipient:        strings.TrimSpace(recipient),
@@ -34195,7 +34201,7 @@ func (a *App) sendServiceEmailNow(ctx context.Context, r *http.Request, codeKind
 	}
 	requestIP := accountClientIP(r)
 	requestedAt := time.Now().UTC().Format(time.RFC3339)
-	formatAccountMail(&message, languageCode, domain, secretValue, actionURL, "", requestIP, requestedAt, change)
+	formatAccountMail(&message, languageCode, domain, secretValue, actionURL, "", requestIP, requestedAt, change, false)
 	a.setMailOrigin(ctx, &message, requestIP, requestedAt)
 	if err := a.mailInitiatorAllowed(ctx, message); err != nil {
 		return emailDeliveryResult{Message: message, Err: err}
@@ -38634,7 +38640,7 @@ func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request
 	if request.EmailChange != nil {
 		applyEmailChangeMail(&message, request.LanguageCode, request.SourceDomain, request.SecretValue, *request.EmailChange)
 	}
-	formatAccountMail(&message, request.LanguageCode, request.SourceDomain, request.SecretValue, request.ActionURL, request.RegistrationCode, request.RequestIP, request.RequestedAt, request.EmailChange)
+	formatAccountMail(&message, request.LanguageCode, request.SourceDomain, request.SecretValue, request.ActionURL, request.RegistrationCode, request.RequestIP, request.RequestedAt, request.EmailChange, request.NoReturnLink)
 	if strings.TrimSpace(request.MessageID) != "" {
 		message.From = serviceMailRelayFromAddress("sitebrush.com")
 		message.Subject = request.Subject
@@ -39758,7 +39764,7 @@ func applyEmailChangeMail(message *mailout.Message, languageCode, domain, secret
 	message.HTMLBody = `<!doctype html><html lang="` + escape(languageCode) + `" dir="` + direction + `"><body style="margin:0;background:#f4f7f8;font-family:Arial,sans-serif;color:#607078"><div style="max-width:600px;margin:0 auto;padding:28px 16px"><div style="background:#fff;border:1px solid #d9e2e5;border-radius:14px;padding:28px"><p style="margin:0;color:#087f8c;font-size:20px;font-weight:700">SiteBrush · ` + escape(domain) + `</p><h1 style="font-size:23px;color:#172126;line-height:1.3">` + escape(translations["profile_email_form_title"]) + `</h1><p style="line-height:1.6">` + escape(introduction) + `</p><p dir="ltr" style="padding:16px;background:#f4f7f8;border-radius:9px;line-height:1.7;overflow-wrap:anywhere;color:#172126"><strong style="font-size:18px;font-weight:700">` + escape(change.Current) + `</strong><br>↓<br><strong style="font-size:18px;font-weight:700">` + escape(change.Next) + `</strong></p><p style="line-height:1.6">` + escape(instructions) + `</p>` + codeHTML + `<p style="margin:24px 0"><a href="` + escape(change.URL) + `" style="display:inline-block;background:#087f8c;color:#fff;text-decoration:none;font-weight:700;padding:13px 20px;border-radius:9px">` + escape(button) + `</a></p><p style="font-size:13px;line-height:1.5">` + escape(ignore) + `</p></div></div></body></html>`
 }
 
-func formatAccountMail(message *mailout.Message, language, domain, secret, link, registrationCode, requestIP, requestedAt string, change *emailChangeMail) {
+func formatAccountMail(message *mailout.Message, language, domain, secret, link, registrationCode, requestIP, requestedAt string, change *emailChangeMail, noReturnLink bool) {
 	translations := translationsForLanguageCode(language)
 	reasonKey, titleKey := "", ""
 	switch message.Kind {
@@ -39798,6 +39804,9 @@ func formatAccountMail(message *mailout.Message, language, domain, secret, link,
 	}
 	if message.Kind == "email_confirm" || message.Kind == "email_change_confirm" {
 		content.Link = secret
+	}
+	if message.Kind == "email_confirm" && noReturnLink {
+		content.Link = ""
 	}
 	if change != nil {
 		content.Previous = change.Current
@@ -60876,6 +60885,17 @@ func igniteHash(secret string) string {
 	return hex.EncodeToString(digest[:])
 }
 
+func newIgniteAttemptID() (string, error) {
+	var identifier [16]byte
+	if _, err := rand.Read(identifier[:]); err != nil {
+		return "", err
+	}
+	identifier[6] = identifier[6]&0x0f | 0x40
+	identifier[8] = identifier[8]&0x3f | 0x80
+	encoded := hex.EncodeToString(identifier[:])
+	return encoded[:8] + "-" + encoded[8:12] + "-" + encoded[12:16] + "-" + encoded[16:20] + "-" + encoded[20:], nil
+}
+
 // The configured owner domain is the sole authority for Ignite registration.
 func (a *App) ignitePolicy(ctx context.Context) (string, error) {
 	reply := make(chan ignitePolicyResult, 1)
@@ -60979,7 +60999,11 @@ func (a *App) invokeIgnite(r *http.Request, ownerDomain, operation string, argum
 		if err != nil || !available {
 			return nil, errors.New("site name is unavailable")
 		}
-		attempt, browser := randomAccessToken()+randomAccessToken(), randomAccessToken()+randomAccessToken()
+		attempt, err := newIgniteAttemptID()
+		if err != nil {
+			return nil, errors.New("registration is temporarily unavailable")
+		}
+		browser := randomAccessToken() + randomAccessToken()
 		now := time.Now().UTC()
 		err = a.withServerControlDatabaseWrite(r.Context(), "ignite-begin", func(database *sql.DB) error {
 			_, err := database.ExecContext(r.Context(), `DELETE FROM ignite_registrations WHERE expires_at<?`, now.Format(time.RFC3339))
@@ -61076,13 +61100,14 @@ func (a *App) igniteCaptchaPage(w http.ResponseWriter, r *http.Request, ownerDom
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if browserAttempt.verified {
-		_, _ = w.Write([]byte("<!doctype html><title>SiteBrush Ignite</title><p>Human verification complete. Return to your AI assistant.</p>"))
+		renderIgniteCaptchaState(w, browserAttempt.domain, "Human verification complete", "Return to your AI assistant to continue creating the site.", "")
 		return
 	}
 	if r.Method == http.MethodPost {
 		r.Body = http.MaxBytesReader(w, r.Body, 4096)
 		if err := r.ParseForm(); err != nil {
-			http.Error(w, "invalid CAPTCHA form", http.StatusBadRequest)
+			w.WriteHeader(http.StatusBadRequest)
+			renderIgniteCaptchaState(w, browserAttempt.domain, "Verification failed", "The form was invalid. Reload the challenge and try again.", browserSecret)
 			return
 		}
 		verificationReply := make(chan bool, 1)
@@ -61095,11 +61120,13 @@ func (a *App) igniteCaptchaPage(w http.ResponseWriter, r *http.Request, ownerDom
 			return nil
 		})
 		if err != nil {
-			http.Error(w, "CAPTCHA is invalid or expired", http.StatusForbidden)
+			w.WriteHeader(http.StatusForbidden)
+			renderIgniteCaptchaState(w, browserAttempt.domain, "Verification failed", "The image code is invalid or expired. Reload the challenge and try again.", browserSecret)
 			return
 		}
 		if !<-verificationReply {
-			http.Error(w, "CAPTCHA is invalid or expired", http.StatusForbidden)
+			w.WriteHeader(http.StatusForbidden)
+			renderIgniteCaptchaState(w, browserAttempt.domain, "Verification failed", "The image code is invalid or expired. Reload the challenge and try again.", browserSecret)
 			return
 		}
 		err = a.withServerControlDatabaseWrite(r.Context(), "ignite-captcha-complete", func(database *sql.DB) error {
@@ -61120,7 +61147,7 @@ func (a *App) igniteCaptchaPage(w http.ResponseWriter, r *http.Request, ownerDom
 			http.Error(w, "registration temporarily unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		_, _ = w.Write([]byte("<!doctype html><title>SiteBrush Ignite</title><p>Human verification complete. Return to your AI assistant.</p>"))
+		renderIgniteCaptchaState(w, browserAttempt.domain, "Human verification complete", "Return to your AI assistant to continue creating the site.", "")
 		return
 	}
 	if r.Method != http.MethodGet {
@@ -61150,7 +61177,15 @@ func (a *App) igniteCaptchaPage(w http.ResponseWriter, r *http.Request, ownerDom
 		http.Error(w, "CAPTCHA unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	_, _ = fmt.Fprintf(w, `<!doctype html><meta name="viewport" content="width=device-width"><title>SiteBrush Ignite</title><h1>Confirm %s</h1><p>Enter the letters from the image, then return to your AI assistant.</p><form method="post"><img alt="CAPTCHA" src="data:image/png;base64,%s"><input type="hidden" name="captcha_id" value="%s"><label>Code <input name="captcha" autocomplete="off" required></label><button type="submit">Continue</button></form>`, template.HTMLEscapeString(browserAttempt.domain), base64.StdEncoding.EncodeToString(encoded), template.HTMLEscapeString(challenge.Token))
+	_, _ = fmt.Fprintf(w, `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Verify · SiteBrush Ignite</title><link rel="stylesheet" href="/p/static/ignite.css"></head><body><main class="ignite-shell"><section class="ignite-card"><p class="ignite-brand">SiteBrush <span>Ignite</span></p><div class="ignite-step">Step 1 of 2 · Human verification</div><h1>Confirm your site</h1><p class="ignite-domain">%s</p><p class="ignite-help">Enter the characters shown below. Your AI assistant will continue the registration after this step.</p><form method="post"><img class="ignite-image" width="320" height="100" alt="Six-character CAPTCHA challenge" src="data:image/png;base64,%s"><input type="hidden" name="captcha_id" value="%s"><label for="ignite-captcha">Characters from the image</label><input id="ignite-captcha" name="captcha" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" minlength="6" maxlength="6" pattern="[A-Za-z2-9]{6}" required autofocus><button type="submit">Verify and continue</button></form><p class="ignite-footnote">After verification, return to your AI assistant.</p></section></main></body></html>`, template.HTMLEscapeString(browserAttempt.domain), base64.StdEncoding.EncodeToString(encoded), template.HTMLEscapeString(challenge.Token))
+}
+
+func renderIgniteCaptchaState(w http.ResponseWriter, domain, title, message, retrySecret string) {
+	retry := ""
+	if retrySecret != "" {
+		retry = `<a class="ignite-retry" href="/?ignite&amp;captcha=` + url.QueryEscape(retrySecret) + `">Reload challenge</a>`
+	}
+	_, _ = fmt.Fprintf(w, `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>%s · SiteBrush Ignite</title><link rel="stylesheet" href="/p/static/ignite.css"></head><body><main class="ignite-shell"><section class="ignite-card"><p class="ignite-brand">SiteBrush <span>Ignite</span></p><p class="ignite-domain">%s</p><h1>%s</h1><p class="ignite-help" role="status">%s</p>%s</section></main></body></html>`, template.HTMLEscapeString(title), template.HTMLEscapeString(domain), template.HTMLEscapeString(title), template.HTMLEscapeString(message), retry)
 }
 
 func (a *App) igniteSendCode(r *http.Request, attemptSecret string, pending igniteAttempt, address string) (map[string]any, error) {
@@ -61247,6 +61282,9 @@ func (a *App) igniteSendCode(r *http.Request, attemptSecret string, pending igni
 // Mail proof is durable before the domain claim and site-local account are created.
 func (a *App) igniteComplete(r *http.Request, attemptSecret string, pending igniteAttempt, code string) (map[string]any, error) {
 	if pending.status == "complete" {
+		if err := a.ensureIgniteStarterPage(contextWithDomain(r.Context(), pending.domain), pending.domain); err != nil {
+			return nil, fmt.Errorf("site starter page is unavailable: %w", err)
+		}
 		if err := a.publicPublicationRequest("refresh", pending.domain); err != nil {
 			return nil, fmt.Errorf("site publication is unavailable: %w", err)
 		}
@@ -61402,6 +61440,44 @@ func (a *App) ensureIgniteStarterPage(ctx context.Context, domain string) error 
 	}
 	html := `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Site ready</title><main><h1>Site ready</h1><p>Your website is ready to edit.</p></main></html>`
 	return a.persistImportedPages(ctx, domain, "/", []wholeSiteImportedPage{{LocalPath: "/", HTML: html}}, nil, false)
+}
+
+// Earlier Ignite registrations could complete without publishing any page.
+// Repair only completed attempts with an existing administrator on startup.
+func (a *App) repairCompletedIgniteSites(ctx context.Context) error {
+	var domains []string
+	err := a.withServerControlDatabaseRead(ctx, "ignite-completed-sites", func(database *sql.DB) error {
+		rows, queryErr := database.QueryContext(ctx, `SELECT DISTINCT domain FROM ignite_registrations WHERE status='complete'`)
+		if queryErr != nil {
+			return queryErr
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var domain string
+			if scanErr := rows.Scan(&domain); scanErr != nil {
+				return scanErr
+			}
+			domains = append(domains, domain)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return err
+	}
+	var repairErrors []error
+	for _, domain := range domains {
+		if !a.hasAdmin(contextWithDomain(ctx, domain), domain) {
+			continue
+		}
+		if err := a.ensureIgniteStarterPage(contextWithDomain(ctx, domain), domain); err != nil {
+			repairErrors = append(repairErrors, fmt.Errorf("%s: %w", domain, err))
+			continue
+		}
+		if err := a.publicPublicationRequest("refresh", domain); err != nil {
+			repairErrors = append(repairErrors, fmt.Errorf("%s: %w", domain, err))
+		}
+	}
+	return errors.Join(repairErrors...)
 }
 
 func (a *App) igniteCreatedSite(domain string) map[string]any {

@@ -12,11 +12,11 @@ import (
 const Path = "/?ignite"
 
 type Arguments struct {
-	Server  string `json:"server,omitempty"`
-	Name    string `json:"name,omitempty"`
-	Attempt string `json:"attempt,omitempty"`
-	Email   string `json:"email,omitempty"`
-	Code    string `json:"code,omitempty"`
+	Server  string `json:"server,omitempty" jsonschema:"SiteBrush server explicitly selected by the user; keep the same server throughout registration"`
+	Name    string `json:"name,omitempty" jsonschema:"Short third-level site name requested by the user"`
+	Attempt string `json:"attempt,omitempty" jsonschema:"Registration attempt UUID returned by ignite_begin. The server uses it only to match CAPTCHA and email verification steps; it is not user content or a credential for an existing site"`
+	Email   string `json:"email,omitempty" jsonschema:"Email address supplied by the user for the confirmation code"`
+	Code    string `json:"code,omitempty" jsonschema:"Six-digit email confirmation code supplied by the user"`
 }
 
 type Invoke func(context.Context, string, Arguments) (map[string]any, error)
@@ -39,8 +39,8 @@ func newHandler(version, name, instructions string, invoke Invoke) http.Handler 
 		{"ignite_check_name", "Check whether a proposed third-level site name is available. No site is created."},
 		{"ignite_begin", "Begin registration for the name the user confirmed. Returns a browser CAPTCHA link."},
 		{"ignite_status", "Check whether the browser CAPTCHA is complete for this registration attempt."},
-		{"ignite_send_code", "Send a six-digit confirmation code to the user's email after CAPTCHA is complete."},
-		{"ignite_complete", "Verify the email code and create the new site. Returns its personal MCP URL."},
+		{"ignite_send_code", "Send a six-digit confirmation code to the user's email after CAPTCHA is complete. Pass the server-issued attempt identifier from ignite_begin to identify this registration."},
+		{"ignite_complete", "Verify the email code and create the new site. Pass the server-issued attempt identifier from ignite_begin and the user's code. Returns its personal MCP URL."},
 	}
 	for _, tool := range tools {
 		sdk.AddTool(server, &sdk.Tool{Name: tool.name, Description: tool.description}, func(boundary context.Context, _ *sdk.CallToolRequest, arguments Arguments) (*sdk.CallToolResult, any, error) {
