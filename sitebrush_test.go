@@ -16613,6 +16613,43 @@ func TestAutoCertCertificateMemoryCachePreloadsDiskCertificate(t *testing.T) {
 	}
 }
 
+func TestAutoCertSelectsNewestCertificateAcrossCacheFormats(t *testing.T) {
+	application, _ := newTestApplication(t)
+	domain := "renewed-cache.example.com"
+	cacheDirectory := filepath.Join(application.storageRootDir(), "letsencrypt")
+	if err := os.MkdirAll(cacheDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	newExpiry := now.Add(85 * 24 * time.Hour).UTC().Truncate(time.Second)
+	for _, certificate := range []struct {
+		name   string
+		expiry time.Time
+	}{
+		{domain, newExpiry},
+		{domain + "+rsa", now.Add(3 * 24 * time.Hour)},
+	} {
+		contents := cachedAutoCertPEMForTest(t, domain, now.Add(-time.Hour), certificate.expiry)
+		if err := os.WriteFile(filepath.Join(cacheDirectory, certificate.name), contents, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, expiry, found := application.autoCertCachedCertificateFromDisk(domain, now, 0); !found || !expiry.Equal(newExpiry) {
+		t.Fatalf("disk certificate expiry = %s, want %s", expiry, newExpiry)
+	}
+	cacheContext, cancelCache := context.WithCancel(context.Background())
+	defer cancelCache()
+	application.autoCertCertificateCache = startAutoCertCertificateMemoryCache(cacheContext, cacheDirectory)
+	selected, err := application.publicTLSConfig(nil, func(string) {}).GetCertificate(&tls.ClientHelloInfo{ServerName: domain})
+	if err != nil || selected == nil {
+		t.Fatalf("public TLS certificate unavailable: %v", err)
+	}
+	expiry, err := tlsCertificateExpiresAt(selected)
+	if err != nil || !expiry.Equal(newExpiry) {
+		t.Fatalf("public TLS certificate expiry = %s, want %s: %v", expiry, newExpiry, err)
+	}
+}
+
 func TestAutoCertDiskCacheRejectsPathTraversalDomains(t *testing.T) {
 	application, _ := newTestApplication(t)
 	for _, untrustedDomain := range []string{
