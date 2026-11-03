@@ -20326,6 +20326,27 @@ func TestIgniteGatewayForwardsOnlyToSelectedServer(t *testing.T) {
 	}
 }
 
+func TestIgniteEndpointForwardsExplicitServer(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "https://sitebrush.com/?ignite", nil)
+	called := false
+	forward := func(_ context.Context, serverDomain, operation string, arguments ignite.Arguments) (map[string]any, error) {
+		if serverDomain != "sitebrush.ru" || operation != "ignite_check_name" || arguments.Name != "matveytest3" || arguments.Server != "sitebrush.ru" {
+			t.Fatalf("unexpected forwarding target: server=%q operation=%q arguments=%+v", serverDomain, operation, arguments)
+		}
+		called = true
+		return map[string]any{"domain": "matveytest3.sitebrush.ru", "available": true, "server": serverDomain}, nil
+	}
+	result, err := (&App{}).invokeIgniteForServer(request, "sitebrush.com", "ignite_check_name", ignite.Arguments{Name: "matveytest3", Server: "sitebrush.ru"}, forward)
+	if err != nil || !called || result["domain"] != "matveytest3.sitebrush.ru" {
+		t.Fatalf("selected server was ignored: result=%v called=%v err=%v", result, called, err)
+	}
+	called = false
+	_, err = (&App{}).invokeIgniteForServer(request, "sitebrush.ru", "ignite_check_name", ignite.Arguments{Name: "matveytest3", Server: "sitebrush.com"}, forward)
+	if err == nil || called {
+		t.Fatalf("non-central server accepted foreign target: called=%v err=%v", called, err)
+	}
+}
+
 func testNewSiteConfirmation(t *testing.T, scheme string) {
 	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
 	application := newPartitionedTestApplication(t)
@@ -31928,9 +31949,11 @@ func TestPublishedBoundaryAvoidsSQLAndPreservesPrivateFiles(t *testing.T) {
 	if !application.servePublicPublished(protectedResponse, protectedFileRequest, true) || protectedResponse.Code != http.StatusUnauthorized {
 		t.Fatal("paused public delivery bypassed section protection")
 	}
-	request := httptest.NewRequest(http.MethodGet, "https://example.org/?mcp", nil)
-	if application.servePublicPublished(httptest.NewRecorder(), request, false) {
-		t.Fatal("public handler swallowed a control request")
+	for _, selector := range []string{"mcp", "ignite", "sitebrush_agent"} {
+		request := httptest.NewRequest(http.MethodGet, "https://example.org/?"+selector, nil)
+		if application.servePublicPublished(httptest.NewRecorder(), request, false) {
+			t.Fatal("public handler swallowed a control request", selector)
+		}
 	}
 	for _, target := range []string{"https://example.org/?request=analytics", "https://example.org/.well-known/oauth-authorization-server", "https://example.org/.well-known/acme-challenge/token"} {
 		serviceRequest := httptest.NewRequest("GET", target, nil)

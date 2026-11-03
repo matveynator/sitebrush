@@ -58315,7 +58315,7 @@ func publicMissingPageRequest(r *http.Request, pagePath string) bool {
 
 func sitebrushControlQueryFlag(flag string) bool {
 	for _, selector := range []string{
-		"mcp", "oauth", "ai", "ai_token", "ai_session", "ai_authorize", "ai_capability_create",
+		"mcp", "ignite", "sitebrush_agent", "oauth", "ai", "ai_token", "ai_session", "ai_authorize", "ai_capability_create",
 		"ai_provider_status", "ai_provider_models", "ai_provider_save", "ai_provider_delete",
 		"ai_execute", "ai_execute_ws", "ai_apply", "ai_background",
 		"login", "logout", "login_link", "register", "recover", "profile", "email_confirm", "https_status",
@@ -60952,7 +60952,11 @@ func (a *App) igniteRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	invoke := func(ctx context.Context, operation string, arguments ignite.Arguments) (map[string]any, error) {
-		return a.invokeIgnite(r.WithContext(ctx), ownerDomain, operation, arguments)
+		return a.invokeIgniteForServer(r.WithContext(ctx), ownerDomain, operation, arguments, forwardIgniteOperation)
+	}
+	if ownerDomain == "sitebrush.com" {
+		ignite.NewGatewayHandler(CompileVersion, invoke).ServeHTTP(w, r)
+		return
 	}
 	ignite.NewHandler(CompileVersion, invoke).ServeHTTP(w, r)
 }
@@ -61538,20 +61542,34 @@ func (a *App) igniteGatewayRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	invoke := func(ctx context.Context, operation string, arguments ignite.Arguments) (map[string]any, error) {
+		return a.invokeIgniteForServer(r.WithContext(ctx), ownerDomain, operation, arguments, forwardIgniteOperation)
+	}
+	ignite.NewGatewayHandler(CompileVersion, invoke).ServeHTTP(w, r)
+}
+
+func (a *App) invokeIgniteForServer(r *http.Request, ownerDomain, operation string, arguments ignite.Arguments, forward func(context.Context, string, string, ignite.Arguments) (map[string]any, error)) (map[string]any, error) {
+	if ownerDomain != "sitebrush.com" && strings.TrimSpace(arguments.Server) != "" {
 		serverDomain, err := igniteGatewayServer(arguments.Server)
+		if err != nil || serverDomain != ownerDomain {
+			return nil, errors.New("this Ignite endpoint registers sites only on its own server")
+		}
+	}
+	serverDomain := ownerDomain
+	if ownerDomain == "sitebrush.com" {
+		var err error
+		serverDomain, err = igniteGatewayServer(arguments.Server)
 		if err != nil {
 			return nil, err
 		}
-		if serverDomain == ownerDomain {
-			result, err := a.invokeIgnite(r.WithContext(ctx), ownerDomain, operation, arguments)
-			if err == nil {
-				result["server"] = ownerDomain
-			}
-			return result, err
-		}
-		return forwardIgniteOperation(ctx, serverDomain, operation, arguments)
 	}
-	ignite.NewGatewayHandler(CompileVersion, invoke).ServeHTTP(w, r)
+	if serverDomain != ownerDomain {
+		return forward(r.Context(), serverDomain, operation, arguments)
+	}
+	result, err := a.invokeIgnite(r, ownerDomain, operation, arguments)
+	if err == nil {
+		result["server"] = ownerDomain
+	}
+	return result, err
 }
 
 func igniteGatewayServer(raw string) (string, error) {

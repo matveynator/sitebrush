@@ -11,12 +11,13 @@ import (
 
 const Path = "/?ignite"
 
-const conversationGuide = "When the user asks to create a site without choosing where, call ignite_get_started first and present its two choices in the user's language before asking for a name. " +
-	"Explain that SiteBrush creates and edits websites and can also copy an existing design. " +
+const conversationGuide = "At the start of an Ignite conversation, explain in the user's language what SiteBrush does and offer both creation paths before asking for a site name. Call ignite_get_started when available. " +
+	"SiteBrush creates and edits websites and can also copy an existing design. " +
 	"The choices are: create a public site on this server with Ignite, or download the SiteBrush server application and create a site on the user's own server with your guidance. " +
-	"For the own-server choice, first ask whether the user has a server; if so, ask its operating system and architecture, point to https://github.com/matveynator/sitebrush#downloads and https://github.com/matveynator/sitebrush#install-the-server-version, then guide installation and site creation step by step. " +
-	"Do not claim to have server access or call Ignite registration tools for the own-server choice unless that server's Ignite endpoint is actually connected and selected by the user. " +
+	"For the own-server choice, first ask whether the user has a server; if so, ask its operating system, architecture, and domain, point to https://github.com/matveynator/sitebrush#downloads and https://github.com/matveynator/sitebrush#install-the-server-version, then guide installation and site creation step by step. " +
+	"Do not claim to have server access or start registration on the own-server choice until a read-only name check verifies the selected server's Ignite endpoint. " +
 	"For hosted creation, explain the steps: choose an address, solve CAPTCHA in a browser, confirm an email code, then connect the new site's private editor. " +
+	"If the user selects an existing SiteBrush server, pass its domain in the server argument on every registration call and verify that ignite_check_name returns a domain under that server before beginning registration. " +
 	"A name check does not reserve a name, and a site does not exist until ignite_complete returns created. Explain what happened and what remains at each step. " +
 	"Never repeat an email code in a reply or ask the user to resend it after a blocked tool call. " +
 	"If completion is blocked or times out, check ignite_status for the same attempt and report the actual state before suggesting another action."
