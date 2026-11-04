@@ -20295,16 +20295,25 @@ func TestIgniteBrowserCodeCreatesSite(t *testing.T) {
 	if formResponse.Code != http.StatusOK || !strings.Contains(formResponse.Body.String(), `name="code"`) || application.hasAdmin(contextWithDomain(context.Background(), siteDomain), siteDomain) {
 		t.Fatalf("browser confirmation form: status=%d body=%s", formResponse.Code, formResponse.Body.String())
 	}
+	foreignRequest := httptest.NewRequest(http.MethodPost, confirmationURL, strings.NewReader("code=000000"))
+	foreignRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	foreignRequest.Header.Set("Origin", "https://other.example")
+	foreignResponse := httptest.NewRecorder()
+	handler.ServeHTTP(foreignResponse, foreignRequest)
+	if foreignResponse.Code != http.StatusForbidden || foreignResponse.Body.Len() == 0 {
+		t.Fatalf("foreign browser origin: status=%d body=%q", foreignResponse.Code, foreignResponse.Body.String())
+	}
 	for _, test := range []struct {
 		code   string
+		origin string
 		status int
 	}{
-		{"000000", http.StatusBadRequest},
-		{confirmation.Code, http.StatusOK},
+		{"000000", "https://" + ownerDomain, http.StatusBadRequest},
+		{confirmation.Code, "null", http.StatusOK},
 	} {
 		postRequest := httptest.NewRequest(http.MethodPost, confirmationURL, strings.NewReader(url.Values{"code": {test.code}}.Encode()))
 		postRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		postRequest.Header.Set("Origin", "https://"+ownerDomain)
+		postRequest.Header.Set("Origin", test.origin)
 		postResponse := httptest.NewRecorder()
 		handler.ServeHTTP(postResponse, postRequest)
 		if postResponse.Code != test.status {

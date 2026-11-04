@@ -61027,8 +61027,10 @@ func (a *App) igniteEmailConfirmationPage(w http.ResponseWriter, r *http.Request
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	if origin := r.Header.Get("Origin"); origin != "" && origin != "https://"+ownerDomain {
-		w.WriteHeader(http.StatusForbidden)
+	// Sandboxed browsers submit forms with Origin: null. The email code and
+	// bounded verification attempts authorize this operation.
+	if origin := r.Header.Get("Origin"); origin != "" && origin != "null" && origin != "https://"+ownerDomain {
+		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 2048)
