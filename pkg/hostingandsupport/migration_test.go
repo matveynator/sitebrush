@@ -55,6 +55,31 @@ func TestMigrateRepairsIncompleteSchemaAtCurrentVersion(t *testing.T) {
 	}
 }
 
+func TestIgniteConfirmationFormHashMigration(t *testing.T) {
+	ctx := context.Background()
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "ignite-migration.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	if _, err := database.ExecContext(ctx, `CREATE TABLE ignite_registrations(attempt_hash TEXT PRIMARY KEY,browser_hash TEXT NOT NULL UNIQUE,domain TEXT NOT NULL,browser_ip TEXT NOT NULL DEFAULT '',email TEXT NOT NULL DEFAULT '',confirmation_token TEXT NOT NULL DEFAULT '',captcha_verified INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL,created_at TEXT NOT NULL,expires_at TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckMigrationSource(ctx, database); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(ctx, database); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckMigrations(ctx, database); err != nil {
+		t.Fatal(err)
+	}
+	found, err := hostingAndSupportColumnExists(ctx, database, "ignite_registrations", "confirmation_form_hash")
+	if err != nil || !found {
+		t.Fatalf("Ignite browser handle column missing after migration: found=%v err=%v", found, err)
+	}
+}
+
 func TestRegistrationClaimMigrationReadinessAndSourceValidation(t *testing.T) {
 	ctx := context.Background()
 	for _, damage := range []string{"missing-step", "changed-step", "missing-table", "blocked-step"} {

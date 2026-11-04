@@ -17056,9 +17056,9 @@ func TestIgniteRegistrationMailOmitsReturnLink(t *testing.T) {
 			if strings.Contains(message.Body, confirmationURL) != test.wantLink || strings.Contains(message.HTMLBody, "email_confirm=secret") != test.wantLink {
 				t.Fatal("registration return link has the wrong visibility")
 			}
-				if test.noReturnLink && !strings.Contains(message.Body, translationCatalog["en"]["ignite_email_mail_reason"]) {
-					t.Fatal("Ignite mail does not explain where to enter the code")
-				}
+			if test.noReturnLink && !strings.Contains(message.Body, translationCatalog["en"]["ignite_email_mail_reason"]) {
+				t.Fatal("Ignite mail does not explain where to enter the code")
+			}
 		})
 	}
 }
@@ -20082,10 +20082,10 @@ func TestIgniteCreatesOnlyConfirmedNewSite(t *testing.T) {
 	if application.hasAdmin(contextWithDomain(request.Context(), siteDomain), siteDomain) {
 		t.Fatal("Ignite created a site before the email code")
 	}
-	var confirmationToken string
+	var confirmationToken, confirmationFormHash string
 	if err := application.withServerControlDatabaseRead(request.Context(), "test-ignite-code", func(database *sql.DB) error {
 		var expiresAt string
-		if err := database.QueryRow(`SELECT confirmation_token,expires_at FROM ignite_registrations WHERE attempt_hash=?`, igniteHash(attempt)).Scan(&confirmationToken, &expiresAt); err != nil {
+		if err := database.QueryRow(`SELECT confirmation_token,confirmation_form_hash,expires_at FROM ignite_registrations WHERE attempt_hash=?`, igniteHash(attempt)).Scan(&confirmationToken, &confirmationFormHash, &expiresAt); err != nil {
 			return err
 		}
 		expiry, err := time.Parse(time.RFC3339, expiresAt)
@@ -20100,6 +20100,15 @@ func TestIgniteCreatesOnlyConfirmedNewSite(t *testing.T) {
 	if !found || confirmation.Workflow != "ignite" {
 		t.Fatal("Ignite email confirmation missing")
 	}
+	if confirmation.FormToken == "" || confirmation.FormToken == confirmation.Token || strings.Contains(sent["confirmation_url"].(string), confirmation.Token) || strings.Contains(status["confirmation_url"].(string), confirmation.Token) {
+		t.Fatal("Ignite exposed the email confirmation bearer token")
+	}
+	if confirmationFormHash != igniteHash(confirmation.FormToken) {
+		t.Fatal("Ignite did not store the separate browser handle hash")
+	}
+	if _, found := application.emailConfirmationByToken(request.Context(), confirmation.Token); found {
+		t.Fatal("ordinary email confirmation accepted an Ignite token")
+	}
 	if _, err := application.invokeIgnite(request, ownerDomain, "ignite_complete", ignite.Arguments{Attempt: attempt, Code: "000000"}); err == nil {
 		t.Fatal("wrong email code accepted")
 	}
@@ -20112,6 +20121,23 @@ func TestIgniteCreatesOnlyConfirmedNewSite(t *testing.T) {
 	}
 	if application.publicCatalog.Lookup(publicsite.Lookup{Host: siteDomain}).Known {
 		t.Fatal("new site entered the public catalog before confirmation")
+	}
+	bypassURL := "https://" + siteDomain + "/?email_confirm=" + url.QueryEscape(confirmation.Token)
+	bypassForm := url.Values{"password": {"attacker-password"}, "password_confirm": {"attacker-password"}}
+	bypassRequest := httptest.NewRequest(http.MethodPost, bypassURL, strings.NewReader(bypassForm.Encode()))
+	bypassRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if application.isRegistrationOnboardingRequest(bypassRequest, siteDomain) {
+		t.Fatal("unknown-host gate accepted an Ignite bearer token")
+	}
+	bypassResponse := httptest.NewRecorder()
+	application.siteHTTPHandler(http.HandlerFunc(application.route)).ServeHTTP(bypassResponse, bypassRequest)
+	if bypassResponse.Code != http.StatusNotFound || application.hasAdmin(contextWithDomain(request.Context(), siteDomain), siteDomain) {
+		t.Fatalf("Ignite bearer token created an administrator: status=%d", bypassResponse.Code)
+	}
+	directResponse := httptest.NewRecorder()
+	application.confirmEmailToken(directResponse, bypassRequest)
+	if directResponse.Code != http.StatusNotFound || application.hasAdmin(contextWithDomain(request.Context(), siteDomain), siteDomain) {
+		t.Fatalf("ordinary confirmation path accepted Ignite token: status=%d", directResponse.Code)
 	}
 	created, err := application.invokeIgnite(request, ownerDomain, "ignite_complete", ignite.Arguments{Attempt: attempt, Code: confirmation.Code})
 	if err != nil {
@@ -20247,8 +20273,11 @@ func TestIgniteBrowserCodeCreatesSite(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, pending, err := application.igniteAttemptByConfirmation(context.Background(), token); err != nil || pending.domain != siteDomain {
+	if _, pending, err := application.igniteAttemptByConfirmation(context.Background(), confirmation.FormToken); err != nil || pending.domain != siteDomain {
 		t.Fatalf("browser confirmation attempt is unavailable: domain=%q error=%v", pending.domain, err)
+	}
+	if _, _, err := application.igniteAttemptByConfirmation(context.Background(), token); err == nil {
+		t.Fatal("Ignite browser accepted the email confirmation bearer token")
 	}
 	stopPublication := make(chan struct{})
 	application.publicCatalog = publicsite.NewCatalog(application.storagePath, stopPublication)
@@ -20258,7 +20287,7 @@ func TestIgniteBrowserCodeCreatesSite(t *testing.T) {
 		t.Fatal(err)
 	}
 	handler := application.siteHTTPHandler(http.HandlerFunc(application.route))
-	confirmationURL := igniteEmailConfirmationURL(ownerDomain, token)
+	confirmationURL := igniteEmailConfirmationURL(ownerDomain, confirmation.FormToken)
 	formRequest := httptest.NewRequest(http.MethodGet, confirmationURL, nil)
 	formRequest.Header.Set("Accept", "text/html")
 	formResponse := httptest.NewRecorder()
@@ -20284,6 +20313,11 @@ func TestIgniteBrowserCodeCreatesSite(t *testing.T) {
 	}
 	if !application.hasAdmin(contextWithDomain(context.Background(), siteDomain), siteDomain) || !application.publicCatalog.Lookup(publicsite.Lookup{Host: siteDomain, Path: "/"}).Found {
 		t.Fatal("browser confirmation did not create a public site")
+	}
+	completedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(completedResponse, httptest.NewRequest(http.MethodGet, confirmationURL, nil))
+	if completedResponse.Code != http.StatusOK || !strings.Contains(completedResponse.Body.String(), siteDomain) {
+		t.Fatalf("completed Ignite browser page: status=%d body=%s", completedResponse.Code, completedResponse.Body.String())
 	}
 	statusRequest := httptest.NewRequest(http.MethodPost, "https://"+ownerDomain+"/?ignite", nil)
 	status, err := application.invokeIgnite(statusRequest, ownerDomain, "ignite_status", ignite.Arguments{Attempt: attempt})

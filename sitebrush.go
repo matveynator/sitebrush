@@ -18550,7 +18550,7 @@ func (a *App) isRegistrationOnboardingRequest(r *http.Request, domain string) bo
 	domain = normalizeDomainName(domain)
 	if token := strings.TrimSpace(r.URL.Query().Get("email_confirm")); token != "" {
 		confirmation, found := a.registrationConfirmationByToken(r.Context(), token)
-		return found && confirmation.Action == "register" && normalizeDomainName(confirmation.Domain) == domain
+		return found && confirmation.Action == "register" && confirmation.Workflow != "ignite" && normalizeDomainName(confirmation.Domain) == domain
 	}
 	if handle := strings.TrimSpace(r.FormValue("registration_form_token")); handle != "" {
 		confirmation, found := a.registrationForDelivery(r, handle)
@@ -34031,6 +34031,9 @@ func (a *App) enqueueEmailChangeNotice(r *http.Request, confirmation EmailConfir
 
 func (a *App) emailConfirmationByToken(ctx context.Context, token string) (EmailConfirmation, bool) {
 	if confirmation, found := a.registrationConfirmationByToken(ctx, token); found {
+		if confirmation.Workflow == "ignite" {
+			return EmailConfirmation{}, false
+		}
 		return confirmation, true
 	}
 	var confirmation EmailConfirmation
@@ -61011,6 +61014,11 @@ func (a *App) igniteEmailConfirmationPage(w http.ResponseWriter, r *http.Request
 		http.NotFound(w, r)
 		return
 	}
+	confirmation, found := a.registrationConfirmationByToken(r.Context(), pending.confirmationToken)
+	if !found || confirmation.Workflow != "ignite" || confirmation.FormToken != token || confirmationExpired(confirmation.ExpiresAt, time.Now().UTC()) {
+		http.NotFound(w, r)
+		return
+	}
 	if r.Method == http.MethodGet {
 		renderIgniteEmailCodeForm(w, r, pending.domain, token, "")
 		return
@@ -61159,7 +61167,9 @@ func (a *App) invokeIgnite(r *http.Request, ownerDomain, operation string, argum
 		if operation == "ignite_status" {
 			result := map[string]any{"domain": pending.domain, "status": pending.status, "captcha_verified": pending.captchaVerified, "mcp_ready": pending.status == "complete" && a.accountHTTPSReady(pending.domain)}
 			if pending.confirmationToken != "" && (pending.status == "email_sent" || pending.status == "verified") {
-				result["confirmation_url"] = igniteEmailConfirmationURL(ownerDomain, pending.confirmationToken)
+				if confirmation, found := a.registrationConfirmationByToken(r.Context(), pending.confirmationToken); found && confirmation.Workflow == "ignite" && confirmation.FormToken != "" {
+					result["confirmation_url"] = igniteEmailConfirmationURL(ownerDomain, confirmation.FormToken)
+				}
 			}
 			return result, nil
 		}
@@ -61193,16 +61203,22 @@ func (a *App) igniteAttempt(ctx context.Context, secret string) (igniteAttempt, 
 	return <-reply, nil
 }
 
-func (a *App) igniteAttemptByConfirmation(ctx context.Context, token string) (string, igniteAttempt, error) {
-	if len(token) < 24 || len(token) > 128 {
+func (a *App) igniteAttemptByConfirmation(ctx context.Context, formToken string) (string, igniteAttempt, error) {
+	if len(formToken) < 24 || len(formToken) > 128 {
 		return "", igniteAttempt{}, errors.New("registration attempt is unavailable")
 	}
 	reply := make(chan igniteConfirmationAttempt, 1)
 	err := a.withServerControlDatabaseRead(ctx, "ignite-email-attempt", func(database *sql.DB) error {
 		var result igniteConfirmationAttempt
 		var verified int
-		if err := database.QueryRowContext(ctx, `SELECT attempt_hash,domain,browser_ip,email,confirmation_token,status,captcha_verified FROM ignite_registrations WHERE confirmation_token=? AND expires_at>? LIMIT 1`, token, time.Now().UTC().Format(time.RFC3339)).Scan(&result.hash, &result.pending.domain, &result.pending.browserIP, &result.pending.email, &result.pending.confirmationToken, &result.pending.status, &verified); err != nil {
-			return err
+		now := time.Now().UTC().Format(time.RFC3339)
+		lookupErr := database.QueryRowContext(ctx, `SELECT attempt_hash,domain,browser_ip,email,confirmation_token,status,captcha_verified FROM ignite_registrations WHERE confirmation_form_hash=? AND expires_at>? LIMIT 1`, igniteHash(formToken), now).Scan(&result.hash, &result.pending.domain, &result.pending.browserIP, &result.pending.email, &result.pending.confirmationToken, &result.pending.status, &verified)
+		if errors.Is(lookupErr, sql.ErrNoRows) {
+			// Pending attempts from older versions have no stored browser handle hash.
+			lookupErr = database.QueryRowContext(ctx, `SELECT attempt.attempt_hash,attempt.domain,attempt.browser_ip,attempt.email,attempt.confirmation_token,attempt.status,attempt.captcha_verified FROM ignite_registrations attempt JOIN registration_confirmations confirmation ON confirmation.token=attempt.confirmation_token WHERE attempt.confirmation_form_hash='' AND confirmation.form_token=? AND confirmation.workflow='ignite' AND confirmation.domain=attempt.domain AND confirmation.email=attempt.email AND confirmation.expires_at>? AND attempt.expires_at>? LIMIT 1`, formToken, now, now).Scan(&result.hash, &result.pending.domain, &result.pending.browserIP, &result.pending.email, &result.pending.confirmationToken, &result.pending.status, &verified)
+		}
+		if lookupErr != nil {
+			return lookupErr
 		}
 		result.pending.captchaVerified = verified == 1
 		reply <- result
@@ -61426,7 +61442,7 @@ func (a *App) igniteSendCode(r *http.Request, attemptSecret string, pending igni
 		return nil, err
 	}
 	err = a.withServerControlDatabaseWrite(finishContext, "ignite-code-sent", func(database *sql.DB) error {
-		result, updateErr := database.ExecContext(finishContext, `UPDATE ignite_registrations SET email=?,confirmation_token=?,status='email_sent',expires_at=? WHERE attempt_hash=? AND status='sending'`, address, confirmation.Token, time.Now().UTC().Add(registrationConfirmationTTL).Format(time.RFC3339), igniteHash(attemptSecret))
+		result, updateErr := database.ExecContext(finishContext, `UPDATE ignite_registrations SET email=?,confirmation_token=?,confirmation_form_hash=?,status='email_sent',expires_at=? WHERE attempt_hash=? AND status='sending'`, address, confirmation.Token, igniteHash(confirmation.FormToken), time.Now().UTC().Add(registrationConfirmationTTL).Format(time.RFC3339), igniteHash(attemptSecret))
 		if updateErr != nil {
 			return updateErr
 		}
@@ -61443,7 +61459,7 @@ func (a *App) igniteSendCode(r *http.Request, attemptSecret string, pending igni
 		return nil, err
 	}
 	admissionCommitted = true
-	return map[string]any{"domain": pending.domain, "status": "email_sent", "confirmation_url": igniteEmailConfirmationURL(ownerDomain, confirmation.Token)}, nil
+	return map[string]any{"domain": pending.domain, "status": "email_sent", "confirmation_url": igniteEmailConfirmationURL(ownerDomain, confirmation.FormToken)}, nil
 }
 
 // Mail proof is durable before the domain claim and site-local account are created.
@@ -61472,7 +61488,7 @@ func (a *App) igniteComplete(r *http.Request, attemptHash string, pending ignite
 			return nil, errors.New("email code is invalid or expired")
 		}
 		err := a.withServerControlDatabaseWrite(r.Context(), "ignite-email-verified", func(database *sql.DB) error {
-			result, updateErr := database.ExecContext(r.Context(), `UPDATE ignite_registrations SET status='verified',expires_at=? WHERE attempt_hash=? AND confirmation_token=? AND status='email_sent' AND expires_at>?`, time.Now().UTC().Add(domainregistration.UnfinishedTTL).Format(time.RFC3339), attemptHash, confirmation.Token, time.Now().UTC().Format(time.RFC3339))
+			result, updateErr := database.ExecContext(r.Context(), `UPDATE ignite_registrations SET status='verified',confirmation_form_hash=?,expires_at=? WHERE attempt_hash=? AND confirmation_token=? AND status='email_sent' AND expires_at>?`, igniteHash(saved.FormToken), time.Now().UTC().Add(domainregistration.UnfinishedTTL).Format(time.RFC3339), attemptHash, confirmation.Token, time.Now().UTC().Format(time.RFC3339))
 			if updateErr != nil {
 				return updateErr
 			}
