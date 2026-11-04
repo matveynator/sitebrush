@@ -432,7 +432,9 @@ An older freeze without a checkpoint cannot restore a state it never recorded.
 
 POST import_site (site-wide write): JSON source_url, path and mode (page or site).
 Returns HTTP 202 with job_id. Imports use the normal bounded crawler and quota
-rules and save drafts. Existing pages with different content are not overwritten.
+rules and save drafts. The unchanged Ignite starter homepage at `/` may be
+replaced by the imported homepage. Other existing pages with different content
+are not overwritten.
 GET get_import_status&job_id=<id> (write): progress, result and failure/partial
 information for the current grant. POST cancel_import with JSON job_id cancels
 that job. Revocation or session expiry also cancels work; saved drafts remain.
