@@ -15028,7 +15028,9 @@ func (a *App) persistImportedPages(ctx context.Context, domain, ownerPath string
 				return err
 			}
 			exists := err == nil
-			if exists && draftOnly && existingHTML != page.HTML {
+			// A new Ignite site starts with a generated homepage so it can be visited
+			// before the owner imports an old site. Only that untouched page yields.
+			if exists && draftOnly && existingHTML != page.HTML && !(pagePath == "/" && existingHTML == igniteStarterPageHTML) {
 				return fmt.Errorf("%w: import destination already exists: %s", aieditor.ErrVersionConflict, pagePath)
 			}
 			if !exists || existingHTML != page.HTML {
@@ -61098,12 +61100,12 @@ func (a *App) invokeIgnite(r *http.Request, ownerDomain, operation string, argum
 	switch operation {
 	case "ignite_get_started":
 		return map[string]any{
-			"product": "SiteBrush creates and edits websites. It can start a new site or copy an existing design.",
+			"product": "SiteBrush helps create a new site, preserve a current site (including WordPress), or redesign one using a design reference. The assistant can edit pages and inspect available traffic analytics after the owner connects the site's personal MCP.",
 			"choices": []map[string]string{
-				{"id": "hosted", "title": "Create on this server", "domain_suffix": ownerDomain, "description": "Ignite checks a site name, asks the user to pass CAPTCHA and confirm an email code, then creates a public site with a starter page."},
-				{"id": "own_server", "title": "Install on your own server", "description": "Download the SiteBrush server application, install it on a server you control, then create the site there with step-by-step guidance.", "download_url": "https://github.com/matveynator/sitebrush#downloads", "install_guide_url": "https://github.com/matveynator/sitebrush#install-the-server-version"},
+				{"id": "hosted", "title": "Start on SiteBrush hosting", "domain_suffix": ownerDomain, "description": "Create a public site with an initial subdomain and add your own domain later. CAPTCHA and an emailed code confirm the owner.", "custom_domain_later": "Site Settings lets the owner verify and select a domain they already own."},
+				{"id": "own_server", "title": "Use your own server", "description": "Keep control of data, rules, and capacity on a server you manage. Native builds support Windows, macOS, Linux, FreeBSD, and OpenBSD on supported CPUs; use the OS-specific architecture-detecting installer.", "download_url": "https://github.com/matveynator/sitebrush#downloads", "install_guide_url": "https://github.com/matveynator/sitebrush#install-the-server-version"},
 			},
-			"next_question": "Would you like to create the site here, or do you have your own server for SiteBrush?",
+			"next_question": "Would you like a new site, a copy of your current site, or a redesign? You can send your old site's URL or an example design you like.",
 		}, nil
 	case "ignite_suggest_names":
 		base := safePublicTrialLabel(arguments.Name)
@@ -61622,14 +61624,15 @@ func (a *App) igniteCreateSite(ctx context.Context, domain, email string, allowE
 }
 
 // A newly registered site needs a public root before its personal editor is connected.
+const igniteStarterPageHTML = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Site ready</title><main><h1>Site ready</h1><p>Your website is ready to edit.</p></main></html>`
+
 func (a *App) ensureIgniteStarterPage(ctx context.Context, domain string) error {
 	if _, err := a.findPage(ctx, domain, "/"); err == nil {
 		return nil
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	html := `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Site ready</title><main><h1>Site ready</h1><p>Your website is ready to edit.</p></main></html>`
-	return a.persistImportedPages(ctx, domain, "/", []wholeSiteImportedPage{{LocalPath: "/", HTML: html}}, nil, false)
+	return a.persistImportedPages(ctx, domain, "/", []wholeSiteImportedPage{{LocalPath: "/", HTML: igniteStarterPageHTML}}, nil, false)
 }
 
 // Earlier Ignite registrations could complete without publishing any page.
@@ -61671,7 +61674,7 @@ func (a *App) repairCompletedIgniteSites(ctx context.Context) error {
 }
 
 func (a *App) igniteCreatedSite(domain string) map[string]any {
-	return map[string]any{"site_id": stableSiteID(domain), "domain": domain, "status": "created", "mcp_ready": a.accountHTTPSReady(domain), "mcp_endpoint": "https://" + domain + "/?mcp", "plugin_name": domain, "next_step": "When MCP is ready, invoke Plugin Creator in this conversation. Reuse the owner's existing private plugin for this site if present; otherwise create one with this exact streamable HTTP endpoint, OAuth, and the domain as its display name. Give the owner its installation and OAuth steps. Once connected, use the personal plugin to inspect the starter homepage, ask what the first page should contain, and make the requested edit. Explain how to select the domain plugin from ChatGPT's @ menu for later edits and publishing. If Plugin Creator is unavailable, give manual connection steps and a ready-to-send follow-up prompt."}
+	return map[string]any{"site_id": stableSiteID(domain), "domain": domain, "status": "created", "mcp_ready": a.accountHTTPSReady(domain), "mcp_endpoint": "https://" + domain + "/?mcp", "plugin_name": domain, "next_step": "When MCP is ready, add this exact endpoint directly through ChatGPT Plugins > Add custom MCP server with the domain as its name and OAuth. Reuse a matching connection if it exists. Install it and select Connect; the owner completes OAuth. Do not create a separate plugin package. Verify sitebrush_get_access, then continue the site goal already chosen; ask only if it is still unknown. For an old public site, use sitebrush_import_site and poll sitebrush_get_import_status, then review partial results. Offer to save a useful first page promptly and explain later editing and analytics in the owner's language."}
 }
 
 // The public agent exposes registration on sitebrush.com and forwards an

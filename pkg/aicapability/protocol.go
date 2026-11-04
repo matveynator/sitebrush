@@ -22,7 +22,7 @@ func Documentation() string {
 	return documentation
 }
 
-const GuideVersion = "2026-10-23"
+const GuideVersion = "2026-11-05"
 
 func GuideSections() []string {
 	return []string{"overview", "editing", "templates", "files", "publishing", "revisions", "analytics", "security", "imports"}

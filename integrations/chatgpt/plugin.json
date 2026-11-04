@@ -1,18 +1,19 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "sitebrush",
-  "version": "0.2.0",
-  "description": "Create and edit websites with SiteBrush. Choose hosting on sitebrush.com or get help installing SiteBrush on your own server.",
+  "version": "0.2.1",
+  "description": "Create a site, preserve an existing website, or redesign it with SiteBrush and an AI assistant.",
   "homepage": "https://sitebrush.com",
   "repository": "https://github.com/matveynator/sitebrush",
   "extensions": {
     "com.openai": {
       "interface": {
         "displayName": "SiteBrush",
-        "shortDescription": "Create a site here or on your own server",
+        "shortDescription": "Create, move, and improve your website",
         "defaultPrompt": [
-          "Help me choose between creating a site on sitebrush.com and installing SiteBrush on my own server.",
-          "Help me install SiteBrush and create a site on my own server."
+          "Help me create a beautiful website. Ask for my goal and save the first page on my new SiteBrush site.",
+          "Help me preserve my current WordPress website and redesign it without losing its public content.",
+          "Help me create my own site inspired by a design link I like."
         ]
       }
     }

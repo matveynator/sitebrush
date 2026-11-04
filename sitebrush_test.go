@@ -20019,7 +20019,7 @@ func TestIgniteCreatesOnlyConfirmedNewSite(t *testing.T) {
 		t.Fatal(err)
 	}
 	choices, ok := introduction["choices"].([]map[string]string)
-	if !ok || len(choices) != 2 || choices[0]["domain_suffix"] != ownerDomain || choices[1]["download_url"] != "https://github.com/matveynator/sitebrush#downloads" || application.hasAdmin(contextWithDomain(request.Context(), siteDomain), siteDomain) {
+	if !ok || len(choices) != 2 || choices[0]["domain_suffix"] != ownerDomain || choices[0]["custom_domain_later"] == "" || choices[1]["download_url"] != "https://github.com/matveynator/sitebrush#downloads" || application.hasAdmin(contextWithDomain(request.Context(), siteDomain), siteDomain) {
 		t.Fatal("Ignite introduction did not explain both creation paths", introduction)
 	}
 	begin, err := application.invokeIgnite(request, ownerDomain, "ignite_begin", ignite.Arguments{Name: "shop"})
@@ -20154,6 +20154,22 @@ func TestIgniteCreatesOnlyConfirmedNewSite(t *testing.T) {
 	}
 	if !application.publicCatalog.Lookup(publicsite.Lookup{Host: siteDomain, Path: "/"}).Found {
 		t.Fatal("created site has no published homepage")
+	}
+	importedHTML := `<!doctype html><html><title>Old site</title><main>Preserved content</main></html>`
+	siteContext := contextWithDomain(request.Context(), siteDomain)
+	if err := application.persistImportedPages(siteContext, siteDomain, "/", []wholeSiteImportedPage{{LocalPath: "/", HTML: importedHTML}}, nil, true); err != nil {
+		t.Fatalf("draft import could not replace the untouched Ignite starter page: %v", err)
+	}
+	importedPage, err := application.findPage(siteContext, siteDomain, "/")
+	if err != nil || importedPage.HTML != importedHTML {
+		t.Fatalf("draft import did not save the old homepage: page=%q err=%v", importedPage.HTML, err)
+	}
+	publishedPage, err := application.findPublishedPage(siteContext, siteDomain, "/")
+	if err != nil || publishedPage.HTML != igniteStarterPageHTML {
+		t.Fatalf("draft import changed the public homepage before publication: page=%q err=%v", publishedPage.HTML, err)
+	}
+	if err := application.persistImportedPages(siteContext, siteDomain, "/", []wholeSiteImportedPage{{LocalPath: "/", HTML: "changed again"}}, nil, true); !errors.Is(err, aieditor.ErrVersionConflict) {
+		t.Fatalf("draft import overwrote the owner's edited homepage: %v", err)
 	}
 	loginRequest := httptest.NewRequest(http.MethodGet, "https://"+siteDomain+"/?login", nil)
 	loginResponse := httptest.NewRecorder()
@@ -20333,7 +20349,7 @@ func TestIgniteBrowserCodeCreatesSite(t *testing.T) {
 	if err != nil || status["status"] != "complete" {
 		t.Fatal("Ignite did not report browser completion", status, err)
 	}
-	if status["mcp_endpoint"] != "https://"+siteDomain+"/?mcp" || status["plugin_name"] != siteDomain || status["next_step"] == "" {
+	if status["mcp_endpoint"] != "https://"+siteDomain+"/?mcp" || status["plugin_name"] != siteDomain || !strings.Contains(status["next_step"].(string), "Add custom MCP server") || strings.Contains(status["next_step"].(string), "Plugin Creator") {
 		t.Fatal("Ignite did not return the personal editor handoff after browser completion", status)
 	}
 }
