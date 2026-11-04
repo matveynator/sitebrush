@@ -20333,6 +20333,9 @@ func TestIgniteBrowserCodeCreatesSite(t *testing.T) {
 	if err != nil || status["status"] != "complete" {
 		t.Fatal("Ignite did not report browser completion", status, err)
 	}
+	if status["mcp_endpoint"] != "https://"+siteDomain+"/?mcp" || status["plugin_name"] != siteDomain || status["next_step"] == "" {
+		t.Fatal("Ignite did not return the personal editor handoff after browser completion", status)
+	}
 }
 
 func TestIgniteWrongCaptchaConsumesChallenge(t *testing.T) {

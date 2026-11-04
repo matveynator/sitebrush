@@ -61168,6 +61168,11 @@ func (a *App) invokeIgnite(r *http.Request, ownerDomain, operation string, argum
 		}
 		if operation == "ignite_status" {
 			result := map[string]any{"domain": pending.domain, "status": pending.status, "captcha_verified": pending.captchaVerified, "mcp_ready": pending.status == "complete" && a.accountHTTPSReady(pending.domain)}
+			if pending.status == "complete" {
+				result = a.igniteCreatedSite(pending.domain)
+				result["status"] = "complete"
+				result["captcha_verified"] = pending.captchaVerified
+			}
 			if pending.confirmationToken != "" && (pending.status == "email_sent" || pending.status == "verified") {
 				if confirmation, found := a.registrationConfirmationByToken(r.Context(), pending.confirmationToken); found && confirmation.Workflow == "ignite" && confirmation.FormToken != "" {
 					result["confirmation_url"] = igniteEmailConfirmationURL(ownerDomain, confirmation.FormToken)
@@ -61666,7 +61671,7 @@ func (a *App) repairCompletedIgniteSites(ctx context.Context) error {
 }
 
 func (a *App) igniteCreatedSite(domain string) map[string]any {
-	return map[string]any{"site_id": stableSiteID(domain), "domain": domain, "status": "created", "mcp_ready": a.accountHTTPSReady(domain), "mcp_endpoint": "https://" + domain + "/?mcp", "plugin_name": domain, "next_step": "When MCP is ready, use Plugin Creator if available to create the user's private plugin from this endpoint. The owner installs it and authorizes site editing through OAuth. If Plugin Creator is unavailable, guide the owner through adding this MCP server manually."}
+	return map[string]any{"site_id": stableSiteID(domain), "domain": domain, "status": "created", "mcp_ready": a.accountHTTPSReady(domain), "mcp_endpoint": "https://" + domain + "/?mcp", "plugin_name": domain, "next_step": "When MCP is ready, invoke Plugin Creator in this conversation. Reuse the owner's existing private plugin for this site if present; otherwise create one with this exact streamable HTTP endpoint, OAuth, and the domain as its display name. Give the owner its installation and OAuth steps. Once connected, use the personal plugin to inspect the starter homepage, ask what the first page should contain, and make the requested edit. Explain how to select the domain plugin from ChatGPT's @ menu for later edits and publishing. If Plugin Creator is unavailable, give manual connection steps and a ready-to-send follow-up prompt."}
 }
 
 // The public agent exposes registration on sitebrush.com and forwards an
