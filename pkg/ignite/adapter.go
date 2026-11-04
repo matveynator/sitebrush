@@ -23,6 +23,8 @@ const conversationGuide = "At the start of an Ignite conversation, explain in th
 	"Never repeat an email code in a reply or ask the user to resend it after a blocked tool call. " +
 	"If completion is blocked or times out, check ignite_status for the same attempt, offer its confirmation_url when available, and report the actual state before suggesting another action."
 
+const personalEditorGuide = " After creation, wait until ignite_status reports mcp_ready. Invoke Plugin Creator in this conversation when available: reuse an existing private plugin for the same site, or create one with the exact returned mcp_endpoint as a streamable HTTP server, OAuth, and the returned domain as its display name. Never embed credentials. Give the owner the plugin link and guide installation and OAuth consent. Once connected, discover the personal plugin's tools, verify its site with sitebrush_get_access, read the starter homepage, and ask what the first page should contain. Use that plugin to make the requested edit, then explain how the owner can select the domain plugin from ChatGPT's @ menu to request future page edits and publication. If Plugin Creator is unavailable, give manual connection steps and a ready-to-send prompt for continuing in a ChatGPT chat with Plugin Creator. Do not claim a plugin or page edit exists without tool confirmation."
+
 type Arguments struct {
 	Server  string `json:"server,omitempty" jsonschema:"SiteBrush server explicitly selected by the user; keep the same server throughout registration"`
 	Name    string `json:"name,omitempty" jsonschema:"Short third-level site name requested by the user"`
@@ -34,11 +36,11 @@ type Arguments struct {
 type Invoke func(context.Context, string, Arguments) (map[string]any, error)
 
 func NewHandler(version string, invoke Invoke) http.Handler {
-	return newHandler(version, "SiteBrush Ignite", conversationGuide+" Ask the user to confirm the selected name before ignite_begin. After creation, use Plugin Creator when available to create the user's private personal plugin from the returned MCP endpoint; then let the owner install it and authorize editing through OAuth. Ignite cannot edit sites.", invoke)
+	return newHandler(version, "SiteBrush Ignite", conversationGuide+" Ask the user to confirm the selected name before ignite_begin."+personalEditorGuide+" Ignite cannot edit sites.", invoke)
 }
 
 func NewGatewayHandler(version string, invoke Invoke) http.Handler {
-	return newHandler(version, "SiteBrush", conversationGuide+" Online creation uses sitebrush.com by default, or another SiteBrush server explicitly chosen by the user. Pass the same server on every registration call. Ask the user to confirm the selected name before ignite_begin. After creation, use Plugin Creator when available to create the user's private personal plugin from the returned MCP endpoint; then let the owner install it and authorize editing through OAuth. Editing belongs to that personal plugin.", invoke)
+	return newHandler(version, "SiteBrush", conversationGuide+" Online creation uses sitebrush.com by default, or another SiteBrush server explicitly chosen by the user. Pass the same server on every registration call. Ask the user to confirm the selected name before ignite_begin."+personalEditorGuide+" Editing belongs to that personal plugin.", invoke)
 }
 
 func newHandler(version, name, instructions string, invoke Invoke) http.Handler {
