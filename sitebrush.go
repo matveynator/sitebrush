@@ -58985,7 +58985,7 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 			http.NotFound(w, r)
 			return true
 		}
-		http.ServeContent(w, r, fileName, info.ModTime(), file)
+		serveContentWithDownloadObservation(w, r, fileName, info.ModTime(), info.Size(), file)
 		return true
 	}
 	if decision.Password.Path != "" {
@@ -59026,7 +59026,7 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 		if decision.ResourceType != "" {
 			w.Header().Set("Content-Type", decision.ResourceType)
 		}
-		http.ServeContent(w, r, pagePath, info.ModTime(), file)
+		serveContentWithDownloadObservation(w, r, pagePath, info.ModTime(), info.Size(), file)
 		return true
 	}
 	if a.servePublishedStaticFileFromDisk(w, r, domain, pagePath, !hideMenu) {
@@ -59060,7 +59060,7 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 				http.NotFound(w, r)
 				return true
 			}
-			http.ServeContent(w, r, decision.ChrootName, info.ModTime(), file)
+			serveContentWithDownloadObservation(w, r, decision.ChrootName, info.ModTime(), info.Size(), file)
 			return true
 		}
 		location := DomainChrootLocation{URLPath: decision.Chroot.Path, DirectoryPath: decision.Chroot.Directory}

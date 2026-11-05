@@ -153,6 +153,40 @@ func TestServerDownloadObservationRequiresCompleteTransfer(t *testing.T) {
 	}
 }
 
+func TestPublicUploadedDownloadProducesServerConfirmedMarker(t *testing.T) {
+	application, _ := newTestApplication(t)
+	domain := "example.org"
+	filePath := filepath.Join(application.domainFilesDirForDomain(domain), "release.zip")
+	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filePath, []byte("archive"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range []struct {
+		method      string
+		rangeHeader string
+		confirmed   bool
+	}{
+		{method: http.MethodGet, confirmed: true},
+		{method: http.MethodHead},
+		{method: http.MethodGet, rangeHeader: "bytes=0-2"},
+	} {
+		request := httptest.NewRequest(check.method, "https://"+domain+"/p/release.zip", nil)
+		request = withPublicRequestDecision(request, publicsite.Decision{Found: true, Domain: domain})
+		if check.rangeHeader != "" {
+			request.Header.Set("Range", check.rangeHeader)
+		}
+		response := httptest.NewRecorder()
+		if !application.servePublicPublished(response, request, false) {
+			t.Fatal("published file was not served")
+		}
+		if got := response.Header().Get("X-SiteBrush-Download-Complete") == "1"; got != check.confirmed {
+			t.Fatalf("method=%s range=%q confirmed=%t response=%d", check.method, check.rangeHeader, got, response.Code)
+		}
+	}
+}
+
 func TestRegistrationAnalyticsStorageFailureDoesNotAbortWorkflow(t *testing.T) {
 	application := newPartitionedTestApplication(t)
 	request := httptest.NewRequest(http.MethodPost, "https://example.org/?register", nil)
