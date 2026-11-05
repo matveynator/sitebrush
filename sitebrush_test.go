@@ -28138,7 +28138,7 @@ func TestMCPOAuthEmailLoginGoesStraightToConsent(t *testing.T) {
 	t.Fatal("email login did not establish a browser session")
 }
 
-func TestRegistrationPreservesOAuthReturnPath(t *testing.T) {
+func TestRegisterPreservesOAuthReturnPath(t *testing.T) {
 	application, _ := newTestApplication(t)
 	application.aiCapabilities = aicapability.NewManager()
 	t.Cleanup(application.aiCapabilities.Close)
