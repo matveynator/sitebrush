@@ -1710,7 +1710,7 @@
     const captchaImageElement = formElement.querySelector('[data-sitebrush-name-check-captcha-image]');
     const captchaIDElement = formElement.querySelector('[data-sitebrush-name-check-captcha-id]');
     const captchaConfirmElement = formElement.querySelector('[data-sitebrush-name-check-captcha-confirm]');
-    const formModel = {busy: false, status: '', captchaRequired: false, captchaImage: '', captchaID: ''};
+    const formModel = {busy: false, status: '', captchaRequired: false, captchaImage: '', captchaID: '', registrationAttempt: ''};
     function renderNewSiteState() {
       submitButton.disabled = formModel.busy;
       statusElement.textContent = formModel.status;
@@ -1727,6 +1727,7 @@
     }
     if (subdomainInputElement) subdomainInputElement.addEventListener('input', function normalizeNewSiteAddress() {
       subdomainInputElement.value = domainInput.normalize(subdomainInputElement.value);
+      formModel.registrationAttempt = '';
       renderNewSiteAddress();
     });
     renderNewSiteAddress();
@@ -1759,11 +1760,13 @@
       }
       subdomainInput.setCustomValidity('');
       const checkURL = new URL(publicTrialFetchURL(configuration.endpoint || '/', 'trial_site_domain_check'));
-      checkURL.searchParams.set('subdomain', subdomainName);
+      const checkBody = new FormData();
+      checkBody.set('subdomain', subdomainName);
+      if (formModel.registrationAttempt) checkBody.set('registration_attempt', formModel.registrationAttempt);
       formModel.busy = true;
       formModel.status = '';
       renderNewSiteState();
-      fetch(checkURL.toString(), {headers: {Accept: 'application/json'}})
+      fetch(checkURL.toString(), {method: 'POST', body: checkBody, headers: {Accept: 'application/json'}})
         .then(function readDomainCheck(response) {
           if (response.status === 429) {
             if (response.headers.get('X-SiteBrush-Captcha-Required') === '1') {
@@ -1778,6 +1781,7 @@
           return response.json();
         })
         .then(function continueNewSiteRegistration(check) {
+          formModel.registrationAttempt = check.registration_attempt || '';
           if (!check.available) throw new Error(publicTrialText(configuration, 'addressUnavailable', 'This address is unavailable. Choose another name.'));
           const registrationURL = new URL('/', configuration.endpoint);
           registrationURL.hostname = check.domain;
@@ -1786,7 +1790,21 @@
           registrationURL.pathname = '/';
           registrationURL.search = '?register&site_workflow=new_site';
           registrationURL.hash = '';
-          window.location.assign(registrationURL.toString());
+          if (!check.registration_attempt) {
+            window.location.assign(registrationURL.toString());
+            return;
+          }
+          const handoffForm = document.createElement('form');
+          handoffForm.method = 'POST';
+          handoffForm.action = registrationURL.toString();
+          handoffForm.referrerPolicy = 'no-referrer';
+          const attemptInput = document.createElement('input');
+          attemptInput.type = 'hidden';
+          attemptInput.name = 'registration_attempt';
+          attemptInput.value = check.registration_attempt;
+          handoffForm.appendChild(attemptInput);
+          document.body.appendChild(handoffForm);
+          handoffForm.submit();
         })
         .catch(function showDomainCheckError(error) {
           formModel.status = error.message;

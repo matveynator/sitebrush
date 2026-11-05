@@ -74,11 +74,16 @@ A legacy current-page grant cannot access or propagate to other pages.
 
 Read-only analytics, scope analytics:
 GET /?ai=get_site_report&days=30 (also get_analytics_summary, get_funnels,
+get_registrations,
 get_paths, get_page_behaviour, get_forms, get_sources, get_page_impacts,
 get_insights). days is 1, 7, 30 or 90; default 30. Optional path filters page
 behaviour/forms/impacts. limit=1..50 (default 20), offset=0..100000 page each
 section independently; totals and truncated indicate remaining aggregate rows.
 Reports include period boundaries, generated_at, availability and incomplete.
+get_registrations returns server-confirmed cohort and event-date outcome totals;
+period=month selects the current UTC month. A server owner receives aggregate
+installation counts; other grants receive only their site's counts. Site creation
+for Test Drive includes a private copy; completed registration requires activation.
 Unavailable is not measured zero. Distinguish visitors, sessions and page views.
 No visitor identities, addresses, raw sessions, replay or form contents are
 returned. Form/element/field identifiers are SHA-256 hashes, not field values.

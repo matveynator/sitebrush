@@ -9,7 +9,7 @@ import (
 const Protocol = "sitebrush-ai-editor/v1"
 
 func Operations() []string {
-	return []string{"list_pages", "read_page", "create_page", "update_page", "list_files", "upload_file", "list_revisions", "publish", "rollback", "get_site_report", "get_analytics_summary", "get_funnels", "get_paths", "get_page_behaviour", "get_forms", "get_sources", "get_page_impacts", "get_insights", "get_site_state", "get_page_settings", "delete_page", "delete_revision", "set_page_password", "remove_page_password", "freeze_site", "import_site", "get_import_status", "cancel_import", "set_revision_active", "get_security_summary", "get_file_settings", "set_file_access"}
+	return []string{"list_pages", "read_page", "create_page", "update_page", "list_files", "upload_file", "list_revisions", "publish", "rollback", "get_site_report", "get_analytics_summary", "get_funnels", "get_registrations", "get_paths", "get_page_behaviour", "get_forms", "get_sources", "get_page_impacts", "get_insights", "get_site_state", "get_page_settings", "delete_page", "delete_revision", "set_page_password", "remove_page_password", "freeze_site", "import_site", "get_import_status", "cancel_import", "set_revision_active", "get_security_summary", "get_file_settings", "set_file_access"}
 }
 
 // Documentation is public and provider-neutral. Secrets are exchanged only in

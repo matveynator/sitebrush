@@ -4140,6 +4140,7 @@ type statusCapturingResponseWriter struct {
 	http.ResponseWriter
 	statusCode   int
 	bytesWritten int64
+	writeFailed  bool
 }
 
 func (writer *statusCapturingResponseWriter) WriteHeader(statusCode int) {
@@ -4161,6 +4162,7 @@ func (writer *statusCapturingResponseWriter) Unwrap() http.ResponseWriter {
 func (writer *statusCapturingResponseWriter) Write(body []byte) (int, error) {
 	count, err := writer.ResponseWriter.Write(body)
 	writer.bytesWritten += int64(count)
+	writer.writeFailed = writer.writeFailed || err != nil
 	return count, err
 }
 func (writer *statusCapturingResponseWriter) ReadFrom(reader io.Reader) (int64, error) {
@@ -4172,6 +4174,7 @@ func (writer *statusCapturingResponseWriter) ReadFrom(reader io.Reader) (int64, 
 		count, err = io.Copy(writer.ResponseWriter, reader)
 	}
 	writer.bytesWritten += count
+	writer.writeFailed = writer.writeFailed || err != nil
 	return count, err
 }
 
@@ -8062,6 +8065,8 @@ func analyticsContentSourceLabel(contentSource string) string {
 		return "dynamic"
 	case "static":
 		return "static"
+	case "verified-download":
+		return "verified-download"
 	default:
 		return "other"
 	}
@@ -9015,7 +9020,16 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 			mailJournalLocations, _ = mailSnapshot["IPDetails"].(map[string]mailJournalIPView)
 		}
 	}
+	registrationReport, registrationReportErr := a.registrationAnalyticsReport(r.Context(), domain, browserDashboard.Days, false, a.isServerManagerRequest(r))
+	verifiedDownloads := 0
+	for _, source := range report.ContentSources {
+		if source.Label == "verified-download" {
+			verifiedDownloads = source.Count
+		}
+	}
 	a.render(w, r, "analytics.html", map[string]any{
+		"Registration": registrationReport, "RegistrationUnavailable": registrationReportErr != nil,
+		"VerifiedDownloads":  verifiedDownloads,
 		"MailJournalEnabled": mailJournalEnabled, "MailJournalLabelsJSON": mailJournalLabelsJSON(translationsForRequest(r)),
 		"MailJournalServers": mailJournalServers, "MailJournalUnavailable": mailJournalUnavailable, "MailJournalIPDetails": mailJournalLocations, "MailGeoIPAttribution": template.HTML(geoip.AttributionHTML),
 		"SecurityPeriod": browserDashboard.Days, "SecurityGlobalSyncStatus": a.securityGlobalSyncView(),
@@ -17554,6 +17568,9 @@ func (a *App) invokeMCPAIContent(r *http.Request, domain string, invocation site
 	requestURL := *request.URL
 	query := url.Values{"ai": []string{action}}
 	arguments := invocation.Arguments
+	if operation == "get_registrations" && arguments.Period == "month" {
+		query.Set("period", "month")
+	}
 	if arguments.FileName != "" {
 		query.Set("file_name", arguments.FileName)
 	}
@@ -18057,14 +18074,14 @@ func (a *App) issueAICapability(w http.ResponseWriter, r *http.Request) {
 
 func isAIAnalyticsOperation(operation string) bool {
 	switch operation {
-	case "get_site_report", "get_analytics_summary", "get_funnels", "get_paths", "get_page_behaviour", "get_forms", "get_sources", "get_page_impacts", "get_insights", "get_security_summary":
+	case "get_site_report", "get_analytics_summary", "get_funnels", "get_registrations", "get_paths", "get_page_behaviour", "get_forms", "get_sources", "get_page_impacts", "get_insights", "get_security_summary":
 		return true
 	default:
 		return false
 	}
 }
 
-func (a *App) aiAnalyticsEndpoint(w http.ResponseWriter, r *http.Request, domain, operation string) {
+func (a *App) aiAnalyticsEndpoint(w http.ResponseWriter, r *http.Request, domain, operation string, installationScope bool) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -18086,6 +18103,21 @@ func (a *App) aiAnalyticsEndpoint(w http.ResponseWriter, r *http.Request, domain
 	}
 	if days != 1 && days != 7 && days != 30 && days != 90 || limit < 1 || limit > 50 || offset < 0 || offset > 100000 {
 		http.Error(w, "invalid analytics period or pagination", http.StatusBadRequest)
+		return
+	}
+	if operation == "get_registrations" {
+		if period := query.Get("period"); period != "" && period != "month" {
+			http.Error(w, "invalid registration period", http.StatusBadRequest)
+			return
+		}
+		registration, err := a.registrationAnalyticsReport(r.Context(), domain, days, query.Get("period") == "month", installationScope)
+		if err != nil {
+			http.Error(w, "registration analytics temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_ = json.NewEncoder(w).Encode(registration)
 		return
 	}
 	if operation == "get_security_summary" {
@@ -18127,7 +18159,16 @@ func (a *App) aiAnalyticsEndpoint(w http.ResponseWriter, r *http.Request, domain
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	_ = json.NewEncoder(w).Encode(browserstats.AIReportView(report, domain, operation, pagePath, available, limit, offset))
+	view := browserstats.AIReportView(report, domain, operation, pagePath, available, limit, offset)
+	if operation == "get_site_report" || operation == "get_funnels" || operation == "get_analytics_summary" {
+		registration, registrationErr := a.registrationAnalyticsReport(r.Context(), domain, days, false, installationScope)
+		if registrationErr == nil {
+			view.Registration = &registration
+		} else {
+			view.Unavailable = append(view.Unavailable, "server_registration_analytics")
+		}
+	}
+	_ = json.NewEncoder(w).Encode(view)
 }
 
 // Session channels own capability work. Context exists only as the compatibility
@@ -18192,7 +18233,7 @@ func (a *App) serveAuthorizedAIContent(w http.ResponseWriter, r *http.Request, d
 			http.Error(w, "analytics scope is required", http.StatusForbidden)
 			return
 		}
-		a.aiAnalyticsEndpoint(w, r, domain, operation)
+		a.aiAnalyticsEndpoint(w, r, domain, operation, a.isServerManagerEmail(r.Context(), domain, session.Owner))
 		return
 	}
 	readOnlyRequest := r.Method == http.MethodGet && (operation == "pages" || operation == "page" || operation == "files" || operation == "revisions")
@@ -19126,10 +19167,16 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 	// Registration never accepts a password before the mail and TLS handoff.
 	password := ""
 	if email == "" {
+		// The parent-site form hands off its opaque attempt in a POST body.
+		if r.FormValue("site_workflow") == "new_site" && browserstats.RegistrationIDHash(r.FormValue("registration_attempt")) != "" {
+			a.renderSetupPage(w, r, domain, "", "")
+			return
+		}
 		w.WriteHeader(http.StatusBadRequest)
 		a.renderSetupPage(w, r, domain, email, translations["email_confirmation_status_invalid_email"])
 		return
 	}
+	a.ensureRegistrationAnalyticsRequest(r, domain, registrationAnalyticsWorkflow(r))
 	if localAccountRequest(r) {
 		password = r.FormValue("password")
 		parsed, err := stdmail.ParseAddress(email)
@@ -19140,8 +19187,15 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 		}
 		registrationLimit := a.registrationCreationQuota(r.Context())
 		registrationContext := contextWithSiteDatabaseCreation(contextWithDomain(r.Context(), domain))
+		if quotaErr := a.initializeRegistrationQuota(registrationContext, domain, registrationLimit); quotaErr != nil {
+			http.Error(w, "site quota initialization unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		registrationOutcome := a.mailAccountEvent(r, "registration", "registration_complete", domain, email, randomAccessToken())
 		registrationOutcome.Detail = "local account setup"
+		if attempt := a.beginRegistrationAnalytics(r, domain, "local", r.FormValue("registration_attempt")); attempt != "" {
+			a.linkRegistrationAnalytics(r.Context(), attempt, registrationOutcome.FlowID)
+		}
 		var count int64
 		err = a.accountTransaction(registrationContext, func(transaction *sql.Tx) error {
 			result, err := transaction.ExecContext(registrationContext, `INSERT INTO users(domain,email,password,is_admin) SELECT ?,?,?,1 WHERE NOT EXISTS (SELECT 1 FROM users WHERE domain=? AND is_admin=1)`, domain, email, password, domain)
@@ -19165,9 +19219,8 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "administrator already exists", http.StatusConflict)
 			return
 		}
-		if quotaErr := a.initializeRegistrationQuota(registrationContext, domain, registrationLimit); quotaErr != nil {
-			http.Error(w, "site quota initialization unavailable", http.StatusServiceUnavailable)
-			return
+		for _, stage := range []string{"user_created", "site_created", "registration_completed"} {
+			a.recordRegistrationAnalyticsForSource(r.Context(), registrationOutcome.FlowID, stage, "")
 		}
 		a.promoteFirstServerOwner(registrationContext, domain, email)
 		if a.createSessionForDomain(w, r, registrationContext, domain, email) == "" {
@@ -19188,8 +19241,10 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !a.authorizeAccountMailForm(w, r, "register") {
+		a.recordRegistrationAnalytics(r.Context(), browserstats.RegistrationIDHash(r.FormValue("registration_attempt")), "registration_failed", "captcha")
 		return
 	}
+	a.recordRegistrationAnalytics(r.Context(), browserstats.RegistrationIDHash(r.FormValue("registration_attempt")), "captcha_completed", "")
 	newSiteAdmission := r.FormValue("site_workflow") == "new_site"
 	if newSiteAdmission {
 		allowed, retryAfter, admissionErr := a.reservePublicTrialIPAdmission(r.Context(), accountClientIP(r), "create", domain, 2)
@@ -19384,10 +19439,29 @@ func (a *App) confirmRegistrationCode(w http.ResponseWriter, r *http.Request) {
 	code := strings.TrimSpace(r.FormValue("registration_code"))
 	confirmation, valid := a.registrationConfirmationForCode(r.Context(), domain, formToken, code)
 	if !valid {
+		if confirmation.Token == "" && formToken != "" && a.controlDatabase != nil {
+			_ = a.withServerControlDatabaseRead(r.Context(), "registration-expired-code-analytics", func(database *sql.DB) error {
+				var token, expiresAt string
+				if err := database.QueryRowContext(r.Context(), `SELECT token,expires_at FROM registration_confirmations WHERE form_token=? AND domain=? AND action='register'`, formToken, domain).Scan(&token, &expiresAt); err != nil {
+					return err
+				}
+				if confirmationExpired(expiresAt, time.Now().UTC()) {
+					confirmation.Token, confirmation.ExpiresAt = token, expiresAt
+				}
+				return nil
+			})
+		}
 		if confirmation.Token != "" && confirmation.Attempts >= 5 {
 			if err := a.finishRegistrationAttempt(mailMonitorFlowID(confirmation.Token), "rejected"); err != nil {
 				log.Printf("MAIL registration rejection accounting failed error_type=%T", err)
 			}
+		}
+		if confirmation.Token != "" {
+			stage := "email_code"
+			if confirmationExpired(confirmation.ExpiresAt, time.Now().UTC()) {
+				stage = "email_expired"
+			}
+			a.recordRegistrationAnalyticsForSource(r.Context(), mailMonitorFlowID(confirmation.Token), "registration_failed", stage)
 		}
 		w.WriteHeader(http.StatusUnauthorized)
 		if confirmation.FormToken != "" && confirmation.Attempts < 5 {
@@ -19672,6 +19746,300 @@ func (a *App) renderSetupPage(w http.ResponseWriter, r *http.Request, domain, em
 	a.renderRegistrationView(w, r, map[string]any{"Domain": domain, "Email": strings.TrimSpace(email), "Status": strings.TrimSpace(status), "ReturnPath": requestedReturnPath(r), "LocalAccount": localAccountRequest(r)})
 }
 
+func registrationAnalyticsWorkflow(r *http.Request) string {
+	switch {
+	case r.FormValue("site_workflow") == "ignite":
+		return "ignite"
+	case hasQueryFlag(r, "site_request"):
+		return "approval"
+	case localAccountRequest(r):
+		return "local"
+	case hasQueryFlag(r, "trial_embed"), r.FormValue("site_workflow") == "trial_paid":
+		return "test_drive"
+	default:
+		return "public"
+	}
+}
+
+// The handoff ID only correlates server evidence. It cannot verify an email,
+// reserve a domain, or authorize an account mutation.
+func (a *App) beginRegistrationAnalytics(r *http.Request, domain, workflow, rawID string) string {
+	if a.controlDatabase == nil {
+		return ""
+	}
+	now := time.Now().UTC()
+	scope := browserstats.RegistrationScope(domain)
+	if id := browserstats.RegistrationIDHash(rawID); id != "" {
+		valid := false
+		_ = a.withServerControlDatabaseRead(r.Context(), "registration-analytics-attempt", func(database *sql.DB) error {
+			valid = browserstats.RegistrationAttemptValid(r.Context(), database, id, scope, workflow, now)
+			return nil
+		})
+		if valid {
+			return rawID
+		}
+	}
+	rawID, err := browserstats.NewRegistrationID()
+	if err != nil {
+		return ""
+	}
+	id := browserstats.RegistrationIDHash(rawID)
+	err = a.withServerControlDatabaseWrite(r.Context(), "registration-analytics-start", func(database *sql.DB) error {
+		return browserstats.StartRegistration(r.Context(), database, id, scope, workflow, "", now, now.Add(domainregistration.UnfinishedTTL))
+	})
+	if err != nil {
+		return ""
+	}
+	return rawID
+}
+
+func (a *App) ensureRegistrationAnalyticsRequest(r *http.Request, domain, workflow string) string {
+	attempt := a.beginRegistrationAnalytics(r, domain, workflow, r.FormValue("registration_attempt"))
+	if attempt != "" {
+		_ = r.ParseForm()
+		r.Form.Set("registration_attempt", attempt)
+		if r.PostForm != nil {
+			r.PostForm.Set("registration_attempt", attempt)
+		}
+	}
+	return attempt
+}
+
+func (a *App) recordRegistrationAnalytics(ctx context.Context, id, stage, detail string) {
+	if a.controlDatabase == nil || id == "" {
+		return
+	}
+	_ = a.withServerControlDatabaseWrite(ctx, "registration-analytics-event", func(database *sql.DB) error {
+		return browserstats.RecordRegistration(ctx, database, id, stage, detail, time.Now().UTC())
+	})
+}
+
+func (a *App) linkRegistrationAnalytics(ctx context.Context, rawID, sourceRef string) {
+	if a.controlDatabase == nil || rawID == "" || sourceRef == "" {
+		return
+	}
+	id := browserstats.RegistrationIDHash(rawID)
+	_ = a.withServerControlDatabaseWrite(ctx, "registration-analytics-link", func(database *sql.DB) error {
+		return browserstats.LinkRegistrationSource(ctx, database, id, sourceRef)
+	})
+}
+
+func (a *App) linkRegistrationAnalyticsID(ctx context.Context, id, sourceRef string) {
+	if a.controlDatabase == nil || id == "" || sourceRef == "" {
+		return
+	}
+	_ = a.withServerControlDatabaseWrite(ctx, "registration-analytics-link", func(database *sql.DB) error {
+		return browserstats.LinkRegistrationSource(ctx, database, id, sourceRef)
+	})
+}
+
+func (a *App) registrationAnalyticsIDForSource(ctx context.Context, sourceRef string) string {
+	if a.controlDatabase == nil || sourceRef == "" {
+		return ""
+	}
+	var id string
+	_ = a.withServerControlDatabaseRead(ctx, "registration-analytics-source", func(database *sql.DB) error {
+		var err error
+		id, err = browserstats.RegistrationIDForSource(ctx, database, sourceRef)
+		return err
+	})
+	return id
+}
+
+func (a *App) recordRegistrationAnalyticsForSource(ctx context.Context, sourceRef, stage, detail string) {
+	a.recordRegistrationAnalytics(ctx, a.registrationAnalyticsIDForSource(ctx, sourceRef), stage, detail)
+}
+
+func (a *App) registrationAnalyticsReport(ctx context.Context, domain string, days int, month, allSites bool) (browserstats.RegistrationReport, error) {
+	if a.controlDatabase == nil {
+		return browserstats.RegistrationReport{}, errors.New("registration analytics unavailable")
+	}
+	if err := a.reconcileRegistrationAnalytics(ctx); err != nil {
+		return browserstats.RegistrationReport{}, err
+	}
+	now := time.Now().UTC()
+	start := now.AddDate(0, 0, -days)
+	if month {
+		start = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	}
+	var report browserstats.RegistrationReport
+	err := a.withServerControlDatabaseRead(ctx, "registration-analytics-report", func(database *sql.DB) error {
+		var readErr error
+		report, readErr = browserstats.RegistrationReportForPeriod(ctx, database, browserstats.RegistrationScope(domain), allSites, start, now, now)
+		return readErr
+	})
+	if month {
+		report.Days = 0
+	}
+	return report, err
+}
+
+// Durable workflow rows repair analytics after a process restart or a failed
+// best-effort write. Event timestamps come from the workflow's committed state.
+func (a *App) reconcileRegistrationAnalytics(ctx context.Context) error {
+	return a.withServerControlDatabaseWrite(ctx, "registration-analytics-reconcile", func(database *sql.DB) error {
+		type outcome struct {
+			id, sourceRef, domain, startedAt, siteAt, completedAt, failedAt, workflow string
+		}
+		cutoff := time.Now().UTC().Add(-browserstats.RegistrationRetention).Format(time.RFC3339)
+		outcomes := []outcome{}
+		trialRows, err := database.QueryContext(ctx, `SELECT id,analytics_attempt_id,domain,created_at,COALESCE(analytics_activated_at,'') FROM public_trial_sites WHERE analytics_attempt_id<>'' AND created_at>=?`, cutoff)
+		if err != nil {
+			return err
+		}
+		for trialRows.Next() {
+			var result outcome
+			var trialID int
+			if err = trialRows.Scan(&trialID, &result.id, &result.domain, &result.siteAt, &result.completedAt); err != nil {
+				break
+			}
+			result.startedAt = result.siteAt
+			result.sourceRef = fmt.Sprintf("test-drive-%d", trialID)
+			result.workflow = "test_drive"
+			outcomes = append(outcomes, result)
+		}
+		if err == nil {
+			err = trialRows.Err()
+		}
+		trialRows.Close()
+		if err != nil {
+			return err
+		}
+		igniteRows, err := database.QueryContext(ctx, `SELECT attempt_hash,domain,created_at,COALESCE(analytics_site_created_at,''),COALESCE(analytics_completed_at,'') FROM ignite_registrations WHERE created_at>=?`, cutoff)
+		if err != nil {
+			return err
+		}
+		for igniteRows.Next() {
+			var result outcome
+			if err = igniteRows.Scan(&result.sourceRef, &result.domain, &result.startedAt, &result.siteAt, &result.completedAt); err != nil {
+				break
+			}
+			result.workflow = "ignite"
+			outcomes = append(outcomes, result)
+		}
+		if err == nil {
+			err = igniteRows.Err()
+		}
+		igniteRows.Close()
+		if err != nil {
+			return err
+		}
+		approvalRows, err := database.QueryContext(ctx, `SELECT id,status,updated_at FROM site_registration_requests WHERE created_at>=? AND status IN ('approved','rejected')`, cutoff)
+		if err != nil {
+			return err
+		}
+		for approvalRows.Next() {
+			var requestID int
+			var status, updatedAt string
+			if err = approvalRows.Scan(&requestID, &status, &updatedAt); err != nil {
+				break
+			}
+			result := outcome{sourceRef: mailMonitorFlowID("site-request:" + strconv.Itoa(requestID)), workflow: "approval"}
+			if status == "approved" {
+				result.siteAt, result.completedAt = updatedAt, updatedAt
+			} else {
+				result.failedAt = updatedAt
+			}
+			outcomes = append(outcomes, result)
+		}
+		if err == nil {
+			err = approvalRows.Err()
+		}
+		approvalRows.Close()
+		if err != nil {
+			return err
+		}
+		type acceptedMail struct {
+			metadata, sentAt string
+		}
+		accepted := []acceptedMail{}
+		mailRows, err := database.QueryContext(ctx, `SELECT metadata.metadata,outbox.sent_at FROM mail_outbox outbox JOIN mail_outbox_metadata metadata ON metadata.message_id=outbox.message_id WHERE outbox.kind='email_confirm' AND outbox.status='sent' AND outbox.sent_at>=?`, cutoff)
+		if err != nil {
+			return err
+		}
+		for mailRows.Next() {
+			var result acceptedMail
+			if err = mailRows.Scan(&result.metadata, &result.sentAt); err != nil {
+				break
+			}
+			accepted = append(accepted, result)
+		}
+		if err == nil {
+			err = mailRows.Err()
+		}
+		mailRows.Close()
+		if err != nil {
+			return err
+		}
+		for _, result := range outcomes {
+			if result.id != "" && result.workflow == "test_drive" {
+				if startedAt, parseErr := time.Parse(time.RFC3339Nano, result.startedAt); parseErr == nil {
+					if err := browserstats.StartRegistration(ctx, database, result.id, browserstats.RegistrationScope(result.domain), result.workflow, result.sourceRef, startedAt, startedAt.Add(24*time.Hour)); err != nil {
+						return err
+					}
+				}
+			}
+			if result.id == "" && result.sourceRef != "" {
+				result.id, err = browserstats.RegistrationIDForSource(ctx, database, result.sourceRef)
+				if errors.Is(err, sql.ErrNoRows) {
+					if result.workflow != "ignite" || result.siteAt == "" && result.completedAt == "" {
+						continue
+					}
+					if startedAt, parseErr := time.Parse(time.RFC3339Nano, result.startedAt); parseErr == nil {
+						result.id, err = browserstats.RecoverRegistrationForSource(ctx, database, result.domain, result.workflow, result.sourceRef, startedAt)
+					}
+				}
+				if err != nil {
+					return err
+				}
+			}
+			if createdAt, parseErr := time.Parse(time.RFC3339Nano, result.siteAt); parseErr == nil {
+				if err := browserstats.RecordRegistration(ctx, database, result.id, "site_created", "", createdAt); err != nil {
+					return err
+				}
+			}
+			if completedAt, parseErr := time.Parse(time.RFC3339Nano, result.completedAt); parseErr == nil {
+				stages := []string{"email_confirmed", "user_created", "public_site_created", "registration_completed"}
+				if result.workflow == "approval" {
+					stages = []string{"user_created", "public_site_created", "registration_completed"}
+					if err := browserstats.RecordRegistration(ctx, database, result.id, "domain_check_completed", "available", completedAt); err != nil {
+						return err
+					}
+				}
+				for _, stage := range stages {
+					if err := browserstats.RecordRegistration(ctx, database, result.id, stage, "", completedAt); err != nil {
+						return err
+					}
+				}
+			}
+			if rejectedAt, parseErr := time.Parse(time.RFC3339Nano, result.failedAt); parseErr == nil {
+				if err := browserstats.RecordRegistration(ctx, database, result.id, "registration_failed", "rejected", rejectedAt); err != nil {
+					return err
+				}
+			}
+		}
+		for _, result := range accepted {
+			var metadata mailout.Metadata
+			if json.Unmarshal([]byte(result.metadata), &metadata) != nil || metadata.FlowID == "" {
+				continue
+			}
+			id, lookupErr := browserstats.RegistrationIDForSource(ctx, database, metadata.FlowID)
+			if errors.Is(lookupErr, sql.ErrNoRows) {
+				continue
+			}
+			if lookupErr != nil {
+				return lookupErr
+			}
+			if sentAt, parseErr := time.Parse(time.RFC3339Nano, result.sentAt); parseErr == nil {
+				if err := browserstats.RecordRegistration(ctx, database, id, "email_confirmation_sent", "", sentAt); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+}
+
 func (a *App) renderSetupConfirmationPage(w http.ResponseWriter, r *http.Request, domain, recipient string, pending ...EmailConfirmation) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
@@ -19761,9 +20129,12 @@ func (a *App) siteRequestPage(w http.ResponseWriter, r *http.Request) {
 		a.renderSiteRequestPage(w, r, domain, "", "", "", "", 0)
 		return
 	}
+	a.ensureRegistrationAnalyticsRequest(r, domain, "approval")
 	if !a.authorizeAccountMailForm(w, r, "site_request") {
+		a.recordRegistrationAnalytics(r.Context(), browserstats.RegistrationIDHash(r.FormValue("registration_attempt")), "registration_failed", "captcha")
 		return
 	}
+	a.recordRegistrationAnalytics(r.Context(), browserstats.RegistrationIDHash(r.FormValue("registration_attempt")), "captcha_completed", "")
 	name := strings.TrimSpace(r.FormValue("name"))
 	email := strings.TrimSpace(r.FormValue("email"))
 	phone := strings.TrimSpace(r.FormValue("phone"))
@@ -19834,6 +20205,9 @@ func (a *App) createSiteRegistrationRequestFromForm(r *http.Request, domain, nam
 	})
 	if err != nil {
 		return err.Error()
+	}
+	if attempt := a.beginRegistrationAnalytics(r, domain, "approval", r.FormValue("registration_attempt")); attempt != "" {
+		a.linkRegistrationAnalytics(r.Context(), attempt, mailMonitorFlowID("site-request:"+strconv.Itoa(requestID)))
 	}
 	a.logHostingSupportEvent(r.Context(), "support_request", "created", email, domain, "site registration request")
 	a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{FlowID: mailMonitorFlowID("site-request:" + strconv.Itoa(requestID)), Kind: "registration", Stage: "registration_requested", Domain: domain, Recipient: email, ClientIP: accountClientIP(r), Detail: "awaiting server administrator approval"})
@@ -23352,14 +23726,14 @@ func (a *App) publicTrialSiteSuggest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) publicTrialSiteDomainCheck(w http.ResponseWriter, r *http.Request) {
-	if !a.publicTrialAllowed(r) || r.Method != http.MethodGet {
+	if !a.publicTrialAllowed(r) || r.Method != http.MethodGet && r.Method != http.MethodPost {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 	if !a.admitTestDriveNameCheck(w, r) {
 		return
 	}
-	label := r.URL.Query().Get("subdomain")
+	label := r.FormValue("subdomain")
 	if !testDriveLabelValid(label) {
 		testDriveHTTPError(w, r, "public_trial_address_invalid", http.StatusBadRequest)
 		return
@@ -23378,7 +23752,18 @@ func (a *App) publicTrialSiteDomainCheck(w http.ResponseWriter, r *http.Request)
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"domain": domain, "available": available})
+	attempt := a.beginRegistrationAnalytics(r, domain, "public", r.FormValue("registration_attempt"))
+	if attempt != "" {
+		detail := "unavailable"
+		if available {
+			detail = "available"
+		}
+		a.recordRegistrationAnalytics(r.Context(), browserstats.RegistrationIDHash(attempt), "domain_check_completed", detail)
+		if !available {
+			a.recordRegistrationAnalytics(r.Context(), browserstats.RegistrationIDHash(attempt), "registration_failed", "domain_unavailable")
+		}
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"domain": domain, "available": available, "registration_attempt": attempt})
 }
 
 func (a *App) testDriveDomain(ctx context.Context, label string) (string, error) {
@@ -30017,7 +30402,7 @@ func createSiteSignupEmbedHTML(r *http.Request, translations map[string]string, 
 	}
 	newSiteTitle := template.HTMLEscapeString(translationOrDefault(translations, "public_trial_new_site_title", "Create an empty site"))
 	newSiteLabel := template.HTMLEscapeString(translationOrDefault(translations, "public_trial_subdomain_label", "Choose your SiteBrush address"))
-	return `<form class="SiteBrushPublicTrialForm SiteBrush-CreateSite-Form sitebrush-public-trial-form" data-sitebrush-new-site-form>
+	return `<form class="SiteBrushPublicTrialForm SiteBrush-CreateSite-Form sitebrush-public-trial-form" data-sitebrush-new-site-form data-analytics-key="sitebrush-create-site">
   <p class="SiteBrushPublicTrialTitle sitebrush-public-trial-title" data-sitebrush-new-site-title>` + newSiteTitle + `</p>
   <label class="SiteBrushPublicTrialField sitebrush-public-trial-field">
     <span class="SiteBrushPublicTrialLabel sitebrush-public-trial-label" data-sitebrush-new-site-label>` + newSiteLabel + `</span>
@@ -30030,7 +30415,7 @@ func createSiteSignupEmbedHTML(r *http.Request, translations map[string]string, 
     <input type="hidden" name="captcha_id" data-sitebrush-name-check-captcha-id>
     <button type="button" data-sitebrush-name-check-captcha-confirm>` + template.HTMLEscapeString(translationOrDefault(translations, "test_drive_confirm_captcha", "Confirm CAPTCHA")) + `</button>
   </div>
-  <button class="SiteBrushPublicTrialButton sitebrush-public-trial-button" type="submit" data-sitebrush-new-site-button>` + newSiteTitle + `</button>
+	  <button class="SiteBrushPublicTrialButton sitebrush-public-trial-button" type="submit" data-sitebrush-new-site-button data-analytics-key="sitebrush-create-site-submit">` + newSiteTitle + `</button>
 </form>
 <script src="` + template.HTMLEscapeString(domainInputURL) + `" data-sitebrush-live-asset></script>
 <script src="` + template.HTMLEscapeString(scriptURL) + `" data-sitebrush-live-asset></script>
@@ -30487,8 +30872,13 @@ func (a *App) createManagedSiteFromForm(r *http.Request) string {
 	if _, err := stdmail.ParseAddress(email); err != nil {
 		return translationOrDefault(translations, "billing_status_admin_email_invalid", "Administrator email is invalid.")
 	}
+	attemptID := browserstats.RegistrationIDHash(a.beginRegistrationAnalytics(r, domain, "admin_created", ""))
 	if err := a.createManagedSite(r.Context(), domain, email, password, quotaBytes); err != nil {
+		a.recordRegistrationAnalytics(r.Context(), attemptID, "registration_failed", "site_provision")
 		return err.Error()
+	}
+	for _, stage := range []string{"user_created", "site_created", "registration_completed"} {
+		a.recordRegistrationAnalytics(r.Context(), attemptID, stage, "")
 	}
 	return fmt.Sprintf(translationOrDefault(translations, "billing_status_site_created", "Site %s was created."), domain)
 }
@@ -30601,6 +30991,7 @@ func (a *App) approveSiteRegistrationRequestFromForm(r *http.Request) string {
 	if err := a.createManagedSite(r.Context(), siteRequest.Domain, siteRequest.Email, temporaryPassword, hostingandsupport.CreationQuota(a.creationSizeLimits(r.Context()).Registration, plan.QuotaBytes)); err != nil {
 		return err.Error()
 	}
+	a.recordRegistrationAnalyticsForSource(r.Context(), mailMonitorFlowID("site-request:"+strconv.Itoa(siteRequest.ID)), "site_created", "")
 	serviceStatus := "paid"
 	if planIsFree(plan) {
 		serviceStatus = "free"
@@ -30617,6 +31008,14 @@ func (a *App) approveSiteRegistrationRequestFromForm(r *http.Request) string {
 		return store.UpdateSiteRequestStatus(r.Context(), requestID, "approved", ownerMessage)
 	}); err != nil {
 		return err.Error()
+	}
+	approvalSource := mailMonitorFlowID("site-request:" + strconv.Itoa(siteRequest.ID))
+	for _, stage := range []string{"domain_check_completed", "user_created", "site_created", "public_site_created", "registration_completed"} {
+		detail := ""
+		if stage == "domain_check_completed" {
+			detail = "available"
+		}
+		a.recordRegistrationAnalyticsForSource(r.Context(), approvalSource, stage, detail)
 	}
 	a.logHostingSupportEvent(r.Context(), "support_request", "approved", siteRequest.Email, siteRequest.Domain, "site registration request approved")
 	a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{FlowID: mailMonitorFlowID("site-request:" + strconv.Itoa(siteRequest.ID)), Kind: "registration", Stage: "registration_complete", Domain: siteRequest.Domain, Recipient: siteRequest.Email, Detail: "approved by server administrator"})
@@ -30652,6 +31051,7 @@ func (a *App) rejectSiteRegistrationRequestFromForm(r *http.Request) string {
 	if err != nil {
 		return err.Error()
 	}
+	a.recordRegistrationAnalyticsForSource(r.Context(), mailMonitorFlowID("site-request:"+strconv.Itoa(siteRequest.ID)), "registration_failed", "rejected")
 	a.logHostingSupportEvent(r.Context(), "support_request", "rejected", siteRequest.Email, siteRequest.Domain, "site registration request rejected")
 	a.recordMailMonitorEvent(r.Context(), mailmonitor.Event{FlowID: mailMonitorFlowID("site-request:" + strconv.Itoa(siteRequest.ID)), Kind: "registration", Stage: "registration_rejected", Domain: siteRequest.Domain, Recipient: siteRequest.Email})
 	if err := a.enqueueSiteRegistrationDecisionEmail(r.Context(), r, siteRequest, plan, "rejected", ownerMessage, ""); err != nil {
@@ -30830,9 +31230,17 @@ func (a *App) deleteManagedSite(ctx context.Context, domain string) error {
 func (a *App) startDemoSiteCleanupWorker(ctx context.Context) {
 	go func() {
 		a.resumeInterruptedPaidTrials(ctx)
+		lastRegistrationCleanup := time.Time{}
 		runCleanup := func(now time.Time) {
 			a.cleanupExpiredDemoSites(ctx, now)
 			a.cleanupExpiredPublicTrialSites(ctx, now)
+			if a.controlDatabase != nil && now.Sub(lastRegistrationCleanup) >= 24*time.Hour {
+				if err := a.withServerControlDatabaseWrite(ctx, "registration-analytics-cleanup", func(database *sql.DB) error {
+					return browserstats.CleanupRegistration(ctx, database, now.Add(-browserstats.RegistrationRetention))
+				}); err == nil {
+					lastRegistrationCleanup = now
+				}
+			}
 		}
 		runCleanup(time.Now())
 		ticker := time.NewTicker(time.Minute)
@@ -33721,6 +34129,11 @@ func (a *App) createAndSendEmailConfirmationForLanguage(r *http.Request, action,
 		if err := a.saveRegistrationConfirmation(databaseContext, confirmation); err != nil {
 			return err
 		}
+		if confirmation.Workflow != "ignite" {
+			if attempt := a.beginRegistrationAnalytics(r, domain, registrationAnalyticsWorkflow(r), r.FormValue("registration_attempt")); attempt != "" {
+				a.linkRegistrationAnalytics(databaseContext, attempt, mailMonitorFlowID(token))
+			}
+		}
 		if err := a.enqueueServiceEmailContent(databaseContext, r, "email_confirm", domain, email, confirmationURL, "", languageCode, confirmation.Code, mailMonitorFlowID(token)); err != nil {
 			a.deleteRegistrationConfirmation(databaseContext, token)
 			return err
@@ -33758,11 +34171,28 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 	}
 	confirmation, found := a.emailConfirmationByToken(r.Context(), token)
 	if !found {
+		if a.controlDatabase != nil {
+			expiredRegistration := false
+			_ = a.withServerControlDatabaseRead(r.Context(), "registration-expired-link-analytics", func(database *sql.DB) error {
+				var expiresAt string
+				if err := database.QueryRowContext(r.Context(), `SELECT expires_at FROM registration_confirmations WHERE token=? AND action='register'`, token).Scan(&expiresAt); err != nil {
+					return err
+				}
+				expiredRegistration = confirmationExpired(expiresAt, time.Now().UTC())
+				return nil
+			})
+			if expiredRegistration {
+				a.recordRegistrationAnalyticsForSource(r.Context(), mailMonitorFlowID(token), "registration_failed", "email_expired")
+			}
+		}
 		a.renderEmailConfirmationStatus(w, r, http.StatusNotFound, translationOrDefault(translations, "email_confirmation_status_invalid", "Confirmation link is invalid."))
 		return
 	}
 	confirmationTranslations := translationsForLanguageCode(confirmation.LanguageCode)
 	if confirmationExpired(confirmation.ExpiresAt, time.Now().UTC()) {
+		if confirmation.Action == "register" {
+			a.recordRegistrationAnalyticsForSource(r.Context(), mailMonitorFlowID(token), "registration_failed", "email_expired")
+		}
 		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, token)
 		a.renderEmailConfirmationStatus(w, r, http.StatusGone, translationOrDefault(confirmationTranslations, "email_confirmation_status_expired", "Confirmation link has expired."))
 		return
@@ -33820,6 +34250,7 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 		if confirmation.Password == "" {
 			confirmation.Password = randomAccessToken() + randomAccessToken()
 		}
+		a.recordRegistrationAnalyticsForSource(r.Context(), mailMonitorFlowID(token), "email_confirmed", "")
 		confirmationContext := contextWithDomain(r.Context(), confirmation.Domain)
 		if a.reservedServerSubdomain(confirmationContext, confirmation.Domain) {
 			a.renderEmailConfirmationStatus(w, r, http.StatusConflict, confirmationTranslations["public_trial_address_unavailable"])
@@ -33862,6 +34293,7 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 		}
 
 		registrationOutcome := a.mailAccountEvent(r, "registration", "registration_complete", confirmation.Domain, confirmation.Email, token)
+		registrationOutcome.Detail = confirmation.Workflow
 		err := a.accountTransaction(registerContext, func(transaction *sql.Tx) error {
 			result, insertErr := transaction.ExecContext(registerContext, `INSERT INTO users(domain,email,password,is_admin) SELECT ?,?,?,1 WHERE NOT EXISTS(SELECT 1 FROM users WHERE domain=? AND is_admin=1)`, confirmation.Domain, confirmation.Email, confirmation.Password, confirmation.Domain)
 			if insertErr != nil {
@@ -34665,6 +35097,11 @@ func (a *App) runDurableMailProcess(stop <-chan struct{}, tasks <-chan mailout.T
 					if err := mailout.MarkSent(context.Background(), database, completion.record.ID, attempts, now); err != nil {
 						return err
 					}
+					if completion.record.Task.Kind == "email_confirm" {
+						if id, lookupErr := browserstats.RegistrationIDForSource(context.Background(), database, completion.record.Task.Message.MonitorFlowID); lookupErr == nil {
+							_ = browserstats.RecordRegistration(context.Background(), database, id, "email_confirmation_sent", "", now)
+						}
+					}
 					return appendMailMonitorTask(context.Background(), database, completion.record.Task, "accepted", attempts, mailAcceptanceBoundary(completion.record.Route), completion.err, completion.transport, completion.diagnostic)
 				case mailout.IsPermanentFailure(completion.err), !now.Before(completion.record.ExpiresAt):
 					terminal = true
@@ -34672,6 +35109,11 @@ func (a *App) runDurableMailProcess(stop <-chan struct{}, tasks <-chan mailout.T
 					result.Err = completion.err
 					if err := mailout.MarkFailed(context.Background(), database, completion.record.ID, attempts, safeMailDeliveryError(completion.err)); err != nil {
 						return err
+					}
+					if completion.record.Task.Kind == "email_confirm" {
+						if id, lookupErr := browserstats.RegistrationIDForSource(context.Background(), database, completion.record.Task.Message.MonitorFlowID); lookupErr == nil {
+							_ = browserstats.RecordRegistration(context.Background(), database, id, "registration_failed", "mail_delivery", now)
+						}
 					}
 					return appendMailMonitorTask(context.Background(), database, completion.record.Task, "failed", attempts, "", completion.err, completion.transport, completion.diagnostic)
 				default:
@@ -40579,6 +41021,11 @@ func (a *App) renderRegistrationView(w http.ResponseWriter, r *http.Request, vie
 	local, _ := view["LocalAccount"].(bool)
 	requestOnly, _ := view["RegistrationDisabled"].(bool)
 	pending, _ := view["ConfirmationPending"].(bool)
+	if !pending && view["RegistrationDisabled"] != true && (r.Method == http.MethodPost || r.FormValue("registration_attempt") != "") {
+		view["RegistrationAttempt"] = a.beginRegistrationAnalytics(r, a.siteDomain(r.Context(), r), registrationAnalyticsWorkflow(r), r.FormValue("registration_attempt"))
+	} else if requestOnly && (r.Method == http.MethodPost || r.FormValue("registration_attempt") != "") {
+		view["RegistrationAttempt"] = a.beginRegistrationAnalytics(r, a.siteDomain(r.Context(), r), "approval", r.FormValue("registration_attempt"))
+	}
 	blocked := false
 	if !local && !requestOnly {
 		registration, err := a.readRegistrationCooldown(r)
@@ -50124,8 +50571,31 @@ func (a *App) serveFileInsideStorage(w http.ResponseWriter, r *http.Request, fil
 		return false
 	}
 	defer file.Close()
-	http.ServeContent(w, r, filepath.Base(filePath), fileInfo.ModTime(), file)
+	serveContentWithDownloadObservation(w, r, filepath.Base(filePath), fileInfo.ModTime(), fileInfo.Size(), file)
 	return true
+}
+
+// A completed transfer requires a full 200 response and every file byte
+// written without a transport error. HEAD, ranges and conditional hits stay
+// outside the server-confirmed download count.
+func serveContentWithDownloadObservation(w http.ResponseWriter, r *http.Request, name string, modified time.Time, size int64, content io.ReadSeeker) {
+	if r.Method != http.MethodGet || r.Header.Get("Range") != "" || !downloadableAssetName(name) {
+		http.ServeContent(w, r, name, modified, content)
+		return
+	}
+	captured := &statusCapturingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+	http.ServeContent(captured, r, name, modified, content)
+	if captured.statusCode == http.StatusOK && !captured.writeFailed && size > 0 && captured.bytesWritten == size {
+		w.Header().Set("X-SiteBrush-Download-Complete", "1")
+	}
+}
+
+func downloadableAssetName(name string) bool {
+	switch strings.ToLower(path.Ext(name)) {
+	case ".zip", ".gz", ".tgz", ".tar", ".bz2", ".xz", ".7z", ".rar", ".pdf", ".exe", ".msi", ".dmg", ".pkg", ".deb", ".rpm", ".appimage", ".apk", ".epub", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx":
+		return true
+	}
+	return false
 }
 
 func (a *App) writeFileInsideStorage(filePath string, payload []byte, perm os.FileMode) error {
@@ -54973,7 +55443,7 @@ func (a *App) servePublishedStaticFileFromDisk(w http.ResponseWriter, r *http.Re
 		}
 		a.logContentDelivery(w, "static-file")
 		w.Header().Set("Content-Type", contentTypeForManagedPage(pagePath, ""))
-		http.ServeContent(w, r, pagePath, info.ModTime(), file)
+		serveContentWithDownloadObservation(w, r, pagePath, info.ModTime(), info.Size(), file)
 		return true
 	}
 	a.logContentDelivery(w, "static-file")
@@ -57209,7 +57679,48 @@ func (a *App) drainMailAccountEvents(ctx context.Context) {
 				}
 				event.Metadata.OriginInstallationID = installationID
 			}
-			err := a.withMailOutboxTransaction(ctx, "mail-account-export", func(database *sql.Tx) error { return (mailmonitor.Store{DB: database}).Append(ctx, event) })
+			err := a.withMailOutboxTransaction(ctx, "mail-account-export", func(database *sql.Tx) error {
+				if err := (mailmonitor.Store{DB: database}).Append(ctx, event); err != nil {
+					return err
+				}
+				if event.Kind != "registration" || event.Stage != "registration_complete" {
+					return nil
+				}
+				occurred := time.Now().UTC()
+				if savedAt, parseErr := time.Parse(time.RFC3339Nano, event.CreatedAt); parseErr == nil {
+					occurred = savedAt
+				}
+				id, err := browserstats.RegistrationIDForSource(ctx, database, event.FlowID)
+				if errors.Is(err, sql.ErrNoRows) {
+					workflow := "public"
+					switch event.Detail {
+					case "local account setup":
+						workflow = "local"
+					case "trial", "trial_paid":
+						workflow = "test_drive"
+					}
+					id, err = browserstats.RecoverRegistrationForSource(ctx, database, event.Domain, workflow, event.FlowID, occurred)
+				}
+				if err != nil {
+					return err
+				}
+				var workflow string
+				if err := database.QueryRowContext(ctx, `SELECT workflow FROM registration_analytics_attempts WHERE id=?`, id).Scan(&workflow); err != nil {
+					return err
+				}
+				stages := []string{"email_confirmed", "user_created", "site_created", "public_site_created", "registration_completed"}
+				if workflow == "local" || workflow == "approval" {
+					stages = []string{"user_created", "site_created", "registration_completed"}
+				} else if event.Detail == "trial" || event.Detail == "trial_paid" {
+					stages = []string{"email_confirmed", "user_created", "public_site_created", "registration_completed"}
+				}
+				for _, stage := range stages {
+					if err := browserstats.RecordRegistration(ctx, database, id, stage, "", occurred); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
 			if err != nil {
 				break
 			}
@@ -58474,7 +58985,7 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 			http.NotFound(w, r)
 			return true
 		}
-		http.ServeContent(w, r, fileName, info.ModTime(), file)
+		serveContentWithDownloadObservation(w, r, fileName, info.ModTime(), info.Size(), file)
 		return true
 	}
 	if decision.Password.Path != "" {
@@ -58515,7 +59026,7 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 		if decision.ResourceType != "" {
 			w.Header().Set("Content-Type", decision.ResourceType)
 		}
-		http.ServeContent(w, r, pagePath, info.ModTime(), file)
+		serveContentWithDownloadObservation(w, r, pagePath, info.ModTime(), info.Size(), file)
 		return true
 	}
 	if a.servePublishedStaticFileFromDisk(w, r, domain, pagePath, !hideMenu) {
@@ -58549,7 +59060,7 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 				http.NotFound(w, r)
 				return true
 			}
-			http.ServeContent(w, r, decision.ChrootName, info.ModTime(), file)
+			serveContentWithDownloadObservation(w, r, decision.ChrootName, info.ModTime(), info.Size(), file)
 			return true
 		}
 		location := DomainChrootLocation{URLPath: decision.Chroot.Path, DirectoryPath: decision.Chroot.Directory}
@@ -58686,7 +59197,12 @@ func (a *App) observePublicResponse(front *publicsite.Front, captured *statusCap
 	if status == 0 {
 		status = http.StatusOK
 	}
+	contentSource := captured.Header().Get("X-Sitebrush-Source")
+	if captured.Header().Get("X-SiteBrush-Download-Complete") == "1" {
+		contentSource = "verified-download"
+	}
 	event := siteAnalyticsEvent{Domain: domain, Path: analyticsBoundedString(r.URL.EscapedPath(), 512), Query: analyticsBoundedString(accountauth.SafeQuery(r.URL.RawQuery), 2048), Method: r.Method, StatusCode: status, Bytes: captured.bytesWritten, OccurredAt: time.Now().UTC(), RemoteAddress: analyticsBoundedString(r.RemoteAddr, 64), Forwarded: analyticsBoundedString(r.Header.Get("Forwarded"), 256), ForwardedFor: analyticsBoundedString(r.Header.Get("X-Forwarded-For"), 256), UserAgent: analyticsBoundedString(r.UserAgent(), 256), AcceptLanguage: analyticsBoundedString(r.Header.Get("Accept-Language"), 64), IndexingCrawler: httpsecurity.IsIndexingCrawlerRequest(r), SecurityBlocked: status == http.StatusForbidden || status == http.StatusTooManyRequests, SecurityAlreadyBlocked: captured.Header().Get("X-Sitebrush-Security-Already-Blocked") == "1"}
+	event.ContentSource = contentSource
 	front.Observe(domain, event)
 }
 
@@ -59093,6 +59609,7 @@ func testDriveLabelValid(label string) bool {
 
 type privateTestDrive struct {
 	ID             int64
+	AnalyticsID    string
 	Domain         string
 	SourceURL      string
 	Status         string
@@ -59145,7 +59662,7 @@ func testDriveEntryAction(r *http.Request) bool {
 func (a *App) privateTestDrive(ctx context.Context, domain string) (privateTestDrive, bool, error) {
 	var trial privateTestDrive
 	err := a.withServerControlDatabaseRead(ctx, "test-drive-read", func(database *sql.DB) error {
-		return database.QueryRowContext(ctx, `SELECT id,domain,COALESCE(source_url,''),status,entry_hash,session_hash,handoff_hash,temporary_admin,pending_email,verified_email,email_history,code_hash,code_expires_at,code_attempts,mail_count,last_mail_at,delete_after,created_at,COALESCE(first_opened_at,''),COALESCE(last_active_at,''),COALESCE(last_ip,''),human_verified FROM public_trial_sites WHERE domain=? AND (status IN ('private','email_pending','email_verified','expiring','blocked','active') OR status='activated' AND session_hash<>'') ORDER BY id DESC LIMIT 1`, domain).Scan(&trial.ID, &trial.Domain, &trial.SourceURL, &trial.Status, &trial.EntryHash, &trial.SessionHash, &trial.HandoffHash, &trial.TemporaryAdmin, &trial.PendingEmail, &trial.VerifiedEmail, &trial.EmailHistory, &trial.CodeHash, &trial.CodeExpiresAt, &trial.CodeAttempts, &trial.MailCount, &trial.LastMailAt, &trial.DeleteAfter, &trial.CreatedAt, &trial.FirstOpenedAt, &trial.LastActiveAt, &trial.LastIP, &trial.HumanVerified)
+		return database.QueryRowContext(ctx, `SELECT id,COALESCE(analytics_attempt_id,''),domain,COALESCE(source_url,''),status,entry_hash,session_hash,handoff_hash,temporary_admin,pending_email,verified_email,email_history,code_hash,code_expires_at,code_attempts,mail_count,last_mail_at,delete_after,created_at,COALESCE(first_opened_at,''),COALESCE(last_active_at,''),COALESCE(last_ip,''),human_verified FROM public_trial_sites WHERE domain=? AND (status IN ('private','email_pending','email_verified','expiring','blocked','active') OR status='activated' AND session_hash<>'') ORDER BY id DESC LIMIT 1`, domain).Scan(&trial.ID, &trial.AnalyticsID, &trial.Domain, &trial.SourceURL, &trial.Status, &trial.EntryHash, &trial.SessionHash, &trial.HandoffHash, &trial.TemporaryAdmin, &trial.PendingEmail, &trial.VerifiedEmail, &trial.EmailHistory, &trial.CodeHash, &trial.CodeExpiresAt, &trial.CodeAttempts, &trial.MailCount, &trial.LastMailAt, &trial.DeleteAfter, &trial.CreatedAt, &trial.FirstOpenedAt, &trial.LastActiveAt, &trial.LastIP, &trial.HumanVerified)
 	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return privateTestDrive{}, false, nil
@@ -59788,8 +60305,21 @@ func (a *App) startPrivateTestDrive(w http.ResponseWriter, r *http.Request) {
 	if a.resumeTestDriveHandoff(w, r, entryHash, domain, email, sourceURL) {
 		return
 	}
+	entrySource := testDriveHash("test-drive-entry:" + entryHash + ":" + domain)
+	attemptID := a.registrationAnalyticsIDForSource(r.Context(), entrySource)
+	if attemptID == "" {
+		attempt := a.beginRegistrationAnalytics(r, domain, "test_drive", "")
+		attemptID = browserstats.RegistrationIDHash(attempt)
+		if attemptID == "" {
+			if fallback, err := browserstats.NewRegistrationID(); err == nil {
+				attemptID = browserstats.RegistrationIDHash(fallback)
+			}
+		}
+		a.linkRegistrationAnalyticsID(r.Context(), attemptID, entrySource)
+	}
 	if !trusted {
 		if !a.verifyPublicTrialCaptcha(r) {
+			a.recordRegistrationAnalytics(r.Context(), attemptID, "registration_failed", "captcha")
 			a.logTestDriveEvent("start", 0, r, "captcha_required", http.StatusForbidden)
 			w.WriteHeader(http.StatusForbidden)
 			a.renderTestDriveForm(w, r, entryHash, false, translationsForRequest(r)["test_drive_captcha_required"])
@@ -59806,6 +60336,9 @@ func (a *App) startPrivateTestDrive(w http.ResponseWriter, r *http.Request) {
 		trusted = true
 		a.logTestDriveEvent("captcha", 0, r, "verified", http.StatusOK)
 	}
+	if trusted {
+		a.recordRegistrationAnalytics(r.Context(), attemptID, "captcha_completed", "")
+	}
 	adminIP := a.testDriveTrustedAdminIP(r)
 	mailAllowed, mailLimitMessage, mailLimitStatus := a.testDriveInitialMailAllowed(r, email, entryHash, adminIP)
 	if !mailAllowed {
@@ -59819,6 +60352,12 @@ func (a *App) startPrivateTestDrive(w http.ResponseWriter, r *http.Request) {
 		a.logTestDriveError("start-domain-check", 0, r, availabilityErr)
 		testDriveHTTPError(w, r, "public_trial_address_check_failed", http.StatusServiceUnavailable)
 		return
+	}
+	if available {
+		a.recordRegistrationAnalytics(r.Context(), attemptID, "domain_check_completed", "available")
+	} else {
+		a.recordRegistrationAnalytics(r.Context(), attemptID, "domain_check_completed", "unavailable")
+		a.recordRegistrationAnalytics(r.Context(), attemptID, "registration_failed", "domain_unavailable")
 	}
 	if !available {
 		a.logTestDriveEvent("start", 0, r, "domain_unavailable", http.StatusConflict)
@@ -59924,7 +60463,7 @@ func (a *App) startPrivateTestDrive(w http.ResponseWriter, r *http.Request) {
 		if len(userAgent) > 256 {
 			userAgent = userAgent[:256]
 		}
-		_, err = transaction.ExecContext(r.Context(), `INSERT INTO public_trial_sites(domain,source_url,status,created_at,last_active_at,delete_after,client_ip,last_ip,user_agent,temporary_admin,handoff_hash,human_verified,ip_history,entry_hash,pending_email,email_history) VALUES(?,?,'private',?,?,?,?,?,?,?, ?,1,?,?,?,?)`, domain, sourceURL, now.Format(time.RFC3339), now.Format(time.RFC3339), now.Add(idleDuration).Format(time.RFC3339), ip, ip, userAgent, temporaryEmail, testDriveHash(handoff), fmt.Sprintf(`[{"ip":%q,"at":%q}]`, ip, now.Format(time.RFC3339)), entryHash, email, string(emailHistory))
+		_, err = transaction.ExecContext(r.Context(), `INSERT INTO public_trial_sites(domain,source_url,status,created_at,last_active_at,delete_after,client_ip,last_ip,user_agent,temporary_admin,handoff_hash,human_verified,ip_history,entry_hash,pending_email,email_history,analytics_attempt_id) VALUES(?,?,'private',?,?,?,?,?,?,?, ?,1,?,?,?,?,?)`, domain, sourceURL, now.Format(time.RFC3339), now.Format(time.RFC3339), now.Add(idleDuration).Format(time.RFC3339), ip, ip, userAgent, temporaryEmail, testDriveHash(handoff), fmt.Sprintf(`[{"ip":%q,"at":%q}]`, ip, now.Format(time.RFC3339)), entryHash, email, string(emailHistory), attemptID)
 		if err != nil {
 			return err
 		}
@@ -59936,11 +60475,13 @@ func (a *App) startPrivateTestDrive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	created = true
+	a.recordRegistrationAnalytics(r.Context(), attemptID, "site_created", "")
 	a.logTestDriveEvent("start", 0, r, "private_site_created", http.StatusOK)
 	trial, found, trialErr := a.privateTestDrive(r.Context(), domain)
 	if trialErr != nil || !found {
 		a.logTestDriveError("initial-mail-load", 0, r, errors.Join(trialErr, errors.New("trial record unavailable after creation")))
 	} else {
+		a.linkRegistrationAnalyticsID(r.Context(), attemptID, fmt.Sprintf("test-drive-%d", trial.ID))
 		mailResponse := &testDriveResponseBuffer{headers: make(http.Header)}
 		a.sendTestDriveCode(mailResponse, r, trial)
 		if mailResponse.status >= http.StatusBadRequest {
@@ -60710,11 +61251,17 @@ func (a *App) verifyTestDriveCode(w http.ResponseWriter, r *http.Request, trial 
 		return
 	}
 	if !updated {
+		failure := "email_code"
+		if err == nil && !time.Now().UTC().Before(expires) {
+			failure = "email_expired"
+		}
+		a.recordRegistrationAnalytics(r.Context(), trial.AnalyticsID, "registration_failed", failure)
 		a.logTestDriveEvent("verify", trial.ID, r, "code_invalid_or_expired", http.StatusBadRequest)
 		testDriveHTTPError(w, r, "test_drive_invalid_code", http.StatusBadRequest)
 		return
 	}
 	trial.Status = "email_verified"
+	a.recordRegistrationAnalytics(r.Context(), trial.AnalyticsID, "email_confirmed", "")
 	trial.VerifiedEmail = trial.PendingEmail
 	trial.HumanVerified = true
 	a.logTestDriveEvent("verify", trial.ID, r, "code_accepted", http.StatusOK)
@@ -60810,8 +61357,18 @@ func (a *App) activatePrivateTestDrive(w http.ResponseWriter, r *http.Request, t
 			return err
 		}
 		defer transaction.Rollback()
-		if _, err := transaction.ExecContext(r.Context(), `UPDATE public_trial_sites SET status='activated',session_hash=?,handoff_hash='',temporary_admin='',last_active_at=?,delete_after=? WHERE id=? AND status='email_verified'`, bootstrapSessionHash, time.Now().UTC().Format(time.RFC3339), bootstrapExpiry, trial.ID); err != nil {
+		activatedAt := time.Now().UTC()
+		result, err := transaction.ExecContext(r.Context(), `UPDATE public_trial_sites SET status='activated',session_hash=?,handoff_hash='',temporary_admin='',last_active_at=?,delete_after=?,analytics_activated_at=? WHERE id=? AND status='email_verified'`, bootstrapSessionHash, activatedAt.Format(time.RFC3339), bootstrapExpiry, activatedAt.Format(time.RFC3339Nano), trial.ID)
+		if err != nil {
 			return err
+		}
+		if count, countErr := result.RowsAffected(); countErr != nil || count != 1 {
+			return errors.New("Test Drive activation was already completed")
+		}
+		if trial.AnalyticsID != "" {
+			for _, stage := range []string{"user_created", "public_site_created", "registration_completed"} {
+				_ = browserstats.RecordRegistration(r.Context(), transaction, trial.AnalyticsID, stage, "", activatedAt)
+			}
 		}
 		if _, err := transaction.ExecContext(r.Context(), `DELETE FROM domain_registration_claims WHERE domain=? AND kind='trial'`, trial.Domain); err != nil {
 			return err
@@ -60825,6 +61382,9 @@ func (a *App) activatePrivateTestDrive(w http.ResponseWriter, r *http.Request, t
 		a.logTestDriveError("activate-record", trial.ID, r, err)
 		testDriveHTTPError(w, r, "test_drive_activation_retry", http.StatusServiceUnavailable)
 		return
+	}
+	for _, stage := range []string{"user_created", "public_site_created", "registration_completed"} {
+		a.recordRegistrationAnalytics(r.Context(), trial.AnalyticsID, stage, "")
 	}
 	_ = a.accountTransaction(domainContext, func(transaction *sql.Tx) error {
 		_, _ = transaction.ExecContext(domainContext, `DELETE FROM sessions WHERE user_email=?`, trial.Domain+"|"+trial.TemporaryAdmin)
@@ -61138,6 +61698,8 @@ func (a *App) invokeIgnite(r *http.Request, ownerDomain, operation string, argum
 		}
 		browser := randomAccessToken() + randomAccessToken()
 		now := time.Now().UTC()
+		analyticsRaw, _ := browserstats.NewRegistrationID()
+		analyticsID := browserstats.RegistrationIDHash(analyticsRaw)
 		err = a.withServerControlDatabaseWrite(r.Context(), "ignite-begin", func(database *sql.DB) error {
 			_, err := database.ExecContext(r.Context(), `DELETE FROM ignite_registrations WHERE expires_at<?`, now.Format(time.RFC3339))
 			if err != nil {
@@ -61157,6 +61719,10 @@ func (a *App) invokeIgnite(r *http.Request, ownerDomain, operation string, argum
 				return errors.New("registration capacity is temporarily full")
 			}
 			_, err = database.ExecContext(r.Context(), `INSERT INTO ignite_registrations(attempt_hash,browser_hash,domain,status,created_at,expires_at) VALUES(?,?,?,'pending',?,?)`, igniteHash(attempt), igniteHash(browser), domain, now.Format(time.RFC3339), now.Add(30*time.Minute).Format(time.RFC3339))
+			if err == nil && analyticsID != "" {
+				_ = browserstats.StartRegistration(r.Context(), database, analyticsID, browserstats.RegistrationScope(domain), "ignite", igniteHash(attempt), now, now.Add(domainregistration.UnfinishedTTL))
+				_ = browserstats.RecordRegistration(r.Context(), database, analyticsID, "domain_check_completed", "available", now)
+			}
 			return err
 		})
 		if err != nil {
@@ -61313,6 +61879,12 @@ func (a *App) igniteCaptchaPage(w http.ResponseWriter, r *http.Request, ownerDom
 			if count != 1 {
 				return errors.New("registration attempt expired")
 			}
+			var attemptHash string
+			if database.QueryRowContext(r.Context(), `SELECT attempt_hash FROM ignite_registrations WHERE browser_hash=?`, igniteHash(browserSecret)).Scan(&attemptHash) == nil {
+				if id, lookupErr := browserstats.RegistrationIDForSource(r.Context(), database, attemptHash); lookupErr == nil {
+					_ = browserstats.RecordRegistration(r.Context(), database, id, "captcha_completed", "", time.Now().UTC())
+				}
+			}
 			return nil
 		})
 		if err != nil {
@@ -61450,6 +62022,7 @@ func (a *App) igniteSendCode(r *http.Request, attemptSecret string, pending igni
 		}
 		return nil, err
 	}
+	a.linkRegistrationAnalyticsID(finishContext, a.registrationAnalyticsIDForSource(finishContext, igniteHash(attemptSecret)), mailMonitorFlowID(confirmation.Token))
 	err = a.withServerControlDatabaseWrite(finishContext, "ignite-code-sent", func(database *sql.DB) error {
 		result, updateErr := database.ExecContext(finishContext, `UPDATE ignite_registrations SET email=?,confirmation_token=?,confirmation_form_hash=?,status='email_sent',expires_at=? WHERE attempt_hash=? AND status='sending'`, address, confirmation.Token, igniteHash(confirmation.FormToken), time.Now().UTC().Add(registrationConfirmationTTL).Format(time.RFC3339), igniteHash(attemptSecret))
 		if updateErr != nil {
@@ -61494,6 +62067,7 @@ func (a *App) igniteComplete(r *http.Request, attemptHash string, pending ignite
 		var valid bool
 		confirmation, valid = a.registrationConfirmationForCode(r.Context(), pending.domain, saved.FormToken, code)
 		if !valid || confirmation.Token != pending.confirmationToken || confirmation.Workflow != "ignite" || confirmation.Email != pending.email {
+			a.recordRegistrationAnalyticsForSource(r.Context(), attemptHash, "registration_failed", "email_code")
 			return nil, errors.New("email code is invalid or expired")
 		}
 		err := a.withServerControlDatabaseWrite(r.Context(), "ignite-email-verified", func(database *sql.DB) error {
@@ -61513,6 +62087,7 @@ func (a *App) igniteComplete(r *http.Request, attemptHash string, pending ignite
 		if err != nil {
 			return nil, errors.New("registration attempt expired")
 		}
+		a.recordRegistrationAnalyticsForSource(r.Context(), attemptHash, "email_confirmed", "")
 	} else if found {
 		if saved.Workflow != "ignite" || saved.Email != pending.email || saved.Domain != pending.domain {
 			return nil, errors.New("email confirmation is unavailable")
@@ -61549,8 +62124,16 @@ func (a *App) igniteComplete(r *http.Request, attemptHash string, pending ignite
 		return nil, err
 	}
 	if err := a.igniteCreateSite(r.Context(), pending.domain, pending.email, ownClaim); err != nil {
+		a.recordRegistrationAnalyticsForSource(r.Context(), attemptHash, "registration_failed", "site_provision")
 		return nil, err
 	}
+	siteCreatedAt := time.Now().UTC()
+	_ = a.withServerControlDatabaseWrite(r.Context(), "ignite-site-created-analytics", func(database *sql.DB) error {
+		_, updateErr := database.ExecContext(r.Context(), `UPDATE ignite_registrations SET analytics_site_created_at=? WHERE attempt_hash=? AND analytics_site_created_at=''`, siteCreatedAt.Format(time.RFC3339Nano), attemptHash)
+		return updateErr
+	})
+	a.recordRegistrationAnalyticsForSource(r.Context(), attemptHash, "user_created", "")
+	a.recordRegistrationAnalyticsForSource(r.Context(), attemptHash, "site_created", "")
 	// The public host gate must learn the new site before Ignite reports success.
 	if err := a.publicPublicationRequest("refresh", pending.domain); err != nil {
 		return nil, fmt.Errorf("site publication is unavailable: %w", err)
@@ -61569,13 +62152,19 @@ func (a *App) igniteComplete(r *http.Request, attemptHash string, pending ignite
 		if countErr != nil || claimCount != 1 {
 			return errors.New("site domain claim was lost")
 		}
-		attempt, updateErr := transaction.ExecContext(r.Context(), `UPDATE ignite_registrations SET status='complete' WHERE attempt_hash=? AND confirmation_token=? AND status='verified'`, attemptHash, confirmation.Token)
+		completedAt := time.Now().UTC()
+		attempt, updateErr := transaction.ExecContext(r.Context(), `UPDATE ignite_registrations SET status='complete',analytics_completed_at=? WHERE attempt_hash=? AND confirmation_token=? AND status='verified'`, completedAt.Format(time.RFC3339Nano), attemptHash, confirmation.Token)
 		if updateErr != nil {
 			return updateErr
 		}
 		attemptCount, countErr := attempt.RowsAffected()
 		if countErr != nil || attemptCount != 1 {
 			return errors.New("registration attempt was lost")
+		}
+		if id, lookupErr := browserstats.RegistrationIDForSource(r.Context(), transaction, attemptHash); lookupErr == nil {
+			for _, stage := range []string{"email_confirmed", "user_created", "site_created", "public_site_created", "registration_completed"} {
+				_ = browserstats.RecordRegistration(r.Context(), transaction, id, stage, "", completedAt)
+			}
 		}
 		return transaction.Commit()
 	})

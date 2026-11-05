@@ -92,6 +92,12 @@ The control database stores Test Drive status, timestamps, verification counts, 
 
 ---
 
+## Registration analytics
+
+SiteBrush Analytics keeps server-confirmed registration stages in the existing control database. Public, Test Drive, Ignite, local, approval, and administrator-created workflows have separate funnels. `site_created` means a site was provisioned, including a private Test Drive copy; `public_site_created` means it became public; `user_created` means its account was committed; `registration_completed` means the workflow reached its own final state. Cohorts count attempts started during the selected 1, 7, 30, or 90 days, while outcome totals count events occurring during that period, including delayed email confirmations. The installation administrator can see aggregate totals across sites; a site owner sees only that site's aggregate totals through Analytics and analytics-scoped MCP tools. Browser form activity remains a separate observation.
+
+Each attempt uses a random, non-authorizing correlation value; analytics stores its digest, hashed workflow source references, a hashed site scope, bounded stage names, and timestamps. It stores no email address, IP address, password, confirmation code, CAPTCHA answer, or authentication token. Unique event keys prevent retry counts. Analytics attempts, events, and source links are removed after 120 days; pending attempts expire after their workflow deadline and are shown separately from failures. Existing installations receive append-only control-database migrations, and historical browser analytics remains intact. Committed workflow and account outbox records replay confirmed outcomes after a transient analytics write failure or restart.
+
 ## Create a site with an AI assistant
 
 SiteBrush creates and edits new websites, copies public pages from an older site, and helps redesign them. Ignite starts by asking what the owner wants to make and whether they have an old site or a design example. The simple starting point is a public site on `sitebrush.com` with a SiteBrush subdomain; the owner can add a domain they already own later in Site Settings. [Installing the server application](#install-the-server-version) gives an owner control over data, rules, and capacity. The platform-specific installation blocks detect `amd64` or `arm64` automatically, so the owner need not know their CPU architecture. The assistant does not claim to have installed anything without access to that server.

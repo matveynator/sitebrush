@@ -12,7 +12,7 @@
 </head>
 <body class="technical-page">
 <main class="container authentication-shell">
-  <form class="authentication-card SiteBrush-TestDrive-Form" method="post" action="/?test_drive_start" data-test-drive-form data-human-verified="{{.HumanVerified}}" data-show-details="{{.ShowDetails}}">
+  <form class="authentication-card SiteBrush-TestDrive-Form" method="post" action="/?test_drive_start" data-test-drive-form data-human-verified="{{.HumanVerified}}" data-show-details="{{.ShowDetails}}" data-analytics-key="sitebrush-test-drive">
     <input type="hidden" name="test_drive_csrf" value="{{.EntryCSRF}}">
     <h1>{{index .T "test_drive_title"}}</h1>
     <div class="test-drive-step" data-test-drive-source-step {{if .ShowDetails}}hidden{{end}}>
@@ -53,7 +53,7 @@
     <label for="test-drive-email">{{index .T "test_drive_email_label"}}</label>
     <input id="test-drive-email" name="email" type="email" value="{{.ChosenEmail}}" autocomplete="email" required>
     {{if .FormError}}<p role="alert">{{.FormError}}</p>{{end}}
-    <button type="submit" class="btn btn-primary">{{index .T "test_drive_create"}}</button>
+    <button type="submit" class="btn btn-primary" data-analytics-key="sitebrush-test-drive-submit">{{index .T "test_drive_create"}}</button>
     <p class="small">{{index .T "test_drive_first_email_hint"}}</p>
     </div>
     {{if .IPQuota}}<p class="small test-drive-ip-quota" role="status">{{.IPQuota}}</p>{{end}}
