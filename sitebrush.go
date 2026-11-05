@@ -19250,7 +19250,7 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		a.recordMailMonitorEvent(registrationContext, registrationOutcome)
-		returnPath := safeConfirmationReturnPath(requestedReturnPath(r))
+		returnPath := registrationReturnPath(r)
 		if r.FormValue("site_workflow") == "new_site" {
 			returnPath = "/?edit"
 		}
@@ -19281,7 +19281,7 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	pending := EmailConfirmation{}
-	if err := a.createAndSendEmailConfirmationForLanguage(r, "register", domain, "", email, password, requestedReturnPath(r), preferredLanguageCode(r.Header.Get("Accept-Language")), &pending); err != nil {
+	if err := a.createAndSendEmailConfirmationForLanguage(r, "register", domain, "", email, password, registrationReturnPath(r), preferredLanguageCode(r.Header.Get("Accept-Language")), &pending); err != nil {
 		if newSiteAdmission {
 			a.releasePublicTrialIPAdmission(context.WithoutCancel(r.Context()), "create", domain)
 		}
@@ -19700,11 +19700,12 @@ func (a *App) registerPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if a.hasAdmin(r.Context(), domain) {
+		returnPath := registrationReturnPath(r)
 		if a.isAdminRequest(r) {
-			httpsecurity.RedirectLocal(w, r, requestedReturnTarget(r), http.StatusFound)
+			httpsecurity.RedirectLocal(w, r, returnPath, http.StatusFound)
 			return
 		}
-		httpsecurity.RedirectLocal(w, r, loginURLForRequest(r), http.StatusFound)
+		httpsecurity.RedirectLocal(w, r, "/?login&return_path="+url.QueryEscape(returnPath), http.StatusFound)
 		return
 	}
 	if a.reservedServerSubdomain(r.Context(), domain) {
@@ -19765,7 +19766,7 @@ func (a *App) resendReservedDomainConfirmation(w http.ResponseWriter, r *http.Re
 }
 
 func (a *App) renderSetupPage(w http.ResponseWriter, r *http.Request, domain, email, status string) {
-	a.renderRegistrationView(w, r, map[string]any{"Domain": domain, "Email": strings.TrimSpace(email), "Status": strings.TrimSpace(status), "ReturnPath": requestedReturnPath(r), "LocalAccount": localAccountRequest(r)})
+	a.renderRegistrationView(w, r, map[string]any{"Domain": domain, "Email": strings.TrimSpace(email), "Status": strings.TrimSpace(status), "ReturnPath": registrationReturnPath(r), "LocalAccount": localAccountRequest(r)})
 }
 
 func registrationAnalyticsWorkflow(r *http.Request) string {
@@ -20108,7 +20109,7 @@ func (a *App) renderSetupConfirmationPage(w http.ResponseWriter, r *http.Request
 		"SenderEmail":           a.registrationConfirmationSenderAddress(r.Context(), domain),
 		"WebmailName":           provider.Name,
 		"WebmailURL":            provider.URL,
-		"ReturnPath":            requestedReturnPath(r),
+		"ReturnPath":            registrationReturnPath(r),
 	})
 }
 
@@ -20276,7 +20277,7 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !a.hasAdmin(r.Context(), domain) {
-		httpsecurity.RedirectLocal(w, r, "?register", http.StatusFound)
+		httpsecurity.RedirectLocal(w, r, "/?register&return_path="+url.QueryEscape(registrationReturnPath(r)), http.StatusFound)
 		return
 	}
 	if a.adminIPLoginBlocked(r.Context(), domain, accountClientIP(r), strings.TrimSpace(r.FormValue("email"))) {
@@ -20497,10 +20498,19 @@ func (a *App) completeAccountLogin(w http.ResponseWriter, r *http.Request, domai
 	setAccountSessionCookie(w, r, outcome.Token, time.Now())
 	a.logHostingSupportEvent(r.Context(), "client_login", "success", outcome.Email, domain, "client signed in")
 	redirectPath := outcome.Path
-	if offerPasskey && accountpasskey.UserCount(r.Context(), a.db, domain, outcome.Email) == 0 {
+	if offerPasskey && !oauthConsentReturnPath(outcome.Path) && accountpasskey.UserCount(r.Context(), a.db, domain, outcome.Email) == 0 {
 		redirectPath = "/?profile&passkey_offer=1&return_path=" + url.QueryEscape(httpsecurity.LocalRedirectTarget(outcome.Path, "/"))
 	}
 	httpsecurity.RedirectLocal(w, r, redirectPath, http.StatusFound)
+}
+
+// OAuth approval resumes before optional account security setup.
+func oauthConsentReturnPath(returnPath string) bool {
+	parsed, err := url.Parse(httpsecurity.LocalRedirectTarget(returnPath, "/"))
+	if err != nil {
+		return false
+	}
+	return parsed.Query().Get("oauth") == "authorize" || parsed.Query().Get("ai_authorize") != ""
 }
 
 func (a *App) storeProfileSessionDetails(r *http.Request, token string) {
@@ -22157,6 +22167,11 @@ func loginReturnPathOrDefault(r *http.Request) string {
 		return returnPath
 	}
 	return requestedReturnTarget(r)
+}
+
+// Registration keeps the validated destination across email confirmation.
+func registrationReturnPath(r *http.Request) string {
+	return safeConfirmationReturnPath(httpsecurity.LocalRedirectTarget(r.FormValue("return_path"), requestedReturnPath(r)))
 }
 
 func hasQueryFlag(r *http.Request, flagName string) bool {
@@ -61779,7 +61794,7 @@ func (a *App) invokeIgnite(r *http.Request, ownerDomain, operation string, argum
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"attempt": attempt, "domain": domain, "captcha_url": "https://" + ownerDomain + "/?ignite&captcha=" + url.QueryEscape(browser), "status": "captcha_required"}, nil
+		return map[string]any{"attempt": attempt, "domain": domain, "captcha_url": "https://" + ownerDomain + "/?ignite&captcha=" + url.QueryEscape(browser), "status": "captcha_required", "next_step": "Show captcha_url as a normal Markdown link and the full URL. Let the owner open it; do not trigger a browser popup."}, nil
 	case "ignite_status", "ignite_send_code", "ignite_complete":
 		pending, err := a.igniteAttempt(r.Context(), arguments.Attempt)
 		if err != nil {
@@ -62314,7 +62329,7 @@ func (a *App) repairCompletedIgniteSites(ctx context.Context) error {
 }
 
 func (a *App) igniteCreatedSite(domain string) map[string]any {
-	return map[string]any{"site_id": stableSiteID(domain), "domain": domain, "status": "created", "mcp_ready": a.accountHTTPSReady(domain), "mcp_endpoint": "https://" + domain + "/?mcp", "plugin_name": domain, "next_step": "When MCP is ready, add this exact endpoint directly through ChatGPT Plugins > Add custom MCP server with the domain as its name and OAuth. Reuse a matching connection if it exists. Install it and select Connect; the owner completes OAuth. Do not create a separate plugin package. Verify sitebrush_get_access, then continue the site goal already chosen; ask only if it is still unknown. For an old public site, use sitebrush_import_site and poll sitebrush_get_import_status, then review partial results. Offer to save a useful first page promptly and explain later editing and analytics in the owner's language."}
+	return map[string]any{"site_id": stableSiteID(domain), "domain": domain, "status": "created", "mcp_ready": a.accountHTTPSReady(domain), "mcp_endpoint": "https://" + domain + "/?mcp", "plugin_name": domain, "next_step": "When MCP is ready, offer two options: the owner adds this exact endpoint with ChatGPT Plugins > Add custom MCP server, full domain name, and OAuth; or the assistant uses Plugin Creator to create or reuse a private plugin bound to this endpoint. For Plugin Creator, install through the UI if possible, otherwise give the plugin link. The owner completes SiteBrush OAuth consent in either case. Verify sitebrush_get_access before claiming connection, then read the starter page, save and verify a useful first draft from the established goal, and explain how to select the domain-named plugin with @ in ChatGPT Work. For an old public site, use sitebrush_import_site and review partial results."}
 }
 
 // The public agent exposes registration on sitebrush.com and forwards an

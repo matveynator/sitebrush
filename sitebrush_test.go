@@ -5041,8 +5041,10 @@ func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
 		t.Fatal(err)
 	}
 	form := url.Values{}
+	const oauthReturnPath = "/?oauth=authorize&client_id=chatgpt&state=registration-state"
 	form.Set("email", "admin@example.com")
 	form.Set("password", "secret")
+	form.Set("return_path", oauthReturnPath)
 	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?register", strings.NewReader(form.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.Header.Set("Accept-Language", "ru")
@@ -5094,8 +5096,8 @@ func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
 	}
 
 	pending, found := application.registrationConfirmationByToken(context.Background(), pendingToken)
-	if !found || pending.FormToken == pendingToken || strings.Contains(registrationBody, pendingToken) {
-		t.Fatal("registration form exposes the confirmation bearer token")
+	if !found || pending.FormToken == pendingToken || strings.Contains(registrationBody, pendingToken) || pending.ReturnPath != oauthReturnPath {
+		t.Fatal("registration handoff lost its return path or exposed the confirmation bearer token")
 	}
 	codeForm := url.Values{"registration_form_token": {pending.FormToken}, "registration_code": {pending.Code}}
 	confirmRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?register", strings.NewReader(codeForm.Encode()))
@@ -5103,8 +5105,8 @@ func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
 	confirmResponse := httptest.NewRecorder()
 	prepareAccountMailCaptchaForTest(t, application, confirmRequest)
 	application.route(confirmResponse, confirmRequest)
-	if confirmResponse.Code != http.StatusFound {
-		t.Fatalf("code did not complete registration: status=%d body=%q", confirmResponse.Code, confirmResponse.Body.String())
+	if confirmResponse.Code != http.StatusFound || confirmResponse.Header().Get("Location") != oauthReturnPath {
+		t.Fatalf("code did not resume OAuth: status=%d location=%q body=%q", confirmResponse.Code, confirmResponse.Header().Get("Location"), confirmResponse.Body.String())
 	}
 	_ = rawDB.QueryRow(`SELECT COUNT(1) FROM users WHERE domain=? AND email=? AND is_admin=1`, "localhost", "admin@example.com").Scan(&userCount)
 	if userCount != 1 {
@@ -20355,6 +20357,9 @@ func TestIgniteCreatesOnlyConfirmedNewSite(t *testing.T) {
 		t.Fatal(err)
 	}
 	verificationURL, _ := begin["captcha_url"].(string)
+	if !strings.Contains(begin["next_step"].(string), "normal Markdown link") {
+		t.Fatal("Ignite did not request a direct CAPTCHA link", begin)
+	}
 	challengeRequest := httptest.NewRequest(http.MethodGet, verificationURL, nil)
 	challengeRequest.RemoteAddr = request.RemoteAddr
 	challengeResponse := httptest.NewRecorder()
@@ -20674,7 +20679,7 @@ func TestIgniteBrowserCodeCreatesSite(t *testing.T) {
 	if err != nil || status["status"] != "complete" {
 		t.Fatal("Ignite did not report browser completion", status, err)
 	}
-	if status["mcp_endpoint"] != "https://"+siteDomain+"/?mcp" || status["plugin_name"] != siteDomain || !strings.Contains(status["next_step"].(string), "Add custom MCP server") || strings.Contains(status["next_step"].(string), "Plugin Creator") {
+	if status["mcp_endpoint"] != "https://"+siteDomain+"/?mcp" || status["plugin_name"] != siteDomain || !strings.Contains(status["next_step"].(string), "Add custom MCP server") || !strings.Contains(status["next_step"].(string), "Plugin Creator") {
 		t.Fatal("Ignite did not return the personal editor handoff after browser completion", status)
 	}
 }
@@ -28060,6 +28065,152 @@ func TestMCPOAuthOffersLoginAndResumesOwnerApprovalOutsideStealth(t *testing.T) 
 	}
 	if allowed := request(authorizationTarget, "text/html", nil); allowed.Code != http.StatusSeeOther || !strings.Contains(allowed.Header().Get("Location"), "login=") {
 		t.Fatalf("allowed stealth IP did not offer login status=%d location=%q", allowed.Code, allowed.Header().Get("Location"))
+	}
+}
+
+func TestMCPOAuthEmailLoginGoesStraightToConsent(t *testing.T) {
+	application, database := newTestApplication(t)
+	application.aiCapabilities = aicapability.NewManager()
+	t.Cleanup(application.aiCapabilities.Close)
+	const domain, email = "localhost", "owner@example.org"
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, email, "secret"); err != nil {
+		t.Fatal(err)
+	}
+	client, err := application.aiCapabilities.RegisterOAuthClient(domain, aicapability.OAuthClient{Name: "ChatGPT", RedirectURIs: []string{"https://client.example/callback"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256([]byte(strings.Repeat("v", 43)))
+	query := url.Values{
+		"oauth": {"authorize"}, "response_type": {"code"}, "client_id": {client.ID},
+		"redirect_uri": {"https://client.example/callback"}, "resource": {"https://localhost/?mcp"},
+		"state": {"resume-after-login"}, "code_challenge_method": {"S256"},
+		"code_challenge": {base64.RawURLEncoding.EncodeToString(digest[:])},
+	}
+	authorizationTarget := "/?" + query.Encode()
+	handler := application.siteHTTPHandler(http.HandlerFunc(application.route))
+	request := func(target string, cookie *http.Cookie) *httptest.ResponseRecorder {
+		t.Helper()
+		incoming := httptest.NewRequest(http.MethodGet, "https://"+domain+target, nil)
+		incoming.RemoteAddr = "198.51.100.8:1234"
+		incoming.Header.Set("Accept", "text/html")
+		if cookie != nil {
+			incoming.AddCookie(cookie)
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, incoming)
+		return response
+	}
+	login := request(authorizationTarget, nil)
+	if login.Code != http.StatusSeeOther {
+		t.Fatalf("OAuth did not offer login: %d %s", login.Code, login.Body.String())
+	}
+	loginURL, err := url.Parse(login.Header().Get("Location"))
+	if err != nil || loginURL.Query().Get("return_path") != authorizationTarget {
+		t.Fatalf("OAuth login lost its request: %q %v", login.Header().Get("Location"), err)
+	}
+	var challenge accountauth.Outcome
+	if err := application.accountTransaction(context.Background(), func(transaction *sql.Tx) error {
+		var challengeErr error
+		challenge, challengeErr = accountauth.Challenge(context.Background(), transaction, domain, email, "198.51.100.8", authorizationTarget, "en", time.Now())
+		return challengeErr
+	}); err != nil || challenge.Status != "code" {
+		t.Fatalf("email login challenge: %+v %v", challenge, err)
+	}
+	completed := request("/?login&login_challenge="+url.QueryEscape(challenge.Token)+"&login_link=1", nil)
+	if completed.Code != http.StatusFound || completed.Header().Get("Location") != authorizationTarget {
+		t.Fatalf("email login did not resume OAuth: status=%d location=%q", completed.Code, completed.Header().Get("Location"))
+	}
+	for _, cookie := range completed.Result().Cookies() {
+		if cookie.Name != "sitebrush_session" {
+			continue
+		}
+		approval := request(completed.Header().Get("Location"), cookie)
+		if approval.Code != http.StatusSeeOther || !strings.Contains(approval.Header().Get("Location"), "ai_authorize=") {
+			t.Fatalf("OAuth did not reach consent: status=%d location=%q", approval.Code, approval.Header().Get("Location"))
+		}
+		consent := request(approval.Header().Get("Location"), cookie)
+		if consent.Code != http.StatusOK || !strings.Contains(consent.Body.String(), "ChatGPT") {
+			t.Fatalf("consent page: status=%d body=%q", consent.Code, consent.Body.String())
+		}
+		return
+	}
+	t.Fatal("email login did not establish a browser session")
+}
+
+func TestRegisterPreservesOAuthReturnPath(t *testing.T) {
+	application, _ := newTestApplication(t)
+	application.aiCapabilities = aicapability.NewManager()
+	t.Cleanup(application.aiCapabilities.Close)
+	client, err := application.aiCapabilities.RegisterOAuthClient("localhost", aicapability.OAuthClient{Name: "ChatGPT", RedirectURIs: []string{"https://client.example/callback"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256([]byte(strings.Repeat("v", 43)))
+	query := url.Values{
+		"oauth": {"authorize"}, "response_type": {"code"}, "client_id": {client.ID},
+		"redirect_uri": {"https://client.example/callback"}, "resource": {"https://localhost/?mcp"},
+		"state": {"resume-after-registration"}, "code_challenge_method": {"S256"},
+		"code_challenge": {base64.RawURLEncoding.EncodeToString(digest[:])},
+	}
+	authorizationTarget := "/?" + query.Encode()
+	handler := application.siteHTTPHandler(http.HandlerFunc(application.route))
+	startRequest := httptest.NewRequest(http.MethodGet, "https://localhost"+authorizationTarget, nil)
+	startRequest.RemoteAddr = "127.0.0.1:1234"
+	startResponse := httptest.NewRecorder()
+	handler.ServeHTTP(startResponse, startRequest)
+	if startResponse.Code != http.StatusSeeOther {
+		t.Fatalf("new owner OAuth entry: status=%d body=%q", startResponse.Code, startResponse.Body.String())
+	}
+	loginRequest := httptest.NewRequest(http.MethodGet, "https://localhost"+startResponse.Header().Get("Location"), nil)
+	loginRequest.RemoteAddr = "127.0.0.1:1234"
+	loginResponse := httptest.NewRecorder()
+	application.login(loginResponse, loginRequest)
+	if loginResponse.Code != http.StatusFound {
+		t.Fatalf("new owner did not reach registration: %d %s", loginResponse.Code, loginResponse.Body.String())
+	}
+	registrationURL, err := url.Parse(loginResponse.Header().Get("Location"))
+	if err != nil || !registrationURL.Query().Has("register") || registrationURL.Query().Get("return_path") != authorizationTarget {
+		t.Fatalf("registration lost OAuth return: %q %v", loginResponse.Header().Get("Location"), err)
+	}
+	registrationRequest := httptest.NewRequest(http.MethodGet, "https://localhost"+registrationURL.String(), nil)
+	registrationRequest.RemoteAddr = loginRequest.RemoteAddr
+	registrationResponse := httptest.NewRecorder()
+	application.registerPage(registrationResponse, registrationRequest)
+	if registrationResponse.Code != http.StatusOK || !strings.Contains(stdhtml.UnescapeString(registrationResponse.Body.String()), `name="return_path" value="`+authorizationTarget+`"`) {
+		t.Fatalf("registration form lost OAuth return: %d", registrationResponse.Code)
+	}
+	form := url.Values{"email": {"owner@example.org"}, "password": {"secret"}, "password_confirm": {"secret"}, "return_path": {authorizationTarget}}
+	postRequest := httptest.NewRequest(http.MethodPost, "https://localhost/?register", strings.NewReader(form.Encode()))
+	postRequest.RemoteAddr = loginRequest.RemoteAddr
+	postRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	postResponse := httptest.NewRecorder()
+	application.registerPage(postResponse, postRequest)
+	if postResponse.Code != http.StatusSeeOther || postResponse.Header().Get("Location") != authorizationTarget {
+		t.Fatalf("account creation did not resume OAuth: status=%d location=%q body=%q", postResponse.Code, postResponse.Header().Get("Location"), postResponse.Body.String())
+	}
+	var sessionCookie *http.Cookie
+	for _, cookie := range postResponse.Result().Cookies() {
+		if cookie.Name == "sitebrush_session" {
+			sessionCookie = cookie
+		}
+	}
+	if sessionCookie == nil {
+		t.Fatal("new owner has no session for OAuth consent")
+	}
+	approvalRequest := httptest.NewRequest(http.MethodGet, "https://localhost"+authorizationTarget, nil)
+	approvalRequest.RemoteAddr = loginRequest.RemoteAddr
+	approvalRequest.AddCookie(sessionCookie)
+	approvalResponse := httptest.NewRecorder()
+	handler.ServeHTTP(approvalResponse, approvalRequest)
+	if approvalResponse.Code != http.StatusSeeOther || !strings.Contains(approvalResponse.Header().Get("Location"), "ai_authorize=") {
+		t.Fatalf("new owner did not reach OAuth consent: status=%d location=%q", approvalResponse.Code, approvalResponse.Header().Get("Location"))
+	}
+	for _, candidate := range []string{"https://elsewhere.example/callback", "/?email_confirm=old-token"} {
+		unsafeRequest := httptest.NewRequest(http.MethodGet, "https://localhost/?register&return_path="+url.QueryEscape(candidate), nil)
+		if destination := registrationReturnPath(unsafeRequest); destination != "/" {
+			t.Fatalf("unsafe registration return %q became %q", candidate, destination)
+		}
 	}
 }
 
