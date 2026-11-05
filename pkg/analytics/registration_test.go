@@ -86,6 +86,23 @@ func TestRegistrationCohortCountsAuthoritativeOutcomesAndRetries(t *testing.T) {
 	}
 }
 
+func TestRegistrationReportExcludesOperatorCreatedSites(t *testing.T) {
+	database := registrationTestDatabase(t)
+	now := time.Now().UTC()
+	publicID := registrationTestAttempt(t, database, "public.example.net", "public", "mail-public", now)
+	registrationTestStage(t, database, publicID, "site_created", "", now)
+	registrationTestStage(t, database, publicID, "registration_completed", "", now)
+	for _, workflow := range []string{"local", "approval", "admin_created"} {
+		id := registrationTestAttempt(t, database, workflow+".example.net", workflow, "", now)
+		registrationTestStage(t, database, id, "site_created", "", now)
+		registrationTestStage(t, database, id, "registration_completed", "", now)
+	}
+	report, err := RegistrationReportForPeriod(context.Background(), database, "", true, now.Add(-time.Minute), now.Add(time.Minute), now)
+	if err != nil || report.Cohort.Started != 1 || report.Cohort.Completed != 1 || report.Outcomes.SitesCreated != 1 || report.Outcomes.Completed != 1 || len(report.Workflows) != 1 {
+		t.Fatalf("operator-created sites changed self-service conversion: %+v %v", report, err)
+	}
+}
+
 func TestRegistrationDelayedOutcomeExpiryAndPrivateSources(t *testing.T) {
 	database := registrationTestDatabase(t)
 	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)

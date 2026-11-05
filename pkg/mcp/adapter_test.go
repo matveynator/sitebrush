@@ -51,7 +51,7 @@ func TestAdapterRealSDKDiscoveryCallsAndSiteBinding(t *testing.T) {
 		t.Run(version, func(t *testing.T) {
 			manager, tokens, resource := adapterGrant(t, aicapability.StandardScopes())
 			calls := make(chan Invocation, 1)
-			server := httptest.NewServer(NewHandler(Options{Domain: "example.org", Resource: resource, Version: "test", Bearer: tokens.AccessToken, Manager: manager, Invoke: func(_ context.Context, invocation Invocation) (Result, error) {
+			server := httptest.NewServer(NewHandler(Options{Domain: "example.org", Resource: resource, Version: "test", Bearer: tokens.AccessToken, Manager: manager, RegistrationAnalytics: true, Invoke: func(_ context.Context, invocation Invocation) (Result, error) {
 				calls <- invocation
 				return Result{Status: 200, Payload: map[string]any{"pages": []string{"/", "/about"}}}, nil
 			}}))
@@ -102,6 +102,46 @@ func TestAdapterRealSDKDiscoveryCallsAndSiteBinding(t *testing.T) {
 			invalid, err := session.CallTool(boundary, &sdk.CallToolParams{Name: "sitebrush_update_page", Arguments: map[string]any{"path": "/", "title": "Title", "html": "<p>draft</p>"}})
 			if err == nil && !invalid.IsError {
 				t.Fatal("missing expected_version passed schema validation")
+			}
+		})
+	}
+}
+
+func TestRegistrationToolRequiresServerOwnerDiscovery(t *testing.T) {
+	manager, tokens, resource := adapterGrant(t, aicapability.StandardScopes())
+	for _, enabled := range []bool{false, true} {
+		name := "disabled"
+		if enabled {
+			name = "enabled"
+		}
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(NewHandler(Options{Domain: "example.org", Resource: resource, Version: "test", Bearer: tokens.AccessToken, Manager: manager, RegistrationAnalytics: enabled}))
+			defer server.Close()
+			boundary, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			session, err := sdk.NewClient(&sdk.Implementation{Name: "client", Version: "test"}, nil).Connect(boundary, &sdk.StreamableClientTransport{Endpoint: server.URL}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer session.Close()
+			listed, err := session.ListTools(boundary, &sdk.ListToolsParams{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, tool := range listed.Tools {
+				if tool.Name == "sitebrush_get_registrations" {
+					found = true
+				}
+			}
+			if found != enabled {
+				t.Fatalf("registration tool visibility = %t, enabled = %t", found, enabled)
+			}
+			if !enabled {
+				result, callErr := session.CallTool(boundary, &sdk.CallToolParams{Name: "sitebrush_get_registrations", Arguments: map[string]any{}})
+				if callErr == nil && (result == nil || !result.IsError) {
+					t.Fatal("unavailable registration tool executed")
+				}
 			}
 		})
 	}

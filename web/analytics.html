@@ -767,7 +767,7 @@
 SiteBrushAnalytics.formResult('contact', true);</code></pre><p class="small">{{index .T "cx_confirmed"}}</p></details>
       </details>
     </div></section>
-    <section class="card mb-4"><div class="card-body"><h2 class="h4">Registration funnel · server confirmed</h2>
+    {{if .ShowRegistrationAnalytics}}<section class="card mb-4"><div class="card-body"><h2 class="h4">Registration funnel · server confirmed</h2>
       {{if .RegistrationUnavailable}}<p class="alert alert-warning">Registration counts are temporarily unavailable.</p>{{else}}
       <p class="small text-muted">Cohort: attempts started in this period. Outcomes: events confirmed in this period, including attempts started earlier. Test Drive site creation includes private copies; completion requires activation. Browser form submissions below are observations.</p>
       <p><strong>Sites created: {{.Registration.Outcomes.SitesCreated}}</strong> · Public sites created: {{.Registration.Outcomes.PublicSitesCreated}} · Accounts created: {{.Registration.Outcomes.UsersCreated}} · Registrations completed: {{.Registration.Outcomes.Completed}}</p>
@@ -786,7 +786,7 @@ SiteBrushAnalytics.formResult('contact', true);</code></pre><p class="small">{{i
       <table class="table table-sm"><thead><tr><th>Workflow</th><th>Started</th><th>Sites created</th><th>Completed</th><th>Incomplete</th><th>Expired</th><th>Failed</th><th>Conversion</th></tr></thead><tbody>{{range $name, $cohort := .Registration.Workflows}}<tr><td>{{$name}}</td><td>{{$cohort.Started}}</td><td>{{index $cohort.Stages "site_created"}}</td><td>{{$cohort.Completed}}</td><td>{{$cohort.Unfinished}}</td><td>{{$cohort.Expired}}</td><td>{{$cohort.Failed}}</td><td>{{printf "%.1f" $cohort.ConversionPercent}}%</td></tr>{{end}}</tbody></table>
       {{range $name, $cohort := .Registration.Workflows}}<details><summary>{{$name}} stage drop-off</summary><table class="table table-sm"><thead><tr><th>Stage</th><th>Attempts</th><th>Drop-off from previous comparable stage</th></tr></thead><tbody>{{range $cohort.Funnel}}<tr><td>{{.Stage}}</td><td>{{.Count}}</td><td>{{if .Comparable}}{{.Dropoff}}{{else}}—{{end}}</td></tr>{{end}}</tbody></table></details>{{end}}
       {{end}}
-    </div></section>
+    </div></section>{{end}}
     <section class="card mb-4"><div class="card-body"><h2 class="h4">Downloads · server confirmed</h2><p><strong>{{.VerifiedDownloads}}</strong> completed transfers of files hosted by this SiteBrush site in this period.</p><p class="small text-muted">Full 200 responses count after every byte is written. Browser clicks and visits to a download section remain observations; external links such as GitHub cannot be verified by this server.</p></div></section>
     <section class="card mb-4"><div class="card-body"><h2 class="h4">{{index .T "ax_journeys"}}</h2><p class="small">{{index .T "cx_paths_hint"}}</p><div id="conversion-site-tree"></div><details><summary>{{index .T "cx_observed_paths"}}</summary><div id="conversion-paths"></div></details></div></section>
     <section class="card mb-4"><div class="card-body"><h2 class="h4">{{index .T "cx_behaviour"}}</h2><div id="conversion-insights"></div><div id="conversion-behaviour"></div>

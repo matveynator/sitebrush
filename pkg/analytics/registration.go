@@ -212,7 +212,10 @@ func RegistrationReportForPeriod(ctx context.Context, database RegistrationSQL, 
 		scope = "installation"
 	}
 	report := RegistrationReport{Source: "server", Scope: scope, Days: int(end.Sub(start).Hours() / 24), PeriodStart: start, PeriodEnd: end, Cohort: newRegistrationCohort(), Workflows: map[string]RegistrationCohort{}}
-	query := `SELECT attempt.id,attempt.workflow,attempt.started_at,attempt.expires_at,event.stage,event.detail,event.occurred_at FROM registration_analytics_attempts attempt LEFT JOIN registration_analytics_events event ON event.attempt_id=attempt.id WHERE attempt.started_at>=? AND attempt.started_at<?`
+	// The server owner's conversion denominator contains only self-service flows.
+	// Operator-created sites and local setup retain their durable events without
+	// changing public registration conversion.
+	query := `SELECT attempt.id,attempt.workflow,attempt.started_at,attempt.expires_at,event.stage,event.detail,event.occurred_at FROM registration_analytics_attempts attempt LEFT JOIN registration_analytics_events event ON event.attempt_id=attempt.id WHERE attempt.started_at>=? AND attempt.started_at<? AND attempt.workflow IN ('public','test_drive','ignite')`
 	args := []any{start.UTC().Format(time.RFC3339Nano), end.UTC().Format(time.RFC3339Nano)}
 	if !allSites {
 		query += ` AND attempt.site_scope=?`
@@ -280,7 +283,7 @@ func RegistrationReportForPeriod(ctx context.Context, database RegistrationSQL, 
 		finishRegistrationCohort(&cohort, workflow)
 		report.Workflows[workflow] = cohort
 	}
-	outcomeQuery := `SELECT event.stage,COUNT(*) FROM registration_analytics_events event JOIN registration_analytics_attempts attempt ON attempt.id=event.attempt_id WHERE event.occurred_at>=? AND event.occurred_at<? AND event.stage IN ('site_created','public_site_created','user_created','registration_completed')`
+	outcomeQuery := `SELECT event.stage,COUNT(*) FROM registration_analytics_events event JOIN registration_analytics_attempts attempt ON attempt.id=event.attempt_id WHERE event.occurred_at>=? AND event.occurred_at<? AND attempt.workflow IN ('public','test_drive','ignite') AND event.stage IN ('site_created','public_site_created','user_created','registration_completed')`
 	if !allSites {
 		outcomeQuery += ` AND attempt.site_scope=?`
 	}

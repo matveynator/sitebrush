@@ -9020,7 +9020,17 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 			mailJournalLocations, _ = mailSnapshot["IPDetails"].(map[string]mailJournalIPView)
 		}
 	}
-	registrationReport, registrationReportErr := a.registrationAnalyticsReport(r.Context(), domain, browserDashboard.Days, false, a.isServerManagerRequest(r))
+	registrationVisible := false
+	registrationReport := browserstats.RegistrationReport{}
+	var registrationReportErr error
+	if selectedTab == "analytics" {
+		if administrator, found := a.currentAdminEmailForDomain(r, domain); found {
+			registrationVisible = a.serverRegistrationAnalyticsAllowed(r.Context(), domainFromRequest(r), administrator)
+		}
+		if registrationVisible {
+			registrationReport, registrationReportErr = a.registrationAnalyticsReport(r.Context(), domain, browserDashboard.Days, false, true)
+		}
+	}
 	verifiedDownloads := 0
 	for _, source := range report.ContentSources {
 		if source.Label == "verified-download" {
@@ -9028,7 +9038,7 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	a.render(w, r, "analytics.html", map[string]any{
-		"Registration": registrationReport, "RegistrationUnavailable": registrationReportErr != nil,
+		"Registration": registrationReport, "ShowRegistrationAnalytics": registrationVisible, "RegistrationUnavailable": registrationReportErr != nil,
 		"VerifiedDownloads":  verifiedDownloads,
 		"MailJournalEnabled": mailJournalEnabled, "MailJournalLabelsJSON": mailJournalLabelsJSON(translationsForRequest(r)),
 		"MailJournalServers": mailJournalServers, "MailJournalUnavailable": mailJournalUnavailable, "MailJournalIPDetails": mailJournalLocations, "MailGeoIPAttribution": template.HTML(geoip.AttributionHTML),
@@ -17303,10 +17313,14 @@ func (a *App) siteMCPRoute(w http.ResponseWriter, r *http.Request) bool {
 				http.Error(w, "demo site is preparing", http.StatusServiceUnavailable)
 				return true
 			}
-		} else if _, _, err := a.aiCapabilities.ValidateOAuth(domain, resource, bearer); err != nil {
-			outcome = "authorization_required"
-			sitemcp.Challenge(w, origin, 401, aicapability.StandardScopes())
-			return true
+		} else {
+			session, _, err := a.aiCapabilities.ValidateOAuth(domain, resource, bearer)
+			if err != nil {
+				outcome = "authorization_required"
+				sitemcp.Challenge(w, origin, 401, aicapability.StandardScopes())
+				return true
+			}
+			options.RegistrationAnalytics = a.serverRegistrationAnalyticsAllowed(r.Context(), domainFromRequest(r), session.Owner)
 		}
 		sitemcp.NewHandler(options).ServeHTTP(w, r)
 		return true
@@ -18081,9 +18095,13 @@ func isAIAnalyticsOperation(operation string) bool {
 	}
 }
 
-func (a *App) aiAnalyticsEndpoint(w http.ResponseWriter, r *http.Request, domain, operation string, installationScope bool) {
+func (a *App) aiAnalyticsEndpoint(w http.ResponseWriter, r *http.Request, domain, operation string, registrationVisible bool) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if operation == "get_registrations" && !registrationVisible {
+		http.NotFound(w, r)
 		return
 	}
 	query := r.URL.Query()
@@ -18110,7 +18128,7 @@ func (a *App) aiAnalyticsEndpoint(w http.ResponseWriter, r *http.Request, domain
 			http.Error(w, "invalid registration period", http.StatusBadRequest)
 			return
 		}
-		registration, err := a.registrationAnalyticsReport(r.Context(), domain, days, query.Get("period") == "month", installationScope)
+		registration, err := a.registrationAnalyticsReport(r.Context(), domain, days, query.Get("period") == "month", true)
 		if err != nil {
 			http.Error(w, "registration analytics temporarily unavailable", http.StatusServiceUnavailable)
 			return
@@ -18160,8 +18178,8 @@ func (a *App) aiAnalyticsEndpoint(w http.ResponseWriter, r *http.Request, domain
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	view := browserstats.AIReportView(report, domain, operation, pagePath, available, limit, offset)
-	if operation == "get_site_report" || operation == "get_funnels" || operation == "get_analytics_summary" {
-		registration, registrationErr := a.registrationAnalyticsReport(r.Context(), domain, days, false, installationScope)
+	if registrationVisible && (operation == "get_site_report" || operation == "get_funnels" || operation == "get_analytics_summary") {
+		registration, registrationErr := a.registrationAnalyticsReport(r.Context(), domain, days, false, true)
 		if registrationErr == nil {
 			view.Registration = &registration
 		} else {
@@ -18233,7 +18251,11 @@ func (a *App) serveAuthorizedAIContent(w http.ResponseWriter, r *http.Request, d
 			http.Error(w, "analytics scope is required", http.StatusForbidden)
 			return
 		}
-		a.aiAnalyticsEndpoint(w, r, domain, operation, a.isServerManagerEmail(r.Context(), domain, session.Owner))
+		registrationVisible := false
+		if operation == "get_registrations" || operation == "get_site_report" || operation == "get_funnels" || operation == "get_analytics_summary" {
+			registrationVisible = a.serverRegistrationAnalyticsAllowed(r.Context(), domainFromRequest(r), session.Owner)
+		}
+		a.aiAnalyticsEndpoint(w, r, domain, operation, registrationVisible)
 		return
 	}
 	readOnlyRequest := r.Method == http.MethodGet && (operation == "pages" || operation == "page" || operation == "files" || operation == "revisions")
@@ -19848,6 +19870,35 @@ func (a *App) registrationAnalyticsIDForSource(ctx context.Context, sourceRef st
 
 func (a *App) recordRegistrationAnalyticsForSource(ctx context.Context, sourceRef, stage, detail string) {
 	a.recordRegistrationAnalytics(ctx, a.registrationAnalyticsIDForSource(ctx, sourceRef), stage, detail)
+}
+
+// Registration outcomes belong to the installation, while ordinary Analytics
+// remains site-scoped. Compare the request host with the configured main domain
+// so a site alias cannot expose server totals. Read persisted policy on each
+// request so a settings change takes effect immediately.
+func (a *App) serverRegistrationAnalyticsAllowed(ctx context.Context, requestDomain, email string) bool {
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return false
+	}
+	enabled := false
+	err := a.withServerControlDatabaseRead(ctx, "registration-analytics-policy", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		ownerDomain, found := store.OwnerDomain(ctx)
+		if !found || !sameHostingAndSupportDomain(ownerDomain, requestDomain) || !store.IsOwner(ctx, email) {
+			return nil
+		}
+		var automaticRegistration, publicTrial string
+		if err := database.QueryRowContext(ctx, `SELECT value FROM server_settings WHERE name='auto_registration_enabled'`).Scan(&automaticRegistration); err != nil {
+			return err
+		}
+		if err := database.QueryRowContext(ctx, `SELECT value FROM server_settings WHERE name='public_trial_enabled'`).Scan(&publicTrial); err != nil {
+			return err
+		}
+		enabled = automaticRegistration == "1" || publicTrial == "1"
+		return nil
+	})
+	return err == nil && enabled
 }
 
 func (a *App) registrationAnalyticsReport(ctx context.Context, domain string, days int, month, allSites bool) (browserstats.RegistrationReport, error) {
