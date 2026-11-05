@@ -20183,12 +20183,12 @@ func TestIgniteCreatesOnlyConfirmedNewSite(t *testing.T) {
 	defer stopConfirmations()
 	application.registrationConfirmations = startEmailConfirmationMemoryWorker(confirmationContext)
 	application.emailDelivery = make(chan mailout.DeliveryJob, mailout.DeliveryQueueSize)
-	const ownerDomain = "sitebrush.example"
-	const siteDomain = "shop.sitebrush.example"
+	const ownerDomain = "atelier.example.net"
+	const siteDomain = "shop.atelier.example.net"
 	const ownerEmail = "owner@example.org"
 	if err := application.withServerControlDatabaseWrite(context.Background(), "test-ignite-owner", func(database *sql.DB) error {
 		store := hostingandsupport.Store{DB: database}
-		if err := store.SetOwner(context.Background(), ownerDomain, "admin@sitebrush.example"); err != nil {
+		if err := store.SetOwner(context.Background(), ownerDomain, "admin@atelier.example.net"); err != nil {
 			return err
 		}
 		return store.SaveSettings(context.Background(), true)
