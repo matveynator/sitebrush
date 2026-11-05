@@ -116,6 +116,24 @@ func RegistrationIDForSource(ctx context.Context, database RegistrationSQL, sour
 	return id, err
 }
 
+// A committed workflow can outlive an analytics outage. Its private source
+// reference lets the server recover a confirmed outcome without client input.
+func RecoverRegistrationForSource(ctx context.Context, database RegistrationSQL, domain, workflow, sourceRef string, occurred time.Time) (string, error) {
+	id, err := RegistrationIDForSource(ctx, database, sourceRef)
+	if err == nil || !errors.Is(err, sql.ErrNoRows) {
+		return id, err
+	}
+	rawID, err := NewRegistrationID()
+	if err != nil {
+		return "", err
+	}
+	id = RegistrationIDHash(rawID)
+	if err := StartRegistration(ctx, database, id, RegistrationScope(domain), workflow, sourceRef, occurred, occurred.Add(24*time.Hour)); err != nil {
+		return "", err
+	}
+	return RegistrationIDForSource(ctx, database, sourceRef)
+}
+
 func registrationSourceKey(sourceRef string) string {
 	digest := sha256.Sum256([]byte("sitebrush registration source\n" + sourceRef))
 	return hex.EncodeToString(digest[:])

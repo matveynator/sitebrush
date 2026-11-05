@@ -19879,19 +19879,23 @@ func (a *App) registrationAnalyticsReport(ctx context.Context, domain string, da
 func (a *App) reconcileRegistrationAnalytics(ctx context.Context) error {
 	return a.withServerControlDatabaseWrite(ctx, "registration-analytics-reconcile", func(database *sql.DB) error {
 		type outcome struct {
-			id, sourceRef, siteAt, completedAt, failedAt, workflow string
+			id, sourceRef, domain, startedAt, siteAt, completedAt, failedAt, workflow string
 		}
 		cutoff := time.Now().UTC().Add(-browserstats.RegistrationRetention).Format(time.RFC3339)
 		outcomes := []outcome{}
-		trialRows, err := database.QueryContext(ctx, `SELECT analytics_attempt_id,created_at,COALESCE(analytics_activated_at,'') FROM public_trial_sites WHERE analytics_attempt_id<>'' AND created_at>=?`, cutoff)
+		trialRows, err := database.QueryContext(ctx, `SELECT id,analytics_attempt_id,domain,created_at,COALESCE(analytics_activated_at,'') FROM public_trial_sites WHERE analytics_attempt_id<>'' AND created_at>=?`, cutoff)
 		if err != nil {
 			return err
 		}
 		for trialRows.Next() {
 			var result outcome
-			if err = trialRows.Scan(&result.id, &result.siteAt, &result.completedAt); err != nil {
+			var trialID int
+			if err = trialRows.Scan(&trialID, &result.id, &result.domain, &result.siteAt, &result.completedAt); err != nil {
 				break
 			}
+			result.startedAt = result.siteAt
+			result.sourceRef = fmt.Sprintf("test-drive-%d", trialID)
+			result.workflow = "test_drive"
 			outcomes = append(outcomes, result)
 		}
 		if err == nil {
@@ -19901,15 +19905,16 @@ func (a *App) reconcileRegistrationAnalytics(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		igniteRows, err := database.QueryContext(ctx, `SELECT attempt_hash,COALESCE(analytics_site_created_at,''),COALESCE(analytics_completed_at,'') FROM ignite_registrations WHERE created_at>=?`, cutoff)
+		igniteRows, err := database.QueryContext(ctx, `SELECT attempt_hash,domain,created_at,COALESCE(analytics_site_created_at,''),COALESCE(analytics_completed_at,'') FROM ignite_registrations WHERE created_at>=?`, cutoff)
 		if err != nil {
 			return err
 		}
 		for igniteRows.Next() {
 			var result outcome
-			if err = igniteRows.Scan(&result.sourceRef, &result.siteAt, &result.completedAt); err != nil {
+			if err = igniteRows.Scan(&result.sourceRef, &result.domain, &result.startedAt, &result.siteAt, &result.completedAt); err != nil {
 				break
 			}
+			result.workflow = "ignite"
 			outcomes = append(outcomes, result)
 		}
 		if err == nil {
@@ -19967,10 +19972,22 @@ func (a *App) reconcileRegistrationAnalytics(ctx context.Context) error {
 			return err
 		}
 		for _, result := range outcomes {
+			if result.id != "" && result.workflow == "test_drive" {
+				if startedAt, parseErr := time.Parse(time.RFC3339Nano, result.startedAt); parseErr == nil {
+					if err := browserstats.StartRegistration(ctx, database, result.id, browserstats.RegistrationScope(result.domain), result.workflow, result.sourceRef, startedAt, startedAt.Add(24*time.Hour)); err != nil {
+						return err
+					}
+				}
+			}
 			if result.id == "" && result.sourceRef != "" {
 				result.id, err = browserstats.RegistrationIDForSource(ctx, database, result.sourceRef)
 				if errors.Is(err, sql.ErrNoRows) {
-					continue
+					if result.workflow != "ignite" || result.siteAt == "" && result.completedAt == "" {
+						continue
+					}
+					if startedAt, parseErr := time.Parse(time.RFC3339Nano, result.startedAt); parseErr == nil {
+						result.id, err = browserstats.RecoverRegistrationForSource(ctx, database, result.domain, result.workflow, result.sourceRef, startedAt)
+					}
 				}
 				if err != nil {
 					return err
@@ -57669,9 +57686,20 @@ func (a *App) drainMailAccountEvents(ctx context.Context) {
 				if event.Kind != "registration" || event.Stage != "registration_complete" {
 					return nil
 				}
+				occurred := time.Now().UTC()
+				if savedAt, parseErr := time.Parse(time.RFC3339Nano, event.CreatedAt); parseErr == nil {
+					occurred = savedAt
+				}
 				id, err := browserstats.RegistrationIDForSource(ctx, database, event.FlowID)
 				if errors.Is(err, sql.ErrNoRows) {
-					return nil
+					workflow := "public"
+					switch event.Detail {
+					case "local account setup":
+						workflow = "local"
+					case "trial", "trial_paid":
+						workflow = "test_drive"
+					}
+					id, err = browserstats.RecoverRegistrationForSource(ctx, database, event.Domain, workflow, event.FlowID, occurred)
 				}
 				if err != nil {
 					return err
@@ -57679,10 +57707,6 @@ func (a *App) drainMailAccountEvents(ctx context.Context) {
 				var workflow string
 				if err := database.QueryRowContext(ctx, `SELECT workflow FROM registration_analytics_attempts WHERE id=?`, id).Scan(&workflow); err != nil {
 					return err
-				}
-				occurred := time.Now().UTC()
-				if savedAt, parseErr := time.Parse(time.RFC3339Nano, event.CreatedAt); parseErr == nil {
-					occurred = savedAt
 				}
 				stages := []string{"email_confirmed", "user_created", "site_created", "public_site_created", "registration_completed"}
 				if workflow == "local" || workflow == "approval" {
@@ -60286,6 +60310,11 @@ func (a *App) startPrivateTestDrive(w http.ResponseWriter, r *http.Request) {
 	if attemptID == "" {
 		attempt := a.beginRegistrationAnalytics(r, domain, "test_drive", "")
 		attemptID = browserstats.RegistrationIDHash(attempt)
+		if attemptID == "" {
+			if fallback, err := browserstats.NewRegistrationID(); err == nil {
+				attemptID = browserstats.RegistrationIDHash(fallback)
+			}
+		}
 		a.linkRegistrationAnalyticsID(r.Context(), attemptID, entrySource)
 	}
 	if !trusted {

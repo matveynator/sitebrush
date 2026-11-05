@@ -190,3 +190,23 @@ func TestRegistrationCorrelationSurvivesRestart(t *testing.T) {
 		t.Fatalf("restart lost completed outcome: %+v %v", report, err)
 	}
 }
+
+func TestRegistrationCommittedOutcomeRecoversAfterAnalyticsStartFailure(t *testing.T) {
+	database := registrationTestDatabase(t)
+	now := time.Now().UTC()
+	firstID, err := RecoverRegistrationForSource(context.Background(), database, "recovered.sitebrush.com", "public", "mail-committed", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondID, err := RecoverRegistrationForSource(context.Background(), database, "recovered.sitebrush.com", "public", "mail-committed", now)
+	if err != nil || secondID != firstID {
+		t.Fatalf("committed source created a second attempt: %q %q %v", firstID, secondID, err)
+	}
+	registrationTestStage(t, database, firstID, "user_created", "", now)
+	registrationTestStage(t, database, firstID, "site_created", "", now)
+	registrationTestStage(t, database, firstID, "registration_completed", "", now)
+	report, err := RegistrationReportForPeriod(context.Background(), database, RegistrationScope("recovered.sitebrush.com"), false, now.Add(-time.Hour), now.Add(time.Hour), now)
+	if err != nil || report.Cohort.Started != 1 || report.Outcomes.SitesCreated != 1 || report.Outcomes.Completed != 1 {
+		t.Fatalf("committed outcome was lost: %+v %v", report, err)
+	}
+}
