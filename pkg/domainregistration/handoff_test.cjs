@@ -17,7 +17,7 @@ function element() {
   };
 }
 
-function registrationBrowser(domainReplies) {
+function registrationBrowser(domainReplies, ownerDomain = 'sitebrush.example') {
   const controls = new Map();
   const select = selector => {
     if (!controls.has(selector)) controls.set(selector, element());
@@ -28,7 +28,7 @@ function registrationBrowser(domainReplies) {
   const body = element();
   const requests = [];
   const redirects = [];
-  const window = {location: new URL('https://sitebrush.example/'), SiteBrushDomainNameInput: {
+  const window = {location: new URL('https://' + ownerDomain + '/'), SiteBrushDomainNameInput: {
     normalize: name => name.toLowerCase().trim(), valid: name => /^[a-z0-9-]+$/.test(name),
     address: (name, parent) => name + '.' + parent
   }};
@@ -40,7 +40,7 @@ function registrationBrowser(domainReplies) {
     return {ok: true, json: async () => domainReplies.shift()};
   };
   vm.runInNewContext(source, {window, document, fetch, URL, FormData, console});
-  window.SiteBrushPublicTrial.attachNewSite(form, {endpoint: 'https://sitebrush.example/', parentDomain: 'sitebrush.example'});
+  window.SiteBrushPublicTrial.attachNewSite(form, {endpoint: 'https://' + ownerDomain + '/', parentDomain: ownerDomain});
   select('input[name="subdomain"]').value = 'example';
   return {form, body, requests, redirects};
 }
@@ -88,4 +88,14 @@ test('registration continues when analytics cannot create a correlation attempt'
   await flush();
   assert.deepEqual(browser.redirects, ['http://example.sitebrush.example/?register&site_workflow=new_site']);
   assert.equal(browser.body.children.length, 0);
+});
+
+test('a custom installation domain keeps its own registration handoff', async () => {
+  const browser = registrationBrowser([{domain: 'example.atelier.example.net', available: true, registration_attempt: 'c'.repeat(48)}], 'atelier.example.net');
+  browser.form.listeners.submit({preventDefault() {}});
+  await flush();
+  const check = browser.requests.find(request => request.address.includes('trial_site_domain_check'));
+  assert.equal(new URL(check.address).host, 'atelier.example.net');
+  assert.equal(browser.body.children[0].action, 'http://example.atelier.example.net/?register&site_workflow=new_site');
+  assert.equal(browser.body.children[0].children[0].value, 'c'.repeat(48));
 });

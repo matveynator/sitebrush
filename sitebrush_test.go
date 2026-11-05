@@ -20080,9 +20080,11 @@ func TestNewSiteConfirmationLogsInAndOpensRootEditor(t *testing.T) {
 
 func TestNewSiteRegistrationPassesUnknownHostGate(t *testing.T) {
 	application := newPartitionedTestApplication(t)
+	const ownerDomain = "atelier.example.net"
+	const siteDomain = "new.atelier.example.net"
 	if err := application.withServerControlDatabaseWrite(context.Background(), "test-new-site-owner", func(database *sql.DB) error {
 		store := hostingandsupport.Store{DB: database}
-		if setErr := store.SetOwner(context.Background(), "sitebrush.example", "admin@sitebrush.example"); setErr != nil {
+		if setErr := store.SetOwner(context.Background(), ownerDomain, "admin@atelier.example.net"); setErr != nil {
 			return setErr
 		}
 		return store.SaveSettings(context.Background(), true)
@@ -20100,10 +20102,10 @@ func TestNewSiteRegistrationPassesUnknownHostGate(t *testing.T) {
 		host, query string
 		want        int
 	}{
-		{"new.sitebrush.example", "?register&site_workflow=new_site", http.StatusOK},
-		{"new.sitebrush.example", "?edit", http.StatusNotFound},
+		{siteDomain, "?register&site_workflow=new_site", http.StatusOK},
+		{siteDomain, "?edit", http.StatusNotFound},
 		{"new.other.example", "?register&site_workflow=new_site", http.StatusNotFound},
-		{"admin.sitebrush.example", "?register&site_workflow=new_site", http.StatusNotFound},
+		{"admin." + ownerDomain, "?register&site_workflow=new_site", http.StatusNotFound},
 	} {
 		request := httptest.NewRequest(http.MethodGet, "http://"+test.host+"/"+test.query, nil)
 		response := httptest.NewRecorder()
@@ -20112,35 +20114,65 @@ func TestNewSiteRegistrationPassesUnknownHostGate(t *testing.T) {
 			t.Errorf("%s%s: status=%d want=%d body=%s", test.host, test.query, response.Code, test.want, response.Body.String())
 		}
 	}
-	postRequest := httptest.NewRequest(http.MethodPost, "http://new.sitebrush.example/?register&site_workflow=new_site", strings.NewReader("site_workflow=new_site"))
+	postRequest := httptest.NewRequest(http.MethodPost, "http://"+siteDomain+"/?register&site_workflow=new_site", strings.NewReader("site_workflow=new_site"))
 	postRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	postRequest.Header.Set("Origin", "http://new.sitebrush.example")
+	postRequest.Header.Set("Origin", "http://"+siteDomain)
 	postResponse := httptest.NewRecorder()
 	handler.ServeHTTP(postResponse, postRequest)
 	if postResponse.Code != http.StatusBadRequest || !strings.Contains(postResponse.Body.String(), `site_workflow=new_site`) {
 		t.Fatalf("new-site form did not reach registration: status=%d body=%s", postResponse.Code, postResponse.Body.String())
 	}
-	beforeHandoff, err := application.registrationAnalyticsReport(context.Background(), "new.sitebrush.example", 30, false, false)
+	beforeHandoff, err := application.registrationAnalyticsReport(context.Background(), siteDomain, 30, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	parentRequest := httptest.NewRequest(http.MethodGet, "https://sitebrush.example/?trial_site_domain_check&subdomain=new", nil)
-	attempt := application.beginRegistrationAnalytics(parentRequest, "new.sitebrush.example", "public", "")
+	parentRequest := httptest.NewRequest(http.MethodGet, "https://"+ownerDomain+"/?trial_site_domain_check&subdomain=new", nil)
+	attempt := application.beginRegistrationAnalytics(parentRequest, siteDomain, "public", "")
 	if attempt == "" {
 		t.Fatal("parent domain did not create a registration correlation ID")
 	}
 	handoffForm := url.Values{"registration_attempt": {attempt}}
-	handoffRequest := httptest.NewRequest(http.MethodPost, "http://new.sitebrush.example/?register&site_workflow=new_site", strings.NewReader(handoffForm.Encode()))
+	handoffRequest := httptest.NewRequest(http.MethodPost, "http://"+siteDomain+"/?register&site_workflow=new_site", strings.NewReader(handoffForm.Encode()))
 	handoffRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	handoffRequest.Header.Set("Origin", "https://sitebrush.example")
+	handoffRequest.Header.Set("Origin", "https://"+ownerDomain)
 	handoffResponse := httptest.NewRecorder()
 	handler.ServeHTTP(handoffResponse, handoffRequest)
 	if handoffResponse.Code != http.StatusOK || !strings.Contains(handoffResponse.Body.String(), `name="registration_attempt" value="`+attempt+`"`) {
 		t.Fatalf("cross-domain POST lost correlation: status=%d body=%s", handoffResponse.Code, handoffResponse.Body.String())
 	}
-	registrationReport, err := application.registrationAnalyticsReport(context.Background(), "new.sitebrush.example", 30, false, false)
+	registrationReport, err := application.registrationAnalyticsReport(context.Background(), siteDomain, 30, false, false)
 	if err != nil || registrationReport.Cohort.Started != beforeHandoff.Cohort.Started+1 || registrationReport.Scope != "site" {
 		t.Fatalf("cross-domain attempt was duplicated: %+v %v", registrationReport, err)
+	}
+}
+
+func TestRegistrationAnalyticsUsesConfiguredTestDriveParentDomain(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	const ownerDomain = "atelier.example.net"
+	const siteDomain = "trial.atelier.example.net"
+	if err := application.withServerControlDatabaseWrite(context.Background(), "test-custom-trial-parent", func(database *sql.DB) error {
+		return (hostingandsupport.Store{DB: database}).SetOwner(context.Background(), ownerDomain, "admin@atelier.example.net")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	parentDomain, err := application.testDriveParentDomain(context.Background())
+	if err != nil || parentDomain != ownerDomain {
+		t.Fatalf("Test Drive parent domain = %q, %v", parentDomain, err)
+	}
+	domain, err := application.testDriveDomain(context.Background(), "trial")
+	if err != nil || domain != siteDomain {
+		t.Fatalf("Test Drive site domain = %q, %v", domain, err)
+	}
+	if !application.isServerManagerEmail(context.Background(), ownerDomain, "admin@atelier.example.net") || application.isServerManagerEmail(context.Background(), siteDomain, "admin@atelier.example.net") {
+		t.Fatal("installation-wide Analytics scope did not follow the configured owner domain")
+	}
+	attempt := application.beginRegistrationAnalytics(httptest.NewRequest(http.MethodPost, "https://"+ownerDomain+"/?test_drive_start", nil), domain, "test_drive", "")
+	if attempt == "" {
+		t.Fatal("custom-domain Test Drive did not start a registration attempt")
+	}
+	report, err := application.registrationAnalyticsReport(context.Background(), domain, 30, false, false)
+	if err != nil || report.Cohort.Started != 1 || report.Workflows["test_drive"].Started != 1 {
+		t.Fatalf("custom-domain Test Drive report: %+v %v", report, err)
 	}
 }
 

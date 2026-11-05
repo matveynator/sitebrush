@@ -15,12 +15,6 @@ import (
 // registration state. Browser observations never enter this ledger.
 const RegistrationRetention = 120 * 24 * time.Hour
 
-var RegistrationStages = []string{
-	"registration_started", "domain_check_completed", "captcha_completed",
-	"email_confirmation_sent", "email_confirmed", "user_created",
-	"site_created", "public_site_created", "registration_completed", "registration_failed",
-}
-
 func RegistrationSchemaQueries() []string {
 	return []string{
 		`CREATE TABLE IF NOT EXISTS registration_analytics_attempts(id TEXT PRIMARY KEY,site_scope TEXT NOT NULL,workflow TEXT NOT NULL,started_at TEXT NOT NULL,expires_at TEXT NOT NULL)`,
@@ -140,20 +134,17 @@ func registrationSourceKey(sourceRef string) string {
 }
 
 func validRegistrationEvent(stage, detail string) bool {
-	for _, known := range RegistrationStages {
-		if stage == known {
-			if stage == "registration_failed" {
-				switch detail {
-				case "domain_unavailable", "captcha", "email_code", "email_expired", "mail_delivery", "site_provision", "account_creation", "rejected", "technical":
-					return true
-				}
-				return false
-			}
-			if stage == "domain_check_completed" {
-				return detail == "available" || detail == "unavailable"
-			}
-			return detail == ""
+	switch stage {
+	case "registration_failed":
+		switch detail {
+		case "domain_unavailable", "captcha", "email_code", "email_expired", "mail_delivery", "site_provision", "account_creation", "rejected", "technical":
+			return true
 		}
+		return false
+	case "domain_check_completed":
+		return detail == "available" || detail == "unavailable"
+	case "registration_started", "captcha_completed", "email_confirmation_sent", "email_confirmed", "user_created", "site_created", "public_site_created", "registration_completed":
+		return detail == ""
 	}
 	return false
 }
@@ -209,7 +200,7 @@ type RegistrationReport struct {
 }
 
 func newRegistrationCohort() RegistrationCohort {
-	return RegistrationCohort{Stages: make(map[string]int, len(RegistrationStages)), Dropoff: make(map[string]int), FailureDetails: make(map[string]int)}
+	return RegistrationCohort{Stages: make(map[string]int), Dropoff: make(map[string]int), FailureDetails: make(map[string]int)}
 }
 
 // RegistrationReportForPeriod uses starts as the funnel denominator. Outcomes
