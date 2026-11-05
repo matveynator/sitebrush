@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/matveynator/sitebrush/v2/pkg/analytics"
 	"github.com/matveynator/sitebrush/v2/pkg/captcha"
 	"github.com/matveynator/sitebrush/v2/pkg/demo"
 	"github.com/matveynator/sitebrush/v2/pkg/domainregistration"
@@ -1099,6 +1100,19 @@ func hostingSchemaSteps(ctx context.Context, repair bool) []migrations.Step {
 	ignite.Ensure = repair
 	steps = append(steps, ignite)
 	steps = append(steps, hostingSchemaColumnSteps(ctx, repair, []hostingAndSupportColumn{{tableName: "ignite_registrations", columnName: "confirmation_form_hash", definition: "TEXT NOT NULL DEFAULT ''"}})...)
+	// Registration analytics shares the control database and follows all
+	// previously published migration ordinals.
+	for index, query := range analytics.RegistrationSchemaQueries() {
+		step := migrations.SQL(fmt.Sprintf("registration-analytics-%03d", index+1), query)
+		step.Ensure = repair
+		steps = append(steps, step)
+	}
+	steps = append(steps, hostingSchemaColumnSteps(ctx, repair, []hostingAndSupportColumn{{tableName: "public_trial_sites", columnName: "analytics_attempt_id", definition: "TEXT NOT NULL DEFAULT ''"}})...)
+	steps = append(steps, hostingSchemaColumnSteps(ctx, repair, []hostingAndSupportColumn{
+		{tableName: "public_trial_sites", columnName: "analytics_activated_at", definition: "TEXT NOT NULL DEFAULT ''"},
+		{tableName: "ignite_registrations", columnName: "analytics_site_created_at", definition: "TEXT NOT NULL DEFAULT ''"},
+		{tableName: "ignite_registrations", columnName: "analytics_completed_at", definition: "TEXT NOT NULL DEFAULT ''"},
+	})...)
 	return steps
 }
 

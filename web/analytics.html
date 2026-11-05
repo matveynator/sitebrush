@@ -744,6 +744,27 @@
     {{if .BrowserAnalytics.Error}}<p class="alert alert-danger" role="alert">{{index .T "cx_report_error"}}</p>{{end}}
     {{if .AnalyticsQuotaBlocked}}<p class="alert alert-warning">{{index .T "cx_storage_paused"}}</p>{{end}}
     {{if .Conversion.Incomplete}}<p class="alert alert-warning">{{index .T "ax_incomplete"}}</p>{{end}}
+    <section class="card mb-4"><div class="card-body"><h2 class="h4">Registration funnel · server confirmed</h2>
+      {{if .RegistrationUnavailable}}<p class="alert alert-warning">Registration counts are temporarily unavailable.</p>{{else}}
+      <p class="small text-muted">Cohort: attempts started in this period. Outcomes: events confirmed in this period, including attempts started earlier. Test Drive site creation includes private copies; completion requires activation. Browser form submissions below are observations.</p>
+      <p><strong>Sites created: {{.Registration.Outcomes.SitesCreated}}</strong> · Public sites created: {{.Registration.Outcomes.PublicSitesCreated}} · Accounts created: {{.Registration.Outcomes.UsersCreated}} · Registrations completed: {{.Registration.Outcomes.Completed}}</p>
+      <table class="table table-sm"><thead><tr><th>Confirmed stage</th><th>Attempts</th></tr></thead><tbody>
+        <tr><td>Registration started</td><td>{{.Registration.Cohort.Started}}</td></tr>
+        <tr><td>Domain available</td><td>{{index .Registration.Cohort.Stages "domain_available"}}</td></tr>
+        <tr><td>CAPTCHA completed</td><td>{{index .Registration.Cohort.Stages "captcha_completed"}}</td></tr>
+        <tr><td>Email accepted for delivery</td><td>{{index .Registration.Cohort.Stages "email_confirmation_sent"}}</td></tr>
+        <tr><td>Email confirmed</td><td>{{index .Registration.Cohort.Stages "email_confirmed"}}</td></tr>
+        <tr><td>Account created</td><td>{{index .Registration.Cohort.Stages "user_created"}}</td></tr>
+        <tr><td>Site created</td><td>{{index .Registration.Cohort.Stages "site_created"}}</td></tr>
+        <tr><td>Registration completed</td><td>{{.Registration.Cohort.Completed}}</td></tr>
+      </tbody></table>
+      <p>Conversion: {{printf "%.1f" .Registration.Cohort.ConversionPercent}}% · Incomplete: {{.Registration.Cohort.Unfinished}} · Expired: {{.Registration.Cohort.Expired}} · Failed: {{.Registration.Cohort.Failed}} · Had an error: {{.Registration.Cohort.Errored}} · Recovered after error: {{.Registration.Cohort.RecoveredErrors}}</p>
+      <details><summary>Error stages</summary><ul>{{range $detail, $count := .Registration.Cohort.FailureDetails}}<li>{{$detail}}: {{$count}}</li>{{end}}</ul></details>
+      <table class="table table-sm"><thead><tr><th>Workflow</th><th>Started</th><th>Sites created</th><th>Completed</th><th>Incomplete</th><th>Expired</th><th>Failed</th><th>Conversion</th></tr></thead><tbody>{{range $name, $cohort := .Registration.Workflows}}<tr><td>{{$name}}</td><td>{{$cohort.Started}}</td><td>{{index $cohort.Stages "site_created"}}</td><td>{{$cohort.Completed}}</td><td>{{$cohort.Unfinished}}</td><td>{{$cohort.Expired}}</td><td>{{$cohort.Failed}}</td><td>{{printf "%.1f" $cohort.ConversionPercent}}%</td></tr>{{end}}</tbody></table>
+      {{range $name, $cohort := .Registration.Workflows}}<details><summary>{{$name}} stage drop-off</summary><table class="table table-sm"><thead><tr><th>Stage</th><th>Attempts</th><th>Drop-off from previous comparable stage</th></tr></thead><tbody>{{range $cohort.Funnel}}<tr><td>{{.Stage}}</td><td>{{.Count}}</td><td>{{if .Comparable}}{{.Dropoff}}{{else}}—{{end}}</td></tr>{{end}}</tbody></table></details>{{end}}
+      {{end}}
+    </div></section>
+    <section class="card mb-4"><div class="card-body"><h2 class="h4">Downloads · server confirmed</h2><p><strong>{{.VerifiedDownloads}}</strong> completed transfers of files hosted by this SiteBrush site in this period.</p><p class="small text-muted">Full 200 responses count after every byte is written. Browser clicks and visits to a download section remain observations; external links such as GitHub cannot be verified by this server.</p></div></section>
     <section class="card mb-4"><div class="card-body"><h2 class="h4">{{index .T "cx_visitor_map"}}</h2>
       <div id="conversion-calendar-years"></div>
   <form method="get" class="d-flex flex-wrap gap-2 mb-3">

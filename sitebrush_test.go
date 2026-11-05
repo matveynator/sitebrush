@@ -96,6 +96,92 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+type interruptedDownloadWriter struct {
+	header http.Header
+	status int
+}
+
+func (writer *interruptedDownloadWriter) Header() http.Header {
+	return writer.header
+}
+
+func (writer *interruptedDownloadWriter) WriteHeader(status int) {
+	writer.status = status
+}
+
+func (writer *interruptedDownloadWriter) Write(body []byte) (int, error) {
+	return len(body) / 2, errors.New("connection closed")
+}
+
+func TestServerDownloadObservationRequiresCompleteTransfer(t *testing.T) {
+	content := []byte("complete file body")
+	modified := time.Date(2026, 11, 5, 0, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name, method, rangeHeader, modifiedHeader string
+		wantComplete                              bool
+	}{
+		{name: "full", method: http.MethodGet, wantComplete: true},
+		{name: "head", method: http.MethodHead},
+		{name: "range", method: http.MethodGet, rangeHeader: "bytes=0-3"},
+		{name: "conditional", method: http.MethodGet, modifiedHeader: modified.Format(http.TimeFormat)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(test.method, "/package.zip", nil)
+			if test.rangeHeader != "" {
+				request.Header.Set("Range", test.rangeHeader)
+			}
+			if test.modifiedHeader != "" {
+				request.Header.Set("If-Modified-Since", test.modifiedHeader)
+			}
+			response := httptest.NewRecorder()
+			serveContentWithDownloadObservation(response, request, "package.zip", modified, int64(len(content)), bytes.NewReader(content))
+			if completed := response.Header().Get("X-SiteBrush-Download-Complete") == "1"; completed != test.wantComplete {
+				t.Fatalf("completed=%t status=%d bytes=%d", completed, response.Code, response.Body.Len())
+			}
+		})
+	}
+	request := httptest.NewRequest(http.MethodGet, "/package.zip", nil)
+	broken := &interruptedDownloadWriter{header: make(http.Header)}
+	serveContentWithDownloadObservation(broken, request, "package.zip", modified, int64(len(content)), bytes.NewReader(content))
+	if broken.Header().Get("X-SiteBrush-Download-Complete") != "" {
+		t.Fatal("interrupted transfer counted as a download")
+	}
+	page := httptest.NewRecorder()
+	serveContentWithDownloadObservation(page, request, "index.html", modified, int64(len(content)), bytes.NewReader(content))
+	if page.Header().Get("X-SiteBrush-Download-Complete") != "" {
+		t.Fatal("ordinary page counted as a download")
+	}
+}
+
+func TestRegistrationAnalyticsStorageFailureDoesNotAbortWorkflow(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	request := httptest.NewRequest(http.MethodPost, "https://example.org/?register", nil)
+	attempt := application.beginRegistrationAnalytics(request, "example.org", "public", "")
+	if attempt == "" {
+		t.Fatal("registration attempt was not created")
+	}
+	if err := application.withServerControlDatabaseWrite(context.Background(), "test-analytics-storage-down", func(database *sql.DB) error {
+		_, dropErr := database.Exec(`DROP TABLE registration_analytics_events`)
+		return dropErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+	application.recordRegistrationAnalytics(context.Background(), browserstats.RegistrationIDHash(attempt), "captcha_completed", "")
+	if err := application.withServerControlDatabaseWrite(context.Background(), "test-analytics-storage-restored", func(database *sql.DB) error {
+		_, createErr := database.Exec(browserstats.RegistrationSchemaQueries()[2])
+		return createErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+	application.recordRegistrationAnalytics(context.Background(), browserstats.RegistrationIDHash(attempt), "captcha_completed", "")
+	var count int
+	if err := application.withServerControlDatabaseRead(context.Background(), "test-analytics-recovered", func(database *sql.DB) error {
+		return database.QueryRow(`SELECT COUNT(*) FROM registration_analytics_events WHERE attempt_id=? AND stage='captcha_completed'`, browserstats.RegistrationIDHash(attempt)).Scan(&count)
+	}); err != nil || count != 1 {
+		t.Fatalf("registration event did not recover: count=%d error=%v", count, err)
+	}
+}
+
 type automaticSSLIssuerFunc func(context.Context, string) channelacme.IssueResult
 
 func (issue automaticSSLIssuerFunc) Issue(ctx context.Context, domain string) channelacme.IssueResult {
@@ -2748,6 +2834,7 @@ func TestMobileServicePageDesignCoversEverySharedTemplate(t *testing.T) {
 		"server_update.html",
 		"setup.html",
 		"test_drive.html",
+		"test_drive_neutral.html",
 		"unfreeze.html",
 	}
 	coveredTemplates := make([]string, 0, len(expectedTemplates))
@@ -3671,7 +3758,7 @@ func TestAnalyticsPageRequiresAdminAndRendersPreparedReport(t *testing.T) {
 		t.Fatalf("admin status = %d, body=%q", adminResponse.Code, adminResponse.Body.String())
 	}
 	body := adminResponse.Body.String()
-	for _, expectedFragment := range []string{"Analytics", "Conversion", "Behaviour", "Retention", `id="conversion-dashboard"`, `id="conversion-configuration"`, `analytics_dashboard.js`} {
+	for _, expectedFragment := range []string{"Analytics", "Conversion", "Behaviour", "Retention", "Registration funnel · server confirmed", `id="conversion-dashboard"`, `id="conversion-configuration"`, `analytics_dashboard.js`} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("analytics missing %q", expectedFragment)
 		}
@@ -14499,6 +14586,10 @@ func testPrivateTestDriveOnboarding(t *testing.T, scheme string) {
 	if trial.VerifiedEmail != "" {
 		t.Fatal("new site unexpectedly verified")
 	}
+	registrationReport, reportErr := application.registrationAnalyticsReport(context.Background(), "sitebrush.com", 30, false, true)
+	if reportErr != nil || registrationReport.Outcomes.SitesCreated != 1 || registrationReport.Outcomes.Completed != 0 || registrationReport.Workflows["test_drive"].Stages["site_created"] != 1 {
+		t.Fatalf("private Test Drive count: %+v %v", registrationReport, reportErr)
+	}
 	trialCreatedAt, _ := time.Parse(time.RFC3339, trial.CreatedAt)
 	trialExpiry, _ := time.Parse(time.RFC3339, trial.DeleteAfter)
 	if trialExpiry.Sub(trialCreatedAt) != testDriveCodeTime {
@@ -14885,6 +14976,10 @@ func testPrivateTestDriveOnboarding(t *testing.T, scheme string) {
 	}
 	if status != "activated" || verifiedEmail != "third@example.com" {
 		t.Fatalf("verification did not activate the site: status=%s email=%s", status, verifiedEmail)
+	}
+	registrationReport, reportErr = application.registrationAnalyticsReport(context.Background(), "sitebrush.com", 30, false, true)
+	if reportErr != nil || registrationReport.Outcomes.SitesCreated != 1 || registrationReport.Outcomes.PublicSitesCreated != 1 || registrationReport.Outcomes.Completed != 1 || registrationReport.Workflows["test_drive"].Completed != 1 {
+		t.Fatalf("activated Test Drive count: %+v %v", registrationReport, reportErr)
 	}
 	activatedSession := false
 	for _, cookie := range verifyResponse.Result().Cookies() {
@@ -19991,6 +20086,28 @@ func TestNewSiteRegistrationPassesUnknownHostGate(t *testing.T) {
 	if postResponse.Code != http.StatusBadRequest || !strings.Contains(postResponse.Body.String(), `site_workflow=new_site`) {
 		t.Fatalf("new-site form did not reach registration: status=%d body=%s", postResponse.Code, postResponse.Body.String())
 	}
+	beforeHandoff, err := application.registrationAnalyticsReport(context.Background(), "new.sitebrush.example", 30, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentRequest := httptest.NewRequest(http.MethodGet, "https://sitebrush.example/?trial_site_domain_check&subdomain=new", nil)
+	attempt := application.beginRegistrationAnalytics(parentRequest, "new.sitebrush.example", "public", "")
+	if attempt == "" {
+		t.Fatal("parent domain did not create a registration correlation ID")
+	}
+	handoffForm := url.Values{"registration_attempt": {attempt}}
+	handoffRequest := httptest.NewRequest(http.MethodPost, "http://new.sitebrush.example/?register&site_workflow=new_site", strings.NewReader(handoffForm.Encode()))
+	handoffRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	handoffRequest.Header.Set("Origin", "https://sitebrush.example")
+	handoffResponse := httptest.NewRecorder()
+	handler.ServeHTTP(handoffResponse, handoffRequest)
+	if handoffResponse.Code != http.StatusOK || !strings.Contains(handoffResponse.Body.String(), `name="registration_attempt" value="`+attempt+`"`) {
+		t.Fatalf("cross-domain POST lost correlation: status=%d body=%s", handoffResponse.Code, handoffResponse.Body.String())
+	}
+	registrationReport, err := application.registrationAnalyticsReport(context.Background(), "new.sitebrush.example", 30, false, false)
+	if err != nil || registrationReport.Cohort.Started != beforeHandoff.Cohort.Started+1 || registrationReport.Scope != "site" {
+		t.Fatalf("cross-domain attempt was duplicated: %+v %v", registrationReport, err)
+	}
 }
 
 func TestIgniteCreatesOnlyConfirmedNewSite(t *testing.T) {
@@ -20029,6 +20146,10 @@ func TestIgniteCreatesOnlyConfirmedNewSite(t *testing.T) {
 	attempt, _ := begin["attempt"].(string)
 	if len(attempt) != 36 || attempt[8] != '-' || attempt[13] != '-' || attempt[18] != '-' || attempt[23] != '-' || begin["domain"] != siteDomain || application.hasAdmin(contextWithDomain(request.Context(), siteDomain), siteDomain) {
 		t.Fatal("Ignite created a site before email confirmation", begin)
+	}
+	igniteReport, reportErr := application.registrationAnalyticsReport(context.Background(), ownerDomain, 30, false, true)
+	if reportErr != nil || igniteReport.Workflows["ignite"].Started != 1 || igniteReport.Outcomes.Completed != 0 {
+		t.Fatalf("Ignite attempt count: %+v %v", igniteReport, reportErr)
 	}
 	if _, err := application.invokeIgnite(request, ownerDomain, "ignite_send_code", ignite.Arguments{Attempt: attempt, Email: ownerEmail}); err == nil {
 		t.Fatal("email sent before browser CAPTCHA")
@@ -20155,6 +20276,10 @@ func TestIgniteCreatesOnlyConfirmedNewSite(t *testing.T) {
 	if !application.publicCatalog.Lookup(publicsite.Lookup{Host: siteDomain, Path: "/"}).Found {
 		t.Fatal("created site has no published homepage")
 	}
+	igniteReport, reportErr = application.registrationAnalyticsReport(context.Background(), ownerDomain, 30, false, true)
+	if reportErr != nil || igniteReport.Workflows["ignite"].Completed != 1 || igniteReport.Outcomes.SitesCreated != 1 || igniteReport.Outcomes.PublicSitesCreated != 1 || igniteReport.Outcomes.Completed != 1 {
+		t.Fatalf("completed Ignite count: %+v %v", igniteReport, reportErr)
+	}
 	importedHTML := `<!doctype html><html><title>Old site</title><main>Preserved content</main></html>`
 	siteContext := contextWithDomain(request.Context(), siteDomain)
 	if err := application.persistImportedPages(siteContext, siteDomain, "/", []wholeSiteImportedPage{{LocalPath: "/", HTML: importedHTML}}, nil, true); err != nil {
@@ -20180,6 +20305,10 @@ func TestIgniteCreatesOnlyConfirmedNewSite(t *testing.T) {
 	again, err := application.invokeIgnite(request, ownerDomain, "ignite_complete", ignite.Arguments{Attempt: attempt, Code: "000000"})
 	if err != nil || again["domain"] != siteDomain {
 		t.Fatal("completed Ignite registration did not resume", again, err)
+	}
+	igniteReport, reportErr = application.registrationAnalyticsReport(context.Background(), ownerDomain, 30, false, true)
+	if reportErr != nil || igniteReport.Outcomes.Completed != 1 {
+		t.Fatalf("repeated Ignite completion counted twice: %+v %v", igniteReport, reportErr)
 	}
 	if _, err := application.db.ExecContext(contextWithDomain(request.Context(), siteDomain), `DELETE FROM pages WHERE domain=? AND path='/'`, siteDomain); err != nil {
 		t.Fatal(err)
@@ -20581,6 +20710,12 @@ func testNewSiteConfirmation(t *testing.T, scheme string) {
 		ReturnPath: "/?email_confirm=old-confirmation",
 		ExpiresAt:  time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
 	}
+	parentRequest := httptest.NewRequest(http.MethodGet, "https://"+ownerDomain+"/?trial_site_domain_check&subdomain=tttt", nil)
+	registrationAttempt := application.beginRegistrationAnalytics(parentRequest, domain, "public", "")
+	if registrationAttempt == "" {
+		t.Fatal("new-site registration attempt unavailable")
+	}
+	application.linkRegistrationAnalytics(context.Background(), registrationAttempt, mailMonitorFlowID(confirmation.Token))
 	if err := application.saveRegistrationConfirmation(context.Background(), confirmation); err != nil {
 		t.Fatal(err)
 	}
@@ -20634,6 +20769,11 @@ func testNewSiteConfirmation(t *testing.T, scheme string) {
 	}
 	if _, found := application.registrationConfirmationByToken(context.Background(), confirmation.Token); found {
 		t.Fatal("used registration confirmation remains active")
+	}
+	application.drainMailAccountEvents(context.Background())
+	registrationReport, reportErr := application.registrationAnalyticsReport(context.Background(), ownerDomain, 30, false, true)
+	if reportErr != nil || registrationReport.Cohort.Started != 1 || registrationReport.Outcomes.Completed != 1 || registrationReport.Outcomes.SitesCreated != 1 {
+		t.Fatalf("new-site server outcome: %+v %v", registrationReport, reportErr)
 	}
 }
 
@@ -27346,6 +27486,7 @@ func TestAICapabilityScopesGateReadAnalyticsAndPublication(t *testing.T) {
 	}{
 		{[]string{aicapability.ScopeAnalytics}, "pages", "GET", "", 403},
 		{[]string{aicapability.ScopeRead}, "get_site_report", "GET", "", 403},
+		{[]string{aicapability.ScopeRead}, "get_registrations", "GET", "", 403},
 		{[]string{aicapability.ScopeAnalytics}, "get_site_report", "POST", "{}", 405},
 		{[]string{aicapability.ScopeWrite}, "publish", "POST", "{}", 403},
 		{[]string{aicapability.ScopeAnalytics}, "get_site_report&days=4", "GET", "", 400},

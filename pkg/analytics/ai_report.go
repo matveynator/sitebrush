@@ -12,25 +12,26 @@ import (
 // AIReport is an allowlist of aggregates, independent of the administrator
 // dashboard's visitor maps, session replays and future diagnostic fields.
 type AIReport struct {
-	Version                   int            `json:"version"`
-	Domain                    string         `json:"domain"`
-	Available                 bool           `json:"available"`
-	ConversionGoalsConfigured bool           `json:"conversion_goals_configured"`
-	PeriodStart               time.Time      `json:"period_start"`
-	PeriodEnd                 time.Time      `json:"period_end"`
-	Generated                 time.Time      `json:"generated_at"`
-	Days                      int            `json:"days"`
-	Incomplete                bool           `json:"incomplete"`
-	AudienceSince             *time.Time     `json:"audience_since"`
-	AudienceIncomplete        bool           `json:"audience_incomplete"`
-	Truncated                 bool           `json:"truncated"`
-	Limit                     int            `json:"limit"`
-	Offset                    int            `json:"offset"`
-	Totals                    map[string]int `json:"totals"`
-	Summary                   AISummary      `json:"summary"`
-	Sections                  map[string]any `json:"sections"`
-	Unavailable               []string       `json:"unavailable_signals"`
-	Interpretation            []string       `json:"interpretation"`
+	Version                   int                 `json:"version"`
+	Domain                    string              `json:"domain"`
+	Available                 bool                `json:"available"`
+	ConversionGoalsConfigured bool                `json:"conversion_goals_configured"`
+	PeriodStart               time.Time           `json:"period_start"`
+	PeriodEnd                 time.Time           `json:"period_end"`
+	Generated                 time.Time           `json:"generated_at"`
+	Days                      int                 `json:"days"`
+	Incomplete                bool                `json:"incomplete"`
+	AudienceSince             *time.Time          `json:"audience_since"`
+	AudienceIncomplete        bool                `json:"audience_incomplete"`
+	Truncated                 bool                `json:"truncated"`
+	Limit                     int                 `json:"limit"`
+	Offset                    int                 `json:"offset"`
+	Totals                    map[string]int      `json:"totals"`
+	Summary                   AISummary           `json:"summary"`
+	Registration              *RegistrationReport `json:"registration,omitempty"`
+	Sections                  map[string]any      `json:"sections"`
+	Unavailable               []string            `json:"unavailable_signals"`
+	Interpretation            []string            `json:"interpretation"`
 }
 
 type AISummary struct {

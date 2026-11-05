@@ -70,7 +70,8 @@
   <div class="site-request-shell">
     <p class="text-muted">{{index .T "setup_request_intro"}}</p>
     {{if .Status}}<div class="alert alert-info" style="max-width:920px;">{{.Status}}</div>{{end}}
-    <form class="card card-body site-request-form" method="post" action="?site_request">
+    <form class="card card-body site-request-form" method="post" action="?site_request" data-analytics-key="sitebrush-site-request">
+      <input type="hidden" name="registration_attempt" value="{{.RegistrationAttempt}}">
       <input type="hidden" name="return_path" value="{{.ReturnPath}}">
       <div class="site-request-grid mb-3">
         <label>{{index .T "billing_plan_name"}}
@@ -138,9 +139,10 @@
     <p>{{index .T "setup_first_visitor"}}</p>
   </div>
   {{if .Status}}<div class="alert alert-info" style="max-width:520px;">{{.Status}}</div>{{end}}
-  <form class="card card-body authentication-card" method="post" action="?register{{if .TrialEmbed}}&amp;trial_embed{{end}}{{if .NewSiteWorkflow}}&amp;site_workflow=new_site{{end}}">
+  <form class="card card-body authentication-card" method="post" action="?register{{if .TrialEmbed}}&amp;trial_embed{{end}}{{if .NewSiteWorkflow}}&amp;site_workflow=new_site{{end}}" data-analytics-key="sitebrush-registration">
     {{if .NewSiteWorkflow}}<input type="hidden" name="site_workflow" value="new_site">{{end}}
     <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
+    <input type="hidden" name="registration_attempt" value="{{.RegistrationAttempt}}">
     <input type="hidden" name="return_path" value="{{.ReturnPath}}">
     <p><input type="email" autocomplete="username" name="email" class="form-control" placeholder="{{index .T "login_email_placeholder"}}" value="{{.Email}}" required></p>
     {{if .TrialPaidImport}}
@@ -159,7 +161,7 @@
       <small>{{index .T "account_captcha_help"}}</small>
     </div>
     {{end}}
-    <div><button type="submit" class="btn btn-primary">{{index .T "setup_create_admin"}}</button></div>
+    <div><button type="submit" class="btn btn-primary" data-analytics-key="sitebrush-register-submit">{{index .T "setup_create_admin"}}</button></div>
   </form>
   {{end}}
   {{if or .RegistrationCooldown.Active .ConfirmationPending .RegistrationGuardUnavailable}}

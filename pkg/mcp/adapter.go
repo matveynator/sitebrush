@@ -47,6 +47,7 @@ type Arguments struct {
 	ImageHeight       int        `json:"image_height,omitempty"`
 	ImageFit          string     `json:"image_fit,omitempty"`
 	Days              int        `json:"days,omitempty"`
+	Period            string     `json:"period,omitempty"`
 	Limit             int        `json:"limit,omitempty"`
 	Offset            int        `json:"offset,omitempty"`
 }
@@ -294,6 +295,7 @@ func toolDescriptor(operation string) *sdk.Tool {
 		"publish":               "Publish ALL pending changes for this site using normal SiteBrush publication, including existing pending drafts. Call only within the owner's authorized task.",
 		"rollback":              "Restore a chosen revision as a draft, guarded by the current expected_version. Publish separately when requested.",
 		"get_site_report":       "Get a bounded privacy-safe site Analytics report. Reports include coverage and incomplete/no-data states; do not invent causes.",
+		"get_registrations":     "Get server-confirmed registration funnel and site creation totals. Use period=month for this month; only the installation owner can see all sites.",
 		"get_analytics_summary": "Read aggregate traffic and conversion summary.", "get_funnels": "Read aggregate conversion funnels.", "get_paths": "Read aggregate visitor paths.", "get_page_behaviour": "Read aggregate behaviour for a page, without replay or raw sessions.", "get_forms": "Read aggregate form observations without field contents.", "get_sources": "Read aggregate traffic sources.", "get_page_impacts": "Read observed metric changes around page publications; correlation is not causation.", "get_insights": "Read evidence-based Analytics insights and coverage limits.",
 	}
 	properties := map[string]any{}
@@ -368,6 +370,9 @@ func toolDescriptor(operation string) *sdk.Tool {
 			properties["days"] = map[string]any{"type": "integer", "enum": []int{1, 7, 30, 90}}
 			properties["limit"] = map[string]any{"type": "integer", "minimum": 1, "maximum": 50}
 			properties["offset"] = map[string]any{"type": "integer", "minimum": 0, "maximum": 100000}
+			if operation == "get_registrations" {
+				properties["period"] = map[string]any{"type": "string", "enum": []string{"month"}}
+			}
 		}
 	}
 	readOnly := operation == "get_access" || operation == "get_guide" || operation == "get_import_status" || hasScope(RequiredScopes(operation), aicapability.ScopeRead) || hasScope(RequiredScopes(operation), aicapability.ScopeAnalytics)
