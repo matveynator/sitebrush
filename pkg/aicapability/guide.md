@@ -80,10 +80,12 @@ get_insights). days is 1, 7, 30 or 90; default 30. Optional path filters page
 behaviour/forms/impacts. limit=1..50 (default 20), offset=0..100000 page each
 section independently; totals and truncated indicate remaining aggregate rows.
 Reports include period boundaries, generated_at, availability and incomplete.
-get_registrations returns server-confirmed cohort and event-date outcome totals;
-period=month selects the current UTC month. A server owner receives aggregate
-installation counts; other grants receive only their site's counts. Site creation
-for Test Drive includes a private copy; completed registration requires activation.
+get_registrations is available only to an installation administrator connected
+to the installation's main domain while self-registration or Test Drive is enabled.
+It returns server-confirmed self-service cohort and event-date outcome totals;
+period=month selects the current UTC month. Site creation for Test Drive includes
+a private copy; completed registration requires activation. Additional sites do
+not expose this tool or registration totals through their site reports.
 Unavailable is not measured zero. Distinguish visitors, sessions and page views.
 No visitor identities, addresses, raw sessions, replay or form contents are
 returned. Form/element/field identifiers are SHA-256 hashes, not field values.

@@ -216,6 +216,133 @@ func TestRegistrationAnalyticsStorageFailureDoesNotAbortWorkflow(t *testing.T) {
 	}
 }
 
+func TestServerRegistrationAnalyticsRequiresMainDomainOwnerAndEnabledRegistration(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	const ownerDomain = "atelier.example.net"
+	const siteDomain = "shop.atelier.example.net"
+	const ownerEmail = "admin@atelier.example.net"
+	if err := application.withServerControlDatabaseWrite(context.Background(), "test-registration-owner", func(database *sql.DB) error {
+		return (hostingandsupport.Store{DB: database}).SetOwner(context.Background(), ownerDomain, ownerEmail)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	setRegistration := func(enabled bool) {
+		t.Helper()
+		if err := application.withServerControlDatabaseWrite(context.Background(), "test-registration-visibility", func(database *sql.DB) error {
+			return (hostingandsupport.Store{DB: database}).SaveRegistrationSettings(context.Background(), enabled, false)
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setRegistration(true)
+	for _, scenario := range []struct {
+		domain, email string
+		allowed       bool
+	}{{ownerDomain, ownerEmail, true}, {siteDomain, ownerEmail, false}, {"other.example.net", ownerEmail, false}, {"alias.example.net", ownerEmail, false}, {ownerDomain, "site-owner@example.net", false}} {
+		allowed := application.serverRegistrationAnalyticsAllowed(context.Background(), scenario.domain, scenario.email)
+		if allowed != scenario.allowed {
+			t.Fatalf("registration visibility for %s / %s = %t", scenario.domain, scenario.email, allowed)
+		}
+		request := httptest.NewRequest(http.MethodGet, "https://"+scenario.domain+"/?ai=get_registrations", nil)
+		response := httptest.NewRecorder()
+		application.aiAnalyticsEndpoint(response, request, scenario.domain, "get_registrations", allowed)
+		wantStatus := http.StatusNotFound
+		if scenario.allowed {
+			wantStatus = http.StatusOK
+		}
+		if response.Code != wantStatus {
+			t.Fatalf("registration API for %s / %s = %d, want %d: %s", scenario.domain, scenario.email, response.Code, wantStatus, response.Body.String())
+		}
+		if scenario.allowed && !strings.Contains(response.Body.String(), `"scope":"installation"`) {
+			t.Fatal("main-domain report did not aggregate the installation")
+		}
+	}
+	analyticsStore := browserstats.OpenStore(filepath.Join(application.storagePath, "analytics"))
+	application.analyticsStorage = analyticsStore
+	t.Cleanup(analyticsStore.Close)
+	for _, domain := range []string{ownerDomain, siteDomain} {
+		if err := os.MkdirAll(application.domainStaticDir(domain), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, operation := range []string{"get_site_report", "get_funnels", "get_analytics_summary"} {
+		for _, scenario := range []struct {
+			domain  string
+			visible bool
+		}{{ownerDomain, true}, {siteDomain, false}} {
+			request := httptest.NewRequest(http.MethodGet, "https://"+scenario.domain+"/?ai="+operation, nil)
+			response := httptest.NewRecorder()
+			application.aiAnalyticsEndpoint(response, request, scenario.domain, operation, scenario.visible)
+			if response.Code != http.StatusOK || strings.Contains(response.Body.String(), `"registration":`) != scenario.visible {
+				t.Fatalf("%s registration visibility for %s: status=%d body=%q", operation, scenario.domain, response.Code, response.Body.String())
+			}
+		}
+	}
+	setRegistration(false)
+	if application.serverRegistrationAnalyticsAllowed(context.Background(), ownerDomain, ownerEmail) {
+		t.Fatal("disabled self-registration still exposed the report")
+	}
+}
+
+func TestServerRegistrationAnalyticsDashboardOnlyOnMainDomain(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	const ownerDomain = "atelier.example.net"
+	const siteDomain = "shop.atelier.example.net"
+	const ownerEmail = "admin@atelier.example.net"
+	if err := application.withServerControlDatabaseWrite(context.Background(), "test-dashboard-owner", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		if err := store.SetOwner(context.Background(), ownerDomain, ownerEmail); err != nil {
+			return err
+		}
+		return store.SaveRegistrationSettings(context.Background(), true, false)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	requestFor := func(domain string) *http.Request {
+		t.Helper()
+		boundary := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), domain))
+		if _, err := application.db.ExecContext(boundary, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, ownerEmail, "test"); err != nil {
+			t.Fatal(err)
+		}
+		request := httptest.NewRequest(http.MethodGet, "https://"+domain+"/?analytics", nil)
+		request = request.WithContext(boundary)
+		sessionResponse := httptest.NewRecorder()
+		if application.createSessionForDomain(sessionResponse, request, boundary, domain, ownerEmail) == "" {
+			t.Fatal("administrator session was not created")
+		}
+		for _, cookie := range sessionResponse.Result().Cookies() {
+			request.AddCookie(cookie)
+		}
+		return request
+	}
+	render := func(request *http.Request) string {
+		t.Helper()
+		response := httptest.NewRecorder()
+		application.analyticsPage(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("Analytics page status = %d, location = %q", response.Code, response.Header().Get("Location"))
+		}
+		return response.Body.String()
+	}
+	mainRequest := requestFor(ownerDomain)
+	if !strings.Contains(render(mainRequest), "Registration funnel · server confirmed") {
+		t.Fatal("installation administrator cannot see the registration funnel")
+	}
+	for _, domain := range []string{siteDomain, "other.example.net"} {
+		if strings.Contains(render(requestFor(domain)), "Registration funnel · server confirmed") {
+			t.Fatalf("%s Analytics exposed the installation registration funnel", domain)
+		}
+	}
+	if err := application.withServerControlDatabaseWrite(context.Background(), "test-dashboard-registration-disabled", func(database *sql.DB) error {
+		return (hostingandsupport.Store{DB: database}).SaveRegistrationSettings(context.Background(), false, false)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(render(mainRequest), "Registration funnel · server confirmed") {
+		t.Fatal("disabled registration left its funnel visible")
+	}
+}
+
 type automaticSSLIssuerFunc func(context.Context, string) channelacme.IssueResult
 
 func (issue automaticSSLIssuerFunc) Issue(ctx context.Context, domain string) channelacme.IssueResult {
@@ -3792,10 +3919,13 @@ func TestAnalyticsPageRequiresAdminAndRendersPreparedReport(t *testing.T) {
 		t.Fatalf("admin status = %d, body=%q", adminResponse.Code, adminResponse.Body.String())
 	}
 	body := adminResponse.Body.String()
-	for _, expectedFragment := range []string{"Analytics", "Conversion", "Behaviour", "Retention", "Registration funnel · server confirmed", `id="conversion-dashboard"`, `id="conversion-configuration"`, `analytics_dashboard.js`} {
+	for _, expectedFragment := range []string{"Analytics", "Conversion", "Behaviour", "Retention", `id="conversion-dashboard"`, `id="conversion-configuration"`, `analytics_dashboard.js`} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("analytics missing %q", expectedFragment)
 		}
+	}
+	if strings.Contains(body, "Registration funnel · server confirmed") {
+		t.Fatal("site Analytics displayed server registration totals")
 	}
 	if strings.Contains(body, `id="technical-analytics"`) {
 		t.Fatal("technical data leaked into Analytics")

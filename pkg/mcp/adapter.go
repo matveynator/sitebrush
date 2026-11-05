@@ -71,16 +71,17 @@ type Result struct {
 
 type Options struct {
 	// PublicHost is the exact authority admitted by the site's authorization boundary.
-	PublicHost string
-	Domain     string
-	Resource   string
-	Version    string
-	Bearer     string
-	Manager    *aicapability.Manager
-	Authorize  func() (aicapability.Session, aicapability.Capability, error)
-	PublicDemo bool
-	Invoke     func(context.Context, Invocation) (Result, error)
-	Download   func(context.Context, string, int64) ([]byte, error)
+	PublicHost            string
+	Domain                string
+	Resource              string
+	Version               string
+	Bearer                string
+	Manager               *aicapability.Manager
+	Authorize             func() (aicapability.Session, aicapability.Capability, error)
+	PublicDemo            bool
+	RegistrationAnalytics bool
+	Invoke                func(context.Context, Invocation) (Result, error)
+	Download              func(context.Context, string, int64) ([]byte, error)
 }
 
 func Challenge(response http.ResponseWriter, origin string, status int, scopes []string) {
@@ -112,6 +113,9 @@ func NewHandler(options Options) http.Handler {
 	})
 	operations := append([]string{"get_access", "get_guide"}, aicapability.Operations()...)
 	for _, operation := range operations {
+		if operation == "get_registrations" && !options.RegistrationAnalytics {
+			continue
+		}
 		descriptor := toolDescriptor(operation)
 		if options.PublicDemo {
 			descriptor.Meta["securitySchemes"] = []any{map[string]any{"type": "noauth"}}
@@ -295,7 +299,7 @@ func toolDescriptor(operation string) *sdk.Tool {
 		"publish":               "Publish ALL pending changes for this site using normal SiteBrush publication, including existing pending drafts. Call only within the owner's authorized task.",
 		"rollback":              "Restore a chosen revision as a draft, guarded by the current expected_version. Publish separately when requested.",
 		"get_site_report":       "Get a bounded privacy-safe site Analytics report. Reports include coverage and incomplete/no-data states; do not invent causes.",
-		"get_registrations":     "Get server-confirmed registration funnel and site creation totals. Use period=month for this month; only the installation owner can see all sites.",
+		"get_registrations":     "Get the installation owner's server-confirmed self-service registration funnel and site creation totals. Use period=month for this month.",
 		"get_analytics_summary": "Read aggregate traffic and conversion summary.", "get_funnels": "Read aggregate conversion funnels.", "get_paths": "Read aggregate visitor paths.", "get_page_behaviour": "Read aggregate behaviour for a page, without replay or raw sessions.", "get_forms": "Read aggregate form observations without field contents.", "get_sources": "Read aggregate traffic sources.", "get_page_impacts": "Read observed metric changes around page publications; correlation is not causation.", "get_insights": "Read evidence-based Analytics insights and coverage limits.",
 	}
 	properties := map[string]any{}
