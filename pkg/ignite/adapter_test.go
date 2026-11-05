@@ -29,8 +29,8 @@ func TestIgniteMCPExposesRegistrationOnly(t *testing.T) {
 		if strings.Contains(test.body, `"method":"tools/list"`) && !strings.Contains(response.Body.String(), "Registration attempt UUID") {
 			t.Fatal("Ignite did not explain the server-issued attempt field")
 		}
-		if strings.Contains(test.body, `"method":"initialize"`) && (!strings.Contains(response.Body.String(), "ignite_get_started") || !strings.Contains(response.Body.String(), "old site") || !strings.Contains(response.Body.String(), "Add custom MCP server") || strings.Contains(response.Body.String(), "Plugin Creator")) {
-			t.Fatal("Ignite did not introduce the owner's goal and direct editor connection")
+		if strings.Contains(test.body, `"method":"initialize"`) && (!strings.Contains(response.Body.String(), "ignite_get_started") || !strings.Contains(response.Body.String(), "old site") || !strings.Contains(response.Body.String(), "Add custom MCP server") || !strings.Contains(response.Body.String(), "Plugin Creator") || !strings.Contains(response.Body.String(), "normal Markdown hyperlink")) {
+			t.Fatal("Ignite did not introduce the owner's goal and connection choices")
 		}
 		if strings.Contains(test.body, `"method":"tools/list"`) && !strings.Contains(response.Body.String(), "ignite_get_started") {
 			t.Fatal("Ignite did not expose its introductory tool")
