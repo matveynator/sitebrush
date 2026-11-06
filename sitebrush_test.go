@@ -20842,11 +20842,15 @@ func TestIgniteGatewayDefaultsToConfiguredSiteBrushServer(t *testing.T) {
 
 func TestIgniteGatewayForwardsOnlyToSelectedServer(t *testing.T) {
 	called := false
+	expectedClient := ""
 	remote := ignite.NewHandler("test", func(_ context.Context, operation string, arguments ignite.Arguments) (map[string]any, error) {
-		if operation != "ignite_check_name" || arguments.Name != "shop" || arguments.Server != "" || arguments.Client != "ChatGPT" {
+		if (operation != "ignite_check_name" && operation != "ignite_complete") || arguments.Name != "shop" || arguments.Server != "" || arguments.Client != expectedClient {
 			t.Fatalf("unexpected forwarded call: operation=%q arguments=%+v", operation, arguments)
 		}
 		called = true
+		if operation == "ignite_complete" {
+			return map[string]any{"domain": "shop.other.example", "mcp_endpoint": "https://shop.other.example/?mcp"}, nil
+		}
 		return map[string]any{"domain": "shop.other.example", "available": true}, nil
 	})
 	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
@@ -20857,9 +20861,21 @@ func TestIgniteGatewayForwardsOnlyToSelectedServer(t *testing.T) {
 		remote.ServeHTTP(response, request)
 		return response.Result(), nil
 	})}
-	result, err := callIgniteServer(context.Background(), client, "other.example", "ignite_check_name", ignite.Arguments{Server: "other.example", Name: "shop", Client: "ChatGPT"})
-	if err != nil || !called || result["domain"] != "shop.other.example" || result["server"] != "other.example" {
-		t.Fatalf("remote Ignite result=%v called=%v err=%v", result, called, err)
+	for _, clientName := range []string{"ChatGPT", "Jan"} {
+		expectedClient = clientName
+		called = false
+		result, err := callIgniteServer(context.Background(), client, "other.example", "ignite_check_name", ignite.Arguments{Server: "other.example", Name: "shop", Client: clientName})
+		if err != nil || !called || result["domain"] != "shop.other.example" || result["server"] != "other.example" {
+			t.Fatalf("%s remote Ignite result=%v called=%v err=%v", clientName, result, called, err)
+		}
+	}
+	result, err := callIgniteServer(context.Background(), client, "other.example", "ignite_complete", ignite.Arguments{Server: "other.example", Name: "shop", Client: "Jan"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	instructions, _ := result["connection_instructions"].(string)
+	if !strings.Contains(instructions, "Jan MCP settings") {
+		t.Fatalf("Jan connection instructions=%q", instructions)
 	}
 }
 

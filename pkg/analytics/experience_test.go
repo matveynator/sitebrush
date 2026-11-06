@@ -171,6 +171,8 @@ func TestExperienceSourceEvidenceAndCleaning(t *testing.T) {
 		name, evidence string
 	}{
 		{"https://chatgpt.com/c/private?from=answer&token=secret#fragment", Campaign{}, "ChatGPT", "referrer"},
+		{"https://gemini.google.com/app/abc", Campaign{}, "Gemini", "referrer"},
+		{"https://www.google.com/search?q=sitebrush", Campaign{}, "Google", "referrer"},
 		{"https://google.com.attacker.example/path?q=1", Campaign{}, "google.com.attacker.example", "referrer"},
 		{"", Campaign{Source: "telegram", Name: "launch"}, "telegram", "utm"},
 		{"", Campaign{Google: true}, "Google Ads", "click-parameter"},

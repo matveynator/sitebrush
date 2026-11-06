@@ -62473,7 +62473,7 @@ func forwardIgniteOperation(ctx context.Context, serverDomain, operation string,
 func callIgniteServer(ctx context.Context, client *http.Client, serverDomain, operation string, arguments ignite.Arguments) (map[string]any, error) {
 	clientName := "SiteBrush agent"
 	if browserstats.AIClientKnown(arguments.Client) {
-		clientName += " via " + arguments.Client
+		clientName = arguments.Client + " via SiteBrush agent"
 	}
 	connection, err := sdk.NewClient(&sdk.Implementation{Name: clientName, Version: CompileVersion}, nil).Connect(ctx, &sdk.StreamableClientTransport{Endpoint: "https://" + serverDomain + ignite.Path, HTTPClient: client}, nil)
 	if err != nil {

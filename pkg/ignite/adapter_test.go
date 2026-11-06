@@ -52,6 +52,7 @@ func TestIgniteClientGuidanceAndUnknownFallback(t *testing.T) {
 		{"Gemini CLI", "Gemini", "/mcp auth"},
 		{"Qwen Code", "Qwen", "qwen mcp add"},
 		{"Kimi Code", "Kimi", "kimi mcp auth"},
+		{"Jan", "Jan", "Jan MCP settings"},
 		{"generic-mcp-client", "Unknown", "remote HTTP MCP server"},
 	} {
 		request := httptest.NewRequest(http.MethodPost, "http://localhost/?ignite", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ignite_complete","arguments":{}}}`))
