@@ -135,6 +135,8 @@ func registrationSourceKey(sourceRef string) string {
 
 func validRegistrationEvent(stage, detail string) bool {
 	switch stage {
+	case "ai_client":
+		return AIClientKnown(detail) || detail == "Unknown"
 	case "registration_failed":
 		switch detail {
 		case "domain_unavailable", "captcha", "email_code", "email_expired", "mail_delivery", "site_provision", "account_creation", "rejected", "technical":
@@ -197,6 +199,7 @@ type RegistrationReport struct {
 	Cohort       RegistrationCohort            `json:"cohort"`
 	Outcomes     RegistrationOutcomes          `json:"outcomes"`
 	Workflows    map[string]RegistrationCohort `json:"workflows"`
+	AIClients    map[string]RegistrationCohort `json:"ai_clients,omitempty"`
 }
 
 func newRegistrationCohort() RegistrationCohort {
@@ -211,7 +214,7 @@ func RegistrationReportForPeriod(ctx context.Context, database RegistrationSQL, 
 	if allSites {
 		scope = "installation"
 	}
-	report := RegistrationReport{Source: "server", Scope: scope, Days: int(end.Sub(start).Hours() / 24), PeriodStart: start, PeriodEnd: end, Cohort: newRegistrationCohort(), Workflows: map[string]RegistrationCohort{}}
+	report := RegistrationReport{Source: "server", Scope: scope, Days: int(end.Sub(start).Hours() / 24), PeriodStart: start, PeriodEnd: end, Cohort: newRegistrationCohort(), Workflows: map[string]RegistrationCohort{}, AIClients: map[string]RegistrationCohort{}}
 	// The server owner's conversion denominator contains only self-service flows.
 	// Operator-created sites and local setup retain their durable events without
 	// changing public registration conversion.
@@ -228,6 +231,7 @@ func RegistrationReportForPeriod(ctx context.Context, database RegistrationSQL, 
 	}
 	type attemptState struct {
 		workflow string
+		client   string
 		expires  time.Time
 		stages   map[string]bool
 		failures map[string]bool
@@ -251,6 +255,9 @@ func RegistrationReportForPeriod(ctx context.Context, database RegistrationSQL, 
 		}
 		if stage.Valid {
 			state.stages[stage.String] = true
+			if stage.String == "ai_client" {
+				state.client = detail.String
+			}
 			if stage.String == "registration_failed" {
 				state.failures[detail.String] = true
 			}
@@ -277,11 +284,27 @@ func RegistrationReportForPeriod(ctx context.Context, database RegistrationSQL, 
 		addRegistrationAttempt(&report.Cohort, attempt.stages, attempt.failures, attempt.expires, now)
 		addRegistrationAttempt(&cohort, attempt.stages, attempt.failures, attempt.expires, now)
 		report.Workflows[attempt.workflow] = cohort
+		if attempt.workflow == "ignite" {
+			client := attempt.client
+			if client == "" {
+				client = "Unknown"
+			}
+			clientCohort := report.AIClients[client]
+			if clientCohort.Stages == nil {
+				clientCohort = newRegistrationCohort()
+			}
+			addRegistrationAttempt(&clientCohort, attempt.stages, attempt.failures, attempt.expires, now)
+			report.AIClients[client] = clientCohort
+		}
 	}
 	finishRegistrationCohort(&report.Cohort, "")
 	for workflow, cohort := range report.Workflows {
 		finishRegistrationCohort(&cohort, workflow)
 		report.Workflows[workflow] = cohort
+	}
+	for client, cohort := range report.AIClients {
+		finishRegistrationCohort(&cohort, "ignite")
+		report.AIClients[client] = cohort
 	}
 	outcomeQuery := `SELECT event.stage,COUNT(*) FROM registration_analytics_events event JOIN registration_analytics_attempts attempt ON attempt.id=event.attempt_id WHERE event.occurred_at>=? AND event.occurred_at<? AND attempt.workflow IN ('public','test_drive','ignite') AND event.stage IN ('site_created','public_site_created','user_created','registration_completed')`
 	if !allSites {

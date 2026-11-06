@@ -3536,6 +3536,8 @@ type siteAnalyticsEvent struct {
 	Method                       string
 	StatusCode                   int
 	ContentSource                string
+	AIClient                     string
+	AIAction                     string
 	OccurredAt                   time.Time
 	Duration                     time.Duration
 	ClientIP                     string
@@ -3624,6 +3626,7 @@ type analyticsPreparedReport struct {
 	TopAssets              []analyticsCountRow            `json:"top_assets"`
 	ErrorPaths             []analyticsCountRow            `json:"error_paths"`
 	ContentSources         []analyticsCountRow            `json:"content_sources"`
+	AIActivity             []analyticsCountRow            `json:"ai_activity,omitempty"`
 	SystemEvents           []analyticsCountRow            `json:"system_events,omitempty"`
 }
 
@@ -5057,7 +5060,7 @@ func (a *App) flushAnalyticsAggregateState(ctx context.Context, state *analytics
 		return
 	}
 	for domain, aggregate := range state.domains {
-		if aggregate.totalRequests == 0 && len(state.systemEvents[domain]) == 0 {
+		if aggregate.totalRequests == 0 && len(aggregate.aiActivity) == 0 && len(state.systemEvents[domain]) == 0 {
 			continue
 		}
 		report := aggregate.report(time.Now().UTC())
@@ -7102,6 +7105,7 @@ type siteAnalyticsAggregate struct {
 	assets                map[string]int
 	errorPaths            map[string]int
 	contentSources        map[string]int
+	aiActivity            map[string]int
 	slowPageTotalDuration map[string]int64
 	slowPageCounts        map[string]int
 	sessionSummary        analyticsSessionSummary
@@ -7146,7 +7150,7 @@ func (state *analyticsAggregateState) record(event siteAnalyticsEvent) {
 		return
 	}
 	aggregate.record(event)
-	if aggregate.totalRequests == 1 || aggregate.totalRequests%32 == 0 {
+	if event.AIAction != "" || aggregate.totalRequests == 1 || aggregate.totalRequests > 0 && aggregate.totalRequests%32 == 0 {
 		measured := aggregate.estimatedBytes() + int64(len(aggregate.geoCandidates))*256
 		state.usedBytes += measured - aggregate.accountedBytes
 		aggregate.accountedBytes = measured
@@ -7182,7 +7186,7 @@ func (state *analyticsAggregateState) reports(generatedAt time.Time) map[string]
 	}
 	reports := make(map[string]analyticsPreparedReport, len(state.domains)+len(state.systemEvents))
 	for domain, aggregate := range state.domains {
-		if aggregate.totalRequests == 0 && len(state.systemEvents[domain]) == 0 {
+		if aggregate.totalRequests == 0 && len(aggregate.aiActivity) == 0 && len(state.systemEvents[domain]) == 0 {
 			continue
 		}
 		report := aggregate.report(generatedAt)
@@ -7270,6 +7274,7 @@ func newSiteAnalyticsAggregate() *siteAnalyticsAggregate {
 		assets:                make(map[string]int),
 		errorPaths:            make(map[string]int),
 		contentSources:        make(map[string]int),
+		aiActivity:            make(map[string]int),
 		slowPageTotalDuration: make(map[string]int64),
 		slowPageCounts:        make(map[string]int),
 		sessionSummary: analyticsSessionSummary{
@@ -7290,6 +7295,10 @@ func (aggregate *siteAnalyticsAggregate) record(event siteAnalyticsEvent) {
 	}
 	if event.OccurredAt.After(aggregate.periodEnd) {
 		aggregate.periodEnd = event.OccurredAt
+	}
+	if event.AIAction != "" {
+		incrementAnalyticsCounter(aggregate.aiActivity, event.AIClient+" / "+event.AIAction)
+		return
 	}
 	aggregate.totalRequests++
 	durationBucket := 0
@@ -7473,6 +7482,7 @@ func (aggregate *siteAnalyticsAggregate) report(generatedAt time.Time) analytics
 	report.TopAssets = sortedAnalyticsRows(aggregate.assets, 10, report.StaticRequests)
 	report.ErrorPaths = sortedAnalyticsRows(aggregate.errorPaths, 10, report.ErrorCount)
 	report.ContentSources = sortedAnalyticsRows(aggregate.contentSources, 10, report.TotalRequests)
+	report.AIActivity = sortedAnalyticsRows(aggregate.aiActivity, 256, 0)
 	report.SlowPages = analyticsSlowPageRows(aggregate.slowPageTotalDuration, aggregate.slowPageCounts, 10)
 	return report
 }
@@ -7558,6 +7568,7 @@ func (aggregate *siteAnalyticsAggregate) estimatedBytes() int64 {
 	total += estimateAnalyticsCounterBytes(aggregate.assets)
 	total += estimateAnalyticsCounterBytes(aggregate.errorPaths)
 	total += estimateAnalyticsCounterBytes(aggregate.contentSources)
+	total += estimateAnalyticsCounterBytes(aggregate.aiActivity)
 	total += estimateAnalyticsDurationCounterBytes(aggregate.slowPageTotalDuration)
 	total += estimateAnalyticsCounterBytes(aggregate.slowPageCounts)
 	for _, session := range aggregate.visitorSessions {
@@ -7961,6 +7972,7 @@ func mergeTechnicalReports(current, addition analyticsPreparedReport) analyticsP
 	current.TopAssets = mergeAnalyticsCountRows(current.TopAssets, addition.TopAssets, 20, current.StaticRequests)
 	current.ErrorPaths = mergeAnalyticsCountRows(current.ErrorPaths, addition.ErrorPaths, 20, current.ErrorCount)
 	current.ContentSources = mergeAnalyticsCountRows(current.ContentSources, addition.ContentSources, 10, current.TotalRequests)
+	current.AIActivity = mergeAnalyticsCountRows(current.AIActivity, addition.AIActivity, 256, 0)
 	current.SystemEvents = append(current.SystemEvents, addition.SystemEvents...)
 	if len(current.SystemEvents) > 32 {
 		current.SystemEvents = current.SystemEvents[len(current.SystemEvents)-32:]
@@ -8982,6 +8994,10 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 	serverNow := time.Now()
 	_, serverTimezoneOffsetSeconds := serverNow.Zone()
 	report := analyticsPreparedReport{}
+	technicalReport := analyticsPreparedReport{}
+	if selectedTab == "analytics" {
+		technicalReport, _ = a.loadAnalyticsReport(r.Context(), domain, browserDashboard.Days)
+	}
 	serverLocalHours := [24]int{}
 	serverHoursJSON := []byte("[]")
 	securityHoursJSON, _ := json.Marshal(security.EventHours)
@@ -9032,13 +9048,14 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	verifiedDownloads := 0
-	for _, source := range report.ContentSources {
+	for _, source := range technicalReport.ContentSources {
 		if source.Label == "verified-download" {
 			verifiedDownloads = source.Count
 		}
 	}
 	a.render(w, r, "analytics.html", map[string]any{
 		"Registration": registrationReport, "ShowRegistrationAnalytics": registrationVisible, "RegistrationUnavailable": registrationReportErr != nil,
+		"AIActivity": technicalReport.AIActivity, "ShowAIActivity": selectedTab == "analytics" && a.isServerManagerRequest(r),
 		"VerifiedDownloads":  verifiedDownloads,
 		"MailJournalEnabled": mailJournalEnabled, "MailJournalLabelsJSON": mailJournalLabelsJSON(translationsForRequest(r)),
 		"MailJournalServers": mailJournalServers, "MailJournalUnavailable": mailJournalUnavailable, "MailJournalIPDetails": mailJournalLocations, "MailGeoIPAttribution": template.HTML(geoip.AttributionHTML),
@@ -17301,7 +17318,10 @@ func (a *App) siteMCPRoute(w http.ResponseWriter, r *http.Request) bool {
 		if len(authorizationFields) == 2 && strings.EqualFold(authorizationFields[0], "Bearer") {
 			bearer = authorizationFields[1]
 		}
-		options := sitemcp.Options{PublicHost: r.Host, Domain: domain, Resource: resource, Version: CompileVersion, Bearer: bearer, Manager: a.aiCapabilities, PublicDemo: publicDemo, Download: downloadAIMCPFile, Invoke: func(boundary context.Context, invocation sitemcp.Invocation) (sitemcp.Result, error) {
+		options := sitemcp.Options{PublicHost: r.Host, Domain: domain, Resource: resource, Version: CompileVersion, Bearer: bearer, Manager: a.aiCapabilities, PublicDemo: publicDemo, Download: downloadAIMCPFile, Observe: func(clientName, operation string) {
+			client := browserstats.AIClient(clientName, r.UserAgent())
+			a.recordAIClientActivity(a.serverOwnerDomain(r.Context()), client, mcpAIAction(operation))
+		}, Invoke: func(boundary context.Context, invocation sitemcp.Invocation) (sitemcp.Result, error) {
 			return a.invokeMCPAIContent(r.WithContext(boundary), domain, invocation)
 		}}
 		if publicDemo {
@@ -59266,10 +59286,50 @@ func (a *App) observePublicResponse(front *publicsite.Front, captured *statusCap
 	contentSource := captured.Header().Get("X-Sitebrush-Source")
 	if captured.Header().Get("X-SiteBrush-Download-Complete") == "1" {
 		contentSource = "verified-download"
+		referrer := r.Referer()
+		if referrer == "" {
+			if cookie, err := r.Cookie("sitebrush_analytics_referrer"); err == nil {
+				referrer, _ = url.QueryUnescape(cookie.Value)
+			}
+		}
+		source := browserstats.SourceAttribution(browserstats.Campaign{Source: r.URL.Query().Get("utm_source")}, referrer, r.Host)
+		client := browserstats.AIClient(source.Name, "")
+		if browserstats.AIClientKnown(client) {
+			a.recordAIClientActivity(a.serverOwnerDomain(r.Context()), client, "download")
+		}
 	}
 	event := siteAnalyticsEvent{Domain: domain, Path: analyticsBoundedString(r.URL.EscapedPath(), 512), Query: analyticsBoundedString(accountauth.SafeQuery(r.URL.RawQuery), 2048), Method: r.Method, StatusCode: status, Bytes: captured.bytesWritten, OccurredAt: time.Now().UTC(), RemoteAddress: analyticsBoundedString(r.RemoteAddr, 64), Forwarded: analyticsBoundedString(r.Header.Get("Forwarded"), 256), ForwardedFor: analyticsBoundedString(r.Header.Get("X-Forwarded-For"), 256), UserAgent: analyticsBoundedString(r.UserAgent(), 256), AcceptLanguage: analyticsBoundedString(r.Header.Get("Accept-Language"), 64), IndexingCrawler: httpsecurity.IsIndexingCrawlerRequest(r), SecurityBlocked: status == http.StatusForbidden || status == http.StatusTooManyRequests, SecurityAlreadyBlocked: captured.Header().Get("X-Sitebrush-Security-Already-Blocked") == "1"}
 	event.ContentSource = contentSource
 	front.Observe(domain, event)
+}
+
+func (a *App) recordAIClientActivity(mainDomain, client, action string) {
+	if mainDomain == "" || action == "" {
+		return
+	}
+	if !browserstats.AIClientKnown(client) {
+		client = "Unknown"
+	}
+	a.enqueueAnalyticsEvent(siteAnalyticsEvent{Domain: mainDomain, AIClient: client, AIAction: action, OccurredAt: time.Now().UTC()})
+}
+
+func mcpAIAction(operation string) string {
+	switch operation {
+	case "get_access":
+		return "access check"
+	case "get_guide":
+		return "guide"
+	case "publish":
+		return "publish"
+	case "import_site", "get_import_status", "cancel_import":
+		return "import"
+	case "get_site_report", "get_funnels", "get_analytics_summary", "get_registrations":
+		return "analytics"
+	}
+	if strings.HasPrefix(operation, "get_") || strings.HasPrefix(operation, "list_") || strings.HasPrefix(operation, "read_") {
+		return "read"
+	}
+	return "edit"
 }
 
 // Certificate selection is shared by the real listener and connection benchmarks.
@@ -61600,13 +61660,17 @@ func (a *App) igniteRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	invoke := func(ctx context.Context, operation string, arguments ignite.Arguments) (map[string]any, error) {
-		return a.invokeIgniteForServer(r.WithContext(ctx), ownerDomain, operation, arguments, forwardIgniteOperation)
+		result, err := a.invokeIgniteForServer(r.WithContext(ctx), ownerDomain, operation, arguments, forwardIgniteOperation)
+		if err == nil {
+			a.recordAIClientActivity(ownerDomain, arguments.Client, operation)
+		}
+		return result, err
 	}
 	if ownerDomain == "sitebrush.com" {
-		ignite.NewGatewayHandler(CompileVersion, invoke).ServeHTTP(w, r)
+		ignite.NewGatewayHandler(CompileVersion, invoke, ignite.ClientNameFromRequest(r)).ServeHTTP(w, r)
 		return
 	}
-	ignite.NewHandler(CompileVersion, invoke).ServeHTTP(w, r)
+	ignite.NewHandler(CompileVersion, invoke, ignite.ClientNameFromRequest(r)).ServeHTTP(w, r)
 }
 
 func renderIgniteIntroduction(w http.ResponseWriter, r *http.Request, ownerDomain string) {
@@ -61787,6 +61851,7 @@ func (a *App) invokeIgnite(r *http.Request, ownerDomain, operation string, argum
 			_, err = database.ExecContext(r.Context(), `INSERT INTO ignite_registrations(attempt_hash,browser_hash,domain,status,created_at,expires_at) VALUES(?,?,?,'pending',?,?)`, igniteHash(attempt), igniteHash(browser), domain, now.Format(time.RFC3339), now.Add(30*time.Minute).Format(time.RFC3339))
 			if err == nil && analyticsID != "" {
 				_ = browserstats.StartRegistration(r.Context(), database, analyticsID, browserstats.RegistrationScope(domain), "ignite", igniteHash(attempt), now, now.Add(domainregistration.UnfinishedTTL))
+				_ = browserstats.RecordRegistration(r.Context(), database, analyticsID, "ai_client", arguments.Client, now)
 				_ = browserstats.RecordRegistration(r.Context(), database, analyticsID, "domain_check_completed", "available", now)
 			}
 			return err
@@ -62329,7 +62394,7 @@ func (a *App) repairCompletedIgniteSites(ctx context.Context) error {
 }
 
 func (a *App) igniteCreatedSite(domain string) map[string]any {
-	return map[string]any{"site_id": stableSiteID(domain), "domain": domain, "status": "created", "mcp_ready": a.accountHTTPSReady(domain), "mcp_endpoint": "https://" + domain + "/?mcp", "plugin_name": domain, "next_step": "When MCP is ready, offer two options: the owner adds this exact endpoint with ChatGPT Plugins > Add custom MCP server, full domain name, and OAuth; or the assistant uses Plugin Creator to create or reuse a private plugin bound to this endpoint. For Plugin Creator, install through the UI if possible, otherwise give the plugin link. The owner completes SiteBrush OAuth consent in either case. Verify sitebrush_get_access before claiming connection, then read the starter page, save and verify a useful first draft from the established goal, and explain how to select the domain-named plugin with @ in ChatGPT Work. For an old public site, use sitebrush_import_site and review partial results."}
+	return map[string]any{"site_id": stableSiteID(domain), "domain": domain, "status": "created", "mcp_ready": a.accountHTTPSReady(domain), "mcp_endpoint": "https://" + domain + "/?mcp", "plugin_name": domain, "next_step": "When MCP is ready, connect this exact endpoint as a remote HTTP MCP server using the full domain as its name and SiteBrush OAuth. Follow connection_instructions for the current client. Verify sitebrush_get_access before claiming connection, then read the starter page and save and verify a useful first draft from the established goal. For an old public site, use sitebrush_import_site and review partial results."}
 }
 
 // The public agent exposes registration on sitebrush.com and forwards an
@@ -62344,9 +62409,13 @@ func (a *App) igniteGatewayRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	invoke := func(ctx context.Context, operation string, arguments ignite.Arguments) (map[string]any, error) {
-		return a.invokeIgniteForServer(r.WithContext(ctx), ownerDomain, operation, arguments, forwardIgniteOperation)
+		result, err := a.invokeIgniteForServer(r.WithContext(ctx), ownerDomain, operation, arguments, forwardIgniteOperation)
+		if err == nil {
+			a.recordAIClientActivity(ownerDomain, arguments.Client, operation)
+		}
+		return result, err
 	}
-	ignite.NewGatewayHandler(CompileVersion, invoke).ServeHTTP(w, r)
+	ignite.NewGatewayHandler(CompileVersion, invoke, ignite.ClientNameFromRequest(r)).ServeHTTP(w, r)
 }
 
 func (a *App) invokeIgniteForServer(r *http.Request, ownerDomain, operation string, arguments ignite.Arguments, forward func(context.Context, string, string, ignite.Arguments) (map[string]any, error)) (map[string]any, error) {
@@ -62402,7 +62471,11 @@ func forwardIgniteOperation(ctx context.Context, serverDomain, operation string,
 }
 
 func callIgniteServer(ctx context.Context, client *http.Client, serverDomain, operation string, arguments ignite.Arguments) (map[string]any, error) {
-	connection, err := sdk.NewClient(&sdk.Implementation{Name: "SiteBrush agent", Version: CompileVersion}, nil).Connect(ctx, &sdk.StreamableClientTransport{Endpoint: "https://" + serverDomain + ignite.Path, HTTPClient: client}, nil)
+	clientName := "SiteBrush agent"
+	if browserstats.AIClientKnown(arguments.Client) {
+		clientName += " via " + arguments.Client
+	}
+	connection, err := sdk.NewClient(&sdk.Implementation{Name: clientName, Version: CompileVersion}, nil).Connect(ctx, &sdk.StreamableClientTransport{Endpoint: "https://" + serverDomain + ignite.Path, HTTPClient: client}, nil)
 	if err != nil {
 		return nil, errors.New("selected SiteBrush server is unavailable")
 	}

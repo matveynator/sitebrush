@@ -51,7 +51,10 @@ func TestAdapterRealSDKDiscoveryCallsAndSiteBinding(t *testing.T) {
 		t.Run(version, func(t *testing.T) {
 			manager, tokens, resource := adapterGrant(t, aicapability.StandardScopes())
 			calls := make(chan Invocation, 1)
-			server := httptest.NewServer(NewHandler(Options{Domain: "example.org", Resource: resource, Version: "test", Bearer: tokens.AccessToken, Manager: manager, RegistrationAnalytics: true, Invoke: func(_ context.Context, invocation Invocation) (Result, error) {
+			observed := make(chan string, 3)
+			server := httptest.NewServer(NewHandler(Options{Domain: "example.org", Resource: resource, Version: "test", Bearer: tokens.AccessToken, Manager: manager, RegistrationAnalytics: true, Observe: func(_ string, operation string) {
+				observed <- operation
+			}, Invoke: func(_ context.Context, invocation Invocation) (Result, error) {
 				calls <- invocation
 				return Result{Status: 200, Payload: map[string]any{"pages": []string{"/", "/about"}}}, nil
 			}}))
@@ -99,9 +102,24 @@ func TestAdapterRealSDKDiscoveryCallsAndSiteBinding(t *testing.T) {
 			case <-boundary.Done():
 				t.Fatal("operation not invoked")
 			}
+			for _, expected := range []string{"get_access", "list_pages"} {
+				select {
+				case operation := <-observed:
+					if operation != expected {
+						t.Fatalf("MCP activity = %q, want %q", operation, expected)
+					}
+				case <-boundary.Done():
+					t.Fatal("successful MCP activity was not observed")
+				}
+			}
 			invalid, err := session.CallTool(boundary, &sdk.CallToolParams{Name: "sitebrush_update_page", Arguments: map[string]any{"path": "/", "title": "Title", "html": "<p>draft</p>"}})
 			if err == nil && !invalid.IsError {
 				t.Fatal("missing expected_version passed schema validation")
+			}
+			select {
+			case operation := <-observed:
+				t.Fatalf("invalid operation counted as successful: %s", operation)
+			default:
 			}
 		})
 	}

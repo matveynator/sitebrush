@@ -266,7 +266,7 @@ func SourceAttribution(campaign Campaign, referrer, siteHost string) Attribution
 	}
 	for _, rule := range []struct{ host, name, kind string }{
 		{"google.com", "Google", "search"}, {"google.ru", "Google", "search"}, {"yandex.ru", "Yandex", "search"}, {"yandex.com", "Yandex", "search"}, {"bing.com", "Bing", "search"}, {"duckduckgo.com", "DuckDuckGo", "search"},
-		{"chatgpt.com", "ChatGPT", "ai"}, {"chat.openai.com", "ChatGPT", "ai"}, {"claude.ai", "Claude", "ai"}, {"perplexity.ai", "Perplexity", "ai"}, {"t.me", "Telegram", "messenger"}, {"telegram.org", "Telegram", "messenger"}, {"habr.com", "Habr", "referral"}, {"github.com", "GitHub", "referral"}, {"reddit.com", "Reddit", "social"},
+		{"chatgpt.com", "ChatGPT", "ai"}, {"chat.openai.com", "ChatGPT", "ai"}, {"claude.ai", "Claude", "ai"}, {"grok.com", "Grok", "ai"}, {"gemini.google.com", "Gemini", "ai"}, {"cursor.com", "Cursor", "ai"}, {"deepseek.com", "DeepSeek", "ai"}, {"chat.qwen.ai", "Qwen", "ai"}, {"kimi.com", "Kimi", "ai"}, {"perplexity.ai", "Perplexity", "ai"}, {"t.me", "Telegram", "messenger"}, {"telegram.org", "Telegram", "messenger"}, {"habr.com", "Habr", "referral"}, {"github.com", "GitHub", "referral"}, {"reddit.com", "Reddit", "social"},
 	} {
 		if host == rule.host || strings.HasSuffix(host, "."+rule.host) {
 			return Attribution{rule.name, rule.kind, "referrer", safeReferrer}

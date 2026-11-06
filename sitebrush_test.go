@@ -20679,8 +20679,23 @@ func TestIgniteBrowserCodeCreatesSite(t *testing.T) {
 	if err != nil || status["status"] != "complete" {
 		t.Fatal("Ignite did not report browser completion", status, err)
 	}
-	if status["mcp_endpoint"] != "https://"+siteDomain+"/?mcp" || status["plugin_name"] != siteDomain || !strings.Contains(status["next_step"].(string), "Add custom MCP server") || !strings.Contains(status["next_step"].(string), "Plugin Creator") {
+	if status["mcp_endpoint"] != "https://"+siteDomain+"/?mcp" || status["plugin_name"] != siteDomain || !strings.Contains(status["next_step"].(string), "remote HTTP MCP server") || !strings.Contains(status["next_step"].(string), "SiteBrush OAuth") {
 		t.Fatal("Ignite did not return the personal editor handoff after browser completion", status)
+	}
+}
+
+func TestAIClientActivityStaysOutOfPageViews(t *testing.T) {
+	state := newAnalyticsAggregateState(1 << 20)
+	now := time.Now().UTC()
+	state.record(siteAnalyticsEvent{Domain: "sitebrush.example", AIClient: "Claude", AIAction: "access check", OccurredAt: now})
+	state.record(siteAnalyticsEvent{Domain: "sitebrush.example", AIClient: "Claude", AIAction: "access check", OccurredAt: now})
+	report := state.reports(now)["sitebrush.example"]
+	if report.TotalRequests != 0 || report.PageViews != 0 || len(report.AIActivity) != 1 || report.AIActivity[0].Count != 2 {
+		t.Fatalf("AI activity changed traffic metrics: %+v", report)
+	}
+	merged := mergeTechnicalReports(report, report)
+	if len(merged.AIActivity) != 1 || merged.AIActivity[0].Count != 4 {
+		t.Fatalf("AI activity was lost during daily merge: %+v", merged.AIActivity)
 	}
 }
 
@@ -20828,7 +20843,7 @@ func TestIgniteGatewayDefaultsToConfiguredSiteBrushServer(t *testing.T) {
 func TestIgniteGatewayForwardsOnlyToSelectedServer(t *testing.T) {
 	called := false
 	remote := ignite.NewHandler("test", func(_ context.Context, operation string, arguments ignite.Arguments) (map[string]any, error) {
-		if operation != "ignite_check_name" || arguments.Name != "shop" || arguments.Server != "" {
+		if operation != "ignite_check_name" || arguments.Name != "shop" || arguments.Server != "" || arguments.Client != "ChatGPT" {
 			t.Fatalf("unexpected forwarded call: operation=%q arguments=%+v", operation, arguments)
 		}
 		called = true
@@ -20842,7 +20857,7 @@ func TestIgniteGatewayForwardsOnlyToSelectedServer(t *testing.T) {
 		remote.ServeHTTP(response, request)
 		return response.Result(), nil
 	})}
-	result, err := callIgniteServer(context.Background(), client, "other.example", "ignite_check_name", ignite.Arguments{Server: "other.example", Name: "shop"})
+	result, err := callIgniteServer(context.Background(), client, "other.example", "ignite_check_name", ignite.Arguments{Server: "other.example", Name: "shop", Client: "ChatGPT"})
 	if err != nil || !called || result["domain"] != "shop.other.example" || result["server"] != "other.example" {
 		t.Fatalf("remote Ignite result=%v called=%v err=%v", result, called, err)
 	}

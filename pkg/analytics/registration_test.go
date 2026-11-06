@@ -86,6 +86,22 @@ func TestRegistrationCohortCountsAuthoritativeOutcomesAndRetries(t *testing.T) {
 	}
 }
 
+func TestIgniteAIClientCohortCountsOnce(t *testing.T) {
+	database := registrationTestDatabase(t)
+	now := time.Now().UTC()
+	id := registrationTestAttempt(t, database, "shop.sitebrush.com", "ignite", "ignite-shop", now)
+	registrationTestStage(t, database, id, "ai_client", "Claude", now)
+	registrationTestStage(t, database, id, "ai_client", "Claude", now)
+	registrationTestStage(t, database, id, "registration_completed", "", now)
+	if err := RecordRegistration(context.Background(), database, id, "ai_client", "owner@example.org", now); err == nil {
+		t.Fatal("registration analytics accepted an unbounded client label")
+	}
+	report, err := RegistrationReportForPeriod(context.Background(), database, "", true, now.Add(-time.Minute), now.Add(time.Minute), now)
+	if err != nil || report.AIClients["Claude"].Started != 1 || report.AIClients["Claude"].Completed != 1 || report.Cohort.Started != 1 {
+		t.Fatalf("AI client cohort: %+v %v", report.AIClients, err)
+	}
+}
+
 func TestRegistrationReportExcludesOperatorCreatedSites(t *testing.T) {
 	database := registrationTestDatabase(t)
 	now := time.Now().UTC()
