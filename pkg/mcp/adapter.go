@@ -82,6 +82,7 @@ type Options struct {
 	RegistrationAnalytics bool
 	Invoke                func(context.Context, Invocation) (Result, error)
 	Download              func(context.Context, string, int64) ([]byte, error)
+	Observe               func(string, string)
 }
 
 func Challenge(response http.ResponseWriter, origin string, status int, scopes []string) {
@@ -120,7 +121,16 @@ func NewHandler(options Options) http.Handler {
 		if options.PublicDemo {
 			descriptor.Meta["securitySchemes"] = []any{map[string]any{"type": "noauth"}}
 		}
-		sdk.AddTool(server, descriptor, func(boundary context.Context, _ *sdk.CallToolRequest, arguments Arguments) (*sdk.CallToolResult, any, error) {
+		sdk.AddTool(server, descriptor, func(boundary context.Context, request *sdk.CallToolRequest, arguments Arguments) (*sdk.CallToolResult, any, error) {
+			observe := func() {
+				if options.Observe != nil {
+					clientName := ""
+					if clientInfo := request.ClientInfo(); clientInfo != nil {
+						clientName = clientInfo.Name
+					}
+					options.Observe(clientName, operation)
+				}
+			}
 			session, capability, err := authorize(options)
 			if err != nil {
 				if options.PublicDemo {
@@ -134,6 +144,7 @@ func NewHandler(options Options) http.Handler {
 				}
 			}
 			if operation == "get_access" {
+				observe()
 				nextActions := []string{"sitebrush_get_guide"}
 				if hasScope(session.Scopes, aicapability.ScopeRead) {
 					nextActions = append(nextActions, "sitebrush_list_pages", "sitebrush_read_page")
@@ -148,6 +159,7 @@ func NewHandler(options Options) http.Handler {
 				if err != nil {
 					return toolFailure("invalid_request", err.Error(), nil), nil, nil
 				}
+				observe()
 				return nil, map[string]any{"version": aicapability.GuideVersion, "section": arguments.Section, "sections": aicapability.GuideSections(), "guide": guide}, nil
 			}
 			if operation == "upload_file" {
@@ -194,6 +206,7 @@ func NewHandler(options Options) http.Handler {
 				}
 				return toolFailure(code, message, nil), nil, nil
 			}
+			observe()
 			return nil, map[string]any{"result": result.Payload}, nil
 		})
 	}
