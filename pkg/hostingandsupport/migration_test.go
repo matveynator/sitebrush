@@ -235,7 +235,7 @@ func TestTrialOnboardingPreservesPublishedMailHistory(t *testing.T) {
 		t.Run(history.name, func(t *testing.T) {
 			var previous []migrations.Step
 			for _, step := range current {
-				if step.ID == "ignite-registration-001" || step.ID == "column-ignite_registrations-confirmation_form_hash" || strings.HasPrefix(step.ID, "registration-analytics-") || strings.HasPrefix(step.ID, "column-public_trial_sites-analytics_") || strings.HasPrefix(step.ID, "column-ignite_registrations-analytics_") {
+				if step.ID == "ignite-registration-001" || step.ID == "column-ignite_registrations-confirmation_form_hash" || strings.HasPrefix(step.ID, "registration-analytics-") || strings.HasPrefix(step.ID, "column-public_trial_sites-analytics_") || strings.HasPrefix(step.ID, "column-ignite_registrations-analytics_") || step.ID == "site-deletion-queue-001" || step.ID == "site-account-deletion-queue-001" || step.ID == "site-recovery-tokens-001" || step.ID == "site-debt-contacts-001" {
 					continue
 				}
 				if step.ID == "mail-monitor-001" && history.onboardingBeforeMail {

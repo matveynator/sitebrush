@@ -119,6 +119,9 @@ type Site struct {
 	BillingBillable      bool
 	AdminEmails          string
 	CanDelete            bool
+	DeletionReason       string
+	DeletionDeadline     string
+	AdminAccounts        []SiteAccountView
 	DatabasePath         string
 	CertificateValid     bool
 	CertificateExpiresAt string
@@ -129,6 +132,12 @@ type Site struct {
 	DeletionSizeLabel    string
 	HasSiteRequest       bool
 	SiteRequest          SiteRequest
+}
+
+type SiteAccountView struct {
+	Email       string
+	DeleteAfter string
+	Protected   bool
 }
 
 type CertificateDomainView struct {
@@ -1113,6 +1122,17 @@ func hostingSchemaSteps(ctx context.Context, repair bool) []migrations.Step {
 		{tableName: "ignite_registrations", columnName: "analytics_site_created_at", definition: "TEXT NOT NULL DEFAULT ''"},
 		{tableName: "ignite_registrations", columnName: "analytics_completed_at", definition: "TEXT NOT NULL DEFAULT ''"},
 	})...)
+	// Deletion queues follow every published billing migration ordinal.
+	for _, query := range []struct{ id, sql string }{
+		{"site-deletion-queue-001", `CREATE TABLE IF NOT EXISTS site_deletion_queue(domain TEXT PRIMARY KEY,reason TEXT NOT NULL,requested_by TEXT NOT NULL,requested_at TEXT NOT NULL,delete_after TEXT NOT NULL,admin_emails TEXT NOT NULL,database_path TEXT NOT NULL DEFAULT '',verified_restore INTEGER NOT NULL DEFAULT 0,extended INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL DEFAULT 'pending')`},
+		{"site-account-deletion-queue-001", `CREATE TABLE IF NOT EXISTS site_account_deletion_queue(domain TEXT NOT NULL,email TEXT NOT NULL,requested_by TEXT NOT NULL,requested_at TEXT NOT NULL,delete_after TEXT NOT NULL,PRIMARY KEY(domain,email))`},
+		{"site-recovery-tokens-001", `CREATE TABLE IF NOT EXISTS site_recovery_tokens(token_hash TEXT PRIMARY KEY,domain TEXT NOT NULL,email TEXT NOT NULL,expires_at TEXT NOT NULL)`},
+		{"site-debt-contacts-001", `CREATE TABLE IF NOT EXISTS site_debt_contacts(domain TEXT NOT NULL,client_ip TEXT NOT NULL,last_sent_at TEXT NOT NULL,PRIMARY KEY(domain,client_ip))`},
+	} {
+		step := migrations.SQL(query.id, query.sql)
+		step.Ensure = repair
+		steps = append(steps, step)
+	}
 	return steps
 }
 
@@ -1179,6 +1199,7 @@ func hostingAndSupportSchemaComplete(ctx context.Context, database *sql.DB) (boo
 	tableNames := []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments", "public_trial_sites", "payment_providers", "billing_invoices", "billing_customers", "billing_customer_emails", "billing_customer_profiles", "billing_customer_tokens", "billing_invoice_lines", "billing_invoice_cycles", "billing_payments", "billing_invoice_deliveries", "hosting_server_cost_policies", "server_expense_policies", "site_registration_requests", "site_deletion_backups", "service_mail_installations", "service_mail_events", "support_events", "service_mail_blocks", "service_mail_recipients", "mail_outbox", "mail_monitor_events", "mail_monitor_sync", "client_hostings", "client_hosting_sites", "client_hosting_domain_checks", "server_resource_checks", "server_network_checks", "site_tls_checks", "registry_accounts", "registry_installation_roles", "registry_installation_plans", "registry_events", "registry_sync_events", "sitebrush_com_keys", "hosting_panel_snapshots", "registration_confirmations", "domain_registration_claims"}
 	tableNames = append(tableNames, "mail_guard_requests", "mail_guard_blocks", "account_captchas", "account_captcha_rates", "registration_mail_cooldowns", "registration_mail_abuse")
 	tableNames = append(tableNames, "mail_outbox_metadata", "mail_monitor_metadata", "mail_journal", "mail_journal_counters", "mail_journal_stages", "mail_ip_blocks", "mail_control_state", "mail_cancel_commands", "mail_abuse", "mail_reject_rates", "mail_account_events")
+	tableNames = append(tableNames, "site_deletion_queue", "site_account_deletion_queue", "site_recovery_tokens", "site_debt_contacts")
 	tableNames = append(tableNames, demo.TableNames()...)
 	for _, tableName := range tableNames {
 		found, err := tableExists(ctx, database, tableName)

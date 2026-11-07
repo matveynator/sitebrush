@@ -1,0 +1,32 @@
+#SiteBrushDebtNotice {
+  all: initial !important;
+  position: fixed !important;
+  inset: 0 !important;
+  z-index: 2147483647 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  background: #10212a99 !important;
+  font-family: system-ui, sans-serif !important;
+}
+#SiteBrushDebtNotice * { box-sizing: border-box; }
+#SiteBrushDebtNotice .panel {
+  background: #fff;
+  color: #172126;
+  width: min(34rem, calc(100vw - 2rem));
+  max-height: calc(100vh - 2rem);
+  overflow: auto;
+  padding: 1.5rem;
+  border-radius: 16px;
+  box-shadow: 0 20px 60px #0005;
+}
+#SiteBrushDebtNotice a { color: #056c7a; }
+#SiteBrushDebtNotice button {
+  font: inherit;
+  cursor: pointer;
+  padding: .55rem 1rem;
+  border: 0;
+  border-radius: 8px;
+  background: #087f8c;
+  color: #fff;
+}
