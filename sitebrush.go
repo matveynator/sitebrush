@@ -12990,6 +12990,9 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 	})))
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if a.servePendingSiteBoundary(w, r) {
+			return
+		}
 		// Registration services remain reachable when the main page is published.
 		if r.URL.Path == "/" && (hasQueryFlag(r, "ignite") || hasQueryFlag(r, "sitebrush_agent")) {
 			dynamic.ServeHTTP(w, r)
@@ -28802,8 +28805,8 @@ func (a *App) handleExpensesAction(r *http.Request) string {
 		return a.updateManagedSiteFromForm(r)
 	case "update_site_quota":
 		return a.updateManagedSiteQuotaFromForm(r)
-	case "delete_site":
-		return a.deleteManagedSiteFromForm(r)
+	case "delete_site", "queue_site", "suspend_site_nonpayment", "delete_site_now", "restore_site", "queue_account", "delete_account_now", "restore_account":
+		return a.siteDeletionActionFromForm(r)
 	case "save_plan":
 		return a.saveServicePlanFromForm(r)
 	case "delete_plan":
@@ -29332,10 +29335,45 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 	if normalizeDomainName(snapshot.MainDomain) == "sitebrush.com" {
 		expensesTitle = translationOrDefault(translations, "expenses_central_title", "Server settings")
 	}
+	sites := append([]hostingandsupport.Site(nil), snapshot.Sites...)
+	ownerDomain := a.serverOwnerDomain(r.Context())
+	for siteIndex := range sites {
+		for _, email := range hostingandsupport.SplitEmailList(sites[siteIndex].AdminEmails) {
+			protected := sites[siteIndex].Domain == ownerDomain && slices.ContainsFunc(snapshot.OwnerEmails, func(ownerEmail string) bool { return strings.EqualFold(ownerEmail, email) })
+			sites[siteIndex].AdminAccounts = append(sites[siteIndex].AdminAccounts, hostingandsupport.SiteAccountView{Email: email, Protected: protected})
+		}
+	}
+	_ = a.withServerControlDatabaseRead(r.Context(), "hosting-panel-deletion-state", func(database *sql.DB) error {
+		for siteIndex := range sites {
+			state, err := readSiteDeletionState(r.Context(), database, sites[siteIndex].Domain)
+			if err == nil && state.Status == "pending" {
+				sites[siteIndex].DeletionReason = state.Reason
+				sites[siteIndex].DeletionDeadline = state.DeleteAfter
+			}
+			rows, err := database.QueryContext(r.Context(), `SELECT email,delete_after FROM site_account_deletion_queue WHERE domain=? ORDER BY email`, sites[siteIndex].Domain)
+			if err != nil {
+				return err
+			}
+			for rows.Next() {
+				var account hostingandsupport.SiteAccountView
+				if err := rows.Scan(&account.Email, &account.DeleteAfter); err != nil {
+					rows.Close()
+					return err
+				}
+				sites[siteIndex].AdminAccounts = append(sites[siteIndex].AdminAccounts, account)
+			}
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				return err
+			}
+			rows.Close()
+		}
+		return nil
+	})
 	return map[string]any{
 		"T":                        translations,
 		"Title":                    expensesTitle,
-		"Sites":                    snapshot.Sites,
+		"Sites":                    sites,
 		"Plans":                    snapshot.Plans,
 		"PaymentProviders":         hostingandsupport.DemoPaymentProviders(absoluteURLForPath(r, "/?hosting_and_support_demo_payment&invoice={invoice}")),
 		"Invoices":                 snapshot.Invoices,
@@ -31310,9 +31348,843 @@ func (a *App) deleteManagedSiteFromForm(r *http.Request) string {
 	return fmt.Sprintf(translationOrDefault(translations, "billing_status_site_deleted_with_backup", "Site %s was deleted. Backup %s was created and kept until %s."), domain, backup.FileName, backup.ExpiresAt)
 }
 
+func (a *App) siteDeletionActionFromForm(r *http.Request) string {
+	if r.FormValue("account_csrf") == "" || r.FormValue("account_csrf") != accountCSRF(r) {
+		return "Security confirmation failed. Reload the page and try again."
+	}
+	domain := normalizeQuotaDomainName(r.FormValue("domain"))
+	if domain == "" || normalizeQuotaDomainName(r.FormValue("confirm_domain")) != domain {
+		return "Type the site domain to confirm this action."
+	}
+	action := strings.TrimSpace(r.FormValue("billing_action"))
+	adminEmail, _ := a.currentAdminEmailForDomain(r, domainFromRequest(r))
+	var err error
+	switch action {
+	case "delete_site", "queue_site":
+		err = a.queueManagedSiteDeletion(r.Context(), domain, "owner", adminEmail)
+	case "suspend_site_nonpayment":
+		err = a.queueManagedSiteDeletion(r.Context(), domain, "nonpayment", adminEmail)
+	case "delete_site_now":
+		err = a.purgeManagedSiteWithoutBackup(r.Context(), domain)
+	case "restore_site":
+		err = a.restoreQueuedSite(r.Context(), domain)
+	case "queue_account", "delete_account_now", "restore_account":
+		email := strings.ToLower(strings.TrimSpace(r.FormValue("email")))
+		if email == "" || !strings.EqualFold(email, strings.TrimSpace(r.FormValue("confirm_email"))) {
+			return "Type the account email to confirm this action."
+		}
+		switch action {
+		case "queue_account":
+			err = a.queueSiteAccountDeletion(r.Context(), domain, email, adminEmail)
+		case "delete_account_now":
+			err = a.purgeSiteAccount(r.Context(), domain, email)
+		case "restore_account":
+			err = a.restoreQueuedSiteAccount(r.Context(), domain, email)
+		}
+	default:
+		return "Unknown deletion action."
+	}
+	if err != nil {
+		return err.Error()
+	}
+	a.refreshHostingAndSupportPanel()
+	return "Action completed for " + domain + "."
+}
+
 func (a *App) deleteManagedSite(ctx context.Context, domain string) error {
 	_, err := a.deleteManagedSiteWithBackup(ctx, nil, domain, hostingandsupport.DefaultDeletionBackupRetentionDays)
 	return err
+}
+
+// Site deletion is a separate lifecycle from editor freeze: the public
+// catalog owns admission while the control database owns the deadline.
+type siteDeletionState struct {
+	Domain       string
+	Reason       string
+	RequestedBy  string
+	DeleteAfter  string
+	AdminEmails  string
+	DatabasePath string
+	Verified     bool
+	Extended     bool
+	Status       string
+}
+
+func (a *App) pendingSiteDecision(r *http.Request) publicsite.Decision {
+	domain := normalizeQuotaDomainName(domainFromRequest(r))
+	if domain == "" {
+		return publicsite.Decision{}
+	}
+	if a.publicCatalog != nil {
+		return a.publicCatalog.Lookup(publicsite.Lookup{Host: domain})
+	}
+	if a.controlDatabase == nil {
+		return publicsite.Decision{}
+	}
+	state, err := a.siteDeletionState(r.Context(), domain)
+	if err != nil || state.Status != "pending" && state.Status != "purging" {
+		return publicsite.Decision{}
+	}
+	decision := publicsite.Decision{Known: true, Found: true, Domain: domain, DeletionReason: state.Reason, DeletionDeadline: state.DeleteAfter}
+	if state.Reason == "nonpayment" {
+		_ = a.withServerControlDatabaseRead(r.Context(), "site-debt-fallback", func(database *sql.DB) error {
+			var debtErr error
+			decision.DeletionDebtLabel, _, debtErr = siteOutstandingDebt(r.Context(), database, domain)
+			return debtErr
+		})
+	}
+	return decision
+}
+
+func (a *App) servePendingSiteBoundary(w http.ResponseWriter, r *http.Request) bool {
+	decision := a.pendingSiteDecision(r)
+	if !decision.Found || decision.DeletionReason == "" {
+		return false
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	if hasQueryFlag(r, "site_recovery") {
+		a.siteRecoveryPage(w, r, decision)
+		return true
+	}
+	if decision.DeletionReason == "nonpayment" {
+		if hasQueryFlag(r, "site_debt_pay") {
+			a.siteDebtPaymentPage(w, r, decision)
+			return true
+		}
+		if hasQueryFlag(r, "site_debt_contact") {
+			a.siteDebtContactPage(w, r, decision)
+			return true
+		}
+		if !publicOrdinaryRequest(r) {
+			http.Error(w, "site is read-only until the outstanding invoice is paid", http.StatusLocked)
+			return true
+		}
+		return false
+	}
+	a.renderPendingSiteCountdown(w, r, decision)
+	return true
+}
+
+func (a *App) renderPendingSiteCountdown(w http.ResponseWriter, r *http.Request, decision publicsite.Decision) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("X-Robots-Tag", "noindex, nofollow")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	if r.Method == http.MethodHead {
+		return
+	}
+	domain := template.HTMLEscapeString(decision.Domain)
+	deadline := template.HTMLEscapeString(decision.DeletionDeadline)
+	_, _ = io.WriteString(w, `<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Сайт ожидает удаления</title><style>body{font:16px system-ui,sans-serif;background:#f3f6f8;color:#172126;min-height:100vh;display:grid;place-items:center;margin:0}.card{max-width:38rem;background:#fff;border-radius:18px;padding:2rem;box-shadow:0 12px 40px #0002;margin:1rem}h1{font-size:1.6rem}a{color:#056c7a}input,button{font:inherit;padding:.65rem}input{width:100%;box-sizing:border-box}button{margin-top:.8rem;background:#087f8c;color:white;border:0;border-radius:8px;cursor:pointer}</style><main class="card"><h1>Сайт `+domain+` ожидает удаления</h1><p>Содержимое временно недоступно. До окончательного удаления осталось:</p><p id="sitebrush-deletion-countdown" data-deadline="`+deadline+`">`+deadline+`</p><p>Администратор сайта может запросить восстановление:</p><form method="post" action="/?site_recovery"><label>Email администратора<input type="email" name="email" autocomplete="email" required></label><button type="submit">Восстановить сайт</button></form></main><script>(function(){var e=document.getElementById('sitebrush-deletion-countdown'),end=Date.parse(e.dataset.deadline);function tick(){var s=Math.max(0,Math.floor((end-Date.now())/1000)),d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);e.textContent=d+' дн. '+h+' ч. '+m+' мин.'}if(Number.isFinite(end)){tick();setInterval(tick,60000)}})();</script></html>`)
+}
+
+func siteDebtOverlayHTML(decision publicsite.Decision) string {
+	if decision.DeletionReason != "nonpayment" {
+		return ""
+	}
+	return `<link rel="stylesheet" href="/p/static/site_debt.css?v=` + url.QueryEscape(CompileVersion) + `" data-sitebrush-owned="true"><script defer src="/p/static/site_debt.js?v=` + url.QueryEscape(CompileVersion) + `" data-sitebrush-owned="true" data-deadline="` + template.HTMLEscapeString(decision.DeletionDeadline) + `" data-debt="` + template.HTMLEscapeString(decision.DeletionDebtLabel) + `"></script>`
+}
+
+func (a *App) servePublicDebtHTMLFile(w http.ResponseWriter, r *http.Request, file *os.File, decision publicsite.Decision) bool {
+	if decision.DeletionReason != "nonpayment" {
+		return false
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	if err := a.publicStreamer.HTML(w, r, file, siteDebtOverlayHTML(decision), CompileVersion, ""); err != nil {
+		log.Printf("public debt notice unavailable domain=%s error=%v", diagnosticlog.SafeLogValue(decision.Domain), err)
+	}
+	return true
+}
+
+func renderSiteRecoveryMessage(w http.ResponseWriter, statusCode int, message string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Robots-Tag", "noindex, nofollow")
+	w.WriteHeader(statusCode)
+	_, _ = io.WriteString(w, `<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Восстановление сайта</title><body style="font:16px system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:1rem"><h1>Восстановление сайта</h1><p>`+template.HTMLEscapeString(message)+`</p><p><a href="/">Вернуться на сайт</a></p></body></html>`)
+}
+
+func (a *App) siteRecoveryPage(w http.ResponseWriter, r *http.Request, decision publicsite.Decision) {
+	if r.Method == http.MethodGet && r.URL.Query().Get("token") != "" {
+		token := strings.TrimSpace(r.URL.Query().Get("token"))
+		if !validOpaqueAccessToken(token) {
+			renderSiteRecoveryMessage(w, http.StatusBadRequest, "Ссылка недействительна.")
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("X-Robots-Tag", "noindex, nofollow")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		_, _ = io.WriteString(w, `<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Подтвердить восстановление</title><body style="font:16px system-ui,sans-serif;max-width:38rem;margin:4rem auto;padding:1rem"><h1>Подтвердить восстановление сайта `+template.HTMLEscapeString(decision.Domain)+`</h1><p>Если у сайта есть долг, срок хранения будет продлен один раз на 30 дней. После оплаты сайт восстановится автоматически.</p><form method="post" action="/?site_recovery"><input type="hidden" name="token" value="`+template.HTMLEscapeString(token)+`"><button type="submit">Подтвердить восстановление</button></form></body></html>`)
+		return
+	}
+	if r.Method == http.MethodPost && r.FormValue("token") != "" {
+		a.confirmQueuedSiteRecovery(w, r, decision)
+		return
+	}
+	if r.Method == http.MethodGet {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("X-Robots-Tag", "noindex, nofollow")
+		_, _ = io.WriteString(w, `<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Восстановить сайт</title><body style="font:16px system-ui,sans-serif;max-width:38rem;margin:4rem auto;padding:1rem"><h1>Восстановить сайт</h1><p>Подтвердите email администратора. При задолженности срок хранения будет продлен на 30 дней.</p><form method="post" action="/?site_recovery"><label>Email администратора <input type="email" name="email" required></label><button type="submit">Отправить ссылку</button></form></body></html>`)
+		return
+	}
+	if r.Method != http.MethodPost {
+		renderSiteRecoveryMessage(w, http.StatusMethodNotAllowed, "Отправьте форму восстановления на главной странице сайта.")
+		return
+	}
+	email := strings.ToLower(strings.TrimSpace(r.FormValue("email")))
+	if len(email) > 254 || email == "" {
+		renderSiteRecoveryMessage(w, http.StatusBadRequest, "Укажите действительный email.")
+		return
+	}
+	if _, err := stdmail.ParseAddress(email); err != nil {
+		renderSiteRecoveryMessage(w, http.StatusBadRequest, "Укажите действительный email.")
+		return
+	}
+	state, err := a.siteDeletionState(r.Context(), decision.Domain)
+	if err != nil || state.Status != "pending" {
+		renderSiteRecoveryMessage(w, http.StatusGone, "Срок восстановления истек.")
+		return
+	}
+	allowed := false
+	for _, administrator := range hostingandsupport.SplitEmailList(state.AdminEmails) {
+		if strings.EqualFold(administrator, email) {
+			allowed = true
+			break
+		}
+	}
+	if allowed {
+		token := randomAccessToken()
+		digest := sha256.Sum256([]byte(token))
+		expiresAt := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+		err = a.withServerControlDatabaseWrite(r.Context(), "site-recovery-token", func(database *sql.DB) error {
+			var pendingTokens int
+			if countErr := database.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM site_recovery_tokens WHERE domain=? AND email=? AND expires_at>?`, decision.Domain, email, time.Now().UTC().Format(time.RFC3339)).Scan(&pendingTokens); countErr != nil {
+				return countErr
+			}
+			if pendingTokens >= 3 {
+				return errors.New("recovery request limit reached")
+			}
+			_, writeErr := database.ExecContext(r.Context(), `INSERT INTO site_recovery_tokens(token_hash,domain,email,expires_at) VALUES(?,?,?,?)`, hex.EncodeToString(digest[:]), decision.Domain, email, expiresAt)
+			return writeErr
+		})
+		if err == nil {
+			link := absoluteURLForPath(r, "/?site_recovery&token="+url.QueryEscape(token))
+			err = a.enqueueEmail(r.Context(), mailout.Message{Kind: "site_recovery", MonitorDomain: decision.Domain, From: a.emailFromAddress(decision.Domain), To: email, Subject: "Восстановление сайта " + decision.Domain, Body: "Для восстановления сайта откройте ссылку в течение часа:\n" + link})
+			if err != nil {
+				_ = a.withServerControlDatabaseWrite(r.Context(), "cancel-site-recovery-token", func(database *sql.DB) error {
+					_, deleteErr := database.ExecContext(r.Context(), `DELETE FROM site_recovery_tokens WHERE token_hash=?`, hex.EncodeToString(digest[:]))
+					return deleteErr
+				})
+			}
+		}
+	}
+	if err != nil {
+		renderSiteRecoveryMessage(w, http.StatusServiceUnavailable, "Не удалось отправить письмо. Повторите попытку позже.")
+		return
+	}
+	renderSiteRecoveryMessage(w, http.StatusOK, "Если адрес принадлежит администратору сайта, письмо с подтверждением отправлено.")
+}
+
+func (a *App) confirmQueuedSiteRecovery(w http.ResponseWriter, r *http.Request, decision publicsite.Decision) {
+	token := strings.TrimSpace(r.FormValue("token"))
+	if !validOpaqueAccessToken(token) {
+		renderSiteRecoveryMessage(w, http.StatusBadRequest, "Ссылка недействительна.")
+		return
+	}
+	digest := sha256.Sum256([]byte(token))
+	domain := decision.Domain
+	var restoreNow bool
+	var hasDebt bool
+	err := a.withServerControlDatabaseWrite(r.Context(), "confirm-site-recovery", func(database *sql.DB) error {
+		transaction, err := database.BeginTx(r.Context(), nil)
+		if err != nil {
+			return err
+		}
+		defer transaction.Rollback()
+		var email, expiresAt string
+		if err := transaction.QueryRowContext(r.Context(), `SELECT email,expires_at FROM site_recovery_tokens WHERE token_hash=? AND domain=?`, hex.EncodeToString(digest[:]), domain).Scan(&email, &expiresAt); err != nil {
+			return err
+		}
+		if expiresAt <= time.Now().UTC().Format(time.RFC3339) {
+			return errors.New("confirmation expired")
+		}
+		state, err := readSiteDeletionState(r.Context(), transaction, domain)
+		if err != nil || state.Status != "pending" {
+			return sql.ErrNoRows
+		}
+		if state.DeleteAfter <= time.Now().UTC().Format(time.RFC3339) {
+			return errors.New("restoration window expired")
+		}
+		allowed := false
+		for _, administrator := range hostingandsupport.SplitEmailList(state.AdminEmails) {
+			if strings.EqualFold(administrator, email) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return errors.New("administrator no longer eligible")
+		}
+		_, hasDebt, err = siteOutstandingDebt(r.Context(), transaction, domain)
+		if err != nil {
+			return err
+		}
+		if !hasDebt {
+			restoreNow = true
+			if _, err := transaction.ExecContext(r.Context(), `UPDATE site_deletion_queue SET verified_restore=1 WHERE domain=? AND status='pending'`, domain); err != nil {
+				return err
+			}
+		} else {
+			deadline, err := time.Parse(time.RFC3339, state.DeleteAfter)
+			if err != nil {
+				return err
+			}
+			if !state.Extended {
+				deadline = deadline.AddDate(0, 0, 30)
+			}
+			if _, err := transaction.ExecContext(r.Context(), `UPDATE site_deletion_queue SET verified_restore=1,extended=1,delete_after=? WHERE domain=? AND status='pending'`, deadline.Format(time.RFC3339), domain); err != nil {
+				return err
+			}
+		}
+		if _, err := transaction.ExecContext(r.Context(), `DELETE FROM site_recovery_tokens WHERE token_hash=?`, hex.EncodeToString(digest[:])); err != nil {
+			return err
+		}
+		return transaction.Commit()
+	})
+	if err != nil {
+		renderSiteRecoveryMessage(w, http.StatusGone, "Ссылка недействительна или срок восстановления истек.")
+		return
+	}
+	if restoreNow {
+		if err := a.restoreQueuedSite(r.Context(), domain); err != nil {
+			renderSiteRecoveryMessage(w, http.StatusServiceUnavailable, "Восстановление временно недоступно. Повторите попытку позже.")
+			return
+		}
+		renderSiteRecoveryMessage(w, http.StatusOK, "Сайт восстановлен. Войдите в учетную запись снова.")
+		return
+	}
+	if err := a.publicPublicationRequest("refresh", domain); err != nil {
+		renderSiteRecoveryMessage(w, http.StatusServiceUnavailable, "Срок продлен, но обновление сайта временно недоступно.")
+		return
+	}
+	renderSiteRecoveryMessage(w, http.StatusOK, "Заявка подтверждена. Срок продлен на 30 дней; сайт восстановится после оплаты счетов.")
+}
+
+func (a *App) siteDebtContactPage(w http.ResponseWriter, r *http.Request, decision publicsite.Decision) {
+	if r.Method == http.MethodGet {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = io.WriteString(w, `<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Получить счет</title><body style="font:16px system-ui,sans-serif;max-width:38rem;margin:4rem auto;padding:1rem"><h1>Помочь оплатить сайт</h1><p>Долг сайта: `+template.HTMLEscapeString(decision.DeletionDebtLabel)+`</p><form method="post" action="/?site_debt_contact"><label>Ваш email <input type="email" name="email" required></label><button type="submit">Запросить счет</button></form></body></html>`)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	email := strings.TrimSpace(r.FormValue("email"))
+	if len(email) > 254 {
+		http.Error(w, "invalid email", http.StatusBadRequest)
+		return
+	}
+	if parsed, err := stdmail.ParseAddress(email); err != nil || parsed.Address != email {
+		http.Error(w, "invalid email", http.StatusBadRequest)
+		return
+	}
+	clientIP := accountClientIP(r)
+	if clientIP == "" {
+		clientIP = "unknown"
+	}
+	now := time.Now().UTC()
+	var recipients []string
+	err := a.withServerControlDatabaseWrite(r.Context(), "site-debt-contact", func(database *sql.DB) error {
+		var lastSent string
+		queryErr := database.QueryRowContext(r.Context(), `SELECT last_sent_at FROM site_debt_contacts WHERE domain=? AND client_ip=?`, decision.Domain, clientIP).Scan(&lastSent)
+		if queryErr != nil && !errors.Is(queryErr, sql.ErrNoRows) {
+			return queryErr
+		}
+		if sentAt, parseErr := time.Parse(time.RFC3339, lastSent); parseErr == nil && now.Sub(sentAt) < 24*time.Hour {
+			return errors.New("contact request limit reached")
+		}
+		recipients = (hostingandsupport.Store{DB: database}).OwnerEmails(r.Context())
+		if len(recipients) == 0 {
+			return errors.New("billing contact is unavailable")
+		}
+		_, writeErr := database.ExecContext(r.Context(), `INSERT INTO site_debt_contacts(domain,client_ip,last_sent_at) VALUES(?,?,?) ON CONFLICT(domain,client_ip) DO UPDATE SET last_sent_at=excluded.last_sent_at`, decision.Domain, clientIP, now.Format(time.RFC3339))
+		return writeErr
+	})
+	if err != nil {
+		http.Error(w, "request unavailable", http.StatusTooManyRequests)
+		return
+	}
+	for _, recipient := range recipients {
+		if err := a.enqueueEmail(r.Context(), mailout.Message{Kind: "site_debt_contact", MonitorDomain: decision.Domain, From: a.emailFromAddress(decision.Domain), To: recipient, Subject: "Запрос счета для сайта " + decision.Domain, Body: "Посетитель " + email + " хочет оплатить долг сайта " + decision.Domain + "."}); err != nil {
+			_ = a.withServerControlDatabaseWrite(r.Context(), "retry-site-debt-contact", func(database *sql.DB) error {
+				_, deleteErr := database.ExecContext(r.Context(), `DELETE FROM site_debt_contacts WHERE domain=? AND client_ip=? AND last_sent_at=?`, decision.Domain, clientIP, now.Format(time.RFC3339))
+				return deleteErr
+			})
+			http.Error(w, "request unavailable", http.StatusServiceUnavailable)
+			return
+		}
+	}
+	renderSiteRecoveryMessage(w, http.StatusOK, "Запрос отправлен администратору сервера.")
+}
+
+func (a *App) siteDebtPaymentPage(w http.ResponseWriter, r *http.Request, decision publicsite.Decision) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	type payableInvoice struct {
+		Number     string `json:"number"`
+		Amount     string `json:"amount"`
+		PaymentURL string `json:"payment_url"`
+	}
+	invoices := []payableInvoice{}
+	err := a.withServerControlDatabaseRead(r.Context(), "site-debt-payments", func(database *sql.DB) error {
+		rows, queryErr := database.QueryContext(r.Context(), `SELECT COALESCE(invoice_number,''),COALESCE(amount_minor,0),COALESCE(currency,''),COALESCE(provider,''),COALESCE(payment_url,''),COALESCE(customer_email,'') FROM billing_invoices invoices WHERE (invoices.domain=? OR EXISTS(SELECT 1 FROM billing_invoice_lines lines WHERE lines.invoice_id=invoices.id AND lines.domain=?)) AND invoices.status IN ('issued','payment_error') AND invoices.amount_minor>0 ORDER BY invoices.id`, decision.Domain, decision.Domain)
+		if queryErr != nil {
+			return queryErr
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var number, currency, provider, paymentURL, customerEmail string
+			var amount int64
+			if scanErr := rows.Scan(&number, &amount, &currency, &provider, &paymentURL, &customerEmail); scanErr != nil {
+				return scanErr
+			}
+			parsedURL, parseErr := url.Parse(paymentURL)
+			if provider == "sitebrush_com" || parseErr != nil || parsedURL.Scheme != "https" || parsedURL.Host == "" || parsedURL.User != nil || customerEmail != "" && (strings.Contains(strings.ToLower(paymentURL), strings.ToLower(customerEmail)) || strings.Contains(strings.ToLower(paymentURL), strings.ToLower(url.QueryEscape(customerEmail)))) {
+				paymentURL = ""
+			}
+			invoices = append(invoices, payableInvoice{Number: number, Amount: hostingandsupport.MoneyLabel(amount, currency), PaymentURL: paymentURL})
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		http.Error(w, "payment information unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Robots-Tag", "noindex, nofollow")
+	if r.URL.Query().Get("format") == "json" {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_ = json.NewEncoder(w).Encode(invoices)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = io.WriteString(w, `<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Оплатить долг сайта</title><body style="font:16px system-ui,sans-serif;max-width:38rem;margin:4rem auto;padding:1rem"><h1>Оплатить долг сайта `+template.HTMLEscapeString(decision.Domain)+`</h1><p>После подтверждения оплаты всех счетов сайт возобновит работу автоматически.</p><ul>`)
+	payable := false
+	for _, invoice := range invoices {
+		_, _ = io.WriteString(w, `<li>Счет `+template.HTMLEscapeString(invoice.Number)+` — `+template.HTMLEscapeString(invoice.Amount))
+		if invoice.PaymentURL != "" {
+			payable = true
+			_, _ = io.WriteString(w, ` — <a rel="noopener noreferrer" href="`+template.HTMLEscapeString(invoice.PaymentURL)+`">Оплатить счет</a>`)
+		}
+		_, _ = io.WriteString(w, `</li>`)
+	}
+	_, _ = io.WriteString(w, `</ul>`)
+	if !payable {
+		_, _ = io.WriteString(w, `<p>Онлайн-оплата пока не настроена для этих счетов. <a href="/?site_debt_contact">Запросить счет у администратора сервера</a>.</p>`)
+	}
+	_, _ = io.WriteString(w, `<p><a href="/">Вернуться на сайт</a></p></body></html>`)
+}
+
+type siteDeletionReader interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func readSiteDeletionState(ctx context.Context, database siteDeletionReader, domain string) (siteDeletionState, error) {
+	var state siteDeletionState
+	var verified, extended int
+	err := database.QueryRowContext(ctx, `SELECT domain,reason,requested_by,delete_after,admin_emails,database_path,verified_restore,extended,status FROM site_deletion_queue WHERE domain=?`, normalizeQuotaDomainName(domain)).Scan(&state.Domain, &state.Reason, &state.RequestedBy, &state.DeleteAfter, &state.AdminEmails, &state.DatabasePath, &verified, &extended, &state.Status)
+	state.Verified = verified != 0
+	state.Extended = extended != 0
+	return state, err
+}
+
+type siteDebtReader interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func siteOutstandingDebt(ctx context.Context, database siteDebtReader, domain string) (string, bool, error) {
+	rows, err := database.QueryContext(ctx, `SELECT COALESCE(currency,''),COALESCE(SUM(amount_minor),0) FROM billing_invoices invoices WHERE (invoices.domain=? OR EXISTS(SELECT 1 FROM billing_invoice_lines lines WHERE lines.invoice_id=invoices.id AND lines.domain=?)) AND invoices.status IN ('issued','payment_error') AND invoices.amount_minor>0 GROUP BY currency ORDER BY currency`, domain, domain)
+	if err != nil {
+		return "", false, err
+	}
+	defer rows.Close()
+	labels := make([]string, 0, 2)
+	for rows.Next() {
+		var currency string
+		var amount int64
+		if err := rows.Scan(&currency, &amount); err != nil {
+			return "", false, err
+		}
+		if amount > 0 {
+			labels = append(labels, hostingandsupport.MoneyLabel(amount, currency))
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", false, err
+	}
+	return strings.Join(labels, ", "), len(labels) > 0, nil
+}
+
+func (a *App) siteDeletionState(ctx context.Context, domain string) (siteDeletionState, error) {
+	var state siteDeletionState
+	err := a.withServerControlDatabaseRead(ctx, "site-deletion-read", func(database *sql.DB) error {
+		var readErr error
+		state, readErr = readSiteDeletionState(ctx, database, domain)
+		return readErr
+	})
+	return state, err
+}
+
+func (a *App) queueManagedSiteDeletion(ctx context.Context, domain, reason, requestedBy string) error {
+	domain = normalizeQuotaDomainName(domain)
+	if reason != "owner" && reason != "nonpayment" {
+		return errors.New("invalid deletion reason")
+	}
+	row, found, err := a.managedSiteQuotaRow(ctx, domain)
+	if err != nil || !found {
+		if err != nil {
+			return err
+		}
+		return errors.New("site was not found")
+	}
+	if row.HostingAndSupportMainSite || sameSiteQuotaPath(row.DatabasePath, a.serverControlDBPath()) || a.isDemoSiteDomain(ctx, domain) {
+		return errors.New("the server owner or demo site cannot be deleted")
+	}
+	if err := a.publicPublicationRequest("protect", domain); err != nil {
+		return err
+	}
+	defer a.publicPublicationRequest("unprotect", domain)
+	adminEmails := strings.Join(row.AdminEmails, ",")
+	now := time.Now().UTC()
+	err = a.withServerControlDatabaseWrite(ctx, "queue-site-deletion", func(database *sql.DB) error {
+		if reason == "nonpayment" {
+			_, owes, debtErr := siteOutstandingDebt(ctx, database, domain)
+			if debtErr != nil {
+				return debtErr
+			}
+			if !owes {
+				return errors.New("the site has no unpaid invoices")
+			}
+		}
+		_, writeErr := database.ExecContext(ctx, `INSERT INTO site_deletion_queue(domain,reason,requested_by,requested_at,delete_after,admin_emails,database_path,status) VALUES(?,?,?,?,?,?,?,'pending')`, domain, reason, requestedBy, now.Format(time.RFC3339), now.AddDate(0, 0, 90).Format(time.RFC3339), adminEmails, row.DatabasePath)
+		return writeErr
+	})
+	if err != nil {
+		return err
+	}
+	a.logHostingSupportEvent(ctx, "site_deletion_queued", "pending", requestedBy, domain, reason)
+	a.reportHostingSnapshotAsync(ctx)
+	return nil
+}
+
+func (a *App) restoreQueuedSite(ctx context.Context, domain string) error {
+	if err := a.publicPublicationRequest("protect", domain); err != nil {
+		return err
+	}
+	defer a.publicPublicationRequest("unprotect", domain)
+	err := a.withServerControlDatabaseWrite(ctx, "restore-site-deletion", func(database *sql.DB) error {
+		_, owes, debtErr := siteOutstandingDebt(ctx, database, domain)
+		if debtErr != nil {
+			return debtErr
+		}
+		if owes {
+			return errors.New("unpaid invoices must be paid before restoration")
+		}
+		result, err := database.ExecContext(ctx, `DELETE FROM site_deletion_queue WHERE domain=? AND status='pending'`, domain)
+		if err != nil {
+			return err
+		}
+		if changed, _ := result.RowsAffected(); changed != 1 {
+			return sql.ErrNoRows
+		}
+		_, err = database.ExecContext(ctx, `DELETE FROM site_recovery_tokens WHERE domain=?`, domain)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	a.logHostingSupportEvent(ctx, "site_restored", "success", "", domain, "queued deletion cancelled")
+	a.reportHostingSnapshotAsync(ctx)
+	return nil
+}
+
+func (a *App) purgeManagedSiteWithoutBackup(ctx context.Context, domain string) error {
+	domain = normalizeQuotaDomainName(domain)
+	row, found, err := a.managedSiteQuotaRow(ctx, domain)
+	if err != nil || !found {
+		state, stateErr := a.siteDeletionState(ctx, domain)
+		if stateErr != nil || state.Status != "purging" || state.DatabasePath == "" {
+			if err != nil {
+				return err
+			}
+			return errors.New("site was not found")
+		}
+		row = siteQuotaRow{Domain: domain, DatabasePath: state.DatabasePath}
+	}
+	if row.HostingAndSupportMainSite || sameSiteQuotaPath(row.DatabasePath, a.serverControlDBPath()) || a.isDemoSiteDomain(ctx, domain) {
+		return errors.New("the server owner or demo site cannot be deleted")
+	}
+	if err := publicsite.SetBlocked(a.storagePath, domain, true); err != nil {
+		return err
+	}
+	if err := a.notifyPublicPolicy("block", domain); err != nil {
+		return err
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := a.withServerControlDatabaseWrite(ctx, "mark-site-purging", func(database *sql.DB) error {
+		_, writeErr := database.ExecContext(ctx, `INSERT INTO site_deletion_queue(domain,reason,requested_by,requested_at,delete_after,admin_emails,database_path,status) VALUES(?,'owner','server',?,?,'',?,'purging') ON CONFLICT(domain) DO UPDATE SET status='purging',database_path=excluded.database_path`, domain, now, now, row.DatabasePath)
+		return writeErr
+	}); err != nil {
+		return err
+	}
+	if err := a.withServerControlDatabaseWrite(ctx, "purge-site-control", func(database *sql.DB) error {
+		return a.deleteManagedSiteControlRows(ctx, database, row)
+	}); err != nil {
+		return err
+	}
+	if err := a.deleteManagedSiteFiles(ctx, row); err != nil {
+		return err
+	}
+	var backupPaths []string
+	if err := a.withServerControlDatabaseRead(ctx, "purge-site-backup-paths", func(database *sql.DB) error {
+		backupPaths = a.managedSiteDeletionBackupPathsByDomain(ctx, database)[domain]
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, backupPath := range backupPaths {
+		realBackupPath, pathErr := a.existingPathInsideStorageSubtree(a.backupRootDir(), backupPath)
+		if errors.Is(pathErr, os.ErrNotExist) {
+			continue
+		}
+		if pathErr != nil {
+			return pathErr
+		}
+		if err := os.Remove(realBackupPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	if err := a.withServerControlDatabaseWrite(ctx, "purge-site-finish", func(database *sql.DB) error {
+		if _, err := database.ExecContext(ctx, `DELETE FROM site_deletion_backups WHERE domain=?`, domain); err != nil {
+			return err
+		}
+		if _, err := database.ExecContext(ctx, `DELETE FROM site_recovery_tokens WHERE domain=?`, domain); err != nil {
+			return err
+		}
+		if _, err := database.ExecContext(ctx, `DELETE FROM site_debt_contacts WHERE domain=?`, domain); err != nil {
+			return err
+		}
+		if _, err := database.ExecContext(ctx, `UPDATE site_deletion_queue SET status='purged',requested_by='',admin_emails='',database_path='',verified_restore=0 WHERE domain=?`, domain); err != nil {
+			return err
+		}
+		_, err := database.ExecContext(ctx, `DELETE FROM site_account_deletion_queue WHERE domain=?`, domain)
+		return err
+	}); err != nil {
+		return err
+	}
+	if a.aiCapabilities != nil {
+		_ = a.aiCapabilities.RevokeDomain(domain)
+	}
+	a.logHostingSupportEvent(ctx, "site_deleted", "success", "", domain, "site purged without backup")
+	a.reportHostingSnapshotAsync(ctx)
+	return nil
+}
+
+func (a *App) revokeAccountCapabilities(domain, email string) error {
+	if a.aiCapabilities == nil {
+		return nil
+	}
+	capabilities, err := a.aiCapabilities.ListCapabilities(email, domain)
+	if err != nil {
+		return err
+	}
+	for _, capability := range capabilities {
+		if !capability.Revoked {
+			if err := a.aiCapabilities.RevokeCapabilityID(capability.ID, email, domain); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (a *App) queueSiteAccountDeletion(ctx context.Context, domain, email, requestedBy string) error {
+	domain = normalizeQuotaDomainName(domain)
+	email = strings.ToLower(strings.TrimSpace(email))
+	if domain == "" || email == "" {
+		return errors.New("site and email are required")
+	}
+	if state, err := a.siteDeletionState(ctx, domain); err == nil && state.Status == "pending" {
+		return errors.New("the whole site is already pending deletion")
+	}
+	if domain == a.serverOwnerDomain(ctx) {
+		owner := false
+		_ = a.withServerControlDatabaseRead(ctx, "account-owner-check", func(database *sql.DB) error {
+			owner = (hostingandsupport.Store{DB: database}).IsOwner(ctx, email)
+			return nil
+		})
+		if owner {
+			return errors.New("the server owner account cannot be deleted")
+		}
+	}
+	accountCtx := contextWithDomain(ctx, domain)
+	var administrators int
+	if err := a.db.QueryRowContext(accountCtx, `SELECT COUNT(1) FROM users WHERE domain=? AND is_admin=1`, domain).Scan(&administrators); err != nil {
+		return err
+	}
+	if administrators <= 1 {
+		return errors.New("the last site administrator cannot be deleted separately")
+	}
+	if err := a.revokeAccountCapabilities(domain, email); err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	err := a.withServerControlDatabaseWrite(ctx, "queue-site-account-deletion", func(database *sql.DB) error {
+		_, err := database.ExecContext(ctx, `INSERT INTO site_account_deletion_queue(domain,email,requested_by,requested_at,delete_after) VALUES(?,?,?,?,?)`, domain, email, requestedBy, now.Format(time.RFC3339), now.AddDate(0, 0, 90).Format(time.RFC3339))
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	err = a.accountTransaction(accountCtx, func(transaction *sql.Tx) error {
+		result, err := transaction.ExecContext(accountCtx, `UPDATE users SET is_admin=0 WHERE domain=? AND email=? AND is_admin=1`, domain, email)
+		if err != nil {
+			return err
+		}
+		if changed, _ := result.RowsAffected(); changed != 1 {
+			return sql.ErrNoRows
+		}
+		_, err = transaction.ExecContext(accountCtx, `DELETE FROM sessions WHERE user_email=?`, domain+"|"+email)
+		return err
+	})
+	if err != nil {
+		_ = a.withServerControlDatabaseWrite(ctx, "cancel-site-account-deletion", func(database *sql.DB) error {
+			_, deleteErr := database.ExecContext(ctx, `DELETE FROM site_account_deletion_queue WHERE domain=? AND email=?`, domain, email)
+			return deleteErr
+		})
+		return err
+	}
+	a.logHostingSupportEvent(ctx, "account_deletion_queued", "pending", email, domain, requestedBy)
+	return nil
+}
+
+func (a *App) restoreQueuedSiteAccount(ctx context.Context, domain, email string) error {
+	domain = normalizeQuotaDomainName(domain)
+	email = strings.ToLower(strings.TrimSpace(email))
+	accountCtx := contextWithDomain(ctx, domain)
+	if state, err := a.siteDeletionState(ctx, domain); err == nil && state.Status == "pending" {
+		return errors.New("restore the site first")
+	}
+	if err := a.withServerControlDatabaseRead(ctx, "restore-site-account-check", func(database *sql.DB) error {
+		var pending int
+		return database.QueryRowContext(ctx, `SELECT 1 FROM site_account_deletion_queue WHERE domain=? AND email=?`, domain, email).Scan(&pending)
+	}); err != nil {
+		return err
+	}
+	var active int
+	if err := a.db.QueryRowContext(accountCtx, `SELECT is_admin FROM users WHERE domain=? AND email=?`, domain, email).Scan(&active); err != nil {
+		return err
+	}
+	if active == 0 {
+		if err := a.accountTransaction(accountCtx, func(transaction *sql.Tx) error {
+			result, err := transaction.ExecContext(accountCtx, `UPDATE users SET is_admin=1 WHERE domain=? AND email=? AND is_admin=0`, domain, email)
+			if err != nil {
+				return err
+			}
+			if changed, _ := result.RowsAffected(); changed != 1 {
+				return sql.ErrNoRows
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+	return a.withServerControlDatabaseWrite(ctx, "restore-site-account", func(database *sql.DB) error {
+		_, err := database.ExecContext(ctx, `DELETE FROM site_account_deletion_queue WHERE domain=? AND email=?`, domain, email)
+		return err
+	})
+}
+
+func (a *App) purgeSiteAccount(ctx context.Context, domain, email string) error {
+	domain = normalizeQuotaDomainName(domain)
+	email = strings.ToLower(strings.TrimSpace(email))
+	if domain == "" || email == "" {
+		return errors.New("site and email are required")
+	}
+	if domain == a.serverOwnerDomain(ctx) {
+		owner := false
+		_ = a.withServerControlDatabaseRead(ctx, "purge-account-owner-check", func(database *sql.DB) error {
+			owner = (hostingandsupport.Store{DB: database}).IsOwner(ctx, email)
+			return nil
+		})
+		if owner {
+			return errors.New("the server owner account cannot be deleted")
+		}
+	}
+	accountCtx := contextWithDomain(ctx, domain)
+	var administrators int
+	if err := a.db.QueryRowContext(accountCtx, `SELECT COUNT(1) FROM users WHERE domain=? AND is_admin=1`, domain).Scan(&administrators); err != nil {
+		return err
+	}
+	var active int
+	if err := a.db.QueryRowContext(accountCtx, `SELECT is_admin FROM users WHERE domain=? AND email=?`, domain, email).Scan(&active); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return a.withServerControlDatabaseWrite(ctx, "finish-missing-site-account", func(database *sql.DB) error {
+				_, deleteErr := database.ExecContext(ctx, `DELETE FROM site_account_deletion_queue WHERE domain=? AND email=?`, domain, email)
+				return deleteErr
+			})
+		}
+		return err
+	}
+	if active == 1 && administrators <= 1 {
+		return errors.New("the last site administrator cannot be deleted separately")
+	}
+	if err := a.revokeAccountCapabilities(domain, email); err != nil {
+		return err
+	}
+	err := a.accountTransaction(accountCtx, func(transaction *sql.Tx) error {
+		for _, statement := range []struct {
+			query string
+			args  []any
+		}{
+			{`DELETE FROM sessions WHERE user_email=?`, []any{domain + "|" + email}},
+			{`DELETE FROM account_passkeys WHERE domain=? AND email=?`, []any{domain, email}},
+			{`DELETE FROM account_totp WHERE domain=? AND email=?`, []any{domain, email}},
+			{`DELETE FROM account_totp_challenges WHERE domain=? AND email=?`, []any{domain, email}},
+			{`DELETE FROM account_webauthn_challenges WHERE domain=? AND email=?`, []any{domain, email}},
+			{`DELETE FROM account_login_codes WHERE domain=? AND email=?`, []any{domain, email}},
+			{`DELETE FROM account_code_rates WHERE domain=? AND email=?`, []any{domain, email}},
+			{`DELETE FROM account_trusted_ips WHERE domain=? AND email=?`, []any{domain, email}},
+			{`DELETE FROM account_session_ips WHERE domain=? AND email=?`, []any{domain, email}},
+			{`DELETE FROM admin_allowed_ips WHERE domain=? AND email=?`, []any{domain, email}},
+			{`DELETE FROM admin_ip_policies WHERE domain=? AND email=?`, []any{domain, email}},
+			{`DELETE FROM admin_stealth_modes WHERE domain=? AND email=?`, []any{domain, email}},
+			{`DELETE FROM ai_provider_user_credentials WHERE domain=? AND email=?`, []any{domain, email}},
+			{`DELETE FROM owner_mail_preferences WHERE domain=? AND email=?`, []any{domain, email}},
+			{`DELETE FROM email_confirmations WHERE domain=? AND (email=? OR current_email=?)`, []any{domain, email, email}},
+			{`DELETE FROM users WHERE domain=? AND email=?`, []any{domain, email}},
+		} {
+			if _, err := transaction.ExecContext(accountCtx, statement.query, statement.args...); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if err := a.withServerControlDatabaseWrite(ctx, "purge-site-account-queue", func(database *sql.DB) error {
+		_, deleteErr := database.ExecContext(ctx, `DELETE FROM site_account_deletion_queue WHERE domain=? AND email=?`, domain, email)
+		return deleteErr
+	}); err != nil {
+		return err
+	}
+	a.logHostingSupportEvent(ctx, "account_deleted", "success", email, domain, "account purged without backup")
+	return nil
 }
 
 func (a *App) startDemoSiteCleanupWorker(ctx context.Context) {
@@ -31322,6 +32194,7 @@ func (a *App) startDemoSiteCleanupWorker(ctx context.Context) {
 		runCleanup := func(now time.Time) {
 			a.cleanupExpiredDemoSites(ctx, now)
 			a.cleanupExpiredPublicTrialSites(ctx, now)
+			a.reconcileQueuedDeletions(ctx, now)
 			if a.controlDatabase != nil && now.Sub(lastRegistrationCleanup) >= 24*time.Hour {
 				if err := a.withServerControlDatabaseWrite(ctx, "registration-analytics-cleanup", func(database *sql.DB) error {
 					return browserstats.CleanupRegistration(ctx, database, now.Add(-browserstats.RegistrationRetention))
@@ -31342,6 +32215,109 @@ func (a *App) startDemoSiteCleanupWorker(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+func (a *App) reconcileQueuedDeletions(ctx context.Context, now time.Time) {
+	var sites []siteDeletionState
+	type queuedAccount struct{ domain, email string }
+	var accounts []queuedAccount
+	err := a.withServerControlDatabaseRead(ctx, "queued-deletion-scan", func(database *sql.DB) error {
+		rows, err := database.QueryContext(ctx, `SELECT domain,reason,requested_by,delete_after,admin_emails,database_path,verified_restore,extended,status FROM site_deletion_queue WHERE status IN ('pending','purging')`)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var site siteDeletionState
+			var verified, extended int
+			if err := rows.Scan(&site.Domain, &site.Reason, &site.RequestedBy, &site.DeleteAfter, &site.AdminEmails, &site.DatabasePath, &verified, &extended, &site.Status); err != nil {
+				rows.Close()
+				return err
+			}
+			site.Verified = verified != 0
+			site.Extended = extended != 0
+			sites = append(sites, site)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+		accountRows, err := database.QueryContext(ctx, `SELECT domain,email FROM site_account_deletion_queue WHERE delete_after<=?`, now.UTC().Format(time.RFC3339))
+		if err != nil {
+			return err
+		}
+		for accountRows.Next() {
+			var account queuedAccount
+			if err := accountRows.Scan(&account.domain, &account.email); err != nil {
+				accountRows.Close()
+				return err
+			}
+			accounts = append(accounts, account)
+		}
+		err = accountRows.Err()
+		accountRows.Close()
+		return err
+	})
+	if err != nil {
+		log.Printf("queued deletion scan failed: %v", err)
+		return
+	}
+	purgedSites := make(map[string]bool)
+	for _, site := range sites {
+		if site.Status == "purging" {
+			if err := a.purgeManagedSiteWithoutBackup(ctx, site.Domain); err != nil {
+				log.Printf("site purge retry failed domain=%s: %v", site.Domain, err)
+			} else {
+				purgedSites[site.Domain] = true
+			}
+			continue
+		}
+		var owes bool
+		debtErr := a.withServerControlDatabaseRead(ctx, "queued-deletion-debt", func(database *sql.DB) error {
+			var lookupErr error
+			_, owes, lookupErr = siteOutstandingDebt(ctx, database, site.Domain)
+			return lookupErr
+		})
+		if debtErr != nil {
+			log.Printf("site debt check failed domain=%s: %v", site.Domain, debtErr)
+			continue
+		}
+		if !owes && (site.Reason == "nonpayment" || site.Verified) {
+			if err := a.restoreQueuedSite(ctx, site.Domain); err != nil {
+				log.Printf("paid site restore failed domain=%s: %v", site.Domain, err)
+			}
+			continue
+		}
+		if site.DeleteAfter > now.UTC().Format(time.RFC3339) {
+			continue
+		}
+		claimErr := a.withServerControlDatabaseWrite(ctx, "claim-site-purge", func(database *sql.DB) error {
+			result, err := database.ExecContext(ctx, `UPDATE site_deletion_queue SET status='purging' WHERE domain=? AND status='pending' AND delete_after<=?`, site.Domain, now.UTC().Format(time.RFC3339))
+			if err != nil {
+				return err
+			}
+			if changed, _ := result.RowsAffected(); changed != 1 {
+				return sql.ErrNoRows
+			}
+			return nil
+		})
+		if claimErr != nil {
+			continue
+		}
+		if err := a.purgeManagedSiteWithoutBackup(ctx, site.Domain); err != nil {
+			log.Printf("site purge failed domain=%s: %v", site.Domain, err)
+		} else {
+			purgedSites[site.Domain] = true
+		}
+	}
+	for _, account := range accounts {
+		if purgedSites[account.domain] {
+			continue
+		}
+		if err := a.purgeSiteAccount(ctx, account.domain, account.email); err != nil {
+			log.Printf("account purge failed domain=%s email=%s: %v", account.domain, account.email, err)
+		}
+	}
 }
 
 func (a *App) cleanupExpiredDemoSites(ctx context.Context, now time.Time) {
@@ -32692,6 +33668,33 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	domain := a.siteDomain(r.Context(), r)
+	if r.Method == http.MethodPost && (r.FormValue("profile_action") == "delete_site" || r.FormValue("profile_action") == "delete_account") {
+		if r.FormValue("account_csrf") == "" || r.FormValue("account_csrf") != accountCSRF(r) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		var err error
+		if r.FormValue("profile_action") == "delete_site" {
+			if normalizeQuotaDomainName(r.FormValue("confirm_domain")) != normalizeQuotaDomainName(domain) {
+				http.Error(w, "type the site domain to confirm deletion", http.StatusBadRequest)
+				return
+			}
+			err = a.queueManagedSiteDeletion(r.Context(), domain, "owner", currentEmail)
+		} else {
+			if !strings.EqualFold(strings.TrimSpace(r.FormValue("confirm_email")), currentEmail) {
+				http.Error(w, "type your email to confirm deletion", http.StatusBadRequest)
+				return
+			}
+			err = a.queueSiteAccountDeletion(r.Context(), domain, currentEmail, currentEmail)
+		}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		httpsecurity.SetSensitiveCookie(w, r, &http.Cookie{Name: "sitebrush_session", Value: "", Expires: time.Unix(0, 0), MaxAge: -1})
+		httpsecurity.RedirectLocal(w, r, "/", http.StatusSeeOther)
+		return
+	}
 	if r.Method == http.MethodPost && r.FormValue("profile_action") == "ai_ingress_save" {
 		a.saveAIIngressPolicy(w, r)
 		return
@@ -33173,6 +34176,19 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 	translations := translationsForRequest(r)
 	domain := a.siteDomain(r.Context(), r)
 	accountEmail, authenticated := a.currentAdminEmail(r)
+	canDeleteAccount := false
+	if authenticated {
+		var administratorCount int
+		if err := a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM users WHERE domain=? AND is_admin=1`, domain).Scan(&administratorCount); err == nil {
+			canDeleteAccount = administratorCount > 1
+		}
+		if canDeleteAccount && domain == a.serverOwnerDomain(r.Context()) {
+			_ = a.withServerControlDatabaseRead(r.Context(), "profile-owner-deletion", func(database *sql.DB) error {
+				canDeleteAccount = !(hostingandsupport.Store{DB: database}).IsOwner(r.Context(), accountEmail)
+				return nil
+			})
+		}
+	}
 	adminIPStatus := ""
 	adminIPDraft := ""
 	if r.Method == http.MethodPost && (strings.HasPrefix(r.FormValue("profile_action"), "admin_ip_") || strings.HasPrefix(r.FormValue("profile_action"), "admin_stealth_")) {
@@ -33368,6 +34384,8 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 		"TOTPSetupURI":               totpSetupURI,
 		"TOTPSetupQRCode":            totpSetupQRCode,
 		"AccountCSRF":                accountCSRF(r),
+		"CanDeleteSite":              !a.isDemoSiteDomain(r.Context(), domain) && domain != a.serverOwnerDomain(r.Context()),
+		"CanDeleteAccount":           canDeleteAccount,
 		"CodeWebmail":                webmailProviderForAddress(email),
 		"EmailChange":                emailChange,
 		"ProfileCodeAction":          "?profile&profile_resume=" + url.QueryEscape(r.URL.Query().Get("profile_resume")),
@@ -45619,7 +46637,11 @@ func (a *App) serveManagedPageContent(w http.ResponseWriter, r *http.Request, do
 			w.Header().Set("X-Robots-Tag", "noindex, nofollow")
 			w.Header().Set("Cache-Control", "no-store")
 		}
-		_, _ = w.Write([]byte(a.injectContextMenuForRequest(r, domain, pagePath, content, isAdmin, adminEmail, domainFrozen)))
+		pageHTML := a.injectContextMenuForRequest(r, domain, pagePath, content, isAdmin, adminEmail, domainFrozen)
+		if debtOverlay := siteDebtOverlayHTML(a.publicRequestDecision(r)); debtOverlay != "" {
+			pageHTML = injectMenuScriptIntoHTML(pageHTML, debtOverlay)
+		}
+		_, _ = w.Write([]byte(pageHTML))
 		return
 	}
 	w.Header().Set("Content-Type", contentTypeForManagedPage(pagePath, content))
@@ -51367,6 +52389,9 @@ func (a *App) serveKnownChrootLocation(w http.ResponseWriter, r *http.Request, d
 	if info.IsDir() {
 		indexPath := filepath.Join(targetPath, "index.html")
 		if indexRealPath, indexInfo, indexErr := a.resolveExistingChrootPath(domain, indexPath); indexErr == nil && !indexInfo.IsDir() {
+			if a.serveChrootDebtPage(w, r, indexRealPath) {
+				return true
+			}
 			if !a.serveFileInsideStorage(w, r, indexRealPath) {
 				http.NotFound(w, r)
 			}
@@ -51375,10 +52400,31 @@ func (a *App) serveKnownChrootLocation(w http.ResponseWriter, r *http.Request, d
 		a.renderDirectoryListing(w, r, domain, requestPath, targetPath, location.URLPath)
 		return true
 	}
+	if a.serveChrootDebtPage(w, r, targetPath) {
+		return true
+	}
 	if !a.serveFileInsideStorage(w, r, targetPath) {
 		http.NotFound(w, r)
 	}
 	return true
+}
+
+func (a *App) serveChrootDebtPage(w http.ResponseWriter, r *http.Request, filePath string) bool {
+	decision, found := r.Context().Value(publicDecisionContextKey{}).(publicsite.Decision)
+	if !found || decision.DeletionReason != "nonpayment" {
+		return false
+	}
+	switch strings.ToLower(filepath.Ext(filePath)) {
+	case ".html", ".htm", ".xhtml":
+	default:
+		return false
+	}
+	file, err := a.openFileInsideStorage(filePath)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	return a.servePublicDebtHTMLFile(w, r, file, decision)
 }
 
 func (a *App) chrootResourceExists(ctx context.Context, domain, requestPath string) bool {
@@ -55817,6 +56863,9 @@ func (a *App) servePublishedStaticFileFromDisk(w http.ResponseWriter, r *http.Re
 		layoutAttribute = ` data-analytics-layout="` + template.HTMLEscapeString(decision.Layout) + `"`
 	}
 	bootstrap := `<script async src="/p/static/visitor.js?v=` + url.QueryEscape(CompileVersion) + `" data-sitebrush-owned="true"` + menuAttribute + layoutAttribute + `></script>`
+	if decision, found := r.Context().Value(publicDecisionContextKey{}).(publicsite.Decision); found {
+		bootstrap += siteDebtOverlayHTML(decision)
+	}
 	if overlay := a.trialRegistrationOverlayHTML(r, domain); overlay != "" {
 		w.Header().Set("X-Robots-Tag", "noindex, nofollow")
 		w.Header().Set("Cache-Control", "no-store")
@@ -58876,6 +59925,30 @@ func missingImportSchemaTable(err error, tableName string) bool {
 func (a *App) writePublicPolicy(domain string) error {
 	ctx := contextWithDomain(context.Background(), domain)
 	policy := publicsite.Policy{Domain: domain}
+	if a.controlDatabase != nil {
+		if err := a.withServerControlDatabaseRead(ctx, "public-site-deletion", func(database *sql.DB) error {
+			state, readErr := readSiteDeletionState(ctx, database, domain)
+			if errors.Is(readErr, sql.ErrNoRows) {
+				return nil
+			}
+			if readErr != nil {
+				return readErr
+			}
+			if state.Status != "pending" && state.Status != "purging" {
+				return nil
+			}
+			policy.DeletionReason = state.Reason
+			policy.DeletionDeadline = state.DeleteAfter
+			if state.Reason == "nonpayment" {
+				var debtErr error
+				policy.DeletionDebtLabel, _, debtErr = siteOutstandingDebt(ctx, database, domain)
+				return debtErr
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
 	var frozen int
 	frozenErr := a.db.QueryRowContext(ctx, `SELECT is_frozen FROM domain_states WHERE domain=?`, domain).Scan(&frozen)
 	if frozenErr != nil && !errors.Is(frozenErr, sql.ErrNoRows) {
@@ -59345,6 +60418,9 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 			http.NotFound(w, r)
 			return true
 		}
+		if pageContentKind(fileName, "") == "html" && a.servePublicDebtHTMLFile(w, r, file, decision) {
+			return true
+		}
 		serveContentWithDownloadObservation(w, r, fileName, info.ModTime(), info.Size(), file)
 		return true
 	}
@@ -59386,6 +60462,9 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 		if decision.ResourceType != "" {
 			w.Header().Set("Content-Type", decision.ResourceType)
 		}
+		if (strings.HasPrefix(strings.ToLower(decision.ResourceType), "text/html") || decision.ResourceType == "" && pageContentKind(pagePath, "") == "html") && a.servePublicDebtHTMLFile(w, r, file, decision) {
+			return true
+		}
 		serveContentWithDownloadObservation(w, r, pagePath, info.ModTime(), info.Size(), file)
 		return true
 	}
@@ -59420,6 +60499,9 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 				http.NotFound(w, r)
 				return true
 			}
+			if pageContentKind(decision.ChrootName, "") == "html" && a.servePublicDebtHTMLFile(w, r, file, decision) {
+				return true
+			}
 			serveContentWithDownloadObservation(w, r, decision.ChrootName, info.ModTime(), info.Size(), file)
 			return true
 		}
@@ -59443,6 +60525,9 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 func newPublicHTTPFront(application *App, secret string, stop <-chan struct{}) *publicsite.Front {
 	var front *publicsite.Front
 	publicHandler := func(w http.ResponseWriter, r *http.Request, paused bool) bool {
+		if application.servePendingSiteBoundary(w, r) {
+			return true
+		}
 		if strings.HasPrefix(r.URL.Path, "/.well-known/acme-challenge/") {
 			// Only the ACME owner's registered token handler may answer this path.
 			return false
@@ -59900,7 +60985,7 @@ func (a *App) publicVisitorAsset(requestPath string) bool {
 	if _, found := a.embeddedStaticAssets[relative]; !found {
 		return false
 	}
-	if relative == "visitor.js" || strings.HasPrefix(relative, "guest_menu.") || relative == "public_menu.js" || relative == "unfreeze.js" || relative == "analytics.js" || relative == "site_copy.js" {
+	if relative == "visitor.js" || relative == "site_debt.js" || relative == "site_debt.css" || strings.HasPrefix(relative, "guest_menu.") || relative == "public_menu.js" || relative == "unfreeze.js" || relative == "analytics.js" || relative == "site_copy.js" {
 		return true
 	}
 	switch strings.ToLower(path.Ext(relative)) {

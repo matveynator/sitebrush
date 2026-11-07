@@ -34497,3 +34497,173 @@ func BenchmarkPublicIngressAllocations(b *testing.B) {
 		}
 	})
 }
+
+func TestQueuedSiteDeletionCountdownAndRestore(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	domain := "queued.example"
+	if err := application.createManagedSite(context.Background(), domain, "owner@example.org", "test", 1<<20); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.queueManagedSiteDeletion(context.Background(), domain, "owner", "owner@example.org"); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "https://"+domain+"/", nil)
+	response := httptest.NewRecorder()
+	if !application.servePendingSiteBoundary(response, request) || response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "sitebrush-deletion-countdown") {
+		t.Fatalf("queued site boundary: %d %s", response.Code, response.Body.String())
+	}
+	if err := application.restoreQueuedSite(context.Background(), domain); err != nil {
+		t.Fatal(err)
+	}
+	if application.servePendingSiteBoundary(httptest.NewRecorder(), request) {
+		t.Fatal("restored site remains behind deletion boundary")
+	}
+	row, found, err := application.managedSiteQuotaRow(context.Background(), domain)
+	if err != nil || !found {
+		t.Fatalf("managed site missing before expiry: %v", err)
+	}
+	if err := application.queueManagedSiteDeletion(context.Background(), domain, "owner", "owner@example.org"); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.withServerControlDatabaseWrite(context.Background(), "expire-site-fixture", func(database *sql.DB) error {
+		_, err := database.Exec(`UPDATE site_deletion_queue SET delete_after='2000-01-01T00:00:00Z' WHERE domain=?`, domain)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	application.reconcileQueuedDeletions(context.Background(), time.Now())
+	state, err := application.siteDeletionState(context.Background(), domain)
+	if err != nil || state.Status != "purged" {
+		t.Fatalf("expired site was not purged: %+v %v", state, err)
+	}
+	if _, err := os.Stat(row.DatabasePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expired site database remains: %v", err)
+	}
+}
+
+func TestNonpaymentSitePublicPaymentAndAutomaticRestore(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	domain := "debt.example"
+	if err := application.createManagedSite(context.Background(), domain, "owner@example.org", "test", 1<<20); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.withServerControlDatabaseWrite(context.Background(), "debt-fixture", func(database *sql.DB) error {
+		_, err := database.Exec(`INSERT INTO billing_invoices(invoice_number,domain,status,provider,payment_url,amount_minor,currency) VALUES('SB-TEST',?,'issued','stripe','https://payments.example/invoice',5000,'USD')`, domain)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.queueManagedSiteDeletion(context.Background(), domain, "nonpayment", "server"); err != nil {
+		t.Fatal(err)
+	}
+	beforeRecovery, err := application.siteDeletionState(context.Background(), domain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveryToken := randomAccessToken()
+	recoveryDigest := sha256.Sum256([]byte(recoveryToken))
+	if err := application.withServerControlDatabaseWrite(context.Background(), "site-recovery-fixture", func(database *sql.DB) error {
+		_, err := database.Exec(`INSERT INTO site_recovery_tokens(token_hash,domain,email,expires_at) VALUES(?,?,?,?)`, hex.EncodeToString(recoveryDigest[:]), domain, "owner@example.org", time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	recoveryForm := httptest.NewRecorder()
+	if !application.servePendingSiteBoundary(recoveryForm, httptest.NewRequest(http.MethodGet, "https://"+domain+"/?site_recovery&token="+url.QueryEscape(recoveryToken), nil)) || recoveryForm.Code != http.StatusOK {
+		t.Fatalf("recovery confirmation form: %d %s", recoveryForm.Code, recoveryForm.Body.String())
+	}
+	beforeConfirmation, err := application.siteDeletionState(context.Background(), domain)
+	if err != nil || beforeConfirmation.Verified {
+		t.Fatalf("GET consumed recovery token: %+v %v", beforeConfirmation, err)
+	}
+	recoveryRequest := httptest.NewRequest(http.MethodPost, "https://"+domain+"/?site_recovery", strings.NewReader(url.Values{"token": {recoveryToken}}.Encode()))
+	recoveryRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	recoveryResponse := httptest.NewRecorder()
+	if !application.servePendingSiteBoundary(recoveryResponse, recoveryRequest) || recoveryResponse.Code != http.StatusOK {
+		t.Fatalf("verified recovery: %d %s", recoveryResponse.Code, recoveryResponse.Body.String())
+	}
+	afterRecovery, err := application.siteDeletionState(context.Background(), domain)
+	if err != nil || !afterRecovery.Verified || !afterRecovery.Extended {
+		t.Fatalf("recovery was not verified: %+v %v", afterRecovery, err)
+	}
+	oldDeadline, _ := time.Parse(time.RFC3339, beforeRecovery.DeleteAfter)
+	newDeadline, _ := time.Parse(time.RFC3339, afterRecovery.DeleteAfter)
+	if newDeadline.Sub(oldDeadline) != 30*24*time.Hour {
+		t.Fatalf("recovery deadline changed by %s", newDeadline.Sub(oldDeadline))
+	}
+	for _, test := range []struct {
+		method, path string
+		blocked      bool
+	}{{http.MethodGet, "/", false}, {http.MethodPost, "/contact", true}, {http.MethodGet, "/?mcp", true}} {
+		request := httptest.NewRequest(test.method, "https://"+domain+test.path, nil)
+		response := httptest.NewRecorder()
+		blocked := application.servePendingSiteBoundary(response, request)
+		if blocked != test.blocked || blocked && response.Code != http.StatusLocked {
+			t.Fatalf("%s %s blocked=%v status=%d", test.method, test.path, blocked, response.Code)
+		}
+	}
+	payment := httptest.NewRecorder()
+	if !application.servePendingSiteBoundary(payment, httptest.NewRequest(http.MethodGet, "https://"+domain+"/?site_debt_pay", nil)) || !strings.Contains(payment.Body.String(), "https://payments.example/invoice") {
+		t.Fatalf("public payment page: %d %s", payment.Code, payment.Body.String())
+	}
+	paymentJSON := httptest.NewRecorder()
+	if !application.servePendingSiteBoundary(paymentJSON, httptest.NewRequest(http.MethodGet, "https://"+domain+"/?site_debt_pay&format=json", nil)) || !strings.Contains(paymentJSON.Body.String(), `"payment_url":"https://payments.example/invoice"`) {
+		t.Fatalf("modal payment options: %d %s", paymentJSON.Code, paymentJSON.Body.String())
+	}
+	decision := publicsite.Decision{DeletionReason: "nonpayment", DeletionDeadline: "2030-01-01T00:00:00Z", DeletionDebtLabel: "50.00 USD"}
+	bootstrap := siteDebtOverlayHTML(decision)
+	if !strings.Contains(bootstrap, `src="/p/static/site_debt.js`) || !strings.Contains(bootstrap, `href="/p/static/site_debt.css`) || strings.Contains(bootstrap, `<div`) {
+		t.Fatalf("debt overlay bootstrap is not head-safe: %s", bootstrap)
+	}
+	if err := application.withServerControlDatabaseWrite(context.Background(), "paid-fixture", func(database *sql.DB) error {
+		_, err := database.Exec(`UPDATE billing_invoices SET status='paid' WHERE invoice_number='SB-TEST'`)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	application.reconcileQueuedDeletions(context.Background(), time.Now())
+	if application.servePendingSiteBoundary(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "https://"+domain+"/", nil)) {
+		t.Fatal("paid site did not resume")
+	}
+}
+
+func TestQueuedAdministratorAccountExpires(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	domain := "accounts.example"
+	if err := application.createManagedSite(context.Background(), domain, "first@example.org", "test", 1<<20); err != nil {
+		t.Fatal(err)
+	}
+	boundary := contextWithDomain(context.Background(), domain)
+	if err := application.queueSiteAccountDeletion(boundary, domain, "first@example.org", "first@example.org"); err == nil {
+		t.Fatal("last administrator could be deleted separately")
+	}
+	if _, err := application.db.ExecContext(boundary, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, "second@example.org", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.queueSiteAccountDeletion(boundary, domain, "second@example.org", "second@example.org"); err != nil {
+		t.Fatal(err)
+	}
+	var active int
+	if err := application.db.QueryRowContext(boundary, `SELECT is_admin FROM users WHERE domain=? AND email=?`, domain, "second@example.org").Scan(&active); err != nil || active != 0 {
+		t.Fatalf("queued account remains active: %d %v", active, err)
+	}
+	if err := application.restoreQueuedSiteAccount(boundary, domain, "second@example.org"); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.db.QueryRowContext(boundary, `SELECT is_admin FROM users WHERE domain=? AND email=?`, domain, "second@example.org").Scan(&active); err != nil || active != 1 {
+		t.Fatalf("restored account is unavailable: %d %v", active, err)
+	}
+	if err := application.queueSiteAccountDeletion(boundary, domain, "second@example.org", "second@example.org"); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.withServerControlDatabaseWrite(boundary, "expire-account-fixture", func(database *sql.DB) error {
+		_, err := database.Exec(`UPDATE site_account_deletion_queue SET delete_after='2000-01-01T00:00:00Z' WHERE domain=?`, domain)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	application.reconcileQueuedDeletions(boundary, time.Now())
+	if err := application.db.QueryRowContext(boundary, `SELECT COUNT(1) FROM users WHERE domain=? AND email=?`, domain, "second@example.org").Scan(&active); err != nil || active != 0 {
+		t.Fatalf("expired account remains: %d %v", active, err)
+	}
+}

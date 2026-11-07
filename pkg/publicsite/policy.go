@@ -69,6 +69,9 @@ type Policy struct {
 	Passwords         []dirprotect.Rule
 	Redirects         []Redirect
 	OwnerSessions     []Session
+	DeletionReason    string
+	DeletionDeadline  string
+	DeletionDebtLabel string
 }
 type Lookup struct {
 	ClientIP    string
@@ -78,33 +81,36 @@ type Lookup struct {
 	SessionHash string
 }
 type Decision struct {
-	PageHidden      bool
-	NoIndex         bool
-	RobotsOverride  bool
-	ResourceFile    string
-	ResourceType    string
-	ResourceVersion string
-	ChrootEntries   []string
-	ChrootDirectory bool
-	ChrootName      string
-	Versioned       bool
-	PageVersion     string
-	ChrootVersion   string
-	Hidden          bool
-	Layout          string
-	AdminAllowed    bool
-	LoadTrusted     bool
-	Known           bool
-	Chroot          Chroot
-	Domain          string
-	Frozen          bool
-	Stealth         bool
-	AllowedIPs      []string
-	Password        dirprotect.Rule
-	File            FileRule
-	Redirect        string
-	Owner           bool
-	Found           bool
+	PageHidden        bool
+	NoIndex           bool
+	RobotsOverride    bool
+	ResourceFile      string
+	ResourceType      string
+	ResourceVersion   string
+	ChrootEntries     []string
+	ChrootDirectory   bool
+	ChrootName        string
+	Versioned         bool
+	PageVersion       string
+	ChrootVersion     string
+	Hidden            bool
+	Layout            string
+	AdminAllowed      bool
+	LoadTrusted       bool
+	Known             bool
+	Chroot            Chroot
+	Domain            string
+	Frozen            bool
+	Stealth           bool
+	AllowedIPs        []string
+	Password          dirprotect.Rule
+	File              FileRule
+	Redirect          string
+	Owner             bool
+	Found             bool
+	DeletionReason    string
+	DeletionDeadline  string
+	DeletionDebtLabel string
 }
 
 func policyName(domain string) string {
@@ -400,7 +406,7 @@ func NewCatalog(root string, stop <-chan struct{}) *Catalog {
 					}
 				}
 				if found {
-					decision = Decision{Layout: policy.Layouts[task.query.Path], Known: true, Domain: policy.Domain, Frozen: policy.Frozen, Stealth: policy.Stealth, Found: true, NoIndex: policy.NoIndex, RobotsOverride: policy.RobotsOverride, ResourceFile: policy.ResourcePaths[task.query.Path], ResourceType: policy.ResourceTypes[task.query.Path]}
+					decision = Decision{Layout: policy.Layouts[task.query.Path], Known: true, Domain: policy.Domain, Frozen: policy.Frozen, Stealth: policy.Stealth, Found: true, NoIndex: policy.NoIndex, RobotsOverride: policy.RobotsOverride, ResourceFile: policy.ResourcePaths[task.query.Path], ResourceType: policy.ResourceTypes[task.query.Path], DeletionReason: policy.DeletionReason, DeletionDeadline: policy.DeletionDeadline, DeletionDebtLabel: policy.DeletionDebtLabel}
 					decision.PageHidden = policy.Hidden["page\x00"+task.query.Path]
 					decision.PageVersion = policy.PublishedVersions[task.query.Path]
 					decision.Versioned = policy.Versioned

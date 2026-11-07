@@ -1828,34 +1828,42 @@
             <button type="submit" class="btn btn-primary btn-sm"><img src="/p/static/save-page.png" alt="">{{index $.T "billing_save"}}</button>
           </form>{{end}}
           {{if $site.CanDelete}}<div class="billing-delete-form">
-            <button type="button" class="btn btn-outline-danger btn-sm" data-bs-toggle="modal" data-bs-target="#deleteSiteModal{{$siteIndex}}"><img src="/p/static/delete.png" alt="">{{index $.T "billing_delete_button"}}</button>
+            <button type="button" class="btn btn-outline-danger btn-sm" data-bs-toggle="modal" data-bs-target="#deleteSiteModal{{$siteIndex}}"><img src="/p/static/delete.png" alt="">Удаление и восстановление</button>
           </div>
           <div class="modal fade" id="deleteSiteModal{{$siteIndex}}" tabindex="-1" aria-hidden="true">
             <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
               <form method="post" action="?expenses"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
                 <div class="modal-header">
-                  <h5 class="modal-title">{{index $.T "billing_delete_modal_title"}} {{$site.Domain}}</h5>
+                  <h5 class="modal-title">Сайт {{$site.Domain}}</h5>
                   <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button>
                 </div>
                 <div class="modal-body">
-                  <p>{{index $.T "billing_delete_modal_backup_notice"}}</p>
-                  <p><strong>{{index $.T "billing_delete_will_remove"}}</strong> {{$site.DeletionSizeLabel}}</p>
-                  <p class="text-muted">{{index $.T "billing_delete_modal_type_site"}}</p>
-                  <input type="hidden" name="billing_action" value="delete_site">
+                  {{if $site.DeletionReason}}<p class="alert alert-warning">Ожидает удаления до {{$site.DeletionDeadline}}. Причина: {{if eq $site.DeletionReason "nonpayment"}}неоплата{{else}}заявка на удаление{{end}}.</p>{{end}}
+                  <p><strong>Данные сайта:</strong> {{$site.DeletionSizeLabel}}. Немедленное удаление не создает резервную копию.</p>
                   <input type="hidden" name="domain" value="{{$site.Domain}}">
-                  <label>{{index $.T "billing_backup_retention_days"}}
-                    <input name="backup_retention_days" type="number" min="1" max="3650" class="form-control" value="365" required>
+                  <label>Действие
+                    <select name="billing_action" class="form-select" required>
+                      {{if $site.DeletionReason}}<option value="restore_site">Восстановить сайт после оплаты счетов</option>{{else}}<option value="queue_site">Удалить через 90 дней, показать отсчет</option><option value="suspend_site_nonpayment">Неоплата: оставить контент и показать окно</option>{{end}}
+                      <option value="delete_site_now">Удалить сайт и учетные записи сейчас, без архива</option>
+                    </select>
                   </label>
-                  <div class="form-text mb-3">{{index $.T "billing_backup_retention_hint"}}</div>
-                  <input name="confirm_domain" type="text" class="form-control" placeholder="{{$site.Domain}}" autocomplete="off" required>
+                  <label class="mt-3">Введите домен для подтверждения<input name="confirm_domain" type="text" class="form-control" placeholder="{{$site.Domain}}" autocomplete="off" required></label>
                 </div>
                 <div class="modal-footer">
                   <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">{{index $.T "edit_cancel"}}</button>
-                  <button type="submit" class="btn btn-outline-danger"><img src="/p/static/delete.png" alt="">{{index $.T "billing_delete_confirm_button"}}</button>
+                  <button type="submit" class="btn btn-outline-danger">Выполнить действие</button>
                 </div>
               </form>
             </div></div>
-          </div>{{end}}
+          </div>
+          {{end}}
+          {{if $site.AdminAccounts}}<details class="mt-3"><summary>Учетные записи администраторов сайта</summary>
+            {{range $site.AdminAccounts}}<form method="post" action="?expenses" class="border rounded p-2 mt-2"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}"><input type="hidden" name="domain" value="{{$site.Domain}}"><input type="hidden" name="confirm_domain" value="{{$site.Domain}}"><input type="hidden" name="email" value="{{.Email}}">
+              <strong>{{.Email}}</strong>{{if .DeleteAfter}} <span class="text-warning">ожидает удаления до {{.DeleteAfter}}</span>{{end}}
+              {{if .Protected}}<p class="text-muted mb-0">Учетная запись владельца сервера защищена от удаления.</p>{{else}}<label class="d-block mt-2">Действие<select name="billing_action" class="form-select form-select-sm">{{if .DeleteAfter}}<option value="restore_account">Восстановить учетную запись</option>{{else}}<option value="queue_account">Удалить через 90 дней</option>{{end}}<option value="delete_account_now">Удалить сейчас</option></select></label>
+              <label class="d-block mt-2">Введите email<input name="confirm_email" type="email" class="form-control form-control-sm" autocomplete="off" required></label><button type="submit" class="btn btn-outline-danger btn-sm mt-2">Подтвердить</button>{{end}}
+            </form>{{end}}
+          </details>{{end}}
           {{if $site.HasSiteRequest}}<div class="modal fade" id="siteRequestDetailsModal{{$siteIndex}}" tabindex="-1" aria-hidden="true">
             <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
               <div class="modal-header">
