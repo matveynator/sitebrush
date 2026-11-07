@@ -31870,7 +31870,17 @@ func (a *App) queueManagedSiteDeletion(ctx context.Context, domain, reason, requ
 				return errors.New("the site has no unpaid invoices")
 			}
 		}
-		_, writeErr := database.ExecContext(ctx, `INSERT INTO site_deletion_queue(domain,reason,requested_by,requested_at,delete_after,admin_emails,database_path,status) VALUES(?,?,?,?,?,?,?,'pending')`, domain, reason, requestedBy, now.Format(time.RFC3339), now.AddDate(0, 0, 90).Format(time.RFC3339), adminEmails, row.DatabasePath)
+		requestedAt := now.Format(time.RFC3339)
+		deleteAfter := now.AddDate(0, 0, 90).Format(time.RFC3339)
+		// A purged row is a tombstone, not an active deletion request.
+		result, writeErr := database.ExecContext(ctx, `UPDATE site_deletion_queue SET reason=?,requested_by=?,requested_at=?,delete_after=?,admin_emails=?,database_path=?,verified_restore=0,extended=0,status='pending' WHERE domain=? AND status='purged'`, reason, requestedBy, requestedAt, deleteAfter, adminEmails, row.DatabasePath, domain)
+		if writeErr != nil {
+			return writeErr
+		}
+		if replaced, _ := result.RowsAffected(); replaced == 1 {
+			return nil
+		}
+		_, writeErr = database.ExecContext(ctx, `INSERT INTO site_deletion_queue(domain,reason,requested_by,requested_at,delete_after,admin_emails,database_path,status) VALUES(?,?,?,?,?,?,?,'pending')`, domain, reason, requestedBy, requestedAt, deleteAfter, adminEmails, row.DatabasePath)
 		return writeErr
 	})
 	if err != nil {
@@ -32051,6 +32061,13 @@ func (a *App) queueSiteAccountDeletion(ctx context.Context, domain, email, reque
 		return err
 	}
 	err = a.accountTransaction(accountCtx, func(transaction *sql.Tx) error {
+		var administrators int
+		if err := transaction.QueryRowContext(accountCtx, `SELECT COUNT(1) FROM users WHERE domain=? AND is_admin=1`, domain).Scan(&administrators); err != nil {
+			return err
+		}
+		if administrators <= 1 {
+			return errors.New("the last site administrator cannot be deleted separately")
+		}
 		result, err := transaction.ExecContext(accountCtx, `UPDATE users SET is_admin=0 WHERE domain=? AND email=? AND is_admin=1`, domain, email)
 		if err != nil {
 			return err
@@ -32556,7 +32573,7 @@ func (a *App) closeManagedSiteDatabase(ctx context.Context, domain string) {
 		return
 	}
 	if err := a.siteDatabaseRouter.ForgetDomain(ctx, domain); err != nil {
-		log.Printf("managed site database close failed domain=%s error=%v", domain, err)
+		log.Printf("managed site database close failed domain=%s error=%s", diagnosticlog.SafeLogValue(domain), diagnosticlog.SafeLogValue(err.Error()))
 	}
 }
 
@@ -60525,12 +60542,17 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 func newPublicHTTPFront(application *App, secret string, stop <-chan struct{}) *publicsite.Front {
 	var front *publicsite.Front
 	publicHandler := func(w http.ResponseWriter, r *http.Request, paused bool) bool {
-		if application.servePendingSiteBoundary(w, r) {
-			return true
-		}
 		if strings.HasPrefix(r.URL.Path, "/.well-known/acme-challenge/") {
 			// Only the ACME owner's registered token handler may answer this path.
 			return false
+		}
+		// Recovery, billing, and invoice requests need the application database
+		// and publication owner; the launcher only owns public admission.
+		if application.publicBoundary && (hasQueryFlag(r, "site_recovery") || hasQueryFlag(r, "site_debt_pay") || hasQueryFlag(r, "site_debt_contact")) {
+			return false
+		}
+		if application.servePendingSiteBoundary(w, r) {
+			return true
 		}
 		if application.serverHostBoundary(w, r) {
 			return true

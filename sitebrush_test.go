@@ -34504,6 +34504,13 @@ func TestQueuedSiteDeletionCountdownAndRestore(t *testing.T) {
 	if err := application.createManagedSite(context.Background(), domain, "owner@example.org", "test", 1<<20); err != nil {
 		t.Fatal(err)
 	}
+	certificatePath := filepath.Join(application.storageRootDir(), "letsencrypt", domain)
+	if err := os.MkdirAll(filepath.Dir(certificatePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(certificatePath, []byte("retained certificate cache"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := application.queueManagedSiteDeletion(context.Background(), domain, "owner", "owner@example.org"); err != nil {
 		t.Fatal(err)
 	}
@@ -34538,6 +34545,65 @@ func TestQueuedSiteDeletionCountdownAndRestore(t *testing.T) {
 	}
 	if _, err := os.Stat(row.DatabasePath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expired site database remains: %v", err)
+	}
+	if _, err := os.Stat(certificatePath); err != nil {
+		t.Fatalf("certificate cache was removed with the site: %v", err)
+	}
+	if err := application.createManagedSite(context.Background(), domain, "new-owner@example.org", "test", 1<<20); err != nil {
+		t.Fatalf("recreate purged site: %v", err)
+	}
+	if err := application.queueManagedSiteDeletion(context.Background(), domain, "owner", "new-owner@example.org"); err != nil {
+		t.Fatalf("queue recreated site: %v", err)
+	}
+	recreatedState, err := application.siteDeletionState(context.Background(), domain)
+	if err != nil || recreatedState.Status != "pending" || recreatedState.RequestedBy != "new-owner@example.org" || recreatedState.Verified || recreatedState.Extended || recreatedState.DatabasePath == "" {
+		t.Fatalf("recreated site retained old deletion state: %+v %v", recreatedState, err)
+	}
+	if err := application.queueManagedSiteDeletion(context.Background(), domain, "owner", "new-owner@example.org"); err == nil {
+		t.Fatal("second pending deletion replaced the active request")
+	}
+}
+
+func TestQueuedSitePublicFrontForwardsRecoveryPaymentAndACME(t *testing.T) {
+	for _, reason := range []string{"owner", "nonpayment"} {
+		t.Run(reason, func(t *testing.T) {
+			root := t.TempDir()
+			domain := "queued.example"
+			stop := make(chan struct{})
+			defer close(stop)
+			if err := publicsite.Write(root, publicsite.Policy{Domain: domain, DeletionReason: reason, DeletionDeadline: time.Now().Add(90 * 24 * time.Hour).UTC().Format(time.RFC3339)}); err != nil {
+				t.Fatal(err)
+			}
+			catalog := publicsite.NewCatalog(root, stop)
+			if err := catalog.SetMemory(true); err != nil {
+				t.Fatal(err)
+			}
+			launcher := &App{storagePath: root, publicBoundary: true, publicCatalog: catalog}
+			front := newPublicHTTPFront(launcher, "deletion-front-fixture", stop)
+			backend := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				_, _ = io.WriteString(writer, "application response")
+			}))
+			defer backend.Close()
+			if err := front.Set(strings.TrimPrefix(backend.URL, "http://"), false); err != nil {
+				t.Fatal(err)
+			}
+			for _, probe := range []struct {
+				method string
+				path   string
+			}{
+				{http.MethodGet, "/.well-known/acme-challenge/token"},
+				{http.MethodPost, "/?site_recovery"},
+				{http.MethodGet, "/?site_debt_pay"},
+				{http.MethodPost, "/?site_debt_contact"},
+			} {
+				request := httptest.NewRequest(probe.method, "http://"+domain+probe.path, nil)
+				response := httptest.NewRecorder()
+				front.ServeHTTP(response, request)
+				if response.Code != http.StatusOK || response.Body.String() != "application response" {
+					t.Fatalf("%s %s was not forwarded: %d %s", probe.method, probe.path, response.Code, response.Body.String())
+				}
+			}
+		})
 	}
 }
 
@@ -34665,5 +34731,39 @@ func TestQueuedAdministratorAccountExpires(t *testing.T) {
 	application.reconcileQueuedDeletions(boundary, time.Now())
 	if err := application.db.QueryRowContext(boundary, `SELECT COUNT(1) FROM users WHERE domain=? AND email=?`, domain, "second@example.org").Scan(&active); err != nil || active != 0 {
 		t.Fatalf("expired account remains: %d %v", active, err)
+	}
+}
+
+func TestConcurrentAdministratorDeletionKeepsOneAdministrator(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	domain := "concurrent-admins.example"
+	if err := application.createManagedSite(context.Background(), domain, "first@example.org", "test", 1<<20); err != nil {
+		t.Fatal(err)
+	}
+	boundary := contextWithDomain(context.Background(), domain)
+	if _, err := application.db.ExecContext(boundary, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, "second@example.org", "test"); err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, email := range []string{"first@example.org", "second@example.org"} {
+		go func(email string) {
+			<-start
+			results <- application.queueSiteAccountDeletion(boundary, domain, email, email)
+		}(email)
+	}
+	close(start)
+	successes := 0
+	for range 2 {
+		if err := <-results; err == nil {
+			successes++
+		}
+	}
+	var active int
+	if err := application.db.QueryRowContext(boundary, `SELECT COUNT(1) FROM users WHERE domain=? AND is_admin=1`, domain).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if successes != 1 || active != 1 {
+		t.Fatalf("concurrent deletion successes=%d active administrators=%d", successes, active)
 	}
 }
