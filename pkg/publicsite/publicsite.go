@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/matveynator/sitebrush/v2/pkg/requesttiming"
+	"github.com/matveynator/sitebrush/v2/pkg/uploadstream"
 )
 
 const ProxyHeader = "X-SiteBrush-Public-Contact"
@@ -196,6 +197,11 @@ func (front *Front) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "2")
 		http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
 		return
+	}
+	if uploadstream.IsFileUploadRequest(r) {
+		if err := uploadstream.BoundIdle(w, r); err == nil {
+			defer uploadstream.ClearReadDeadline(w)
+		}
 	}
 	target := &url.URL{Scheme: "http", Host: state.Address}
 	r = r.WithContext(context.WithValue(r.Context(), proxyTargetKey{}, target))

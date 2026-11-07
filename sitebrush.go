@@ -57,6 +57,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -109,6 +110,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/storagejail"
 	"github.com/matveynator/sitebrush/v2/pkg/systeminit"
 	"github.com/matveynator/sitebrush/v2/pkg/updateannounce"
+	"github.com/matveynator/sitebrush/v2/pkg/uploadstream"
 	"github.com/matveynator/sitebrush/v2/pkg/winservice"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/skip2/go-qrcode"
@@ -41369,6 +41371,13 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 		contentType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
 		switch contentType {
 		case "multipart/form-data":
+			// The ordinary request deadline is too short for large uploads. The
+			// quota bounds the body while the reader bounds connection idle time.
+			if deadlineErr := uploadstream.BoundIdle(w, r); deadlineErr == nil {
+				defer uploadstream.ClearReadDeadline(w)
+			} else if !errors.Is(deadlineErr, http.ErrNotSupported) {
+				log.Printf("file upload read deadline unavailable: %v", deadlineErr)
+			}
 			usage := a.domainStorageUsage(r.Context(), a.siteDomain(r.Context(), r))
 			freeBytes := usage.LimitBytes - usage.totalBytes()
 			if freeBytes < 0 {
@@ -41377,7 +41386,16 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 			if hasQueryFlag(r, "prepare_image") {
 				freeBytes = imageprepare.SourceByteLimit
 			}
-			r.Body = http.MaxBytesReader(w, r.Body, freeBytes+fileUploadMultipartOverheadBytes)
+			maximumBodyBytes := freeBytes + fileUploadMultipartOverheadBytes
+			if r.ContentLength > maximumBodyBytes {
+				http.Error(w, "uploaded files exceed available site storage", http.StatusRequestEntityTooLarge)
+				return
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, maximumBodyBytes)
+			if !hasQueryFlag(r, "prepare_image") {
+				a.uploadFilesStream(w, r, currentPath)
+				return
+			}
 			if err := r.ParseMultipartForm(fileUploadMultipartMemoryBytes); err != nil {
 				if strings.Contains(strings.ToLower(err.Error()), "too large") {
 					http.Error(w, "uploaded files exceed available site storage", http.StatusRequestEntityTooLarge)
@@ -41452,9 +41470,14 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 		httpsecurity.RedirectLocal(w, r, redirectPath, http.StatusFound)
 		return
 	}
+	usage := a.storedDomainStorageUsage(r.Context(), a.siteDomain(r.Context(), r))
+	availableUploadBytes := usage.LimitBytes - usage.totalBytes()
+	if availableUploadBytes < 0 {
+		availableUploadBytes = 0
+	}
 	fileList, listErr := a.listManagedFiles(r.Context(), r, currentPath, showAllFiles)
 	if listErr != nil {
-		a.render(w, r, "files.html", map[string]any{"Path": currentPath, "Files": []ManagedFile{}, "ShowAllFiles": showAllFiles, "NativeFileDialog": a.nativeFileDialog})
+		a.render(w, r, "files.html", map[string]any{"Path": currentPath, "Files": []ManagedFile{}, "ShowAllFiles": showAllFiles, "NativeFileDialog": a.nativeFileDialog, "AvailableUploadBytes": availableUploadBytes, "AvailableUploadSize": formatFileSize(availableUploadBytes)})
 		return
 	}
 	servicePages, serviceErr := a.listManagedServicePages(r.Context(), a.siteDomain(r.Context(), r))
@@ -41476,7 +41499,7 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 		fileList[index].SingleUseLeft = accessRule.SingleUseLeft
 		fileList[index].TokenUseCount = accessRule.TokenUseCount
 	}
-	a.render(w, r, "files.html", map[string]any{"Path": currentPath, "Files": fileList, "ServicePages": servicePages, "ShowAllFiles": showAllFiles, "NativeFileDialog": a.nativeFileDialog})
+	a.render(w, r, "files.html", map[string]any{"Path": currentPath, "Files": fileList, "ServicePages": servicePages, "ShowAllFiles": showAllFiles, "NativeFileDialog": a.nativeFileDialog, "AvailableUploadBytes": availableUploadBytes, "AvailableUploadSize": formatFileSize(availableUploadBytes)})
 }
 
 func (a *App) listManagedServicePages(ctx context.Context, domain string) ([]managedServicePageView, error) {
@@ -42068,6 +42091,206 @@ func (a *App) storePreparedFilesWithPrefix(ctx context.Context, domain, currentP
 	return result, nil
 }
 
+type stagedFileUpload struct {
+	temporaryPath string
+	storedName    string
+	mimeType      string
+	sizeBytes     int64
+}
+
+// MultipartReader and a small reused buffer keep memory independent of file
+// size. Files remain temporary until the form and mutation source are valid.
+func (a *App) uploadFilesStream(w http.ResponseWriter, r *http.Request, currentPath string) {
+	reader, err := r.MultipartReader()
+	if err != nil {
+		http.Error(w, "failed to parse uploaded files", http.StatusBadRequest)
+		return
+	}
+	baseDir := a.domainFilesDir(r)
+	if err := a.mkdirAllInsideStorage(baseDir, 0o755); err != nil {
+		http.Error(w, "failed to create files directory", http.StatusInternalServerError)
+		return
+	}
+	stagingDir := filepath.Join(a.storageRootDir(), "upload-staging", domainStorageName(a.siteDomain(r.Context(), r)))
+	if err := a.mkdirAllInsideStorage(stagingDir, 0o700); err != nil {
+		http.Error(w, "failed to create upload staging directory", http.StatusInternalServerError)
+		return
+	}
+	a.cleanupStaleFileUploads(stagingDir)
+	stagedFiles := make([]stagedFileUpload, 0, 1)
+	defer func() {
+		for _, stagedFile := range stagedFiles {
+			_ = a.removeInsideStorage(stagedFile.temporaryPath)
+		}
+	}()
+	r.PostForm = make(url.Values)
+	buffer := make([]byte, 32*1024)
+	for partCount := 0; ; partCount++ {
+		part, nextErr := reader.NextPart()
+		if errors.Is(nextErr, io.EOF) {
+			break
+		}
+		if nextErr != nil {
+			writeFileUploadReadError(w, nextErr)
+			return
+		}
+		if partCount >= 1000 {
+			part.Close()
+			http.Error(w, "too many upload fields", http.StatusBadRequest)
+			return
+		}
+		if part.FileName() == "" {
+			fieldContent, readErr := io.ReadAll(io.LimitReader(part, 4097))
+			part.Close()
+			if readErr != nil {
+				writeFileUploadReadError(w, readErr)
+				return
+			}
+			if len(fieldContent) > 4096 {
+				http.Error(w, "upload field is too large", http.StatusBadRequest)
+				return
+			}
+			r.PostForm.Add(part.FormName(), string(fieldContent))
+			continue
+		}
+		if part.FormName() != "upload_files" {
+			part.Close()
+			http.Error(w, "unexpected upload file field", http.StatusBadRequest)
+			return
+		}
+		stagedFile, stageErr := a.stageFileUploadPart(stagingDir, part, buffer)
+		part.Close()
+		if stageErr != nil {
+			writeFileUploadReadError(w, stageErr)
+			return
+		}
+		stagedFiles = append(stagedFiles, stagedFile)
+	}
+	if r.PostForm.Get("action") != "upload" || len(stagedFiles) == 0 {
+		http.Error(w, "no files selected", http.StatusBadRequest)
+		return
+	}
+	if !adminMutationSourceAllowed(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	domain := domainStorageName(a.siteDomain(r.Context(), r))
+	uploadedNames := make([]string, 0, len(stagedFiles))
+	for _, stagedFile := range stagedFiles {
+		targetPath := filepath.Join(baseDir, stagedFile.storedName)
+		if existingFile, statErr := a.statInsideStorage(targetPath); statErr == nil && !existingFile.IsDir() {
+			a.upsertFileMetadata(r.Context(), domain, stagedFile.storedName, currentPath, existingFile.Size(), stagedFile.mimeType, "upload")
+			uploadedNames = append(uploadedNames, stagedFile.storedName)
+			continue
+		}
+		if stagedFile.sizeBytes > 0 {
+			if storageErr := a.applyDomainStorageDelta(r.Context(), domain, 0, 0, 0, stagedFile.sizeBytes, 0); storageErr != nil {
+				http.Error(w, storageErr.Error(), http.StatusInsufficientStorage)
+				return
+			}
+		}
+		if renameErr := a.renameInsideStorage(stagedFile.temporaryPath, targetPath); renameErr != nil {
+			if stagedFile.sizeBytes > 0 {
+				_ = a.applyDomainStorageDelta(r.Context(), domain, 0, 0, 0, -stagedFile.sizeBytes, 0)
+			}
+			http.Error(w, "failed to save uploaded file", http.StatusInternalServerError)
+			return
+		}
+		a.upsertFileMetadata(r.Context(), domain, stagedFile.storedName, currentPath, stagedFile.sizeBytes, stagedFile.mimeType, "upload")
+		uploadedNames = append(uploadedNames, stagedFile.storedName)
+	}
+	if len(uploadedNames) > 0 {
+		a.rebuildDomainStorageUsage(r.Context(), domain)
+	}
+	writeUploadedFilesResponse(w, r, currentPath, uploadedNames)
+}
+
+func (a *App) cleanupStaleFileUploads(stagingDir string) {
+	jail, relativePath, err := a.storageJailForPath(stagingDir)
+	if err != nil {
+		return
+	}
+	directory, err := jail.Open(relativePath)
+	if err != nil {
+		return
+	}
+	defer directory.Close()
+	cutoff := time.Now().Add(-24 * time.Hour)
+	for {
+		entries, readErr := directory.ReadDir(128)
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasPrefix(entry.Name(), ".sitebrush-upload-") {
+				continue
+			}
+			info, infoErr := entry.Info()
+			if infoErr == nil && info.ModTime().Before(cutoff) {
+				_ = a.removeInsideStorage(filepath.Join(stagingDir, entry.Name()))
+			}
+		}
+		if readErr != nil {
+			return
+		}
+	}
+}
+
+func (a *App) stageFileUploadPart(stagingDir string, part *multipart.Part, buffer []byte) (stagedFileUpload, error) {
+	fileName := safeFileName(part.FileName())
+	if fileName == "" {
+		return stagedFileUpload{}, errors.New("invalid uploaded file name")
+	}
+	temporaryPath := filepath.Join(stagingDir, ".sitebrush-upload-"+randomAccessToken())
+	temporaryFile, err := a.createFileInsideStorage(temporaryPath)
+	if err != nil {
+		return stagedFileUpload{}, err
+	}
+	hasher := sha256.New()
+	writtenBytes, copyErr := io.CopyBuffer(io.MultiWriter(temporaryFile, hasher), part, buffer)
+	closeErr := temporaryFile.Close()
+	if copyErr != nil || closeErr != nil {
+		_ = a.removeInsideStorage(temporaryPath)
+		if copyErr != nil {
+			return stagedFileUpload{}, copyErr
+		}
+		return stagedFileUpload{}, closeErr
+	}
+	mimeType := strings.TrimSpace(part.Header.Get("Content-Type"))
+	if mimeType == "" {
+		mimeType = mime.TypeByExtension(path.Ext(fileName))
+	}
+	return stagedFileUpload{
+		temporaryPath: temporaryPath,
+		storedName:    hex.EncodeToString(hasher.Sum(nil)) + strings.ToLower(path.Ext(fileName)),
+		mimeType:      mimeType,
+		sizeBytes:     writtenBytes,
+	}, nil
+}
+
+func writeFileUploadReadError(w http.ResponseWriter, err error) {
+	var sizeError *http.MaxBytesError
+	if errors.As(err, &sizeError) {
+		http.Error(w, "uploaded files exceed available site storage", http.StatusRequestEntityTooLarge)
+		return
+	}
+	if errors.Is(err, syscall.ENOSPC) {
+		http.Error(w, "server storage is full", http.StatusInsufficientStorage)
+		return
+	}
+	http.Error(w, "failed to read uploaded files", http.StatusBadRequest)
+}
+
+func writeUploadedFilesResponse(w http.ResponseWriter, r *http.Request, currentPath string, uploadedNames []string) {
+	if wantsJSONResponse(r) {
+		uploadedPaths := make([]string, 0, len(uploadedNames))
+		for _, uploadedName := range uploadedNames {
+			uploadedPaths = append(uploadedPaths, "/p/"+uploadedName)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"uploaded": len(uploadedNames), "files": uploadedNames, "paths": uploadedPaths, "redirect": httpsecurity.LocalRedirectTarget(currentPath+"?files", "/")})
+		return
+	}
+	httpsecurity.RedirectLocal(w, r, currentPath+"?files", http.StatusFound)
+}
+
 func (a *App) uploadFiles(w http.ResponseWriter, r *http.Request, currentPath string) {
 	if r.MultipartForm == nil {
 		if err := r.ParseMultipartForm(fileUploadMultipartMemoryBytes); err != nil {
@@ -42153,16 +42376,7 @@ func (a *App) uploadFiles(w http.ResponseWriter, r *http.Request, currentPath st
 	if len(uploadedNames) > 0 {
 		a.rebuildDomainStorageUsage(r.Context(), siteDomain)
 	}
-	if wantsJSONResponse(r) {
-		uploadedPaths := make([]string, 0, len(uploadedNames))
-		for _, uploadedName := range uploadedNames {
-			uploadedPaths = append(uploadedPaths, "/p/"+uploadedName)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"uploaded": len(uploadedNames), "files": uploadedNames, "paths": uploadedPaths, "redirect": httpsecurity.LocalRedirectTarget(currentPath+"?files", "/")})
-		return
-	}
-	httpsecurity.RedirectLocal(w, r, currentPath+"?files", http.StatusFound)
+	writeUploadedFilesResponse(w, r, currentPath, uploadedNames)
 }
 
 func (a *App) uniqueUploadedFileName(baseDir, requestedName string) string {
