@@ -8,7 +8,74 @@ import (
 	"net/url"
 	"os"
 	"testing"
+	"time"
+
+	"github.com/matveynator/sitebrush/v2/pkg/uploadstream"
 )
+
+func TestFrontStreamsFileUploadPastBothServerReadTimeouts(t *testing.T) {
+	const ordinaryReadTimeout = 500 * time.Millisecond
+	backend := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := uploadstream.BoundIdle(w, r); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer uploadstream.ClearReadDeadline(w)
+		if _, err := io.Copy(io.Discard, r.Body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	backend.Config.ReadTimeout = ordinaryReadTimeout
+	backend.Start()
+	defer backend.Close()
+	backendURL, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	defer close(stop)
+	front := NewFront("secret", func(http.ResponseWriter, *http.Request, bool) bool { return false }, stop)
+	if err := front.Set(backendURL.Host, false); err != nil {
+		t.Fatal(err)
+	}
+	publicServer := httptest.NewUnstartedServer(front)
+	publicServer.Config.ReadTimeout = ordinaryReadTimeout
+	publicServer.Start()
+	defer publicServer.Close()
+	requestBody, uploadWriter := io.Pipe()
+	uploadDone := make(chan error, 1)
+	go func() {
+		defer uploadWriter.Close()
+		for byteIndex := 0; byteIndex < 20; byteIndex++ {
+			if _, err := uploadWriter.Write([]byte("slow upload chunk")); err != nil {
+				uploadDone <- err
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		uploadDone <- nil
+	}()
+	request, err := http.NewRequest(http.MethodPost, publicServer.URL+"/?files", requestBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "multipart/form-data; boundary=slow")
+	client := &http.Client{Timeout: 5 * time.Second}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("upload through front status=%d body=%q", response.StatusCode, body)
+	}
+	if err := <-uploadDone; err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestFrontKeepsPublicHTTPAndHTTPSWhileBackendIsReplaced(t *testing.T) {
 	stop := make(chan struct{})

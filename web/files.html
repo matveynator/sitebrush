@@ -165,6 +165,7 @@
       <input id="upload_files" class="form-control" type="file" name="upload_files" multiple>
       <button class="btn btn-primary" type="submit">{{index .T "files_upload_button"}}</button>
     </div>
+    <div class="text-muted mt-2" id="availableUploadSpace" data-free-bytes="{{.AvailableUploadBytes}}">{{index .T "missing_quota_free_space"}}: {{.AvailableUploadSize}}</div>
   </form>
 
   <form id="selectedFilesForm" class="file-delete-form" method="post" action="{{.Path}}?files{{if .ShowAllFiles}}&amp;files_scope=all{{end}}"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
@@ -323,6 +324,7 @@
   const uploadModalElement = document.getElementById('uploadProgressModal');
   const uploadProgressTextElement = document.getElementById('uploadProgressText');
   const uploadProgressBarElement = document.getElementById('uploadProgressBar');
+  const availableUploadSpaceElement = document.getElementById('availableUploadSpace');
   const uploadModalController = uploadModalElement && window.bootstrap ? new bootstrap.Modal(uploadModalElement, { backdrop: 'static', keyboard: false }) : null;
   const currentFilesPath = {{.Path}};
   const desktopNativeFilePickerEnabled = {{.NativeFileDialog}};
@@ -702,6 +704,17 @@
 
   function uploadSelectedFiles(selectedFiles) {
     if (!uploadFormElement || uploadInFlight || selectedFiles.length === 0) { return; }
+      const availableUploadBytes = Number(availableUploadSpaceElement.dataset.freeBytes);
+      let selectedFilesBytes = 0;
+      for (const selectedFile of selectedFiles) {
+        selectedFilesBytes += selectedFile.size;
+      }
+      if (selectedFilesBytes > availableUploadBytes) {
+        setUploadPercent(0);
+        uploadProgressTextElement.textContent = {{printf "%q" (index .T "files_upload_failed")}} + ' ' + availableUploadSpaceElement.textContent;
+        showUploadModal();
+        return;
+      }
       const request = new XMLHttpRequest();
       const body = new FormData();
       body.append('action', 'upload');

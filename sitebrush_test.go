@@ -23191,6 +23191,266 @@ func TestSecurityBoundaryGlobalSyncStopsWhenSignalChannelCloses(t *testing.T) {
 
 // BEGIN file upload security tests.
 
+func TestFilesPageStreamsLargeUploadWithBoundedStaging(t *testing.T) {
+	application, database := newTestApplication(t)
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('localhost','admin@example.com','password',1)`); err != nil {
+		t.Fatal(err)
+	}
+	adminCookie := newAdminSessionCookie(t, application, "admin@example.com")
+	csrfRequest := httptest.NewRequest(http.MethodGet, "http://localhost/?files", nil)
+	csrfRequest.AddCookie(adminCookie)
+	bodyReader, bodyWriter := io.Pipe()
+	multipartWriter := multipart.NewWriter(bodyWriter)
+	uploadDone := make(chan error, 1)
+	const chunkCount = 96
+	chunk := bytes.Repeat([]byte("V"), 32*1024)
+	go func() {
+		finishUpload := func(err error) {
+			_ = bodyWriter.CloseWithError(err)
+			uploadDone <- err
+		}
+		if err := multipartWriter.WriteField("action", "upload"); err != nil {
+			finishUpload(err)
+			return
+		}
+		if err := multipartWriter.WriteField("account_csrf", accountCSRF(csrfRequest)); err != nil {
+			finishUpload(err)
+			return
+		}
+		fileWriter, err := multipartWriter.CreateFormFile("upload_files", "large-video.mp4")
+		if err != nil {
+			finishUpload(err)
+			return
+		}
+		for range chunkCount {
+			if _, err := fileWriter.Write(chunk); err != nil {
+				finishUpload(err)
+				return
+			}
+		}
+		finishUpload(multipartWriter.Close())
+	}()
+	request := httptest.NewRequest(http.MethodPost, "http://localhost/?files", bodyReader)
+	request.Header.Set("Content-Type", multipartWriter.FormDataContentType())
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Origin", "null")
+	request.AddCookie(adminCookie)
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("streaming upload status=%d body=%q", response.Code, response.Body.String())
+	}
+	if err := <-uploadDone; err != nil {
+		t.Fatal(err)
+	}
+	hasher := sha256.New()
+	for range chunkCount {
+		_, _ = hasher.Write(chunk)
+	}
+	storedName := hex.EncodeToString(hasher.Sum(nil)) + ".mp4"
+	fileInfo, err := application.statInsideStorage(filepath.Join(application.domainFilesDirForDomain("localhost"), storedName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fileInfo.Size() != int64(chunkCount*len(chunk)) {
+		t.Fatalf("stored file size=%d", fileInfo.Size())
+	}
+	stagingDir := filepath.Join(application.storageRootDir(), "upload-staging", "localhost")
+	entries, err := os.ReadDir(stagingDir)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("upload staging entries=%v error=%v", entries, err)
+	}
+}
+
+func TestFilesPageStreamRejectsInvalidCSRFWithoutPublishing(t *testing.T) {
+	application, database := newTestApplication(t)
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('localhost','admin@example.com','password',1)`); err != nil {
+		t.Fatal(err)
+	}
+	var body bytes.Buffer
+	multipartWriter := multipart.NewWriter(&body)
+	_ = multipartWriter.WriteField("action", "upload")
+	_ = multipartWriter.WriteField("account_csrf", "invalid")
+	fileWriter, err := multipartWriter.CreateFormFile("upload_files", "forbidden.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fileWriter.Write([]byte("video content")); err != nil {
+		t.Fatal(err)
+	}
+	if err := multipartWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "http://localhost/?files", &body)
+	request.Header.Set("Content-Type", multipartWriter.FormDataContentType())
+	request.Header.Set("Origin", "null")
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("invalid CSRF upload status=%d body=%q", response.Code, response.Body.String())
+	}
+	storedFiles, err := os.ReadDir(application.domainFilesDirForDomain("localhost"))
+	if err != nil || len(storedFiles) != 0 {
+		t.Fatalf("invalid CSRF published files=%v error=%v", storedFiles, err)
+	}
+	stagingDir := filepath.Join(application.storageRootDir(), "upload-staging", "localhost")
+	stagedFiles, err := os.ReadDir(stagingDir)
+	if err != nil || len(stagedFiles) != 0 {
+		t.Fatalf("invalid CSRF staged files=%v error=%v", stagedFiles, err)
+	}
+}
+
+func TestFilesPageStreamRejectsQuotaAfterStaging(t *testing.T) {
+	application, database := newTestApplication(t)
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('localhost','admin@example.com','password',1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT OR REPLACE INTO domain_storage_usage(domain,page_bytes,published_page_bytes,revision_bytes,file_bytes,published_static_bytes,limit_bytes,updated_at) VALUES(?,?,?,?,?,?,?,?)`, "localhost", 0, 0, 0, 0, 0, 1, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	adminCookie := newAdminSessionCookie(t, application, "admin@example.com")
+	csrfRequest := httptest.NewRequest(http.MethodGet, "http://localhost/?files", nil)
+	csrfRequest.AddCookie(adminCookie)
+	var body bytes.Buffer
+	multipartWriter := multipart.NewWriter(&body)
+	if err := multipartWriter.WriteField("action", "upload"); err != nil {
+		t.Fatal(err)
+	}
+	if err := multipartWriter.WriteField("account_csrf", accountCSRF(csrfRequest)); err != nil {
+		t.Fatal(err)
+	}
+	fileWriter, err := multipartWriter.CreateFormFile("upload_files", "too-large.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fileWriter.Write([]byte("video content")); err != nil {
+		t.Fatal(err)
+	}
+	if err := multipartWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "http://localhost/?files", &body)
+	request.Header.Set("Content-Type", multipartWriter.FormDataContentType())
+	request.Header.Set("Origin", "null")
+	request.AddCookie(adminCookie)
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusInsufficientStorage {
+		t.Fatalf("quota upload status=%d body=%q", response.Code, response.Body.String())
+	}
+	storedFiles, err := os.ReadDir(application.domainFilesDirForDomain("localhost"))
+	if err != nil || len(storedFiles) != 0 {
+		t.Fatalf("quota rejected files=%v error=%v", storedFiles, err)
+	}
+	stagingDir := filepath.Join(application.storageRootDir(), "upload-staging", "localhost")
+	stagedFiles, err := os.ReadDir(stagingDir)
+	if err != nil || len(stagedFiles) != 0 {
+		t.Fatalf("quota rejected staging=%v error=%v", stagedFiles, err)
+	}
+}
+
+func TestFilesPageStreamUsesOriginalIPv6DomainForQuota(t *testing.T) {
+	application, database := newTestApplication(t)
+	const siteDomain = "2001:db8::44"
+	const fileContent = "video content"
+	if _, err := database.Exec(`INSERT OR REPLACE INTO domain_storage_usage(domain,page_bytes,published_page_bytes,revision_bytes,file_bytes,published_static_bytes,limit_bytes,updated_at) VALUES(?,?,?,?,?,?,?,?)`, siteDomain, 0, 0, 0, 0, 0, 1, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	newRequest := func() *http.Request {
+		var body bytes.Buffer
+		multipartWriter := multipart.NewWriter(&body)
+		if err := multipartWriter.WriteField("action", "upload"); err != nil {
+			t.Fatal(err)
+		}
+		fileWriter, err := multipartWriter.CreateFormFile("upload_files", "video.mp4")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.WriteString(fileWriter, fileContent); err != nil {
+			t.Fatal(err)
+		}
+		if err := multipartWriter.Close(); err != nil {
+			t.Fatal(err)
+		}
+		request := httptest.NewRequest(http.MethodPost, "https://["+siteDomain+"]/?files", &body)
+		request.Header.Set("Content-Type", multipartWriter.FormDataContentType())
+		request.Header.Set("Accept", "application/json")
+		request.Header.Set("Origin", "null")
+		request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "test-session"})
+		request.Header.Set("X-SiteBrush-CSRF", accountCSRF(request))
+		return request
+	}
+	rejected := httptest.NewRecorder()
+	application.uploadFilesStream(rejected, newRequest(), "/")
+	if rejected.Code != http.StatusInsufficientStorage {
+		t.Fatalf("IPv6 quota rejection status=%d body=%q", rejected.Code, rejected.Body.String())
+	}
+	if _, err := database.Exec(`UPDATE domain_storage_usage SET limit_bytes=? WHERE domain=?`, 100, siteDomain); err != nil {
+		t.Fatal(err)
+	}
+	accepted := httptest.NewRecorder()
+	application.uploadFilesStream(accepted, newRequest(), "/")
+	if accepted.Code != http.StatusOK {
+		t.Fatalf("IPv6 upload status=%d body=%q", accepted.Code, accepted.Body.String())
+	}
+	var fileBytes int64
+	if err := database.QueryRow(`SELECT file_bytes FROM domain_storage_usage WHERE domain=?`, siteDomain).Scan(&fileBytes); err != nil || fileBytes != int64(len(fileContent)) {
+		t.Fatalf("original IPv6 quota row file bytes=%d error=%v", fileBytes, err)
+	}
+	var sanitizedRows int
+	if err := database.QueryRow(`SELECT COUNT(1) FROM domain_storage_usage WHERE domain=?`, domainStorageName(siteDomain)).Scan(&sanitizedRows); err != nil || sanitizedRows != 0 {
+		t.Fatalf("unexpected sanitized IPv6 quota rows=%d error=%v", sanitizedRows, err)
+	}
+}
+
+func TestFileUploadStagingCleanupPreservesActiveRequest(t *testing.T) {
+	application, _ := newTestApplication(t)
+	stagingRoot := filepath.Join(application.storageRootDir(), "upload-staging", "localhost")
+	active, err := application.startFileUploadStaging(stagingRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer application.finishFileUploadStaging(active)
+	firstFilePath := filepath.Join(active.directory, ".sitebrush-upload-first")
+	firstFile, err := application.createFileInsideStorage(firstFilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := firstFile.Write([]byte("first completed part")); err != nil {
+		t.Fatal(err)
+	}
+	if err := firstFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	staleTime := time.Now().Add(-25 * time.Hour)
+	if err := os.Chtimes(firstFilePath, staleTime, staleTime); err != nil {
+		t.Fatal(err)
+	}
+	abandonedDir := filepath.Join(stagingRoot, "abandoned")
+	if err := application.mkdirAllInsideStorage(abandonedDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	abandonedMarker := filepath.Join(abandonedDir, ".active")
+	marker, err := application.createFileInsideStorage(abandonedMarker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := marker.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(abandonedMarker, staleTime, staleTime); err != nil {
+		t.Fatal(err)
+	}
+	application.cleanupStaleFileUploads(stagingRoot)
+	if _, err := application.statInsideStorage(firstFilePath); err != nil {
+		t.Fatalf("active request lost an earlier completed file: %v", err)
+	}
+	if _, err := application.statInsideStorage(abandonedDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("abandoned request was not cleaned: %v", err)
+	}
+}
+
 func TestSecurityBoundaryFileUploadRejectsBodyLargerThanAvailableStorage(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`,
