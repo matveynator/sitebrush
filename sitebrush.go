@@ -42098,6 +42098,12 @@ type stagedFileUpload struct {
 	sizeBytes     int64
 }
 
+type fileUploadStagingSession struct {
+	directory string
+	stop      chan struct{}
+	done      chan struct{}
+}
+
 // MultipartReader and a small reused buffer keep memory independent of file
 // size. Files remain temporary until the form and mutation source are valid.
 func (a *App) uploadFilesStream(w http.ResponseWriter, r *http.Request, currentPath string) {
@@ -42106,23 +42112,26 @@ func (a *App) uploadFilesStream(w http.ResponseWriter, r *http.Request, currentP
 		http.Error(w, "failed to parse uploaded files", http.StatusBadRequest)
 		return
 	}
-	baseDir := a.domainFilesDir(r)
+	siteDomain := a.siteDomain(r.Context(), r)
+	storageDomain := domainStorageName(siteDomain)
+	baseDir := a.domainFilesDirForDomain(siteDomain)
 	if err := a.mkdirAllInsideStorage(baseDir, 0o755); err != nil {
 		http.Error(w, "failed to create files directory", http.StatusInternalServerError)
 		return
 	}
-	stagingDir := filepath.Join(a.storageRootDir(), "upload-staging", domainStorageName(a.siteDomain(r.Context(), r)))
-	if err := a.mkdirAllInsideStorage(stagingDir, 0o700); err != nil {
+	stagingRoot := filepath.Join(a.storageRootDir(), "upload-staging", storageDomain)
+	if err := a.mkdirAllInsideStorage(stagingRoot, 0o700); err != nil {
 		http.Error(w, "failed to create upload staging directory", http.StatusInternalServerError)
 		return
 	}
-	a.cleanupStaleFileUploads(stagingDir)
+	a.cleanupStaleFileUploads(stagingRoot)
+	staging, err := a.startFileUploadStaging(stagingRoot)
+	if err != nil {
+		http.Error(w, "failed to create upload staging directory", http.StatusInternalServerError)
+		return
+	}
+	defer a.finishFileUploadStaging(staging)
 	stagedFiles := make([]stagedFileUpload, 0, 1)
-	defer func() {
-		for _, stagedFile := range stagedFiles {
-			_ = a.removeInsideStorage(stagedFile.temporaryPath)
-		}
-	}()
 	r.PostForm = make(url.Values)
 	buffer := make([]byte, 32*1024)
 	for partCount := 0; ; partCount++ {
@@ -42158,7 +42167,7 @@ func (a *App) uploadFilesStream(w http.ResponseWriter, r *http.Request, currentP
 			http.Error(w, "unexpected upload file field", http.StatusBadRequest)
 			return
 		}
-		stagedFile, stageErr := a.stageFileUploadPart(stagingDir, part, buffer)
+		stagedFile, stageErr := a.stageFileUploadPart(staging.directory, part, buffer)
 		part.Close()
 		if stageErr != nil {
 			writeFileUploadReadError(w, stageErr)
@@ -42174,39 +42183,85 @@ func (a *App) uploadFilesStream(w http.ResponseWriter, r *http.Request, currentP
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	domain := domainStorageName(a.siteDomain(r.Context(), r))
 	uploadedNames := make([]string, 0, len(stagedFiles))
 	for _, stagedFile := range stagedFiles {
 		targetPath := filepath.Join(baseDir, stagedFile.storedName)
 		if existingFile, statErr := a.statInsideStorage(targetPath); statErr == nil && !existingFile.IsDir() {
-			a.upsertFileMetadata(r.Context(), domain, stagedFile.storedName, currentPath, existingFile.Size(), stagedFile.mimeType, "upload")
+			a.upsertFileMetadata(r.Context(), storageDomain, stagedFile.storedName, currentPath, existingFile.Size(), stagedFile.mimeType, "upload")
 			uploadedNames = append(uploadedNames, stagedFile.storedName)
 			continue
 		}
 		if stagedFile.sizeBytes > 0 {
-			if storageErr := a.applyDomainStorageDelta(r.Context(), domain, 0, 0, 0, stagedFile.sizeBytes, 0); storageErr != nil {
+			if storageErr := a.applyDomainStorageDelta(r.Context(), siteDomain, 0, 0, 0, stagedFile.sizeBytes, 0); storageErr != nil {
 				http.Error(w, storageErr.Error(), http.StatusInsufficientStorage)
 				return
 			}
 		}
 		if renameErr := a.renameInsideStorage(stagedFile.temporaryPath, targetPath); renameErr != nil {
 			if stagedFile.sizeBytes > 0 {
-				_ = a.applyDomainStorageDelta(r.Context(), domain, 0, 0, 0, -stagedFile.sizeBytes, 0)
+				_ = a.applyDomainStorageDelta(r.Context(), siteDomain, 0, 0, 0, -stagedFile.sizeBytes, 0)
 			}
 			http.Error(w, "failed to save uploaded file", http.StatusInternalServerError)
 			return
 		}
-		a.upsertFileMetadata(r.Context(), domain, stagedFile.storedName, currentPath, stagedFile.sizeBytes, stagedFile.mimeType, "upload")
+		a.upsertFileMetadata(r.Context(), storageDomain, stagedFile.storedName, currentPath, stagedFile.sizeBytes, stagedFile.mimeType, "upload")
 		uploadedNames = append(uploadedNames, stagedFile.storedName)
 	}
 	if len(uploadedNames) > 0 {
-		a.rebuildDomainStorageUsage(r.Context(), domain)
+		a.rebuildDomainStorageUsage(r.Context(), siteDomain)
 	}
 	writeUploadedFilesResponse(w, r, currentPath, uploadedNames)
 }
 
-func (a *App) cleanupStaleFileUploads(stagingDir string) {
-	jail, relativePath, err := a.storageJailForPath(stagingDir)
+// A request owns its staging directory until its session channel closes.
+// Other server processes can recognize abandoned directories by the marker.
+func (a *App) startFileUploadStaging(stagingRoot string) (fileUploadStagingSession, error) {
+	session := fileUploadStagingSession{
+		directory: filepath.Join(stagingRoot, randomAccessToken()),
+		stop:      make(chan struct{}),
+		done:      make(chan struct{}),
+	}
+	if err := a.mkdirAllInsideStorage(session.directory, 0o700); err != nil {
+		return fileUploadStagingSession{}, err
+	}
+	markerPath := filepath.Join(session.directory, ".active")
+	marker, err := a.createFileInsideStorage(markerPath)
+	if err != nil {
+		_ = a.removeAllInsideStorage(session.directory)
+		return fileUploadStagingSession{}, err
+	}
+	if _, err := marker.Write([]byte{1}); err != nil {
+		marker.Close()
+		_ = a.removeAllInsideStorage(session.directory)
+		return fileUploadStagingSession{}, err
+	}
+	go func() {
+		defer close(session.done)
+		defer marker.Close()
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-session.stop:
+				return
+			case <-ticker.C:
+				if _, err := marker.WriteAt([]byte{1}, 0); err != nil {
+					log.Printf("upload staging heartbeat failed: %v", err)
+				}
+			}
+		}
+	}()
+	return session, nil
+}
+
+func (a *App) finishFileUploadStaging(session fileUploadStagingSession) {
+	close(session.stop)
+	<-session.done
+	_ = a.removeAllInsideStorage(session.directory)
+}
+
+func (a *App) cleanupStaleFileUploads(stagingRoot string) {
+	jail, relativePath, err := a.storageJailForPath(stagingRoot)
 	if err != nil {
 		return
 	}
@@ -42219,12 +42274,17 @@ func (a *App) cleanupStaleFileUploads(stagingDir string) {
 	for {
 		entries, readErr := directory.ReadDir(128)
 		for _, entry := range entries {
-			if entry.IsDir() || !strings.HasPrefix(entry.Name(), ".sitebrush-upload-") {
+			if !entry.IsDir() {
 				continue
 			}
-			info, infoErr := entry.Info()
-			if infoErr == nil && info.ModTime().Before(cutoff) {
-				_ = a.removeInsideStorage(filepath.Join(stagingDir, entry.Name()))
+			requestDir := filepath.Join(stagingRoot, entry.Name())
+			markerInfo, markerErr := a.statInsideStorage(filepath.Join(requestDir, ".active"))
+			if markerErr == nil && markerInfo.ModTime().Before(cutoff) {
+				_ = a.removeAllInsideStorage(requestDir)
+			} else if errors.Is(markerErr, os.ErrNotExist) {
+				if directoryInfo, infoErr := entry.Info(); infoErr == nil && directoryInfo.ModTime().Before(cutoff) {
+					_ = a.removeAllInsideStorage(requestDir)
+				}
 			}
 		}
 		if readErr != nil {
