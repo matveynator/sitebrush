@@ -14998,6 +14998,9 @@ func ensurePageRevision(ctx context.Context, database sqlExecutor, domain, pageP
 }
 
 func (a *App) persistImportedPages(ctx context.Context, domain, ownerPath string, pages []wholeSiteImportedPage, spider *pageSpider, draftOnly bool) error {
+	if spider != nil {
+		defer spider.cleanupStreamedFiles()
+	}
 	frozen := draftOnly || a.isDomainFrozen(ctx, domain)
 	a.ensureDomainStorageUsageRow(ctx, domain)
 	type assetWrite struct {
@@ -21472,7 +21475,8 @@ func (a *App) importDemoSiteContent(ctx context.Context, domain string, settings
 		}
 		return failedTotal, err
 	}
-	spider, importedHTML := prepareSinglePageImport(grabImportRequest{Domain: domain, PagePath: "/", SourceURL: resolvedSourceURL.String(), RemoteSourceURL: resolvedSourceURL, HTML: string(htmlBytes), ProgressToken: progressToken, PreserveFailedReferences: true}, a.grabTracker)
+	resourceBudget, budgetKnown := a.remainingImportResourceQuota(domainContext, domain)
+	spider, importedHTML := prepareSinglePageImport(grabImportRequest{Domain: domain, PagePath: "/", SourceURL: resolvedSourceURL.String(), RemoteSourceURL: resolvedSourceURL, HTML: string(htmlBytes), ProgressToken: progressToken, PreserveFailedReferences: true, ResourceBudgetBytes: resourceBudget, ResourceBudgetKnown: budgetKnown}, a.grabTracker)
 	importedPages := []wholeSiteImportedPage{{SourceURL: resolvedSourceURL.String(), LocalPath: "/", HTML: importedHTML}}
 	importedPages = append(importedPages, importServiceDocuments(spider, resolvedSourceURL, string(htmlBytes), domain, "/")...)
 	if spider.publicResourcePaths["/favicon.ico"] != "" || spider.serviceManifestPath != "" {
@@ -21698,6 +21702,7 @@ func (a *App) retryDemoFailedResources(ctx context.Context, settings demo.Settin
 		return 0, err
 	}
 	spider := newPageSpider(settings.Domain, remoteSourceURL, grabResourceMaxDepth, a.grabTracker, progressToken, grabSourceOptions{})
+	spider.quotaBudgetBytes, spider.quotaBudgetKnown = a.remainingImportResourceQuota(ctx, settings.Domain)
 	spider.selectedResourceURLs = failedResourceURLs
 	spider.publicAssetBasePath = "/"
 	resourceURLs := make([]string, 0, len(failedResourceURLs))
@@ -22919,6 +22924,7 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 		SelectedResourceURLs: selectedGrabResourceURLs(r),
 		AutoDetectTemplates:  grabAutoDetectSiteBrushTemplate(r),
 	}
+	importRequest.ResourceBudgetBytes, importRequest.ResourceBudgetKnown = a.remainingImportResourceQuota(importContext, domain)
 	if grabCopyWholeSite(r) {
 		importResult, importErr := a.importWholeRemoteSite(importContext, importRequest)
 		if importErr != nil {
@@ -25491,6 +25497,7 @@ func (a *App) retryImportedPageResources(ctx context.Context, importRequest grab
 		return grabImportResult{RedirectPath: cleanPath(importRequest.PagePath)}, nil
 	}
 	spider := newPageSpider(importRequest.Domain, importRequest.RemoteSourceURL, grabResourceMaxDepth, a.grabTracker, importRequest.ProgressToken, importRequest.SourceOptions)
+	spider.quotaBudgetBytes, spider.quotaBudgetKnown = a.remainingImportResourceQuota(ctx, importRequest.Domain)
 	spider.setContext(importRequest.Context)
 	spider.setDownloadPlan(importRequest.DownloadTotal, importRequest.DownloadTotalBytes)
 	spider.selectedResourceURLs = importRequest.SelectedResourceURLs
@@ -26278,6 +26285,7 @@ func previewGrabResources(pageURL *url.URL, htmlSource string, tracker *grabProg
 
 func prepareSinglePageImport(importRequest grabImportRequest, tracker *grabProgressTracker) (*pageSpider, string) {
 	spider := newPageSpider(importRequest.Domain, importRequest.RemoteSourceURL, 8, tracker, importRequest.ProgressToken, importRequest.SourceOptions)
+	spider.quotaBudgetBytes, spider.quotaBudgetKnown = importRequest.ResourceBudgetBytes, importRequest.ResourceBudgetKnown
 	spider.maxResources = 512
 	parentContext := importRequest.Context
 	if parentContext == nil {
@@ -26956,6 +26964,7 @@ func (a *App) prepareWholeRemoteSiteImport(importRequest grabImportRequest) (*pa
 		return nil, nil, nil, errors.New("source_url is invalid")
 	}
 	spider := newPageSpider(importRequest.Domain, startURL, grabResourceMaxDepth, a.grabTracker, importRequest.ProgressToken, importRequest.SourceOptions)
+	spider.quotaBudgetBytes, spider.quotaBudgetKnown = importRequest.ResourceBudgetBytes, importRequest.ResourceBudgetKnown
 	spider.preserveFailedReferences = importRequest.PreserveFailedReferences
 	spider.setContext(importRequest.Context)
 	spider.setDownloadPlan(importRequest.DownloadTotal, importRequest.DownloadTotalBytes)
@@ -27136,6 +27145,7 @@ func (a *App) loadExistingImportedResources(ctx context.Context, domain string, 
 }
 
 func (a *App) importWholeRemoteSite(ctx context.Context, importRequest grabImportRequest) (grabImportResult, error) {
+	importRequest.ResourceBudgetBytes, importRequest.ResourceBudgetKnown = a.remainingImportResourceQuota(ctx, importRequest.Domain)
 	importRequest.PagePath = cleanPath(importRequest.PagePath)
 	if importRequest.RemoteSourceURL == nil || importRequest.RemoteSourceURL.Hostname() == "" {
 		return grabImportResult{}, errors.New("source_url is invalid")
@@ -27188,6 +27198,9 @@ func (a *App) importWholeRemoteSite(ctx context.Context, importRequest grabImpor
 		}
 	}
 	spider, importedPages, completedPageKeys, prepareErr := a.prepareWholeRemoteSiteImport(importRequest)
+	if spider != nil {
+		defer spider.cleanupStreamedFiles()
+	}
 	if prepareErr != nil {
 		if importRequest.ImportID != "" {
 			cleanupContext, cancelCleanup := wholeSiteImportCleanupContext(ctx)
@@ -49046,6 +49059,7 @@ func (a *App) persistSpiderAssets(ctx context.Context, spider *pageSpider, pageP
 	if spider == nil {
 		return nil
 	}
+	defer spider.cleanupStreamedFiles()
 	domain := canonicalLocalDomain(spider.domain)
 	if domain != "localhost" {
 		domain = normalizeDomainName(domain)
@@ -49109,6 +49123,7 @@ type mirroredResource struct {
 	url         string
 	resolvedURL string
 	content     []byte
+	tempFilePath string // temporary disk body for large binary imports
 	assetPath   string
 	contentType string
 	sizeBytes   int64
@@ -49152,6 +49167,8 @@ type pageSpider struct {
 	previewLimitReached       bool
 	previewUnfinishedPageURLs []string
 	preserveFailedReferences  bool
+	quotaBudgetBytes          int64
+	quotaBudgetKnown          bool
 }
 
 func (spider *pageSpider) recordPreviewBytes(sizeBytes int64) bool {
@@ -49455,7 +49472,7 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, response.ContentLength)
 		return nil, fmt.Errorf("resource download failed: %s", response.Status)
 	}
-	body, err := spider.readResourceBody(response.Body, normalizedURL, response.ContentLength)
+	body, err := spider.readResourceBody(response.Body, normalizedURL, response.ContentLength, nil)
 	if err != nil {
 		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
 		spider.failedTotal++
@@ -49649,7 +49666,7 @@ func (spider *pageSpider) waitBeforeRetry(currentURL string, attempt, total int)
 	}
 }
 
-func (spider *pageSpider) readResourceBody(reader io.Reader, resourceURL string, sizeBytes int64) ([]byte, error) {
+func (spider *pageSpider) readResourceBody(reader io.Reader, resourceURL string, sizeBytes int64, onChunk func()) ([]byte, error) {
 	if sizeBytes > grabResourceBodyLimitBytes {
 		return nil, fmt.Errorf("resource body exceeds %d bytes", grabResourceBodyLimitBytes)
 	}
@@ -49662,6 +49679,9 @@ func (spider *pageSpider) readResourceBody(reader io.Reader, resourceURL string,
 		readCount, readErr := reader.Read(buffer)
 		if readCount > 0 {
 			downloadedBytes += int64(readCount)
+			if onChunk != nil {
+				onChunk()
+			}
 			if downloadedBytes > grabResourceBodyLimitBytes {
 				return nil, fmt.Errorf("resource body exceeds %d bytes", grabResourceBodyLimitBytes)
 			}
@@ -49754,7 +49774,7 @@ func (spider *pageSpider) retryFailedResources(baseURL *url.URL, attempts int) {
 				continue
 			}
 			failedResource := spider.resources[failedURL]
-			if failedResource != nil && failedResource.content != nil {
+			if failedResource != nil && (failedResource.content != nil || failedResource.tempFilePath != "") {
 				spider.clearFailedResource(failedURL)
 				continue
 			}
@@ -49816,6 +49836,98 @@ func (spider *pageSpider) collectPreviewNestedResources(resource *mirroredResour
 		rewritten = parser.RewriteJavaScriptReferences(source, resource.url, depth)
 	}
 	resource.content = []byte(rewritten)
+}
+
+
+func (spider *pageSpider) cleanupStreamedFiles() {
+	if spider == nil {
+		return
+	}
+	for _, resource := range spider.resources {
+		if resource != nil && resource.tempFilePath != "" {
+			_ = os.Remove(resource.tempFilePath)
+			resource.tempFilePath = ""
+		}
+	}
+}
+
+func (spider *pageSpider) consumeImportQuota(bytes int64) error {
+	if !spider.quotaBudgetKnown || bytes <= 0 {
+		return nil
+	}
+	if bytes > spider.quotaBudgetBytes {
+		return errors.New("storage limit reached: imported resources exceed site quota")
+	}
+	spider.quotaBudgetBytes -= bytes
+	return nil
+}
+
+func (a *App) remainingImportResourceQuota(ctx context.Context, domain string) (int64, bool) {
+	if a == nil || strings.TrimSpace(domain) == "" {
+		return 0, false
+	}
+	a.ensureDomainStorageUsageRow(ctx, domain)
+	usage := a.domainStorageUsage(ctx, domain)
+	if usage.LimitBytes <= 0 {
+		return 0, false
+	}
+	return max(int64(0), usage.LimitBytes-usage.totalBytes()), true
+}
+
+func shouldStreamImportResource(rawURL, contentType string, contentLength int64) bool {
+	if contentLength >= 0 && contentLength <= grabResourceBodyLimitBytes {
+		return false
+	}
+	contentType = strings.ToLower(contentType)
+	extension := strings.ToLower(crawler.ResourceExtension(rawURL))
+	if strings.HasPrefix(contentType, "text/") || strings.Contains(contentType, "javascript") || strings.Contains(contentType, "json") || strings.Contains(contentType, "xml") ||
+		extension == ".html" || extension == ".htm" || extension == ".css" || extension == ".js" || extension == ".mjs" {
+		return false
+	}
+	return true
+}
+
+func (spider *pageSpider) assetPathForDigest(digest [32]byte, sourceURL, contentType string) string {
+	extension := crawler.DownloadedResourceExtension(sourceURL, contentType)
+	if extension == "" {
+		extension = ".bin"
+	}
+	fileName := hex.EncodeToString(digest[:]) + extension
+	basePath := cleanPath(spider.publicAssetBasePath)
+	if basePath == "/" {
+		return "/p/" + fileName
+	}
+	return strings.TrimRight(basePath, "/") + "/p/" + fileName
+}
+
+// Stage in the destination directory so canceled imports never expose partial movies.
+func (a *App) writeAtomicStreamedImportAsset(destination, source string) error {
+	reader, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+	baseDir := filepath.Dir(destination)
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		return err
+	}
+	stage, err := os.CreateTemp(baseDir, ".sitebrush-asset-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(stage.Name())
+	if _, err := io.CopyBuffer(stage, reader, make([]byte, 128*1024)); err != nil {
+		_ = stage.Close()
+		return err
+	}
+	if err := stage.Sync(); err != nil {
+		_ = stage.Close()
+		return err
+	}
+	if err := stage.Close(); err != nil {
+		return err
+	}
+	return os.Rename(stage.Name(), destination)
 }
 
 func (spider *pageSpider) grabberParser() crawler.Parser {
@@ -50346,7 +50458,7 @@ func (spider *pageSpider) fetchPreviewResourceBody(normalizedURL string) ([]byte
 	if !spider.isAllowedResourceContentType(normalizedURL, contentType) {
 		return nil, contentType, response.ContentLength, fmt.Errorf("resource content-type rejected: %s", response.Header.Get("Content-Type"))
 	}
-	body, err := spider.readResourceBody(response.Body, normalizedURL, response.ContentLength)
+	body, err := spider.readResourceBody(response.Body, normalizedURL, response.ContentLength, nil)
 	if err != nil {
 		return nil, contentType, response.ContentLength, err
 	}
