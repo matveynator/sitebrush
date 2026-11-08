@@ -198,7 +198,7 @@
     const checkboxElements = resourcesElement.querySelectorAll('input[data-sitebrush-copy-resource-url]');
     for (const checkboxElement of checkboxElements) {
       if (checkboxElement.checked) {
-        byteCount += Number(checkboxElement.dataset.sitebrushCopyResourceSizeBytes) || 0;
+        byteCount += Math.max(0, Number(checkboxElement.dataset.sitebrushCopyResourceSizeBytes) || 0);
       }
     }
     return byteCount;
@@ -332,7 +332,11 @@
     const afterText = formatSignedSize(projectedUsedBytes, configuration) + ' ' + textFromConfig(configuration, 'quotaAfterImportOf', 'of') + ' ' + formatSignedSize(limitBytes, configuration);
     const afterLineElement = quotaLine(textFromConfig(configuration, 'quotaAfterImport', 'After import'), afterText);
     const remainLineElement = quotaLine(textFromConfig(configuration, 'quotaWillRemain', 'Will remain'), formatSignedSize(Math.max(remainingBytes, 0), configuration));
-    const statusElement = createElement('div', 'SiteBrushCopySiteQuotaStatus ' + (fitsQuota ? 'is-ok' : 'is-error'), fitsQuota ? textFromConfig(configuration, 'quotaFits', 'Enough space') : textFromConfig(configuration, 'quotaExceeded', 'Storage limit exceeded'));
+    const estimateComplete = previewPayload.estimate_complete !== false;
+    const statusText = estimateComplete
+      ? (fitsQuota ? textFromConfig(configuration, 'quotaFits', 'Enough space') : textFromConfig(configuration, 'quotaExceeded', 'Storage limit exceeded'))
+      : textFromConfig(configuration, 'sizeUnknown', 'unknown');
+    const statusElement = createElement('div', 'SiteBrushCopySiteQuotaStatus ' + (fitsQuota || !estimateComplete ? 'is-ok' : 'is-error'), statusText);
     quotaElement.appendChild(titleElement);
     quotaElement.appendChild(currentLineElement);
     quotaElement.appendChild(addLineElement);
@@ -340,7 +344,8 @@
     quotaElement.appendChild(remainLineElement);
     quotaElement.appendChild(statusElement);
     quotaElement.classList.remove('SiteBrushCopySiteHidden');
-    continueButtonElement.disabled = !fitsQuota;
+    // A repeated import can reuse stored bytes; the server checks the final quota.
+    continueButtonElement.disabled = false;
   }
 
   function quotaLine(labelText, amountText) {

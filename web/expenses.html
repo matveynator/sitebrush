@@ -2685,6 +2685,7 @@
     closeButton: {{printf "%q" (index .T "tree_close")}},
     quotaOk: {{printf "%q" (index .T "billing_demo_refresh_quota_ok")}},
     quotaExceeded: {{printf "%q" (index .T "billing_demo_refresh_quota_exceeded")}},
+    sizeUnknown: {{printf "%q" (index .T "missing_size_unknown")}},
     checkDownload: {{printf "%q" (index .T "billing_demo_refresh_check_download")}},
     sourceLabel: {{printf "%q" (index .T "billing_demo_refresh_source")}},
     pagesLabel: {{printf "%q" (index .T "billing_demo_refresh_pages")}},
@@ -2727,7 +2728,9 @@
 
   function renderPreviewResult(previewPayload) {
     const totalDownloadBytes = Number(previewPayload.page_download_bytes || 0) + Number(previewPayload.selected_resource_bytes || 0);
-    const quotaText = previewPayload.fits_quota ? demoRefreshText.quotaOk : demoRefreshText.quotaExceeded;
+    const quotaText = previewPayload.estimate_complete === false
+      ? demoRefreshText.sizeUnknown
+      : previewPayload.fits_quota ? demoRefreshText.quotaOk : demoRefreshText.quotaExceeded;
     currentPreviewPayload = previewPayload;
     failedResourceURLs = new Set();
     currentRefreshIsRetry = false;
@@ -2745,7 +2748,8 @@
       '<p class="text-muted">' + quotaText + '</p>'
     ].join('');
     renderResourceRows(previewPayload.resources || []);
-    confirmButtonElement.disabled = !previewPayload.fits_quota;
+    // Only the completed import knows which content-addressed files are new.
+    confirmButtonElement.disabled = false;
   }
 
   function escapeHTML(rawText) {

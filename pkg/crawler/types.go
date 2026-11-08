@@ -28,6 +28,7 @@ type ImportRequest struct {
 	DownloadTotalBytes       int64
 	ResourceBudgetBytes      int64
 	ResourceBudgetKnown      bool
+	PreviewOnly              bool
 	SelectedResourceURLs     map[string]struct{}
 	SourceOptions            SourceOptions
 	AutoDetectTemplates      bool
