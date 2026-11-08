@@ -15006,6 +15006,8 @@ func (a *App) persistImportedPages(ctx context.Context, domain, ownerPath string
 	type assetWrite struct {
 		filename, name, contentType string
 		content, previous           []byte
+		sourceFile                  string
+		sizeBytes                   int64
 		existed                     bool
 	}
 	written := []assetWrite{}
@@ -15120,7 +15122,7 @@ func (a *App) persistImportedPages(ctx context.Context, domain, ownerPath string
 		if spider != nil {
 			references := make(map[string]bool)
 			for _, resource := range spider.resources {
-				if resource == nil || resource.content == nil || !resource.persist || strings.TrimSpace(resource.assetPath) == "" {
+				if resource == nil || (resource.content == nil && resource.tempFilePath == "") || !resource.persist || strings.TrimSpace(resource.assetPath) == "" {
 					continue
 				}
 				name := publicAssetReferenceFromPath(resource.assetPath)
@@ -15128,19 +15130,25 @@ func (a *App) persistImportedPages(ctx context.Context, domain, ownerPath string
 					continue
 				}
 				references[name] = true
-				asset := assetWrite{filename: filepath.Join(a.domainFilesDirForDomain(domain), filepath.FromSlash(name)), name: name, content: resource.content, contentType: resource.contentType}
-				previous, err := a.readFileInsideStorage(asset.filename)
-				if err != nil && !errors.Is(err, os.ErrNotExist) {
-					return err
-				}
-				asset.existed, asset.previous = err == nil, previous
-				if asset.contentType == "" {
-					asset.contentType = mime.TypeByExtension(path.Ext(name))
-				}
-				if versionedAssets && asset.existed && !bytes.Equal(previous, asset.content) {
-					fileDelta += int64(len(asset.content))
+				asset := assetWrite{filename: filepath.Join(a.domainFilesDirForDomain(domain), filepath.FromSlash(name)), name: name, content: resource.content, sourceFile: resource.tempFilePath, contentType: resource.contentType, sizeBytes: int64(len(resource.content))}
+				if asset.sourceFile != "" {
+					asset.sizeBytes = resource.sizeBytes
+					info, statErr := a.statInsideStorage(asset.filename)
+					if statErr != nil && !errors.Is(statErr, os.ErrNotExist) { return statErr }
+					asset.existed = statErr == nil
+					if asset.existed && info.Size() != asset.sizeBytes { return errors.New("imported content-hash resource has conflicting size") }
 				} else {
-					fileDelta += int64(len(asset.content) - len(previous))
+					previous, readErr := a.readFileInsideStorage(asset.filename)
+					if readErr != nil && !errors.Is(readErr, os.ErrNotExist) { return readErr }
+					asset.existed, asset.previous = readErr == nil, previous
+				}
+				if asset.contentType == "" { asset.contentType = mime.TypeByExtension(path.Ext(name)) }
+				if asset.sourceFile != "" {
+					if !asset.existed { fileDelta += asset.sizeBytes }
+				} else if versionedAssets && asset.existed && !bytes.Equal(asset.previous, asset.content) {
+					fileDelta += asset.sizeBytes
+				} else {
+					fileDelta += asset.sizeBytes - int64(len(asset.previous))
 				}
 				assets = append(assets, asset)
 			}
@@ -15160,16 +15168,21 @@ func (a *App) persistImportedPages(ctx context.Context, domain, ownerPath string
 			return errors.New("storage limit reached: site quota exceeded")
 		}
 		for _, asset := range assets {
-			if !asset.existed || !bytes.Equal(asset.previous, asset.content) {
-				if err := a.writeAtomicStorageFile(asset.filename, asset.content); err != nil {
-					return err
+			if asset.sourceFile != "" {
+				if !asset.existed {
+					target, pathErr := a.writablePathInsideStorageSubtree(a.domainFilesDirForDomain(domain), asset.filename)
+					if pathErr != nil { return pathErr }
+					if err := a.writeAtomicStreamedImportAsset(target, asset.sourceFile); err != nil { return err }
+					written = append(written, asset)
 				}
+			} else if !asset.existed || !bytes.Equal(asset.previous, asset.content) {
+				if err := a.writeAtomicStorageFile(asset.filename, asset.content); err != nil { return err }
 				written = append(written, asset)
 			}
 			if asset.name == "" {
 				continue
 			}
-			if err := updateOrInsertFileMetadata(ctx, transaction, domainStorageName(domain), asset.name, cleanPath(ownerPath), len(asset.content), asset.contentType, time.Now().UTC().Format(time.RFC3339), "import"); err != nil {
+			if err := updateOrInsertFileMetadata(ctx, transaction, domainStorageName(domain), asset.name, cleanPath(ownerPath), int(asset.sizeBytes), asset.contentType, time.Now().UTC().Format(time.RFC3339), "import"); err != nil {
 				return err
 			}
 		}
@@ -21747,7 +21760,7 @@ func importedResourceReplacements(spider *pageSpider) map[string]string {
 		return replacements
 	}
 	for resourceURL, resource := range spider.resources {
-		if resource == nil || !resource.persist || strings.TrimSpace(resource.assetPath) == "" || resource.content == nil {
+		if resource == nil || !resource.persist || strings.TrimSpace(resource.assetPath) == "" || (resource.content == nil && resource.tempFilePath == "") {
 			continue
 		}
 		replacements[resourceURL] = crawler.NormalizeMirroredAssetReference(resource.assetPath)
@@ -27672,7 +27685,7 @@ func (a *App) estimateImportedFileDelta(domain string, spider *pageSpider) int64
 	var fileDelta int64
 	accountedAssetReferences := make(map[string]struct{})
 	for _, resource := range spider.resources {
-		if resource == nil || !resource.persist || strings.TrimSpace(resource.assetPath) == "" || resource.content == nil {
+		if resource == nil || !resource.persist || strings.TrimSpace(resource.assetPath) == "" || (resource.content == nil && resource.tempFilePath == "") {
 			continue
 		}
 		assetReference := publicAssetReferenceFromPath(resource.assetPath)
@@ -27686,8 +27699,16 @@ func (a *App) estimateImportedFileDelta(domain string, spider *pageSpider) int64
 		targetFilePath := filepath.Join(baseDir, filepath.FromSlash(assetReference))
 		existingSize := a.fileSizeInsideStorage(targetFilePath)
 		newSize := int64(len(resource.content))
+		if resource.tempFilePath != "" {
+			newSize = resource.sizeBytes
+			if existingSize == newSize { continue }
+		}
 		if existingSize <= 0 {
 			fileDelta += newSize
+			continue
+		}
+		if resource.tempFilePath != "" {
+			fileDelta += newSize - existingSize
 			continue
 		}
 		if _, err := a.statInsideStorage(filepath.Join(filepath.Dir(a.storageRootDir()), filepath.Dir(sitefreeze.ObjectPath(domain, strings.Repeat("0", 64))))); err == nil {
@@ -49075,7 +49096,7 @@ func (a *App) persistSpiderAssets(ctx context.Context, spider *pageSpider, pageP
 	ownerPath := cleanPath(pagePath)
 	writtenAssetReferences := make(map[string]struct{})
 	for _, resource := range spider.resources {
-		if resource == nil || resource.content == nil || !resource.persist || strings.TrimSpace(resource.assetPath) == "" {
+		if resource == nil || (resource.content == nil && resource.tempFilePath == "") || !resource.persist || strings.TrimSpace(resource.assetPath) == "" {
 			continue
 		}
 		assetReference := publicAssetReferenceFromPath(resource.assetPath)
@@ -49094,14 +49115,22 @@ func (a *App) persistSpiderAssets(ctx context.Context, spider *pageSpider, pageP
 		if err := os.MkdirAll(filepath.Dir(realTargetFilePath), 0o755); err != nil {
 			return err
 		}
-		if err := a.writeAtomicStorageFile(realTargetFilePath, resource.content); err != nil {
+		if resource.tempFilePath != "" {
+			info, statErr := a.statInsideStorage(realTargetFilePath)
+			if statErr != nil && !errors.Is(statErr, os.ErrNotExist) { return statErr }
+			if statErr == nil {
+				if info.Size() != resource.sizeBytes { return errors.New("imported content-hash resource has conflicting size") }
+			} else if err := a.writeAtomicStreamedImportAsset(realTargetFilePath, resource.tempFilePath); err != nil { return err }
+		} else if err := a.writeAtomicStorageFile(realTargetFilePath, resource.content); err != nil {
 			return err
 		}
 		resourceContentType := resource.contentType
 		if strings.TrimSpace(resourceContentType) == "" {
 			resourceContentType = mime.TypeByExtension(path.Ext(assetReference))
 		}
-		a.upsertFileMetadata(ctx, domainStorageName(domain), assetReference, ownerPath, int64(len(resource.content)), resourceContentType, "import")
+		assetBytes := int64(len(resource.content))
+		if resource.tempFilePath != "" { assetBytes = resource.sizeBytes }
+		a.upsertFileMetadata(ctx, domainStorageName(domain), assetReference, ownerPath, assetBytes, resourceContentType, "import")
 	}
 	return a.siteContentTransaction(ctx, func(transaction *sql.Tx) error {
 		return persistSpiderResourceProvenance(ctx, transaction, domainStorageName(domain), []wholeSiteImportedPage{{LocalPath: ownerPath}}, spider, false)
@@ -49552,8 +49581,9 @@ func (spider *pageSpider) recordDownloadedBytes(stage, currentURL string, curren
 			recordedBytes = currentSizeBytes
 		}
 		if stage == "downloaded" && recordedBytes <= 0 {
-			if resource := spider.resources[currentURL]; resource != nil && resource.content != nil {
+			if resource := spider.resources[currentURL]; resource != nil && (resource.content != nil || resource.tempFilePath != "") {
 				recordedBytes = int64(len(resource.content))
+				if resource.tempFilePath != "" { recordedBytes = resource.sizeBytes }
 			}
 		}
 		if recordedBytes > 0 {
