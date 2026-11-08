@@ -49629,12 +49629,14 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 	responseContentType := response.Header.Get("Content-Type")
 	resourceContentType := crawler.EffectiveResourceContentType(normalizedURL, responseContentType)
 	largeBinary := shouldStreamImportResource(normalizedURL, resourceContentType)
+	var previewSampleBytes int
 	if spider.previewOnly && largeBinary {
 		sample := make([]byte, 512)
 		readCount, readErr := io.ReadFull(response.Body, sample)
 		if readErr != nil && readErr != io.EOF && readErr != io.ErrUnexpectedEOF {
 			return nil, readErr
 		}
+		previewSampleBytes = readCount
 		resetIdle()
 		resourceContentType = detectedImportedResourceContentType(normalizedURL, responseContentType, sample[:readCount])
 		if requiresImportedTextRewrite(normalizedURL, resourceContentType) {
@@ -49646,13 +49648,22 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 		if !spider.isAllowedResourceContentType(normalizedURL, resourceContentType) {
 			return nil, fmt.Errorf("resource content-type rejected: %s", resourceContentType)
 		}
-		resource := &mirroredResource{url: normalizedURL, contentType: resourceContentType, sizeBytes: response.ContentLength, persist: persist}
+		previewSize := response.ContentLength
+		if previewSize == 0 && previewSampleBytes > 0 {
+			previewSize = -1
+		}
+		resource := &mirroredResource{url: normalizedURL, contentType: resourceContentType, sizeBytes: previewSize, persist: persist}
 		spider.resources[normalizedURL] = resource
 		spider.downloadedTotal++
 		spider.publishResourceProgress("downloaded", normalizedURL, 100, 0, response.ContentLength)
 		return resource, nil
 	}
 	streamBinary := persist && spider.storage != nil && spider.previewByteLimit == 0 && largeBinary
+	declaredLength := response.ContentLength
+	if declaredLength == 0 && response.Body != http.NoBody {
+		// Some HTTP adapters leave ContentLength at zero for an unknown body.
+		declaredLength = -1
+	}
 	var body []byte
 	var stream crawler.StreamedImportResource
 	var downloadErr error
@@ -49664,7 +49675,7 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 			if stageErr != nil {
 				downloadErr = stageErr
 			} else {
-				stream, downloadErr = crawler.StreamImportResource(requestContext.Done(), response.Body, stageDirectory, response.ContentLength, spider.siteLimitBytes, func(downloaded int64) {
+				stream, downloadErr = crawler.StreamImportResource(requestContext.Done(), response.Body, stageDirectory, declaredLength, spider.siteLimitBytes, func(downloaded int64) {
 					resetIdle()
 					spider.publishResourceProgress("downloading", normalizedURL, resourcePercent(downloaded, response.ContentLength), downloaded, response.ContentLength)
 				})
