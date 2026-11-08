@@ -2817,7 +2817,8 @@
     const sizeElement = document.createElement('div');
     sizeElement.className = 'text-muted small';
     sizeElement.dataset.demoRefreshResourceStatus = '1';
-    sizeElement.textContent = formatByteCount(Number(previewResource.size_bytes || 0));
+    const resourceSizeBytes = Number(previewResource.size_bytes);
+    sizeElement.textContent = resourceSizeBytes >= 0 ? formatByteCount(resourceSizeBytes) : demoRefreshText.sizeUnknown;
     textElement.appendChild(urlTextElement);
     textElement.appendChild(sizeElement);
     resourceHeaderElement.appendChild(kindElement);
