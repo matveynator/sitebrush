@@ -74,7 +74,7 @@
 
   <div class="expense-simple-page">
     <nav class="hosting-installation-tabs" role="tablist" aria-label="{{index .T "billing_installations"}}" data-hosting-installation-tabs>
-      {{if gt (len .Servers) 1}}<button type="button" class="hosting-installation-tab active" role="tab" aria-selected="true" data-hosting-installation-tab="servers">{{index .T "billing_servers"}}</button>{{end}}
+      {{if or (gt (len .Servers) 1) .ActivePublicTrialSites .ArchivedPublicTrialSites .ShowCentralRegistry}}<button type="button" class="hosting-installation-tab active" role="tab" aria-selected="true" data-hosting-installation-tab="servers">{{index .T "billing_servers"}}</button>{{end}}
       {{if or .ActivePublicTrialSites .ArchivedPublicTrialSites}}<button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="temporary-sites">{{index .T "billing_temporary_sites"}}</button>{{end}}
       {{if .ShowCentralRegistry}}
       <button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="desktop">{{index .T "billing_desktop_installations"}}</button>
@@ -168,7 +168,7 @@
           <div id="server-update" class="mb-4">
             <h2>{{index $.T "update_title"}}</h2>
             <p role="status" data-server-update-frame-loading>{{index $.T "update_connecting"}}</p>
-            <iframe title="{{index $.T "update_title"}}" src="/?server_update&embedded" style="width:100%;min-height:1000px;border:0" data-server-update-frame hidden></iframe>
+            <iframe title="{{index $.T "update_title"}}" data-src="/?server_update&embedded" style="width:100%;min-height:1000px;border:0" data-server-update-frame hidden></iframe>
             <p role="alert" class="alert alert-danger" data-server-update-frame-error hidden>{{index $.T "update_unavailable"}}</p>
             <script>
               (function checkEmbeddedUpdate() {
@@ -184,6 +184,7 @@
                 }
                 frameElement.addEventListener('load', function showEmbeddedUpdateStatus() {
                   try {
+                    if (!frameElement.contentDocument || !frameElement.contentDocument.URL.includes('server_update')) return;
                     frameModel.ready = Boolean(frameElement.contentDocument && frameElement.contentDocument.querySelector('[data-server-update]'));
                     frameModel.diagnostic = Boolean(frameElement.contentDocument && frameElement.contentDocument.querySelector('[data-server-update-diagnostic]'));
                   } catch (frameError) { frameModel.ready = false; frameModel.diagnostic = false; }
@@ -191,6 +192,12 @@
                   renderFrameStatus();
                 });
                 frameElement.addEventListener('error', function showEmbeddedUpdateError() { frameModel.ready = false; frameModel.loaded = true; renderFrameStatus(); });
+                window.setTimeout(function showEmbeddedUpdateTimeout() {
+                  if (frameModel.loaded) return;
+                  frameModel.loaded = true;
+                  renderFrameStatus();
+                }, 20000);
+                frameElement.src = frameElement.dataset.src;
               })();
             </script>
           </div>
@@ -355,7 +362,7 @@
   </section>
 
   <nav class="hosting-installation-tabs" role="tablist" aria-label="{{index .T "billing_installations"}}" data-hosting-installation-tabs>
-    {{if gt (len .Servers) 1}}<button type="button" class="hosting-installation-tab active" role="tab" aria-selected="true" data-hosting-installation-tab="servers">{{index .T "billing_servers"}}</button>{{end}}
+    {{if or (gt (len .Servers) 1) .ActivePublicTrialSites .ArchivedPublicTrialSites .ShowCentralRegistry}}<button type="button" class="hosting-installation-tab active" role="tab" aria-selected="true" data-hosting-installation-tab="servers">{{index .T "billing_servers"}}</button>{{end}}
     {{if or .ActivePublicTrialSites .ArchivedPublicTrialSites}}<button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="temporary-sites">{{index .T "billing_temporary_sites"}}</button>{{end}}
     {{if .ShowCentralRegistry}}
     <button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="desktop">{{index .T "billing_desktop_installations"}}</button>

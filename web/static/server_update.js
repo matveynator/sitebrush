@@ -281,6 +281,7 @@
     catch (socketError) { reportUpdateError(socketError); renderUpdate(); window.setTimeout(connectUpdateSocket, 2000); return; }
     updateModel.socket.addEventListener('open', function handleUpdateOpen() {
       updateModel.connected = true;
+      updateModel.error = '';
       submitUpdateCommand('status');
     });
     updateModel.socket.addEventListener('message', function handleUpdateMessage(messageEvent) {
@@ -324,11 +325,13 @@
       updateModel.pending = false;
       updateModel.pendingAction = '';
       updateModel.queuedCommand = null;
+      if (!updateModel.lastContact && !updateModel.error) reportUpdateError(new Error('update status connection closed'));
       renderUpdate();
       if (!updateModel.stopped) window.setTimeout(connectUpdateSocket, 2000);
     });
     updateModel.socket.addEventListener('error', function handleUpdateError() {
       updateModel.connected = false;
+      if (!updateModel.lastContact && !updateModel.error) reportUpdateError(new Error('update status connection failed'));
       renderUpdate();
     });
   }

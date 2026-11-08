@@ -204,6 +204,7 @@ const backupImportUploadLimitBytes int64 = 512 * 1024 * 1024
 const fileUploadMultipartMemoryBytes int64 = 1 * 1024 * 1024
 const fileUploadMultipartOverheadBytes int64 = 16 * 1024 * 1024
 const backupImportJSONLimitBytes int64 = 4 * 1024 * 1024
+const demoSnapshotTextLimitBytes int64 = 64 * 1024 * 1024
 const backupImportTextEntryLimitBytes int64 = 16 * 1024 * 1024
 const backupImportFileEntryLimitBytes int64 = 128 * 1024 * 1024
 const backupImportUncompressedLimitBytes int64 = 1024 * 1024 * 1024
@@ -21991,7 +21992,7 @@ func (a *App) restoreDemoSiteFromSnapshot(ctx context.Context, domain string) er
 		} else {
 			archiveLimit = math.MaxInt64
 		}
-		_, importErr := staged.importDomainBackupZIPWithLimits(contextWithDomain(ctx, domain), domain, "/", zipReader, archiveLimit, limitBytes)
+		_, importErr := staged.importDomainBackupZIPWithLimits(contextWithDomain(ctx, domain), domain, "/", zipReader, archiveLimit, limitBytes, demoSnapshotTextLimitBytes, demoSnapshotTextLimitBytes)
 		return importErr
 	}); err != nil {
 		return err
@@ -43851,6 +43852,18 @@ func (a *App) listSiteQuotaRowsWithControlDatabase(ctx context.Context, controlD
 			}
 		}
 		if err != nil {
+			if errors.Is(err, errSiteDatabaseMissing) && a.siteDatabaseRouter != nil && a.siteDatabaseRouter.partitioned {
+				registered, registrationErr := a.siteQuotaCandidateRegistered(ctx, candidate.fallbackDomain)
+				if registrationErr != nil {
+					return nil, registrationErr
+				}
+				if !registered {
+					// The router owns active sites. An orphaned database file must not
+					// prevent registered sites from reaching the panel and registry.
+					log.Printf("site quota skipped unregistered database candidate domain=%s", diagnosticlog.SafeLogValue(candidate.fallbackDomain))
+					continue
+				}
+			}
 			return nil, err
 		}
 		rows = append(rows, candidateRows...)
@@ -43863,6 +43876,20 @@ func (a *App) listSiteQuotaRowsWithControlDatabase(ctx context.Context, controlD
 		return rows[left].Domain < rows[right].Domain
 	})
 	return rows, nil
+}
+
+func (a *App) siteQuotaCandidateRegistered(ctx context.Context, domain string) (bool, error) {
+	registered := false
+	err := a.withServerControlDatabaseRead(ctx, "site-quota-candidate-registry", func(database *sql.DB) error {
+		var found int
+		queryErr := database.QueryRowContext(ctx, `SELECT 1 FROM site_registry WHERE domain=?`, normalizeDomainName(domain)).Scan(&found)
+		if errors.Is(queryErr, sql.ErrNoRows) {
+			return nil
+		}
+		registered = queryErr == nil
+		return queryErr
+	})
+	return registered, err
 }
 
 func (a *App) siteQuotaRowFromOwners(ctx context.Context, candidate siteQuotaDatabaseCandidate) (siteQuotaRow, error) {
@@ -56520,7 +56547,11 @@ func readBackupZIPEntryWithLimit(zipEntry *zip.File, limitBytes int64) ([]byte, 
 		return nil, openErr
 	}
 	defer entryReader.Close()
-	return readAllWithLimit(entryReader, limitBytes)
+	entryBytes, err := readAllWithLimit(entryReader, limitBytes)
+	if err != nil {
+		return nil, fmt.Errorf("backup entry %q (limit %d bytes): %w", zipEntry.Name, limitBytes, err)
+	}
+	return entryBytes, nil
 }
 
 func zipEntryDeclaredSize(zipEntry *zip.File) int64 {
@@ -56570,10 +56601,11 @@ func resolveStaticExportRelativeSitePaths(rawPath, sourceSitePath string) []stri
 }
 
 func (a *App) importDomainBackupZIP(ctx context.Context, domain string, importBasePath string, backupZIP *zip.Reader) (string, error) {
-	return a.importDomainBackupZIPWithLimits(ctx, domain, importBasePath, backupZIP, backupImportUncompressedLimitBytes, backupImportFileEntryLimitBytes)
+	return a.importDomainBackupZIPWithLimits(ctx, domain, importBasePath, backupZIP, backupImportUncompressedLimitBytes, backupImportFileEntryLimitBytes, backupImportJSONLimitBytes, backupImportTextEntryLimitBytes)
 }
 
-func (a *App) importDomainBackupZIPWithLimits(ctx context.Context, domain string, importBasePath string, backupZIP *zip.Reader, totalLimitBytes, fileLimitBytes int64) (string, error) {
+// Internal demo snapshots may exceed the limits for uploaded backup archives.
+func (a *App) importDomainBackupZIPWithLimits(ctx context.Context, domain string, importBasePath string, backupZIP *zip.Reader, totalLimitBytes, fileLimitBytes, jsonLimitBytes, textLimitBytes int64) (string, error) {
 	var backupJSON []byte
 	filesByName := make(map[string]*zip.File)
 	var totalUncompressedBytes int64
@@ -56592,7 +56624,7 @@ func (a *App) importDomainBackupZIPWithLimits(ctx context.Context, domain string
 			if zipEntry.FileInfo().IsDir() {
 				return "/", errors.New("backup.json is a directory")
 			}
-			payload, readErr := readBackupZIPEntryWithLimit(zipEntry, backupImportJSONLimitBytes)
+			payload, readErr := readBackupZIPEntryWithLimit(zipEntry, jsonLimitBytes)
 			if readErr != nil {
 				return "/", readErr
 			}
@@ -56720,7 +56752,7 @@ ON CONFLICT(domain,file_name) DO UPDATE SET access_mode=excluded.access_mode,tok
 			return rootRedirectPath, fmt.Errorf("backup file path escapes site directory: %s", nextFileName)
 		}
 		if shouldRewriteImportedTextFile(nextFileName) {
-			fileBytes, readErr := readBackupZIPEntryWithLimit(zipEntry, backupImportTextEntryLimitBytes)
+			fileBytes, readErr := readBackupZIPEntryWithLimit(zipEntry, textLimitBytes)
 			if readErr != nil {
 				return rootRedirectPath, readErr
 			}
