@@ -2924,6 +2924,39 @@ func TestSimplifiedExpenseServerViewsIncludeOwnerAndClientDetails(t *testing.T) 
 	}
 }
 
+func TestSimplifiedExpensesShowsLocalSiteDeletionControls(t *testing.T) {
+	site := hostingandsupport.ServerSiteView{Domain: "client.example", UsedLabel: "1 GB", LimitLabel: "10 GB"}
+	servers := []simplifiedExpenseServerView{
+		{Server: hostingandsupport.ServerView{Local: true}, Clients: []simplifiedExpenseClientView{{Email: "owner@example.org", Sites: []simplifiedExpenseSiteView{{ServerSiteView: site}}}}},
+		{Server: hostingandsupport.ServerView{Local: false}, Clients: []simplifiedExpenseClientView{{Email: "remote@example.org", Sites: []simplifiedExpenseSiteView{{ServerSiteView: site}}}}},
+	}
+	applySimplifiedSiteDeletionControls(servers, []hostingandsupport.Site{{
+		Domain: "client.example", CanDelete: true, DeletionReason: "nonpayment", DeletionDeadline: "2030-01-01T00:00:00Z", DeletionSizeLabel: "1 GB",
+		AdminAccounts: []hostingandsupport.SiteAccountView{{Email: "owner@example.org"}},
+	}})
+	if !servers[0].Clients[0].Sites[0].CanDelete || servers[1].Clients[0].Sites[0].CanDelete || len(servers[1].Clients[0].Sites[0].AdminAccounts) != 0 {
+		t.Fatal("site deletion controls must belong only to the local installation")
+	}
+	parsedTemplate, err := template.ParseFS(embeddedWebFiles, "web/expenses.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rendered bytes.Buffer
+	view := map[string]any{"Domain": "sitebrush.com", "Title": "Server settings", "T": translationsForLanguageCode("ru"), "SimplifiedExpenses": true, "Servers": []hostingandsupport.ServerView{{Local: true}}, "ExpenseServers": servers, "AccountCSRF": "test-csrf"}
+	if err := parsedTemplate.Execute(&rendered, view); err != nil {
+		t.Fatal(err)
+	}
+	body := rendered.String()
+	for _, expected := range []string{`data-bs-target="#simpleDelete0_0_0"`, `value="restore_site"`, `value="delete_site_now"`, `value="queue_account"`, `value="delete_account_now"`, `name="confirm_domain"`} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("simplified site row is missing %s", expected)
+		}
+	}
+	if strings.Contains(body, `id="simpleDelete1_0_0"`) || strings.Count(body, `data-bs-target="#simpleDelete`) != 1 {
+		t.Fatal("remote site received a local deletion control")
+	}
+}
+
 func TestVisibleHostingAndSupportLocalSitesHidesDisabledDemo(t *testing.T) {
 	sites := []hostingandsupport.Site{
 		{Domain: "owner.example"},

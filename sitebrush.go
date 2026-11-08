@@ -29507,6 +29507,7 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 		}
 		return nil
 	})
+	applySimplifiedSiteDeletionControls(expenseServers, sites)
 	return map[string]any{
 		"T":                        translations,
 		"Title":                    expensesTitle,
@@ -29663,13 +29664,50 @@ type simplifiedExpenseClientView struct {
 	MonthlyShareLabel       string
 	PaidThisMonthLabel      string
 	PaymentStatus           string
-	Sites                   []hostingandsupport.ServerSiteView
+	Sites                   []simplifiedExpenseSiteView
 	BillingCustomerID       string
 	InvoiceDay              int
 	PaymentTermDays         int
 	BillingTimezone         string
 	AutomaticBillingEnabled bool
 	Invoices                []hostingAndSupportClientInvoiceView
+}
+
+type simplifiedExpenseSiteView struct {
+	hostingandsupport.ServerSiteView
+	CanDelete         bool
+	DeletionReason    string
+	DeletionDeadline  string
+	DeletionSizeLabel string
+	AdminAccounts     []hostingandsupport.SiteAccountView
+}
+
+// Only the local installation can act on its control database. Remote server
+// snapshots can describe sites but cannot authorize local deletion actions.
+func applySimplifiedSiteDeletionControls(servers []simplifiedExpenseServerView, sites []hostingandsupport.Site) {
+	localSites := make(map[string]hostingandsupport.Site, len(sites))
+	for _, site := range sites {
+		localSites[normalizeQuotaDomainName(site.Domain)] = site
+	}
+	for serverIndex := range servers {
+		if !servers[serverIndex].Server.Local {
+			continue
+		}
+		for clientIndex := range servers[serverIndex].Clients {
+			for siteIndex := range servers[serverIndex].Clients[clientIndex].Sites {
+				view := &servers[serverIndex].Clients[clientIndex].Sites[siteIndex]
+				site, found := localSites[normalizeQuotaDomainName(view.Domain)]
+				if !found {
+					continue
+				}
+				view.CanDelete = site.CanDelete
+				view.DeletionReason = site.DeletionReason
+				view.DeletionDeadline = site.DeletionDeadline
+				view.DeletionSizeLabel = site.DeletionSizeLabel
+				view.AdminAccounts = site.AdminAccounts
+			}
+		}
+	}
 }
 
 func simplifiedExpenseServerViews(servers []hostingandsupport.ServerView, clients []hostingAndSupportClientView, invoices []hostingandsupport.Invoice) []simplifiedExpenseServerView {
@@ -29690,12 +29728,12 @@ func simplifiedExpenseServerViews(servers []hostingandsupport.ServerView, client
 			clientDetails := clientDetailsByEmail[email]
 			monthlyShareMinor := int64(0)
 			totalStorageBytes := int64(0)
-			clientSites := make([]hostingandsupport.ServerSiteView, 0, len(serverClient.Sites))
+			clientSites := make([]simplifiedExpenseSiteView, 0, len(serverClient.Sites))
 			for _, site := range serverClient.Sites {
 				if site.BillingExcluded {
 					continue
 				}
-				clientSites = append(clientSites, site)
+				clientSites = append(clientSites, simplifiedExpenseSiteView{ServerSiteView: site})
 				totalStorageBytes += max(site.UsedBytes, 0)
 				monthlyShareMinor += hostingandsupport.MoneyMinor(site.BillingAmount)
 			}
