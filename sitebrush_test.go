@@ -1348,6 +1348,43 @@ func TestGuestPublishedStaticRouteDoesNotWaitForControlDatabaseWriter(t *testing
 	}
 }
 
+func TestPublicBoundaryServesDemoHTMLFromPolicyWithoutSiteDatabase(t *testing.T) {
+	application, _ := newTestApplication(t)
+	const domain = "demo-public-policy.example"
+	if err := application.withServerControlDatabaseWrite(context.Background(), "test-demo-policy", func(database *sql.DB) error {
+		return (demo.Store{DB: database}).SaveSettings(context.Background(), domain, "", false, true)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher, err := startServerControlDatabaseDispatcher(application.serverControlDBPath(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.controlDatabase = dispatcher
+	t.Cleanup(func() { dispatcher.Close() })
+	stop := make(chan struct{})
+	defer close(stop)
+	application.publicCatalog = publicsite.NewCatalog(application.storagePath, stop)
+	application.writePublishedStaticHTML(domain, "/", "<html><body>demo policy</body></html>")
+	if err := application.writePublicPolicy(domain); err != nil {
+		t.Fatal(err)
+	}
+	decision := application.publicCatalog.Lookup(publicsite.Lookup{Host: domain, Path: "/"})
+	if !decision.Found || !decision.DemoSite {
+		t.Fatalf("demo membership was not published: %+v", decision)
+	}
+	publicBoundary := &App{storagePath: application.storagePath, storageRealRoot: application.storageRealRoot, publicBoundary: true, publicStreamer: publicsite.NewStreamer()}
+	request := withPublicRequestDecision(httptest.NewRequest(http.MethodGet, "https://"+domain+"/", nil), decision)
+	request.Header.Set("If-Modified-Since", time.Now().Add(time.Hour).UTC().Format(http.TimeFormat))
+	response := httptest.NewRecorder()
+	if !publicBoundary.servePublishedStaticFileFromDisk(response, request, domain, "/", true) {
+		t.Fatal("published demo page was not served")
+	}
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "demo policy") || response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("public demo response = %d cache=%q body=%q", response.Code, response.Header().Get("Cache-Control"), response.Body.String())
+	}
+}
+
 func TestPreparedDemoSiteStartsAndLogsOutWhileControlDatabaseWriterIsBusy(t *testing.T) {
 	application := newRouterTestApplication(t)
 	controlDatabase := setupBillingOwnerForTest(t, application, "owner.example", "owner@example.com", true)
