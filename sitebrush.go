@@ -26304,7 +26304,7 @@ func prepareSinglePageImport(importRequest grabImportRequest, tracker *grabProgr
 	if parentContext == nil {
 		parentContext = context.Background()
 	}
-	resourceContext, stopResources := context.WithTimeout(parentContext, 3*time.Minute)
+	resourceContext, stopResources := context.WithCancel(parentContext)
 	// Service documents are imported by the caller after page discovery returns.
 	// Restore its live parent before closing the bounded resource request window.
 	defer func() {
@@ -49478,10 +49478,19 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 		return nil, validationErr
 	}
 	// #nosec G704 -- URL validation and the pinned public-only transport are both mandatory.
-	request, _ := http.NewRequestWithContext(spider.context(), http.MethodGet, normalizedURL, nil)
+	// The import client has a short deadline for small resources. Media imports use
+	// a per-chunk idle watchdog instead of a total transfer deadline.
+	requestContext, cancelRequest := context.WithCancel(spider.context())
+	defer cancelRequest()
+	idleTimer := time.AfterFunc(45*time.Second, cancelRequest)
+	defer idleTimer.Stop()
+	resetIdle := func() { idleTimer.Reset(45*time.Second) }
+	request, _ := http.NewRequestWithContext(requestContext, http.MethodGet, normalizedURL, nil)
 	applyGrabRequestHeaders(request, spider.sourceOptions)
+	largeResourceClient := *spider.client
+	largeResourceClient.Timeout = 0
 	// #nosec G704 -- the client transport rejects private DNS results and validates every redirect.
-	response, err := spider.client.Do(request)
+	response, err := largeResourceClient.Do(request)
 	if err != nil {
 		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
 		spider.failedTotal++
@@ -49501,42 +49510,76 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, response.ContentLength)
 		return nil, fmt.Errorf("resource download failed: %s", response.Status)
 	}
-	body, err := spider.readResourceBody(response.Body, normalizedURL, response.ContentLength, nil)
-	if err != nil {
+	responseContentType := response.Header.Get("Content-Type")
+	resourceContentType := crawler.EffectiveResourceContentType(normalizedURL, responseContentType)
+	streamBinary := persist && spider.previewByteLimit == 0 && shouldStreamImportResource(normalizedURL, resourceContentType, response.ContentLength)
+	var body []byte
+	var stream crawler.StreamedImportResource
+	var downloadErr error
+	if streamBinary {
+		remainingQuota := int64(-1)
+		if spider.quotaBudgetKnown {
+			remainingQuota = spider.quotaBudgetBytes
+		}
+		stream, downloadErr = crawler.StreamImportResource(requestContext, response.Body, response.ContentLength, remainingQuota, func(downloaded int64) {
+			resetIdle()
+			spider.publishResourceProgress("downloading", normalizedURL, resourcePercent(downloaded, response.ContentLength), downloaded, response.ContentLength)
+		})
+	} else {
+		body, downloadErr = spider.readResourceBody(response.Body, normalizedURL, response.ContentLength, resetIdle)
+	}
+	if downloadErr != nil {
 		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
 		spider.failedTotal++
-		spider.recordRetryableResource(normalizedURL, crawler.ErrorReason(err), shouldRetryGrabSourceHTMLDownload(crawler.HTMLDownloadResult{}, err))
+		spider.recordRetryableResource(normalizedURL, crawler.ErrorReason(downloadErr), shouldRetryGrabSourceHTMLDownload(crawler.HTMLDownloadResult{}, downloadErr))
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, response.ContentLength)
-		return nil, err
+		return nil, downloadErr
 	}
 	if spider.previewByteLimit > 0 && !spider.recordPreviewBytes(int64(len(body))) {
 		return nil, errors.New("free Test Drive download limit reached")
 	}
-	responseContentType := response.Header.Get("Content-Type")
-	resourceContentType := crawler.DetectedResourceContentType(normalizedURL, responseContentType, body)
+	sample := body
+	actualSize := int64(len(body))
+	if streamBinary {
+		sample = stream.FirstBytes
+		actualSize = stream.Size
+	}
+	resourceContentType = crawler.DetectedResourceContentType(normalizedURL, responseContentType, sample)
 	if !spider.isAllowedResourceContentType(normalizedURL, resourceContentType) {
+		if streamBinary { _ = os.Remove(stream.Path) }
 		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
 		spider.failedTotal++
 		spider.recordRetryableResource(normalizedURL, "content-type", false)
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, response.ContentLength)
 		return nil, fmt.Errorf("resource content-type rejected: %s", resourceContentType)
 	}
-	body = decodeImportedResourceBytes(normalizedURL, body, responseContentType, resourceContentType)
+	if err := spider.consumeImportQuota(actualSize); err != nil {
+		if streamBinary { _ = os.Remove(stream.Path) }
+		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
+		spider.failedTotal++
+		spider.recordRetryableResource(normalizedURL, "site-quota", false)
+		spider.publishResourceProgress("error", normalizedURL, 0, 0, response.ContentLength)
+		return nil, err
+	}
+	if !streamBinary {
+		body = decodeImportedResourceBytes(normalizedURL, body, responseContentType, resourceContentType)
+		actualSize = int64(len(body))
+	}
 	resolvedURL := normalizedURL
 	if response.Request != nil && response.Request.URL != nil {
 		resolvedURL = response.Request.URL.String()
 	}
-	resource := &mirroredResource{url: normalizedURL, resolvedURL: resolvedURL, content: body, contentType: resourceContentType, persist: persist}
-	if persist {
-		assetPath := spider.assetPathFor(body, normalizedURL, resourceContentType)
-		if assetPath != "" {
-			resource.assetPath = assetPath
-		}
+	resource := &mirroredResource{url: normalizedURL, resolvedURL: resolvedURL, content: body, contentType: resourceContentType, sizeBytes: actualSize, persist: persist}
+	if streamBinary {
+		resource.tempFilePath = stream.Path
+		resource.assetPath = spider.assetPathForDigest(stream.SHA256, normalizedURL, resourceContentType)
+	} else if persist {
+		resource.assetPath = spider.assetPathFor(body, normalizedURL, resourceContentType)
 	}
 	spider.resources[normalizedURL] = resource
 	spider.downloadedTotal++
 	spider.clearFailedResource(normalizedURL)
-	spider.publishResourceProgress("downloaded", normalizedURL, 100, int64(len(body)), response.ContentLength)
+	spider.publishResourceProgress("downloaded", normalizedURL, 100, actualSize, response.ContentLength)
 	spider.rewriteNestedResources(resource, depth+1, resourceContentType)
 	return resource, nil
 }
@@ -49899,7 +49942,7 @@ func (a *App) remainingImportResourceQuota(ctx context.Context, domain string) (
 	a.ensureDomainStorageUsageRow(ctx, domain)
 	usage := a.domainStorageUsage(ctx, domain)
 	if usage.LimitBytes <= 0 {
-		return 0, false
+		return 0, true
 	}
 	return max(int64(0), usage.LimitBytes-usage.totalBytes()), true
 }
