@@ -1348,11 +1348,12 @@ func TestGuestPublishedStaticRouteDoesNotWaitForControlDatabaseWriter(t *testing
 	}
 }
 
-func TestPublicBoundaryServesDemoHTMLFromPolicyWithoutSiteDatabase(t *testing.T) {
+func TestPublicBoundaryServesGuestHTMLWithoutSiteDatabase(t *testing.T) {
 	application, _ := newTestApplication(t)
-	const domain = "demo-public-policy.example"
+	const demoDomain = "demo-public-policy.example"
+	const ordinaryDomain = "ordinary-public-policy.example"
 	if err := application.withServerControlDatabaseWrite(context.Background(), "test-demo-policy", func(database *sql.DB) error {
-		return (demo.Store{DB: database}).SaveSettings(context.Background(), domain, "", false, true)
+		return (demo.Store{DB: database}).SaveSettings(context.Background(), demoDomain, "", false, true)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1365,23 +1366,41 @@ func TestPublicBoundaryServesDemoHTMLFromPolicyWithoutSiteDatabase(t *testing.T)
 	stop := make(chan struct{})
 	defer close(stop)
 	application.publicCatalog = publicsite.NewCatalog(application.storagePath, stop)
-	application.writePublishedStaticHTML(domain, "/", "<html><body>demo policy</body></html>")
-	if err := application.writePublicPolicy(domain); err != nil {
-		t.Fatal(err)
+	for domain, body := range map[string]string{demoDomain: "demo policy", ordinaryDomain: "ordinary policy"} {
+		application.writePublishedStaticHTML(domain, "/", "<html><body>"+body+"</body></html>")
+		if err := application.writePublicPolicy(domain); err != nil {
+			t.Fatal(err)
+		}
 	}
-	decision := application.publicCatalog.Lookup(publicsite.Lookup{Host: domain, Path: "/"})
+	decision := application.publicCatalog.Lookup(publicsite.Lookup{Host: demoDomain, Path: "/"})
 	if !decision.Found || !decision.DemoSite {
 		t.Fatalf("demo membership was not published: %+v", decision)
 	}
-	publicBoundary := &App{storagePath: application.storagePath, storageRealRoot: application.storageRealRoot, publicBoundary: true, publicStreamer: publicsite.NewStreamer()}
-	request := withPublicRequestDecision(httptest.NewRequest(http.MethodGet, "https://"+domain+"/", nil), decision)
-	request.Header.Set("If-Modified-Since", time.Now().Add(time.Hour).UTC().Format(http.TimeFormat))
-	response := httptest.NewRecorder()
-	if !publicBoundary.servePublishedStaticFileFromDisk(response, request, domain, "/", true) {
-		t.Fatal("published demo page was not served")
-	}
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "demo policy") || response.Header().Get("Cache-Control") != "no-store" {
-		t.Fatalf("public demo response = %d cache=%q body=%q", response.Code, response.Header().Get("Cache-Control"), response.Body.String())
+	publicBoundary := &App{storagePath: application.storagePath, storageRealRoot: application.storageRealRoot, publicBoundary: true, publicCatalog: application.publicCatalog, publicStreamer: publicsite.NewStreamer()}
+	for _, test := range []struct {
+		domain string
+		body   string
+		demo   bool
+	}{
+		{domain: demoDomain, body: "demo policy", demo: true},
+		{domain: ordinaryDomain, body: "ordinary policy"},
+	} {
+		t.Run(test.domain, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "https://"+test.domain+"/", nil)
+			if test.demo {
+				request.Header.Set("If-Modified-Since", time.Now().Add(time.Hour).UTC().Format(http.TimeFormat))
+			}
+			response := httptest.NewRecorder()
+			if !publicBoundary.servePublicPublished(response, request, false) {
+				t.Fatal("published guest page was not served")
+			}
+			if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), test.body) {
+				t.Fatalf("public response = %d body=%q", response.Code, response.Body.String())
+			}
+			if got := response.Header().Get("Cache-Control"); (got == "no-store") != test.demo {
+				t.Fatalf("public cache policy = %q, demo=%t", got, test.demo)
+			}
+		})
 	}
 }
 
