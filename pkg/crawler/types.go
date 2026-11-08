@@ -26,6 +26,8 @@ type ImportRequest struct {
 	ProgressToken            string
 	DownloadTotal            int
 	DownloadTotalBytes       int64
+	ResourceBudgetBytes      int64
+	ResourceBudgetKnown      bool
 	SelectedResourceURLs     map[string]struct{}
 	SourceOptions            SourceOptions
 	AutoDetectTemplates      bool
