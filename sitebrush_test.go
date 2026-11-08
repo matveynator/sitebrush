@@ -501,13 +501,14 @@ func TestSinglePageImportRetainsParentContextForServiceDocuments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	spider, _ := prepareSinglePageImport(grabImportRequest{
+	spider, _ := (&App{}).prepareSinglePageImport(grabImportRequest{
 		Domain:          "trial.example.org",
 		PagePath:        "/",
 		SourceURL:       sourceURL.String(),
 		RemoteSourceURL: sourceURL,
 		HTML:            "<html><body></body></html>",
 		Context:         parentContext,
+		PreviewOnly:     true,
 	}, nil)
 	if spider.context() != parentContext || spider.context().Err() != nil {
 		t.Fatal("service-document requests lost their live parent context")
@@ -25842,10 +25843,14 @@ func TestPageSavePublishesStylesheetWhitespaceAndDoctypeChanges(t *testing.T) {
 }
 
 func TestDemoRefreshReplacesPageSetAndFirstImportCreatesDatabase(t *testing.T) {
+	pageVersion := "Home"
 	previousClient := newGrabHTTPClient
 	newGrabHTTPClient = func() *http.Client {
 		return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-			html := `<!doctype html><html><body><a href="/about">About</a><p>Home</p></body></html>`
+			if request.Header.Get("Cache-Control") != "no-cache" {
+				t.Errorf("refresh request omitted cache revalidation: %s", request.URL)
+			}
+			html := `<!doctype html><html><body><a href="/about">About</a><p>` + pageVersion + `</p></body></html>`
 			if strings.HasPrefix(request.URL.Path, "/about") {
 				html = `<!doctype html><html><body><p>About</p></body></html>`
 			}
@@ -25889,6 +25894,98 @@ func TestDemoRefreshReplacesPageSetAndFirstImportCreatesDatabase(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(application.domainStaticDir(domain), "obsolete.html")); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("old publication exists: %v", err)
 		}
+	}
+	pageVersion = "Homa" // Same byte length must still replace the cached page.
+	if _, _, err := application.ensureDemoSiteReady(context.Background(), settings, true, ""); err != nil {
+		t.Fatal(err)
+	}
+	var refreshedHTML string
+	if err := application.db.QueryRowContext(domainContext, `SELECT html FROM pages WHERE domain=? AND path='/'`, domain).Scan(&refreshedHTML); err != nil || !strings.Contains(refreshedHTML, pageVersion) {
+		t.Fatalf("same-length page change was not imported: html=%q err=%v", refreshedHTML, err)
+	}
+}
+
+func TestStreamedImportReusesExistingAssetWithNoRemainingBudget(t *testing.T) {
+	application, _ := newTestApplication(t)
+	assetURL, err := url.Parse("https://assets.example/film.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assetBody := strings.Repeat("M", 2<<20)
+	newSpider := func(budget int64) *pageSpider {
+		spider := newPageSpider("localhost", assetURL, 1, nil, "", grabSourceOptions{})
+		spider.storage = application
+		spider.siteLimitBytes = 4 << 20
+		spider.quotaBudgetKnown = true
+		spider.quotaBudgetBytes = budget
+		spider.client = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			return fakeGrabResponse{contentType: "application/octet-stream", body: assetBody}.httpResponse(request), nil
+		})}
+		return spider
+	}
+	first := newSpider(4 << 20)
+	resource, err := first.fetchResource(assetURL.String(), assetURL, 0, true)
+	if err != nil || resource.tempFilePath == "" || resource.content != nil || resource.contentType != "video/mp4" {
+		t.Fatalf("first file was not streamed: resource=%+v err=%v", resource, err)
+	}
+	if err := application.persistSpiderAssets(context.Background(), first, "/"); err != nil {
+		t.Fatal(err)
+	}
+	second := newSpider(0)
+	defer second.cleanupStreamedFiles()
+	if _, err := second.fetchResource(assetURL.String(), assetURL, 0, true); err != nil {
+		t.Fatalf("existing content-hash asset was charged again: %v", err)
+	}
+}
+
+func TestImportPreviewKeepsLargeBinaryOutOfMemoryAndStaging(t *testing.T) {
+	assetURL, err := url.Parse("https://assets.example/film.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const declaredSize = int64(100) << 30
+	spider := newPreviewPageSpider("localhost", assetURL, 1, nil, "", grabSourceOptions{})
+	spider.client = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode:    http.StatusOK,
+			Status:        "200 OK",
+			Header:        http.Header{"Content-Type": {"video/mp4"}},
+			Body:          io.NopCloser(strings.NewReader(strings.Repeat("M", 1024))),
+			ContentLength: declaredSize,
+			Request:       request,
+		}, nil
+	})}
+	resource, err := spider.fetchResource(assetURL.String(), assetURL, 0, true)
+	if err != nil || resource.sizeBytes != declaredSize || resource.content != nil || resource.tempFilePath != "" {
+		t.Fatalf("preview buffered large media: resource=%+v err=%v", resource, err)
+	}
+}
+
+func TestImportRejectsMislabelledHTMLWithoutStaging(t *testing.T) {
+	application, _ := newTestApplication(t)
+	resourceURL, err := url.Parse("https://assets.example/document.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	spider := newPageSpider("localhost", resourceURL, 1, nil, "", grabSourceOptions{})
+	spider.storage = application
+	spider.siteLimitBytes = 1 << 20
+	spider.quotaBudgetKnown = true
+	spider.quotaBudgetBytes = 1 << 20
+	spider.client = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return fakeGrabResponse{contentType: "application/octet-stream", body: "<!doctype html><html><body>document</body></html>"}.httpResponse(request), nil
+	})}
+	_, err = spider.fetchResource(resourceURL.String(), resourceURL, 0, true)
+	if err == nil || !strings.Contains(err.Error(), "content-type rejected") {
+		t.Fatalf("mislabelled HTML was accepted: %v", err)
+	}
+	stageDirectory, err := application.importStagingDirectory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(stageDirectory)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("rejected response left staged files: entries=%v err=%v", entries, err)
 	}
 }
 
@@ -26718,6 +26815,50 @@ func TestDemoSnapshotRestoreHonorsNewQuotaBeforeReplacingContent(t *testing.T) {
 	var retained string
 	if err := application.db.QueryRowContext(ctx, `SELECT html FROM pages WHERE domain=? AND path='/'`, domain).Scan(&retained); err != nil || retained != large {
 		t.Fatal("failed restore removed working content")
+	}
+}
+
+func TestDemoSnapshotRestoreStreamsMediaLargerThanPublicBackupLimit(t *testing.T) {
+	application := newRouterTestApplication(t)
+	control := setupBillingOwnerForTest(t, application, "owner.example", "owner@example.com", true)
+	defer control.Close()
+	const domain = "snapshot-media.example"
+	const mediaSize = int64(129) << 20
+	settings := demo.Settings{Domain: domain, Enabled: true, MaxSiteBytes: 256 << 20}
+	if _, _, err := application.ensureDemoSiteReady(context.Background(), settings, true, ""); err != nil {
+		t.Fatal(err)
+	}
+	mediaPath := filepath.Join(application.domainFilesDirForDomain(domain), "film.mp4")
+	if err := os.MkdirAll(filepath.Dir(mediaPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mediaFile, err := os.Create(mediaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mediaFile.Truncate(mediaSize); err != nil {
+		mediaFile.Close()
+		t.Fatal(err)
+	}
+	if err := mediaFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx := contextWithDomain(context.Background(), domain)
+	if err := application.createDemoSiteSnapshot(ctx, domain); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(mediaPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.restoreDemoSiteFromSnapshot(ctx, domain); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(mediaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != mediaSize {
+		t.Fatalf("restored media size=%d, want %d", info.Size(), mediaSize)
 	}
 }
 

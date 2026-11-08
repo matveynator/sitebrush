@@ -3740,6 +3740,7 @@ type grabPreviewResponse struct {
 	EstimatedImportBytes  int64                 `json:"estimated_import_bytes"`
 	ProjectedUsedBytes    int64                 `json:"projected_used_bytes"`
 	FitsQuota             bool                  `json:"fits_quota"`
+	EstimateComplete      bool                  `json:"estimate_complete"`
 }
 
 type publicTrialResourceCounts struct {
@@ -9894,6 +9895,7 @@ func cleanStoragePath(storagePath string) string {
 
 func prepareStorageJailRoot(storagePath string) (string, error) {
 	cleanedStoragePath := cleanStoragePath(storagePath)
+	// #nosec G703 -- storagePath is the administrator-selected root, not a request path; child paths are confined by storagejail.
 	if err := os.MkdirAll(cleanedStoragePath, 0o755); err != nil {
 		return "", err
 	}
@@ -14909,7 +14911,8 @@ func (a *App) runAIImport(request aiimport.Request, id string, stop <-chan struc
 		}
 		return result, err
 	}
-	spider, importedHTML := prepareSinglePageImport(importRequest, a.grabTracker)
+	spider, importedHTML := a.prepareSinglePageImport(importRequest, a.grabTracker)
+	defer spider.cleanupStreamedFiles()
 	if boundary.Err() != nil {
 		return crawler.ImportResult{}, boundary.Err()
 	}
@@ -14998,11 +15001,16 @@ func ensurePageRevision(ctx context.Context, database sqlExecutor, domain, pageP
 }
 
 func (a *App) persistImportedPages(ctx context.Context, domain, ownerPath string, pages []wholeSiteImportedPage, spider *pageSpider, draftOnly bool) error {
+	if spider != nil {
+		defer spider.cleanupStreamedFiles()
+	}
 	frozen := draftOnly || a.isDomainFrozen(ctx, domain)
 	a.ensureDomainStorageUsageRow(ctx, domain)
 	type assetWrite struct {
 		filename, name, contentType string
 		content, previous           []byte
+		sourceFile                  string
+		sizeBytes                   int64
 		existed                     bool
 	}
 	written := []assetWrite{}
@@ -15117,7 +15125,7 @@ func (a *App) persistImportedPages(ctx context.Context, domain, ownerPath string
 		if spider != nil {
 			references := make(map[string]bool)
 			for _, resource := range spider.resources {
-				if resource == nil || resource.content == nil || !resource.persist || strings.TrimSpace(resource.assetPath) == "" {
+				if resource == nil || (resource.content == nil && resource.tempFilePath == "") || !resource.persist || strings.TrimSpace(resource.assetPath) == "" {
 					continue
 				}
 				name := publicAssetReferenceFromPath(resource.assetPath)
@@ -15125,19 +15133,35 @@ func (a *App) persistImportedPages(ctx context.Context, domain, ownerPath string
 					continue
 				}
 				references[name] = true
-				asset := assetWrite{filename: filepath.Join(a.domainFilesDirForDomain(domain), filepath.FromSlash(name)), name: name, content: resource.content, contentType: resource.contentType}
-				previous, err := a.readFileInsideStorage(asset.filename)
-				if err != nil && !errors.Is(err, os.ErrNotExist) {
-					return err
+				asset := assetWrite{filename: filepath.Join(a.domainFilesDirForDomain(domain), filepath.FromSlash(name)), name: name, content: resource.content, sourceFile: resource.tempFilePath, contentType: resource.contentType, sizeBytes: int64(len(resource.content))}
+				if asset.sourceFile != "" {
+					asset.sizeBytes = resource.sizeBytes
+					info, statErr := a.statInsideStorage(asset.filename)
+					if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+						return statErr
+					}
+					asset.existed = statErr == nil
+					if asset.existed && info.Size() != asset.sizeBytes {
+						return errors.New("imported content-hash resource has conflicting size")
+					}
+				} else {
+					previous, readErr := a.readFileInsideStorage(asset.filename)
+					if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+						return readErr
+					}
+					asset.existed, asset.previous = readErr == nil, previous
 				}
-				asset.existed, asset.previous = err == nil, previous
 				if asset.contentType == "" {
 					asset.contentType = mime.TypeByExtension(path.Ext(name))
 				}
-				if versionedAssets && asset.existed && !bytes.Equal(previous, asset.content) {
-					fileDelta += int64(len(asset.content))
+				if asset.sourceFile != "" {
+					if !asset.existed {
+						fileDelta += asset.sizeBytes
+					}
+				} else if versionedAssets && asset.existed && !bytes.Equal(asset.previous, asset.content) {
+					fileDelta += asset.sizeBytes
 				} else {
-					fileDelta += int64(len(asset.content) - len(previous))
+					fileDelta += asset.sizeBytes - int64(len(asset.previous))
 				}
 				assets = append(assets, asset)
 			}
@@ -15157,7 +15181,18 @@ func (a *App) persistImportedPages(ctx context.Context, domain, ownerPath string
 			return errors.New("storage limit reached: site quota exceeded")
 		}
 		for _, asset := range assets {
-			if !asset.existed || !bytes.Equal(asset.previous, asset.content) {
+			if asset.sourceFile != "" {
+				if !asset.existed {
+					target, pathErr := a.writablePathInsideStorageSubtree(a.domainFilesDirForDomain(domain), asset.filename)
+					if pathErr != nil {
+						return pathErr
+					}
+					if err := a.writeAtomicStreamedImportAsset(target, asset.sourceFile); err != nil {
+						return err
+					}
+					written = append(written, asset)
+				}
+			} else if !asset.existed || !bytes.Equal(asset.previous, asset.content) {
 				if err := a.writeAtomicStorageFile(asset.filename, asset.content); err != nil {
 					return err
 				}
@@ -15166,7 +15201,7 @@ func (a *App) persistImportedPages(ctx context.Context, domain, ownerPath string
 			if asset.name == "" {
 				continue
 			}
-			if err := updateOrInsertFileMetadata(ctx, transaction, domainStorageName(domain), asset.name, cleanPath(ownerPath), len(asset.content), asset.contentType, time.Now().UTC().Format(time.RFC3339), "import"); err != nil {
+			if err := updateOrInsertFileMetadata(ctx, transaction, domainStorageName(domain), asset.name, cleanPath(ownerPath), asset.sizeBytes, asset.contentType, time.Now().UTC().Format(time.RFC3339), "import"); err != nil {
 				return err
 			}
 		}
@@ -20912,7 +20947,7 @@ func (a *App) prepareDemoSiteRuntime(stop <-chan struct{}, requests chan<- demoS
 func (a *App) refreshDemoSiteRuntime(stop <-chan struct{}, requests chan<- demoSiteRuntimeRequest, settings demo.Settings, adminEmail string) {
 	retryDelay := 30 * time.Second
 	for {
-		refreshContext, cancelRefresh := context.WithTimeout(context.Background(), 15*time.Minute)
+		refreshContext, cancelRefresh := context.WithCancel(context.Background())
 		go func() {
 			select {
 			case <-stop:
@@ -21472,7 +21507,9 @@ func (a *App) importDemoSiteContent(ctx context.Context, domain string, settings
 		}
 		return failedTotal, err
 	}
-	spider, importedHTML := prepareSinglePageImport(grabImportRequest{Domain: domain, PagePath: "/", SourceURL: resolvedSourceURL.String(), RemoteSourceURL: resolvedSourceURL, HTML: string(htmlBytes), ProgressToken: progressToken, PreserveFailedReferences: true}, a.grabTracker)
+	resourceBudget, budgetKnown := a.remainingImportResourceQuota(domainContext, domain)
+	spider, importedHTML := a.prepareSinglePageImport(grabImportRequest{Domain: domain, PagePath: "/", SourceURL: resolvedSourceURL.String(), RemoteSourceURL: resolvedSourceURL, HTML: string(htmlBytes), ProgressToken: progressToken, PreserveFailedReferences: true, ResourceBudgetBytes: resourceBudget, ResourceBudgetKnown: budgetKnown}, a.grabTracker)
+	defer spider.cleanupStreamedFiles()
 	importedPages := []wholeSiteImportedPage{{SourceURL: resolvedSourceURL.String(), LocalPath: "/", HTML: importedHTML}}
 	importedPages = append(importedPages, importServiceDocuments(spider, resolvedSourceURL, string(htmlBytes), domain, "/")...)
 	if spider.publicResourcePaths["/favicon.ico"] != "" || spider.serviceManifestPath != "" {
@@ -21516,14 +21553,22 @@ func (a *App) demoGrabPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ownerMatchesDemo := false
+	var demoLimitBytes int64
+	var invalidSizeErr error
 	err := a.withServerControlDatabaseRead(r.Context(), "demo-preview-owner-check", func(database *sql.DB) error {
 		if ownerDomain, found := (hostingandsupport.Store{DB: database}).OwnerDomain(r.Context()); found {
 			ownerMatchesDemo = normalizeDomainName(ownerDomain) == domain
 		}
-		return nil
+		previous := (demo.Store{DB: database}).Settings(r.Context())
+		demoLimitBytes, invalidSizeErr = parseCreationSize(r.FormValue("demo_site_max_size"), previous.MaxSiteBytes)
+		return invalidSizeErr
 	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		statusCode := http.StatusInternalServerError
+		if invalidSizeErr != nil {
+			statusCode = http.StatusBadRequest
+		}
+		http.Error(w, err.Error(), statusCode)
 		return
 	}
 	if ownerMatchesDemo {
@@ -21555,7 +21600,7 @@ func (a *App) demoGrabPreview(w http.ResponseWriter, r *http.Request) {
 		importedPages = wholeSitePreview.ImportedPages
 		previewSpider = wholeSitePreview.Spider
 	} else {
-		previewSpider, importedHTML := prepareSinglePageImport(grabImportRequest{Domain: domain, PagePath: pagePath, SourceURL: remoteSourceURL.String(), RemoteSourceURL: remoteSourceURL, HTML: string(htmlBytes), ProgressToken: progressToken}, a.grabTracker)
+		previewSpider, importedHTML := a.prepareSinglePageImport(grabImportRequest{Domain: domain, PagePath: pagePath, SourceURL: remoteSourceURL.String(), RemoteSourceURL: remoteSourceURL, HTML: string(htmlBytes), ProgressToken: progressToken, PreviewOnly: true}, a.grabTracker)
 		resources = previewResourcesFromSpider(previewSpider, map[string]struct{}{remoteSourceURL.String(): {}})
 		importedPages = []wholeSiteImportedPage{{SourceURL: remoteSourceURL.String(), LocalPath: pagePath, HTML: importedHTML}}
 	}
@@ -21564,8 +21609,19 @@ func (a *App) demoGrabPreview(w http.ResponseWriter, r *http.Request) {
 		pageDownloadBytes += int64(len([]byte(importedPage.HTML)))
 	}
 	selectedResourceBytes := sumGrabPreviewResourceBytes(resources)
-	domainContext := contextWithDomain(r.Context(), domain)
-	quotaEstimate := a.estimateImportQuota(domainContext, domain, importedPages, previewSpider)
+	// A refresh swaps in a new site. The old site's bytes do not consume the
+	// replacement's quota, even when the source URLs are unchanged.
+	pageStorageBytes := pageDownloadBytes * 4
+	estimatedImportBytes := pageStorageBytes + selectedResourceBytes
+	limitBytes := demoSizeLimit(demo.Settings{MaxSiteBytes: demoLimitBytes})
+	estimateComplete := true
+	for _, resource := range resources {
+		if resource.SizeBytes < 0 {
+			estimateComplete = false
+			break
+		}
+	}
+	quotaEstimate := importQuotaEstimate{PageStorageBytes: pageStorageBytes, ResourceBytes: selectedResourceBytes, EstimatedImportBytes: estimatedImportBytes, LimitBytes: limitBytes, FreeBytes: limitBytes, ProjectedUsedBytes: estimatedImportBytes, FitsQuota: estimatedImportBytes <= limitBytes, EstimateComplete: estimateComplete}
 	w.Header().Set("Content-Type", "application/json")
 	encodeErr := json.NewEncoder(w).Encode(grabPreviewResponse{
 		SourceURL:             remoteSourceURL.String(),
@@ -21583,6 +21639,7 @@ func (a *App) demoGrabPreview(w http.ResponseWriter, r *http.Request) {
 		EstimatedImportBytes:  quotaEstimate.EstimatedImportBytes,
 		ProjectedUsedBytes:    quotaEstimate.ProjectedUsedBytes,
 		FitsQuota:             quotaEstimate.FitsQuota,
+		EstimateComplete:      quotaEstimate.EstimateComplete,
 	})
 	if encodeErr != nil {
 		a.logProblemEvent("demo grab preview response failed domain=%s source=%s error=%v duration=%s", domain, sourceURL, encodeErr, time.Since(startedAt).String())
@@ -21609,16 +21666,22 @@ func (a *App) demoGrabRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	demoCopyWholeSite := demoCopyWholeSiteFromRequest(r)
 	var demoLimitBytes int64
+	var invalidSizeErr error
 	err := a.withServerControlDatabaseWrite(r.Context(), "demo-refresh-settings", func(database *sql.DB) error {
 		store := hostingandsupport.Store{DB: database}
 		if ownerDomain, found := store.OwnerDomain(r.Context()); found && normalizeDomainName(ownerDomain) == demoDomain {
 			return errors.New("Сайт владельца сервера нельзя использовать как публичный демо-сайт.")
 		}
-		demoLimitBytes = (demo.Store{DB: database}).Settings(r.Context()).MaxSiteBytes
-		return (demo.Store{DB: database}).SaveSettings(r.Context(), demoDomain, demoSourceURL, demoCopyWholeSite, true)
+		demoStore := demo.Store{DB: database}
+		previous := demoStore.Settings(r.Context())
+		demoLimitBytes, invalidSizeErr = parseCreationSize(r.FormValue("demo_site_max_size"), previous.MaxSiteBytes)
+		if invalidSizeErr != nil {
+			return invalidSizeErr
+		}
+		return demoStore.SaveSettingsWithLimit(r.Context(), demoDomain, demoSourceURL, demoCopyWholeSite, true, demoLimitBytes)
 	})
 	if err != nil {
-		if strings.Contains(err.Error(), "владельца сервера") {
+		if invalidSizeErr != nil || strings.Contains(err.Error(), "владельца сервера") {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -21698,6 +21761,10 @@ func (a *App) retryDemoFailedResources(ctx context.Context, settings demo.Settin
 		return 0, err
 	}
 	spider := newPageSpider(settings.Domain, remoteSourceURL, grabResourceMaxDepth, a.grabTracker, progressToken, grabSourceOptions{})
+	defer spider.cleanupStreamedFiles()
+	spider.storage = a
+	spider.siteLimitBytes = a.storedDomainStorageUsage(contextWithDomain(ctx, settings.Domain), settings.Domain).LimitBytes
+	spider.quotaBudgetBytes, spider.quotaBudgetKnown = a.remainingImportResourceQuota(ctx, settings.Domain)
 	spider.selectedResourceURLs = failedResourceURLs
 	spider.publicAssetBasePath = "/"
 	resourceURLs := make([]string, 0, len(failedResourceURLs))
@@ -21742,7 +21809,7 @@ func importedResourceReplacements(spider *pageSpider) map[string]string {
 		return replacements
 	}
 	for resourceURL, resource := range spider.resources {
-		if resource == nil || !resource.persist || strings.TrimSpace(resource.assetPath) == "" || resource.content == nil {
+		if resource == nil || !resource.persist || strings.TrimSpace(resource.assetPath) == "" || (resource.content == nil && resource.tempFilePath == "") {
 			continue
 		}
 		replacements[resourceURL] = crawler.NormalizeMirroredAssetReference(resource.assetPath)
@@ -21912,8 +21979,19 @@ func (a *App) restoreDemoSiteFromSnapshot(ctx context.Context, domain string) er
 		return err
 	}
 	limitBytes := a.storedDomainStorageUsage(contextWithDomain(ctx, domain), domain).LimitBytes
+	if limitBytes <= 0 {
+		return errors.New("demo snapshot quota is unavailable")
+	}
 	if err = a.withStagedDemoContent(ctx, domain, limitBytes, func(staged *App) error {
-		_, importErr := staged.importDomainBackupZIP(contextWithDomain(ctx, domain), domain, "/", zipReader)
+		// The snapshot was produced by this installation; the public backup upload
+		// limits must not prevent restoration of an otherwise valid demo site.
+		archiveLimit := limitBytes
+		if archiveLimit <= math.MaxInt64/4 {
+			archiveLimit *= 4
+		} else {
+			archiveLimit = math.MaxInt64
+		}
+		_, importErr := staged.importDomainBackupZIPWithLimits(contextWithDomain(ctx, domain), domain, "/", zipReader, archiveLimit, limitBytes)
 		return importErr
 	}); err != nil {
 		return err
@@ -22919,6 +22997,7 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 		SelectedResourceURLs: selectedGrabResourceURLs(r),
 		AutoDetectTemplates:  grabAutoDetectSiteBrushTemplate(r),
 	}
+	importRequest.ResourceBudgetBytes, importRequest.ResourceBudgetKnown = a.remainingImportResourceQuota(importContext, domain)
 	if grabCopyWholeSite(r) {
 		importResult, importErr := a.importWholeRemoteSite(importContext, importRequest)
 		if importErr != nil {
@@ -22937,7 +23016,8 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 		httpsecurity.RedirectLocal(w, r, importResult.RedirectPath, http.StatusFound)
 		return
 	}
-	spider, html := prepareSinglePageImport(importRequest, a.grabTracker)
+	spider, html := a.prepareSinglePageImport(importRequest, a.grabTracker)
+	defer spider.cleanupStreamedFiles()
 	importedPages := []wholeSiteImportedPage{{SourceURL: sourceURL, LocalPath: pagePath, HTML: html}}
 	importedPages = append(importedPages, importServiceDocuments(spider, remoteSourceURL, importRequest.HTML, domain, pagePath)...)
 	if spider.publicResourcePaths["/favicon.ico"] != "" || spider.serviceManifestPath != "" {
@@ -25491,6 +25571,10 @@ func (a *App) retryImportedPageResources(ctx context.Context, importRequest grab
 		return grabImportResult{RedirectPath: cleanPath(importRequest.PagePath)}, nil
 	}
 	spider := newPageSpider(importRequest.Domain, importRequest.RemoteSourceURL, grabResourceMaxDepth, a.grabTracker, importRequest.ProgressToken, importRequest.SourceOptions)
+	defer spider.cleanupStreamedFiles()
+	spider.storage = a
+	spider.siteLimitBytes = a.storedDomainStorageUsage(contextWithDomain(ctx, importRequest.Domain), importRequest.Domain).LimitBytes
+	spider.quotaBudgetBytes, spider.quotaBudgetKnown = a.remainingImportResourceQuota(ctx, importRequest.Domain)
 	spider.setContext(importRequest.Context)
 	spider.setDownloadPlan(importRequest.DownloadTotal, importRequest.DownloadTotalBytes)
 	spider.selectedResourceURLs = importRequest.SelectedResourceURLs
@@ -25573,7 +25657,7 @@ func (a *App) grabPreview(w http.ResponseWriter, r *http.Request) {
 		importedPages = wholeSitePreview.ImportedPages
 		previewSpider = wholeSitePreview.Spider
 	} else {
-		previewSpider, importedHTML := prepareSinglePageImport(grabImportRequest{Domain: domain, PagePath: pagePath, SourceURL: sourceURL, RemoteSourceURL: remoteSourceURL, HTML: string(htmlBytes), Context: r.Context(), ProgressToken: progressToken, SourceOptions: sourceOptions}, a.grabTracker)
+		previewSpider, importedHTML := a.prepareSinglePageImport(grabImportRequest{Domain: domain, PagePath: pagePath, SourceURL: sourceURL, RemoteSourceURL: remoteSourceURL, HTML: string(htmlBytes), Context: r.Context(), ProgressToken: progressToken, SourceOptions: sourceOptions, PreviewOnly: true}, a.grabTracker)
 		resources = previewResourcesFromSpider(previewSpider, map[string]struct{}{sourceURL: {}})
 		importedPages = []wholeSiteImportedPage{{SourceURL: sourceURL, LocalPath: pagePath, HTML: importedHTML}}
 	}
@@ -25599,6 +25683,7 @@ func (a *App) grabPreview(w http.ResponseWriter, r *http.Request) {
 		EstimatedImportBytes:  quotaEstimate.EstimatedImportBytes,
 		ProjectedUsedBytes:    quotaEstimate.ProjectedUsedBytes,
 		FitsQuota:             quotaEstimate.FitsQuota,
+		EstimateComplete:      quotaEstimate.EstimateComplete,
 	})
 	if encodeErr != nil {
 		a.logProblemEvent("grab preview response failed source=%s error=%v duration=%s", sourceURL, encodeErr, time.Since(startedAt).String())
@@ -26097,6 +26182,8 @@ func doGrabGETContext(ctx context.Context, client *http.Client, rawURL string, s
 
 func applyGrabRequestHeaders(request *http.Request, sourceOptions grabSourceOptions) {
 	request.Header.Set("User-Agent", "Mozilla/5.0 (compatible; SiteBrush/1.0)")
+	request.Header.Set("Cache-Control", "no-cache")
+	request.Header.Set("Pragma", "no-cache")
 	peerAttestation := strings.TrimSpace(sourceOptions.PeerAttestation)
 	if peerAttestation != "" {
 		timestamp := time.Now().UTC().Format(time.RFC3339Nano)
@@ -26238,11 +26325,25 @@ type importQuotaEstimate struct {
 	FreeBytes            int64
 	ProjectedUsedBytes   int64
 	FitsQuota            bool
+	EstimateComplete     bool
 }
 
 func (a *App) estimateImportQuota(ctx context.Context, domain string, importedPages []wholeSiteImportedPage, spider *pageSpider) importQuotaEstimate {
 	pageDelta, publishedPageDelta, revisionDelta, publishedStaticDelta := a.estimateImportedPagesStorageDelta(ctx, domain, importedPages)
 	resourceBytes := a.estimateImportedFileDelta(domain, spider)
+	estimateComplete := true
+	if spider != nil && spider.previewOnly {
+		for _, resource := range spider.resources {
+			if resource == nil || !resource.persist || resource.content != nil || resource.assetPath != "" {
+				continue
+			}
+			if resource.sizeBytes < 0 {
+				estimateComplete = false
+				continue
+			}
+			resourceBytes += resource.sizeBytes
+		}
+	}
 	usage := a.domainStorageUsage(ctx, domain)
 	currentUsedBytes := usage.totalBytes()
 	estimatedImportBytes := pageDelta + publishedPageDelta + revisionDelta + publishedStaticDelta + resourceBytes
@@ -26257,6 +26358,7 @@ func (a *App) estimateImportQuota(ctx context.Context, domain string, importedPa
 		FreeBytes:            freeBytes,
 		ProjectedUsedBytes:   projectedUsedBytes,
 		FitsQuota:            projectedUsedBytes <= usage.LimitBytes,
+		EstimateComplete:     estimateComplete,
 	}
 }
 
@@ -26276,14 +26378,27 @@ func previewGrabResources(pageURL *url.URL, htmlSource string, tracker *grabProg
 	return resources
 }
 
-func prepareSinglePageImport(importRequest grabImportRequest, tracker *grabProgressTracker) (*pageSpider, string) {
+func (a *App) prepareSinglePageImport(importRequest grabImportRequest, tracker *grabProgressTracker) (*pageSpider, string) {
 	spider := newPageSpider(importRequest.Domain, importRequest.RemoteSourceURL, 8, tracker, importRequest.ProgressToken, importRequest.SourceOptions)
+	spider.previewOnly = importRequest.PreviewOnly
+	if !spider.previewOnly && a != nil && a.db != nil {
+		quotaContext := importRequest.Context
+		if quotaContext == nil {
+			quotaContext = context.Background()
+		}
+		spider.storage = a
+		spider.siteLimitBytes = a.storedDomainStorageUsage(contextWithDomain(quotaContext, importRequest.Domain), importRequest.Domain).LimitBytes
+		if !importRequest.ResourceBudgetKnown {
+			importRequest.ResourceBudgetBytes, importRequest.ResourceBudgetKnown = a.remainingImportResourceQuota(quotaContext, importRequest.Domain)
+		}
+	}
+	spider.quotaBudgetBytes, spider.quotaBudgetKnown = importRequest.ResourceBudgetBytes, importRequest.ResourceBudgetKnown
 	spider.maxResources = 512
 	parentContext := importRequest.Context
 	if parentContext == nil {
 		parentContext = context.Background()
 	}
-	resourceContext, stopResources := context.WithTimeout(parentContext, 3*time.Minute)
+	resourceContext, stopResources := context.WithCancel(parentContext)
 	// Service documents are imported by the caller after page discovery returns.
 	// Restore its live parent before closing the bounded resource request window.
 	defer func() {
@@ -26956,6 +27071,13 @@ func (a *App) prepareWholeRemoteSiteImport(importRequest grabImportRequest) (*pa
 		return nil, nil, nil, errors.New("source_url is invalid")
 	}
 	spider := newPageSpider(importRequest.Domain, startURL, grabResourceMaxDepth, a.grabTracker, importRequest.ProgressToken, importRequest.SourceOptions)
+	spider.storage = a
+	quotaContext := importRequest.Context
+	if quotaContext == nil {
+		quotaContext = context.Background()
+	}
+	spider.siteLimitBytes = a.storedDomainStorageUsage(contextWithDomain(quotaContext, importRequest.Domain), importRequest.Domain).LimitBytes
+	spider.quotaBudgetBytes, spider.quotaBudgetKnown = importRequest.ResourceBudgetBytes, importRequest.ResourceBudgetKnown
 	spider.preserveFailedReferences = importRequest.PreserveFailedReferences
 	spider.setContext(importRequest.Context)
 	spider.setDownloadPlan(importRequest.DownloadTotal, importRequest.DownloadTotalBytes)
@@ -27136,6 +27258,7 @@ func (a *App) loadExistingImportedResources(ctx context.Context, domain string, 
 }
 
 func (a *App) importWholeRemoteSite(ctx context.Context, importRequest grabImportRequest) (grabImportResult, error) {
+	importRequest.ResourceBudgetBytes, importRequest.ResourceBudgetKnown = a.remainingImportResourceQuota(ctx, importRequest.Domain)
 	importRequest.PagePath = cleanPath(importRequest.PagePath)
 	if importRequest.RemoteSourceURL == nil || importRequest.RemoteSourceURL.Hostname() == "" {
 		return grabImportResult{}, errors.New("source_url is invalid")
@@ -27188,6 +27311,9 @@ func (a *App) importWholeRemoteSite(ctx context.Context, importRequest grabImpor
 		}
 	}
 	spider, importedPages, completedPageKeys, prepareErr := a.prepareWholeRemoteSiteImport(importRequest)
+	if spider != nil {
+		defer spider.cleanupStreamedFiles()
+	}
 	if prepareErr != nil {
 		if importRequest.ImportID != "" {
 			cleanupContext, cancelCleanup := wholeSiteImportCleanupContext(ctx)
@@ -27659,7 +27785,7 @@ func (a *App) estimateImportedFileDelta(domain string, spider *pageSpider) int64
 	var fileDelta int64
 	accountedAssetReferences := make(map[string]struct{})
 	for _, resource := range spider.resources {
-		if resource == nil || !resource.persist || strings.TrimSpace(resource.assetPath) == "" || resource.content == nil {
+		if resource == nil || !resource.persist || strings.TrimSpace(resource.assetPath) == "" || (resource.content == nil && resource.tempFilePath == "") {
 			continue
 		}
 		assetReference := publicAssetReferenceFromPath(resource.assetPath)
@@ -27673,8 +27799,18 @@ func (a *App) estimateImportedFileDelta(domain string, spider *pageSpider) int64
 		targetFilePath := filepath.Join(baseDir, filepath.FromSlash(assetReference))
 		existingSize := a.fileSizeInsideStorage(targetFilePath)
 		newSize := int64(len(resource.content))
+		if resource.tempFilePath != "" {
+			newSize = resource.sizeBytes
+			if existingSize == newSize {
+				continue
+			}
+		}
 		if existingSize <= 0 {
 			fileDelta += newSize
+			continue
+		}
+		if resource.tempFilePath != "" {
+			fileDelta += newSize - existingSize
 			continue
 		}
 		if _, err := a.statInsideStorage(filepath.Join(filepath.Dir(a.storageRootDir()), filepath.Dir(sitefreeze.ObjectPath(domain, strings.Repeat("0", 64))))); err == nil {
@@ -43024,7 +43160,7 @@ func (a *App) storePreparedImageReplacement(r *http.Request, currentPath string,
 	return a.storePreparedFiles(r.Context(), a.siteDomain(r.Context(), r), currentPath, prepared)
 }
 
-func updateOrInsertFileMetadata(ctx context.Context, database sqlExecutor, domain, filename, pagePath string, size int, mime, now, source string) error {
+func updateOrInsertFileMetadata(ctx context.Context, database sqlExecutor, domain, filename, pagePath string, size int64, mime, now, source string) error {
 	if _, err := database.ExecContext(ctx, `DELETE FROM site_hidden_assets WHERE domain=? AND tree='files' AND path=?`, domain, filename); err != nil {
 		return err
 	}
@@ -43103,7 +43239,7 @@ func (a *App) storePreparedFilesWithPrefix(ctx context.Context, domain, currentP
 				}
 				created = append(created, target)
 			}
-			if err := updateOrInsertFileMetadata(ctx, transaction, domainStorageName(domain), write.name, currentPath, len(write.file.Content), write.file.MIME, now, "upload"); err != nil {
+			if err := updateOrInsertFileMetadata(ctx, transaction, domainStorageName(domain), write.name, currentPath, int64(len(write.file.Content)), write.file.MIME, now, "upload"); err != nil {
 				return err
 			}
 		}
@@ -49036,7 +49172,8 @@ func contentHashName(fileBytes []byte, extension string) (string, error) {
 }
 
 func (a *App) mirrorRemotePage(domain, pagePath, sourceURL string, pageURL *url.URL, fallbackHTML, progressToken string, selectedResourceURLs map[string]struct{}, sourceIP string) string {
-	spider, html := prepareSinglePageImport(grabImportRequest{Domain: domain, PagePath: pagePath, SourceURL: sourceURL, RemoteSourceURL: pageURL, HTML: fallbackHTML, ProgressToken: progressToken, SelectedResourceURLs: selectedResourceURLs, SourceOptions: grabSourceOptions{IP: sourceIP}}, a.grabTracker)
+	spider, html := a.prepareSinglePageImport(grabImportRequest{Domain: domain, PagePath: pagePath, SourceURL: sourceURL, RemoteSourceURL: pageURL, HTML: fallbackHTML, ProgressToken: progressToken, SelectedResourceURLs: selectedResourceURLs, SourceOptions: grabSourceOptions{IP: sourceIP}}, a.grabTracker)
+	defer spider.cleanupStreamedFiles()
 	_ = a.persistSpiderAssets(contextWithDomain(context.Background(), domain), spider, pagePath)
 	a.grabTracker.publish(spider.finalProgressEvent(progressToken, "done"))
 	return html
@@ -49046,6 +49183,7 @@ func (a *App) persistSpiderAssets(ctx context.Context, spider *pageSpider, pageP
 	if spider == nil {
 		return nil
 	}
+	defer spider.cleanupStreamedFiles()
 	domain := canonicalLocalDomain(spider.domain)
 	if domain != "localhost" {
 		domain = normalizeDomainName(domain)
@@ -49061,7 +49199,7 @@ func (a *App) persistSpiderAssets(ctx context.Context, spider *pageSpider, pageP
 	ownerPath := cleanPath(pagePath)
 	writtenAssetReferences := make(map[string]struct{})
 	for _, resource := range spider.resources {
-		if resource == nil || resource.content == nil || !resource.persist || strings.TrimSpace(resource.assetPath) == "" {
+		if resource == nil || (resource.content == nil && resource.tempFilePath == "") || !resource.persist || strings.TrimSpace(resource.assetPath) == "" {
 			continue
 		}
 		assetReference := publicAssetReferenceFromPath(resource.assetPath)
@@ -49080,14 +49218,30 @@ func (a *App) persistSpiderAssets(ctx context.Context, spider *pageSpider, pageP
 		if err := os.MkdirAll(filepath.Dir(realTargetFilePath), 0o755); err != nil {
 			return err
 		}
-		if err := a.writeAtomicStorageFile(realTargetFilePath, resource.content); err != nil {
+		if resource.tempFilePath != "" {
+			info, statErr := a.statInsideStorage(realTargetFilePath)
+			if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+				return statErr
+			}
+			if statErr == nil {
+				if info.Size() != resource.sizeBytes {
+					return errors.New("imported content-hash resource has conflicting size")
+				}
+			} else if err := a.writeAtomicStreamedImportAsset(realTargetFilePath, resource.tempFilePath); err != nil {
+				return err
+			}
+		} else if err := a.writeAtomicStorageFile(realTargetFilePath, resource.content); err != nil {
 			return err
 		}
 		resourceContentType := resource.contentType
 		if strings.TrimSpace(resourceContentType) == "" {
 			resourceContentType = mime.TypeByExtension(path.Ext(assetReference))
 		}
-		a.upsertFileMetadata(ctx, domainStorageName(domain), assetReference, ownerPath, int64(len(resource.content)), resourceContentType, "import")
+		assetBytes := int64(len(resource.content))
+		if resource.tempFilePath != "" {
+			assetBytes = resource.sizeBytes
+		}
+		a.upsertFileMetadata(ctx, domainStorageName(domain), assetReference, ownerPath, assetBytes, resourceContentType, "import")
 	}
 	return a.siteContentTransaction(ctx, func(transaction *sql.Tx) error {
 		return persistSpiderResourceProvenance(ctx, transaction, domainStorageName(domain), []wholeSiteImportedPage{{LocalPath: ownerPath}}, spider, false)
@@ -49106,16 +49260,21 @@ func publicAssetReferenceFromPath(assetPath string) string {
 }
 
 type mirroredResource struct {
-	url         string
-	resolvedURL string
-	content     []byte
-	assetPath   string
-	contentType string
-	sizeBytes   int64
-	persist     bool
+	url          string
+	resolvedURL  string
+	content      []byte
+	tempFilePath string // temporary disk body for large binary imports
+	assetPath    string
+	contentType  string
+	sizeBytes    int64
+	persist      bool
 }
 
 type pageSpider struct {
+	storage                   *App
+	previewOnly               bool
+	siteLimitBytes            int64
+	chargedAssetPaths         map[string]struct{}
 	domain                    string
 	pageURL                   *url.URL
 	maxDepth                  int
@@ -49152,6 +49311,8 @@ type pageSpider struct {
 	previewLimitReached       bool
 	previewUnfinishedPageURLs []string
 	preserveFailedReferences  bool
+	quotaBudgetBytes          int64
+	quotaBudgetKnown          bool
 }
 
 func (spider *pageSpider) recordPreviewBytes(sizeBytes int64) bool {
@@ -49262,6 +49423,7 @@ func grabImportHTTPClient(client *http.Client) *http.Client {
 
 func newPreviewPageSpider(domain string, pageURL *url.URL, maxDepth int, tracker *grabProgressTracker, progressToken string, sourceOptions grabSourceOptions) *pageSpider {
 	spider := newPageSpider(domain, pageURL, maxDepth, tracker, progressToken, sourceOptions)
+	spider.previewOnly = true
 	spider.client = grabPreviewHTTPClient(spider.client)
 	return spider
 }
@@ -49431,11 +49593,20 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 	if validationErr := outboundhttp.RequirePublicURL(resourceURL); validationErr != nil {
 		return nil, validationErr
 	}
-	// #nosec G704 -- URL validation and the pinned public-only transport are both mandatory.
-	request, _ := http.NewRequestWithContext(spider.context(), http.MethodGet, normalizedURL, nil)
+	// The import client has a short deadline for small resources. Media imports use
+	// a per-chunk idle watchdog instead of a total transfer deadline.
+	requestContext, cancelRequest := context.WithCancel(spider.context())
+	defer cancelRequest()
+	idleTimer := time.AfterFunc(45*time.Second, cancelRequest)
+	defer idleTimer.Stop()
+	resetIdle := func() { idleTimer.Reset(45 * time.Second) }
+	// #nosec G704 -- RequirePublicURL validates the target; the transport pins public DNS and checks redirects.
+	request, _ := http.NewRequestWithContext(requestContext, http.MethodGet, normalizedURL, nil)
 	applyGrabRequestHeaders(request, spider.sourceOptions)
+	largeResourceClient := *spider.client
+	largeResourceClient.Timeout = 0
 	// #nosec G704 -- the client transport rejects private DNS results and validates every redirect.
-	response, err := spider.client.Do(request)
+	response, err := largeResourceClient.Do(request)
 	if err != nil {
 		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
 		spider.failedTotal++
@@ -49455,42 +49626,132 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, response.ContentLength)
 		return nil, fmt.Errorf("resource download failed: %s", response.Status)
 	}
-	body, err := spider.readResourceBody(response.Body, normalizedURL, response.ContentLength)
-	if err != nil {
+	responseContentType := response.Header.Get("Content-Type")
+	resourceContentType := crawler.EffectiveResourceContentType(normalizedURL, responseContentType)
+	largeBinary := shouldStreamImportResource(normalizedURL, resourceContentType)
+	var previewSampleBytes int
+	if spider.previewOnly && largeBinary {
+		sample := make([]byte, 512)
+		readCount, readErr := io.ReadFull(response.Body, sample)
+		if readErr != nil && readErr != io.EOF && readErr != io.ErrUnexpectedEOF {
+			return nil, readErr
+		}
+		previewSampleBytes = readCount
+		resetIdle()
+		resourceContentType = detectedImportedResourceContentType(normalizedURL, responseContentType, sample[:readCount])
+		if requiresImportedTextRewrite(normalizedURL, resourceContentType) {
+			response.Body = io.NopCloser(io.MultiReader(bytes.NewReader(sample[:readCount]), response.Body))
+			largeBinary = false
+		}
+	}
+	if spider.previewOnly && largeBinary {
+		if !spider.isAllowedResourceContentType(normalizedURL, resourceContentType) {
+			return nil, fmt.Errorf("resource content-type rejected: %s", resourceContentType)
+		}
+		previewSize := response.ContentLength
+		if previewSize == 0 && previewSampleBytes > 0 {
+			previewSize = -1
+		}
+		resource := &mirroredResource{url: normalizedURL, contentType: resourceContentType, sizeBytes: previewSize, persist: persist}
+		spider.resources[normalizedURL] = resource
+		spider.downloadedTotal++
+		spider.publishResourceProgress("downloaded", normalizedURL, 100, 0, response.ContentLength)
+		return resource, nil
+	}
+	streamBinary := persist && spider.storage != nil && spider.previewByteLimit == 0 && largeBinary
+	declaredLength := response.ContentLength
+	if declaredLength == 0 && response.Body != http.NoBody {
+		// Some HTTP adapters leave ContentLength at zero for an unknown body.
+		declaredLength = -1
+	}
+	var body []byte
+	var stream crawler.StreamedImportResource
+	var downloadErr error
+	if streamBinary {
+		if !spider.quotaBudgetKnown || spider.siteLimitBytes <= 0 {
+			downloadErr = errors.New("storage limit reached: site quota is unavailable")
+		} else {
+			stageDirectory, stageErr := spider.storage.importStagingDirectory()
+			if stageErr != nil {
+				downloadErr = stageErr
+			} else {
+				stream, downloadErr = crawler.StreamImportResource(requestContext.Done(), response.Body, stageDirectory, declaredLength, spider.siteLimitBytes, func(downloaded int64) {
+					resetIdle()
+					spider.publishResourceProgress("downloading", normalizedURL, resourcePercent(downloaded, response.ContentLength), downloaded, response.ContentLength)
+				})
+			}
+		}
+	} else {
+		body, downloadErr = spider.readResourceBody(response.Body, normalizedURL, response.ContentLength, resetIdle)
+	}
+	if downloadErr != nil {
 		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
 		spider.failedTotal++
-		spider.recordRetryableResource(normalizedURL, crawler.ErrorReason(err), shouldRetryGrabSourceHTMLDownload(crawler.HTMLDownloadResult{}, err))
+		spider.recordRetryableResource(normalizedURL, crawler.ErrorReason(downloadErr), shouldRetryGrabSourceHTMLDownload(crawler.HTMLDownloadResult{}, downloadErr))
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, response.ContentLength)
-		return nil, err
+		return nil, downloadErr
 	}
 	if spider.previewByteLimit > 0 && !spider.recordPreviewBytes(int64(len(body))) {
 		return nil, errors.New("free Test Drive download limit reached")
 	}
-	responseContentType := response.Header.Get("Content-Type")
-	resourceContentType := crawler.DetectedResourceContentType(normalizedURL, responseContentType, body)
+	sample := body
+	actualSize := int64(len(body))
+	if streamBinary {
+		sample = stream.FirstBytes
+		actualSize = stream.Size
+	}
+	resourceContentType = detectedImportedResourceContentType(normalizedURL, responseContentType, sample)
 	if !spider.isAllowedResourceContentType(normalizedURL, resourceContentType) {
+		if streamBinary {
+			_ = spider.storage.removeInsideStorage(stream.Path)
+		}
 		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
 		spider.failedTotal++
 		spider.recordRetryableResource(normalizedURL, "content-type", false)
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, response.ContentLength)
 		return nil, fmt.Errorf("resource content-type rejected: %s", resourceContentType)
 	}
-	body = decodeImportedResourceBytes(normalizedURL, body, responseContentType, resourceContentType)
+	if streamBinary && requiresImportedTextRewrite(normalizedURL, resourceContentType) {
+		if stream.Size > grabResourceBodyLimitBytes {
+			_ = spider.storage.removeInsideStorage(stream.Path)
+			return nil, fmt.Errorf("resource body exceeds %d bytes", grabResourceBodyLimitBytes)
+		}
+		body, downloadErr = spider.storage.readFileInsideStorage(stream.Path)
+		_ = spider.storage.removeInsideStorage(stream.Path)
+		if downloadErr != nil {
+			return nil, downloadErr
+		}
+		streamBinary = false
+	}
+	if !streamBinary {
+		body = decodeImportedResourceBytes(normalizedURL, body, responseContentType, resourceContentType)
+		actualSize = int64(len(body))
+	}
 	resolvedURL := normalizedURL
 	if response.Request != nil && response.Request.URL != nil {
 		resolvedURL = response.Request.URL.String()
 	}
-	resource := &mirroredResource{url: normalizedURL, resolvedURL: resolvedURL, content: body, contentType: resourceContentType, persist: persist}
-	if persist {
-		assetPath := spider.assetPathFor(body, normalizedURL, resourceContentType)
-		if assetPath != "" {
-			resource.assetPath = assetPath
+	resource := &mirroredResource{url: normalizedURL, resolvedURL: resolvedURL, content: body, contentType: resourceContentType, sizeBytes: actualSize, persist: persist}
+	if streamBinary {
+		resource.tempFilePath = stream.Path
+		resource.assetPath = spider.assetPathForDigest(stream.SHA256, normalizedURL, resourceContentType)
+	} else if persist {
+		resource.assetPath = spider.assetPathFor(body, normalizedURL, resourceContentType)
+	}
+	if err := spider.consumeImportQuota(resource); err != nil {
+		if streamBinary {
+			_ = spider.storage.removeInsideStorage(stream.Path)
 		}
+		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
+		spider.failedTotal++
+		spider.recordRetryableResource(normalizedURL, "site-quota", false)
+		spider.publishResourceProgress("error", normalizedURL, 0, 0, response.ContentLength)
+		return nil, err
 	}
 	spider.resources[normalizedURL] = resource
 	spider.downloadedTotal++
 	spider.clearFailedResource(normalizedURL)
-	spider.publishResourceProgress("downloaded", normalizedURL, 100, int64(len(body)), response.ContentLength)
+	spider.publishResourceProgress("downloaded", normalizedURL, 100, actualSize, response.ContentLength)
 	spider.rewriteNestedResources(resource, depth+1, resourceContentType)
 	return resource, nil
 }
@@ -49535,8 +49796,11 @@ func (spider *pageSpider) recordDownloadedBytes(stage, currentURL string, curren
 			recordedBytes = currentSizeBytes
 		}
 		if stage == "downloaded" && recordedBytes <= 0 {
-			if resource := spider.resources[currentURL]; resource != nil && resource.content != nil {
+			if resource := spider.resources[currentURL]; resource != nil && (resource.content != nil || resource.tempFilePath != "") {
 				recordedBytes = int64(len(resource.content))
+				if resource.tempFilePath != "" {
+					recordedBytes = resource.sizeBytes
+				}
 			}
 		}
 		if recordedBytes > 0 {
@@ -49649,7 +49913,7 @@ func (spider *pageSpider) waitBeforeRetry(currentURL string, attempt, total int)
 	}
 }
 
-func (spider *pageSpider) readResourceBody(reader io.Reader, resourceURL string, sizeBytes int64) ([]byte, error) {
+func (spider *pageSpider) readResourceBody(reader io.Reader, resourceURL string, sizeBytes int64, onChunk func()) ([]byte, error) {
 	if sizeBytes > grabResourceBodyLimitBytes {
 		return nil, fmt.Errorf("resource body exceeds %d bytes", grabResourceBodyLimitBytes)
 	}
@@ -49662,6 +49926,9 @@ func (spider *pageSpider) readResourceBody(reader io.Reader, resourceURL string,
 		readCount, readErr := reader.Read(buffer)
 		if readCount > 0 {
 			downloadedBytes += int64(readCount)
+			if onChunk != nil {
+				onChunk()
+			}
 			if downloadedBytes > grabResourceBodyLimitBytes {
 				return nil, fmt.Errorf("resource body exceeds %d bytes", grabResourceBodyLimitBytes)
 			}
@@ -49754,7 +50021,7 @@ func (spider *pageSpider) retryFailedResources(baseURL *url.URL, attempts int) {
 				continue
 			}
 			failedResource := spider.resources[failedURL]
-			if failedResource != nil && failedResource.content != nil {
+			if failedResource != nil && (failedResource.content != nil || failedResource.tempFilePath != "") {
 				spider.clearFailedResource(failedURL)
 				continue
 			}
@@ -49816,6 +50083,130 @@ func (spider *pageSpider) collectPreviewNestedResources(resource *mirroredResour
 		rewritten = parser.RewriteJavaScriptReferences(source, resource.url, depth)
 	}
 	resource.content = []byte(rewritten)
+}
+
+func (spider *pageSpider) cleanupStreamedFiles() {
+	if spider == nil {
+		return
+	}
+	for _, resource := range spider.resources {
+		if resource != nil && resource.tempFilePath != "" {
+			if spider.storage != nil {
+				_ = spider.storage.removeInsideStorage(resource.tempFilePath)
+			} else {
+				_ = os.Remove(resource.tempFilePath)
+			}
+			resource.tempFilePath = ""
+		}
+	}
+}
+
+// Only distinct, newly stored assets consume the provisional download budget.
+// The content transaction remains the final authority for concurrent changes.
+func (spider *pageSpider) consumeImportQuota(resource *mirroredResource) error {
+	if !spider.quotaBudgetKnown || resource == nil || !resource.persist || resource.sizeBytes <= 0 || resource.assetPath == "" {
+		return nil
+	}
+	assetName := publicAssetReferenceFromPath(resource.assetPath)
+	if assetName == "" {
+		return nil
+	}
+	if spider.chargedAssetPaths == nil {
+		spider.chargedAssetPaths = make(map[string]struct{})
+	}
+	if _, charged := spider.chargedAssetPaths[assetName]; charged {
+		return nil
+	}
+	additionalBytes := resource.sizeBytes
+	if spider.storage != nil {
+		filePath := filepath.Join(spider.storage.domainFilesDirForDomain(spider.domain), filepath.FromSlash(assetName))
+		fileInfo, err := spider.storage.statInsideStorage(filePath)
+		if err == nil {
+			if fileInfo.Size() != resource.sizeBytes {
+				return errors.New("imported content-hash resource has conflicting size")
+			}
+			additionalBytes = 0
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	if additionalBytes > spider.quotaBudgetBytes {
+		return errors.New("storage limit reached: imported resources exceed site quota")
+	}
+	spider.quotaBudgetBytes -= additionalBytes
+	spider.chargedAssetPaths[assetName] = struct{}{}
+	return nil
+}
+
+func (a *App) importStagingDirectory() (string, error) {
+	stageDirectory := filepath.Join(a.storageRootDir(), "scratch", "import-resources")
+	if err := a.mkdirAllInsideStorage(stageDirectory, 0o700); err != nil {
+		return "", err
+	}
+	return a.writablePathInsideStorage(stageDirectory)
+}
+
+func (a *App) remainingImportResourceQuota(ctx context.Context, domain string) (int64, bool) {
+	if a == nil || strings.TrimSpace(domain) == "" {
+		return 0, false
+	}
+	ctx = contextWithDomain(ctx, domain)
+	a.ensureDomainStorageUsageRow(ctx, domain)
+	a.rebuildDomainStorageUsage(ctx, domain)
+	var usage domainStorageUsage
+	err := a.db.QueryRowContext(ctx, `SELECT page_bytes,published_page_bytes,revision_bytes,file_bytes,published_static_bytes,COALESCE(import_queue_bytes,0),COALESCE(analytics_bytes,0),COALESCE(analytics_reserved_bytes,0),limit_bytes FROM domain_storage_usage WHERE domain=?`, domain).
+		Scan(&usage.PageBytes, &usage.PublishedPageBytes, &usage.RevisionBytes, &usage.FileBytes, &usage.PublishedStaticBytes, &usage.ImportQueueBytes, &usage.AnalyticsBytes, &usage.AnalyticsReservedBytes, &usage.LimitBytes)
+	if err != nil || usage.LimitBytes <= 0 || usage.totalBytes() < 0 {
+		return 0, false
+	}
+	return max(int64(0), usage.LimitBytes-usage.totalBytes()-usage.AnalyticsReservedBytes), true
+}
+
+func shouldStreamImportResource(rawURL, contentType string) bool {
+	contentType = strings.ToLower(contentType)
+	extension := strings.ToLower(crawler.ResourceExtension(rawURL))
+	if strings.HasPrefix(contentType, "text/") || strings.Contains(contentType, "javascript") || strings.Contains(contentType, "json") || strings.Contains(contentType, "xml") ||
+		extension == ".html" || extension == ".htm" || extension == ".css" || extension == ".js" || extension == ".mjs" {
+		return false
+	}
+	return true
+}
+
+func requiresImportedTextRewrite(rawURL, contentType string) bool {
+	extension := strings.ToLower(crawler.ResourceExtension(rawURL))
+	return isImportedHTMLContentType(contentType) || strings.Contains(contentType, "text/css") || strings.Contains(contentType, "javascript") || strings.Contains(contentType, "ecmascript") || extension == ".js" || extension == ".mjs"
+}
+
+func detectedImportedResourceContentType(rawURL, declaredContentType string, sample []byte) string {
+	contentType := crawler.DetectedResourceContentType(rawURL, declaredContentType, sample)
+	if contentType != "application/octet-stream" {
+		return contentType
+	}
+	// Go cannot sniff every media container. A generic binary response may use
+	// a known media extension after HTML signatures have already been rejected.
+	mediaType := crawler.NormalizedResourceContentType(mime.TypeByExtension(crawler.ResourceExtension(rawURL)))
+	if strings.HasPrefix(mediaType, "video/") || strings.HasPrefix(mediaType, "audio/") {
+		return mediaType
+	}
+	return contentType
+}
+
+func (spider *pageSpider) assetPathForDigest(digest [32]byte, sourceURL, contentType string) string {
+	extension := crawler.DownloadedResourceExtension(sourceURL, contentType)
+	if extension == "" {
+		extension = ".bin"
+	}
+	fileName := hex.EncodeToString(digest[:]) + extension
+	basePath := cleanPath(spider.publicAssetBasePath)
+	if basePath == "/" {
+		return "/p/" + fileName
+	}
+	return strings.TrimRight(basePath, "/") + "/p/" + fileName
+}
+
+// Both paths belong to one storage root, so publication only renames a verified file.
+func (a *App) writeAtomicStreamedImportAsset(destination, source string) error {
+	return a.renameInsideStorage(source, destination)
 }
 
 func (spider *pageSpider) grabberParser() crawler.Parser {
@@ -50346,7 +50737,7 @@ func (spider *pageSpider) fetchPreviewResourceBody(normalizedURL string) ([]byte
 	if !spider.isAllowedResourceContentType(normalizedURL, contentType) {
 		return nil, contentType, response.ContentLength, fmt.Errorf("resource content-type rejected: %s", response.Header.Get("Content-Type"))
 	}
-	body, err := spider.readResourceBody(response.Body, normalizedURL, response.ContentLength)
+	body, err := spider.readResourceBody(response.Body, normalizedURL, response.ContentLength, nil)
 	if err != nil {
 		return nil, contentType, response.ContentLength, err
 	}
@@ -55894,9 +56285,9 @@ func addDirectoryToZip(zipWriter *zip.Writer, sourceDirPath, archiveDirPrefix st
 		if openErr != nil {
 			return openErr
 		}
-		defer sourceFile.Close()
 		_, copyErr := io.Copy(archiveFileWriter, sourceFile)
-		return copyErr
+		closeErr := sourceFile.Close()
+		return errors.Join(copyErr, closeErr)
 	})
 }
 
@@ -56179,6 +56570,10 @@ func resolveStaticExportRelativeSitePaths(rawPath, sourceSitePath string) []stri
 }
 
 func (a *App) importDomainBackupZIP(ctx context.Context, domain string, importBasePath string, backupZIP *zip.Reader) (string, error) {
+	return a.importDomainBackupZIPWithLimits(ctx, domain, importBasePath, backupZIP, backupImportUncompressedLimitBytes, backupImportFileEntryLimitBytes)
+}
+
+func (a *App) importDomainBackupZIPWithLimits(ctx context.Context, domain string, importBasePath string, backupZIP *zip.Reader, totalLimitBytes, fileLimitBytes int64) (string, error) {
 	var backupJSON []byte
 	filesByName := make(map[string]*zip.File)
 	var totalUncompressedBytes int64
@@ -56188,8 +56583,8 @@ func (a *App) importDomainBackupZIP(ctx context.Context, domain string, importBa
 			return "/", fmt.Errorf("unsafe backup entry %q", zipEntry.Name)
 		}
 		entrySize := zipEntryDeclaredSize(zipEntry)
-		if entrySize > backupImportUncompressedLimitBytes || totalUncompressedBytes > backupImportUncompressedLimitBytes-entrySize {
-			return "/", fmt.Errorf("backup uncompressed size exceeds %d bytes", backupImportUncompressedLimitBytes)
+		if entrySize > totalLimitBytes || totalUncompressedBytes > totalLimitBytes-entrySize {
+			return "/", fmt.Errorf("backup uncompressed size exceeds %d bytes", totalLimitBytes)
 		}
 		totalUncompressedBytes += entrySize
 		switch {
@@ -56207,8 +56602,8 @@ func (a *App) importDomainBackupZIP(ctx context.Context, domain string, importBa
 			if relativeName == "" || zipEntry.FileInfo().IsDir() {
 				continue
 			}
-			if zipEntryDeclaredSize(zipEntry) > backupImportFileEntryLimitBytes {
-				return "/", fmt.Errorf("backup file %s exceeds %d bytes", relativeName, backupImportFileEntryLimitBytes)
+			if zipEntryDeclaredSize(zipEntry) > fileLimitBytes {
+				return "/", fmt.Errorf("backup file %s exceeds %d bytes", relativeName, fileLimitBytes)
 			}
 			filesByName[relativeName] = zipEntry
 		case strings.HasPrefix(entryName, "p/"):
@@ -56216,8 +56611,8 @@ func (a *App) importDomainBackupZIP(ctx context.Context, domain string, importBa
 			if relativeName == "" || zipEntry.FileInfo().IsDir() {
 				continue
 			}
-			if zipEntryDeclaredSize(zipEntry) > backupImportFileEntryLimitBytes {
-				return "/", fmt.Errorf("backup file %s exceeds %d bytes", relativeName, backupImportFileEntryLimitBytes)
+			if zipEntryDeclaredSize(zipEntry) > fileLimitBytes {
+				return "/", fmt.Errorf("backup file %s exceeds %d bytes", relativeName, fileLimitBytes)
 			}
 			filesByName[relativeName] = zipEntry
 		}
@@ -56345,7 +56740,7 @@ ON CONFLICT(domain,file_name) DO UPDATE SET access_mode=excluded.access_mode,tok
 			_ = entryReader.Close()
 			return rootRedirectPath, createErr
 		}
-		_, copyErr := copyWithLimit(targetFile, entryReader, backupImportFileEntryLimitBytes)
+		_, copyErr := copyWithLimit(targetFile, entryReader, fileLimitBytes)
 		closeErr := targetFile.Close()
 		_ = entryReader.Close()
 		if copyErr != nil {
@@ -56887,6 +57282,14 @@ func (a *App) servePublishedStaticFileFromDisk(w http.ResponseWriter, r *http.Re
 		w.Header().Set("X-Robots-Tag", "noindex, nofollow")
 		w.Header().Set("Cache-Control", "no-store")
 		bootstrap += overlay
+	}
+	if a.isDemoSiteDomain(r.Context(), domain) {
+		w.Header().Set("Cache-Control", "no-store")
+		// A directory swap can replace a page with equal size and timestamp.
+		// Ignore validators from an older demo snapshot after that swap.
+		r = r.Clone(r.Context())
+		r.Header.Del("If-None-Match")
+		r.Header.Del("If-Modified-Since")
 	}
 	w.Header().Add("Vary", "Accept-Language")
 	if !injectPublicMenu && w.Header().Get("Cache-Control") == "" {
