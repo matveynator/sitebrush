@@ -57283,7 +57283,15 @@ func (a *App) servePublishedStaticFileFromDisk(w http.ResponseWriter, r *http.Re
 		w.Header().Set("Cache-Control", "no-store")
 		bootstrap += overlay
 	}
-	if a.isDemoSiteDomain(r.Context(), domain) {
+	// The public boundary has no site database. Its policy snapshot already owns
+	// demo membership, so static responses do not enter the control plane.
+	demoSite := false
+	if a.publicBoundary {
+		demoSite = a.publicRequestDecision(r).DemoSite
+	} else {
+		demoSite = a.isDemoSiteDomain(r.Context(), domain)
+	}
+	if demoSite {
 		w.Header().Set("Cache-Control", "no-store")
 		// A directory swap can replace a page with equal size and timestamp.
 		// Ignore validators from an older demo snapshot after that swap.
@@ -60347,6 +60355,8 @@ func (a *App) writePublicPolicy(domain string) error {
 	policy := publicsite.Policy{Domain: domain}
 	if a.controlDatabase != nil {
 		if err := a.withServerControlDatabaseRead(ctx, "public-site-deletion", func(database *sql.DB) error {
+			demoSettings := (demo.Store{DB: database}).Settings(ctx)
+			policy.DemoSite = demoSettings.Enabled && normalizeDomainName(demoSettings.Domain) == normalizeDomainName(domain)
 			state, readErr := readSiteDeletionState(ctx, database, domain)
 			if errors.Is(readErr, sql.ErrNoRows) {
 				return nil
