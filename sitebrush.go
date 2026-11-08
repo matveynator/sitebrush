@@ -9895,6 +9895,7 @@ func cleanStoragePath(storagePath string) string {
 
 func prepareStorageJailRoot(storagePath string) (string, error) {
 	cleanedStoragePath := cleanStoragePath(storagePath)
+	// #nosec G703 -- storagePath is the administrator-selected root, not a request path; child paths are confined by storagejail.
 	if err := os.MkdirAll(cleanedStoragePath, 0o755); err != nil {
 		return "", err
 	}
