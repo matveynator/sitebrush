@@ -104,6 +104,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/revisioncontent"
 	"github.com/matveynator/sitebrush/v2/pkg/securitysync"
 	"github.com/matveynator/sitebrush/v2/pkg/serviceinstall"
+	"github.com/matveynator/sitebrush/v2/pkg/servicepriv"
 	"github.com/matveynator/sitebrush/v2/pkg/shutdownsignals"
 	"github.com/matveynator/sitebrush/v2/pkg/sitebrushtemplate"
 	"github.com/matveynator/sitebrush/v2/pkg/sitefreeze"
@@ -9972,6 +9973,8 @@ type listenPorts struct {
 
 type serverRunConfig struct {
 	ParsedPorts          listenPorts
+	InheritedHTTP        net.Listener
+	InheritedHTTPS       net.Listener
 	StoragePath          string
 	DBPath               string
 	AllowStorageFallback bool
@@ -10179,6 +10182,9 @@ func main() {
 	upgradeMode := flag.Bool("upgrade", false, "install the latest signed stable server release")
 	upgradeBackup := flag.String("upgrade-backup", "all", "backup groups for -upgrade: all, none, or databases,analytics,files,settings")
 	updateSupervisor := flag.Bool("update-supervisor", false, "internal offline maintenance supervisor")
+	serviceRuntime := flag.Bool("service-runtime", false, "internal privileged service launcher")
+	serviceWorker := flag.Bool("service-worker", false, "internal unprivileged service worker")
+	serviceName := flag.String("service-name", "sitebrush", "internal Windows service name")
 	publicProxy := flag.Bool("public-proxy", false, "internal private HTTP backend")
 	serverChild := flag.Bool("server-child", false, "internal supervised server process")
 	updateProbation := flag.Bool("update-probation", false, "internal startup verification without public writes")
@@ -10343,6 +10349,12 @@ func main() {
 		if !appcli.InstallFlagSupported() {
 			log.Fatal("updates are available only in server builds")
 		}
+		if handled, dropErr := servicepriv.DropForMaintenance(os.Args[1:], effectiveStoragePath); handled {
+			if dropErr != nil {
+				log.Fatal(dropErr)
+			}
+			return
+		}
 		policy, policyErr := appupdate.ParseBackupPolicy(*upgradeBackup)
 		if policyErr != nil {
 			log.Fatal(policyErr)
@@ -10353,6 +10365,21 @@ func main() {
 		return
 	}
 	if installMode {
+		if !storagePathWasProvided {
+			if stored, found := serviceinstall.StoredOptions(); found {
+				effectiveStoragePath = stored.StoragePath
+				effectiveDBPath = stored.DBPath
+				if !flagWasProvided("port") {
+					parsedPorts, err = parseListenPorts(stored.Port)
+					if err != nil {
+						log.Fatal(err)
+					}
+				}
+			} else {
+				effectiveStoragePath = serviceinstall.DefaultStoragePath()
+				effectiveDBPath = filepath.Join(effectiveStoragePath, defaultDBPath)
+			}
+		}
 		if err := runServiceInstaller(parsedPorts.Raw, effectiveStoragePath, effectiveDBPath); err != nil {
 			handleServiceControlError(err)
 		}
@@ -10364,11 +10391,30 @@ func main() {
 		}
 		return
 	}
+	if *serviceRuntime && *serviceWorker {
+		log.Fatal("service launcher and worker modes cannot be combined")
+	}
+	if *serviceRuntime {
+		if err := servicepriv.Launch(os.Args[1:], effectiveStoragePath, parsedPorts.HTTPPort, parsedPorts.TLSEnabled); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	serverConfig := serverRunConfig{
 		ParsedPorts: parsedPorts, StoragePath: effectiveStoragePath, DBPath: effectiveDBPath,
 		AllowStorageFallback: !storagePathWasProvided && !dbPathWasProvided, PortWasProvided: flagWasProvided("port"),
 		DesktopMode: desktopMode, Debug: *debugMode, RequestTimings: *requestTimings,
 		UpdateProbation: *updateProbation, UpdateChild: *serverChild, PublicProxy: *publicProxy,
+	}
+	if *serviceWorker {
+		serverConfig.InheritedHTTP, serverConfig.InheritedHTTPS, err = servicepriv.InheritedListeners(parsedPorts.HTTPPort, parsedPorts.TLSEnabled)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer serverConfig.InheritedHTTP.Close()
+		if serverConfig.InheritedHTTPS != nil {
+			defer serverConfig.InheritedHTTPS.Close()
+		}
 	}
 	if *updateSupervisor {
 		if err := runStoppedUpdateSupervisor(serverConfig); err != nil {
@@ -10384,7 +10430,7 @@ func main() {
 		}
 		return
 	}
-	if handled, err := winservice.RunIfNeeded("sitebrush", func(ctx context.Context) error {
+	if handled, err := winservice.RunIfNeeded(*serviceName, func(ctx context.Context) error {
 		return runSupervisedSitebrush(ctx, serverConfig)
 	}); handled {
 		if err != nil {
@@ -10686,7 +10732,12 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 		}
 		listener, err = net.Listen("tcp", "127.0.0.1:0")
 	} else {
-		listener, listenPort, err = listenOnAvailablePort(parsedPorts.HTTPPort)
+		if config.InheritedHTTP != nil {
+			listener = config.InheritedHTTP
+			listenPort = parsedPorts.HTTPPort
+		} else {
+			listener, listenPort, err = listenOnAvailablePort(parsedPorts.HTTPPort)
+		}
 	}
 	if err != nil {
 		return err
@@ -10871,7 +10922,11 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 		var tlsListener net.Listener
 		var tlsListenErr error
 		if !config.PublicProxy {
-			tlsListener, tlsListenErr = listenTLSForAutoCert()
+			if config.InheritedHTTPS != nil {
+				tlsListener = config.InheritedHTTPS
+			} else {
+				tlsListener, tlsListenErr = listenTLSForAutoCert()
+			}
 		}
 		if tlsListenErr != nil {
 			application.logProblemEvent("AUTOCERT disabled: cannot listen on port 443: %v", tlsListenErr)
@@ -57837,6 +57892,9 @@ func runSupervisedSitebrush(ctx context.Context, config serverRunConfig) error {
 		return err
 	}
 	if !appupdate.PublicBoundarySupported(storagePath, CompileVersion) {
+		if config.InheritedHTTP != nil {
+			return errors.New("installed update child does not support unprivileged public listeners; update the selected release before starting the service")
+		}
 		arguments := []string{"-path", storagePath, "-db-path", databasePath, "-port", config.ParsedPorts.Raw}
 		if config.Debug {
 			arguments = append(arguments, "-debug")
@@ -61305,7 +61363,11 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 		defer cancel()
 		return application.storeAutoCertCachedCertificate(storeContext, normalized, certificate, expires)
 	}
-	listener, port, err := listenOnAvailablePort(config.ParsedPorts.HTTPPort)
+	listener := config.InheritedHTTP
+	port := config.ParsedPorts.HTTPPort
+	if listener == nil {
+		listener, port, err = listenOnAvailablePort(config.ParsedPorts.HTTPPort)
+	}
 	if err != nil {
 		closeGuards()
 		return nil, nil, "", err
@@ -61326,7 +61388,12 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 		tlsPort = port + 1
 	}
 	if tlsPort > 0 {
-		tlsListener, selectedPort, listenErr := listenPublicHTTPS(port)
+		tlsListener := config.InheritedHTTPS
+		selectedPort := 443
+		var listenErr error
+		if tlsListener == nil {
+			tlsListener, selectedPort, listenErr = listenPublicHTTPS(port)
+		}
 		if listenErr != nil {
 			application.logProblemEvent("HTTPS listener unavailable; public HTTP remains active: %v", listenErr)
 		} else {

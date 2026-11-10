@@ -313,6 +313,15 @@ func runCrosscompile() error {
 	}
 	step++
 	if err := console.Step(step, total, "Prepare release metadata", func() error {
+		if (mode == modeAll || mode == modeServerApp) && *programName == "sitebrush" {
+			installer, err := os.ReadFile(filepath.Join(repoRoot, "scripts", "install", "openbsd.sh"))
+			if err != nil {
+				return err
+			}
+			if err := os.WriteFile(filepath.Join(artifactsRoot, "install.sh"), installer, 0o644); err != nil {
+				return err
+			}
+		}
 		if signServerUpdates {
 			commit, err := runOutput(repoRoot, "git", "rev-parse", "HEAD")
 			if err != nil {

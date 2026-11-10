@@ -285,7 +285,7 @@ The launcher keeps the public HTTP and HTTPS listeners open while the editor pro
 
 The server owner sees a newer signed release at the bottom of the SiteBrush menu. The launcher checks at startup and every 15 minutes. Unchecking every backup group skips backup scanning and copying; shutdown and migration have separate progress stages. The update panel shows the running launcher version as well as the application version.
 
-Existing installations need the new application and launcher, followed by one service restart, to enable persistent public listeners. Updating only a child process leaves the old launcher running. A newer launcher continues to support an older selected application until that application has also been updated.
+Existing installations need the new application and launcher, followed by one service restart, to enable persistent public listeners. Updating only a child process leaves the old launcher running. Before enabling the unprivileged service, update any older selected application that cannot use the persistent public listeners.
 
 ## Best suited for
 
@@ -327,6 +327,8 @@ Linux desktop builds use **GTK 4.1** for newer distributions and **GTK 4.0** for
 # Install the server version
 
 Each block below is ready to copy and paste. It automatically selects `amd64` or `arm64`, downloads SiteBrush, makes it executable, and installs the system service.
+
+On Unix systems the service starts with root privileges to apply system tuning and open ports 80/443, then runs SiteBrush under a dedicated service account. The data directory selected in the installer becomes its working directory and database root. Windows uses a dedicated virtual service account.
 
 <details open>
 <summary><img src="https://sitebrush.com/p/04b158d78c93b65c714bb6256da221a490a73a31d1159732fe66604b68a64799.png" alt="Linux" width="28" align="middle"> <strong>Linux — copy and paste into the terminal</strong></summary>
@@ -440,25 +442,10 @@ The installer creates and verifies the Windows service and enables automatic sta
 <summary><img src="https://sitebrush.com/p/e3124d65b5feeb6af8ec8f882b167a35ab8e4cc791701789479d0523394267ba.png" alt="OpenBSD" width="28" align="middle"> <strong>OpenBSD — amd64 and arm64</strong></summary>
 
 ```sh
-(
-  set -eu
-
-  case "$(uname -m)" in
-    x86_64|amd64) ARCH="amd64" ;;
-    aarch64|arm64) ARCH="arm64" ;;
-    *) echo "Unsupported CPU architecture: $(uname -m)" >&2; exit 1 ;;
-  esac
-
-  doas mkdir -p /usr/local/bin
-  doas ftp \
-    -o /usr/local/bin/sitebrush \
-    "https://sitebrush.com/download/latest/server-app/sitebrush_openbsd_${ARCH}"
-  doas chmod +x /usr/local/bin/sitebrush
-  doas /usr/local/bin/sitebrush -install
-)
+ftp -o /root/sitebrush-install.sh https://sitebrush.com/download/install.sh && sh /root/sitebrush-install.sh
 ```
 
-Run the commands as `root` when `doas` is not configured.
+Run this command as `root`. The installer uses OpenBSD's built-in `ftp`, verifies the downloaded binary, then asks where to store site data. For example, choose `/data1/sitebrush`. The service creates a dedicated unprivileged account and prepares the selected directory before startup.
 
 </details>
 
@@ -503,7 +490,7 @@ sudo /usr/local/bin/sitebrush -uninstall
 <summary><strong>OpenBSD</strong></summary>
 
 ```sh
-doas /usr/local/bin/sitebrush -uninstall
+/usr/local/bin/sitebrush -uninstall
 ```
 
 </details>

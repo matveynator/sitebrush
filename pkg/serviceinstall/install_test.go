@@ -251,6 +251,36 @@ func TestInteractiveWizardEditsEveryInstallField(t *testing.T) {
 	}
 }
 
+func TestInteractiveWizardMovesDerivedPathsWithStorage(t *testing.T) {
+	options, err := runInteractiveWizard(
+		context.Background(),
+		Options{
+			StoragePath: "/root/.sitebrush",
+			DBPath:      "/root/.sitebrush/storage/db/sitebrush.db",
+			WorkingDir:  "/root/.sitebrush",
+			BinaryPath:  "/usr/local/bin/sitebrush",
+			Input:       strings.NewReader("en\n3\n/data1/sitebrush\n\n"),
+			Output:      io.Discard,
+		},
+		fakeProbe("openbsd", nil, nil),
+		serviceManager{Name: "rc.d/rcctl"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.StoragePath != "/data1/sitebrush" || options.DBPath != "/data1/sitebrush/storage/db/sitebrush.db" || options.WorkingDir != "/data1/sitebrush" {
+		t.Fatalf("storage relocation left stale paths: %+v", options)
+	}
+}
+
+func TestOpenBSDServicePatternExcludesInstaller(t *testing.T) {
+	plan := installPlan{ServiceName: "sitebrush", BinaryPath: "/usr/local/bin/sitebrush", ExecArgs: []string{"/usr/local/bin/sitebrush", "-port", "80,443", "-path", "/data1/sitebrush", "-service-runtime"}}
+	script := openBSDRcScript(plan)
+	if strings.Contains(script, `pexp="${daemon}.*"`) || !strings.Contains(script, `pexp="${daemon}.*-service-runtime"`) {
+		t.Fatalf("OpenBSD service can match the installer process:\n%s", script)
+	}
+}
+
 func TestInteractiveWizardCanCancel(t *testing.T) {
 	_, err := runInteractiveWizard(
 		context.Background(),
