@@ -13,6 +13,37 @@ import (
 	"testing"
 )
 
+func TestWriteOpenBSDInstallerReplacesLinkWithoutTouchingTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows test environments may not allow creating symlinks")
+	}
+	repoRoot := t.TempDir()
+	installDir := filepath.Join(repoRoot, "scripts", "install")
+	if err := os.MkdirAll(installDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(installDir, "openbsd.sh"), []byte("installer"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	artifactsRoot := t.TempDir()
+	target := filepath.Join(repoRoot, "untouched")
+	if err := os.WriteFile(target, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(artifactsRoot, "install.sh")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeOpenBSDInstaller(repoRoot, artifactsRoot); err != nil {
+		t.Fatal(err)
+	}
+	for path, expected := range map[string]string{target: "original", filepath.Join(artifactsRoot, "install.sh"): "installer"} {
+		content, err := os.ReadFile(path)
+		if err != nil || string(content) != expected {
+			t.Fatalf("%s: content=%q err=%v", path, content, err)
+		}
+	}
+}
+
 func TestReleaseBuildsEmbedDedicatedNetChanTrustPin(t *testing.T) {
 	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

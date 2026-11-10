@@ -45,6 +45,17 @@ func StoredOptions() (Options, bool) {
 	return Options{Port: metadata.Port, StoragePath: metadata.StoragePath, DBPath: metadata.DBPath, BinaryPath: metadata.BinaryPath, WorkingDir: metadata.WorkingDir}, true
 }
 
+// InstalledUnprivilegedStorage distinguishes a migrated service from older
+// root-owned installations whose maintenance must retain its original owner.
+func InstalledUnprivilegedStorage(storagePath string) bool {
+	manager, err := detectServiceManager(newRuntimeProbe())
+	if err != nil {
+		return false
+	}
+	metadata, found := readServiceMetadata(manager.Name, "sitebrush")
+	return found && metadata.unprivilegedStorageMatches(storagePath)
+}
+
 var ErrCancelled = errors.New("service action cancelled by user")
 
 type Result struct {
@@ -103,14 +114,19 @@ type cliTheme struct {
 }
 
 type serviceMetadata struct {
-	Language    string `json:"language"`
-	ServiceName string `json:"service_name"`
-	Port        string `json:"port"`
-	StoragePath string `json:"storage_path"`
-	DBType      string `json:"db_type"`
-	DBPath      string `json:"db_path"`
-	BinaryPath  string `json:"binary_path"`
-	WorkingDir  string `json:"working_dir"`
+	Language     string `json:"language"`
+	ServiceName  string `json:"service_name"`
+	Unprivileged bool   `json:"unprivileged,omitempty"`
+	Port         string `json:"port"`
+	StoragePath  string `json:"storage_path"`
+	DBType       string `json:"db_type"`
+	DBPath       string `json:"db_path"`
+	BinaryPath   string `json:"binary_path"`
+	WorkingDir   string `json:"working_dir"`
+}
+
+func (metadata serviceMetadata) unprivilegedStorageMatches(storagePath string) bool {
+	return metadata.Unprivileged && sameCleanPath(metadata.StoragePath, storagePath)
 }
 
 type cliText struct {
@@ -222,10 +238,10 @@ func Install(ctx context.Context, options Options) (Result, error) {
 		if err := prepareServiceIdentity(plan); err != nil {
 			return err
 		}
-		if err := prepareInstallFilesystem(plan); err != nil {
+		if err := prepareServiceStorage(plan); err != nil {
 			return err
 		}
-		return prepareServiceStorage(plan)
+		return prepareExecutableFilesystem(plan)
 	}
 	return installWithManager(ctx, options, probe, manager, prepare, writeServiceMetadata)
 }
@@ -806,14 +822,15 @@ func expectedServiceMetadataPath(managerName, serviceName string) string {
 
 func writeServiceMetadata(managerName string, plan installPlan, languageCode string) error {
 	metadata := serviceMetadata{
-		Language:    normalizeLanguageCode(languageCode),
-		ServiceName: plan.ServiceName,
-		Port:        installOptionOrDefault(plan.Options.Port, "80,443"),
-		StoragePath: installOptionOrDefault(plan.Options.StoragePath, defaultStoragePath()),
-		DBType:      installOptionOrDefault(plan.Options.DBType, "sqlite"),
-		DBPath:      installOptionOrDefault(plan.Options.DBPath, filepath.Join(installOptionOrDefault(plan.Options.StoragePath, defaultStoragePath()), "storage", "db", "sitebrush.db")),
-		BinaryPath:  plan.BinaryPath,
-		WorkingDir:  plan.WorkingDir,
+		Language:     normalizeLanguageCode(languageCode),
+		ServiceName:  plan.ServiceName,
+		Unprivileged: true,
+		Port:         installOptionOrDefault(plan.Options.Port, "80,443"),
+		StoragePath:  installOptionOrDefault(plan.Options.StoragePath, defaultStoragePath()),
+		DBType:       installOptionOrDefault(plan.Options.DBType, "sqlite"),
+		DBPath:       installOptionOrDefault(plan.Options.DBPath, filepath.Join(installOptionOrDefault(plan.Options.StoragePath, defaultStoragePath()), "storage", "db", "sitebrush.db")),
+		BinaryPath:   plan.BinaryPath,
+		WorkingDir:   plan.WorkingDir,
 	}
 	if metadata.Language == "" {
 		metadata.Language = "en"
@@ -1143,7 +1160,7 @@ func buildInstallPlan(options Options) (installPlan, error) {
 		workingDir = strings.TrimSpace(options.StoragePath)
 	}
 	if workingDir == "" {
-		workingDir = filepath.Dir(installedBinary)
+		workingDir = defaultStoragePath()
 	}
 	port := strings.TrimSpace(options.Port)
 	if port == "" {
@@ -1227,12 +1244,9 @@ func sameCleanPath(left, right string) bool {
 	return filepath.Clean(left) == filepath.Clean(right)
 }
 
-func prepareInstallFilesystem(plan installPlan) error {
+func prepareExecutableFilesystem(plan installPlan) error {
 	if err := os.MkdirAll(filepath.Dir(plan.BinaryPath), 0o755); err != nil {
 		return fmt.Errorf("create binary directory: %w", err)
-	}
-	if err := os.MkdirAll(plan.WorkingDir, 0o755); err != nil {
-		return fmt.Errorf("create working directory: %w", err)
 	}
 	sourceBinary := strings.TrimSpace(plan.Options.BinaryPath)
 	if sourceBinary == "" {

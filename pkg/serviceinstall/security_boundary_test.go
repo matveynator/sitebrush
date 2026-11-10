@@ -3,6 +3,7 @@ package serviceinstall
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -44,22 +45,27 @@ func TestSecurityBoundaryInstallAcceptsOnlyPortableServiceNameAlphabet(t *testin
 }
 
 func TestSecurityBoundaryInstallKeepsArgumentsSeparateFromShellSyntax(t *testing.T) {
+	storagePath := platformAbsolutePath(`/srv/site;touch /tmp/storage && echo owned`)
 	plan, err := buildInstallPlan(Options{
 		Port:        `8080;touch /tmp/owned $(command)`,
-		StoragePath: `/srv/site;touch /tmp/storage && echo owned`,
+		StoragePath: storagePath,
 		ServiceName: "sitebrush-security-test",
 	})
 	if err != nil {
 		t.Fatalf("buildInstallPlan() error = %v", err)
 	}
 
-	if len(plan.ExecArgs) != 5 {
-		t.Fatalf("exec argument count = %d, want 5: %#v", len(plan.ExecArgs), plan.ExecArgs)
+	wantArgs := 5
+	if runtime.GOOS == "windows" {
+		wantArgs = 7
+	}
+	if len(plan.ExecArgs) != wantArgs {
+		t.Fatalf("exec argument count = %d, want %d: %#v", len(plan.ExecArgs), wantArgs, plan.ExecArgs)
 	}
 	if plan.ExecArgs[1] != "-port" || plan.ExecArgs[2] != `8080;touch /tmp/owned $(command)` {
 		t.Fatalf("port argument was split or rewritten: %#v", plan.ExecArgs)
 	}
-	if plan.ExecArgs[3] != "-path" || plan.ExecArgs[4] != `/srv/site;touch /tmp/storage && echo owned` {
+	if plan.ExecArgs[3] != "-path" || plan.ExecArgs[4] != storagePath {
 		t.Fatalf("storage argument was split or rewritten: %#v", plan.ExecArgs)
 	}
 }

@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"os/user"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -103,8 +102,7 @@ func DropForMaintenance(arguments []string, storagePath string) (bool, error) {
 	if os.Geteuid() != 0 {
 		return false, nil
 	}
-	stored, found := serviceinstall.StoredOptions()
-	if !found || filepath.Clean(stored.StoragePath) != filepath.Clean(storagePath) {
+	if !serviceinstall.InstalledUnprivilegedStorage(storagePath) {
 		return false, nil
 	}
 	account, credentials, err := serviceCredentials()

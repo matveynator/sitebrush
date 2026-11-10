@@ -3,6 +3,7 @@
 package serviceinstall
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,7 +12,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 func ServiceUserName() string {
@@ -25,7 +27,7 @@ func prepareServiceIdentity(plan installPlan) error {
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("installing a system service requires root privileges")
 	}
-	if err := validateServiceStoragePath(installOptionOrDefault(plan.Options.StoragePath, defaultStoragePath())); err != nil {
+	if err := checkServiceStoragePath(installOptionOrDefault(plan.Options.StoragePath, defaultStoragePath())); err != nil {
 		return err
 	}
 	name := ServiceUserName()
@@ -116,41 +118,16 @@ func createDarwinServiceIdentity(name string) error {
 	return nil
 }
 
-func validateServiceStoragePath(storagePath string) error {
+func checkServiceStoragePath(storagePath string) error {
 	if !filepath.IsAbs(storagePath) || filepath.Clean(storagePath) == string(filepath.Separator) {
 		return fmt.Errorf("storage folder must be an absolute non-root path")
-	}
-	current := string(filepath.Separator)
-	for _, component := range strings.Split(strings.TrimPrefix(filepath.Clean(storagePath), current), current) {
-		current = filepath.Join(current, component)
-		info, err := os.Lstat(current)
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			return fmt.Errorf("inspect storage path %s: %w", current, err)
-		}
-		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("storage path component %s is not a real directory", current)
-		}
-	}
-	if info, err := os.Stat(storagePath); err == nil && info.IsDir() {
-		return filepath.WalkDir(storagePath, func(path string, entry os.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				return walkErr
-			}
-			if entry.Type()&os.ModeSymlink != 0 {
-				return fmt.Errorf("storage contains symbolic link %s", path)
-			}
-			return nil
-		})
 	}
 	return nil
 }
 
 func prepareServiceStorage(plan installPlan) error {
 	storagePath := installOptionOrDefault(plan.Options.StoragePath, defaultStoragePath())
-	if err := validateServiceStoragePath(storagePath); err != nil {
+	if err := checkServiceStoragePath(storagePath); err != nil {
 		return err
 	}
 	account, err := user.Lookup(ServiceUserName())
@@ -161,41 +138,46 @@ func prepareServiceStorage(plan installPlan) error {
 	if err != nil {
 		return err
 	}
+	if uid < 0 {
+		return fmt.Errorf("service user ID must be nonnegative")
+	}
 	gid, err := strconv.Atoi(account.Gid)
 	if err != nil {
 		return err
 	}
-	if err := createServiceStoragePath(storagePath, uid, gid); err != nil {
+	if gid < 0 {
+		return fmt.Errorf("service group ID must be nonnegative")
+	}
+	storageFD, err := openServiceStoragePath(storagePath, uid, gid)
+	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Join(storagePath, "storage", "db"), 0o700); err != nil {
-		return fmt.Errorf("create storage directories: %w", err)
+	defer unix.Close(storageFD)
+	workingDirectory := filepath.Clean(plan.WorkingDir)
+	relativeWorkingDirectory, err := filepath.Rel(filepath.Clean(storagePath), workingDirectory)
+	if err != nil || relativeWorkingDirectory == ".." || strings.HasPrefix(relativeWorkingDirectory, ".."+string(filepath.Separator)) || filepath.IsAbs(relativeWorkingDirectory) {
+		return fmt.Errorf("working folder must be inside storage folder")
 	}
-	// Validate the entire tree before changing any ownership.
-	check := func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if entry.Type()&os.ModeSymlink != 0 {
-			return fmt.Errorf("storage contains symbolic link %s", path)
-		}
-		return nil
-	}
-	if err := filepath.WalkDir(storagePath, check); err != nil {
-		return err
-	}
-	if err := filepath.WalkDir(storagePath, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if err := os.Chown(path, uid, gid); err != nil {
+	if relativeWorkingDirectory != "." {
+		if err := ensureServiceWorkingDirectory(storageFD, relativeWorkingDirectory); err != nil {
 			return err
 		}
-		if entry.IsDir() {
-			return os.Chmod(path, 0o700)
-		}
-		return nil
-	}); err != nil {
+	}
+	dataFD, err := ensureServiceDirectory(storageFD, "storage")
+	if err != nil {
+		return err
+	}
+	dbFD, err := ensureServiceDirectory(dataFD, "db")
+	unix.Close(dataFD)
+	if err != nil {
+		return err
+	}
+	unix.Close(dbFD)
+	var rootStat unix.Stat_t
+	if err := unix.Fstat(storageFD, &rootStat); err != nil {
+		return fmt.Errorf("inspect storage root: %w", err)
+	}
+	if err := chownServiceStorageTree(storageFD, storagePath, &rootStat, uid, gid); err != nil {
 		return fmt.Errorf("set service storage ownership: %w", err)
 	}
 	return nil
@@ -203,44 +185,157 @@ func prepareServiceStorage(plan installPlan) error {
 
 // Parent directories stay owned by their existing owners. Newly created
 // parents allow traversal while the data root remains private to the service.
-func createServiceStoragePath(storagePath string, uid, gid int) error {
-	current := string(filepath.Separator)
-	components := strings.Split(strings.TrimPrefix(filepath.Clean(storagePath), current), current)
+func openServiceStoragePath(storagePath string, uid, gid int) (int, error) {
+	parentFD, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, err
+	}
+	components := strings.Split(strings.TrimPrefix(filepath.Clean(storagePath), string(filepath.Separator)), string(filepath.Separator))
 	for index, component := range components {
-		current = filepath.Join(current, component)
-		mode := os.FileMode(0o755)
+		mode := uint32(0o755)
 		if index == len(components)-1 {
 			mode = 0o700
 		}
-		if err := os.Mkdir(current, mode); err == nil {
-			if err := os.Chmod(current, mode); err != nil {
-				return fmt.Errorf("set storage path permissions %s: %w", current, err)
+		childFD, openErr := unix.Openat(parentFD, component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if errors.Is(openErr, unix.ENOENT) {
+			created := unix.Mkdirat(parentFD, component, mode)
+			if created != nil && !errors.Is(created, unix.EEXIST) {
+				unix.Close(parentFD)
+				return -1, fmt.Errorf("create storage component %s: %w", component, created)
 			}
-		} else if !os.IsExist(err) {
-			return fmt.Errorf("create storage path %s: %w", current, err)
+			childFD, openErr = unix.Openat(parentFD, component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+			if openErr == nil && created == nil {
+				openErr = unix.Fchmod(childFD, mode)
+			}
 		}
-		if index < len(components)-1 {
-			info, err := os.Stat(current)
-			if err != nil {
-				return err
+		unix.Close(parentFD)
+		if openErr != nil {
+			if childFD >= 0 {
+				unix.Close(childFD)
 			}
-			if !info.IsDir() || !serviceCanTraverse(info, uid, gid) {
-				return fmt.Errorf("storage parent %s must be traversable by the service user", current)
+			return -1, fmt.Errorf("open storage component %s without following links: %w", component, openErr)
+		}
+		parentFD = childFD
+		if index < len(components)-1 {
+			var stat unix.Stat_t
+			if err := unix.Fstat(parentFD, &stat); err != nil {
+				unix.Close(parentFD)
+				return -1, err
+			}
+			if !serviceCanTraverse(&stat, uid, gid) {
+				unix.Close(parentFD)
+				return -1, fmt.Errorf("storage parent %s must be traversable by the service user", component)
 			}
 		}
 	}
-	return nil
+	return parentFD, nil
 }
 
-func serviceCanTraverse(info os.FileInfo, uid, gid int) bool {
-	permissions := info.Mode().Perm()
+func serviceCanTraverse(stat *unix.Stat_t, uid, gid int) bool {
+	permissions := uint32(stat.Mode) & 0o777
 	if permissions&0o001 != 0 {
 		return true
 	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return false
+	return uint64(uid) == uint64(stat.Uid) && permissions&0o100 != 0 ||
+		uint64(gid) == uint64(stat.Gid) && permissions&0o010 != 0
+}
+
+func ensureServiceDirectory(parentFD int, name string) (int, error) {
+	if err := unix.Mkdirat(parentFD, name, 0o700); err != nil && !errors.Is(err, unix.EEXIST) {
+		return -1, fmt.Errorf("create storage directory %s: %w", name, err)
 	}
-	return uint32(uid) == stat.Uid && permissions&0o100 != 0 ||
-		uint32(gid) == stat.Gid && permissions&0o010 != 0
+	childFD, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, fmt.Errorf("open storage directory %s: %w", name, err)
+	}
+	return childFD, nil
+}
+
+func ensureServiceWorkingDirectory(storageFD int, relativePath string) error {
+	parentFD, err := unix.Dup(storageFD)
+	if err != nil {
+		return err
+	}
+	for _, component := range strings.Split(relativePath, string(filepath.Separator)) {
+		childFD, err := ensureServiceDirectory(parentFD, component)
+		unix.Close(parentFD)
+		if err != nil {
+			return err
+		}
+		parentFD = childFD
+	}
+	return unix.Close(parentFD)
+}
+
+// Every ownership change uses an opened inode or a directory descriptor, so
+// a worker replacing a path cannot redirect root's changes outside storage.
+func chownServiceStorageTree(directoryFD int, path string, rootStat *unix.Stat_t, uid, gid int) error {
+	var directoryStat unix.Stat_t
+	if err := unix.Fstat(directoryFD, &directoryStat); err != nil {
+		return err
+	}
+	if directoryStat.Dev != rootStat.Dev {
+		return fmt.Errorf("storage crosses a filesystem mount at %s", path)
+	}
+	if err := unix.Fchown(directoryFD, uid, gid); err != nil {
+		return err
+	}
+	if err := unix.Fchmod(directoryFD, 0o700); err != nil {
+		return err
+	}
+	readFD, err := unix.Dup(directoryFD)
+	if err != nil {
+		return err
+	}
+	directory := os.NewFile(uintptr(readFD), path)
+	entries, err := directory.ReadDir(-1)
+	directory.Close()
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		entryPath := filepath.Join(path, name)
+		var stat unix.Stat_t
+		if err := unix.Fstatat(directoryFD, name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			return fmt.Errorf("inspect %s: %w", entryPath, err)
+		}
+		if stat.Dev != rootStat.Dev {
+			return fmt.Errorf("storage crosses a filesystem mount at %s", entryPath)
+		}
+		switch uint32(stat.Mode) & unix.S_IFMT {
+		case unix.S_IFDIR:
+			childFD, err := unix.Openat(directoryFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+			if err != nil {
+				return fmt.Errorf("open %s: %w", entryPath, err)
+			}
+			err = chownServiceStorageTree(childFD, entryPath, rootStat, uid, gid)
+			unix.Close(childFD)
+			if err != nil {
+				return err
+			}
+		case unix.S_IFREG:
+			fileFD, err := unix.Openat(directoryFD, name, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+			if err != nil {
+				return fmt.Errorf("open %s: %w", entryPath, err)
+			}
+			var fileStat unix.Stat_t
+			err = unix.Fstat(fileFD, &fileStat)
+			if err == nil && (uint32(fileStat.Mode)&unix.S_IFMT != unix.S_IFREG || fileStat.Dev != rootStat.Dev || fileStat.Nlink != 1) {
+				err = fmt.Errorf("storage file %s is not a single-link regular file", entryPath)
+			}
+			if err == nil {
+				err = unix.Fchown(fileFD, uid, gid)
+			}
+			unix.Close(fileFD)
+			if err != nil {
+				return err
+			}
+		case unix.S_IFLNK:
+			return fmt.Errorf("storage contains symbolic link %s", entryPath)
+		default:
+			// Transient sockets and pipes are recreated by their owning process.
+		}
+	}
+	return nil
 }

@@ -18,7 +18,7 @@ func TestServiceInstallFilesystemAndCommandHelpers(t *testing.T) {
 	}
 	destinationPath := filepath.Join(directory, "bin", "sitebrush")
 	plan := installPlan{Options: Options{BinaryPath: sourcePath}, BinaryPath: destinationPath, WorkingDir: filepath.Join(directory, "data")}
-	if err := prepareInstallFilesystem(plan); err != nil {
+	if err := prepareExecutableFilesystem(plan); err != nil {
 		t.Fatal(err)
 	}
 	installedBinary, err := os.ReadFile(destinationPath)
@@ -35,14 +35,14 @@ func TestServiceInstallFilesystemAndCommandHelpers(t *testing.T) {
 	if err := copyExecutable(sourcePath, filepath.Join(directory, "missing-directory", "binary")); err == nil {
 		t.Fatal("copy into missing destination directory succeeded")
 	}
-	if err := prepareInstallFilesystem(installPlan{BinaryPath: destinationPath, WorkingDir: filepath.Join(directory, "data"), Options: Options{BinaryPath: destinationPath}}); err != nil {
+	if err := prepareExecutableFilesystem(installPlan{BinaryPath: destinationPath, WorkingDir: filepath.Join(directory, "data"), Options: Options{BinaryPath: destinationPath}}); err != nil {
 		t.Fatalf("already-installed binary should not be copied: %v", err)
 	}
 	blockerPath := filepath.Join(directory, "blocker")
 	if err := os.WriteFile(blockerPath, []byte("file"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := prepareInstallFilesystem(installPlan{BinaryPath: filepath.Join(blockerPath, "bin"), WorkingDir: directory}); err == nil {
+	if err := prepareExecutableFilesystem(installPlan{BinaryPath: filepath.Join(blockerPath, "bin"), WorkingDir: directory}); err == nil {
 		t.Fatal("filesystem preparation ignored binary directory failure")
 	}
 	if got := windowsCommandLine([]string{`C:\Program Files\sitebrush.exe`, `name "quoted"`}); got != `"C:\\Program Files\\sitebrush.exe" "name \"quoted\""` {

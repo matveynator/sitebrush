@@ -3,13 +3,36 @@ package serviceinstall
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
+
+func platformAbsolutePath(unixPath string) string {
+	if runtime.GOOS == "windows" {
+		return `C:` + filepath.FromSlash(unixPath)
+	}
+	return unixPath
+}
+
+func TestLegacyServiceMetadataKeepsRootMaintenance(t *testing.T) {
+	var legacy serviceMetadata
+	if err := json.Unmarshal([]byte(`{"storage_path":"/data1/sitebrush"}`), &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if legacy.unprivilegedStorageMatches("/data1/sitebrush") {
+		t.Fatal("legacy root-owned service was treated as migrated")
+	}
+	migrated := serviceMetadata{StoragePath: "/data1/sitebrush", Unprivileged: true}
+	if !migrated.unprivilegedStorageMatches("/data1/sitebrush") || migrated.unprivilegedStorageMatches("/another/sitebrush") {
+		t.Fatal("migrated service storage was not matched exactly")
+	}
+}
 
 func fakeProbe(goos string, commands map[string]bool, paths map[string]bool) runtimeProbe {
 	return runtimeProbe{
@@ -187,12 +210,13 @@ func TestGeneratedServiceFilesContainSitebrushCommand(t *testing.T) {
 }
 
 func TestBuildInstallPlanUsesInstallFlagFreeExecArgs(t *testing.T) {
+	storagePath := platformAbsolutePath("/var/lib/sitebrush")
 	plan, err := buildInstallPlan(Options{
 		Port:        "8080",
-		StoragePath: "/var/lib/sitebrush",
+		StoragePath: storagePath,
 		DBType:      "sqlite",
-		DBPath:      "/var/lib/sitebrush/storage/db/sitebrush.db",
-		BinaryPath:  "/tmp/sitebrush",
+		DBPath:      filepath.Join(storagePath, "storage", "db", "sitebrush.db"),
+		BinaryPath:  platformAbsolutePath("/tmp/sitebrush"),
 		ServiceName: "sitebrush",
 	})
 	if err != nil {
@@ -211,14 +235,15 @@ func TestBuildInstallPlanUsesInstallFlagFreeExecArgs(t *testing.T) {
 
 func TestInteractiveWizardEditsPlanBeforeApply(t *testing.T) {
 	var output strings.Builder
+	storagePath := platformAbsolutePath("/var/lib/sitebrush")
 	options, err := runInteractiveWizard(
 		context.Background(),
 		Options{
 			Port:        "80,443",
-			StoragePath: "/var/lib/sitebrush",
+			StoragePath: storagePath,
 			DBType:      "sqlite",
-			DBPath:      "/var/lib/sitebrush/storage/db/sitebrush.db",
-			BinaryPath:  "/tmp/sitebrush",
+			DBPath:      filepath.Join(storagePath, "storage", "db", "sitebrush.db"),
+			BinaryPath:  platformAbsolutePath("/tmp/sitebrush"),
 			Input:       strings.NewReader("en\n2\n9090\ncontinue\n"),
 			Output:      &output,
 		},
@@ -237,29 +262,36 @@ func TestInteractiveWizardEditsPlanBeforeApply(t *testing.T) {
 }
 
 func TestInteractiveWizardEditsEveryInstallField(t *testing.T) {
+	storagePath := platformAbsolutePath("/tmp/data")
+	databasePath := filepath.Join(storagePath, "db.sqlite")
+	binaryPath := platformAbsolutePath("/tmp/custom-sitebrush")
+	workingDirectory := platformAbsolutePath("/tmp/work")
+	input := strings.Join([]string{"en", "1", "custom-service", "2", "8081", "3", storagePath, "4", databasePath, "5", binaryPath, "6", workingDirectory, "invalid", "continue", ""}, "\n")
 	options, err := runInteractiveWizard(
 		context.Background(),
-		Options{BinaryPath: "/tmp/sitebrush", Input: strings.NewReader("en\n1\ncustom-service\n2\n8081\n3\n/tmp/data\n4\n/tmp/data/db.sqlite\n5\n/tmp/custom-sitebrush\n6\n/tmp/work\ninvalid\ncontinue\n"), Output: io.Discard},
+		Options{BinaryPath: platformAbsolutePath("/tmp/sitebrush"), Input: strings.NewReader(input), Output: io.Discard},
 		fakeProbe("linux", nil, nil),
 		serviceManager{Name: "systemd"},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if options.ServiceName != "custom-service" || options.Port != "8081" || options.StoragePath != "/tmp/data" || options.DBPath != "/tmp/data/db.sqlite" || options.BinaryPath != "/tmp/custom-sitebrush" || options.WorkingDir != "/tmp/work" {
+	if options.ServiceName != "custom-service" || options.Port != "8081" || options.StoragePath != storagePath || options.DBPath != databasePath || options.BinaryPath != binaryPath || options.WorkingDir != workingDirectory {
 		t.Fatalf("wizard options=%+v", options)
 	}
 }
 
 func TestInteractiveWizardMovesDerivedPathsWithStorage(t *testing.T) {
+	initialPath := platformAbsolutePath("/root/.sitebrush")
+	selectedPath := platformAbsolutePath("/data1/sitebrush")
 	options, err := runInteractiveWizard(
 		context.Background(),
 		Options{
-			StoragePath: "/root/.sitebrush",
-			DBPath:      "/root/.sitebrush/storage/db/sitebrush.db",
-			WorkingDir:  "/root/.sitebrush",
-			BinaryPath:  "/usr/local/bin/sitebrush",
-			Input:       strings.NewReader("en\n3\n/data1/sitebrush\n\n"),
+			StoragePath: initialPath,
+			DBPath:      filepath.Join(initialPath, "storage", "db", "sitebrush.db"),
+			WorkingDir:  initialPath,
+			BinaryPath:  platformAbsolutePath("/usr/local/bin/sitebrush"),
+			Input:       strings.NewReader("en\n3\n" + selectedPath + "\n\n"),
 			Output:      io.Discard,
 		},
 		fakeProbe("openbsd", nil, nil),
@@ -268,7 +300,7 @@ func TestInteractiveWizardMovesDerivedPathsWithStorage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if options.StoragePath != "/data1/sitebrush" || options.DBPath != "/data1/sitebrush/storage/db/sitebrush.db" || options.WorkingDir != "/data1/sitebrush" {
+	if options.StoragePath != selectedPath || options.DBPath != filepath.Join(selectedPath, "storage", "db", "sitebrush.db") || options.WorkingDir != selectedPath {
 		t.Fatalf("storage relocation left stale paths: %+v", options)
 	}
 }
