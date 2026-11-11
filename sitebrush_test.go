@@ -2924,6 +2924,39 @@ func TestSimplifiedExpenseServerViewsIncludeOwnerAndClientDetails(t *testing.T) 
 	}
 }
 
+func TestSimplifiedExpensesShowsLocalSiteDeletionControls(t *testing.T) {
+	site := hostingandsupport.ServerSiteView{Domain: "client.example", UsedLabel: "1 GB", LimitLabel: "10 GB"}
+	servers := []simplifiedExpenseServerView{
+		{Server: hostingandsupport.ServerView{Local: true}, Clients: []simplifiedExpenseClientView{{Email: "owner@example.org", Sites: []simplifiedExpenseSiteView{{ServerSiteView: site}}}}},
+		{Server: hostingandsupport.ServerView{Local: false}, Clients: []simplifiedExpenseClientView{{Email: "remote@example.org", Sites: []simplifiedExpenseSiteView{{ServerSiteView: site}}}}},
+	}
+	applySimplifiedSiteDeletionControls(servers, []hostingandsupport.Site{{
+		Domain: "client.example", CanDelete: true, DeletionReason: "nonpayment", DeletionDeadline: "2030-01-01T00:00:00Z", DeletionSizeLabel: "1 GB",
+		AdminAccounts: []hostingandsupport.SiteAccountView{{Email: "owner@example.org"}},
+	}})
+	if !servers[0].Clients[0].Sites[0].CanDelete || servers[1].Clients[0].Sites[0].CanDelete || len(servers[1].Clients[0].Sites[0].AdminAccounts) != 0 {
+		t.Fatal("site deletion controls must belong only to the local installation")
+	}
+	parsedTemplate, err := template.ParseFS(embeddedWebFiles, "web/expenses.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rendered bytes.Buffer
+	view := map[string]any{"Domain": "sitebrush.com", "Title": "Server settings", "T": translationsForLanguageCode("ru"), "SimplifiedExpenses": true, "Servers": []hostingandsupport.ServerView{{Local: true}}, "ExpenseServers": servers, "AccountCSRF": "test-csrf"}
+	if err := parsedTemplate.Execute(&rendered, view); err != nil {
+		t.Fatal(err)
+	}
+	body := rendered.String()
+	for _, expected := range []string{`data-bs-target="#simpleDelete0_0_0"`, `value="restore_site"`, `value="delete_site_now"`, `value="queue_account"`, `value="delete_account_now"`, `name="confirm_domain"`} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("simplified site row is missing %s", expected)
+		}
+	}
+	if strings.Contains(body, `id="simpleDelete1_0_0"`) || strings.Count(body, `data-bs-target="#simpleDelete`) != 1 {
+		t.Fatal("remote site received a local deletion control")
+	}
+}
+
 func TestVisibleHostingAndSupportLocalSitesHidesDisabledDemo(t *testing.T) {
 	sites := []hostingandsupport.Site{
 		{Domain: "owner.example"},
@@ -15389,7 +15422,7 @@ func TestSimplifiedExpensesShowsTestDriveUnderRegistrationAfterExplicitPermissio
 		"T":                          translationsForLanguageCode("en"),
 		"SimplifiedExpenses":         true,
 		"ExpenseServers":             []simplifiedExpenseServerView{{Server: hostingandsupport.ServerView{Local: true}}},
-		"Servers":                    []hostingandsupport.ServerView{},
+		"Servers":                    []hostingandsupport.ServerView{{Local: true}},
 		"ShowCentralRegistry":        false,
 		"DemoSettings":               demo.Settings{},
 		"DemoStatus":                 demoSiteStatusView{},
@@ -15417,6 +15450,7 @@ func TestSimplifiedExpensesShowsTestDriveUnderRegistrationAfterExplicitPermissio
 	}
 	body := rendered.String()
 	for _, expectedFragment := range []string{
+		`data-hosting-installation-tab="servers"`,
 		`data-hosting-installation-tab="temporary-sites"`,
 		`trial.sitebrush.example`,
 		`https://copied.example/`,
@@ -26918,6 +26952,32 @@ func TestDemoSnapshotRestoreStreamsMediaLargerThanPublicBackupLimit(t *testing.T
 	}
 }
 
+func TestDemoSnapshotRestoresLargePageManifest(t *testing.T) {
+	application := newRouterTestApplication(t)
+	control := setupBillingOwnerForTest(t, application, "owner.example", "owner@example.com", true)
+	defer control.Close()
+	const domain = "large-demo.example"
+	settings := demo.Settings{Domain: domain, Enabled: true, MaxSiteBytes: 32 << 20}
+	if _, _, err := application.ensureDemoSiteReady(context.Background(), settings, true, ""); err != nil {
+		t.Fatal(err)
+	}
+	boundary := contextWithDomain(context.Background(), domain)
+	largePage := "<html><body>" + strings.Repeat("A", 5<<20) + "</body></html>"
+	if err := application.persistFinalPageSave(boundary, domain, "/", "/", "Home", largePage); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.createDemoSiteSnapshot(boundary, domain); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.restoreDemoSiteFromSnapshot(boundary, domain); err != nil {
+		t.Fatalf("restore internally generated snapshot larger than uploaded manifest limit: %v", err)
+	}
+	var restored string
+	if err := application.db.QueryRowContext(boundary, `SELECT html FROM pages WHERE domain=? AND path='/'`, domain).Scan(&restored); err != nil || restored != largePage {
+		t.Fatalf("restored page differs: bytes=%d error=%v", len(restored), err)
+	}
+}
+
 func TestConcurrentIdenticalPageSavesCreateOneRevision(t *testing.T) {
 	application := newRouterTestApplication(t)
 	domain := "save-concurrency.example"
@@ -29625,6 +29685,39 @@ func newPartitionedTestApplication(t *testing.T) *App {
 	application := &App{db: router, siteDatabaseRouter: router, controlDatabase: global, storagePath: root, dbPath: globalPath}
 	application.connectAIControlFacade()
 	return application
+}
+
+func TestHostingSnapshotsSkipOrphanedSiteDatabase(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	const domain = "aika.sitebrush.ru"
+	if err := application.createManagedSite(context.Background(), domain, "owner@example.org", "test", 8<<20); err != nil {
+		t.Fatal(err)
+	}
+	orphanPath := filepath.Join(siteDatabaseRootPath(application.serverControlDBPath()), "33.rtmrom77.ru.db")
+	if err := os.WriteFile(orphanPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := application.listSiteQuotaRows(context.Background())
+	if err != nil || len(rows) != 1 || rows[0].Domain != domain {
+		t.Fatalf("active site rows=%+v error=%v", rows, err)
+	}
+	panel, err := application.collectHostingAndSupportPanelSnapshot(context.Background(), nil)
+	if err != nil || len(panel.Sites) != 1 || panel.Sites[0].Domain != domain {
+		t.Fatalf("panel sites=%+v error=%v", panel.Sites, err)
+	}
+	registry, err := application.buildHostingSnapshot(context.Background())
+	if err != nil || len(registry.Sites) != 1 || registry.Sites[0].Domain != domain {
+		t.Fatalf("registry sites=%+v error=%v", registry.Sites, err)
+	}
+	if err := application.withServerControlDatabaseWrite(context.Background(), "register-missing-site", func(database *sql.DB) error {
+		_, err := database.Exec(`INSERT INTO site_registry(domain,site_id) VALUES(?,?)`, "33.rtmrom77.ru", stableSiteID("33.rtmrom77.ru"))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.listSiteQuotaRows(context.Background()); !errors.Is(err, errSiteDatabaseMissing) {
+		t.Fatalf("registered site with a missing database was hidden: %v", err)
+	}
 }
 
 func TestSiteSubsystemIsolationAndUnknownHost(t *testing.T) {
