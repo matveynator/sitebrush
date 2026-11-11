@@ -45,6 +45,17 @@ func StoredOptions() (Options, bool) {
 	return Options{Port: metadata.Port, StoragePath: metadata.StoragePath, DBPath: metadata.DBPath, BinaryPath: metadata.BinaryPath, WorkingDir: metadata.WorkingDir}, true
 }
 
+// InstalledUnprivilegedStorage distinguishes a migrated service from older
+// root-owned installations whose maintenance must retain its original owner.
+func InstalledUnprivilegedStorage(storagePath string) bool {
+	manager, err := detectServiceManager(newRuntimeProbe())
+	if err != nil {
+		return false
+	}
+	metadata, found := readServiceMetadata(manager.Name, "sitebrush")
+	return found && metadata.unprivilegedStorageMatches(storagePath)
+}
+
 var ErrCancelled = errors.New("service action cancelled by user")
 
 type Result struct {
@@ -103,14 +114,19 @@ type cliTheme struct {
 }
 
 type serviceMetadata struct {
-	Language    string `json:"language"`
-	ServiceName string `json:"service_name"`
-	Port        string `json:"port"`
-	StoragePath string `json:"storage_path"`
-	DBType      string `json:"db_type"`
-	DBPath      string `json:"db_path"`
-	BinaryPath  string `json:"binary_path"`
-	WorkingDir  string `json:"working_dir"`
+	Language     string `json:"language"`
+	ServiceName  string `json:"service_name"`
+	Unprivileged bool   `json:"unprivileged,omitempty"`
+	Port         string `json:"port"`
+	StoragePath  string `json:"storage_path"`
+	DBType       string `json:"db_type"`
+	DBPath       string `json:"db_path"`
+	BinaryPath   string `json:"binary_path"`
+	WorkingDir   string `json:"working_dir"`
+}
+
+func (metadata serviceMetadata) unprivilegedStorageMatches(storagePath string) bool {
+	return metadata.Unprivileged && sameCleanPath(metadata.StoragePath, storagePath)
 }
 
 type cliText struct {
@@ -218,7 +234,16 @@ func Install(ctx context.Context, options Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	return installWithManager(ctx, options, probe, manager, prepareInstallFilesystem, writeServiceMetadata)
+	prepare := func(plan installPlan) error {
+		if err := prepareServiceIdentity(plan); err != nil {
+			return err
+		}
+		if err := prepareServiceStorage(plan); err != nil {
+			return err
+		}
+		return prepareExecutableFilesystem(plan)
+	}
+	return installWithManager(ctx, options, probe, manager, prepare, writeServiceMetadata)
 }
 
 func installWithManager(
@@ -239,6 +264,9 @@ func installWithManager(
 	plan, err := buildInstallPlan(options)
 	if err != nil {
 		return Result{}, err
+	}
+	if probe.goos != "windows" {
+		plan.ExecArgs = append(plan.ExecArgs, "-service-runtime")
 	}
 	if err := prepare(plan); err != nil {
 		return Result{}, err
@@ -636,12 +664,8 @@ func runInteractiveWizard(ctx context.Context, options Options, probe runtimePro
 				return Options{}, err
 			}
 			options.StoragePath = value
-			if strings.TrimSpace(options.DBPath) == "" {
-				options.DBPath = filepath.Join(value, "storage", "db", "sitebrush.db")
-			}
-			if strings.TrimSpace(options.WorkingDir) == "" {
-				options.WorkingDir = value
-			}
+			options.DBPath = filepath.Join(value, "storage", "db", "sitebrush.db")
+			options.WorkingDir = value
 		case actionKey == "4":
 			defaultDBPath := filepath.Join(installOptionOrDefault(options.StoragePath, defaultStoragePath()), "storage", "db", "sitebrush.db")
 			value, err := promptLine(ctx, reader, out, text.DBPathLabel, installOptionOrDefault(options.DBPath, defaultDBPath))
@@ -798,14 +822,15 @@ func expectedServiceMetadataPath(managerName, serviceName string) string {
 
 func writeServiceMetadata(managerName string, plan installPlan, languageCode string) error {
 	metadata := serviceMetadata{
-		Language:    normalizeLanguageCode(languageCode),
-		ServiceName: plan.ServiceName,
-		Port:        installOptionOrDefault(plan.Options.Port, "80,443"),
-		StoragePath: installOptionOrDefault(plan.Options.StoragePath, defaultStoragePath()),
-		DBType:      installOptionOrDefault(plan.Options.DBType, "sqlite"),
-		DBPath:      installOptionOrDefault(plan.Options.DBPath, filepath.Join(installOptionOrDefault(plan.Options.StoragePath, defaultStoragePath()), "storage", "db", "sitebrush.db")),
-		BinaryPath:  plan.BinaryPath,
-		WorkingDir:  plan.WorkingDir,
+		Language:     normalizeLanguageCode(languageCode),
+		ServiceName:  plan.ServiceName,
+		Unprivileged: true,
+		Port:         installOptionOrDefault(plan.Options.Port, "80,443"),
+		StoragePath:  installOptionOrDefault(plan.Options.StoragePath, defaultStoragePath()),
+		DBType:       installOptionOrDefault(plan.Options.DBType, "sqlite"),
+		DBPath:       installOptionOrDefault(plan.Options.DBPath, filepath.Join(installOptionOrDefault(plan.Options.StoragePath, defaultStoragePath()), "storage", "db", "sitebrush.db")),
+		BinaryPath:   plan.BinaryPath,
+		WorkingDir:   plan.WorkingDir,
 	}
 	if metadata.Language == "" {
 		metadata.Language = "en"
@@ -1135,7 +1160,7 @@ func buildInstallPlan(options Options) (installPlan, error) {
 		workingDir = strings.TrimSpace(options.StoragePath)
 	}
 	if workingDir == "" {
-		workingDir = filepath.Dir(installedBinary)
+		workingDir = defaultStoragePath()
 	}
 	port := strings.TrimSpace(options.Port)
 	if port == "" {
@@ -1145,7 +1170,25 @@ func buildInstallPlan(options Options) (installPlan, error) {
 	if storagePath == "" {
 		storagePath = defaultStoragePath()
 	}
+	if !filepath.IsAbs(storagePath) || filepath.Clean(storagePath) == string(filepath.Separator) {
+		return installPlan{}, fmt.Errorf("storage folder must be an absolute non-root path: %q", storagePath)
+	}
 	execArgs := []string{installedBinary, "-port", port, "-path", storagePath}
+	if runtime.GOOS == "windows" {
+		execArgs = append(execArgs, "-service-name", serviceName)
+	}
+	if databasePath := strings.TrimSpace(options.DBPath); databasePath != "" {
+		if !filepath.IsAbs(databasePath) {
+			return installPlan{}, fmt.Errorf("database path must be absolute: %q", databasePath)
+		}
+		relative, err := filepath.Rel(storagePath, databasePath)
+		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return installPlan{}, fmt.Errorf("database path must be inside storage folder: %q", databasePath)
+		}
+		if !sameCleanPath(databasePath, filepath.Join(storagePath, "storage", "db", "sitebrush.db")) {
+			execArgs = append(execArgs, "-db-path", databasePath)
+		}
+	}
 	return installPlan{Options: options, ServiceName: serviceName, BinaryPath: installedBinary, WorkingDir: workingDir, ExecArgs: execArgs}, nil
 }
 
@@ -1181,8 +1224,13 @@ func defaultStoragePath() string {
 		}
 		return filepath.Join(base, "Sitebrush")
 	}
+	if runtime.GOOS == "darwin" {
+		return filepath.Join("/Library", "Application Support", "SiteBrush")
+	}
 	return "/var/lib/sitebrush"
 }
+
+func DefaultStoragePath() string { return defaultStoragePath() }
 
 func sameCleanPath(left, right string) bool {
 	leftAbs, leftErr := filepath.Abs(left)
@@ -1196,12 +1244,9 @@ func sameCleanPath(left, right string) bool {
 	return filepath.Clean(left) == filepath.Clean(right)
 }
 
-func prepareInstallFilesystem(plan installPlan) error {
+func prepareExecutableFilesystem(plan installPlan) error {
 	if err := os.MkdirAll(filepath.Dir(plan.BinaryPath), 0o755); err != nil {
 		return fmt.Errorf("create binary directory: %w", err)
-	}
-	if err := os.MkdirAll(plan.WorkingDir, 0o755); err != nil {
-		return fmt.Errorf("create working directory: %w", err)
 	}
 	sourceBinary := strings.TrimSpace(plan.Options.BinaryPath)
 	if sourceBinary == "" {
@@ -1652,23 +1697,30 @@ func escapeXML(value string) string {
 func installWindowsService(ctx context.Context, probe runtimeProbe, plan installPlan) (Result, error) {
 	serviceName := plan.ServiceName
 	binPath := windowsCommandLine(plan.ExecArgs)
+	serviceAccount := "NT SERVICE\\" + serviceName
 	commands, err := runInstallCommands(ctx, probe, [][]string{
 		{"sc.exe", "query", serviceName},
 	})
 	if err != nil {
 		commands, err = runInstallCommands(ctx, probe, [][]string{
-			{"sc.exe", "create", serviceName, "binPath=", binPath, "start=", "auto", "DisplayName=", "Sitebrush"},
+			{"sc.exe", "create", serviceName, "binPath=", binPath, "start=", "auto", "DisplayName=", "Sitebrush", "obj=", serviceAccount},
 			{"sc.exe", "failure", serviceName, "reset=", "60", "actions=", "restart/5000/restart/5000/"},
-			{"sc.exe", "start", serviceName},
-			{"sc.exe", "query", serviceName},
 		})
 	} else {
 		commands, err = runInstallCommands(ctx, probe, [][]string{
-			{"sc.exe", "config", serviceName, "binPath=", binPath, "start=", "auto"},
+			{"sc.exe", "config", serviceName, "binPath=", binPath, "start=", "auto", "obj=", serviceAccount},
 			{"sc.exe", "failure", serviceName, "reset=", "60", "actions=", "restart/5000/restart/5000/"},
+		})
+	}
+	if err == nil {
+		storagePath := installOptionOrDefault(plan.Options.StoragePath, defaultStoragePath())
+		var accessCommands []string
+		accessCommands, err = runInstallCommands(ctx, probe, [][]string{
+			{"icacls", storagePath, "/grant", serviceAccount + ":(OI)(CI)F", "/T"},
 			{"sc.exe", "start", serviceName},
 			{"sc.exe", "query", serviceName},
 		})
+		commands = append(commands, accessCommands...)
 	}
 	return Result{ServicePath: "Windows Service: " + serviceName, Commands: commands}, err
 }
@@ -1866,14 +1918,15 @@ func openBSDRcScript(plan installPlan) string {
 daemon=%s
 daemon_flags=%s
 daemon_user=root
+daemon_execdir=%s
 
 . /etc/rc.d/rc.subr
 
 rc_bg=YES
 rc_reload=NO
-pexp="${daemon}.*"
+pexp="${daemon}.*-service-runtime"
 rc_cmd $1
-`, shellQuote(plan.BinaryPath), shellQuote(strings.Join(plan.ExecArgs[1:], " ")))
+`, shellQuote(plan.BinaryPath), shellQuote(strings.Join(plan.ExecArgs[1:], " ")), shellQuote(plan.WorkingDir))
 }
 
 func netBSDRcScript(plan installPlan) string {

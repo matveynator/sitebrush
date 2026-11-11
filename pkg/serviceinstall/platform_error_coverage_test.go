@@ -26,10 +26,10 @@ func TestServiceManagersPropagateRequiredCommandFailures(t *testing.T) {
 
 	sentinel := errors.New("required command failed")
 	probe := runtimeProbe{
-		goos: "linux",
+		goos:           "linux",
 		filesystemRoot: root,
-		lookPath: func(string) (string, error) { return "/test/tool", nil },
-		fileExists: func(string) bool { return false },
+		lookPath:       func(string) (string, error) { return "/test/tool", nil },
+		fileExists:     func(string) bool { return false },
 		dirExists: func(path string) bool {
 			info, err := os.Stat(path)
 			return err == nil && info.IsDir()
@@ -40,9 +40,9 @@ func TestServiceManagersPropagateRequiredCommandFailures(t *testing.T) {
 	}
 	plan := installPlan{
 		ServiceName: "sitebrush-test",
-		BinaryPath: "/opt/sitebrush",
-		WorkingDir: "/srv/sitebrush",
-		ExecArgs: []string{"/opt/sitebrush", "-port", "8080"},
+		BinaryPath:  "/opt/sitebrush",
+		WorkingDir:  "/srv/sitebrush",
+		ExecArgs:    []string{"/opt/sitebrush", "-port", "8080"},
 	}
 
 	installers := []struct {
@@ -87,9 +87,9 @@ func TestServiceManagerFallbackAndAlternateBranches(t *testing.T) {
 	}
 	plan := installPlan{
 		ServiceName: "sitebrush-test",
-		BinaryPath: "/opt/sitebrush",
-		WorkingDir: "/srv/sitebrush",
-		ExecArgs: []string{"/opt/sitebrush"},
+		BinaryPath:  "/opt/sitebrush",
+		WorkingDir:  "/srv/sitebrush",
+		ExecArgs:    []string{"/opt/sitebrush"},
 	}
 
 	t.Run("upstart restart falls back to start", func(t *testing.T) {
@@ -143,8 +143,8 @@ func TestServiceManagerFallbackAndAlternateBranches(t *testing.T) {
 	t.Run("freebsd without sysrc updates rc.conf", func(t *testing.T) {
 		probe := runtimeProbe{
 			filesystemRoot: root,
-			lookPath: func(string) (string, error) { return "", errors.New("missing") },
-			commandRuns: func(context.Context, string, ...string) (string, error) { return "ok", nil },
+			lookPath:       func(string) (string, error) { return "", errors.New("missing") },
+			commandRuns:    func(context.Context, string, ...string) (string, error) { return "ok", nil },
 		}
 		if _, err := installFreeBSDRcD(context.Background(), probe, plan); err != nil {
 			t.Fatal(err)
@@ -203,18 +203,18 @@ func TestServiceInstallFilesystemAndMetadataFailureBranches(t *testing.T) {
 	if err := os.WriteFile(blockedParent, []byte("file"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := prepareInstallFilesystem(installPlan{
+	if err := prepareExecutableFilesystem(installPlan{
 		BinaryPath: filepath.Join(blockedParent, "sitebrush"),
 		WorkingDir: filepath.Join(root, "work"),
 	}); err == nil {
-		t.Fatal("prepareInstallFilesystem hid binary parent failure")
+		t.Fatal("prepareExecutableFilesystem hid binary parent failure")
 	}
 
 	servicePath := filepath.Join(root, "service")
 	if err := writeServiceMetadata("custom", installPlan{
 		ServiceName: servicePath,
-		BinaryPath: source,
-		WorkingDir: root,
+		BinaryPath:  source,
+		WorkingDir:  root,
 	}, "en"); err != nil {
 		t.Fatal(err)
 	}

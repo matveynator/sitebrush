@@ -7,10 +7,12 @@ import (
 	"compress/gzip"
 	"crypto/ed25519"
 	"crypto/md5"
+	"crypto/rand"
 	"crypto/sha256"
 	"debug/macho"
 	_ "embed"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -313,6 +315,11 @@ func runCrosscompile() error {
 	}
 	step++
 	if err := console.Step(step, total, "Prepare release metadata", func() error {
+		if (mode == modeAll || mode == modeServerApp) && *programName == "sitebrush" {
+			if err := writeOpenBSDInstaller(repoRoot, artifactsRoot); err != nil {
+				return err
+			}
+		}
 		if signServerUpdates {
 			commit, err := runOutput(repoRoot, "git", "rev-parse", "HEAD")
 			if err != nil {
@@ -344,6 +351,42 @@ func runCrosscompile() error {
 		}
 	}
 	return nil
+}
+
+// The output root confines publication even when a prior artifact is a link.
+// Renaming a newly created file avoids following an existing install.sh link.
+func writeOpenBSDInstaller(repoRoot, artifactsRoot string) error {
+	installer, err := os.ReadFile(filepath.Join(repoRoot, "scripts", "install", "openbsd.sh"))
+	if err != nil {
+		return err
+	}
+	output, err := os.OpenRoot(artifactsRoot)
+	if err != nil {
+		return err
+	}
+	defer output.Close()
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return err
+	}
+	stagedName := ".sitebrush-install-" + hex.EncodeToString(nonce[:])
+	staged, err := output.OpenFile(stagedName, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer output.Remove(stagedName)
+	written, writeErr := staged.Write(installer)
+	closeErr := staged.Close()
+	if writeErr != nil {
+		return writeErr
+	}
+	if written != len(installer) {
+		return io.ErrShortWrite
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return output.Rename(stagedName, "install.sh")
 }
 
 // Publication settings describe upload destinations, never credentials or
