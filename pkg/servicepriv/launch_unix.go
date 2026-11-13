@@ -14,6 +14,7 @@ import (
 	"syscall"
 
 	"github.com/matveynator/sitebrush/v2/pkg/serviceinstall"
+	"github.com/matveynator/sitebrush/v2/pkg/shutdownsignals"
 	"github.com/matveynator/sitebrush/v2/pkg/systeminit"
 )
 
@@ -82,7 +83,7 @@ func Launch(arguments []string, storagePath string, httpPort int, tlsEnabled boo
 	}
 	_ = httpListener.Close()
 	signals := make(chan os.Signal, 2)
-	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
+	signal.Notify(signals, shutdownsignals.ServerShutdownSignals()...)
 	defer signal.Stop(signals)
 	finished := make(chan error, 1)
 	go func() { finished <- command.Wait() }()

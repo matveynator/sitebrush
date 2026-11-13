@@ -173,6 +173,21 @@ func prepareServiceStorage(plan installPlan) error {
 		return err
 	}
 	unix.Close(dbFD)
+	dataFD, err = ensureServiceDirectory(storageFD, "storage")
+	if err != nil {
+		return err
+	}
+	logsFD, err := ensureServiceDirectory(dataFD, "logs")
+	unix.Close(dataFD)
+	if err != nil {
+		return err
+	}
+	logFD, err := unix.Openat(logsFD, "sitebrush.log", unix.O_WRONLY|unix.O_APPEND|unix.O_CREAT|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+	unix.Close(logsFD)
+	if err != nil {
+		return fmt.Errorf("prepare application journal: %w", err)
+	}
+	unix.Close(logFD)
 	var rootStat unix.Stat_t
 	if err := unix.Fstat(storageFD, &rootStat); err != nil {
 		return fmt.Errorf("inspect storage root: %w", err)

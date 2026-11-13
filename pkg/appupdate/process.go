@@ -289,19 +289,26 @@ func runCandidate(binary string, arguments []string, directory string, output io
 // StartMaintenance keeps an accepted offline operation alive if its CLI observer
 // disconnects. The temporary supervisor exits after its idle grace period.
 func StartMaintenance(executable, storagePath string, arguments []string, directory string) error {
-	store, err := openStore(storagePath)
+	logRoot, err := os.OpenRoot(storagePath)
 	if err != nil {
 		return err
 	}
-	defer store.Close()
-	output, err := store.OpenFile("maintenance.log", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	defer logRoot.Close()
+	if err := logRoot.MkdirAll(filepath.Join("storage", "logs"), 0o700); err != nil {
+		return err
+	}
+	output, err := logRoot.OpenFile(filepath.Join("storage", "logs", "sitebrush.log"), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}
 	defer output.Close()
 	command := exec.Command(executable, append(arguments, "-update-supervisor")...)
 	command.Dir = directory
-	command.Env = childEnvironment(os.Environ())
+	for _, entry := range childEnvironment(os.Environ()) {
+		if !strings.HasPrefix(entry, "SITEBRUSH_LOG_PIPE=") {
+			command.Env = append(command.Env, entry)
+		}
+	}
 	command.Stdout = output
 	command.Stderr = output
 	detachCommand(command)

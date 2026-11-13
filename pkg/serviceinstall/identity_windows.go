@@ -28,6 +28,9 @@ func prepareServiceStorage(plan installPlan) error {
 	if err := storageRoot.MkdirAll(filepath.Join("storage", "db"), 0o700); err != nil {
 		return err
 	}
+	if err := storageRoot.MkdirAll(filepath.Join("storage", "logs"), 0o700); err != nil {
+		return err
+	}
 	if relativeWorkingDirectory != "." {
 		return storageRoot.MkdirAll(relativeWorkingDirectory, 0o700)
 	}

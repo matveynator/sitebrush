@@ -85,6 +85,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/publicsite"
 	"github.com/matveynator/sitebrush/v2/pkg/requesttiming"
 	"github.com/matveynator/sitebrush/v2/pkg/securitysync"
+	"github.com/matveynator/sitebrush/v2/pkg/serviceinstall"
 	"github.com/matveynator/sitebrush/v2/pkg/sitebrushtemplate"
 	"github.com/matveynator/sitebrush/v2/pkg/sitefreeze"
 	"github.com/matveynator/sitebrush/v2/pkg/updateannounce"
@@ -111,6 +112,30 @@ func (writer *interruptedDownloadWriter) WriteHeader(status int) {
 
 func (writer *interruptedDownloadWriter) Write(body []byte) (int, error) {
 	return len(body) / 2, errors.New("connection closed")
+}
+
+func TestServiceInstallPathsPreserveExplicitDatabasePath(t *testing.T) {
+	customDB := "/data1/sitebrush/storage/db/custom.db"
+	stored := serviceinstall.Options{StoragePath: "/data1/sitebrush", DBPath: "/data1/sitebrush/storage/db/sitebrush.db"}
+	for _, testCase := range []struct {
+		name   string
+		stored serviceinstall.Options
+		found  bool
+	}{
+		{name: "existing installation", stored: stored, found: true},
+		{name: "first installation"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, dbPath := serviceInstallPaths("/unused", customDB, true, testCase.stored, testCase.found)
+			if dbPath != customDB {
+				t.Fatalf("database path = %q, want %q", dbPath, customDB)
+			}
+		})
+	}
+	storagePath, dbPath := serviceInstallPaths("/unused", "", false, stored, true)
+	if storagePath != stored.StoragePath || dbPath != stored.DBPath {
+		t.Fatalf("stored paths = %q, %q; want %q, %q", storagePath, dbPath, stored.StoragePath, stored.DBPath)
+	}
 }
 
 func TestServerDownloadObservationRequiresCompleteTransfer(t *testing.T) {
@@ -12317,7 +12342,7 @@ func TestCopySiteDialogKeepsWholeSiteCheckboxInteractive(t *testing.T) {
 		`.SiteBrushCopySiteCheckbox input[type=\"checkbox\"]`,
 		`pointer-events:auto!important`,
 		`wholeSiteElement.checked = Boolean(configuration && configuration.copyWholeSite)`,
-		`wholeSiteElement.addEventListener('change', invalidatePreview)`,
+		`wholeSiteElement.addEventListener('change', function onImportScopeChange()`,
 	} {
 		if !strings.Contains(script, expectedFragment) {
 			t.Fatalf("copy-site checkbox contract is missing %q", expectedFragment)
@@ -12396,23 +12421,22 @@ func TestSiteBrushTemplateImportControlsAreEnabledByDefaultAndLocalized(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	for fileName, source := range map[string]string{
-		"missing.html": string(missingTemplateBytes),
-		"site_copy.js": string(copyScriptBytes),
+	copyScript := string(copyScriptBytes)
+	for _, expectedFragment := range []string{
+		"auto_detect_sitebrush_template",
+		"automaticTemplateElement.checked = true",
+		"templateLabel",
+		"templateHelpLink",
+		"templateHelpTitle",
+		"templateHelpBody",
+		"setProgress(progressBarElement, detectionPercent)",
 	} {
-		for _, expectedFragment := range []string{"auto_detect_sitebrush_template", "checked"} {
-			if !strings.Contains(source, expectedFragment) {
-				t.Fatalf("%s is missing %q", fileName, expectedFragment)
-			}
+		if !strings.Contains(copyScript, expectedFragment) {
+			t.Fatalf("copy script is missing %q", expectedFragment)
 		}
 	}
-	for _, translationKey := range []string{"site_copy_auto_detect_template", "site_copy_template_help_link", "site_copy_template_help_title", "site_copy_template_help_body"} {
-		if !strings.Contains(string(missingTemplateBytes), translationKey) {
-			t.Fatalf("import template is missing translation key %q", translationKey)
-		}
-	}
-	if !strings.Contains(string(missingTemplateBytes), "setProgressPercent(detectionPercent)") || !strings.Contains(string(copyScriptBytes), "setProgress(progressBarElement, detectionPercent)") {
-		t.Fatal("full-site import interfaces do not render SiteBrush-Template detection progress")
+	if !strings.Contains(string(missingTemplateBytes), "site_copy.js") || !strings.Contains(string(missingTemplateBytes), "SiteBrushCopySite.open(copySiteConfiguration)") {
+		t.Fatal("missing-page import does not load the shared copy dialog")
 	}
 
 	for languageCode, translations := range translationCatalog {
@@ -13440,7 +13464,7 @@ func TestExternalSiteImportPrimaryActionsUseThemeStyles(t *testing.T) {
 		"@media(max-width:900px)",
 		"--copy-card:#1c2027;--copy-text:#e6e9ef",
 		"function setCopySiteStatus(statusElement, statusText, statusKind)",
-		"setCopySiteStatus(statusElement, previewError.message",
+		"previewError.message || textFromConfig(configuration, 'previewErrorDefault'",
 		"cancelButtonElement.classList.toggle('SiteBrushCopySiteContinueButton', finishImportMode)",
 		"continueButtonElement.classList.toggle('SiteBrushCopySiteContinueButton', primaryAction)",
 		"formElement.classList.add('SiteBrushCopySiteHidden')",
@@ -17858,73 +17882,6 @@ func TestAutomaticSSLStatusViewExplainsReadyWaitingAndErrors(t *testing.T) {
 	ipErrorStatus := automaticSSLStatusView(DomainAutomaticSSLSetting{Domain: "example.com", Available: true}, os.ErrNotExist)
 	if ipErrorStatus.DomainCheckClass != "status-bad" || ipErrorStatus.DomainCheckTextKey != "domain_settings_ssl_domain_check_error" {
 		t.Fatalf("ip error status = %+v, want red domain check error", ipErrorStatus)
-	}
-}
-
-func TestDomainLogsRotateDailyAndKeepAnalyticsData(t *testing.T) {
-	application, rawDB := newTestApplication(t)
-	now := time.Date(2026, 5, 13, 12, 0, 0, 0, time.UTC)
-	logDir := application.domainLogDir("example.com")
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	oldLogPath := filepath.Join(logDir, "2026-05-07.log")
-	recentLogPath := filepath.Join(logDir, "2026-05-08.log")
-	if err := os.WriteFile(oldLogPath, []byte("old\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(recentLogPath, []byte("recent\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	_, err := rawDB.Exec(`INSERT INTO analytics_reports(domain,generated_at,period_start,period_end,event_count,report_json) VALUES(?,?,?,?,?,?)`, "example.com", now.Format(time.RFC3339), "", "", 1, "{}")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	application.cleanupOldDomainLogs("example.com", now)
-	if _, err := os.Stat(oldLogPath); !os.IsNotExist(err) {
-		t.Fatalf("old log still exists, stat error = %v", err)
-	}
-	if _, err := os.Stat(recentLogPath); err != nil {
-		t.Fatalf("recent log was removed: %v", err)
-	}
-
-	application.appendDomainLogEvent(domainLogEvent{Domain: "example.com", OccurredAt: now, Message: "AUTOCERT certificate requested"})
-	todayLogPath := filepath.Join(logDir, "2026-05-13.log")
-	todayLog, err := os.ReadFile(todayLogPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(todayLog), "AUTOCERT certificate requested") {
-		t.Fatalf("today log does not contain certificate message: %q", string(todayLog))
-	}
-	var reportCount int
-	if err := rawDB.QueryRow(`SELECT COUNT(1) FROM analytics_reports WHERE domain=?`, "example.com").Scan(&reportCount); err != nil {
-		t.Fatal(err)
-	}
-	if reportCount != 1 {
-		t.Fatalf("analytics report count = %d, want 1", reportCount)
-	}
-
-	problemLogDir := application.problemLogDir()
-	if err := os.MkdirAll(problemLogDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	oldProblemLogPath := filepath.Join(problemLogDir, "2026-05-07.log")
-	if err := os.WriteFile(oldProblemLogPath, []byte("old problem\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	application.appendProblemLogEvent(now, "AUTOCERT DNS refresh started")
-	if _, err := os.Stat(oldProblemLogPath); !os.IsNotExist(err) {
-		t.Fatalf("old problem log still exists, stat error = %v", err)
-	}
-	problemLogPath := filepath.Join(problemLogDir, "2026-05-13.log")
-	problemLog, err := os.ReadFile(problemLogPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(problemLog), "AUTOCERT DNS refresh started") {
-		t.Fatalf("problem log does not contain diagnostic message: %q", string(problemLog))
 	}
 }
 

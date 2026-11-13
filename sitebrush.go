@@ -29,6 +29,7 @@ import (
 	"flag"
 	"fmt"
 	"github.com/matveynator/netchan/v2"
+	"github.com/matveynator/sitebrush/v2/pkg/applog"
 	"hash"
 	"html/template"
 	"io"
@@ -283,7 +284,6 @@ type App struct {
 	analyticsConnections           chan struct{}
 	guestStaticHTMLCache           chan guestStaticHTMLCacheRequest
 	geoIP                          *geoip.Resolver
-	domainLogEvents                chan domainLogEvent
 	tlsHandshakeNoiseEvents        chan tlsHandshakeNoiseEvent
 	tlsHandshakeNoiseOverflow      chan struct{}
 	autoCertGuard                  chan autoCertGuardRequest
@@ -4193,13 +4193,6 @@ func (writer *statusCapturingResponseWriter) Flush() {
 	}
 }
 
-type domainLogEvent struct {
-	Domain     string
-	OccurredAt time.Time
-	Message    string
-}
-
-const domainLogRetentionDays = 5
 const tlsHandshakeNoiseQueueSize = 4096
 const tlsHandshakeNoiseMaximumGroups = 2048
 const tlsHandshakeNoiseReservedOverflowGroups = 4
@@ -4320,14 +4313,10 @@ func (a *App) accessLogMiddleware(next http.Handler) http.Handler {
 		if strings.TrimSpace(r.URL.RawQuery) == "" {
 			log.Printf("%s%s [%s]%s method=%s path=%s status=%d remote=%s duration=%s",
 				logColor, logType, requestDomain, colorReset, requestMethod, requestPath, writer.statusCode, requestRemoteAddress, duration.String())
-			a.writeDomainLog(requestDomain, "%s [%s] method=%s path=%s status=%d remote=%s duration=%s",
-				logType, requestDomain, requestMethod, requestPath, writer.statusCode, requestRemoteAddress, duration.String())
 			return
 		}
 		log.Printf("%s%s [%s]%s method=%s path=%s query=%s status=%d remote=%s duration=%s",
 			logColor, logType, requestDomain, colorReset, requestMethod, requestPath, requestQuery, writer.statusCode, requestRemoteAddress, duration.String())
-		a.writeDomainLog(requestDomain, "%s [%s] method=%s path=%s query=%s status=%d remote=%s duration=%s",
-			logType, requestDomain, requestMethod, requestPath, requestQuery, writer.statusCode, requestRemoteAddress, duration.String())
 	})
 }
 
@@ -4359,193 +4348,16 @@ func sitebrushConnStateLogger(protocol string, debug bool) func(net.Conn, http.C
 	}
 }
 
-func (a *App) startDomainLogWorker(ctx context.Context) {
-	if a.domainLogEvents == nil {
-		a.domainLogEvents = make(chan domainLogEvent, 1024)
-	}
-	go a.runDomainLogWorker(ctx, a.domainLogEvents)
-}
-
-func (a *App) writeDomainLog(domain string, format string, args ...any) {
-	cleanDomain := normalizeDomainName(domain)
-	if cleanDomain == "" {
-		cleanDomain = "localhost"
-	}
-	cleanDomain = diagnosticlog.SafeLogValue(cleanDomain)
-	message := diagnosticlog.SafeLogValue(fmt.Sprintf(format, args...))
-	if a.domainLogEvents == nil {
-		return
-	}
-	event := domainLogEvent{Domain: cleanDomain, OccurredAt: time.Now().UTC(), Message: message}
-	select {
-	case a.domainLogEvents <- event:
-	default:
-		log.Printf("domain log queue is full, skipped log for domain=%s", cleanDomain)
-	}
-}
-
 func (a *App) logDomainEvent(domain string, format string, args ...any) {
 	cleanDomain := normalizeDomainName(domain)
 	if cleanDomain == "" {
 		cleanDomain = "localhost"
 	}
-	cleanDomain = diagnosticlog.SafeLogValue(cleanDomain)
-	message := diagnosticlog.SafeLogValue(fmt.Sprintf(format, args...))
-	log.Printf("domain=%s %s", cleanDomain, message)
-	a.writeDomainLog(cleanDomain, "%s", message)
-}
-
-func (a *App) runDomainLogWorker(ctx context.Context, events <-chan domainLogEvent) {
-	lastCleanupByDomain := make(map[string]string)
-	for {
-		select {
-		case <-ctx.Done():
-			a.drainDomainLogEvents(events)
-			return
-		case event := <-events:
-			if event.OccurredAt.IsZero() {
-				event.OccurredAt = time.Now().UTC()
-			}
-			a.appendDomainLogEvent(event)
-			cleanupDate := event.OccurredAt.Format("2006-01-02")
-			if lastCleanupByDomain[event.Domain] == cleanupDate {
-				continue
-			}
-			lastCleanupByDomain[event.Domain] = cleanupDate
-			a.cleanupOldDomainLogs(event.Domain, event.OccurredAt)
-		}
-	}
-}
-
-func (a *App) drainDomainLogEvents(events <-chan domainLogEvent) {
-	for {
-		select {
-		case event := <-events:
-			if event.OccurredAt.IsZero() {
-				event.OccurredAt = time.Now().UTC()
-			}
-			a.appendDomainLogEvent(event)
-		default:
-			return
-		}
-	}
-}
-
-func (a *App) appendDomainLogEvent(event domainLogEvent) {
-	event.Domain = diagnosticlog.SafeLogValue(event.Domain)
-	event.Message = diagnosticlog.SafeLogValue(event.Message)
-	logDir := a.domainLogDir(event.Domain)
-	if err := a.mkdirAllInsideStorage(logDir, 0o755); err != nil {
-		log.Printf("failed to create domain log dir for %s: %v", event.Domain, err)
-		return
-	}
-	logPath := filepath.Join(logDir, event.OccurredAt.Format("2006-01-02")+".log")
-	realLogPath, pathErr := a.writablePathInsideStorageSubtree(logDir, logPath)
-	if pathErr != nil {
-		log.Printf("failed to resolve domain log path for %s: %v", event.Domain, pathErr)
-		return
-	}
-	logFile, err := os.OpenFile(realLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		log.Printf("failed to open domain log for %s: %v", event.Domain, err)
-		return
-	}
-	defer logFile.Close()
-	if _, err := fmt.Fprintf(logFile, "%s %s\n", event.OccurredAt.Format(time.RFC3339), event.Message); err != nil {
-		log.Printf("failed to write domain log for %s: %v", event.Domain, err)
-	}
-}
-
-func (a *App) cleanupOldDomainLogs(domain string, now time.Time) {
-	logDir := a.domainLogDir(domain)
-	realLogDir, pathErr := a.existingPathInsideStorage(logDir)
-	if pathErr != nil {
-		return
-	}
-	entries, err := os.ReadDir(realLogDir)
-	if err != nil {
-		return
-	}
-	cutoffDate := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -domainLogRetentionDays)
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".log") {
-			continue
-		}
-		logDate, parseErr := time.Parse("2006-01-02", strings.TrimSuffix(entry.Name(), ".log"))
-		if parseErr != nil || !logDate.Before(cutoffDate) {
-			continue
-		}
-		realLogPath, pathErr := a.existingPathInsideStorageSubtree(realLogDir, filepath.Join(realLogDir, entry.Name()))
-		if pathErr != nil {
-			continue
-		}
-		if removeErr := os.Remove(realLogPath); removeErr != nil {
-			log.Printf("failed to remove old domain log %s/%s: %v", domain, entry.Name(), removeErr)
-		}
-	}
+	log.Printf("domain=%s %s", diagnosticlog.SafeLogValue(cleanDomain), diagnosticlog.SafeLogValue(fmt.Sprintf(format, args...)))
 }
 
 func (a *App) logProblemEvent(format string, args ...any) {
-	message := diagnosticlog.SafeLogValue(fmt.Sprintf(format, args...))
-	log.Printf("PROBLEM %s", message)
-	a.appendProblemLogEvent(time.Now().UTC(), message)
-}
-
-func (a *App) appendProblemLogEvent(occurredAt time.Time, message string) {
-	if occurredAt.IsZero() {
-		occurredAt = time.Now().UTC()
-	}
-	message = diagnosticlog.SafeLogValue(message)
-	logDir := a.problemLogDir()
-	if err := a.mkdirAllInsideStorage(logDir, 0o755); err != nil {
-		log.Printf("failed to create problem log dir: %v", err)
-		return
-	}
-	logPath := filepath.Join(logDir, occurredAt.Format("2006-01-02")+".log")
-	realLogPath, pathErr := a.writablePathInsideStorageSubtree(logDir, logPath)
-	if pathErr != nil {
-		log.Printf("failed to resolve problem log path: %v", pathErr)
-		return
-	}
-	logFile, err := os.OpenFile(realLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		log.Printf("failed to open problem log: %v", err)
-		return
-	}
-	defer logFile.Close()
-	if _, err := fmt.Fprintf(logFile, "%s %s\n", occurredAt.Format(time.RFC3339), message); err != nil {
-		log.Printf("failed to write problem log: %v", err)
-	}
-	a.cleanupOldProblemLogs(occurredAt)
-}
-
-func (a *App) cleanupOldProblemLogs(now time.Time) {
-	logDir := a.problemLogDir()
-	realLogDir, pathErr := a.existingPathInsideStorage(logDir)
-	if pathErr != nil {
-		return
-	}
-	entries, err := os.ReadDir(realLogDir)
-	if err != nil {
-		return
-	}
-	cutoffDate := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -domainLogRetentionDays)
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".log") {
-			continue
-		}
-		logDate, parseErr := time.Parse("2006-01-02", strings.TrimSuffix(entry.Name(), ".log"))
-		if parseErr != nil || !logDate.Before(cutoffDate) {
-			continue
-		}
-		realLogPath, pathErr := a.existingPathInsideStorageSubtree(realLogDir, filepath.Join(realLogDir, entry.Name()))
-		if pathErr != nil {
-			continue
-		}
-		if removeErr := os.Remove(realLogPath); removeErr != nil {
-			log.Printf("failed to remove old problem log %s: %v", entry.Name(), removeErr)
-		}
-	}
+	log.Printf("PROBLEM %s", diagnosticlog.SafeLogValue(fmt.Sprintf(format, args...)))
 }
 
 type problemLogWriter struct {
@@ -10349,6 +10161,12 @@ func main() {
 		if !appcli.InstallFlagSupported() {
 			log.Fatal("updates are available only in server builds")
 		}
+		closeJournal, journalErr := applog.Capture(effectiveStoragePath)
+		if journalErr != nil {
+			log.Fatalf("open application journal: %v", journalErr)
+		}
+		defer closeJournal()
+		log.Printf("sitebrush process started role=manual-upgrade pid=%d uid=%d version=%s", os.Getpid(), os.Getuid(), CompileVersion)
 		if handled, dropErr := servicepriv.DropForMaintenance(os.Args[1:], effectiveStoragePath); handled {
 			if dropErr != nil {
 				log.Fatal(dropErr)
@@ -10366,18 +10184,13 @@ func main() {
 	}
 	if installMode {
 		if !storagePathWasProvided {
-			if stored, found := serviceinstall.StoredOptions(); found {
-				effectiveStoragePath = stored.StoragePath
-				effectiveDBPath = stored.DBPath
-				if !flagWasProvided("port") {
-					parsedPorts, err = parseListenPorts(stored.Port)
-					if err != nil {
-						log.Fatal(err)
-					}
+			stored, found := serviceinstall.StoredOptions()
+			effectiveStoragePath, effectiveDBPath = serviceInstallPaths(effectiveStoragePath, effectiveDBPath, dbPathWasProvided, stored, found)
+			if found && !flagWasProvided("port") {
+				parsedPorts, err = parseListenPorts(stored.Port)
+				if err != nil {
+					log.Fatal(err)
 				}
-			} else {
-				effectiveStoragePath = serviceinstall.DefaultStoragePath()
-				effectiveDBPath = filepath.Join(effectiveStoragePath, defaultDBPath)
 			}
 		}
 		if err := runServiceInstaller(parsedPorts.Raw, effectiveStoragePath, effectiveDBPath); err != nil {
@@ -10391,6 +10204,31 @@ func main() {
 		}
 		return
 	}
+	if !*serviceRuntime && !*serviceWorker && !*serverChild && !*updateSupervisor {
+		preparedStoragePath, usedFallback, prepareErr := prepareStoragePathWithFallback(effectiveStoragePath, userAppStoragePath(), !storagePathWasProvided && !dbPathWasProvided)
+		if prepareErr != nil {
+			log.Fatalf("prepare storage path: %v", prepareErr)
+		}
+		if usedFallback {
+			log.Printf("system storage %s is unavailable; using user storage %s", effectiveStoragePath, preparedStoragePath)
+			if !dbPathWasProvided {
+				effectiveDBPath = filepath.Join(preparedStoragePath, defaultDBPath)
+			}
+		}
+		effectiveStoragePath = preparedStoragePath
+	}
+	if !*serviceWorker {
+		closeJournal, journalErr := applog.Capture(effectiveStoragePath)
+		if journalErr != nil {
+			log.Fatalf("open application journal: %v", journalErr)
+		}
+		defer func() {
+			if err := closeJournal(); err != nil {
+				fmt.Fprintf(os.Stderr, "close application journal: %v\n", err)
+			}
+		}()
+	}
+	log.Printf("sitebrush process started role=%s pid=%d uid=%d version=%s", processRole(*serviceRuntime, *serviceWorker, *updateSupervisor, *serverChild), os.Getpid(), os.Getuid(), CompileVersion)
 	if *serviceRuntime && *serviceWorker {
 		log.Fatal("service launcher and worker modes cannot be combined")
 	}
@@ -10445,6 +10283,36 @@ func main() {
 		log.Fatal(err)
 	}
 	logShutdownDone("program stopped")
+}
+
+func serviceInstallPaths(storagePath, dbPath string, dbPathProvided bool, stored serviceinstall.Options, found bool) (string, string) {
+	if found {
+		storagePath = stored.StoragePath
+		if !dbPathProvided {
+			dbPath = stored.DBPath
+		}
+		return storagePath, dbPath
+	}
+	storagePath = serviceinstall.DefaultStoragePath()
+	if !dbPathProvided {
+		dbPath = filepath.Join(storagePath, defaultDBPath)
+	}
+	return storagePath, dbPath
+}
+
+func processRole(launcher, worker, supervisor, child bool) string {
+	switch {
+	case launcher:
+		return "service-launcher"
+	case worker:
+		return "service-worker"
+	case supervisor:
+		return "update-supervisor"
+	case child:
+		return "server-child"
+	default:
+		return "server"
+	}
 }
 
 func signalAwareContext(parent context.Context) (context.Context, context.CancelFunc) {
@@ -10556,7 +10424,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	}
 	var siteDatabaseRouter *perSiteDBRouter
 	aiCapabilityStatePath := filepath.Join(storageRealRoot, "security", "ai-capabilities.json")
-	application := &App{storagePath: effectiveStoragePath, storageRealRoot: storageRealRoot, dbPath: effectiveDBPath, debug: config.Debug, desktopMode: config.DesktopMode, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), grabCancels: newGrabCancelTracker(), trialPreviews: newPublicTrialPreviewStore(), paidTrialSlots: make(chan struct{}, 2), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 1024), analyticsLosses: make(chan string, 64), browserAnalyticsLosses: make(chan string, 64), browserAnalytics: make(chan browserAnalyticsEnvelope, 512), analyticsConnections: make(chan struct{}, 128), domainLogEvents: make(chan domainLogEvent, 1024), aiCapabilities: nil}
+	application := &App{storagePath: effectiveStoragePath, storageRealRoot: storageRealRoot, dbPath: effectiveDBPath, debug: config.Debug, desktopMode: config.DesktopMode, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), grabCancels: newGrabCancelTracker(), trialPreviews: newPublicTrialPreviewStore(), paidTrialSlots: make(chan struct{}, 2), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 1024), analyticsLosses: make(chan string, 64), browserAnalyticsLosses: make(chan string, 64), browserAnalytics: make(chan browserAnalyticsEnvelope, 512), analyticsConnections: make(chan struct{}, 128), aiCapabilities: nil}
 	application.requestTimings = startRequestTimingCounters(config.RequestTimings, ctx.Done(), "application")
 	application.developmentMode = CompileVersion == "dev" && !config.UpdateChild
 	application.updateActivation = activation
@@ -10693,7 +10561,6 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 		application.demoSiteRuntime = application.startDemoSiteRuntimeProcess(ctx.Done())
 		application.hostingAndSupportPanel = application.startHostingAndSupportPanelProcess(ctx.Done())
 		application.billingInvoices = application.startBillingInvoiceProcess(ctx.Done())
-		application.startDomainLogWorker(ctx)
 		application.startAnalyticsWorkers(ctx)
 		go application.runRegistrationCooldownProcess(ctx.Done())
 		application.startServerOwnerRecoveryWorker(ctx)
@@ -10779,8 +10646,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 			w = captured
 
 			defer func() {
-				logDomain := domainFromRequest(r)
-				safeDomain := diagnosticlog.SafeLogValue(logDomain)
+				safeDomain := diagnosticlog.SafeLogValue(domainFromRequest(r))
 				safeRemote := diagnosticlog.SafeLogValue(r.RemoteAddr)
 				requestMethod := http.MethodGet
 				if r.Method == http.MethodHead {
@@ -10797,15 +10663,6 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 					duration,
 				)
 
-				application.writeDomainLog(
-					logDomain,
-					"REQUEST [%s] method=%s path=/robots.txt status=%d remote=%s duration=%s",
-					safeDomain,
-					requestMethod,
-					captured.statusCode,
-					safeRemote,
-					duration,
-				)
 			}()
 		}
 		if r.URL.Path == "/_sitebrush/update-health" && r.Header.Get("X-SiteBrush-Update-Probe") == healthNonce && requestRemoteIsLoopback(r) {
@@ -57777,10 +57634,6 @@ func (a *App) domainLogDir(domain string) string {
 	return filepath.Join(a.storageRootDir(), "logs", domainStorageName(domain))
 }
 
-func (a *App) problemLogDir() string {
-	return filepath.Join(a.storageRootDir(), "logs", "problems")
-}
-
 func (a *App) logContentDelivery(w http.ResponseWriter, sourceType string) {
 	contentSource := "dynamic"
 	if sourceType == "static-file" {
@@ -61283,7 +61136,6 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 	application.publicStreamer = publicsite.NewStreamer()
 	application.publicCatalog = publicsite.NewCatalog(storagePath, ctx.Done())
 	application.autoCertCertificateCache = startAutoCertCertificateMemoryCache(ctx, filepath.Join(application.storageRootDir(), "letsencrypt"))
-	application.startDomainLogWorker(ctx)
 	staticFiles, err := fs.Sub(embeddedWebFiles, "web/static")
 	if err != nil {
 		return nil, nil, "", err

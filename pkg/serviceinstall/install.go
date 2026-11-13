@@ -1416,12 +1416,12 @@ command_args=%s
 directory=%s
 command_background=true
 pidfile="/run/%s.pid"
-output_log="/var/log/%s.log"
-error_log="/var/log/%s.log"
+output_log=%s
+error_log=%s
 depend() {
 	need net
 }
-`, shellQuote(plan.BinaryPath), shellQuote(strings.Join(plan.ExecArgs[1:], " ")), shellQuote(plan.WorkingDir), plan.ServiceName, plan.ServiceName, plan.ServiceName)
+`, shellQuote(plan.BinaryPath), shellQuote(strings.Join(plan.ExecArgs[1:], " ")), shellQuote(plan.WorkingDir), plan.ServiceName, shellQuote(filepath.Join(installOptionOrDefault(plan.Options.StoragePath, defaultStoragePath()), "storage", "logs", "sitebrush.log")), shellQuote(filepath.Join(installOptionOrDefault(plan.Options.StoragePath, defaultStoragePath()), "storage", "logs", "sitebrush.log")))
 	if err := writeFile(path, content, 0o755); err != nil {
 		return Result{}, err
 	}
@@ -1586,7 +1586,7 @@ func sysVRcScript(plan installPlan) string {
 case "$1" in
   start)
     cd %s || exit 1
-    nohup %s >/var/log/%s.log 2>&1 &
+    nohup %s >>%s 2>&1 &
     echo $! >/var/run/%s.pid
     ;;
   stop)
@@ -1605,7 +1605,7 @@ case "$1" in
     ;;
 esac
 exit $?
-`, plan.ServiceName, shellQuote(plan.WorkingDir), execLine(plan.ExecArgs), plan.ServiceName, plan.ServiceName, plan.ServiceName, plan.ServiceName, plan.ServiceName, plan.ServiceName, plan.ServiceName)
+`, plan.ServiceName, shellQuote(plan.WorkingDir), execLine(plan.ExecArgs), shellQuote(filepath.Join(installOptionOrDefault(plan.Options.StoragePath, defaultStoragePath()), "storage", "logs", "sitebrush.log")), plan.ServiceName, plan.ServiceName, plan.ServiceName, plan.ServiceName, plan.ServiceName, plan.ServiceName)
 }
 
 func installLaunchd(ctx context.Context, probe runtimeProbe, plan installPlan) (Result, error) {
@@ -1678,12 +1678,12 @@ func launchdPlist(label string, plan installPlan) string {
 	<key>KeepAlive</key>
 	<true/>
 	<key>StandardOutPath</key>
-	<string>/var/log/%s.log</string>
+	<string>%s</string>
 	<key>StandardErrorPath</key>
-	<string>/var/log/%s.log</string>
+	<string>%s</string>
 </dict>
 </plist>
-`, label, strings.Join(args, "\n"), escapeXML(plan.WorkingDir), plan.ServiceName, plan.ServiceName)
+`, label, strings.Join(args, "\n"), escapeXML(plan.WorkingDir), escapeXML(filepath.Join(installOptionOrDefault(plan.Options.StoragePath, defaultStoragePath()), "storage", "logs", "sitebrush.log")), escapeXML(filepath.Join(installOptionOrDefault(plan.Options.StoragePath, defaultStoragePath()), "storage", "logs", "sitebrush.log")))
 }
 
 func escapeXML(value string) string {

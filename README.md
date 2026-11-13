@@ -287,6 +287,14 @@ The server owner sees a newer signed release at the bottom of the SiteBrush menu
 
 Existing installations need the new application and launcher, followed by one service restart, to enable persistent public listeners. Updating only a child process leaves the old launcher running. Before enabling the unprivileged service, update any older selected application that cannot use the persistent public listeners.
 
+## Service journal and process roles
+
+Server events from every site and update process are written to `<data directory>/storage/logs/sitebrush.log` on every supported operating system. The active file is rotated at UTC midnight, compressed as `sitebrush-YYYY-MM-DD-000001.log.gz`, and retained for 30 days. Old per-site logs remain readable until their 30-day cleanup; no new per-site logs are created. Watch the active journal with `tail -f /data1/sitebrush/storage/logs/sitebrush.log` on OpenBSD when `/data1/sitebrush` is the chosen data directory.
+
+On Unix, `-service-runtime` starts the root launcher. It applies process tuning and opens ports 80 and 443, then starts a worker as the dedicated `_sitebrush` account on OpenBSD (or the platform's corresponding service account). The launcher remains as root to own the listeners and forward shutdown signals. The worker and its supervised update child run without root privileges. Re-run `sitebrush -install -path /data1/sitebrush -port 80,443` after updating an older OpenBSD installation to replace a service definition that starts the whole server as root.
+
+The flags `-service-worker`, `-public-proxy`, `-server-child`, and `-update-target-version` are internal: they identify the unprivileged worker, the private HTTP backend behind the updater, the supervised application process, and the signed release identity. They are added by SiteBrush and should not be set in a service definition manually.
+
 ## Best suited for
 
 SiteBrush works especially well for:
