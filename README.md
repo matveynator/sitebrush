@@ -295,6 +295,12 @@ On Unix, `-service-runtime` starts the root launcher. It applies process tuning 
 
 The flags `-service-worker`, `-public-proxy`, `-server-child`, and `-update-target-version` are internal: they identify the unprivileged worker, the private HTTP backend behind the updater, the supervised application process, and the signed release identity. They are added by SiteBrush and should not be set in a service definition manually.
 
+On OpenBSD, the installer creates `/etc/login.conf.d/sitebrush` with an `openfiles` limit of 65536 and rebuilds that class before restarting the service. The class applies to the launcher and its unprivileged children. Site databases open their readers when first needed, so a server with many registered sites does not keep every site's connections open at startup. The startup report in the journal shows the effective file limit.
+
+When moving a data directory between operating systems, install and start the native SiteBrush binary. The update supervisor then replaces the copied platform's selected binary with the native launcher while preserving the databases. It rejects an unfinished update or recovery state that must be resolved on the original machine first.
+
+For a new server without a domain, open its IP address over HTTPS and compare the fallback certificate SHA-256 fingerprint printed by `sitebrush -install` on the server. Enter the one-time first administrator code from that command. The code expires after 15 minutes; `sitebrush -setup-code -path /data1/sitebrush` issues a new one only while no server owner or other site exists. The initial installer gives ownership of the code file to the dedicated service account.
+
 ## Best suited for
 
 SiteBrush works especially well for:

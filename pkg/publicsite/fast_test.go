@@ -140,6 +140,20 @@ func TestHTMLStreamsConditionalAndRangeResponses(t *testing.T) {
 	}
 }
 
+func TestPublicFrontWaitsForPolicyBeforeServingSiteHost(t *testing.T) {
+	stop := make(chan struct{})
+	defer close(stop)
+	front := NewFront("secret", func(http.ResponseWriter, *http.Request, bool) bool { return false }, stop)
+	if err := front.Set("127.0.0.1:12345", false); err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	front.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://site.test/", nil))
+	if response.Code != http.StatusServiceUnavailable || response.Header().Get("Retry-After") != "2" {
+		t.Fatalf("policy startup response=%d retry=%q", response.Code, response.Header().Get("Retry-After"))
+	}
+}
+
 func TestObservationsRetainAcknowledgedBoundaryAndDropLater(t *testing.T) {
 	stop := make(chan struct{})
 	defer close(stop)

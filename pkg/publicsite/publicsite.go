@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/matveynator/sitebrush/v2/pkg/requesttiming"
@@ -187,6 +188,11 @@ func (front *Front) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "server unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	if !state.Paused && !state.PolicyReady && !installationHost(r.Host) {
+		w.Header().Set("Retry-After", "2")
+		http.Error(w, "site policy is loading", http.StatusServiceUnavailable)
+		return
+	}
 	if front.public(w, r, state.Paused) {
 		return
 	}
@@ -208,6 +214,14 @@ func (front *Front) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	started = requesttiming.Start(r)
 	front.proxy.ServeHTTP(w, r)
 	requesttiming.Finish(r, requesttiming.ProxyBackend, started)
+}
+
+func installationHost(host string) bool {
+	if name, _, err := net.SplitHostPort(host); err == nil {
+		host = name
+	}
+	host = strings.Trim(host, "[]")
+	return net.ParseIP(host) != nil || strings.EqualFold(host, "localhost")
 }
 
 type proxyTargetKey struct{}
