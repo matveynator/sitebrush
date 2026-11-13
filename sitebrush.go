@@ -13314,7 +13314,11 @@ func (a *App) aiIngressMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The SQL router needs the requested site before admission reads its
 		// control database. HTTP requests do not arrive with a domain context.
-		r = r.WithContext(contextWithDomain(r.Context(), domainFromRequest(r)))
+		domain := domainFromRequest(r)
+		if requestHostIP(r) != nil {
+			domain = a.siteDomain(r.Context(), r)
+		}
+		r = r.WithContext(contextWithDomain(r.Context(), domain))
 		machine, owner := a.aiIngressAdmission(r)
 		// Public logging, abuse detection and referrer cookies must observe the
 		// same request as the public router, without hidden control selectors.

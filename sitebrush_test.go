@@ -14260,6 +14260,32 @@ func TestRemoteIPFirstAdminRequiresTLSAndInstallCode(t *testing.T) {
 	}
 }
 
+func TestIPOwnerRequestRoutesToNamedOwnerDatabase(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	const ownerDomain = "owner.example.org"
+	if err := application.createManagedSite(context.Background(), ownerDomain, "owner@example.org", "test", 8<<20); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.withServerControlDatabaseWrite(context.Background(), "test-ip-owner", func(database *sql.DB) error {
+		return (hostingandsupport.Store{DB: database}).SetOwner(context.Background(), ownerDomain, "owner@example.org")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	handler := application.aiIngressMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var admins int
+		err := application.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM users WHERE domain=? AND is_admin=1`, ownerDomain).Scan(&admins)
+		if err != nil || admins != 1 {
+			http.Error(w, fmt.Sprintf("owner admins=%d error=%v", admins, err), http.StatusServiceUnavailable)
+		}
+	}))
+	request := httptest.NewRequest(http.MethodGet, "https://203.0.113.10/?login", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("IP owner request status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestServerWWWAliasSSLUsesOwnerDatabase(t *testing.T) {
 	application := newPartitionedTestApplication(t)
 	application.automaticSSLAvailable = true
