@@ -14870,10 +14870,14 @@ func testPrivateTestDriveOnboarding(t *testing.T, scheme string) {
 	if reportErr != nil || registrationReport.Outcomes.SitesCreated != 1 || registrationReport.Outcomes.Completed != 0 || registrationReport.Workflows["test_drive"].Stages["site_created"] != 1 {
 		t.Fatalf("private Test Drive count: %+v %v", registrationReport, reportErr)
 	}
-	trialCreatedAt, _ := time.Parse(time.RFC3339, trial.CreatedAt)
-	trialExpiry, _ := time.Parse(time.RFC3339, trial.DeleteAfter)
-	if trialExpiry.Sub(trialCreatedAt) != testDriveCodeTime {
-		t.Fatalf("pending site expires before its confirmation code: %s", trialExpiry.Sub(trialCreatedAt))
+	trialCreatedAt, createdAtErr := time.Parse(time.RFC3339, trial.CreatedAt)
+	trialExpiry, expiryErr := time.Parse(time.RFC3339, trial.DeleteAfter)
+	codeExpiry, codeExpiryErr := time.Parse(time.RFC3339, trial.CodeExpiresAt)
+	if createdAtErr != nil || expiryErr != nil || codeExpiryErr != nil {
+		t.Fatalf("invalid pending site timestamps: created=%q expiry=%q code_expiry=%q", trial.CreatedAt, trial.DeleteAfter, trial.CodeExpiresAt)
+	}
+	if codeExpiry.Sub(trialCreatedAt) < testDriveCodeTime || trialExpiry.Before(codeExpiry) {
+		t.Fatalf("pending site expires before its confirmation code: site=%s code=%s created=%s", trialExpiry, codeExpiry, trialCreatedAt)
 	}
 	var handoffCookie *http.Cookie
 	for _, cookie := range startResponse.Result().Cookies() {
