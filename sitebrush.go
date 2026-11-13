@@ -1271,7 +1271,13 @@ const slowHTTPRequestLogAfter = 2 * time.Second
 const slowHTTPRequestRepeatAfter = 10 * time.Second
 const slowDatabaseOperationLogAfter = time.Second
 const slowDatabaseOperationRepeatAfter = 5 * time.Second
-const siteDatabaseReaderCount = 2
+
+func siteDatabaseReaderCount() int {
+	if runtime.GOOS == "openbsd" {
+		return 2
+	}
+	return 5
+}
 
 func contextWithDomain(ctx context.Context, domain string) context.Context {
 	normalizedDomain := normalizeDomainName(domain)
@@ -1353,8 +1359,9 @@ func newSiteFileDatabase(databasePath string, rawDatabase *sql.DB, debug bool) (
 		}
 	}
 
-	readDatabases := make([]*sql.DB, 0, siteDatabaseReaderCount)
-	for range siteDatabaseReaderCount {
+	readerCount := siteDatabaseReaderCount()
+	readDatabases := make([]*sql.DB, 0, readerCount)
+	for range readerCount {
 		readDatabase, err := openSiteDatabaseReadHandle(databasePath)
 		if err != nil {
 			for _, openedDatabase := range readDatabases {
@@ -1375,7 +1382,7 @@ func newSiteFileDatabase(databasePath string, rawDatabase *sql.DB, debug bool) (
 		writeQueue:    make(chan siteDBOperation, 128),
 		closeRequests: make(chan chan error),
 		readStop:      make(chan struct{}),
-		readersDone:   make(chan struct{}, siteDatabaseReaderCount),
+		readersDone:   make(chan struct{}, readerCount),
 		stopped:       make(chan struct{}),
 	}
 	for _, readDatabase := range readDatabases {
@@ -1399,7 +1406,11 @@ func openSiteDatabaseReadHandle(databasePath string) (*sql.DB, error) {
 		return nil, err
 	}
 	database.SetMaxOpenConns(1)
-	database.SetMaxIdleConns(0)
+	if runtime.GOOS == "openbsd" {
+		database.SetMaxIdleConns(0)
+	} else {
+		database.SetMaxIdleConns(1)
+	}
 	database.SetConnMaxLifetime(0)
 	return database, nil
 }
@@ -2847,9 +2858,25 @@ func (r *perSiteDBRouter) preloadMigratedDatabases(siteDatabaseRootDir string, d
 	}
 	sort.Strings(domainList)
 	response := siteDBPreloadResponse{total: len(domainList)}
-	// Startup migration has already verified every registered site. Open its
-	// long-lived workers only when the site receives its first request.
-	log.Printf("%sPRELOAD%s site databases registered=%d opened=on-demand", terminalGreen(), terminalReset(), response.total)
+	if runtime.GOOS == "openbsd" {
+		// Startup migration has already verified every registered site.
+		// Conservative descriptor limits make permanent warm workers costly.
+		log.Printf("%sPRELOAD%s site databases registered=%d opened=on-demand", terminalGreen(), terminalReset(), response.total)
+		return response
+	}
+	for _, domain := range domainList {
+		_, err := r.databaseForDomain(siteDatabaseRootDir, databasesByDomain, migratedDomains, degradedDomains, domain, false, migrate)
+		if err != nil {
+			response.failed++
+			if response.err == nil {
+				response.err = err
+			}
+			log.Printf("%sPRELOAD%s site database failed domain=%s err=%v", terminalRed(), terminalReset(), domain, err)
+			continue
+		}
+		response.opened++
+	}
+	log.Printf("%sPRELOAD%s site databases total=%d opened=%d failed=%d", terminalGreen(), terminalReset(), response.total, response.opened, response.failed)
 	return response
 }
 

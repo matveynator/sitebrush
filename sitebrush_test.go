@@ -4539,7 +4539,7 @@ func TestListSiteQuotaRowsRequiresRegisteredAdmin(t *testing.T) {
 	}
 }
 
-func TestPerSiteDBRouterPreloadKeepsRegisteredSiteDatabasesLazy(t *testing.T) {
+func TestPerSiteDBRouterPreloadRespectsPlatformDescriptorBudget(t *testing.T) {
 	storagePath := t.TempDir()
 	dbPath := filepath.Join(storagePath, defaultDBPath)
 	siteDatabaseDir := siteDatabaseRootPath(dbPath)
@@ -4577,8 +4577,12 @@ func TestPerSiteDBRouterPreloadKeepsRegisteredSiteDatabasesLazy(t *testing.T) {
 	if preloadResponse.err != nil {
 		t.Fatalf("preload err: %v", preloadResponse.err)
 	}
-	if preloadResponse.total != len(domains) || preloadResponse.opened != 0 || preloadResponse.failed != 0 {
-		t.Fatalf("preload response = %#v, want registered site dbs left unopened", preloadResponse)
+	expectedOpened := len(domains)
+	if runtime.GOOS == "openbsd" {
+		expectedOpened = 0
+	}
+	if preloadResponse.total != len(domains) || preloadResponse.opened != expectedOpened || preloadResponse.failed != 0 {
+		t.Fatalf("preload response = %#v, want %d registered site dbs opened", preloadResponse, expectedOpened)
 	}
 	for _, domain := range domains {
 		var count int
@@ -16712,8 +16716,8 @@ func TestPerSiteDBRouterSerializesConcurrentWritesToOneSiteDatabase(t *testing.T
 	if got := siteDatabase.rawDatabase.Stats().MaxOpenConnections; got != 1 {
 		t.Fatalf("site database max open connections = %d, want 1", got)
 	}
-	if got := len(siteDatabase.readDatabases); got != siteDatabaseReaderCount {
-		t.Fatalf("site database readers = %d, want %d", got, siteDatabaseReaderCount)
+	if got := len(siteDatabase.readDatabases); got != siteDatabaseReaderCount() {
+		t.Fatalf("site database readers = %d, want %d", got, siteDatabaseReaderCount())
 	}
 	for readerIndex, readDatabase := range siteDatabase.readDatabases {
 		if got := readDatabase.Stats().MaxOpenConnections; got != 1 {
