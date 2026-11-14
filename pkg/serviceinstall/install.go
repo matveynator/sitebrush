@@ -1979,7 +1979,10 @@ daemon_execdir=%s
 
 rc_bg=YES
 rc_reload=NO
-pexp="${daemon}.*-service-runtime"
+# Match the actual launcher command, not the internal -service-runtime flag.
+# rc.subr launches this executable with daemon_flags, while the private
+# child uses a separate versioned binary under the update directory.
+pexp="^${daemon}([[:space:]]|$)"
 rc_cmd $1
 `, shellQuote(plan.BinaryPath), shellQuote(strings.Join(plan.ExecArgs[1:], " ")), shellQuote(plan.WorkingDir))
 }
