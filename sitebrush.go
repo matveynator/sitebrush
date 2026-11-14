@@ -10955,6 +10955,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 					enableErr = fallbackErr
 				}
 				if enableErr != nil {
+					log.Printf("PUBLIC policy enable failed address=%q error=%v", application.publicPolicyAddress, enableErr)
 					delay = min(time.Minute, delay*2)
 				} else {
 					delay = 5 * time.Second
@@ -11239,6 +11240,7 @@ func (a *App) refreshStartupPublicPolicies(ctx context.Context) {
 		}
 		if !ready && published {
 			close(a.publicPolicyReady)
+			log.Printf("PUBLIC policy snapshot ready; requesting public boundary enable")
 			ready = true
 		}
 		if err == nil {
@@ -60429,7 +60431,9 @@ func (a *App) refreshPublicPolicies() (bool, []string, error) {
 			return false, nil, err
 		}
 	}
-	return a.refreshSelectedPublicPolicies(domains)
+	ready, failed, err := a.refreshSelectedPublicPolicies(domains)
+	log.Printf("PUBLIC policy snapshot domains=%d failed=%d ready=%t", len(domains), len(failed), ready)
+	return ready, failed, err
 }
 
 func (a *App) refreshSelectedPublicPolicies(domains []string) (bool, []string, error) {
@@ -61543,7 +61547,7 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 				return nil, stateErr
 			}
 			if state.Address != change.Address || state.Paused {
-				return nil, errors.New("policy publisher is not serving")
+				return nil, fmt.Errorf("policy publisher is not serving: requested=%q active=%q paused=%t", change.Address, state.Address, state.Paused)
 			}
 			if !state.PolicyReady {
 				if policyErr := application.publicCatalog.SetMemory(true); policyErr != nil {
@@ -61665,6 +61669,7 @@ func localPublicPolicyGuest(front *publicsite.Front, secret string, next func(ht
 			return true
 		}
 		if _, err := front.Policy(encoded); err != nil {
+			log.Printf("PUBLIC policy loopback change rejected: %v", err)
 			http.Error(w, "public policy change failed", http.StatusServiceUnavailable)
 			return true
 		}

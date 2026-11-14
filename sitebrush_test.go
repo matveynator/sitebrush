@@ -35248,3 +35248,57 @@ func TestLocalPublicPolicyFallbackDeliversToBoundary(t *testing.T) {
 		t.Fatalf("received policy change %q", received)
 	}
 }
+
+func TestPublicPolicyLoadingEndsAfterAuthenticatedEnable(t *testing.T) {
+	root := t.TempDir()
+	domain := "example.org"
+	backend := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = io.WriteString(writer, "ready")
+	}))
+	defer backend.Close()
+	boundary, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	front, closeFront, secret, err := startPublicSiteBoundary(boundary, root, serverRunConfig{ParsedPorts: listenPorts{HTTPPort: 0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeFront()
+	t.Setenv("SITEBRUSH_PUBLIC_HTTP_PORT", strconv.Itoa(front.HTTPPort))
+	t.Setenv("SITEBRUSH_PUBLIC_CONTACT", secret)
+	application := &App{}
+	address := strings.TrimPrefix(backend.URL, "http://")
+	enable := func() error {
+		encoded, marshalErr := json.Marshal(publicsite.Change{Action: "enable", Address: address})
+		if marshalErr != nil {
+			return marshalErr
+		}
+		return application.exchangePublicPolicyFallback(encoded)
+	}
+	if err := enable(); err == nil {
+		t.Fatal("policy enabled before publisher started")
+	}
+	if err := front.Set(address, false); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://"+domain+"/", nil)
+	response := httptest.NewRecorder()
+	front.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "site policy is loading") {
+		t.Fatalf("before enable: %d %q", response.Code, response.Body.String())
+	}
+	if err := enable(); err != nil {
+		t.Fatal(err)
+	}
+	state, err := front.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.PolicyReady || state.Address != address || state.Paused {
+		t.Fatalf("policy state after enable: %+v", state)
+	}
+	response = httptest.NewRecorder()
+	front.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "ready") {
+		t.Fatalf("after enable: %d %q", response.Code, response.Body.String())
+	}
+}

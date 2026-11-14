@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -162,6 +163,9 @@ func (front *Front) PolicyEnabled() error {
 	}
 	state.PolicyReady = true
 	_, err = front.exchange(&state)
+	if err == nil {
+		log.Printf("PUBLIC policy state=ready address=%q paused=%t", state.Address, state.Paused)
+	}
 	return err
 }
 func (front *Front) Set(address string, paused bool) error {
@@ -171,6 +175,13 @@ func (front *Front) Set(address string, paused bool) error {
 		}
 	}
 	_, err := front.exchange(&State{Address: address, Paused: paused, Draining: paused && address == ""})
+	if err == nil {
+		stage := "loading"
+		if paused {
+			stage = "paused"
+		}
+		log.Printf("PUBLIC policy state=%s address=%q reason=publisher-state-changed", stage, address)
+	}
 	return err
 }
 func (front *Front) ServeHTTP(w http.ResponseWriter, r *http.Request) {
