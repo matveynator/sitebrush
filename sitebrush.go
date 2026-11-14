@@ -61336,6 +61336,12 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 	if err != nil {
 		return nil, nil, "", err
 	}
+	// The OpenBSD launcher can still find 0600 root-owned policies from a
+	// previous Linux installation. Repair only private metadata files before
+	// the unprivileged reader starts; any unsafe entry fails startup closed.
+	if err := publicsite.RepairPolicyOwnership(storagePath); err != nil {
+		return nil, nil, "", fmt.Errorf("repair public policy ownership: %w", err)
+	}
 	secret, err := appupdate.Identifier()
 	if err != nil {
 		return nil, nil, "", err
