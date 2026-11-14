@@ -32,53 +32,73 @@ type Journal struct {
 	done   chan struct{}
 }
 
-// Open starts the sole writer. Callers block until their bytes have been written.
+// Open starts the installation journal under storage/logs.
+// Foreground commands should not call this unless file output was selected.
 func Open(storagePath string) (*Journal, error) {
 	root, err := os.OpenRoot(storagePath)
 	if err != nil {
 		return nil, err
 	}
+	defer root.Close()
 	if err := root.MkdirAll(filepath.Join("storage", "logs"), 0o700); err != nil {
-		root.Close()
 		return nil, err
 	}
 	if err := root.Chmod(filepath.Join("storage", "logs"), 0o700); err != nil {
-		root.Close()
 		return nil, err
 	}
-	logDirectory, err := root.OpenRoot(filepath.Join("storage", "logs"))
+	directory, err := root.OpenRoot(filepath.Join("storage", "logs"))
 	if err != nil {
-		root.Close()
 		return nil, err
 	}
-	archiveDirectory, err := root.OpenRoot(filepath.Join("storage", "logs"))
-	root.Close()
+	return openJournal(directory, activeName, storagePath)
+}
+
+// OpenFile writes to the selected absolute path without changing the
+// permissions of an administrator-owned directory such as /var/log.
+func OpenFile(logFile string) (*Journal, error) {
+	if !filepath.IsAbs(logFile) {
+		return nil, errors.New("logfile must be an absolute path")
+	}
+	filename := filepath.Base(logFile)
+	if len(filename) <= len(".log") || !strings.HasSuffix(filename, ".log") {
+		return nil, errors.New("logfile must have a .log filename")
+	}
+	directory, err := os.OpenRoot(filepath.Dir(logFile))
 	if err != nil {
-		logDirectory.Close()
 		return nil, err
 	}
-	active, err := logDirectory.OpenFile(activeName, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	return openJournal(directory, filename, "")
+}
+
+func openJournal(directory *os.Root, filename, storagePath string) (*Journal, error) {
+	// Archive work owns its own directory handle.
+	archiveDirectory, err := directory.OpenRoot(".")
 	if err != nil {
-		logDirectory.Close()
+		directory.Close()
+		return nil, err
+	}
+	active, err := directory.OpenFile(filename, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		directory.Close()
 		archiveDirectory.Close()
 		return nil, err
 	}
 	if err := active.Chmod(0o600); err != nil {
 		active.Close()
-		logDirectory.Close()
+		directory.Close()
 		archiveDirectory.Close()
 		return nil, err
 	}
-	stat, err := active.Stat()
+	initial, err := active.Stat()
 	if err != nil {
 		active.Close()
-		logDirectory.Close()
+		directory.Close()
 		archiveDirectory.Close()
 		return nil, err
 	}
-	j := &Journal{writes: make(chan writeRequest), stop: make(chan chan error), done: make(chan struct{})}
-	go j.run(storagePath, logDirectory, archiveDirectory, active, stat)
-	return j, nil
+	journal := &Journal{writes: make(chan writeRequest), stop: make(chan chan error), done: make(chan struct{})}
+	go journal.run(storagePath, filename, directory, archiveDirectory, active, initial)
+	return journal, nil
 }
 
 func (j *Journal) Write(message []byte) (int, error) {
@@ -111,7 +131,7 @@ func (j *Journal) Close() error {
 	}
 }
 
-func (j *Journal) run(storagePath string, directory, archiveDirectory *os.Root, active *os.File, initial os.FileInfo) {
+func (j *Journal) run(storagePath, filename string, directory, archiveDirectory *os.Root, active *os.File, initial os.FileInfo) {
 	defer close(j.done)
 	defer directory.Close()
 	defer archiveDirectory.Close()
@@ -121,26 +141,26 @@ func (j *Journal) run(storagePath string, directory, archiveDirectory *os.Root, 
 	}
 	archives := make(chan string, 8)
 	archiveDone := make(chan error, 1)
-	pending := pendingSegments(archiveDirectory)
+	pending := pendingSegments(archiveDirectory, filename)
 	go func() {
 		var archiveError error
-		if err := pruneArchives(archiveDirectory, time.Now().UTC()); err != nil {
+		if err := pruneArchives(archiveDirectory, filename, time.Now().UTC()); err != nil {
 			archiveError = errors.Join(archiveError, err)
 		}
-		if err := PruneLegacy(storagePath, time.Now().UTC()); err != nil {
+		if err := pruneLegacyIfConfigured(storagePath); err != nil {
 			archiveError = errors.Join(archiveError, err)
 		}
 		for _, name := range pending {
-			if err := compressSegment(archiveDirectory, name); err != nil {
+			if err := compressSegment(archiveDirectory, filename, name); err != nil {
 				log.Printf("application journal archive %s failed: %v", name, err)
 				archiveError = errors.Join(archiveError, err)
 			}
 		}
-		if err := pruneArchives(archiveDirectory, time.Now().UTC()); err != nil {
+		if err := pruneArchives(archiveDirectory, filename, time.Now().UTC()); err != nil {
 			archiveError = errors.Join(archiveError, err)
 		}
 		for name := range archives {
-			for _, err := range []error{compressSegment(archiveDirectory, name), pruneArchives(archiveDirectory, time.Now().UTC()), PruneLegacy(storagePath, time.Now().UTC())} {
+			for _, err := range []error{compressSegment(archiveDirectory, filename, name), pruneArchives(archiveDirectory, filename, time.Now().UTC()), pruneLegacyIfConfigured(storagePath)} {
 				if err != nil {
 					log.Printf("application journal maintenance failed: %v", err)
 					archiveError = errors.Join(archiveError, err)
@@ -168,15 +188,15 @@ func (j *Journal) run(storagePath string, directory, archiveDirectory *os.Root, 
 			return err
 		}
 		active = nil
-		name, err := nextSegmentName(directory, day)
+		name, err := nextSegmentName(directory, filename, day)
 		if err == nil {
-			err = directory.Rename(activeName, name)
+			err = directory.Rename(filename, name)
 		}
 		if err != nil {
-			active, _ = directory.OpenFile(activeName, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+			active, _ = directory.OpenFile(filename, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 			return err
 		}
-		active, err = directory.OpenFile(activeName, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		active, err = directory.OpenFile(filename, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 		if err != nil {
 			return err
 		}
@@ -232,9 +252,9 @@ func nextUTCMidnight(now time.Time) time.Time {
 	return time.Date(utc.Year(), utc.Month(), utc.Day()+1, 0, 0, 0, 0, time.UTC)
 }
 
-func nextSegmentName(directory *os.Root, day string) (string, error) {
+func nextSegmentName(directory *os.Root, filename, day string) (string, error) {
 	for sequence := 1; sequence < 1000000; sequence++ {
-		name := fmt.Sprintf("sitebrush-%s-%06d.log", day, sequence)
+		name := fmt.Sprintf("%s-%s-%06d.log", strings.TrimSuffix(filename, ".log"), day, sequence)
 		if _, err := directory.Lstat(name); errors.Is(err, os.ErrNotExist) {
 			if _, err := directory.Lstat(name + ".gz"); errors.Is(err, os.ErrNotExist) {
 				return name, nil
@@ -257,14 +277,14 @@ func readRootDir(root *os.Root) ([]os.DirEntry, error) {
 	return directory.ReadDir(-1)
 }
 
-func pendingSegments(directory *os.Root) []string {
+func pendingSegments(directory *os.Root, filename string) []string {
 	entries, err := readRootDir(directory)
 	if err != nil {
 		return nil
 	}
 	var names []string
 	for _, entry := range entries {
-		if entry.Type().IsRegular() && segmentName(entry.Name(), ".log") {
+		if entry.Type().IsRegular() && segmentName(entry.Name(), ".log", filename) {
 			names = append(names, entry.Name())
 		}
 	}
@@ -272,11 +292,12 @@ func pendingSegments(directory *os.Root) []string {
 	return names
 }
 
-func segmentName(name, suffix string) bool {
-	if !strings.HasPrefix(name, "sitebrush-") || !strings.HasSuffix(name, suffix) {
+func segmentName(name, suffix, filename string) bool {
+	prefix := strings.TrimSuffix(filename, ".log") + "-"
+	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, suffix) {
 		return false
 	}
-	base := strings.TrimSuffix(strings.TrimPrefix(name, "sitebrush-"), suffix)
+	base := strings.TrimSuffix(strings.TrimPrefix(name, prefix), suffix)
 	if len(base) != len("2006-01-02-000001") || base[10] != '-' {
 		return false
 	}
@@ -287,8 +308,8 @@ func segmentName(name, suffix string) bool {
 	return err == nil
 }
 
-func compressSegment(directory *os.Root, name string) error {
-	if !segmentName(name, ".log") {
+func compressSegment(directory *os.Root, filename, name string) error {
+	if !segmentName(name, ".log", filename) {
 		return errors.New("invalid application journal segment")
 	}
 	input, err := directory.Open(name)
@@ -320,7 +341,7 @@ func compressSegment(directory *os.Root, name string) error {
 	return directory.Remove(name)
 }
 
-func pruneArchives(directory *os.Root, now time.Time) error {
+func pruneArchives(directory *os.Root, filename string, now time.Time) error {
 	entries, err := readRootDir(directory)
 	if err != nil {
 		return err
@@ -328,10 +349,11 @@ func pruneArchives(directory *os.Root, now time.Time) error {
 	utc := now.UTC()
 	cutoff := time.Date(utc.Year(), utc.Month(), utc.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -archiveDays)
 	for _, entry := range entries {
-		if !entry.Type().IsRegular() || !segmentName(entry.Name(), ".log.gz") {
+		if !entry.Type().IsRegular() || !segmentName(entry.Name(), ".log.gz", filename) {
 			continue
 		}
-		day, err := time.Parse("2006-01-02", entry.Name()[len("sitebrush-"):len("sitebrush-2006-01-02")])
+		prefix := strings.TrimSuffix(filename, ".log") + "-"
+		day, err := time.Parse("2006-01-02", entry.Name()[len(prefix):len(prefix)+len("2006-01-02")])
 		if err != nil || !day.Before(cutoff) {
 			continue
 		}
@@ -340,6 +362,13 @@ func pruneArchives(directory *os.Root, now time.Time) error {
 		}
 	}
 	return nil
+}
+
+func pruneLegacyIfConfigured(storagePath string) error {
+	if storagePath == "" {
+		return nil
+	}
+	return PruneLegacy(storagePath, time.Now().UTC())
 }
 
 // Legacy site and problem logs remain readable until their dated retention
@@ -408,7 +437,7 @@ func legacyDateName(name string) bool {
 	return err == nil
 }
 
-// Capture redirects process output through the journal before children spawn.
+// Capture redirects the service process output to the installation journal.
 func Capture(storagePath string) (func() error, error) {
 	if os.Getenv(pipeVariable) == "1" {
 		return func() error { return nil }, nil
@@ -417,6 +446,23 @@ func Capture(storagePath string) (func() error, error) {
 	if err != nil {
 		return nil, err
 	}
+	return captureJournal(journal)
+}
+
+// CaptureFile redirects process output to an explicitly selected rotating file.
+func CaptureFile(logFile string) (func() error, error) {
+	if os.Getenv(pipeVariable) == "1" {
+		return func() error { return nil }, nil
+	}
+	journal, err := OpenFile(logFile)
+	if err != nil {
+		return nil, err
+	}
+	return captureJournal(journal)
+}
+
+// A single channel-owned journal serializes stdout, stderr and child output.
+func captureJournal(journal *Journal) (func() error, error) {
 	reader, writer, err := os.Pipe()
 	if err != nil {
 		journal.Close()
