@@ -89,6 +89,10 @@ func Run(options Options, stop <-chan struct{}) error {
 		maintenanceSession.Close()
 		return err
 	}
+	if err := reconcilePlatformState(store, options, &state); err != nil {
+		maintenanceSession.Close()
+		return err
+	}
 	if state.Busy || state.RecoveryRequired {
 		// Terminal stages are written before pruning. An interrupted cleanup
 		// must not turn a committed update into a failed version operation.
@@ -679,6 +683,9 @@ func bootstrap(store *os.Root, options Options) (State, error) {
 }
 
 func verifiedStart(store *os.Root, worker process, version Version, probation bool) error {
+	if filepath.Base(version.Binary) != BinaryName(runtime.GOOS, runtime.GOARCH) {
+		return fmt.Errorf("refusing to run a %s binary on %s/%s", filepath.Base(version.Binary), runtime.GOOS, runtime.GOARCH)
+	}
 	digest, err := fileDigest(store, version.Binary)
 	if err != nil {
 		return err
@@ -687,6 +694,75 @@ func verifiedStart(store *os.Root, worker process, version Version, probation bo
 		return errors.New("installed binary checksum mismatch")
 	}
 	return worker.exchange("start", version, probation)
+}
+
+// A copied data tree may retain a verified release for another operating
+// system. Only the running native launcher can seed the new platform journal.
+func reconcilePlatformState(store *os.Root, options Options, state *State) error {
+	nativeName := BinaryName(runtime.GOOS, runtime.GOARCH)
+	if filepath.Base(state.Current.Binary) == nativeName {
+		if state.Busy || state.RecoveryRequired {
+			if state.RecoveryVersion != nil && filepath.Base(state.RecoveryVersion.Binary) != nativeName {
+				return errors.New("copied update recovery refers to a binary for another operating system")
+			}
+			if state.Candidate != nil && filepath.Base(state.Candidate.Binary) != nativeName {
+				return errors.New("copied update candidate refers to a binary for another operating system")
+			}
+		}
+		changed := false
+		if state.Previous != nil && filepath.Base(state.Previous.Binary) != nativeName {
+			state.Previous = nil
+			state.RollbackAvailable = false
+			state.RollbackReason = "Previous release belongs to another operating system"
+			changed = true
+		}
+		if !state.Busy && !state.RecoveryRequired {
+			if state.Candidate != nil && filepath.Base(state.Candidate.Binary) != nativeName {
+				state.Candidate = nil
+				changed = true
+			}
+			if state.RecoveryVersion != nil && filepath.Base(state.RecoveryVersion.Binary) != nativeName {
+				state.RecoveryVersion = nil
+				changed = true
+			}
+		}
+		if changed {
+			return atomicJSON(store, "state.json", state)
+		}
+		return nil
+	}
+	if state.Busy || state.RecoveryRequired || state.DataChanged {
+		return errors.New("copied update state has an unfinished operation for another operating system; restore or finish it on the source system before installing this native release")
+	}
+	if state.Current.Compatibility != options.Compatibility {
+		return fmt.Errorf("copied update state has incompatible data from %s; install a compatible %s/%s release before starting this data tree", state.Current.Version, runtime.GOOS, runtime.GOARCH)
+	}
+	identifier, err := Identifier()
+	if err != nil {
+		return err
+	}
+	binary := filepath.Join("versions", identifier, nativeName)
+	source, err := os.OpenRoot(filepath.Dir(options.Executable))
+	if err != nil {
+		return err
+	}
+	defer source.Close()
+	digest, err := copyFile(source, filepath.Base(options.Executable), store, binary, 0o700)
+	if err != nil {
+		return err
+	}
+	if err := syncAncestors(store, filepath.Dir(binary)); err != nil {
+		return err
+	}
+	state.Current = Version{Version: options.Version, Binary: binary, SHA256: digest, Compatibility: options.Compatibility}
+	state.Launcher = options.Executable
+	state.Previous = nil
+	state.Candidate = nil
+	state.RecoveryVersion = nil
+	state.RollbackAvailable = false
+	state.RollbackReason = "Previous release belongs to another operating system"
+	state.Stage = "current"
+	return atomicJSON(store, "state.json", state)
 }
 
 func perform(options Options, store *os.Root, catalog Catalog, worker process, state State, action string, progress chan<- transition, stop <-chan struct{}) (result State) {

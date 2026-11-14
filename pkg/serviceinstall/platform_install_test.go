@@ -5,8 +5,32 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestOpenBSDResourceClassIsManagedSeparately(t *testing.T) {
+	classPath := filepath.Join(t.TempDir(), "login.conf.d", "sitebrush")
+	changed, err := writeOpenBSDResourceClass(classPath, "sitebrush")
+	if err != nil || !changed {
+		t.Fatalf("create class changed=%v err=%v", changed, err)
+	}
+	content, err := os.ReadFile(classPath)
+	if err != nil || !strings.Contains(string(content), "openfiles-cur=65536") || !strings.Contains(string(content), "openfiles-max=65536") {
+		t.Fatalf("class content=%q err=%v", content, err)
+	}
+	changed, err = writeOpenBSDResourceClass(classPath, "sitebrush")
+	if err != nil || changed {
+		t.Fatalf("repeat class changed=%v err=%v", changed, err)
+	}
+	if err := os.WriteFile(classPath, []byte("sitebrush:\n\t:openfiles-cur=8192:\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	changed, err = writeOpenBSDResourceClass(classPath, "sitebrush")
+	if err == nil || changed {
+		t.Fatalf("user class changed=%v err=%v", changed, err)
+	}
+}
 
 func TestServiceManagersInstallAndUninstallUnderTemporaryRoot(t *testing.T) {
 	root := t.TempDir()

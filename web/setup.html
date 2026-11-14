@@ -151,6 +151,8 @@
     {{end}}
     {{if .LocalAccount}}
     <p class="hint">{{index .T "auth_local_setup"}}</p>
+    {{if .InstallCode}}<p class="hint">Enter the one-time code printed by <code>sitebrush -install</code> or <code>sitebrush -setup-code</code>. Verify the HTTPS certificate SHA-256 fingerprint on the server before submitting a password.</p>
+    <label>Install code<input type="text" name="install_code" class="form-control" autocomplete="one-time-code" spellcheck="false" minlength="48" maxlength="48" required></label>{{end}}
     <label>{{index .T "login_password_placeholder"}}<input type="password" name="password" autocomplete="new-password" required></label>
     <label>{{index .T "profile_confirm_password"}}<input type="password" name="password_confirm" autocomplete="new-password" required></label>
     {{else}}<p class="hint">{{if .TrialEmbed}}{{index .T "trial_confirm_email_to_continue"}}{{else}}{{index .T "auth_registration_secure"}}{{end}}</p>

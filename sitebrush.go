@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"github.com/matveynator/netchan/v2"
 	"github.com/matveynator/sitebrush/v2/pkg/applog"
+	"github.com/matveynator/sitebrush/v2/pkg/bootstrapcode"
 	"hash"
 	"html/template"
 	"io"
@@ -236,6 +237,7 @@ type App struct {
 	publicPublicationDone <-chan struct{}
 	publicBoundary        bool
 	publicPolicyContact   bool
+	publicPolicyReady     chan struct{}
 	publicPolicyAddress   string
 
 	centralNetChanIdentity         *centralNetChanIdentityProcess
@@ -289,6 +291,7 @@ type App struct {
 	autoCertGuard                  chan autoCertGuardRequest
 	authIPFailureCache             chan authIPFailureCacheRequest
 	registrationConfirmations      chan emailConfirmationMemoryRequest
+	installCodes                   chan<- bootstrapcode.Request
 	// emailDelivery keeps the legacy in-memory adapter available to isolated callers.
 	// Production transfers every message to durableMailTasks before network work starts.
 	emailDelivery             chan mailout.DeliveryJob
@@ -1268,7 +1271,13 @@ const slowHTTPRequestLogAfter = 2 * time.Second
 const slowHTTPRequestRepeatAfter = 10 * time.Second
 const slowDatabaseOperationLogAfter = time.Second
 const slowDatabaseOperationRepeatAfter = 5 * time.Second
-const siteDatabaseReaderCount = 5
+
+func siteDatabaseReaderCount() int {
+	if runtime.GOOS == "openbsd" {
+		return 2
+	}
+	return 5
+}
 
 func contextWithDomain(ctx context.Context, domain string) context.Context {
 	normalizedDomain := normalizeDomainName(domain)
@@ -1350,8 +1359,9 @@ func newSiteFileDatabase(databasePath string, rawDatabase *sql.DB, debug bool) (
 		}
 	}
 
-	readDatabases := make([]*sql.DB, 0, siteDatabaseReaderCount)
-	for range siteDatabaseReaderCount {
+	readerCount := siteDatabaseReaderCount()
+	readDatabases := make([]*sql.DB, 0, readerCount)
+	for range readerCount {
 		readDatabase, err := openSiteDatabaseReadHandle(databasePath)
 		if err != nil {
 			for _, openedDatabase := range readDatabases {
@@ -1372,7 +1382,7 @@ func newSiteFileDatabase(databasePath string, rawDatabase *sql.DB, debug bool) (
 		writeQueue:    make(chan siteDBOperation, 128),
 		closeRequests: make(chan chan error),
 		readStop:      make(chan struct{}),
-		readersDone:   make(chan struct{}, siteDatabaseReaderCount),
+		readersDone:   make(chan struct{}, readerCount),
 		stopped:       make(chan struct{}),
 	}
 	for _, readDatabase := range readDatabases {
@@ -1388,19 +1398,20 @@ func openSiteDatabaseReadHandle(databasePath string) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Reader connections may be reclaimed between requests. Install the
+	// connection-local SQLite protections whenever a new handle is opened.
+	address += "&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&_pragma=query_only(ON)"
 	database, err := sql.Open("sqlite", address)
 	if err != nil {
 		return nil, err
 	}
 	database.SetMaxOpenConns(1)
-	database.SetMaxIdleConns(1)
-	database.SetConnMaxLifetime(0)
-	for _, pragma := range []string{"PRAGMA busy_timeout=5000", "PRAGMA foreign_keys=ON", "PRAGMA query_only=ON"} {
-		if _, err := database.ExecContext(context.Background(), pragma); err != nil {
-			_ = database.Close()
-			return nil, err
-		}
+	if runtime.GOOS == "openbsd" {
+		database.SetMaxIdleConns(0)
+	} else {
+		database.SetMaxIdleConns(1)
 	}
+	database.SetConnMaxLifetime(0)
 	return database, nil
 }
 
@@ -2847,6 +2858,12 @@ func (r *perSiteDBRouter) preloadMigratedDatabases(siteDatabaseRootDir string, d
 	}
 	sort.Strings(domainList)
 	response := siteDBPreloadResponse{total: len(domainList)}
+	if runtime.GOOS == "openbsd" {
+		// Startup migration has already verified every registered site.
+		// Conservative descriptor limits make permanent warm workers costly.
+		log.Printf("%sPRELOAD%s site databases registered=%d opened=on-demand", terminalGreen(), terminalReset(), response.total)
+		return response
+	}
 	for _, domain := range domainList {
 		_, err := r.databaseForDomain(siteDatabaseRootDir, databasesByDomain, migratedDomains, degradedDomains, domain, false, migrate)
 		if err != nil {
@@ -9992,6 +10009,7 @@ func main() {
 	storagePath := flag.String("path", defaultAppStoragePath(), "path to the SiteBrush app data directory")
 	cliMode := flag.Bool("cli", false, "open interactive SiteBrush server console")
 	upgradeMode := flag.Bool("upgrade", false, "install the latest signed stable server release")
+	setupCodeMode := flag.Bool("setup-code", false, "issue a one-time code for first administrator setup over HTTPS")
 	upgradeBackup := flag.String("upgrade-backup", "all", "backup groups for -upgrade: all, none, or databases,analytics,files,settings")
 	updateSupervisor := flag.Bool("update-supervisor", false, "internal offline maintenance supervisor")
 	serviceRuntime := flag.Bool("service-runtime", false, "internal privileged service launcher")
@@ -10095,6 +10113,21 @@ func main() {
 	dbPathWasProvided := strings.TrimSpace(*legacyDBPath) != ""
 	if dbPathWasProvided {
 		effectiveDBPath = cleanDBPath(*legacyDBPath)
+	}
+	if *setupCodeMode {
+		if installMode || uninstallMode || *upgradeMode || *serviceRuntime || *serviceWorker || *serverChild || *updateSupervisor || *resetAdminIP || *cliMode {
+			log.Fatal("-setup-code cannot be combined with another service or maintenance mode")
+		}
+		if handled, err := servicepriv.DropForMaintenance(os.Args[1:], effectiveStoragePath); handled {
+			if err != nil {
+				log.Fatal(err)
+			}
+			return
+		}
+		if err := printNewSetupCode(effectiveStoragePath, effectiveDBPath, true); err != nil {
+			log.Fatal(err)
+		}
+		return
 	}
 	adminIPResetArgumentsProvided := strings.TrimSpace(*resetAdminIPDomain) != "" || strings.TrimSpace(*resetAdminIPEmail) != "" || strings.TrimSpace(*resetAdminIPAddress) != ""
 	if *resetAdminIP || adminIPResetArgumentsProvided {
@@ -10496,6 +10529,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 		return fmt.Errorf("start server control database dispatcher: %w", err)
 	}
 	application.controlDatabase = controlDatabaseDispatcher
+	application.installCodes = bootstrapcode.Start(effectiveStoragePath, ctx.Done())
 	defer func() {
 		logShutdownStep("closing server control database dispatcher")
 		if closeErr := controlDatabaseDispatcher.Close(); closeErr != nil {
@@ -10512,10 +10546,12 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application.hostingSupportEvents = application.startHostingSupportEventWorker(ctx.Done())
 	application.geoIP = geoip.NewResolver(filepath.Join(application.storageRootDir(), "geoip"))
 	certificateCacheDir := filepath.Join(application.storageRootDir(), "letsencrypt")
-	if mkdirErr := application.mkdirAllInsideStorage(certificateCacheDir, 0o755); mkdirErr != nil {
+	if mkdirErr := application.mkdirAllInsideStorage(certificateCacheDir, 0o700); mkdirErr != nil {
 		application.logProblemEvent("AUTOCERT disabled: failed to create certificate cache %s: %v", certificateCacheDir, mkdirErr)
 	} else if realCertificateCacheDir, pathErr := application.existingPathInsideStorage(certificateCacheDir); pathErr != nil {
 		application.logProblemEvent("AUTOCERT disabled: failed to resolve certificate cache %s: %v", certificateCacheDir, pathErr)
+	} else if chmodErr := os.Chmod(realCertificateCacheDir, 0o700); chmodErr != nil {
+		application.logProblemEvent("AUTOCERT disabled: failed to protect certificate cache %s: %v", certificateCacheDir, chmodErr)
 	} else {
 		certificateCacheDir = realCertificateCacheDir
 		application.autoCertCertificateCache = startAutoCertCertificateMemoryCache(ctx, certificateCacheDir)
@@ -10620,6 +10656,9 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application.publicCatalog = publicsite.NewCatalog(effectiveStoragePath, ctx.Done())
 	application.startPublicPublication(ctx.Done())
 	application.publicPolicyContact = config.PublicProxy && os.Getenv("SITEBRUSH_PUBLIC_POLICY_CHANNEL") == "1"
+	if application.publicPolicyContact {
+		application.publicPolicyReady = make(chan struct{})
+	}
 	application.publicPolicyAddress = listener.Addr().String()
 	if !config.PublicProxy {
 		if policyErr := application.publicCatalog.SetMemory(true); policyErr != nil {
@@ -10871,6 +10910,11 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	if application.publicPolicyContact {
 		go application.pullPublicObservations(ctx.Done())
 		go func() {
+			select {
+			case <-application.publicPolicyReady:
+			case <-ctx.Done():
+				return
+			}
 			delay := time.Second
 			for {
 				encoded, _ := json.Marshal(publicsite.Change{Action: "enable", Address: application.publicPolicyAddress})
@@ -11128,7 +11172,27 @@ func (a *App) runStartupPreload(ctx context.Context, siteDatabaseRootDir string)
 	if err := a.repairCompletedIgniteSites(ctx); err != nil {
 		log.Printf("IGNITE starter page recovery unavailable: %v", err)
 	}
-	a.refreshAllPublicPolicies()
+	if a.publicPolicyReady == nil {
+		if err := a.refreshAllPublicPolicies(); err != nil {
+			log.Printf("PUBLIC startup policy refresh failed: %v", err)
+		}
+	} else {
+		retry := time.NewTicker(5 * time.Second)
+		defer retry.Stop()
+		for {
+			if err := a.refreshAllPublicPolicies(); err == nil {
+				close(a.publicPolicyReady)
+				break
+			} else {
+				log.Printf("PUBLIC startup policy refresh failed: %v", err)
+			}
+			select {
+			case <-retry.C:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}
 	staticStats := startupStaticPreloadStats{}
 	if a.publicStreamer == nil {
 		staticStats = a.preloadPublishedStaticFiles(ctx)
@@ -11450,6 +11514,8 @@ func runServiceInstaller(port, storagePath, dbPath string) error {
 	if err != nil || strings.TrimSpace(binaryPath) == "" {
 		binaryPath = os.Args[0]
 	}
+	var installCode string
+	installStoragePath := storagePath
 	_, err = serviceinstall.Install(context.Background(), serviceinstall.Options{
 		Port:        port,
 		StoragePath: storagePath,
@@ -11458,8 +11524,98 @@ func runServiceInstaller(port, storagePath, dbPath string) error {
 		WorkingDir:  storagePath,
 		Input:       os.Stdin,
 		Output:      os.Stdout,
+		PrepareFirstAdminCode: func(selectedStoragePath, selectedDBPath string) error {
+			installStoragePath = selectedStoragePath
+			if _, statErr := os.Stat(selectedDBPath); statErr == nil {
+				return nil
+			} else if !errors.Is(statErr, os.ErrNotExist) {
+				return statErr
+			}
+			code, issueErr := bootstrapcode.Issue(selectedStoragePath, false)
+			installCode = code
+			return issueErr
+		},
 	})
+	if err == nil && installCode != "" {
+		fmt.Fprintf(os.Stdout, "First administrator code (valid for 15 minutes): %s\n", installCode)
+		printFallbackFingerprint(installStoragePath)
+	}
 	return err
+}
+
+func printNewSetupCode(storagePath, dbPath string, replace bool) error {
+	eligible, err := setupCodeEligible(storagePath, dbPath)
+	if err != nil {
+		return err
+	}
+	if !eligible {
+		return errors.New("first administrator code is unavailable after a site or server owner has been registered")
+	}
+	code, err := bootstrapcode.Issue(storagePath, replace)
+	if err != nil {
+		return err
+	}
+	if code == "" {
+		return errors.New("an install code already exists; use -setup-code to replace it")
+	}
+	fmt.Fprintf(os.Stdout, "First administrator code (valid for 15 minutes): %s\n", code)
+	printFallbackFingerprint(storagePath)
+	return nil
+}
+
+func setupCodeEligible(storagePath, dbPath string) (bool, error) {
+	if _, err := os.Stat(dbPath); errors.Is(err, os.ErrNotExist) {
+		return true, nil
+	} else if err != nil {
+		return false, err
+	}
+	address, err := siteDatabaseURL(dbPath, "ro")
+	if err != nil {
+		return false, err
+	}
+	database, err := sql.Open("sqlite", address)
+	if err != nil {
+		return false, err
+	}
+	defer database.Close()
+	var otherSites, owners int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM site_registry WHERE domain<>'localhost'`).Scan(&otherSites); err != nil {
+		// Older single-database installations have no site registry. Their
+		// administrator table still decides whether bootstrap is available.
+		var legacyAdmins int
+		if legacyErr := database.QueryRow(`SELECT COUNT(*) FROM users WHERE is_admin=1`).Scan(&legacyAdmins); legacyErr == nil {
+			return legacyAdmins == 0, nil
+		}
+		return false, err
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM server_managers WHERE role='owner'`).Scan(&owners); err != nil {
+		return false, err
+	}
+	if otherSites != 0 || owners != 0 {
+		return false, nil
+	}
+	sites, err := listSiteQuotaRows(context.Background(), storagePath, dbPath)
+	if err != nil {
+		return false, err
+	}
+	for _, site := range sites {
+		if len(site.AdminEmails) > 0 {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func printFallbackFingerprint(storagePath string) {
+	for attempt := 0; attempt < 20; attempt++ {
+		fingerprint, err := bootstrapcode.Fingerprint(storagePath)
+		if err == nil {
+			fmt.Fprintf(os.Stdout, "HTTPS fallback certificate SHA-256: %s\n", fingerprint)
+			return
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	fmt.Fprintln(os.Stdout, "HTTPS fallback certificate is unavailable; inspect it on the server before setup")
 }
 
 func runServiceUninstaller(port, storagePath, dbPath string) error {
@@ -12921,6 +13077,22 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 			embedded.ServeHTTP(w, r)
 			return
 		}
+		if requestHostIP(r) != nil && r.URL.Path == "/" {
+			if !localAccountRequest(r) && r.TLS == nil {
+				a.awaitAccountHTTPS(w, r)
+				return
+			}
+			if r.URL.RawQuery == "" {
+				if a.hasAdmin(r.Context(), a.siteDomain(r.Context(), r)) {
+					httpsecurity.RedirectLocal(w, r, "/?login", http.StatusSeeOther)
+				} else {
+					httpsecurity.RedirectLocal(w, r, "/?register", http.StatusSeeOther)
+				}
+				return
+			}
+			dynamic.ServeHTTP(w, r)
+			return
+		}
 
 		testDriveHandoffRequest := hasQueryFlag(r, "test_drive_handoff") &&
 			r.Method == http.MethodGet &&
@@ -13091,12 +13263,6 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 
 func (a *App) siteDynamicHTTPCore(router http.Handler) http.Handler {
 	queryRouter := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && !localAccountRequest(r) && !remoteIPRegistrationRequest(r) {
-			if requestIP := net.ParseIP(domainFromRequest(r)); requestIP != nil && a.serverOwnerDomain(r.Context()) != "" && requestIPMatchesListener(r, requestIP) {
-				http.NotFound(w, r)
-				return
-			}
-		}
 		if siteAITransportRequest(r) {
 			cloned := r.Clone(r.Context())
 			cloned.Header.Set("X-SiteBrush-Workspace-Epoch", strconv.FormatUint(a.workspace.Generation(a.siteDomain(r.Context(), r)), 10))
@@ -13148,7 +13314,11 @@ func (a *App) aiIngressMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The SQL router needs the requested site before admission reads its
 		// control database. HTTP requests do not arrive with a domain context.
-		r = r.WithContext(contextWithDomain(r.Context(), domainFromRequest(r)))
+		domain := domainFromRequest(r)
+		if requestHostIP(r) != nil {
+			domain = a.siteDomain(r.Context(), r)
+		}
+		r = r.WithContext(contextWithDomain(r.Context(), domain))
 		machine, owner := a.aiIngressAdmission(r)
 		// Public logging, abuse detection and referrer cookies must observe the
 		// same request as the public router, without hidden control selectors.
@@ -19154,6 +19324,25 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 		httpsecurity.RedirectLocal(w, r, "/", http.StatusFound)
 		return
 	}
+	remoteIPSetup := requestHostIP(r) != nil && !localAccountRequest(r)
+	if remoteIPSetup {
+		if r.TLS == nil {
+			http.Error(w, "first administrator setup is unavailable", http.StatusForbidden)
+			return
+		}
+		if !bootstrapcode.Verify(a.installCodes, strings.TrimSpace(r.FormValue("install_code")), false, r.Context().Done()) {
+			http.Error(w, "install code is invalid or expired", http.StatusForbidden)
+			return
+		}
+		if a.serverOwnerExists(r.Context()) {
+			http.Error(w, "first administrator setup is unavailable", http.StatusForbidden)
+			return
+		}
+		if _, _, found := a.firstExistingSiteAdmin(r.Context()); found {
+			http.Error(w, "first administrator setup is unavailable", http.StatusForbidden)
+			return
+		}
+	}
 	if a.reservedServerSubdomain(r.Context(), domain) {
 		a.renderReservedDomain(w, r, translationsForRequest(r)["public_trial_address_unavailable"], http.StatusConflict)
 		return
@@ -19172,7 +19361,7 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.ensureRegistrationAnalyticsRequest(r, domain, registrationAnalyticsWorkflow(r))
-	if localAccountRequest(r) {
+	if localAccountRequest(r) || remoteIPSetup {
 		password = r.FormValue("password")
 		parsed, err := stdmail.ParseAddress(email)
 		if err != nil || parsed.Address != email || password == "" || password != r.FormValue("password_confirm") {
@@ -19213,6 +19402,9 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 		if count != 1 {
 			http.Error(w, "administrator already exists", http.StatusConflict)
 			return
+		}
+		if remoteIPSetup && !bootstrapcode.Verify(a.installCodes, strings.TrimSpace(r.FormValue("install_code")), true, r.Context().Done()) {
+			log.Print("first administrator created; install code removal failed")
 		}
 		for _, stage := range []string{"user_created", "site_created", "registration_completed"} {
 			a.recordRegistrationAnalyticsForSource(r.Context(), registrationOutcome.FlowID, stage, "")
@@ -19367,15 +19559,6 @@ func requestIPMatchesListener(r *http.Request, requestIP net.IP) bool {
 	return listenerIP != nil && requestIP.Equal(listenerIP)
 }
 
-func remoteIPRegistrationRequest(r *http.Request) bool {
-	for _, flag := range []string{"register", "site_request", "email_confirm", "test_drive", "test_drive_start", "trial_site_create", "trial_site_domain_check", "trial_site_captcha"} {
-		if hasQueryFlag(r, flag) {
-			return true
-		}
-	}
-	return false
-}
-
 // Canonical server hosts are handled before trial and public-site lookup so a
 // former www site can never serve content under the server's service address.
 func (a *App) serverHostBoundary(w http.ResponseWriter, r *http.Request) bool {
@@ -19390,10 +19573,6 @@ func (a *App) serverHostBoundary(w http.ResponseWriter, r *http.Request) bool {
 				httpsecurity.RedirectExternal(w, r, &redirectURL, http.StatusFound)
 				return true
 			}
-		}
-		if !localAccountRequest(r) && remoteIPRegistrationRequest(r) {
-			testDriveHTTPError(w, r, "public_trial_address_unavailable", http.StatusForbidden)
-			return true
 		}
 		return false
 	}
@@ -19739,7 +19918,8 @@ func (a *App) resendReservedDomainConfirmation(w http.ResponseWriter, r *http.Re
 }
 
 func (a *App) renderSetupPage(w http.ResponseWriter, r *http.Request, domain, email, status string) {
-	a.renderRegistrationView(w, r, map[string]any{"Domain": domain, "Email": strings.TrimSpace(email), "Status": strings.TrimSpace(status), "ReturnPath": registrationReturnPath(r), "LocalAccount": localAccountRequest(r)})
+	remoteIPSetup := requestHostIP(r) != nil && !localAccountRequest(r)
+	a.renderRegistrationView(w, r, map[string]any{"Domain": domain, "Email": strings.TrimSpace(email), "Status": strings.TrimSpace(status), "ReturnPath": registrationReturnPath(r), "LocalAccount": localAccountRequest(r) || remoteIPSetup, "InstallCode": remoteIPSetup})
 }
 
 func registrationAnalyticsWorkflow(r *http.Request) string {
@@ -51323,6 +51503,20 @@ func canonicalLocalDomain(rawDomain string) string {
 
 func (a *App) siteDomain(ctx context.Context, r *http.Request) string {
 	requestDomain := domainFromRequest(r)
+	if requestHostIP(r) != nil || requestDomain == "localhost" && localAccountRequest(r) {
+		if a.controlDatabase == nil {
+			return requestDomain
+		}
+		var ownerDomain string
+		_ = a.withServerControlDatabaseRead(ctx, "ip-owner-domain", func(database *sql.DB) error {
+			ownerDomain, _ = (hostingandsupport.Store{DB: database}).OwnerDomain(ctx)
+			return nil
+		})
+		if ownerDomain != "" {
+			return canonicalLocalDomain(ownerDomain)
+		}
+		return requestDomain
+	}
 	if a.publicCatalog != nil && (a.publicBoundary || publicOrdinaryRequest(r)) {
 		decision := a.publicCatalog.Lookup(publicsite.Lookup{Host: requestDomain})
 		if decision.Found {
@@ -60950,6 +61144,9 @@ func newPublicHTTPFront(application *App, secret string, stop <-chan struct{}) *
 		}
 		if application.serverHostBoundary(w, r) {
 			return true
+		}
+		if requestHostIP(r) != nil {
+			return false
 		}
 		if testDriveEntryAction(r) {
 			return false

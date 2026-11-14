@@ -61,6 +61,7 @@ import (
 	browserstats "github.com/matveynator/sitebrush/v2/pkg/analytics"
 	"github.com/matveynator/sitebrush/v2/pkg/appupdate"
 	"github.com/matveynator/sitebrush/v2/pkg/authmail"
+	"github.com/matveynator/sitebrush/v2/pkg/bootstrapcode"
 	"github.com/matveynator/sitebrush/v2/pkg/captcha"
 	"github.com/matveynator/sitebrush/v2/pkg/channelacme"
 	"github.com/matveynator/sitebrush/v2/pkg/crawler"
@@ -4538,7 +4539,7 @@ func TestListSiteQuotaRowsRequiresRegisteredAdmin(t *testing.T) {
 	}
 }
 
-func TestPerSiteDBRouterPreloadOpensRegisteredSiteDatabases(t *testing.T) {
+func TestPerSiteDBRouterPreloadRespectsPlatformDescriptorBudget(t *testing.T) {
 	storagePath := t.TempDir()
 	dbPath := filepath.Join(storagePath, defaultDBPath)
 	siteDatabaseDir := siteDatabaseRootPath(dbPath)
@@ -4576,8 +4577,19 @@ func TestPerSiteDBRouterPreloadOpensRegisteredSiteDatabases(t *testing.T) {
 	if preloadResponse.err != nil {
 		t.Fatalf("preload err: %v", preloadResponse.err)
 	}
-	if preloadResponse.total != len(domains) || preloadResponse.opened != len(domains) || preloadResponse.failed != 0 {
-		t.Fatalf("preload response = %#v, want all registered site dbs opened", preloadResponse)
+	expectedOpened := len(domains)
+	if runtime.GOOS == "openbsd" {
+		expectedOpened = 0
+	}
+	if preloadResponse.total != len(domains) || preloadResponse.opened != expectedOpened || preloadResponse.failed != 0 {
+		t.Fatalf("preload response = %#v, want %d registered site dbs opened", preloadResponse, expectedOpened)
+	}
+	for _, domain := range domains {
+		var count int
+		err := router.QueryRowContext(contextWithDomain(context.Background(), domain), `SELECT COUNT(*) FROM users WHERE is_admin=1`).Scan(&count)
+		if err != nil || count == 0 {
+			t.Fatalf("lazy site database %s count=%d err=%v", domain, count, err)
+		}
 	}
 }
 
@@ -14161,18 +14173,18 @@ func TestServerReservedSubdomainsAndWWWRedirect(t *testing.T) {
 	}
 }
 
-func TestServerIPHostRequiresBoundAddressAndBlocksRegistration(t *testing.T) {
+func TestServerIPHostAllowsSetupAndRequiresBoundAddressForRedirect(t *testing.T) {
 	application, _ := newTestApplication(t)
 	request := httptest.NewRequest(http.MethodGet, "http://203.0.113.10/?register", nil)
 	response := httptest.NewRecorder()
-	if !application.serverHostBoundary(response, request) || response.Code != http.StatusForbidden {
-		t.Fatalf("remote IP registration: %d", response.Code)
+	if application.serverHostBoundary(response, request) {
+		t.Fatalf("remote IP registration was rejected: %d", response.Code)
 	}
 	for _, selector := range []string{"register", "site_request", "test_drive_start"} {
 		registrationRequest := httptest.NewRequest(http.MethodPost, "http://203.0.113.10/?"+selector, nil)
 		registrationResponse := httptest.NewRecorder()
-		if !application.serverHostBoundary(registrationResponse, registrationRequest) || registrationResponse.Code != http.StatusForbidden {
-			t.Fatalf("remote IP registration mutation %s: %d", selector, registrationResponse.Code)
+		if application.serverHostBoundary(registrationResponse, registrationRequest) {
+			t.Fatalf("remote IP registration mutation %s was rejected: %d", selector, registrationResponse.Code)
 		}
 	}
 	loginRequest := httptest.NewRequest(http.MethodPost, "http://203.0.113.10/?login", nil)
@@ -14199,6 +14211,78 @@ func TestServerIPHostRequiresBoundAddressAndBlocksRegistration(t *testing.T) {
 	response = httptest.NewRecorder()
 	if !application.serverHostBoundary(response, request) || response.Code != http.StatusFound || response.Header().Get("Location") != "http://sitebrush.com/docs?q=1" {
 		t.Fatalf("bound IP redirect: %d %s", response.Code, response.Header().Get("Location"))
+	}
+}
+
+func TestRemoteIPFirstAdminRequiresTLSAndInstallCode(t *testing.T) {
+	application, _ := newTestApplication(t)
+	eligible, err := setupCodeEligible(application.storagePath, filepath.Join(application.storagePath, "sitebrush.db"))
+	if err != nil || !eligible {
+		t.Fatalf("fresh server install code eligibility=%v err=%v", eligible, err)
+	}
+	code, err := bootstrapcode.Issue(application.storagePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	defer close(stop)
+	application.installCodes = bootstrapcode.Start(application.storagePath, stop)
+	form := url.Values{"email": {"owner@example.com"}, "password": {"secret"}, "password_confirm": {"secret"}, "install_code": {code}}
+	request := httptest.NewRequest(http.MethodPost, "http://203.0.113.10/?register", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	application.setupAdmin(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("HTTP IP setup status=%d", response.Code)
+	}
+	form.Set("install_code", "000000000000000000000000000000000000000000000000")
+	request = httptest.NewRequest(http.MethodPost, "https://203.0.113.10/?register", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response = httptest.NewRecorder()
+	application.setupAdmin(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("wrong install code status=%d", response.Code)
+	}
+	form.Set("install_code", code)
+	request = httptest.NewRequest(http.MethodPost, "https://203.0.113.10/?register", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response = httptest.NewRecorder()
+	application.setupAdmin(response, request)
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("authorized first administrator setup status=%d body=%s", response.Code, response.Body.String())
+	}
+	if bootstrapcode.Verify(application.installCodes, code, false, stop) {
+		t.Fatal("install code remained active after first administrator creation")
+	}
+	eligible, err = setupCodeEligible(application.storagePath, filepath.Join(application.storagePath, "sitebrush.db"))
+	if err != nil || eligible {
+		t.Fatalf("configured server install code eligibility=%v err=%v", eligible, err)
+	}
+}
+
+func TestIPOwnerRequestRoutesToNamedOwnerDatabase(t *testing.T) {
+	application := newPartitionedTestApplication(t)
+	const ownerDomain = "owner.example.org"
+	if err := application.createManagedSite(context.Background(), ownerDomain, "owner@example.org", "test", 8<<20); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.withServerControlDatabaseWrite(context.Background(), "test-ip-owner", func(database *sql.DB) error {
+		return (hostingandsupport.Store{DB: database}).SetOwner(context.Background(), ownerDomain, "owner@example.org")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	handler := application.aiIngressMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var admins int
+		err := application.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM users WHERE domain=? AND is_admin=1`, ownerDomain).Scan(&admins)
+		if err != nil || admins != 1 {
+			http.Error(w, fmt.Sprintf("owner admins=%d error=%v", admins, err), http.StatusServiceUnavailable)
+		}
+	}))
+	request := httptest.NewRequest(http.MethodGet, "https://203.0.113.10/?login", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("IP owner request status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
@@ -16658,8 +16742,8 @@ func TestPerSiteDBRouterSerializesConcurrentWritesToOneSiteDatabase(t *testing.T
 	if got := siteDatabase.rawDatabase.Stats().MaxOpenConnections; got != 1 {
 		t.Fatalf("site database max open connections = %d, want 1", got)
 	}
-	if got := len(siteDatabase.readDatabases); got != siteDatabaseReaderCount {
-		t.Fatalf("site database readers = %d, want %d", got, siteDatabaseReaderCount)
+	if got := len(siteDatabase.readDatabases); got != siteDatabaseReaderCount() {
+		t.Fatalf("site database readers = %d, want %d", got, siteDatabaseReaderCount())
 	}
 	for readerIndex, readDatabase := range siteDatabase.readDatabases {
 		if got := readDatabase.Stats().MaxOpenConnections; got != 1 {

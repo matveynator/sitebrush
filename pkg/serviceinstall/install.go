@@ -19,16 +19,17 @@ import (
 )
 
 type Options struct {
-	Port        string
-	StoragePath string
-	DBType      string
-	DBPath      string
-	BinaryPath  string
-	WorkingDir  string
-	ServiceName string
-	Language    string
-	Input       io.Reader
-	Output      io.Writer
+	Port                  string
+	StoragePath           string
+	DBType                string
+	DBPath                string
+	BinaryPath            string
+	WorkingDir            string
+	ServiceName           string
+	Language              string
+	Input                 io.Reader
+	Output                io.Writer
+	PrepareFirstAdminCode func(storagePath, dbPath string) error
 }
 
 // StoredOptions lets local maintenance commands reuse the installed service's
@@ -241,7 +242,18 @@ func Install(ctx context.Context, options Options) (Result, error) {
 		if err := prepareServiceStorage(plan); err != nil {
 			return err
 		}
-		return prepareExecutableFilesystem(plan)
+		if err := prepareExecutableFilesystem(plan); err != nil {
+			return err
+		}
+		if options.PrepareFirstAdminCode != nil {
+			if err := options.PrepareFirstAdminCode(plan.Options.StoragePath, plan.Options.DBPath); err != nil {
+				return err
+			}
+			// The installer creates the code as root; the service account must
+			// own it before the first administrator submits it over HTTPS.
+			return prepareServiceStorage(plan)
+		}
+		return nil
 	}
 	return installWithManager(ctx, options, probe, manager, prepare, writeServiceMetadata)
 }
@@ -1370,6 +1382,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=%s
 ExecStart=%s
+LimitNOFILE=65536
 Restart=on-failure
 RestartSec=5
 
@@ -1764,16 +1777,47 @@ func uninstallFreeBSDRcD(ctx context.Context, probe runtimeProbe, plan installPl
 }
 
 func installOpenBSDRcD(ctx context.Context, probe runtimeProbe, plan installPlan) (Result, error) {
+	classPath := probe.filesystemPath(filepath.Join("/etc/login.conf.d", plan.ServiceName))
+	classChanged, err := writeOpenBSDResourceClass(classPath, plan.ServiceName)
+	if err != nil {
+		return Result{}, err
+	}
 	path := probe.filesystemPath(filepath.Join("/etc/rc.d", plan.ServiceName))
 	if err := writeFile(path, openBSDRcScript(plan), 0o755); err != nil {
 		return Result{}, err
 	}
-	commands, err := runInstallCommands(ctx, probe, [][]string{
-		{"rcctl", "enable", plan.ServiceName},
-		{"rcctl", "restart", plan.ServiceName},
-		{"rcctl", "check", plan.ServiceName},
-	})
+	steps := make([][]string, 0, 4)
+	if classChanged {
+		steps = append(steps, []string{"cap_mkdb", classPath})
+	}
+	steps = append(steps,
+		[]string{"rcctl", "enable", plan.ServiceName},
+		[]string{"rcctl", "restart", plan.ServiceName},
+		[]string{"rcctl", "check", plan.ServiceName},
+	)
+	commands, err := runInstallCommands(ctx, probe, steps)
 	return Result{ServicePath: path, Commands: commands}, err
+}
+
+// rc.subr selects the login class named after the service script. Keep the
+// resource policy in a class fragment so unrelated system classes are intact.
+func writeOpenBSDResourceClass(path, serviceName string) (bool, error) {
+	content := openBSDResourceClassContent(serviceName)
+	existing, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	if err == nil {
+		if string(existing) == content {
+			return false, nil
+		}
+		return false, fmt.Errorf("OpenBSD login class %s already exists with different settings; set its openfiles limit to at least 65536 before installing", path)
+	}
+	return true, writeFile(path, content, 0o644)
+}
+
+func openBSDResourceClassContent(serviceName string) string {
+	return fmt.Sprintf("# SiteBrush managed resource class\n%s:\\\n\t:openfiles-cur=65536:\\\n\t:openfiles-max=65536:\n", serviceName)
 }
 
 func uninstallOpenBSDRcD(ctx context.Context, probe runtimeProbe, plan installPlan) (Result, error) {
@@ -1784,6 +1828,17 @@ func uninstallOpenBSDRcD(ctx context.Context, probe runtimeProbe, plan installPl
 	})
 	if removeErr := removeFileIfExists(path); removeErr != nil && err == nil {
 		err = removeErr
+	}
+	classPath := probe.filesystemPath(filepath.Join("/etc/login.conf.d", plan.ServiceName))
+	if content, readErr := os.ReadFile(classPath); readErr == nil && string(content) == openBSDResourceClassContent(plan.ServiceName) {
+		if removeErr := removeFileIfExists(classPath); removeErr != nil && err == nil {
+			err = removeErr
+		}
+		if removeErr := removeFileIfExists(classPath + ".db"); removeErr != nil && err == nil {
+			err = removeErr
+		}
+	} else if readErr != nil && !errors.Is(readErr, os.ErrNotExist) && err == nil {
+		err = readErr
 	}
 	return Result{ServicePath: path, Commands: commands}, err
 }

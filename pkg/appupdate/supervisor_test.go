@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -25,6 +26,57 @@ func TestMain(suite *testing.M) {
 		}
 	}
 	os.Exit(suite.Run())
+}
+
+func TestReconcilePlatformStateSeedsNativeBinaryAfterDataMove(t *testing.T) {
+	storagePath := t.TempDir()
+	store, err := openStore(storagePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	executable := filepath.Join(t.TempDir(), "sitebrush")
+	if err := os.WriteFile(executable, []byte("native launcher"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	compatibility := CurrentCompatibility()
+	foreignOS := "linux"
+	if runtime.GOOS == foreignOS {
+		foreignOS = "openbsd"
+	}
+	foreign := Version{Version: "old", Binary: filepath.Join("versions", "old", BinaryName(foreignOS, "amd64")), Compatibility: compatibility}
+	state := State{Current: foreign, Previous: &foreign, RollbackAvailable: true}
+	options := Options{Executable: executable, Version: "new", Compatibility: compatibility}
+	if err := reconcilePlatformState(store, options, &state); err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(state.Current.Binary) != BinaryName(runtime.GOOS, runtime.GOARCH) || state.Previous != nil || state.RollbackAvailable {
+		t.Fatalf("reconciled state = %#v", state)
+	}
+	content, err := store.ReadFile(state.Current.Binary)
+	if err != nil || string(content) != "native launcher" {
+		t.Fatalf("native binary content=%q err=%v", content, err)
+	}
+	stored, err := loadState(store)
+	if err != nil || stored.Current.Binary != state.Current.Binary {
+		t.Fatalf("stored state=%#v err=%v", stored, err)
+	}
+}
+
+func TestReconcilePlatformStateRejectsForeignUnfinishedUpdate(t *testing.T) {
+	store, err := openStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	foreignOS := "linux"
+	if runtime.GOOS == foreignOS {
+		foreignOS = "openbsd"
+	}
+	state := State{Current: Version{Binary: filepath.Join("versions", "old", BinaryName(foreignOS, "amd64"))}, Busy: true}
+	if err := reconcilePlatformState(store, Options{}, &state); err == nil {
+		t.Fatal("unfinished update was replaced by a new platform binary")
+	}
 }
 
 func runUpdateFixture() int {

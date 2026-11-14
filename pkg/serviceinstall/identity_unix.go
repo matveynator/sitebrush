@@ -195,6 +195,75 @@ func prepareServiceStorage(plan installPlan) error {
 	if err := chownServiceStorageTree(storageFD, storagePath, &rootStat, uid, gid); err != nil {
 		return fmt.Errorf("set service storage ownership: %w", err)
 	}
+	for _, components := range [][]string{{"storage", "letsencrypt"}, {"storage", "keys", "tls"}} {
+		if err := restrictServiceSecretTree(storageFD, components); err != nil {
+			return fmt.Errorf("protect certificate storage: %w", err)
+		}
+	}
+	return nil
+}
+
+func restrictServiceSecretTree(storageFD int, components []string) error {
+	directoryFD, err := unix.Dup(storageFD)
+	if err != nil {
+		return err
+	}
+	for _, component := range components {
+		childFD, openErr := unix.Openat(directoryFD, component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		unix.Close(directoryFD)
+		if errors.Is(openErr, unix.ENOENT) {
+			return nil
+		}
+		if openErr != nil {
+			return openErr
+		}
+		directoryFD = childFD
+	}
+	defer unix.Close(directoryFD)
+	return restrictServiceSecretDirectory(directoryFD)
+}
+
+func restrictServiceSecretDirectory(directoryFD int) error {
+	if err := unix.Fchmod(directoryFD, 0o700); err != nil {
+		return err
+	}
+	readFD, err := unix.Dup(directoryFD)
+	if err != nil {
+		return err
+	}
+	directory := os.NewFile(uintptr(readFD), "certificate storage")
+	entries, err := directory.ReadDir(-1)
+	directory.Close()
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() {
+			childFD, err := unix.Openat(directoryFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+			if err != nil {
+				return err
+			}
+			err = restrictServiceSecretDirectory(childFD)
+			unix.Close(childFD)
+			if err != nil {
+				return err
+			}
+			continue
+		}
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("unexpected certificate storage entry %s", name)
+		}
+		fileFD, err := unix.Openat(directoryFD, name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return err
+		}
+		err = unix.Fchmod(fileFD, 0o600)
+		unix.Close(fileFD)
+		if err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
