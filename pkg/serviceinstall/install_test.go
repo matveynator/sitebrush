@@ -311,7 +311,7 @@ func TestOpenBSDServicePatternExcludesInstaller(t *testing.T) {
 		script = openBSDRcScript(plan)
 		return Result{}, nil
 	}}
-	_, err := installWithManager(context.Background(), Options{Port: "80,443", StoragePath: "/data1/sitebrush", BinaryPath: "/usr/local/bin/sitebrush", Output: io.Discard}, fakeProbe("openbsd", nil, nil), manager, func(installPlan) error { return nil }, func(string, installPlan, string) error { return nil })
+	_, err := installWithManager(context.Background(), Options{Port: "80,443", StoragePath: platformAbsolutePath("/data1/sitebrush"), BinaryPath: platformAbsolutePath("/usr/local/bin/sitebrush"), Output: io.Discard}, fakeProbe("openbsd", nil, nil), manager, func(installPlan) error { return nil }, func(string, installPlan, string) error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
