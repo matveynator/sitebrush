@@ -238,6 +238,7 @@ type App struct {
 	publicBoundary        bool
 	publicPolicyContact   bool
 	publicPolicyReady     chan struct{}
+	publicPolicyBootstrap atomic.Bool
 	publicPolicyAddress   string
 
 	centralNetChanIdentity         *centralNetChanIdentityProcess
@@ -10657,6 +10658,10 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application.startPublicPublication(ctx.Done())
 	application.publicPolicyContact = config.PublicProxy && os.Getenv("SITEBRUSH_PUBLIC_POLICY_CHANNEL") == "1"
 	if application.publicPolicyContact {
+		// The first complete snapshot is built locally before asking the
+		// supervisor to enable the public front. Publication is still gated
+		// until the supervisor acknowledges the final snapshot.
+		application.publicPolicyBootstrap.Store(true)
 		application.publicPolicyReady = make(chan struct{})
 	}
 	application.publicPolicyAddress = listener.Addr().String()
@@ -11181,6 +11186,9 @@ func (a *App) runStartupPreload(ctx context.Context, siteDatabaseRootDir string)
 		defer retry.Stop()
 		for {
 			if err := a.refreshAllPublicPolicies(); err == nil {
+				// All durable policies are complete. Future writes must again
+				// await a supervisor acknowledgement before lifting barriers.
+				a.publicPolicyBootstrap.Store(false)
 				close(a.publicPolicyReady)
 				break
 			} else {
@@ -60841,7 +60849,11 @@ func (a *App) notifyPublicPolicy(action, domain string) error {
 			return err
 		}
 	}
-	if !a.publicPolicyContact {
+	if !a.publicPolicyContact || a.publicPolicyBootstrap.Load() {
+		// Before the first enable the public front rejects dynamic requests.
+		// Calling the remote policy contact from this initial snapshot would
+		// form a startup cycle if NetChan has not established its session yet.
+		// The enable operation loads every durable policy in one snapshot.
 		return nil
 	}
 	encoded, err := json.Marshal(publicsite.Change{Action: action, Domain: domain})
