@@ -26,5 +26,16 @@ func setPolicyFileOwner(file *os.File, root *os.Root) error {
 	if !ok {
 		return errors.New("public policy directory ownership unavailable")
 	}
+	current, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	owner, ok := current.Sys().(*syscall.Stat_t)
+	if !ok {
+		return errors.New("public policy file ownership unavailable")
+	}
+	if owner.Uid == stat.Uid && owner.Gid == stat.Gid {
+		return nil
+	}
 	return file.Chown(int(stat.Uid), int(stat.Gid))
 }
