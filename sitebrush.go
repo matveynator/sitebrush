@@ -60997,12 +60997,20 @@ func (a *App) exchangePublicPolicyFallback(encoded []byte) error {
 	if secret == "" {
 		return errors.New("public boundary contact is unavailable")
 	}
-	request, err := http.NewRequest(http.MethodPost, "http://127.0.0.1:"+strconv.Itoa(port)+"/.well-known/sitebrush-public-policy", bytes.NewReader(encoded))
+	request, err := http.NewRequest(http.MethodPost, "http://127.0.0.1/.well-known/sitebrush-public-policy", bytes.NewReader(encoded))
 	if err != nil {
 		return err
 	}
 	request.Header.Set(publicsite.InternalHeader, secret)
-	client := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true}}
+	// The request URL is fixed. Only the validated local listener port varies;
+	// the transport never resolves a host or follows an external redirect.
+	dialer := &net.Dialer{Timeout: 3 * time.Second}
+	transport := &http.Transport{Proxy: nil, DisableKeepAlives: true, DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return dialer.DialContext(ctx, "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	}}
+	client := &http.Client{Timeout: 3 * time.Second, Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
 	response, err := client.Do(request)
 	if err != nil {
 		return err
