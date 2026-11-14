@@ -10258,10 +10258,11 @@ func main() {
 	if !*serviceWorker && (*serviceRuntime || strings.TrimSpace(*logFile) != "") {
 		var closeJournal func() error
 		var journalErr error
-		if strings.TrimSpace(*logFile) != "" {
-			closeJournal, journalErr = applog.CaptureFile(*logFile)
-		} else {
+		defaultLogFile := filepath.Join(effectiveStoragePath, "storage", "logs", "sitebrush.log")
+		if strings.TrimSpace(*logFile) == "" || sameCleanPath(*logFile, defaultLogFile) {
 			closeJournal, journalErr = applog.Capture(effectiveStoragePath)
+		} else {
+			closeJournal, journalErr = applog.CaptureFile(*logFile)
 		}
 		if journalErr != nil {
 			log.Fatalf("open application journal: %v", journalErr)
