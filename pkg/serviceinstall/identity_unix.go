@@ -17,7 +17,11 @@ import (
 )
 
 func ServiceUserName() string {
-	if runtime.GOOS == "openbsd" || runtime.GOOS == "darwin" {
+	return serviceUserName(runtime.GOOS)
+}
+
+func serviceUserName(goos string) string {
+	if goos == "openbsd" || goos == "darwin" {
 		return "_sitebrush"
 	}
 	return "sitebrush"
@@ -37,18 +41,12 @@ func prepareServiceIdentity(plan installPlan) error {
 		}
 		return nil
 	}
-	var commands [][]string
-	switch runtime.GOOS {
-	case "linux":
-		commands = [][]string{{"useradd", "--system", "--no-create-home", "--home-dir", "/var/empty", "--shell", "/usr/sbin/nologin", name}}
-	case "freebsd":
-		commands = [][]string{{"pw", "groupadd", name}, {"pw", "useradd", name, "-g", name, "-d", "/nonexistent", "-s", "/usr/sbin/nologin"}}
-	case "openbsd", "netbsd":
-		commands = [][]string{{"groupadd", name}, {"useradd", "-g", name, "-d", "/nonexistent", "-s", "/sbin/nologin", name}}
-	case "darwin":
+	if runtime.GOOS == "darwin" {
 		return createDarwinServiceIdentity(name)
-	default:
-		return fmt.Errorf("service account creation is unsupported on %s", runtime.GOOS)
+	}
+	commands, err := serviceIdentityCommands(runtime.GOOS, name)
+	if err != nil {
+		return err
 	}
 	for _, command := range commands {
 		if (command[0] == "groupadd" || command[0] == "pw" && len(command) > 1 && command[1] == "groupadd") && serviceGroupExists(name) {
@@ -63,6 +61,19 @@ func prepareServiceIdentity(plan installPlan) error {
 		return fmt.Errorf("service account %s is unavailable after creation: %w", name, err)
 	}
 	return nil
+}
+
+func serviceIdentityCommands(goos, name string) ([][]string, error) {
+	switch goos {
+	case "linux":
+		return [][]string{{"useradd", "--system", "--no-create-home", "--home-dir", "/var/empty", "--shell", "/usr/sbin/nologin", name}}, nil
+	case "freebsd":
+		return [][]string{{"pw", "groupadd", name}, {"pw", "useradd", name, "-g", name, "-d", "/nonexistent", "-s", "/usr/sbin/nologin"}}, nil
+	case "openbsd", "netbsd":
+		return [][]string{{"groupadd", name}, {"useradd", "-g", name, "-d", "/nonexistent", "-s", "/sbin/nologin", name}}, nil
+	default:
+		return nil, fmt.Errorf("service account creation is unsupported on %s", goos)
+	}
 }
 
 func serviceGroupExists(name string) bool {
@@ -315,13 +326,16 @@ func openServiceStoragePath(storagePath string, uid, gid int) (int, error) {
 	return parentFD, nil
 }
 
+// Unix applies one permission class, even when another class grants access.
 func serviceCanTraverse(stat *unix.Stat_t, uid, gid int) bool {
 	permissions := uint32(stat.Mode) & 0o777
-	if permissions&0o001 != 0 {
-		return true
+	if uint64(uid) == uint64(stat.Uid) {
+		return permissions&0o100 != 0
 	}
-	return uint64(uid) == uint64(stat.Uid) && permissions&0o100 != 0 ||
-		uint64(gid) == uint64(stat.Gid) && permissions&0o010 != 0
+	if uint64(gid) == uint64(stat.Gid) {
+		return permissions&0o010 != 0
+	}
+	return permissions&0o001 != 0
 }
 
 func ensureServiceDirectory(parentFD int, name string) (int, error) {
