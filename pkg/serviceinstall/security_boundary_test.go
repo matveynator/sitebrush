@@ -55,9 +55,9 @@ func TestSecurityBoundaryInstallKeepsArgumentsSeparateFromShellSyntax(t *testing
 		t.Fatalf("buildInstallPlan() error = %v", err)
 	}
 
-	wantArgs := 5
+	wantArgs := 7
 	if runtime.GOOS == "windows" {
-		wantArgs = 7
+		wantArgs = 9
 	}
 	if len(plan.ExecArgs) != wantArgs {
 		t.Fatalf("exec argument count = %d, want %d: %#v", len(plan.ExecArgs), wantArgs, plan.ExecArgs)
@@ -67,6 +67,10 @@ func TestSecurityBoundaryInstallKeepsArgumentsSeparateFromShellSyntax(t *testing
 	}
 	if plan.ExecArgs[3] != "-path" || plan.ExecArgs[4] != storagePath {
 		t.Fatalf("storage argument was split or rewritten: %#v", plan.ExecArgs)
+	}
+	logFile := filepath.Join(storagePath, "storage", "logs", "sitebrush.log")
+	if plan.ExecArgs[5] != "-logfile" || plan.ExecArgs[6] != logFile {
+		t.Fatalf("logfile argument was split or rewritten: %#v", plan.ExecArgs)
 	}
 }
 
