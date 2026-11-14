@@ -263,6 +263,7 @@ func Exchange(storagePath string, request Request, stop <-chan struct{}) (Respon
 	// "channel closed". A transient transport error can be retried by
 	// NetChan, so only report it when the session actually ends.
 	var transportError error
+	transportErrors := connection.Errors
 	for {
 		select {
 		case response, open := <-connection.Receive:
@@ -271,8 +272,10 @@ func Exchange(storagePath string, request Request, stop <-chan struct{}) (Respon
 			}
 			graceful = true
 			return decodeContactResult(response)
-		case problem, open := <-connection.Errors:
-			if open && problem != nil {
+		case problem, open := <-transportErrors:
+			if !open {
+				transportErrors = nil
+			} else if problem != nil {
 				transportError = problem
 			}
 		case <-stop:
