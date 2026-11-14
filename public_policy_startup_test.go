@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"testing"
 
 	"github.com/matveynator/sitebrush/v2/pkg/publicsite"
@@ -34,5 +33,4 @@ func TestInitialPublicPolicySnapshotDoesNotRequireNetChanContact(t *testing.T) {
 	if err := app.notifyPublicPolicy("refresh", "example.test"); err == nil {
 		t.Fatal("live policy refresh must require a supervisor acknowledgement")
 	}
-	_ = context.Background()
 }
