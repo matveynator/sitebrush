@@ -306,10 +306,17 @@ func TestInteractiveWizardMovesDerivedPathsWithStorage(t *testing.T) {
 }
 
 func TestOpenBSDServicePatternExcludesInstaller(t *testing.T) {
-	plan := installPlan{ServiceName: "sitebrush", BinaryPath: "/usr/local/bin/sitebrush", ExecArgs: []string{"/usr/local/bin/sitebrush", "-port", "80,443", "-path", "/data1/sitebrush", "-service-runtime"}}
-	script := openBSDRcScript(plan)
-	if strings.Contains(script, `pexp="${daemon}.*"`) || !strings.Contains(script, `pexp="${daemon}.*-service-runtime"`) {
-		t.Fatalf("OpenBSD service can match the installer process:\n%s", script)
+	var script string
+	manager := serviceManager{Name: "rc.d/rcctl", Install: func(_ context.Context, _ runtimeProbe, plan installPlan) (Result, error) {
+		script = openBSDRcScript(plan)
+		return Result{}, nil
+	}}
+	_, err := installWithManager(context.Background(), Options{Port: "80,443", StoragePath: "/data1/sitebrush", BinaryPath: "/usr/local/bin/sitebrush", Output: io.Discard}, fakeProbe("openbsd", nil, nil), manager, func(installPlan) error { return nil }, func(string, installPlan, string) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(script, `pexp="${daemon}.*"`) || !strings.Contains(script, `pexp="${daemon}.*-service-runtime"`) || !strings.Contains(script, "-service-runtime'") {
+		t.Fatalf("OpenBSD service cannot track its launcher:\n%s", script)
 	}
 }
 
