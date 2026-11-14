@@ -188,7 +188,7 @@ func (front *Front) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "server unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	if !state.Paused && !state.PolicyReady && !installationHost(r.Host) {
+	if !state.Paused && !state.PolicyReady && !installationHost(r.Host) && !strings.HasPrefix(r.URL.Path, "/.well-known/acme-challenge/") {
 		w.Header().Set("Retry-After", "2")
 		http.Error(w, "site policy is loading", http.StatusServiceUnavailable)
 		return

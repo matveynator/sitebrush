@@ -143,7 +143,13 @@ func TestHTMLStreamsConditionalAndRangeResponses(t *testing.T) {
 func TestPublicFrontWaitsForPolicyBeforeServingSiteHost(t *testing.T) {
 	stop := make(chan struct{})
 	defer close(stop)
-	front := NewFront("secret", func(http.ResponseWriter, *http.Request, bool) bool { return false }, stop)
+	front := NewFront("secret", func(writer http.ResponseWriter, request *http.Request, paused bool) bool {
+		if request.URL.Path == "/.well-known/acme-challenge/token" {
+			writer.WriteHeader(http.StatusNoContent)
+			return true
+		}
+		return false
+	}, stop)
 	if err := front.Set("127.0.0.1:12345", false); err != nil {
 		t.Fatal(err)
 	}
@@ -151,6 +157,11 @@ func TestPublicFrontWaitsForPolicyBeforeServingSiteHost(t *testing.T) {
 	front.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://site.test/", nil))
 	if response.Code != http.StatusServiceUnavailable || response.Header().Get("Retry-After") != "2" {
 		t.Fatalf("policy startup response=%d retry=%q", response.Code, response.Header().Get("Retry-After"))
+	}
+	challenge := httptest.NewRecorder()
+	front.ServeHTTP(challenge, httptest.NewRequest(http.MethodGet, "http://site.test/.well-known/acme-challenge/token", nil))
+	if challenge.Code != http.StatusNoContent {
+		t.Fatalf("ACME challenge was blocked during policy startup: %d", challenge.Code)
 	}
 }
 
