@@ -229,6 +229,12 @@ func atomicPolicy(root *os.Root, name string, policy Policy) error {
 	if closeErr != nil {
 		return closeErr
 	}
+	// The policy reader runs as the unprivileged service account. When the
+	// privileged launcher writes a snapshot on OpenBSD, preserve the policy
+	// directory owner's identity before atomically publishing the file.
+	if err = setPolicyFileOwner(file, root); err != nil {
+		return err
+	}
 	if err = root.Rename(temporary, name); err != nil {
 		return err
 	}
