@@ -258,18 +258,36 @@ func Exchange(storagePath string, request Request, stop <-chan struct{}) (Respon
 	if err := sendChannel(connection.Send, wireRequest{Protocol: Protocol, Action: request.Action, ManifestHash: request.ManifestHash, Detail: request.Detail}, stop, 5*time.Second); err != nil {
 		return Response{}, err
 	}
-	select {
-	case response, open := <-connection.Receive:
-		if !open {
-			return Response{}, errors.New("supervisor reply contact terminated")
+	// NetChan can close a logical session before delivering a response.
+	// Preserve its transport error instead of masking it as a generic
+	// "channel closed". A transient transport error can be retried by
+	// NetChan, so only report it when the session actually ends.
+	var transportError error
+	for {
+		select {
+		case response, open := <-connection.Receive:
+			if !open {
+				return Response{}, contactFailure("supervisor reply contact terminated", transportError)
+			}
+			graceful = true
+			return decodeContactResult(response)
+		case problem, open := <-connection.Errors:
+			if open && problem != nil {
+				transportError = problem
+			}
+		case <-stop:
+			return Response{}, errors.New("update request canceled")
+		case <-connection.Done:
+			return Response{}, contactFailure("update supervisor disconnected", transportError)
+		case <-timer.C:
+			return Response{}, contactFailure("update supervisor timed out", transportError)
 		}
-		graceful = true
-		return decodeContactResult(response)
-	case <-stop:
-		return Response{}, errors.New("update request canceled")
-	case <-connection.Done:
-		return Response{}, errors.New("update supervisor disconnected")
-	case <-timer.C:
-		return Response{}, errors.New("update supervisor timed out")
 	}
+}
+
+func contactFailure(message string, transportError error) error {
+	if transportError != nil {
+		return fmt.Errorf("%s: %w", message, transportError)
+	}
+	return errors.New(message)
 }
