@@ -219,22 +219,19 @@ func atomicPolicy(root *os.Root, name string, policy Policy) error {
 		return err
 	}
 	defer root.Remove(temporary)
-	if _, err = file.Write(encoded); err != nil {
-		file.Close()
+	if _, err = file.Write(encoded); err == nil {
+		// Preserve the private service ownership before publishing the snapshot.
+		err = setPolicyFileOwner(file, root)
+	}
+	if err == nil {
+		err = file.Sync()
+	}
+	closeErr := file.Close()
+	if err != nil {
 		return err
 	}
-	// On OpenBSD the root launcher must publish snapshots as the service
-	// directory owner so the unprivileged policy reader can open them.
-	if err = setPolicyFileOwner(file, root); err != nil {
-		file.Close()
-		return err
-	}
-	if err = file.Sync(); err != nil {
-		file.Close()
-		return err
-	}
-	if err = file.Close(); err != nil {
-		return err
+	if closeErr != nil {
+		return closeErr
 	}
 	if err = root.Rename(temporary, name); err != nil {
 		return err
