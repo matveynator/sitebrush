@@ -1700,7 +1700,7 @@ func launchdPlist(label string, plan installPlan) string {
 	<true/>
 	<key>KeepAlive</key>
 	<true/>
- </dict>
+</dict>
 </plist>
 `, label, strings.Join(args, "\n"), escapeXML(plan.WorkingDir))
 }
