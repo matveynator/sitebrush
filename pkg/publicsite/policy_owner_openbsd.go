@@ -78,41 +78,41 @@ func RepairPolicyOwnership(root string) error {
 	for {
 		entries, readErr := directory.ReadDir(128)
 		for _, entry := range entries {
-		name := entry.Name()
-		if !policyMetadataName(name) {
-			continue
-		}
-		// An attacker-controlled symlink must never be chowned by root.
-		if !entry.Type().IsRegular() {
-			return errors.New("unsafe public policy metadata entry")
-		}
-		fd, openErr := unix.Openat(int(directory.Fd()), name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-		if openErr != nil {
-			return openErr
-		}
-		var stat unix.Stat_t
-		if err := unix.Fstat(fd, &stat); err != nil {
-			unix.Close(fd)
-			return err
-		}
-		if stat.Mode&unix.S_IFMT != unix.S_IFREG {
-			unix.Close(fd)
-			return errors.New("unsafe public policy metadata type")
-		}
-		if stat.Uid != owner.Uid || stat.Gid != owner.Gid {
-			if err := unix.Fchown(fd, int(owner.Uid), int(owner.Gid)); err != nil {
+			name := entry.Name()
+			if !policyMetadataName(name) {
+				continue
+			}
+			// An attacker-controlled symlink must never be chowned by root.
+			if !entry.Type().IsRegular() {
+				return errors.New("unsafe public policy metadata entry")
+			}
+			fd, openErr := unix.Openat(int(directory.Fd()), name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+			if openErr != nil {
+				return openErr
+			}
+			var stat unix.Stat_t
+			if err := unix.Fstat(fd, &stat); err != nil {
 				unix.Close(fd)
 				return err
 			}
-			if err := unix.Fsync(fd); err != nil {
+			if stat.Mode&unix.S_IFMT != unix.S_IFREG {
 				unix.Close(fd)
+				return errors.New("unsafe public policy metadata type")
+			}
+			if stat.Uid != owner.Uid || stat.Gid != owner.Gid {
+				if err := unix.Fchown(fd, int(owner.Uid), int(owner.Gid)); err != nil {
+					unix.Close(fd)
+					return err
+				}
+				if err := unix.Fsync(fd); err != nil {
+					unix.Close(fd)
+					return err
+				}
+				changed = true
+			}
+			if err := unix.Close(fd); err != nil {
 				return err
 			}
-			changed = true
-		}
-		if err := unix.Close(fd); err != nil {
-			return err
-		}
 		}
 		if readErr != nil {
 			if readErr != io.EOF {
