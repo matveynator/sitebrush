@@ -447,3 +447,39 @@ func TestCLITranslationsDoNotFallbackToEnglishForInterfaceActions(t *testing.T) 
 		}
 	}
 }
+
+func TestServiceInstallPlanSelectsRotatingLogFile(t *testing.T) {
+	storagePath := filepath.Join(t.TempDir(), "data")
+	binaryPath := filepath.Join(t.TempDir(), "sitebrush")
+	plan, err := buildInstallPlan(Options{BinaryPath: binaryPath, StoragePath: storagePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := filepath.Join(storagePath, "storage", "logs", "sitebrush.log")
+	if !strings.Contains(strings.Join(plan.ExecArgs, " "), "-logfile "+expected) {
+		t.Fatalf("service installation did not configure default journal: %v", plan.ExecArgs)
+	}
+	customPath := filepath.Join(t.TempDir(), "events.log")
+	plan, err = buildInstallPlan(Options{BinaryPath: binaryPath, StoragePath: storagePath, LogFile: customPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(plan.ExecArgs, " "), "-logfile "+customPath) {
+		t.Fatalf("service installation ignored custom journal: %v", plan.ExecArgs)
+	}
+	for _, invalid := range []string{"relative.log", filepath.Join(storagePath, "invalid.txt")} {
+		if _, err := buildInstallPlan(Options{BinaryPath: binaryPath, StoragePath: storagePath, LogFile: invalid}); err == nil {
+			t.Fatalf("invalid service logfile was accepted: %q", invalid)
+		}
+	}
+}
+
+func TestServiceManagersDoNotWriteUnrotatedJournalCopies(t *testing.T) {
+	storagePath := filepath.Join(t.TempDir(), "data")
+	plan := installPlan{ServiceName: "sitebrush", BinaryPath: "/usr/local/bin/sitebrush", WorkingDir: storagePath, ExecArgs: []string{"/usr/local/bin/sitebrush", "-logfile", filepath.Join(storagePath, "storage", "logs", "sitebrush.log")}}
+	for _, content := range []string{launchdPlist("net.sitebrush", plan), sysVRcScript(plan)} {
+		if strings.Contains(content, "StandardOutPath") || strings.Contains(content, "StandardErrorPath") || strings.Contains(content, ">>") {
+			t.Fatalf("service manager bypasses application log rotation: %s", content)
+		}
+	}
+}
