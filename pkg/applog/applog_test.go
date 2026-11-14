@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -144,8 +145,11 @@ func TestCustomLogFileRotatesAndKeepsDirectoryPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 	directoryInfo, err := os.Stat(directory)
-	if err != nil || directoryInfo.Mode().Perm() != 0o755 {
-		t.Fatalf("custom log directory permissions changed: %v, %v", directoryInfo, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && directoryInfo.Mode().Perm() != 0o755 {
+		t.Fatalf("custom log directory permissions changed: %v", directoryInfo.Mode())
 	}
 	active, err := os.ReadFile(logFile)
 	if err != nil || string(active) != "current day\n" {
