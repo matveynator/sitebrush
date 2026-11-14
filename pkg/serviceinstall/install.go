@@ -1979,6 +1979,8 @@ daemon_execdir=%s
 
 rc_bg=YES
 rc_reload=NO
+# The service installer adds -service-runtime to daemon_flags.
+# Exclude installer and maintenance commands from rcctl process checks.
 pexp="${daemon}.*-service-runtime"
 rc_cmd $1
 `, shellQuote(plan.BinaryPath), shellQuote(strings.Join(plan.ExecArgs[1:], " ")), shellQuote(plan.WorkingDir))

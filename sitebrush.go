@@ -10657,6 +10657,8 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application.startPublicPublication(ctx.Done())
 	application.publicPolicyContact = config.PublicProxy && os.Getenv("SITEBRUSH_PUBLIC_POLICY_CHANNEL") == "1"
 	if application.publicPolicyContact {
+		// This channel closes after the initial local snapshot is complete.
+		// The separate supervisor enable acknowledgement controls public admission.
 		application.publicPolicyReady = make(chan struct{})
 	}
 	application.publicPolicyAddress = listener.Addr().String()
@@ -11181,6 +11183,8 @@ func (a *App) runStartupPreload(ctx context.Context, siteDatabaseRootDir string)
 		defer retry.Stop()
 		for {
 			if err := a.refreshAllPublicPolicies(); err == nil {
+				// Resume acknowledged policy notifications only after all durable
+				// snapshots are available to the supervisor's initial enable request.
 				close(a.publicPolicyReady)
 				break
 			} else {
@@ -60844,6 +60848,15 @@ func (a *App) notifyPublicPolicy(action, domain string) error {
 	if !a.publicPolicyContact {
 		return nil
 	}
+	// During initial snapshot construction the front remains disabled.
+	// A remote refresh at this point would make startup depend on NetChan
+	// before the supervisor can acknowledge its initial policy snapshot.
+	select {
+	case <-a.publicPolicyReady:
+		// Subsequent publications require supervisor acknowledgement.
+	default:
+		return nil
+	}
 	encoded, err := json.Marshal(publicsite.Change{Action: action, Domain: domain})
 	if err != nil {
 		return err
@@ -61323,6 +61336,12 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 	storageRoot, err := prepareStorageJailRoot(storagePath)
 	if err != nil {
 		return nil, nil, "", err
+	}
+	// The OpenBSD launcher can still find 0600 root-owned policies from a
+	// previous Linux installation. Repair only private metadata files before
+	// the unprivileged reader starts; any unsafe entry fails startup closed.
+	if err := publicsite.RepairPolicyOwnership(storagePath); err != nil {
+		return nil, nil, "", fmt.Errorf("repair public policy ownership: %w", err)
 	}
 	secret, err := appupdate.Identifier()
 	if err != nil {
