@@ -8,3 +8,6 @@ import "os"
 func setPolicyFileOwner(_ *os.File, _ *os.Root) error {
 	return nil
 }
+
+// Other platforms keep their existing installation migration behavior.
+func RepairPolicyOwnership(_ string) error { return nil }
