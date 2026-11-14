@@ -220,6 +220,10 @@ func atomicPolicy(root *os.Root, name string, policy Policy) error {
 	}
 	defer root.Remove(temporary)
 	if _, err = file.Write(encoded); err == nil {
+		// Preserve the private service ownership before publishing the snapshot.
+		err = setPolicyFileOwner(file, root)
+	}
+	if err == nil {
 		err = file.Sync()
 	}
 	closeErr := file.Close()
