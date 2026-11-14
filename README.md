@@ -574,3 +574,26 @@ Manual acceptance:
 4. Interrupt the process during restoration, restart it, and check that the same
    restoration completes. Revoke or consume a file token during the freeze;
    cancellation must not make that old token usable again.
+
+## Git commit identity
+
+Set an explicit identity in each development checkout before committing. Use an
+email address verified in GitHub **Settings → Emails**; for a private address,
+copy the exact noreply address shown there instead of constructing its numeric
+prefix yourself.
+
+```sh
+git config --local user.useConfigOnly true
+git config --local user.name 'Your Name'
+git config --local user.email 'your-verified-address@example.com'
+git var GIT_AUTHOR_IDENT
+git var GIT_COMMITTER_IDENT
+```
+
+Replace the example name and email with your own. `GIT_AUTHOR_*` and
+`GIT_COMMITTER_*` environment variables can override Git configuration, so check
+both identities in automated workspaces. SiteBrush CI compares the numeric ID
+and login in `ID+LOGIN@users.noreply.github.com` addresses against GitHub for
+commit authors, committers and `Co-authored-by` trailers. For the repository
+owner `matveynator`, GitHub reports ID `26712073`; the `1970409+matveynator`
+address from issue #258 belongs to a different account and is rejected.
