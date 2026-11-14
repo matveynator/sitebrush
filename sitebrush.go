@@ -51505,7 +51505,7 @@ func (a *App) siteDomain(ctx context.Context, r *http.Request) string {
 	requestDomain := domainFromRequest(r)
 	if requestHostIP(r) != nil || requestDomain == "localhost" && localAccountRequest(r) {
 		if a.controlDatabase == nil {
-			return "localhost"
+			return requestDomain
 		}
 		var ownerDomain string
 		_ = a.withServerControlDatabaseRead(ctx, "ip-owner-domain", func(database *sql.DB) error {
@@ -51515,7 +51515,7 @@ func (a *App) siteDomain(ctx context.Context, r *http.Request) string {
 		if ownerDomain != "" {
 			return canonicalLocalDomain(ownerDomain)
 		}
-		return "localhost"
+		return requestDomain
 	}
 	if a.publicCatalog != nil && (a.publicBoundary || publicOrdinaryRequest(r)) {
 		decision := a.publicCatalog.Lookup(publicsite.Lookup{Host: requestDomain})
