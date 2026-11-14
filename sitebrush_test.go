@@ -35131,3 +35131,174 @@ func TestInitialPublicPolicySnapshotDoesNotRequireNetChanContact(t *testing.T) {
 		t.Fatal("live policy refresh must require a supervisor acknowledgement")
 	}
 }
+
+func TestStartupPublicPoliciesBlockOnlyFailedDomain(t *testing.T) {
+	application, database := newTestApplication(t)
+	for _, domain := range []string{"healthy.example", "broken.example"} {
+		if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, "owner@"+domain, "old"); err != nil {
+			t.Fatal(err)
+		}
+		if domain == "healthy.example" {
+			if err := publicsite.Write(application.storagePath, publicsite.Policy{Domain: domain}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	requests := make(chan publicPublicationTask)
+	done := make(chan struct{})
+	application.publicPublication = requests
+	application.publicPublicationDone = done
+	go func() {
+		defer close(done)
+		for request := range requests {
+			if request.domain == "broken.example" {
+				request.reply <- netchan.ErrChannelClosed
+			} else {
+				request.reply <- nil
+			}
+		}
+	}()
+	t.Cleanup(func() { close(requests); <-application.publicPublicationDone })
+	ready, failed, err := application.refreshPublicPolicies()
+	if !ready || err == nil || !strings.Contains(err.Error(), "broken.example") {
+		t.Fatalf("startup policy readiness=%t error=%v", ready, err)
+	}
+	if len(failed) != 1 || failed[0] != "broken.example" {
+		t.Fatalf("policy retry list = %v", failed)
+	}
+	stop := make(chan struct{})
+	defer close(stop)
+	catalog := publicsite.NewCatalog(application.storagePath, stop)
+	if err := catalog.SetMemory(true); err != nil {
+		t.Fatal(err)
+	}
+	if decision := catalog.Lookup(publicsite.Lookup{Host: "healthy.example"}); !decision.Found {
+		t.Fatalf("healthy site remained unavailable: %+v", decision)
+	}
+	if decision := catalog.Lookup(publicsite.Lookup{Host: "broken.example"}); !decision.Known || decision.Found {
+		t.Fatalf("failed site was served with stale policy: %+v", decision)
+	}
+	boundary := &App{storagePath: application.storagePath, publicBoundary: true, publicCatalog: catalog, embeddedStaticAssets: map[string]embeddedStaticAsset{}}
+	front := newPublicHTTPFront(boundary, "secret", stop)
+	if err := front.Set("127.0.0.1:9999", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := front.PolicyEnabled(); err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	front.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://broken.example/", nil))
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("blocked domain reached backend: %d %q", response.Code, response.Body.String())
+	}
+}
+
+func TestLocalPublicPolicyContactRequiresLoopbackAndSecret(t *testing.T) {
+	stop := make(chan struct{})
+	defer close(stop)
+	front := publicsite.NewFront("secret", func(http.ResponseWriter, *http.Request, bool) bool { return false }, stop)
+	accepted := 0
+	front.Policy = func(encoded []byte) ([]byte, error) {
+		accepted++
+		return nil, nil
+	}
+	handler := localPublicPolicyGuest(front, "secret", func(http.ResponseWriter, *http.Request) bool { return false })
+	for _, test := range []struct {
+		remote, secret string
+		status         int
+	}{
+		{"192.0.2.1:1234", "secret", http.StatusNotFound},
+		{"127.0.0.1:1234", "wrong", http.StatusNotFound},
+		{"127.0.0.1:1234", "secret", http.StatusNoContent},
+	} {
+		request := httptest.NewRequest(http.MethodPost, "http://localhost/.well-known/sitebrush-public-policy", strings.NewReader(`{"Action":"enable"}`))
+		request.RemoteAddr = test.remote
+		request.Header.Set(publicsite.InternalHeader, test.secret)
+		response := httptest.NewRecorder()
+		if !handler(response, request) || response.Code != test.status {
+			t.Fatalf("remote=%s status=%d want=%d", test.remote, response.Code, test.status)
+		}
+	}
+	if accepted != 1 {
+		t.Fatalf("accepted %d unauthorized policy changes", accepted)
+	}
+}
+
+func TestLocalPublicPolicyFallbackDeliversToBoundary(t *testing.T) {
+	stop := make(chan struct{})
+	defer close(stop)
+	front := publicsite.NewFront("secret", func(http.ResponseWriter, *http.Request, bool) bool { return false }, stop)
+	front.Guest = localPublicPolicyGuest(front, "secret", func(http.ResponseWriter, *http.Request) bool { return false })
+	changes := make(chan []byte, 1)
+	front.Policy = func(encoded []byte) ([]byte, error) {
+		changes <- encoded
+		return nil, nil
+	}
+	server := httptest.NewServer(front)
+	defer server.Close()
+	port := server.Listener.Addr().(*net.TCPAddr).Port
+	t.Setenv("SITEBRUSH_PUBLIC_HTTP_PORT", strconv.Itoa(port))
+	t.Setenv("SITEBRUSH_PUBLIC_CONTACT", "secret")
+	application := &App{}
+	change := []byte(`{"Action":"enable","Address":"127.0.0.1:12345"}`)
+	if err := application.exchangePublicPolicyFallback(change); err != nil {
+		t.Fatal(err)
+	}
+	if received := <-changes; !bytes.Equal(received, change) {
+		t.Fatalf("received policy change %q", received)
+	}
+}
+
+func TestPublicPolicyLoadingEndsAfterAuthenticatedEnable(t *testing.T) {
+	root := t.TempDir()
+	domain := "example.org"
+	backend := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = io.WriteString(writer, "ready")
+	}))
+	defer backend.Close()
+	boundary, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	front, closeFront, secret, err := startPublicSiteBoundary(boundary, root, serverRunConfig{ParsedPorts: listenPorts{HTTPPort: 0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeFront()
+	t.Setenv("SITEBRUSH_PUBLIC_HTTP_PORT", strconv.Itoa(front.HTTPPort))
+	t.Setenv("SITEBRUSH_PUBLIC_CONTACT", secret)
+	application := &App{}
+	address := strings.TrimPrefix(backend.URL, "http://")
+	enable := func() error {
+		encoded, marshalErr := json.Marshal(publicsite.Change{Action: "enable", Address: address})
+		if marshalErr != nil {
+			return marshalErr
+		}
+		return application.exchangePublicPolicyFallback(encoded)
+	}
+	if err := enable(); err == nil {
+		t.Fatal("policy enabled before publisher started")
+	}
+	if err := front.Set(address, false); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://"+domain+"/", nil)
+	response := httptest.NewRecorder()
+	front.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "site policy is loading") {
+		t.Fatalf("before enable: %d %q", response.Code, response.Body.String())
+	}
+	if err := enable(); err != nil {
+		t.Fatal(err)
+	}
+	state, err := front.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.PolicyReady || state.Address != address || state.Paused {
+		t.Fatalf("policy state after enable: %+v", state)
+	}
+	response = httptest.NewRecorder()
+	front.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "ready") {
+		t.Fatalf("after enable: %d %q", response.Code, response.Body.String())
+	}
+}

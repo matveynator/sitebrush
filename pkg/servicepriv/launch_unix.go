@@ -3,6 +3,7 @@
 package servicepriv
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -95,6 +96,21 @@ func Launch(arguments []string, storagePath string, httpPort int, tlsEnabled boo
 			_ = command.Process.Signal(received)
 		}
 	}
+}
+
+// Older OpenBSD rc.d entries may still start the public server directly. Exec
+// preserves their PID while adding the launcher role recognized by rcctl.
+func PromoteDirectRoot(arguments []string) error {
+	if os.Geteuid() != 0 {
+		return errors.New("privileged service promotion requires root")
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	launcherArguments := append([]string{executable}, arguments...)
+	launcherArguments = append(launcherArguments, "-service-runtime")
+	return syscall.Exec(executable, launcherArguments, os.Environ())
 }
 
 // DropForMaintenance keeps offline updates on the same data owner as the

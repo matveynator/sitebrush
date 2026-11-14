@@ -10007,6 +10007,7 @@ func main() {
 
 	port := flag.String("port", "80,443", "listen port or standard pair 80,443")
 	storagePath := flag.String("path", defaultAppStoragePath(), "path to the SiteBrush app data directory")
+	logFile := flag.String("logfile", "", "write rotating daily gzip logs to an absolute .log path (default: console)")
 	cliMode := flag.Bool("cli", false, "open interactive SiteBrush server console")
 	upgradeMode := flag.Bool("upgrade", false, "install the latest signed stable server release")
 	setupCodeMode := flag.Bool("setup-code", false, "issue a one-time code for first administrator setup over HTTPS")
@@ -10194,11 +10195,13 @@ func main() {
 		if !appcli.InstallFlagSupported() {
 			log.Fatal("updates are available only in server builds")
 		}
-		closeJournal, journalErr := applog.Capture(effectiveStoragePath)
-		if journalErr != nil {
-			log.Fatalf("open application journal: %v", journalErr)
+		if strings.TrimSpace(*logFile) != "" {
+			closeJournal, journalErr := applog.CaptureFile(*logFile)
+			if journalErr != nil {
+				log.Fatalf("open application journal: %v", journalErr)
+			}
+			defer closeJournal()
 		}
-		defer closeJournal()
 		log.Printf("sitebrush process started role=manual-upgrade pid=%d uid=%d version=%s", os.Getpid(), os.Getuid(), CompileVersion)
 		if handled, dropErr := servicepriv.DropForMaintenance(os.Args[1:], effectiveStoragePath); handled {
 			if dropErr != nil {
@@ -10226,7 +10229,7 @@ func main() {
 				}
 			}
 		}
-		if err := runServiceInstaller(parsedPorts.Raw, effectiveStoragePath, effectiveDBPath); err != nil {
+		if err := runServiceInstaller(parsedPorts.Raw, effectiveStoragePath, effectiveDBPath, *logFile); err != nil {
 			handleServiceControlError(err)
 		}
 		return
@@ -10234,6 +10237,15 @@ func main() {
 	if uninstallMode {
 		if err := runServiceUninstaller(parsedPorts.Raw, effectiveStoragePath, effectiveDBPath); err != nil {
 			handleServiceControlError(err)
+		}
+		return
+	}
+	if runtime.GOOS == "openbsd" && os.Geteuid() == 0 && !*serviceRuntime && !*serviceWorker && !*serverChild && !*updateSupervisor && !desktopMode && !runningInContainer() {
+		if !serviceinstall.InstalledUnprivilegedStorage(effectiveStoragePath) {
+			log.Fatal("OpenBSD root startup requires an installed unprivileged SiteBrush service; run sitebrush -install first")
+		}
+		if err := servicepriv.PromoteDirectRoot(os.Args[1:]); err != nil {
+			log.Fatal(err)
 		}
 		return
 	}
@@ -10250,8 +10262,17 @@ func main() {
 		}
 		effectiveStoragePath = preparedStoragePath
 	}
-	if !*serviceWorker {
-		closeJournal, journalErr := applog.Capture(effectiveStoragePath)
+	// Terminal runs keep stdout and stderr. Service launchers and explicitly
+	// configured files share one rotating writer across supervised children.
+	if !*serviceWorker && (*serviceRuntime || strings.TrimSpace(*logFile) != "") {
+		var closeJournal func() error
+		var journalErr error
+		defaultLogFile := filepath.Join(effectiveStoragePath, "storage", "logs", "sitebrush.log")
+		if strings.TrimSpace(*logFile) == "" || sameCleanPath(*logFile, defaultLogFile) {
+			closeJournal, journalErr = applog.Capture(effectiveStoragePath)
+		} else {
+			closeJournal, journalErr = applog.CaptureFile(*logFile)
+		}
 		if journalErr != nil {
 			log.Fatalf("open application journal: %v", journalErr)
 		}
@@ -10918,10 +10939,23 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 				return
 			}
 			delay := time.Second
+			fallbackPolicyContact := false
 			for {
 				encoded, _ := json.Marshal(publicsite.Change{Action: "enable", Address: application.publicPolicyAddress})
-				_, enableErr := appupdate.Exchange(effectiveStoragePath, appupdate.Request{Action: "public_policy", Detail: string(encoded)}, ctx.Done())
+				var enableErr error
+				if !fallbackPolicyContact {
+					_, enableErr = appupdate.Exchange(effectiveStoragePath, appupdate.Request{Action: "public_policy", Detail: string(encoded)}, ctx.Done())
+				}
+				if enableErr != nil || fallbackPolicyContact {
+					fallbackErr := application.exchangePublicPolicyFallback(encoded)
+					if fallbackErr == nil && !fallbackPolicyContact {
+						fallbackPolicyContact = true
+						log.Printf("PUBLIC policy enable switched to authenticated loopback fallback: %v", enableErr)
+					}
+					enableErr = fallbackErr
+				}
 				if enableErr != nil {
+					log.Printf("PUBLIC policy enable failed address=%q error=%v", application.publicPolicyAddress, enableErr)
 					delay = min(time.Minute, delay*2)
 				} else {
 					delay = 5 * time.Second
@@ -11179,23 +11213,7 @@ func (a *App) runStartupPreload(ctx context.Context, siteDatabaseRootDir string)
 			log.Printf("PUBLIC startup policy refresh failed: %v", err)
 		}
 	} else {
-		retry := time.NewTicker(5 * time.Second)
-		defer retry.Stop()
-		for {
-			if err := a.refreshAllPublicPolicies(); err == nil {
-				// Resume acknowledged policy notifications only after all durable
-				// snapshots are available to the supervisor's initial enable request.
-				close(a.publicPolicyReady)
-				break
-			} else {
-				log.Printf("PUBLIC startup policy refresh failed: %v", err)
-			}
-			select {
-			case <-retry.C:
-			case <-ctx.Done():
-				return
-			}
-		}
+		go a.refreshStartupPublicPolicies(ctx)
 	}
 	staticStats := startupStaticPreloadStats{}
 	if a.publicStreamer == nil {
@@ -11204,6 +11222,38 @@ func (a *App) runStartupPreload(ctx context.Context, siteDatabaseRootDir string)
 	chrootStats := a.preloadChrootStorage(ctx)
 	log.Printf("%sPRELOAD%s startup complete duration=%s site_db_root=%s static_files=%d static_html=%d chroot_entries=%d",
 		terminalGreen(), terminalReset(), time.Since(startedAt).String(), siteDatabaseRootDir, staticStats.files, staticStats.htmlFiles, chrootStats.entries)
+}
+
+func (a *App) refreshStartupPublicPolicies(ctx context.Context) {
+	retry := time.NewTicker(5 * time.Second)
+	defer retry.Stop()
+	ready := false
+	var retryDomains []string
+	for {
+		var published bool
+		var failed []string
+		var err error
+		if retryDomains == nil {
+			published, failed, err = a.refreshPublicPolicies()
+		} else {
+			published, failed, err = a.refreshSelectedPublicPolicies(retryDomains)
+		}
+		if !ready && published {
+			close(a.publicPolicyReady)
+			log.Printf("PUBLIC policy snapshot ready; requesting public boundary enable")
+			ready = true
+		}
+		if err == nil {
+			return
+		}
+		log.Printf("PUBLIC startup policy refresh failed: %v", err)
+		retryDomains = failed
+		select {
+		case <-retry.C:
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 func (a *App) waitForSiteDatabaseStartupMigrations(ctx context.Context) {
@@ -11513,7 +11563,7 @@ func httpStatusAllowsBody(statusCode int) bool {
 	return statusCode != http.StatusNoContent && statusCode != http.StatusNotModified
 }
 
-func runServiceInstaller(port, storagePath, dbPath string) error {
+func runServiceInstaller(port, storagePath, dbPath, logFile string) error {
 	binaryPath, err := os.Executable()
 	if err != nil || strings.TrimSpace(binaryPath) == "" {
 		binaryPath = os.Args[0]
@@ -11524,6 +11574,7 @@ func runServiceInstaller(port, storagePath, dbPath string) error {
 		Port:        port,
 		StoragePath: storagePath,
 		DBPath:      dbPath,
+		LogFile:     logFile,
 		BinaryPath:  binaryPath,
 		WorkingDir:  storagePath,
 		Input:       os.Stdin,
@@ -60264,6 +60315,10 @@ func (a *App) startPublicPublication(stop <-chan struct{}) {
 		active := make(map[string]int)
 		protected := make(map[string]int)
 		paused := false
+		fallbackPolicyContact := false
+		notify := func(action, domain string) error {
+			return a.notifyPublicPolicyWithPreference(action, domain, &fallbackPolicyContact)
+		}
 		var waitingPause []chan error
 		for {
 			select {
@@ -60288,7 +60343,7 @@ func (a *App) startPublicPublication(stop <-chan struct{}) {
 					if task.action == "protect" && protected[task.domain] == 0 {
 						err = publicsite.SetBlocked(a.storagePath, task.domain, true)
 						if err == nil {
-							err = a.notifyPublicPolicy("block", task.domain)
+							err = notify("block", task.domain)
 						}
 					}
 
@@ -60312,12 +60367,12 @@ func (a *App) startPublicPublication(stop <-chan struct{}) {
 						}
 					}
 					if protected[task.domain] == 0 && (active[task.domain] == 0 || task.action == "unprotect") {
-						err = a.writePublicPolicy(task.domain)
+						err = a.writePublicPolicyWithNotifier(task.domain, notify)
 					}
 
 				case "refresh":
 					if active[task.domain] == 0 && protected[task.domain] == 0 {
-						err = a.writePublicPolicy(task.domain)
+						err = a.writePublicPolicyWithNotifier(task.domain, notify)
 					}
 				}
 				if err != nil && (task.action == "end" || task.action == "unprotect" || task.action == "refresh") {
@@ -60349,34 +60404,79 @@ func (a *App) publicMutationRequest(r *http.Request) bool {
 	return false
 }
 func (a *App) refreshAllPublicPolicies() error {
+	_, _, err := a.refreshPublicPolicies()
+	return err
+}
+
+func (a *App) refreshPublicPolicies() (bool, []string, error) {
 	var domains []string
 	if a.siteDatabaseRouter != nil {
 		domains = a.siteDatabaseRouter.Domains(context.Background())
 	} else {
 		rows, err := a.db.QueryContext(context.Background(), `SELECT DISTINCT domain FROM users`)
 		if err != nil {
-			return err
+			return false, nil, err
 		}
 		for rows.Next() {
 			var domain string
 			if err = rows.Scan(&domain); err != nil {
 				rows.Close()
-				return err
+				return false, nil, err
 			}
 			domains = append(domains, domain)
 		}
 		err = rows.Err()
 		rows.Close()
 		if err != nil {
-			return err
+			return false, nil, err
 		}
 	}
+	ready, failed, err := a.refreshSelectedPublicPolicies(domains)
+	log.Printf("PUBLIC policy snapshot domains=%d failed=%d ready=%t", len(domains), len(failed), ready)
+	return ready, failed, err
+}
+
+func (a *App) refreshSelectedPublicPolicies(domains []string) (bool, []string, error) {
+	ready := len(domains) == 0
+	sealed := true
+	var failures []error
+	var failed []string
+	fallbackPolicyContact := false
 	for _, domain := range domains {
 		if err := a.publicPublicationRequest("refresh", domain); err != nil {
-			return err
+			failed = append(failed, domain)
+			if blockErr := publicsite.SetBlocked(a.storagePath, domain, true); blockErr != nil {
+				sealed = false
+				failures = append(failures, fmt.Errorf("%s: refresh: %w; block: %v", domain, err, blockErr))
+				continue
+			}
+			if _, statErr := os.Stat(publicsite.PolicyPath(a.storagePath, domain)); errors.Is(statErr, os.ErrNotExist) {
+				if writeErr := publicsite.Write(a.storagePath, publicsite.Policy{Domain: domain}); writeErr != nil {
+					sealed = false
+					failures = append(failures, fmt.Errorf("%s: refresh: %w; create blocked policy: %v", domain, err, writeErr))
+					continue
+				}
+			} else if statErr != nil {
+				sealed = false
+				failures = append(failures, fmt.Errorf("%s: refresh: %w; inspect blocked policy: %v", domain, err, statErr))
+				continue
+			}
+			if refreshErr := a.notifyPublicPolicyWithPreference("refresh", domain, &fallbackPolicyContact); refreshErr != nil {
+				sealed = false
+				failures = append(failures, fmt.Errorf("%s: refresh: %w; notify blocked policy: %v", domain, err, refreshErr))
+				continue
+			}
+			if blockErr := a.notifyPublicPolicyWithPreference("block", domain, &fallbackPolicyContact); blockErr != nil {
+				sealed = false
+				failures = append(failures, fmt.Errorf("%s: refresh: %w; notify block: %v", domain, err, blockErr))
+				continue
+			}
+			failures = append(failures, fmt.Errorf("%s: %w", domain, err))
+			continue
 		}
+		ready = true
 	}
-	return nil
+	return ready && sealed, failed, errors.Join(failures...)
 }
 func applyFreezePolicy(policy *publicsite.Policy, point sitefreeze.Checkpoint) {
 	policy.Versioned = true
@@ -60530,6 +60630,10 @@ func missingImportSchemaTable(err error, tableName string) bool {
 }
 
 func (a *App) writePublicPolicy(domain string) error {
+	return a.writePublicPolicyWithNotifier(domain, a.notifyPublicPolicy)
+}
+
+func (a *App) writePublicPolicyWithNotifier(domain string, notify func(string, string) error) error {
 	ctx := contextWithDomain(context.Background(), domain)
 	policy := publicsite.Policy{Domain: domain}
 	if a.controlDatabase != nil {
@@ -60797,13 +60901,13 @@ func (a *App) writePublicPolicy(domain string) error {
 	// A launcher installing its initial snapshot must see the barrier until
 	// it has acknowledged this version; otherwise it could read an older policy
 	// immediately before a writer removes the barrier.
-	if err = a.notifyPublicPolicy("refresh", domain); err != nil {
+	if err = notify("refresh", domain); err != nil {
 		return err
 	}
 	if err = publicsite.SetBlocked(a.storagePath, domain, false); err != nil {
 		return err
 	}
-	return a.notifyPublicPolicy("open", domain)
+	return notify("open", domain)
 }
 
 type publicDecisionContextKey struct{}
@@ -60832,6 +60936,10 @@ func (a *App) publicRequestDecision(r *http.Request) publicsite.Decision {
 	return decision
 }
 func (a *App) notifyPublicPolicy(action, domain string) error {
+	return a.notifyPublicPolicyWithPreference(action, domain, nil)
+}
+
+func (a *App) notifyPublicPolicyWithPreference(action, domain string, fallback *bool) error {
 	if a.publicCatalog != nil {
 		var err error
 		if action == "block" {
@@ -60861,8 +60969,57 @@ func (a *App) notifyPublicPolicy(action, domain string) error {
 	if err != nil {
 		return err
 	}
+	if fallback != nil && *fallback {
+		return a.exchangePublicPolicyFallback(encoded)
+	}
 	_, err = appupdate.Exchange(a.storagePath, appupdate.Request{Action: "public_policy", Detail: string(encoded)}, a.publicPublicationDone)
-	return err
+	if err == nil {
+		return nil
+	}
+	if fallbackErr := a.exchangePublicPolicyFallback(encoded); fallbackErr != nil {
+		return fmt.Errorf("public policy contact: %w; local fallback: %v", err, fallbackErr)
+	}
+	if fallback != nil {
+		*fallback = true
+		log.Printf("PUBLIC policy transport switched to authenticated loopback fallback: %v", err)
+	}
+	return nil
+}
+
+// The public boundary is a separate process. A loopback contact keeps policy
+// publication available when the supervisor's NetChan contact is interrupted.
+func (a *App) exchangePublicPolicyFallback(encoded []byte) error {
+	port, err := strconv.Atoi(os.Getenv("SITEBRUSH_PUBLIC_HTTP_PORT"))
+	if err != nil || port < 1 || port > 65535 {
+		return errors.New("public boundary loopback port is unavailable")
+	}
+	secret := os.Getenv("SITEBRUSH_PUBLIC_CONTACT")
+	if secret == "" {
+		return errors.New("public boundary contact is unavailable")
+	}
+	request, err := http.NewRequest(http.MethodPost, "http://127.0.0.1/.well-known/sitebrush-public-policy", bytes.NewReader(encoded))
+	if err != nil {
+		return err
+	}
+	request.Header.Set(publicsite.InternalHeader, secret)
+	// The request URL is fixed. Only the validated local listener port varies;
+	// the transport never resolves a host or follows an external redirect.
+	dialer := &net.Dialer{Timeout: 3 * time.Second}
+	transport := &http.Transport{Proxy: nil, DisableKeepAlives: true, DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return dialer.DialContext(ctx, "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	}}
+	client := &http.Client{Timeout: 3 * time.Second, Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	response, err := client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("public boundary returned %s", response.Status)
+	}
+	return nil
 }
 
 func (a *App) publicAdminIPAllowed(domain, clientIP string) bool {
@@ -61209,6 +61366,11 @@ func newPublicHTTPFront(application *App, secret string, stop <-chan struct{}) *
 
 		lookup := application.publicRequestDecision(r)
 		r = withPublicRequestDecision(r, lookup)
+		if lookup.Known && !lookup.Found {
+			w.Header().Set("Retry-After", "2")
+			http.Error(w, "site policy is unavailable", http.StatusServiceUnavailable)
+			return true
+		}
 		if !lookup.Found || !paused && hasSitebrushSessionCookie(r) && (lookup.Frozen || lookup.File.Mode == "page_password" || !strings.HasPrefix(r.URL.Path, "/p/") && lookup.Password.Path != "") || lookup.File.Mode == "token" {
 			return false
 		}
@@ -61393,7 +61555,7 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 				return nil, stateErr
 			}
 			if state.Address != change.Address || state.Paused {
-				return nil, errors.New("policy publisher is not serving")
+				return nil, fmt.Errorf("policy publisher is not serving: requested=%q active=%q paused=%t", change.Address, state.Address, state.Paused)
 			}
 			if !state.PolicyReady {
 				if policyErr := application.publicCatalog.SetMemory(true); policyErr != nil {
@@ -61414,6 +61576,7 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 			return nil, errors.New("unknown public policy operation")
 		}
 	}
+	front.Guest = localPublicPolicyGuest(front, secret, front.Guest)
 	front.Security = application.attackGuard.Relay
 	if application.throttleGuard != nil {
 		front.Throttle = application.throttleGuard.Relay
@@ -61493,6 +61656,34 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 	}
 	log.Printf("PUBLIC SiteBrush HTTP port=%d HTTPS port=%d", front.HTTPPort, front.HTTPSPort)
 	return front, closeBoundary, secret, nil
+}
+
+func localPublicPolicyGuest(front *publicsite.Front, secret string, next func(http.ResponseWriter, *http.Request) bool) func(http.ResponseWriter, *http.Request) bool {
+	return func(w http.ResponseWriter, r *http.Request) bool {
+		if r.URL.Path != "/.well-known/sitebrush-public-policy" {
+			return next(w, r)
+		}
+		if secret == "" || !requestRemoteIsLoopback(r) || subtle.ConstantTimeCompare([]byte(r.Header.Get(publicsite.InternalHeader)), []byte(secret)) != 1 {
+			http.NotFound(w, r)
+			return true
+		}
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return true
+		}
+		encoded, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 4096))
+		if err != nil {
+			http.Error(w, "invalid public policy change", http.StatusBadRequest)
+			return true
+		}
+		if _, err := front.Policy(encoded); err != nil {
+			log.Printf("PUBLIC policy loopback change rejected: %v", err)
+			http.Error(w, "public policy change failed", http.StatusServiceUnavailable)
+			return true
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return true
+	}
 }
 func (a *App) publicUpdatingMenuSocket(w http.ResponseWriter, r *http.Request) {
 	decision := a.publicCatalog.Lookup(publicsite.Lookup{Host: domainFromRequest(r)})
