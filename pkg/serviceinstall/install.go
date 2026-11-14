@@ -23,6 +23,7 @@ type Options struct {
 	StoragePath           string
 	DBType                string
 	DBPath                string
+	LogFile               string
 	BinaryPath            string
 	WorkingDir            string
 	ServiceName           string
@@ -43,7 +44,7 @@ func StoredOptions() (Options, bool) {
 	if !found {
 		return Options{}, false
 	}
-	return Options{Port: metadata.Port, StoragePath: metadata.StoragePath, DBPath: metadata.DBPath, BinaryPath: metadata.BinaryPath, WorkingDir: metadata.WorkingDir}, true
+	return Options{Port: metadata.Port, StoragePath: metadata.StoragePath, DBPath: metadata.DBPath, LogFile: metadata.LogFile, BinaryPath: metadata.BinaryPath, WorkingDir: metadata.WorkingDir}, true
 }
 
 // InstalledUnprivilegedStorage distinguishes a migrated service from older
@@ -122,6 +123,7 @@ type serviceMetadata struct {
 	StoragePath  string `json:"storage_path"`
 	DBType       string `json:"db_type"`
 	DBPath       string `json:"db_path"`
+	LogFile      string `json:"logfile,omitempty"`
 	BinaryPath   string `json:"binary_path"`
 	WorkingDir   string `json:"working_dir"`
 }
@@ -841,6 +843,7 @@ func writeServiceMetadata(managerName string, plan installPlan, languageCode str
 		StoragePath:  installOptionOrDefault(plan.Options.StoragePath, defaultStoragePath()),
 		DBType:       installOptionOrDefault(plan.Options.DBType, "sqlite"),
 		DBPath:       installOptionOrDefault(plan.Options.DBPath, filepath.Join(installOptionOrDefault(plan.Options.StoragePath, defaultStoragePath()), "storage", "db", "sitebrush.db")),
+		LogFile:      plan.Options.LogFile,
 		BinaryPath:   plan.BinaryPath,
 		WorkingDir:   plan.WorkingDir,
 	}
@@ -879,6 +882,7 @@ func applyStoredServiceMetadata(options Options, managerName string) Options {
 	options.StoragePath = installOptionOrDefault(metadata.StoragePath, options.StoragePath)
 	options.DBType = installOptionOrDefault(metadata.DBType, options.DBType)
 	options.DBPath = installOptionOrDefault(metadata.DBPath, options.DBPath)
+	options.LogFile = installOptionOrDefault(options.LogFile, metadata.LogFile)
 	options.WorkingDir = installOptionOrDefault(metadata.WorkingDir, options.WorkingDir)
 	return options
 }
@@ -1186,6 +1190,14 @@ func buildInstallPlan(options Options) (installPlan, error) {
 		return installPlan{}, fmt.Errorf("storage folder must be an absolute non-root path: %q", storagePath)
 	}
 	execArgs := []string{installedBinary, "-port", port, "-path", storagePath}
+	logFile := strings.TrimSpace(options.LogFile)
+	if logFile == "" {
+		logFile = filepath.Join(storagePath, "storage", "logs", "sitebrush.log")
+	}
+	if !filepath.IsAbs(logFile) || !strings.HasSuffix(filepath.Base(logFile), ".log") || filepath.Base(logFile) == ".log" {
+		return installPlan{}, fmt.Errorf("logfile must be an absolute .log path: %q", logFile)
+	}
+	execArgs = append(execArgs, "-logfile", logFile)
 	if runtime.GOOS == "windows" {
 		execArgs = append(execArgs, "-service-name", serviceName)
 	}
@@ -1429,12 +1441,10 @@ command_args=%s
 directory=%s
 command_background=true
 pidfile="/run/%s.pid"
-output_log=%s
-error_log=%s
 depend() {
 	need net
 }
-`, shellQuote(plan.BinaryPath), shellQuote(strings.Join(plan.ExecArgs[1:], " ")), shellQuote(plan.WorkingDir), plan.ServiceName, shellQuote(filepath.Join(installOptionOrDefault(plan.Options.StoragePath, defaultStoragePath()), "storage", "logs", "sitebrush.log")), shellQuote(filepath.Join(installOptionOrDefault(plan.Options.StoragePath, defaultStoragePath()), "storage", "logs", "sitebrush.log")))
+`, shellQuote(plan.BinaryPath), shellQuote(strings.Join(plan.ExecArgs[1:], " ")), shellQuote(plan.WorkingDir), plan.ServiceName)
 	if err := writeFile(path, content, 0o755); err != nil {
 		return Result{}, err
 	}
@@ -1599,7 +1609,7 @@ func sysVRcScript(plan installPlan) string {
 case "$1" in
   start)
     cd %s || exit 1
-    nohup %s >>%s 2>&1 &
+    nohup %s >/dev/null 2>&1 &
     echo $! >/var/run/%s.pid
     ;;
   stop)
@@ -1618,7 +1628,7 @@ case "$1" in
     ;;
 esac
 exit $?
-`, plan.ServiceName, shellQuote(plan.WorkingDir), execLine(plan.ExecArgs), shellQuote(filepath.Join(installOptionOrDefault(plan.Options.StoragePath, defaultStoragePath()), "storage", "logs", "sitebrush.log")), plan.ServiceName, plan.ServiceName, plan.ServiceName, plan.ServiceName, plan.ServiceName, plan.ServiceName)
+`, plan.ServiceName, shellQuote(plan.WorkingDir), execLine(plan.ExecArgs), plan.ServiceName, plan.ServiceName, plan.ServiceName, plan.ServiceName, plan.ServiceName, plan.ServiceName)
 }
 
 func installLaunchd(ctx context.Context, probe runtimeProbe, plan installPlan) (Result, error) {
@@ -1690,13 +1700,9 @@ func launchdPlist(label string, plan installPlan) string {
 	<true/>
 	<key>KeepAlive</key>
 	<true/>
-	<key>StandardOutPath</key>
-	<string>%s</string>
-	<key>StandardErrorPath</key>
-	<string>%s</string>
 </dict>
 </plist>
-`, label, strings.Join(args, "\n"), escapeXML(plan.WorkingDir), escapeXML(filepath.Join(installOptionOrDefault(plan.Options.StoragePath, defaultStoragePath()), "storage", "logs", "sitebrush.log")), escapeXML(filepath.Join(installOptionOrDefault(plan.Options.StoragePath, defaultStoragePath()), "storage", "logs", "sitebrush.log")))
+`, label, strings.Join(args, "\n"), escapeXML(plan.WorkingDir))
 }
 
 func escapeXML(value string) string {
