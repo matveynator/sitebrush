@@ -4,6 +4,7 @@ package publicsite
 
 import (
 	"encoding/hex"
+	"io"
 	"errors"
 	"os"
 	"path/filepath"
@@ -73,12 +74,10 @@ func RepairPolicyOwnership(root string) error {
 	if !ok {
 		return errors.New("public policy directory ownership unavailable")
 	}
-	entries, err := directory.ReadDir(-1)
-	if err != nil {
-		return err
-	}
 	changed := false
-	for _, entry := range entries {
+	for {
+		entries, readErr := directory.ReadDir(128)
+		for _, entry := range entries {
 		name := entry.Name()
 		if !policyMetadataName(name) {
 			continue
@@ -113,6 +112,13 @@ func RepairPolicyOwnership(root string) error {
 		}
 		if err := unix.Close(fd); err != nil {
 			return err
+		}
+		}
+		if readErr != nil {
+			if readErr != io.EOF {
+				return readErr
+			}
+			break
 		}
 	}
 	if changed {
