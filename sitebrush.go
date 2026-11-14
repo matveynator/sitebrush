@@ -10007,6 +10007,7 @@ func main() {
 
 	port := flag.String("port", "80,443", "listen port or standard pair 80,443")
 	storagePath := flag.String("path", defaultAppStoragePath(), "path to the SiteBrush app data directory")
+	logFile := flag.String("logfile", "", "write rotating daily gzip logs to an absolute .log path (default: console)")
 	cliMode := flag.Bool("cli", false, "open interactive SiteBrush server console")
 	upgradeMode := flag.Bool("upgrade", false, "install the latest signed stable server release")
 	setupCodeMode := flag.Bool("setup-code", false, "issue a one-time code for first administrator setup over HTTPS")
@@ -10194,11 +10195,13 @@ func main() {
 		if !appcli.InstallFlagSupported() {
 			log.Fatal("updates are available only in server builds")
 		}
-		closeJournal, journalErr := applog.Capture(effectiveStoragePath)
-		if journalErr != nil {
-			log.Fatalf("open application journal: %v", journalErr)
+		if strings.TrimSpace(*logFile) != "" {
+			closeJournal, journalErr := applog.CaptureFile(*logFile)
+			if journalErr != nil {
+				log.Fatalf("open application journal: %v", journalErr)
+			}
+			defer closeJournal()
 		}
-		defer closeJournal()
 		log.Printf("sitebrush process started role=manual-upgrade pid=%d uid=%d version=%s", os.Getpid(), os.Getuid(), CompileVersion)
 		if handled, dropErr := servicepriv.DropForMaintenance(os.Args[1:], effectiveStoragePath); handled {
 			if dropErr != nil {
@@ -10226,7 +10229,7 @@ func main() {
 				}
 			}
 		}
-		if err := runServiceInstaller(parsedPorts.Raw, effectiveStoragePath, effectiveDBPath); err != nil {
+		if err := runServiceInstaller(parsedPorts.Raw, effectiveStoragePath, effectiveDBPath, *logFile); err != nil {
 			handleServiceControlError(err)
 		}
 		return
@@ -10250,8 +10253,16 @@ func main() {
 		}
 		effectiveStoragePath = preparedStoragePath
 	}
-	if !*serviceWorker {
-		closeJournal, journalErr := applog.Capture(effectiveStoragePath)
+	// Terminal runs keep stdout and stderr. Service launchers and explicitly
+	// configured files share one rotating writer across supervised children.
+	if !*serviceWorker && (*serviceRuntime || strings.TrimSpace(*logFile) != "") {
+		var closeJournal func() error
+		var journalErr error
+		if strings.TrimSpace(*logFile) != "" {
+			closeJournal, journalErr = applog.CaptureFile(*logFile)
+		} else {
+			closeJournal, journalErr = applog.Capture(effectiveStoragePath)
+		}
 		if journalErr != nil {
 			log.Fatalf("open application journal: %v", journalErr)
 		}
@@ -11513,7 +11524,7 @@ func httpStatusAllowsBody(statusCode int) bool {
 	return statusCode != http.StatusNoContent && statusCode != http.StatusNotModified
 }
 
-func runServiceInstaller(port, storagePath, dbPath string) error {
+func runServiceInstaller(port, storagePath, dbPath, logFile string) error {
 	binaryPath, err := os.Executable()
 	if err != nil || strings.TrimSpace(binaryPath) == "" {
 		binaryPath = os.Args[0]
@@ -11524,6 +11535,7 @@ func runServiceInstaller(port, storagePath, dbPath string) error {
 		Port:        port,
 		StoragePath: storagePath,
 		DBPath:      dbPath,
+		LogFile:     logFile,
 		BinaryPath:  binaryPath,
 		WorkingDir:  storagePath,
 		Input:       os.Stdin,
