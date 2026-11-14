@@ -243,7 +243,7 @@ func Exchange(storagePath string, request Request, stop <-chan struct{}) (Respon
 	}
 	connection, err := netchan.Dial[wireRequest](Address(storagePath), netchan.Config{Capacity: 4, TLS: configuration})
 	if err != nil {
-		return Response{}, err
+		return Response{}, fmt.Errorf("update supervisor NetChan dial: %w", err)
 	}
 	graceful := false
 	defer func() {
