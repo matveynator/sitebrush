@@ -34596,6 +34596,9 @@ func TestGuestMenuBundleRetainsOriginalStylesAndLogin(t *testing.T) {
 	if !strings.Contains(bundle, "?login") || strings.Contains(bundle, "Checking sign-in") || strings.Contains(bundle, "guestAccountContents") {
 		t.Fatal("guest menu no longer exposes its original sign-in action")
 	}
+	if !strings.Contains(bundle, "/?sitebrush_menu_ws") {
+		t.Fatal("guest menu lost its authenticated WebSocket transport")
+	}
 }
 
 func TestLocalhostPublicRootAndAuthenticatedMenuDuringCatalogPreload(t *testing.T) {
@@ -34631,6 +34634,11 @@ func TestLocalhostPublicRootAndAuthenticatedMenuDuringCatalogPreload(t *testing.
 		t.Fatal("owner session was not created")
 	}
 	ownerCookie := cookies[0]
+	menuServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		request.Host = "localhost:777"
+		handler.ServeHTTP(writer, request)
+	}))
+	defer menuServer.Close()
 	for _, ready := range []bool{false, true} {
 		if ready {
 			if err := publicsite.Write(application.storagePath, publicsite.Policy{Domain: "localhost"}); err != nil {
@@ -34655,8 +34663,41 @@ func TestLocalhostPublicRootAndAuthenticatedMenuDuringCatalogPreload(t *testing.
 					t.Fatalf("bare localhost was redirected or lost public contents: %d %q", response.Code, response.Header().Get("Location"))
 				}
 				administratorMenu := strings.Contains(response.Body.String(), "initializeSitebrushContextMenuForAdmin")
-				if administratorMenu != (role == "owner") {
+				if administratorMenu != (role == "owner" && !ready) {
 					t.Fatalf("wrong menu for %s: administrator=%t", role, administratorMenu)
+				}
+				if ready && (!strings.Contains(response.Body.String(), "/p/static/visitor.js") || !strings.Contains(response.Body.String(), `data-menu="guest_menu.`)) {
+					t.Fatal("published HTML lost its authenticated menu transport")
+				}
+				configuration, err := websocket.NewConfig("ws"+strings.TrimPrefix(menuServer.URL, "http")+"/?sitebrush_menu_ws", "http://localhost:777")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if role == "owner" {
+					configuration.Header.Set("Cookie", ownerCookie.Name+"="+ownerCookie.Value)
+				} else if role == "expired" {
+					configuration.Header.Set("Cookie", "sitebrush_session=expired-cookie")
+				}
+				connection, err := websocket.DialConfig(configuration)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer connection.Close()
+				if err := connection.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+					t.Fatal(err)
+				}
+				if err := websocket.JSON.Send(connection, map[string]any{"path": "/", "admin": false}); err != nil {
+					t.Fatal(err)
+				}
+				var menuResponse struct {
+					Admin bool   `json:"admin"`
+					Menu  string `json:"menu"`
+				}
+				if err := websocket.JSON.Receive(connection, &menuResponse); err != nil {
+					t.Fatal(err)
+				}
+				if menuResponse.Admin != (role == "owner") || strings.Contains(menuResponse.Menu, "initializeSitebrushContextMenuForAdmin") != (role == "owner") {
+					t.Fatalf("wrong authenticated menu for %s: administrator=%t", role, menuResponse.Admin)
 				}
 			})
 		}
@@ -35552,6 +35593,9 @@ func TestLocalPublicPolicyFallbackDeliversToBoundary(t *testing.T) {
 func TestPublicPolicyLoadingEndsAfterAuthenticatedEnable(t *testing.T) {
 	root := t.TempDir()
 	domain := "example.org"
+	if err := publicsite.Write(root, publicsite.Policy{Domain: domain, PrivateTestDrive: true}); err != nil {
+		t.Fatal(err)
+	}
 	backend := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		_, _ = io.WriteString(writer, "ready")
 	}))
@@ -35586,6 +35630,12 @@ func TestPublicPolicyLoadingEndsAfterAuthenticatedEnable(t *testing.T) {
 	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "site policy is loading") {
 		t.Fatalf("before enable: %d %q", response.Code, response.Body.String())
 	}
+	unknownRequest := httptest.NewRequest(http.MethodGet, "http://unknown.example/", nil)
+	unknownResponse := httptest.NewRecorder()
+	front.ServeHTTP(unknownResponse, unknownRequest)
+	if unknownResponse.Code != http.StatusNotFound {
+		t.Fatalf("unknown host before enable: %d %q", unknownResponse.Code, unknownResponse.Body.String())
+	}
 	if err := enable(); err != nil {
 		t.Fatal(err)
 	}
@@ -35600,5 +35650,10 @@ func TestPublicPolicyLoadingEndsAfterAuthenticatedEnable(t *testing.T) {
 	front.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "ready") {
 		t.Fatalf("after enable: %d %q", response.Code, response.Body.String())
+	}
+	unknownResponse = httptest.NewRecorder()
+	front.ServeHTTP(unknownResponse, unknownRequest)
+	if unknownResponse.Code != http.StatusNotFound {
+		t.Fatalf("unknown host after enable: %d %q", unknownResponse.Code, unknownResponse.Body.String())
 	}
 }
