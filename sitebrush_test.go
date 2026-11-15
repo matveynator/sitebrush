@@ -15212,9 +15212,16 @@ func testPrivateTestDriveOnboarding(t *testing.T, scheme string) {
 	handoffRequest := httptest.NewRequest(http.MethodGet, scheme+"://myproject.sitebrush.com/?test_drive_handoff&handoff_token="+ticketMatch[1], nil)
 	stopCatalog := make(chan struct{})
 	t.Cleanup(func() { close(stopCatalog) })
+	if err := application.writePublicPolicy(trial.Domain); err != nil {
+		t.Fatalf("publish private Test Drive policy: %v", err)
+	}
 	application.publicCatalog = publicsite.NewCatalog(application.storagePath, stopCatalog)
 	if err := application.publicCatalog.SetMemory(true); err != nil {
 		t.Fatal(err)
+	}
+	trialRoute := application.publicCatalog.Lookup(publicsite.Lookup{Host: trial.Domain})
+	if !trialRoute.Found || !trialRoute.PrivateTestDrive {
+		t.Fatalf("private Test Drive route was not published: %+v", trialRoute)
 	}
 	applicationHandler := application.siteHTTPHandler(http.HandlerFunc(application.route))
 	forgedRequest := httptest.NewRequest(http.MethodGet, scheme+"://unknown.sitebrush.com/?edit", nil)
@@ -15225,7 +15232,7 @@ func testPrivateTestDriveOnboarding(t *testing.T, scheme string) {
 	if forgedResponse.Code != http.StatusNotFound {
 		t.Fatalf("forged Test Drive cookies bypassed unknown-host gate: %d", forgedResponse.Code)
 	}
-	publicBoundary := &App{storagePath: application.storagePath, storageRealRoot: application.storageRealRoot, publicBoundary: true, controlDatabase: dispatcher}
+	publicBoundary := &App{storagePath: application.storagePath, storageRealRoot: application.storageRealRoot, publicBoundary: true}
 	boundaryResponse := httptest.NewRecorder()
 	if publicBoundary.privateTestDriveGate(boundaryResponse, handoffRequest) || boundaryResponse.Body.Len() != 0 {
 		t.Fatalf("public boundary consumed the handoff: %d %s", boundaryResponse.Code, boundaryResponse.Body.String())
