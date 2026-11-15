@@ -394,6 +394,19 @@ func openServerControlDatabaseForTest(ctx context.Context, application *App) (*s
 	return database, nil
 }
 
+// Production initializes control storage before HTTP admission. Fixtures must
+// honor that boundary instead of relying on a read to migrate the schema.
+func initializeServerControlDatabaseForTest(t *testing.T, application *App) {
+	t.Helper()
+	database, err := openServerControlDatabaseForTest(context.Background(), application)
+	if err != nil {
+		t.Fatalf("initialize control database: %v", err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatalf("close initialized control database: %v", err)
+	}
+}
+
 type fakeGrabTransport struct {
 	responses map[string]fakeGrabResponse
 }
@@ -758,6 +771,7 @@ func newTestApplicationWithDatabase(t *testing.T, openDatabase func(string) (*sq
 	if err := application.migrate(context.Background()); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
+	initializeServerControlDatabaseForTest(t, application)
 	return application, rawDB
 }
 
@@ -5757,6 +5771,7 @@ func TestRegisterRejectsUnverifiedDomainBeforeCreatingSiteDatabase(t *testing.T)
 		registrationConfirmations: startEmailConfirmationMemoryWorker(context.Background()),
 		emailDelivery:             make(chan mailout.DeliveryJob, 1),
 	}
+	initializeServerControlDatabaseForTest(t, application)
 	form := url.Values{}
 	form.Set("email", "admin@fake.example")
 	form.Set("password", "secret")
@@ -5791,6 +5806,7 @@ func TestLocalhostWithoutSiteDatabaseOpensRegistration(t *testing.T) {
 	t.Cleanup(func() { _ = router.Close() })
 	waitSiteDBRouterStartup(t, router)
 	application := &App{db: router, siteDatabaseRouter: router, storagePath: storagePath, dbPath: dbPath}
+	initializeServerControlDatabaseForTest(t, application)
 	staticPath := filepath.Join(application.domainStaticDir("localhost"), staticRelativePathForPage("/"))
 	if err := os.MkdirAll(filepath.Dir(staticPath), 0o755); err != nil {
 		t.Fatal(err)
@@ -5871,6 +5887,7 @@ func TestRegisterCreatesSiteDatabaseOnlyAfterConfirmedVerifiedDomain(t *testing.
 		emailDelivery:             make(chan mailout.DeliveryJob, 1),
 		automaticSSL:              make(chan automaticSSLRequest, 2),
 	}
+	initializeServerControlDatabaseForTest(t, application)
 	application.hostingSnapshotReports = make(chan struct{}, 1)
 	domainContext := contextWithDomain(context.Background(), domain)
 	if _, err := application.adminStealthEnabled(domainContext, domain, ""); !errors.Is(err, errSiteDatabaseMissing) {
@@ -6702,7 +6719,7 @@ func newRouterTestApplication(t *testing.T) *App {
 		}
 	})
 	waitSiteDBRouterStartup(t, router)
-	return &App{
+	application := &App{
 		db:                 router,
 		siteDatabaseRouter: router,
 		storagePath:        storagePath,
@@ -6710,6 +6727,8 @@ func newRouterTestApplication(t *testing.T) *App {
 		grabTracker:        newGrabProgressTracker(),
 		emailDelivery:      make(chan mailout.DeliveryJob, 4),
 	}
+	initializeServerControlDatabaseForTest(t, application)
+	return application
 }
 
 func setupBillingOwnerForTest(t *testing.T, application *App, domain, email string, autoRegistrationEnabled bool) *sql.DB {
@@ -7395,6 +7414,7 @@ func TestPagePasswordProtectionAppliesToLoggedInAdmin(t *testing.T) {
 func TestGuestProtectedStaticRouteUsesPrefixFileWithoutDatabase(t *testing.T) {
 	storagePath := t.TempDir()
 	application := &App{db: panicSQLExecutor{t: t}, storagePath: storagePath}
+	initializeServerControlDatabaseForTest(t, application)
 	application.writePublishedStaticHTML("localhost", "/passport/one", "<html><body>nested static secret</body></html>")
 	application.writePublishedStaticHTML("localhost", "/public", "<html><body>public static page</body></html>")
 
@@ -15851,6 +15871,7 @@ func TestPublicImportedAssetsServeFromCanonicalAndDomainPrefixedPaths(t *testing
 		t.Fatalf("migrate: %v", err)
 	}
 
+	initializeServerControlDatabaseForTest(t, application)
 	canonicalDir := application.domainFilesDirForDomain("localhost")
 	if err := os.MkdirAll(canonicalDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -15891,6 +15912,7 @@ func TestPublicImportedAssetsServeFromCanonicalAndDomainPrefixedPaths(t *testing
 func TestGuestStaticRouteServesPublishedFileWithoutDatabase(t *testing.T) {
 	storagePath := t.TempDir()
 	application := &App{db: panicSQLExecutor{t: t}, storagePath: storagePath}
+	initializeServerControlDatabaseForTest(t, application)
 	staticFilePath := filepath.Join(application.domainStaticDir("localhost"), "en.html")
 	if err := os.MkdirAll(filepath.Dir(staticFilePath), 0o755); err != nil {
 		t.Fatal(err)
@@ -25035,6 +25057,27 @@ func TestControlDatabaseShutdownCompletesWithIdleWorkers(t *testing.T) {
 	}
 	if err := dispatcher.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestControlReaderFallbackRequiresInitializedTrialSchema(t *testing.T) {
+	application := &App{storagePath: t.TempDir()}
+	boundary := context.Background()
+	if _, found, err := application.privateTestDrive(boundary, "private.example"); err == nil || found {
+		t.Fatalf("uninitialized trial schema accepted: found=%v err=%v", found, err)
+	}
+	initializeServerControlDatabaseForTest(t, application)
+	if _, found, err := application.privateTestDrive(boundary, "private.example"); err != nil || found {
+		t.Fatalf("initialized empty trial storage: found=%v err=%v", found, err)
+	}
+	if err := application.withServerControlDatabaseWrite(boundary, "test-remove-trial-schema", func(database *sql.DB) error {
+		_, err := database.Exec(`DROP TABLE public_trial_sites`)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := application.privateTestDrive(boundary, "private.example"); err == nil || found {
+		t.Fatalf("trial read repaired or bypassed missing schema: found=%v err=%v", found, err)
 	}
 }
 
