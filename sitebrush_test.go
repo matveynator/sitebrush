@@ -18152,7 +18152,7 @@ func TestDiagnosticEventsDoNotCreateHostDirectories(t *testing.T) {
 	application, _ := newTestApplication(t)
 	application.logDomainEvent("unregistered.example", "AUTOCERT certificate requested")
 	application.logProblemEvent("AUTOCERT DNS refresh started")
-	for _, directory := range []string{application.domainLogDir("unregistered.example"), application.problemLogDir()} {
+	for _, directory := range []string{application.domainLogDir("unregistered.example"), filepath.Join(application.storageRootDir(), "logs", "problems")} {
 		if _, err := os.Stat(directory); !os.IsNotExist(err) {
 			t.Fatalf("diagnostic event created legacy directory %s: %v", directory, err)
 		}
