@@ -63,6 +63,7 @@ const (
 	throttleSnapshot
 	throttleHistory
 	throttleRemove
+	throttleCheck
 )
 
 type throttleRequest struct {
@@ -74,6 +75,7 @@ type throttleRequest struct {
 	Reply             chan throttleResult `json:"-"`
 	Queued            time.Time           `json:"-"`
 	Done              <-chan struct{}     `json:"-"`
+	WaitLimit         time.Duration       `json:"-"`
 }
 
 type throttleResult struct {
@@ -197,7 +199,7 @@ func handleThrottleRequest(observations map[string]throttleObservation, throttle
 	ip := normalizeThrottleIP(request.IP)
 
 	switch request.Operation {
-	case throttleObserve:
+	case throttleObserve, throttleCheck:
 		if request.Trusted || ip == "" {
 			return throttleResult{}
 		}
@@ -216,6 +218,9 @@ func handleThrottleRequest(observations map[string]throttleObservation, throttle
 				decision.RetryAfter = time.Second
 			}
 			return throttleResult{Decision: decision}
+		}
+		if request.Operation == throttleCheck {
+			return throttleResult{}
 		}
 		if request.ExemptObservation {
 			return throttleResult{}
@@ -339,6 +344,11 @@ func (guard *ThrottleGuard) ObserveFast(ip string, trusted bool, now time.Time) 
 	return guard.observeFast(ip, trusted, false, now)
 }
 
+func (guard *ThrottleGuard) CheckFast(ip string, now time.Time) (ThrottleDecision, bool) {
+	result, ok := guard.exchangeFast(throttleRequest{Operation: throttleCheck, IP: ip, Now: now, WaitLimit: time.Millisecond})
+	return result.Decision, ok
+}
+
 // ObserveFastExemptObservation keeps an already active throttle enforceable while
 // excluding this request from the sustained-rate history that can create one.
 func (guard *ThrottleGuard) ObserveFastExemptObservation(ip string, trusted bool, now time.Time) ThrottleDecision {
@@ -425,7 +435,15 @@ func (guard *ThrottleGuard) exchangeFast(request throttleRequest) (throttleResul
 	default:
 		return throttleResult{}, false
 	}
+	var deadline <-chan time.Time
+	if request.WaitLimit > 0 {
+		timer := time.NewTimer(request.WaitLimit)
+		defer timer.Stop()
+		deadline = timer.C
+	}
 	select {
+	case <-deadline:
+		return throttleResult{}, false
 	case <-request.Done:
 		return throttleResult{}, false
 	case <-guard.done:

@@ -12,6 +12,35 @@ import (
 	"time"
 )
 
+func TestLegacyPolicyFailsClosedUntilOwnerRefresh(t *testing.T) {
+	root := t.TempDir()
+	stop := make(chan struct{})
+	defer close(stop)
+	path := PolicyPath(root, "legacy.test")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"Domain":"legacy.test"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalog := NewCatalog(root, stop)
+	if err := catalog.SetMemory(true); err != nil {
+		t.Fatal(err)
+	}
+	if decision := catalog.Lookup(Lookup{Host: "legacy.test"}); !decision.Known || decision.Found {
+		t.Fatalf("legacy policy was admitted: %+v", decision)
+	}
+	if err := Write(root, Policy{Domain: "legacy.test"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.Reload("legacy.test"); err != nil {
+		t.Fatal(err)
+	}
+	if decision := catalog.Lookup(Lookup{Host: "legacy.test"}); !decision.Found {
+		t.Fatalf("refreshed policy remains unavailable: %+v", decision)
+	}
+}
+
 func TestMemoryCatalogTrustRevocationAndBarrier(t *testing.T) {
 	root := t.TempDir()
 	stop := make(chan struct{})

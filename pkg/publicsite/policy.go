@@ -44,8 +44,11 @@ type TrustedIP struct {
 }
 
 type Policy struct {
+	RoutingVersion    int
 	Versioned         bool
 	DemoSite          bool
+	PrivateTestDrive  bool
+	ServerOwner       bool
 	NoIndex           bool
 	RobotsOverride    bool
 	ResourcePaths     map[string]string
@@ -84,6 +87,8 @@ type Lookup struct {
 type Decision struct {
 	PageHidden        bool
 	DemoSite          bool
+	PrivateTestDrive  bool
+	ServerOwner       bool
 	NoIndex           bool
 	RobotsOverride    bool
 	ResourceFile      string
@@ -163,6 +168,9 @@ func Write(root string, policy Policy) error {
 	if strings.TrimSpace(policy.Domain) == "" {
 		return errors.New("public policy requires a site domain")
 	}
+	// A previous policy cannot establish that Test Drive is public. Its
+	// routing version stays invalid until the owner republishes it.
+	policy.RoutingVersion = 3
 	storage, err := os.OpenRoot(root)
 	if err != nil {
 		return err
@@ -398,7 +406,9 @@ func NewCatalog(root string, stop <-chan struct{}) *Catalog {
 				if found {
 					decision.Known = true
 					decision.Domain = policy.Domain
-					if memory {
+					if policy.RoutingVersion != 3 {
+						found = false
+					} else if memory {
 						found = !blocked[policy.Domain]
 					} else {
 						blockName, _ := filepath.Rel(root, BlockPath(root, policy.Domain))
@@ -412,7 +422,7 @@ func NewCatalog(root string, stop <-chan struct{}) *Catalog {
 					}
 				}
 				if found {
-					decision = Decision{Layout: policy.Layouts[task.query.Path], Known: true, Domain: policy.Domain, Frozen: policy.Frozen, Stealth: policy.Stealth, Found: true, DemoSite: policy.DemoSite, NoIndex: policy.NoIndex, RobotsOverride: policy.RobotsOverride, ResourceFile: policy.ResourcePaths[task.query.Path], ResourceType: policy.ResourceTypes[task.query.Path], DeletionReason: policy.DeletionReason, DeletionDeadline: policy.DeletionDeadline, DeletionDebtLabel: policy.DeletionDebtLabel}
+					decision = Decision{Layout: policy.Layouts[task.query.Path], Known: true, Domain: policy.Domain, Frozen: policy.Frozen, Stealth: policy.Stealth, Found: true, DemoSite: policy.DemoSite, PrivateTestDrive: policy.PrivateTestDrive, ServerOwner: policy.ServerOwner, NoIndex: policy.NoIndex, RobotsOverride: policy.RobotsOverride, ResourceFile: policy.ResourcePaths[task.query.Path], ResourceType: policy.ResourceTypes[task.query.Path], DeletionReason: policy.DeletionReason, DeletionDeadline: policy.DeletionDeadline, DeletionDebtLabel: policy.DeletionDebtLabel}
 					decision.PageHidden = policy.Hidden["page\x00"+task.query.Path]
 					decision.PageVersion = policy.PublishedVersions[task.query.Path]
 					decision.Versioned = policy.Versioned

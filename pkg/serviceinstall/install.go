@@ -1394,7 +1394,8 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=%s
 ExecStart=%s
-LimitNOFILE=65536
+LimitNOFILE=1048576
+LimitNPROC=65536
 Restart=on-failure
 RestartSec=5
 
@@ -1700,6 +1701,10 @@ func launchdPlist(label string, plan installPlan) string {
 	<true/>
 	<key>KeepAlive</key>
 	<true/>
+	<key>SoftResourceLimits</key>
+	<dict><key>NumberOfFiles</key><integer>65536</integer></dict>
+	<key>HardResourceLimits</key>
+	<dict><key>NumberOfFiles</key><integer>65536</integer></dict>
 </dict>
 </plist>
 `, label, strings.Join(args, "\n"), escapeXML(plan.WorkingDir))
@@ -1755,14 +1760,45 @@ func uninstallWindowsService(ctx context.Context, probe runtimeProbe, plan insta
 }
 
 func installFreeBSDRcD(ctx context.Context, probe runtimeProbe, plan installPlan) (Result, error) {
+	classChanged, err := installFreeBSDResourceClass(probe, plan.ServiceName)
+	if err != nil {
+		return Result{}, err
+	}
 	path := probe.filesystemPath(filepath.Join("/usr/local/etc/rc.d", plan.ServiceName))
 	if err := writeFile(path, freeBSDRcScript(plan), 0o755); err != nil {
 		return Result{}, err
 	}
 	enableCommands := bsdEnableCommands(probe, plan.ServiceName, "YES")
-	commands := append(enableCommands, []string{"service", plan.ServiceName, "restart"}, []string{"service", plan.ServiceName, "status"})
+	commands := enableCommands
+	if classChanged {
+		commands = append(commands, []string{"cap_mkdb", probe.filesystemPath("/etc/login.conf")})
+	}
+	commands = append(commands, []string{"service", plan.ServiceName, "restart"}, []string{"service", plan.ServiceName, "status"})
 	executed, err := runInstallCommands(ctx, probe, commands)
 	return Result{ServicePath: path, Commands: executed}, err
+}
+
+func installFreeBSDResourceClass(probe runtimeProbe, serviceName string) (bool, error) {
+	path := probe.filesystemPath("/etc/login.conf")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	if strings.Contains("\n"+string(content), "\n"+serviceName+":") {
+		return false, nil
+	}
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		return false, err
+	}
+	class := freeBSDResourceClass(serviceName)
+	_, writeErr := file.WriteString(class)
+	closeErr := file.Close()
+	return true, errors.Join(writeErr, closeErr)
+}
+
+func freeBSDResourceClass(serviceName string) string {
+	return fmt.Sprintf("\n# SiteBrush managed class %s\n%s:\\\n\t:openfiles-cur=65536:\\\n\t:openfiles-max=65536:\\\n\t:maxproc-cur=4096:\\\n\t:maxproc-max=4096:\n", serviceName, serviceName)
 }
 
 func uninstallFreeBSDRcD(ctx context.Context, probe runtimeProbe, plan installPlan) (Result, error) {
@@ -1779,7 +1815,36 @@ func uninstallFreeBSDRcD(ctx context.Context, probe runtimeProbe, plan installPl
 	if removeErr := removeFileIfExists(path); removeErr != nil && err == nil {
 		err = removeErr
 	}
+	if err == nil {
+		removed, removeErr := removeFreeBSDResourceClass(probe, plan.ServiceName)
+		if removeErr != nil {
+			err = removeErr
+		} else if removed {
+			extra, rebuildErr := runInstallCommands(ctx, probe, [][]string{{"cap_mkdb", probe.filesystemPath("/etc/login.conf")}})
+			executed = append(executed, extra...)
+			err = rebuildErr
+		}
+	}
 	return Result{ServicePath: path, Commands: executed}, err
+}
+
+// Keep the shared system configuration inside /etc even when a filesystem
+// root redirects installation into a test or packaging directory.
+func removeFreeBSDResourceClass(probe runtimeProbe, serviceName string) (bool, error) {
+	directory, err := os.OpenRoot(probe.filesystemPath("/etc"))
+	if err != nil {
+		return false, err
+	}
+	defer directory.Close()
+	content, err := directory.ReadFile("login.conf")
+	if err != nil {
+		return false, err
+	}
+	class := freeBSDResourceClass(serviceName)
+	if !strings.Contains(string(content), class) {
+		return false, nil
+	}
+	return true, directory.WriteFile("login.conf", []byte(strings.Replace(string(content), class, "", 1)), 0o644)
 }
 
 func installOpenBSDRcD(ctx context.Context, probe runtimeProbe, plan installPlan) (Result, error) {
@@ -1960,7 +2025,7 @@ stop_cmd="${name}_stop"
 %s_start()
 {
 	cd %s || exit 1
-	/usr/sbin/daemon -p "${pidfile}" -f "${command}" ${command_args}
+	/usr/bin/limits -C %s /usr/sbin/daemon -p "${pidfile}" -f "${command}" ${command_args}
 }
 
 %s_stop()
@@ -1971,7 +2036,7 @@ stop_cmd="${name}_stop"
 load_rc_config $name
 : ${%s_enable:="NO"}
 run_rc_command "$1"
-`, plan.ServiceName, plan.ServiceName, shellQuote(plan.BinaryPath), shellQuote(strings.Join(plan.ExecArgs[1:], " ")), plan.ServiceName, shellQuote(plan.WorkingDir), plan.ServiceName, plan.ServiceName)
+`, plan.ServiceName, plan.ServiceName, shellQuote(plan.BinaryPath), shellQuote(strings.Join(plan.ExecArgs[1:], " ")), plan.ServiceName, shellQuote(plan.WorkingDir), plan.ServiceName, plan.ServiceName, plan.ServiceName)
 }
 
 func openBSDRcScript(plan installPlan) string {

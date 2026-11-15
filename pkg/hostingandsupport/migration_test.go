@@ -12,6 +12,31 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+func TestMigrateDoesNotRewriteCurrentBillingVersion(t *testing.T) {
+	boundary := context.Background()
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "billing-version.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	if err := Migrate(boundary, database); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(boundary, `UPDATE schema_migrations SET updated_at='unchanged' WHERE component='billing'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(boundary, database); err != nil {
+		t.Fatal(err)
+	}
+	var updatedAt string
+	if err := database.QueryRowContext(boundary, `SELECT updated_at FROM schema_migrations WHERE component='billing'`).Scan(&updatedAt); err != nil {
+		t.Fatal(err)
+	}
+	if updatedAt != "unchanged" {
+		t.Fatalf("steady-state migration rewrote the billing version timestamp: %q", updatedAt)
+	}
+}
+
 func TestMigrateRepairsIncompleteSchemaAtCurrentVersion(t *testing.T) {
 	ctx := context.Background()
 	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "migration.db"))

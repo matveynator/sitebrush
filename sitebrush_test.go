@@ -394,6 +394,19 @@ func openServerControlDatabaseForTest(ctx context.Context, application *App) (*s
 	return database, nil
 }
 
+// Production initializes control storage before HTTP admission. Fixtures must
+// honor that boundary instead of relying on a read to migrate the schema.
+func initializeServerControlDatabaseForTest(t *testing.T, application *App) {
+	t.Helper()
+	database, err := openServerControlDatabaseForTest(context.Background(), application)
+	if err != nil {
+		t.Fatalf("initialize control database: %v", err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatalf("close initialized control database: %v", err)
+	}
+}
+
 type fakeGrabTransport struct {
 	responses map[string]fakeGrabResponse
 }
@@ -758,6 +771,7 @@ func newTestApplicationWithDatabase(t *testing.T, openDatabase func(string) (*sq
 	if err := application.migrate(context.Background()); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
+	initializeServerControlDatabaseForTest(t, application)
 	return application, rawDB
 }
 
@@ -1371,6 +1385,218 @@ func TestGuestPublishedStaticRouteDoesNotWaitForControlDatabaseWriter(t *testing
 	}
 	if duration >= time.Second {
 		t.Fatalf("static route waited for control database writer: %s", duration)
+	}
+}
+
+func TestPublicStaticDeliverySurvivesUnavailableObservationGuards(t *testing.T) {
+	attack, err := httpsecurity.NewAttackGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	throttle, err := httpsecurity.NewThrottleGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	attack.Close()
+	throttle.Close()
+	application := &App{publicBoundary: true, attackGuard: attack, throttleGuard: throttle, publicSecurityEvents: make(chan publicSecurityObservation, 1)}
+	request := httptest.NewRequest(http.MethodGet, "https://fast.example/", nil)
+	request.RemoteAddr = "203.0.113.8:12345"
+	request = withPublicRequestDecision(request, publicsite.Decision{Domain: "fast.example", Found: true})
+	handler := application.authAbuseMiddleware(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = io.WriteString(writer, "published")
+	}))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Body.String() != "published" {
+		t.Fatalf("unavailable observations blocked static delivery: %d %q", response.Code, response.Body.String())
+	}
+}
+
+func TestPublicSecurityObservationBoundsRetainedRequest(t *testing.T) {
+	application := &App{publicSecurityEvents: make(chan publicSecurityObservation, 1)}
+	application.enqueuePublicSecurityObservation(publicSecurityObservation{
+		domain: strings.Repeat("d", 1000), ip: strings.Repeat("i", 1000),
+		path: strings.Repeat("p", 10000), query: strings.Repeat("q", 10000), method: strings.Repeat("m", 1000),
+	})
+	event := <-application.publicSecurityEvents
+	if len(event.domain) > 253 || len(event.ip) > 64 || len(event.path) > 512 || len(event.query) > 2048 || len(event.method) > 16 {
+		t.Fatal("observation queue retained an oversized request")
+	}
+}
+
+func TestPublicStaticSecurityObservesAfterResponseAndDropsWhenFull(t *testing.T) {
+	guard, err := httpsecurity.NewAttackGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Close()
+	application := &App{publicBoundary: true, attackGuard: guard, publicSecurityEvents: make(chan publicSecurityObservation, 1), publicSecurityLosses: make(chan struct{}, 1)}
+	decision := publicsite.Decision{Domain: "fast.example", Found: true}
+	served := false
+	handler := application.authAbuseMiddleware(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		served = true
+		writer.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(writer, "published")
+	}))
+	for range 2 {
+		request := httptest.NewRequest(http.MethodGet, "https://fast.example/", nil)
+		request.RemoteAddr = "203.0.113.8:12345"
+		request = withPublicRequestDecision(request, decision)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK || response.Body.String() != "published" {
+			t.Fatalf("static response waited for security observation: %d %q", response.Code, response.Body.String())
+		}
+	}
+	if !served || len(application.publicSecurityEvents) != 1 || len(application.publicSecurityLosses) != 1 {
+		t.Fatal("bounded observation queue did not record saturation")
+	}
+	<-application.publicSecurityEvents
+	crawlerRequest := httptest.NewRequest(http.MethodGet, "https://fast.example/crawl", nil)
+	crawlerRequest.RemoteAddr = "203.0.113.8:12345"
+	crawlerRequest.Header.Set("User-Agent", "Googlebot/2.1")
+	crawlerRequest = withPublicRequestDecision(crawlerRequest, decision)
+	handler.ServeHTTP(httptest.NewRecorder(), crawlerRequest)
+	if observation := <-application.publicSecurityEvents; !observation.crawlerRead {
+		t.Fatal("crawler exemption was lost before asynchronous security analysis")
+	}
+	if _, err := guard.Add("203.0.113.9", "manual", "blocked fixture", "manual", time.Now().Add(time.Hour), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	served = false
+	request := httptest.NewRequest(http.MethodGet, "https://fast.example/", nil)
+	request.RemoteAddr = "203.0.113.9:12345"
+	request = withPublicRequestDecision(request, decision)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusTooManyRequests || served {
+		t.Fatalf("established block was not enforced before delivery: %d", response.Code)
+	}
+}
+
+func TestTestDriveLookupFormerlyUsedByPublicGateOpensControlDatabase(t *testing.T) {
+	root := t.TempDir()
+	application := &App{storagePath: root, storageRealRoot: root}
+	_, _, err := application.privateTestDrive(context.Background(), "fast.example")
+	if err == nil {
+		t.Fatal("an unowned Test Drive lookup unexpectedly succeeded")
+	}
+	if _, err := os.Stat(application.serverControlDBPath()); err != nil {
+		t.Fatalf("the old gate lookup did not demonstrate database access: %v", err)
+	}
+}
+
+func TestPublicFrontServesPublishedFilesWithoutControlDatabase(t *testing.T) {
+	root := t.TempDir()
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	application := &App{storagePath: root, storageRealRoot: root, publicBoundary: true, publicStreamer: publicsite.NewStreamer()}
+	application.publicCatalog = publicsite.NewCatalog(root, stop)
+	const domain = "fast.example"
+	policy := publicsite.Policy{Domain: domain, AllowedIPs: []string{"198.51.100.50"}}
+	if err := publicsite.Write(root, policy); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.publicCatalog.SetMemory(true); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(application.domainStaticDir(domain), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	application.writePublishedStaticHTML(domain, "/", "<html><body>published page</body></html>")
+	resources := map[string]string{"style.css": "body{color:red}", "app.js": "window.ready=true", "pixel.png": "image bytes"}
+	if err := os.MkdirAll(application.domainFilesDirForDomain(domain), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range resources {
+		if err := os.WriteFile(filepath.Join(application.domainFilesDirForDomain(domain), name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	controlPath := application.serverControlDBPath()
+	if err := os.MkdirAll(filepath.Dir(controlPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	control, err := sql.Open("sqlite", "file:"+controlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.Close()
+	connection, err := control.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	if _, err := connection.ExecContext(context.Background(), "BEGIN EXCLUSIVE"); err != nil {
+		t.Fatal(err)
+	}
+	defer connection.ExecContext(context.Background(), "ROLLBACK")
+	front := newPublicHTTPFront(application, "static-fixture", stop)
+	if err := front.Set("127.0.0.1:1", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := front.PolicyEnabled(); err != nil {
+		t.Fatal(err)
+	}
+	for _, resource := range []struct{ path, body string }{{"/", "published page"}, {"/p/style.css", resources["style.css"]}, {"/p/app.js", resources["app.js"]}, {"/p/pixel.png", resources["pixel.png"]}} {
+		for _, method := range []string{http.MethodGet, http.MethodHead} {
+			request := httptest.NewRequest(method, "https://"+domain+resource.path, nil)
+			request.RemoteAddr = "198.51.100.50:12345"
+			request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "unverified"})
+			response := httptest.NewRecorder()
+			front.ServeHTTP(response, request)
+			if response.Code != http.StatusOK || method == http.MethodGet && !strings.Contains(response.Body.String(), resource.body) || method == http.MethodHead && response.Body.Len() != 0 {
+				t.Fatalf("%s %s: status=%d body=%q", method, resource.path, response.Code, response.Body.String())
+			}
+		}
+	}
+	results := make(chan int, 64)
+	for range 64 {
+		go func() {
+			request := httptest.NewRequest(http.MethodGet, "https://"+domain+"/", nil)
+			request.RemoteAddr = "198.51.100.50:12345"
+			response := httptest.NewRecorder()
+			front.ServeHTTP(response, request)
+			results <- response.Code
+		}()
+	}
+	for range 64 {
+		if status := <-results; status != http.StatusOK {
+			t.Fatalf("concurrent public request status=%d", status)
+		}
+	}
+	unknown := httptest.NewRecorder()
+	front.ServeHTTP(unknown, httptest.NewRequest(http.MethodGet, "https://unknown.example/", nil))
+	if unknown.Code != http.StatusNotFound {
+		t.Fatalf("unknown host status=%d", unknown.Code)
+	}
+	ownerPolicy := publicsite.Policy{Domain: "owner.example", ServerOwner: true, Aliases: []string{"www.owner.example"}}
+	if err := publicsite.Write(root, ownerPolicy); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.publicCatalog.Reload(ownerPolicy.Domain); err != nil {
+		t.Fatal(err)
+	}
+	www := httptest.NewRecorder()
+	front.ServeHTTP(www, httptest.NewRequest(http.MethodGet, "https://www.owner.example/", nil))
+	if www.Code != http.StatusPermanentRedirect || www.Header().Get("Location") != "https://owner.example/" {
+		t.Fatalf("owner www routing status=%d location=%q", www.Code, www.Header().Get("Location"))
+	}
+	policy.PrivateTestDrive = true
+	if err := publicsite.Write(root, policy); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.publicCatalog.Reload(domain); err != nil {
+		t.Fatal(err)
+	}
+	if err := front.Set("127.0.0.1:1", true); err != nil {
+		t.Fatal(err)
+	}
+	private := httptest.NewRecorder()
+	front.ServeHTTP(private, httptest.NewRequest(http.MethodGet, "https://"+domain+"/", nil))
+	if private.Code != http.StatusServiceUnavailable || strings.Contains(private.Body.String(), "published page") {
+		t.Fatalf("private route served published content: %d %q", private.Code, private.Body.String())
 	}
 }
 
@@ -5582,6 +5808,7 @@ func TestRegisterRejectsUnverifiedDomainBeforeCreatingSiteDatabase(t *testing.T)
 		registrationConfirmations: startEmailConfirmationMemoryWorker(context.Background()),
 		emailDelivery:             make(chan mailout.DeliveryJob, 1),
 	}
+	initializeServerControlDatabaseForTest(t, application)
 	form := url.Values{}
 	form.Set("email", "admin@fake.example")
 	form.Set("password", "secret")
@@ -5616,6 +5843,7 @@ func TestLocalhostWithoutSiteDatabaseOpensRegistration(t *testing.T) {
 	t.Cleanup(func() { _ = router.Close() })
 	waitSiteDBRouterStartup(t, router)
 	application := &App{db: router, siteDatabaseRouter: router, storagePath: storagePath, dbPath: dbPath}
+	initializeServerControlDatabaseForTest(t, application)
 	staticPath := filepath.Join(application.domainStaticDir("localhost"), staticRelativePathForPage("/"))
 	if err := os.MkdirAll(filepath.Dir(staticPath), 0o755); err != nil {
 		t.Fatal(err)
@@ -5696,6 +5924,7 @@ func TestRegisterCreatesSiteDatabaseOnlyAfterConfirmedVerifiedDomain(t *testing.
 		emailDelivery:             make(chan mailout.DeliveryJob, 1),
 		automaticSSL:              make(chan automaticSSLRequest, 2),
 	}
+	initializeServerControlDatabaseForTest(t, application)
 	application.hostingSnapshotReports = make(chan struct{}, 1)
 	domainContext := contextWithDomain(context.Background(), domain)
 	if _, err := application.adminStealthEnabled(domainContext, domain, ""); !errors.Is(err, errSiteDatabaseMissing) {
@@ -6527,7 +6756,7 @@ func newRouterTestApplication(t *testing.T) *App {
 		}
 	})
 	waitSiteDBRouterStartup(t, router)
-	return &App{
+	application := &App{
 		db:                 router,
 		siteDatabaseRouter: router,
 		storagePath:        storagePath,
@@ -6535,6 +6764,8 @@ func newRouterTestApplication(t *testing.T) *App {
 		grabTracker:        newGrabProgressTracker(),
 		emailDelivery:      make(chan mailout.DeliveryJob, 4),
 	}
+	initializeServerControlDatabaseForTest(t, application)
+	return application
 }
 
 func setupBillingOwnerForTest(t *testing.T, application *App, domain, email string, autoRegistrationEnabled bool) *sql.DB {
@@ -7220,6 +7451,7 @@ func TestPagePasswordProtectionAppliesToLoggedInAdmin(t *testing.T) {
 func TestGuestProtectedStaticRouteUsesPrefixFileWithoutDatabase(t *testing.T) {
 	storagePath := t.TempDir()
 	application := &App{db: panicSQLExecutor{t: t}, storagePath: storagePath}
+	initializeServerControlDatabaseForTest(t, application)
 	application.writePublishedStaticHTML("localhost", "/passport/one", "<html><body>nested static secret</body></html>")
 	application.writePublishedStaticHTML("localhost", "/public", "<html><body>public static page</body></html>")
 
@@ -13988,7 +14220,7 @@ func TestPrivateTestDriveRequiresCreatingBrowserSession(t *testing.T) {
 	stopPublicFront := make(chan struct{})
 	defer close(stopPublicFront)
 	publicCatalog := publicsite.NewCatalog(application.storagePath, stopPublicFront)
-	if err := publicsite.Write(application.storagePath, publicsite.Policy{Domain: domain}); err != nil {
+	if err := publicsite.Write(application.storagePath, publicsite.Policy{Domain: domain, PrivateTestDrive: true}); err != nil {
 		t.Fatal(err)
 	}
 	if err := publicCatalog.SetMemory(true); err != nil {
@@ -14028,8 +14260,8 @@ func TestPrivateTestDriveRequiresCreatingBrowserSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	publishedProbe := httptest.NewRecorder()
-	if !publicBoundary.servePublicPublished(publishedProbe, httptest.NewRequest(http.MethodGet, "https://"+domain+"/", nil), true) || !strings.Contains(publishedProbe.Body.String(), content) {
-		t.Fatal("paused public content fixture is unavailable")
+	if publicBoundary.servePublicPublished(publishedProbe, httptest.NewRequest(http.MethodGet, "https://"+domain+"/", nil), true) || strings.Contains(publishedProbe.Body.String(), content) {
+		t.Fatal("private content was admitted to the public file reader")
 	}
 	for _, trialStatus := range []string{"private", "email_pending", "email_verified", "blocked", "expiring"} {
 		if err := application.withServerControlDatabaseWrite(context.Background(), "test-private-front-state", func(database *sql.DB) error {
@@ -14045,8 +14277,8 @@ func TestPrivateTestDriveRequiresCreatingBrowserSession(t *testing.T) {
 			if strings.Contains(response.Body.String(), content) || response.Code == http.StatusOK {
 				t.Fatalf("paused public front exposed %s on %s: status=%d body=%q", trialStatus, mixedQuery, response.Code, response.Body.String())
 			}
-			if mixedQuery == "" && response.Code != http.StatusForbidden {
-				t.Fatalf("paused public front did not render neutral page for %s: status=%d body=%q", trialStatus, response.Code, response.Body.String())
+			if mixedQuery == "" && response.Code != http.StatusServiceUnavailable {
+				t.Fatalf("paused public front did not keep %s private: status=%d body=%q", trialStatus, response.Code, response.Body.String())
 			}
 		}
 	}
@@ -14159,6 +14391,19 @@ func TestServerReservedSubdomainsAndWWWRedirect(t *testing.T) {
 	publicBoundary := &App{storagePath: application.storagePath, storageRealRoot: application.storageRealRoot, publicBoundary: true}
 	boundaryRequest := httptest.NewRequest(http.MethodGet, "http://www.sitebrush.com/private", nil)
 	boundaryResponse := httptest.NewRecorder()
+	if publicBoundary.serverHostBoundary(boundaryResponse, boundaryRequest) {
+		t.Fatal("public boundary redirected without an owner-issued catalog")
+	}
+	stopCatalog := make(chan struct{})
+	defer close(stopCatalog)
+	if err := publicsite.Write(application.storagePath, publicsite.Policy{Domain: "sitebrush.com", ServerOwner: true}); err != nil {
+		t.Fatal(err)
+	}
+	publicBoundary.publicCatalog = publicsite.NewCatalog(application.storagePath, stopCatalog)
+	if err := publicBoundary.publicCatalog.SetMemory(true); err != nil {
+		t.Fatal(err)
+	}
+	boundaryResponse = httptest.NewRecorder()
 	if !publicBoundary.serverHostBoundary(boundaryResponse, boundaryRequest) || boundaryResponse.Header().Get("Location") != "http://sitebrush.com/private" {
 		t.Fatalf("public boundary did not redirect www: %d %s", boundaryResponse.Code, boundaryResponse.Header().Get("Location"))
 	}
@@ -15017,9 +15262,16 @@ func testPrivateTestDriveOnboarding(t *testing.T, scheme string) {
 	handoffRequest := httptest.NewRequest(http.MethodGet, scheme+"://myproject.sitebrush.com/?test_drive_handoff&handoff_token="+ticketMatch[1], nil)
 	stopCatalog := make(chan struct{})
 	t.Cleanup(func() { close(stopCatalog) })
+	if err := application.writePublicPolicy(trial.Domain); err != nil {
+		t.Fatalf("publish private Test Drive policy: %v", err)
+	}
 	application.publicCatalog = publicsite.NewCatalog(application.storagePath, stopCatalog)
 	if err := application.publicCatalog.SetMemory(true); err != nil {
 		t.Fatal(err)
+	}
+	trialRoute := application.publicCatalog.Lookup(publicsite.Lookup{Host: trial.Domain})
+	if !trialRoute.Found || !trialRoute.PrivateTestDrive {
+		t.Fatalf("private Test Drive route was not published: %+v", trialRoute)
 	}
 	applicationHandler := application.siteHTTPHandler(http.HandlerFunc(application.route))
 	forgedRequest := httptest.NewRequest(http.MethodGet, scheme+"://unknown.sitebrush.com/?edit", nil)
@@ -15030,7 +15282,7 @@ func testPrivateTestDriveOnboarding(t *testing.T, scheme string) {
 	if forgedResponse.Code != http.StatusNotFound {
 		t.Fatalf("forged Test Drive cookies bypassed unknown-host gate: %d", forgedResponse.Code)
 	}
-	publicBoundary := &App{storagePath: application.storagePath, storageRealRoot: application.storageRealRoot, publicBoundary: true, controlDatabase: dispatcher}
+	publicBoundary := &App{storagePath: application.storagePath, storageRealRoot: application.storageRealRoot, publicBoundary: true}
 	boundaryResponse := httptest.NewRecorder()
 	if publicBoundary.privateTestDriveGate(boundaryResponse, handoffRequest) || boundaryResponse.Body.Len() != 0 {
 		t.Fatalf("public boundary consumed the handoff: %d %s", boundaryResponse.Code, boundaryResponse.Body.String())
@@ -15676,6 +15928,7 @@ func TestPublicImportedAssetsServeFromCanonicalAndDomainPrefixedPaths(t *testing
 		t.Fatalf("migrate: %v", err)
 	}
 
+	initializeServerControlDatabaseForTest(t, application)
 	canonicalDir := application.domainFilesDirForDomain("localhost")
 	if err := os.MkdirAll(canonicalDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -15716,6 +15969,7 @@ func TestPublicImportedAssetsServeFromCanonicalAndDomainPrefixedPaths(t *testing
 func TestGuestStaticRouteServesPublishedFileWithoutDatabase(t *testing.T) {
 	storagePath := t.TempDir()
 	application := &App{db: panicSQLExecutor{t: t}, storagePath: storagePath}
+	initializeServerControlDatabaseForTest(t, application)
 	staticFilePath := filepath.Join(application.domainStaticDir("localhost"), "en.html")
 	if err := os.MkdirAll(filepath.Dir(staticFilePath), 0o755); err != nil {
 		t.Fatal(err)
@@ -17970,6 +18224,17 @@ func TestAutomaticSSLStatusViewExplainsReadyWaitingAndErrors(t *testing.T) {
 	ipErrorStatus := automaticSSLStatusView(DomainAutomaticSSLSetting{Domain: "example.com", Available: true}, os.ErrNotExist)
 	if ipErrorStatus.DomainCheckClass != "status-bad" || ipErrorStatus.DomainCheckTextKey != "domain_settings_ssl_domain_check_error" {
 		t.Fatalf("ip error status = %+v, want red domain check error", ipErrorStatus)
+	}
+}
+
+func TestDiagnosticEventsDoNotCreateHostDirectories(t *testing.T) {
+	application, _ := newTestApplication(t)
+	application.logDomainEvent("unregistered.example", "AUTOCERT certificate requested")
+	application.logProblemEvent("AUTOCERT DNS refresh started")
+	for _, directory := range []string{application.domainLogDir("unregistered.example"), filepath.Join(application.storageRootDir(), "logs", "problems")} {
+		if _, err := os.Stat(directory); !os.IsNotExist(err) {
+			t.Fatalf("diagnostic event created legacy directory %s: %v", directory, err)
+		}
 	}
 }
 
@@ -24849,6 +25114,27 @@ func TestControlDatabaseShutdownCompletesWithIdleWorkers(t *testing.T) {
 	}
 	if err := dispatcher.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestControlReaderFallbackRequiresInitializedTrialSchema(t *testing.T) {
+	application := &App{storagePath: t.TempDir()}
+	boundary := context.Background()
+	if _, found, err := application.privateTestDrive(boundary, "private.example"); err == nil || found {
+		t.Fatalf("uninitialized trial schema accepted: found=%v err=%v", found, err)
+	}
+	initializeServerControlDatabaseForTest(t, application)
+	if _, found, err := application.privateTestDrive(boundary, "private.example"); err != nil || found {
+		t.Fatalf("initialized empty trial storage: found=%v err=%v", found, err)
+	}
+	if err := application.withServerControlDatabaseWrite(boundary, "test-remove-trial-schema", func(database *sql.DB) error {
+		_, err := database.Exec(`DROP TABLE public_trial_sites`)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := application.privateTestDrive(boundary, "private.example"); err == nil || found {
+		t.Fatalf("trial read repaired or bypassed missing schema: found=%v err=%v", found, err)
 	}
 }
 
@@ -33502,6 +33788,18 @@ func BenchmarkPublicHTTP(b *testing.B) {
 	}
 }
 
+func BenchmarkPublicFastPath(b *testing.B) {
+	for _, mode := range []string{"http-keep", "http-new", "https-keep", "https-new"} {
+		for _, concurrency := range []int{1, 10, 50, 100, 300} {
+			for _, scenario := range []string{"normal", "trusted", "analytics-full"} {
+				b.Run(fmt.Sprintf("%s/clients=%d/%s", mode, concurrency, scenario), func(b *testing.B) {
+					benchmarkPublicConnections(b, mode, concurrency, scenario)
+				})
+			}
+		}
+	}
+}
+
 func BenchmarkPublicConnections(b *testing.B) {
 	for _, mode := range []string{"http-keep", "http-new", "https-keep", "https-new", "https-http2", "https-resume-new", "https12-new"} {
 		for _, concurrency := range []int{300, 600, 1000} {
@@ -33570,6 +33868,7 @@ func benchmarkPublicConnections(b *testing.B, mode string, concurrency int, scen
 		b.Fatal(err)
 	}
 	defer application.throttleGuard.Close()
+	application.startPublicSecurityObservations(stop)
 	if scenario == "analytics-full" {
 		application.securityAnalytics = make(chan siteAnalyticsEvent, 1)
 		application.securityAnalytics <- siteAnalyticsEvent{}
@@ -34297,6 +34596,9 @@ func TestGuestMenuBundleRetainsOriginalStylesAndLogin(t *testing.T) {
 	if !strings.Contains(bundle, "?login") || strings.Contains(bundle, "Checking sign-in") || strings.Contains(bundle, "guestAccountContents") {
 		t.Fatal("guest menu no longer exposes its original sign-in action")
 	}
+	if !strings.Contains(bundle, "/?sitebrush_menu_ws") {
+		t.Fatal("guest menu lost its authenticated WebSocket transport")
+	}
 }
 
 func TestLocalhostPublicRootAndAuthenticatedMenuDuringCatalogPreload(t *testing.T) {
@@ -34332,6 +34634,11 @@ func TestLocalhostPublicRootAndAuthenticatedMenuDuringCatalogPreload(t *testing.
 		t.Fatal("owner session was not created")
 	}
 	ownerCookie := cookies[0]
+	menuServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		request.Host = "localhost:777"
+		handler.ServeHTTP(writer, request)
+	}))
+	defer menuServer.Close()
 	for _, ready := range []bool{false, true} {
 		if ready {
 			if err := publicsite.Write(application.storagePath, publicsite.Policy{Domain: "localhost"}); err != nil {
@@ -34356,8 +34663,41 @@ func TestLocalhostPublicRootAndAuthenticatedMenuDuringCatalogPreload(t *testing.
 					t.Fatalf("bare localhost was redirected or lost public contents: %d %q", response.Code, response.Header().Get("Location"))
 				}
 				administratorMenu := strings.Contains(response.Body.String(), "initializeSitebrushContextMenuForAdmin")
-				if administratorMenu != (role == "owner") {
+				if administratorMenu != (role == "owner" && !ready) {
 					t.Fatalf("wrong menu for %s: administrator=%t", role, administratorMenu)
+				}
+				if ready && (!strings.Contains(response.Body.String(), "/p/static/visitor.js") || !strings.Contains(response.Body.String(), `data-menu="guest_menu.`)) {
+					t.Fatal("published HTML lost its authenticated menu transport")
+				}
+				configuration, err := websocket.NewConfig("ws"+strings.TrimPrefix(menuServer.URL, "http")+"/?sitebrush_menu_ws", "http://localhost:777")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if role == "owner" {
+					configuration.Header.Set("Cookie", ownerCookie.Name+"="+ownerCookie.Value)
+				} else if role == "expired" {
+					configuration.Header.Set("Cookie", "sitebrush_session=expired-cookie")
+				}
+				connection, err := websocket.DialConfig(configuration)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer connection.Close()
+				if err := connection.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+					t.Fatal(err)
+				}
+				if err := websocket.JSON.Send(connection, map[string]any{"path": "/", "admin": false}); err != nil {
+					t.Fatal(err)
+				}
+				var menuResponse struct {
+					Admin bool   `json:"admin"`
+					Menu  string `json:"menu"`
+				}
+				if err := websocket.JSON.Receive(connection, &menuResponse); err != nil {
+					t.Fatal(err)
+				}
+				if menuResponse.Admin != (role == "owner") || strings.Contains(menuResponse.Menu, "initializeSitebrushContextMenuForAdmin") != (role == "owner") {
+					t.Fatalf("wrong authenticated menu for %s: administrator=%t", role, menuResponse.Admin)
 				}
 			})
 		}
@@ -34813,6 +35153,7 @@ func BenchmarkPublicIngressAllocations(b *testing.B) {
 		b.Fatal(err)
 	}
 	defer application.throttleGuard.Close()
+	application.startPublicSecurityObservations(stop)
 	front := newPublicHTTPFront(application, "allocation-fixture", stop)
 	if err := front.Set("127.0.0.1:1", false); err != nil {
 		b.Fatal(err)
@@ -35252,6 +35593,9 @@ func TestLocalPublicPolicyFallbackDeliversToBoundary(t *testing.T) {
 func TestPublicPolicyLoadingEndsAfterAuthenticatedEnable(t *testing.T) {
 	root := t.TempDir()
 	domain := "example.org"
+	if err := publicsite.Write(root, publicsite.Policy{Domain: domain, PrivateTestDrive: true}); err != nil {
+		t.Fatal(err)
+	}
 	backend := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		_, _ = io.WriteString(writer, "ready")
 	}))
@@ -35286,6 +35630,12 @@ func TestPublicPolicyLoadingEndsAfterAuthenticatedEnable(t *testing.T) {
 	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "site policy is loading") {
 		t.Fatalf("before enable: %d %q", response.Code, response.Body.String())
 	}
+	unknownRequest := httptest.NewRequest(http.MethodGet, "http://unknown.example/", nil)
+	unknownResponse := httptest.NewRecorder()
+	front.ServeHTTP(unknownResponse, unknownRequest)
+	if unknownResponse.Code != http.StatusNotFound {
+		t.Fatalf("unknown host before enable: %d %q", unknownResponse.Code, unknownResponse.Body.String())
+	}
 	if err := enable(); err != nil {
 		t.Fatal(err)
 	}
@@ -35300,5 +35650,10 @@ func TestPublicPolicyLoadingEndsAfterAuthenticatedEnable(t *testing.T) {
 	front.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "ready") {
 		t.Fatalf("after enable: %d %q", response.Code, response.Body.String())
+	}
+	unknownResponse = httptest.NewRecorder()
+	front.ServeHTTP(unknownResponse, unknownRequest)
+	if unknownResponse.Code != http.StatusNotFound {
+		t.Fatalf("unknown host after enable: %d %q", unknownResponse.Code, unknownResponse.Body.String())
 	}
 }

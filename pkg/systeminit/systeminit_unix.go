@@ -3,6 +3,7 @@
 package systeminit
 
 import (
+	"log"
 	"math"
 	"reflect"
 	"strconv"
@@ -26,22 +27,37 @@ func raiseResourceLimit(resource int, desiredLimit uint64) (uint64, uint64, uint
 	}
 	currentValue := rlimitFieldUint(reflect.ValueOf(currentLimit).FieldByName("Cur"))
 	maxValue := rlimitFieldUint(reflect.ValueOf(currentLimit).FieldByName("Max"))
-	targetLimit := desiredLimit
-	if maxValue > 0 && maxValue < targetLimit {
-		targetLimit = maxValue
-	}
-	if currentValue >= targetLimit {
-		return currentValue, targetLimit, currentValue, stateSkipped, false
+	if currentValue >= desiredLimit {
+		return currentValue, desiredLimit, currentValue, stateSkipped, false
 	}
 	nextLimit := currentLimit
-	setRlimitField(reflect.ValueOf(&nextLimit).Elem().FieldByName("Cur"), targetLimit)
+	if maxValue < desiredLimit {
+		setRlimitField(reflect.ValueOf(&nextLimit).Elem().FieldByName("Max"), desiredLimit)
+	}
+	setRlimitField(reflect.ValueOf(&nextLimit).Elem().FieldByName("Cur"), desiredLimit)
 	if err := syscall.Setrlimit(resource, &nextLimit); err != nil {
-		return currentValue, targetLimit, currentValue, stateSkipped, true
+		log.Printf("SYSTEM LIMIT resource=%d requested_soft=%d requested_hard=%d rejected=%v", resource, desiredLimit, desiredLimit, err)
+		if maxValue <= currentValue {
+			return currentValue, desiredLimit, currentValue, stateSkipped, true
+		}
+		fallback := currentLimit
+		setRlimitField(reflect.ValueOf(&fallback).Elem().FieldByName("Cur"), maxValue)
+		if fallbackErr := syscall.Setrlimit(resource, &fallback); fallbackErr != nil {
+			log.Printf("SYSTEM LIMIT resource=%d fallback_soft=%d rejected=%v", resource, maxValue, fallbackErr)
+			return currentValue, desiredLimit, currentValue, stateSkipped, true
+		}
 	}
 	if err := syscall.Getrlimit(resource, &currentLimit); err != nil {
-		return currentValue, targetLimit, targetLimit, stateApplied, false
+		return currentValue, desiredLimit, currentValue, stateSkipped, true
 	}
-	return currentValue, targetLimit, rlimitFieldUint(reflect.ValueOf(currentLimit).FieldByName("Cur")), stateApplied, false
+	afterValue := rlimitFieldUint(reflect.ValueOf(currentLimit).FieldByName("Cur"))
+	afterMax := rlimitFieldUint(reflect.ValueOf(currentLimit).FieldByName("Max"))
+	log.Printf("SYSTEM LIMIT resource=%d soft_before=%d hard_before=%d soft_after=%d hard_after=%d requested=%d", resource, currentValue, maxValue, afterValue, afterMax, desiredLimit)
+	status := stateSkipped
+	if afterValue > currentValue {
+		status = stateApplied
+	}
+	return currentValue, desiredLimit, afterValue, status, afterValue < desiredLimit
 }
 
 func rlimitFieldUint(field reflect.Value) uint64 {
