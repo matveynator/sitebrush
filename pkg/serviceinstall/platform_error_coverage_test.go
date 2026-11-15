@@ -24,6 +24,9 @@ func TestServiceManagersPropagateRequiredCommandFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	if err := os.WriteFile(filepath.Join(root, "etc", "login.conf"), []byte("default:\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	sentinel := errors.New("required command failed")
 	probe := runtimeProbe{
 		goos:           "linux",
@@ -83,6 +86,9 @@ func TestServiceManagerFallbackAndAlternateBranches(t *testing.T) {
 		}
 	}
 	if err := os.WriteFile(filepath.Join(root, "etc", "rc.conf"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "etc", "login.conf"), []byte("default:\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	plan := installPlan{

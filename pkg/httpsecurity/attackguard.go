@@ -846,8 +846,13 @@ func (guard *AttackGuard) Check(ip string, now time.Time) (SecurityBlock, bool) 
 }
 
 func (guard *AttackGuard) CheckSite(domain, ip string, now time.Time) (SecurityBlock, bool) {
+	block, blocked, _ := guard.CheckSiteAvailable(domain, ip, now)
+	return block, blocked
+}
+
+func (guard *AttackGuard) CheckSiteAvailable(domain, ip string, now time.Time) (SecurityBlock, bool, bool) {
 	result, ok := guard.exchangeFast(attackGuardRequest{Operation: attackGuardCheck, Domain: normalizeSecurityDomain(domain), IP: ip, Now: now})
-	return result.Block, ok && result.Blocked
+	return result.Block, result.Blocked, ok
 }
 
 func (guard *AttackGuard) ObserveFast(ip, path string, trusted bool, now time.Time) (SecurityBlock, bool) {

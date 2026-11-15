@@ -6,6 +6,29 @@ import (
 	"time"
 )
 
+func TestThrottleCheckEnforcesOnlyEstablishedThrottle(t *testing.T) {
+	guard, err := NewThrottleGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Close()
+	ip := "203.0.113.44"
+	started := time.Now().Add(-2 * time.Minute).UTC()
+	if decision, available := guard.CheckFast(ip, started); !available || decision.Active {
+		t.Fatalf("new IP was throttled before observation: %+v available=%t", decision, available)
+	}
+	for index := 0; index <= 600; index++ {
+		guard.ObserveFast(ip, false, started.Add(time.Duration(index)*time.Minute/600))
+	}
+	activeAt := started.Add(time.Minute + time.Second)
+	for index := 0; index < 9; index++ {
+		decision, available := guard.CheckFast(ip, activeAt)
+		if !available || !decision.Active || decision.RateLimited != (index >= 8) {
+			t.Fatalf("established throttle check %d: %+v available=%t", index, decision, available)
+		}
+	}
+}
+
 func TestThrottleGuardIgnoresShortBurst(t *testing.T) {
 	guard, err := NewThrottleGuard("")
 	if err != nil {
@@ -159,7 +182,6 @@ func TestThrottleGuardDoesNotThrottleTrustedPeer(t *testing.T) {
 		}
 	}
 }
-
 
 func TestThrottleGuardCrawlerExemptionDoesNotBypassActiveThrottle(t *testing.T) {
 	guard, err := NewThrottleGuard("")

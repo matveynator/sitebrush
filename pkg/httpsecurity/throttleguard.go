@@ -63,6 +63,7 @@ const (
 	throttleSnapshot
 	throttleHistory
 	throttleRemove
+	throttleCheck
 )
 
 type throttleRequest struct {
@@ -197,7 +198,7 @@ func handleThrottleRequest(observations map[string]throttleObservation, throttle
 	ip := normalizeThrottleIP(request.IP)
 
 	switch request.Operation {
-	case throttleObserve:
+	case throttleObserve, throttleCheck:
 		if request.Trusted || ip == "" {
 			return throttleResult{}
 		}
@@ -216,6 +217,9 @@ func handleThrottleRequest(observations map[string]throttleObservation, throttle
 				decision.RetryAfter = time.Second
 			}
 			return throttleResult{Decision: decision}
+		}
+		if request.Operation == throttleCheck {
+			return throttleResult{}
 		}
 		if request.ExemptObservation {
 			return throttleResult{}
@@ -337,6 +341,11 @@ func pruneThrottleState(observations map[string]throttleObservation, throttles m
 
 func (guard *ThrottleGuard) ObserveFast(ip string, trusted bool, now time.Time) ThrottleDecision {
 	return guard.observeFast(ip, trusted, false, now)
+}
+
+func (guard *ThrottleGuard) CheckFast(ip string, now time.Time) (ThrottleDecision, bool) {
+	result, ok := guard.exchangeFast(throttleRequest{Operation: throttleCheck, IP: ip, Now: now})
+	return result.Decision, ok
 }
 
 // ObserveFastExemptObservation keeps an already active throttle enforceable while

@@ -32,9 +32,75 @@ func TestOpenBSDResourceClassIsManagedSeparately(t *testing.T) {
 	}
 }
 
+func TestFreeBSDResourceClassPreservesSystemConfiguration(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "etc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configurationPath := filepath.Join(root, "etc", "login.conf")
+	original := "# System policy\ndefault:\\\n\t:openfiles=1024:\n\ncustom:\\\n\t:maxproc=512:\n"
+	if err := os.WriteFile(configurationPath, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	probe := runtimeProbe{filesystemRoot: root}
+	changed, err := installFreeBSDResourceClass(probe, "sitebrush")
+	if err != nil || !changed {
+		t.Fatalf("install changed=%v err=%v", changed, err)
+	}
+	changed, err = installFreeBSDResourceClass(probe, "sitebrush")
+	if err != nil || changed {
+		t.Fatalf("repeat install changed=%v err=%v", changed, err)
+	}
+	changed, err = removeFreeBSDResourceClass(probe, "other-service")
+	if err != nil || changed {
+		t.Fatalf("unmanaged class removal changed=%v err=%v", changed, err)
+	}
+	changed, err = removeFreeBSDResourceClass(probe, "sitebrush")
+	if err != nil || !changed {
+		t.Fatalf("remove changed=%v err=%v", changed, err)
+	}
+	remaining, err := os.ReadFile(configurationPath)
+	if err != nil || string(remaining) != original {
+		t.Fatalf("system configuration changed: %q err=%v", remaining, err)
+	}
+	changed, err = removeFreeBSDResourceClass(probe, "sitebrush")
+	if err != nil || changed {
+		t.Fatalf("repeat removal changed=%v err=%v", changed, err)
+	}
+}
+
+func TestFreeBSDResourceClassRejectsEscapingConfigurationSymlink(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "etc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outsidePath := filepath.Join(t.TempDir(), "login.conf")
+	original := "default:\n" + freeBSDResourceClass("sitebrush")
+	if err := os.WriteFile(outsidePath, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsidePath, filepath.Join(root, "etc", "login.conf")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	changed, err := removeFreeBSDResourceClass(runtimeProbe{filesystemRoot: root}, "sitebrush")
+	if err == nil || changed {
+		t.Fatalf("escaping symlink accepted: changed=%v err=%v", changed, err)
+	}
+	remaining, err := os.ReadFile(outsidePath)
+	if err != nil || string(remaining) != original {
+		t.Fatalf("outside configuration changed: %q err=%v", remaining, err)
+	}
+}
+
 func TestServiceManagersInstallAndUninstallUnderTemporaryRoot(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "service"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "etc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "etc", "login.conf"), []byte("default:\\\n\t:openfiles=1024:\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	probe := runtimeProbe{

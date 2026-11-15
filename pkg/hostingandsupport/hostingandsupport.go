@@ -875,8 +875,10 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 	}); err != nil {
 		return err
 	}
-	if err := setSchemaMigrationVersion(ctx, database, "billing", currentBillingSchemaVersion); err != nil {
-		return fmt.Errorf("write billing schema version: %w", err)
+	if schemaVersion < currentBillingSchemaVersion || !schemaComplete {
+		if err := setSchemaMigrationVersion(ctx, database, "billing", currentBillingSchemaVersion); err != nil {
+			return fmt.Errorf("write billing schema version: %w", err)
+		}
 	}
 	return nil
 }
