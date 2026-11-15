@@ -75,6 +75,7 @@ type throttleRequest struct {
 	Reply             chan throttleResult `json:"-"`
 	Queued            time.Time           `json:"-"`
 	Done              <-chan struct{}     `json:"-"`
+	WaitLimit         time.Duration       `json:"-"`
 }
 
 type throttleResult struct {
@@ -344,7 +345,7 @@ func (guard *ThrottleGuard) ObserveFast(ip string, trusted bool, now time.Time) 
 }
 
 func (guard *ThrottleGuard) CheckFast(ip string, now time.Time) (ThrottleDecision, bool) {
-	result, ok := guard.exchangeFast(throttleRequest{Operation: throttleCheck, IP: ip, Now: now})
+	result, ok := guard.exchangeFast(throttleRequest{Operation: throttleCheck, IP: ip, Now: now, WaitLimit: time.Millisecond})
 	return result.Decision, ok
 }
 
@@ -434,7 +435,15 @@ func (guard *ThrottleGuard) exchangeFast(request throttleRequest) (throttleResul
 	default:
 		return throttleResult{}, false
 	}
+	var deadline <-chan time.Time
+	if request.WaitLimit > 0 {
+		timer := time.NewTimer(request.WaitLimit)
+		defer timer.Stop()
+		deadline = timer.C
+	}
 	select {
+	case <-deadline:
+		return throttleResult{}, false
 	case <-request.Done:
 		return throttleResult{}, false
 	case <-guard.done:

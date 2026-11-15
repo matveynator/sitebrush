@@ -115,6 +115,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/updateannounce"
 	"github.com/matveynator/sitebrush/v2/pkg/uploadstream"
 	"github.com/matveynator/sitebrush/v2/pkg/winservice"
+	"github.com/matveynator/sitebrush/v2/pkg/workbudget"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/skip2/go-qrcode"
 	"golang.org/x/net/dns/dnsmessage"
@@ -5218,7 +5219,8 @@ func (a *App) browserAnalyticsStorage(jobs <-chan browserAnalyticsStorageJob, re
 		}
 	}()
 
-	for {
+	var budget workbudget.Budget
+	for budget.Wait(stop) {
 		select {
 		case <-stop:
 			return
@@ -5226,6 +5228,7 @@ func (a *App) browserAnalyticsStorage(jobs <-chan browserAnalyticsStorageJob, re
 			if !open {
 				return
 			}
+			started := time.Now()
 			var err error
 			if job.load {
 				job.state = browserstats.New(time.Now().UTC())
@@ -5298,6 +5301,7 @@ func (a *App) browserAnalyticsStorage(jobs <-chan browserAnalyticsStorageJob, re
 					}
 				}
 			}
+			budget.Record(started)
 			select {
 			case results <- browserAnalyticsStorageResult{domain: job.domain, state: job.state, err: err, saved: !job.load && job.state == nil}:
 			case <-stop:
@@ -5346,6 +5350,7 @@ func (a *App) runBrowserAnalytics(stopRequested <-chan struct{}) {
 	defer close(stop)
 	go a.browserAnalyticsStorage(jobs, results, stop)
 	go a.browserAnalyticsStorage(jobs, results, stop)
+	var budget workbudget.Budget
 	slots := map[string]*browserAnalyticsSlot{}
 	resolutions := make(map[string]analyticsDomainResolution)
 	lostDomains := map[string]bool{}
@@ -5398,6 +5403,7 @@ func (a *App) runBrowserAnalytics(stopRequested <-chan struct{}) {
 		acknowledgeBrowserAnalytics(envelope, accepted)
 	}
 	applyResult := func(result browserAnalyticsStorageResult) {
+		defer budget.Record(time.Now())
 		slot := slots[result.domain]
 		if slot == nil {
 			return
@@ -5440,6 +5446,7 @@ func (a *App) runBrowserAnalytics(stopRequested <-chan struct{}) {
 	// Draining shutdown uses the same admission path as normal consumption. A
 	// queued first visit must create its slot before it can be persisted.
 	admit := func(envelope browserAnalyticsEnvelope) bool {
+		defer budget.Record(time.Now())
 		envelope.domain = a.resolveAnalyticsDomain(envelope.domain, resolutions)
 		if envelope.domain == "" {
 			return false
@@ -5474,6 +5481,7 @@ func (a *App) runBrowserAnalytics(stopRequested <-chan struct{}) {
 	}
 
 	for {
+		budget.Wait(stopRequested)
 		select {
 		case <-stopRequested:
 			deadline := time.NewTimer(10 * time.Second)
@@ -5615,6 +5623,7 @@ func (a *App) runBrowserAnalytics(stopRequested <-chan struct{}) {
 // Security owns a separate queue and checkpoint; editor transactions never wait
 // for observations, enrichment, or incident persistence.
 func (a *App) runSecurityAnalytics(stop <-chan struct{}) {
+	var budget workbudget.Budget
 	states := map[string]*browserstats.SecurityState{}
 	dirty := map[string]bool{}
 	lost := map[string]bool{}
@@ -5633,6 +5642,7 @@ func (a *App) runSecurityAnalytics(stop <-chan struct{}) {
 	hostLoadHistory := make([]sitebrushSecurityHostLoad, 0, 12)
 	defer ticker.Stop()
 	save := func(domain string, cancellation <-chan struct{}) bool {
+		defer budget.Record(time.Now())
 		state := states[domain]
 		state.Prune(time.Now().UTC())
 		a.enrichSecurityIncidents(state, cancellation)
@@ -5653,6 +5663,7 @@ func (a *App) runSecurityAnalytics(stop <-chan struct{}) {
 		return true
 	}
 	load := func(domain string) *browserstats.SecurityState {
+		defer budget.Record(time.Now())
 		state := states[domain]
 		if state == nil {
 			if len(states) >= 8 {
@@ -5683,7 +5694,69 @@ func (a *App) runSecurityAnalytics(stop <-chan struct{}) {
 		return state
 	}
 
+	observe := func(event siteAnalyticsEvent) {
+		defer budget.Record(time.Now())
+		domain := a.resolveAnalyticsDomain(event.Domain, resolutions)
+		if domain == "" && event.SecurityCategory == mailguard.RegistrationMailAbuse {
+			var ownerDomain string
+			adapterContext, cancel := context.WithTimeout(context.Background(), time.Second)
+			ownerErr := a.withServerControlDatabaseRead(adapterContext, "registration-abuse-owner", func(database *sql.DB) error {
+				ownerDomain, _ = (hostingandsupport.Store{DB: database}).OwnerDomain(adapterContext)
+				return nil
+			})
+			cancel()
+			if ownerErr == nil && ownerDomain != "" {
+				domain = a.resolveAnalyticsDomain(ownerDomain, resolutions)
+			}
+		}
+		if domain == "" {
+			return
+		}
+		state := load(domain)
+		if state == nil {
+			return
+		}
+		address := clientIPAddress(&http.Request{RemoteAddr: event.RemoteAddress, Header: http.Header{"Forwarded": []string{event.Forwarded}, "X-Forwarded-For": []string{event.ForwardedFor}}})
+		country, city := "", ""
+		latitude, longitude := 0.0, 0.0
+		geoKnown := false
+		if a.geoIP != nil && address != "" {
+			boundary, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			if location, found := a.geoIP.Lookup(boundary, address); found {
+				country = location.CountryCode
+				city = location.City
+				latitude, longitude, geoKnown = location.Latitude, location.Longitude, true
+			}
+			cancel()
+		}
+		observation := browserstats.RequestObservation{Time: event.OccurredAt, IP: address, Path: event.Path, Query: event.Query, Method: event.Method, Status: event.StatusCode, Bytes: event.Bytes, Agent: event.UserAgent, Language: analyticsLanguageLabel(event.AcceptLanguage), Country: country, City: city, Blocked: event.SecurityBlocked, AlreadyBlocked: event.SecurityAlreadyBlocked, ServerLoadHigh: sitebrushSecurityLoadWasHigh(hostLoadHistory, event.OccurredAt), Trusted: event.TrustedPeer, IndexingCrawler: event.IndexingCrawler}
+		observation.Latitude, observation.Longitude, observation.GeoKnown = latitude, longitude, geoKnown
+		observation.ConfirmedCategory = event.SecurityCategory
+		category := state.Record(observation)
+		if category != "" && a.attackGuard != nil {
+			description := securityIncidentDescription(category, event.Path, event.StatusCode)
+			block, alreadyBlocked := a.attackGuard.CheckSite(domain, address, event.OccurredAt)
+			blocked := alreadyBlocked
+			if !alreadyBlocked {
+				block, blocked = a.attackGuard.ObserveSiteIncident(domain, address, category, description, event.OccurredAt)
+			}
+			if blocked && !alreadyBlocked && a.securityGlobalSignals != nil && securityBlockReasonFirstObservation(block, category, description) {
+				settings, settingsErr := a.attackGuard.Settings()
+				if settingsErr == nil && settings.GlobalSync {
+					signal := securitysync.Signal{IP: address, Category: category, Description: description, ObservedAt: event.OccurredAt}
+					select {
+					case a.securityGlobalSignals <- signal:
+					default:
+					}
+				}
+			}
+		}
+		state.Limit(1 << 20)
+		dirty[domain] = true
+	}
+
 	for {
+		budget.Wait(stop)
 		select {
 		case <-stop:
 			grace := make(chan struct{})
@@ -5714,63 +5787,7 @@ func (a *App) runSecurityAnalytics(stop <-chan struct{}) {
 				hostLoadHistory = append([]sitebrushSecurityHostLoad(nil), hostLoadHistory[len(hostLoadHistory)-12:]...)
 			}
 		case event := <-a.securityAnalytics:
-			domain := a.resolveAnalyticsDomain(event.Domain, resolutions)
-			if domain == "" && event.SecurityCategory == mailguard.RegistrationMailAbuse {
-				var ownerDomain string
-				adapterContext, cancel := context.WithTimeout(context.Background(), time.Second)
-				ownerErr := a.withServerControlDatabaseRead(adapterContext, "registration-abuse-owner", func(database *sql.DB) error {
-					ownerDomain, _ = (hostingandsupport.Store{DB: database}).OwnerDomain(adapterContext)
-					return nil
-				})
-				cancel()
-				if ownerErr == nil && ownerDomain != "" {
-					domain = a.resolveAnalyticsDomain(ownerDomain, resolutions)
-				}
-			}
-			if domain == "" {
-				continue
-			}
-			state := load(domain)
-			if state == nil {
-				continue
-			}
-			address := clientIPAddress(&http.Request{RemoteAddr: event.RemoteAddress, Header: http.Header{"Forwarded": []string{event.Forwarded}, "X-Forwarded-For": []string{event.ForwardedFor}}})
-			country, city := "", ""
-			latitude, longitude := 0.0, 0.0
-			geoKnown := false
-			if a.geoIP != nil && address != "" {
-				boundary, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-				if location, found := a.geoIP.Lookup(boundary, address); found {
-					country = location.CountryCode
-					city = location.City
-					latitude, longitude, geoKnown = location.Latitude, location.Longitude, true
-				}
-				cancel()
-			}
-			observation := browserstats.RequestObservation{Time: event.OccurredAt, IP: address, Path: event.Path, Query: event.Query, Method: event.Method, Status: event.StatusCode, Bytes: event.Bytes, Agent: event.UserAgent, Language: analyticsLanguageLabel(event.AcceptLanguage), Country: country, City: city, Blocked: event.SecurityBlocked, AlreadyBlocked: event.SecurityAlreadyBlocked, ServerLoadHigh: sitebrushSecurityLoadWasHigh(hostLoadHistory, event.OccurredAt), Trusted: event.TrustedPeer, IndexingCrawler: event.IndexingCrawler}
-			observation.Latitude, observation.Longitude, observation.GeoKnown = latitude, longitude, geoKnown
-			observation.ConfirmedCategory = event.SecurityCategory
-			category := state.Record(observation)
-			if category != "" && a.attackGuard != nil {
-				description := securityIncidentDescription(category, event.Path, event.StatusCode)
-				block, alreadyBlocked := a.attackGuard.CheckSite(domain, address, event.OccurredAt)
-				blocked := alreadyBlocked
-				if !alreadyBlocked {
-					block, blocked = a.attackGuard.ObserveSiteIncident(domain, address, category, description, event.OccurredAt)
-				}
-				if blocked && !alreadyBlocked && a.securityGlobalSignals != nil && securityBlockReasonFirstObservation(block, category, description) {
-					settings, settingsErr := a.attackGuard.Settings()
-					if settingsErr == nil && settings.GlobalSync {
-						signal := securitysync.Signal{IP: address, Category: category, Description: description, ObservedAt: event.OccurredAt}
-						select {
-						case a.securityGlobalSignals <- signal:
-						default:
-						}
-					}
-				}
-			}
-			state.Limit(1 << 20)
-			dirty[domain] = true
+			observe(event)
 		case <-ticker.C:
 			if len(a.securityAnalytics) > cap(a.securityAnalytics)/4 {
 				continue
@@ -9306,48 +9323,76 @@ type publicSecurityObservation struct {
 // to this bounded owner after the response, so persistence cannot hold a file.
 func (a *App) startPublicSecurityObservations(stop <-chan struct{}) {
 	a.publicSecurityEvents = make(chan publicSecurityObservation, 4096)
-	a.publicSecurityLosses = make(chan struct{}, 4096)
+	a.publicSecurityLosses = make(chan struct{}, 1)
 	go func() {
 		var dropped uint64
 		var reported uint64
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
-		for {
+		var budget workbudget.Budget
+		for budget.Wait(stop) {
 			select {
 			case <-stop:
 				return
 			case <-a.publicSecurityLosses:
+				started := time.Now()
 				dropped++
+				budget.Record(started)
 			case <-ticker.C:
 				if dropped != reported {
 					log.Printf("PUBLIC security observations dropped_at_least=%d", dropped)
 					reported = dropped
 				}
 			case event := <-a.publicSecurityEvents:
-				if a.attackGuard != nil {
-					category := browserstats.ProbeCategory(event.path, event.query)
-					if !immediateSecurityCategory(category) {
-						category = ""
-					}
-					description := ""
-					if category != "" {
-						description = securityIncidentDescription(category, event.path, event.status)
-					}
-					if _, err := a.attackGuard.Decide(httpsecurity.AttackRequest{Domain: event.domain, IP: event.ip, Path: event.path, Method: event.method, StatusCode: event.status, Category: category, Description: description, Trusted: event.crawlerRead, PolicyTrust: true, Now: event.at}, stop); err != nil {
-						dropped++
-					}
-				}
-				if a.throttleGuard != nil && !event.throttleActive {
-					if _, err := a.throttleGuard.Decide(httpsecurity.ThrottleRequest{IP: event.ip, Exempt: event.crawlerRead, Now: event.at}, stop); err != nil {
-						dropped++
-					}
-				}
+				started := time.Now()
+				a.observePublicSecurity(event, stop)
+				budget.Record(started)
 			}
 		}
 	}()
 }
 
+func (a *App) observePublicSecurity(event publicSecurityObservation, stop <-chan struct{}) {
+	if a.attackGuard != nil {
+		category := browserstats.ProbeCategory(event.path, event.query)
+		if !immediateSecurityCategory(category) {
+			category = ""
+		}
+		description := ""
+		if category != "" {
+			description = securityIncidentDescription(category, event.path, event.status)
+		}
+		if _, err := a.attackGuard.Decide(httpsecurity.AttackRequest{Domain: event.domain, IP: event.ip, Path: event.path, Method: event.method, StatusCode: event.status, Category: category, Description: description, Trusted: event.crawlerRead, PolicyTrust: true, Now: event.at}, stop); err != nil {
+			select {
+			case a.publicSecurityLosses <- struct{}{}:
+			default:
+			}
+		}
+	}
+	if a.throttleGuard != nil && !event.throttleActive {
+		if _, err := a.throttleGuard.Decide(httpsecurity.ThrottleRequest{IP: event.ip, Exempt: event.crawlerRead, Now: event.at}, stop); err != nil {
+			select {
+			case a.publicSecurityLosses <- struct{}{}:
+			default:
+			}
+		}
+	}
+}
+
 func (a *App) enqueuePublicSecurityObservation(event publicSecurityObservation) {
+	if len(a.publicSecurityEvents) >= cap(a.publicSecurityEvents) {
+		select {
+		case a.publicSecurityLosses <- struct{}{}:
+		default:
+		}
+		return
+	}
+	event.domain = analyticsBoundedString(event.domain, 253)
+	event.ip = analyticsBoundedString(event.ip, 64)
+	event.path = analyticsBoundedString(event.path, 512)
+	event.query = analyticsBoundedString(event.query, 2048)
+	event.method = analyticsBoundedString(event.method, 16)
+
 	select {
 	case a.publicSecurityEvents <- event:
 	default:
@@ -9402,11 +9447,7 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 		}
 		if a.publicBoundary && a.publicSecurityEvents != nil && publicOrdinaryRequest(r) && decision.Found && !decision.PrivateTestDrive && !trusted {
 			if a.attackGuard != nil {
-				block, blocked, available := a.attackGuard.CheckSiteAvailable(domain, clientIP, now)
-				if !available {
-					serveSecurityUnavailable(w)
-					return
-				}
+				block, blocked, _ := a.attackGuard.CheckSiteAvailable(domain, clientIP, now)
 				if blocked {
 					w.Header().Set("Content-Type", "text/html; charset=utf-8")
 					w.Header().Set("Cache-Control", "no-store")
@@ -9420,11 +9461,7 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 			}
 			throttleActive := false
 			if a.throttleGuard != nil {
-				throttle, available := a.throttleGuard.CheckFast(clientIP, now)
-				if !available {
-					serveSecurityUnavailable(w)
-					return
-				}
+				throttle, _ := a.throttleGuard.CheckFast(clientIP, now)
 				throttleActive = throttle.Active
 				if throttle.RateLimited {
 					w.Header().Set("Retry-After", "1")
@@ -21613,10 +21650,17 @@ func (a *App) withStagedDemoContent(ctx context.Context, domain string, limitByt
 		return err
 	}
 	defer stagedDB.Close()
-	staged := &App{db: stagedDB, storagePath: realRoot, storageRealRoot: realRoot, dbPath: databasePath, grabTracker: a.grabTracker, debug: a.debug}
+	staged := &App{db: stagedDB, controlDatabase: a.controlDatabase, storagePath: realRoot, storageRealRoot: realRoot, dbPath: databasePath, grabTracker: a.grabTracker, debug: a.debug}
 	domainContext := contextWithDomain(ctx, domain)
 	if err = staged.migrate(domainContext); err != nil {
 		return err
+	}
+	// Production staging uses the existing control participant. Legacy imports
+	// without that contact own an isolated schema and prepare it before reads.
+	if staged.controlDatabase == nil {
+		if err = hostingandsupport.Migrate(domainContext, stagedDB); err != nil {
+			return err
+		}
 	}
 	if err = staged.initializeRegistrationQuota(domainContext, domain, limitBytes); err != nil {
 		return err
@@ -61088,7 +61132,7 @@ func (a *App) publicLoadTrusted(r *http.Request, decision publicsite.Decision) b
 	if decision.AdminAllowed || decision.LoadTrusted || httpsecurity.IsLocalRequest(r) {
 		return true
 	}
-	return a.attackGuard != nil && a.attackGuard.IsAllowed(accountClientIP(r))
+	return a.attackGuard != nil && a.attackGuard.IsAllowedFast(accountClientIP(r))
 }
 func (a *App) notifyPublicPolicy(action, domain string) error {
 	return a.notifyPublicPolicyWithPreference(action, domain, nil)

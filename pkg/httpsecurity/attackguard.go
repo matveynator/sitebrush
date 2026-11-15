@@ -130,6 +130,7 @@ type attackGuardRequest struct {
 	Reply       chan attackGuardResult `json:"-"`
 	Queued      time.Time              `json:"-"`
 	Done        <-chan struct{}        `json:"-"`
+	WaitLimit   time.Duration          `json:"-"`
 }
 
 type attackGuardResult struct {
@@ -846,12 +847,12 @@ func (guard *AttackGuard) Check(ip string, now time.Time) (SecurityBlock, bool) 
 }
 
 func (guard *AttackGuard) CheckSite(domain, ip string, now time.Time) (SecurityBlock, bool) {
-	block, blocked, _ := guard.CheckSiteAvailable(domain, ip, now)
-	return block, blocked
+	result, ok := guard.exchangeFast(attackGuardRequest{Operation: attackGuardCheck, Domain: normalizeSecurityDomain(domain), IP: ip, Now: now})
+	return result.Block, ok && result.Blocked
 }
 
 func (guard *AttackGuard) CheckSiteAvailable(domain, ip string, now time.Time) (SecurityBlock, bool, bool) {
-	result, ok := guard.exchangeFast(attackGuardRequest{Operation: attackGuardCheck, Domain: normalizeSecurityDomain(domain), IP: ip, Now: now})
+	result, ok := guard.exchangeFast(attackGuardRequest{Operation: attackGuardCheck, Domain: normalizeSecurityDomain(domain), IP: ip, Now: now, WaitLimit: time.Millisecond})
 	return result.Block, result.Blocked, ok
 }
 
@@ -1011,6 +1012,12 @@ func (guard *AttackGuard) ApplyGlobal(ip, reason, description string, lastEvent,
 		guard.signalSave()
 	}
 	return result.Err
+}
+
+// IsAllowedFast keeps optional public admission independent of admin traffic.
+func (guard *AttackGuard) IsAllowedFast(ip string) bool {
+	result, ok := guard.exchangeFast(attackGuardRequest{Operation: attackGuardAllowCheck, IP: ip, Now: time.Now().UTC(), WaitLimit: time.Millisecond})
+	return ok && result.Allowed
 }
 
 func (guard *AttackGuard) IsAllowed(ip string) bool {
@@ -1188,7 +1195,15 @@ func (guard *AttackGuard) exchangeFast(request attackGuardRequest) (attackGuardR
 	default:
 		return attackGuardResult{}, false
 	}
+	var deadline <-chan time.Time
+	if request.WaitLimit > 0 {
+		timer := time.NewTimer(request.WaitLimit)
+		defer timer.Stop()
+		deadline = timer.C
+	}
 	select {
+	case <-deadline:
+		return attackGuardResult{}, false
 	case <-request.Done:
 		return attackGuardResult{}, false
 	case <-guard.done:

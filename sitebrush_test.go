@@ -1388,6 +1388,43 @@ func TestGuestPublishedStaticRouteDoesNotWaitForControlDatabaseWriter(t *testing
 	}
 }
 
+func TestPublicStaticDeliverySurvivesUnavailableObservationGuards(t *testing.T) {
+	attack, err := httpsecurity.NewAttackGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	throttle, err := httpsecurity.NewThrottleGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	attack.Close()
+	throttle.Close()
+	application := &App{publicBoundary: true, attackGuard: attack, throttleGuard: throttle, publicSecurityEvents: make(chan publicSecurityObservation, 1)}
+	request := httptest.NewRequest(http.MethodGet, "https://fast.example/", nil)
+	request.RemoteAddr = "203.0.113.8:12345"
+	request = withPublicRequestDecision(request, publicsite.Decision{Domain: "fast.example", Found: true})
+	handler := application.authAbuseMiddleware(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = io.WriteString(writer, "published")
+	}))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Body.String() != "published" {
+		t.Fatalf("unavailable observations blocked static delivery: %d %q", response.Code, response.Body.String())
+	}
+}
+
+func TestPublicSecurityObservationBoundsRetainedRequest(t *testing.T) {
+	application := &App{publicSecurityEvents: make(chan publicSecurityObservation, 1)}
+	application.enqueuePublicSecurityObservation(publicSecurityObservation{
+		domain: strings.Repeat("d", 1000), ip: strings.Repeat("i", 1000),
+		path: strings.Repeat("p", 10000), query: strings.Repeat("q", 10000), method: strings.Repeat("m", 1000),
+	})
+	event := <-application.publicSecurityEvents
+	if len(event.domain) > 253 || len(event.ip) > 64 || len(event.path) > 512 || len(event.query) > 2048 || len(event.method) > 16 {
+		t.Fatal("observation queue retained an oversized request")
+	}
+}
+
 func TestPublicStaticSecurityObservesAfterResponseAndDropsWhenFull(t *testing.T) {
 	guard, err := httpsecurity.NewAttackGuard("")
 	if err != nil {
