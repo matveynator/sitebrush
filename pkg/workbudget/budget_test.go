@@ -7,9 +7,10 @@ import (
 
 func TestBudgetRepaysWorkBeforeAcceptingMore(t *testing.T) {
 	var budget Budget
-	started := time.Now().Add(-time.Millisecond)
+	recordedAt := time.Now()
+	started := recordedAt.Add(-time.Millisecond)
 	budget.Record(started)
-	if time.Until(budget.next) < 90*time.Millisecond {
+	if budget.next.Before(recordedAt.Add(99 * time.Millisecond)) {
 		t.Fatal("background work did not reserve its idle interval")
 	}
 	previous := budget.next

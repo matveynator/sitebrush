@@ -19799,6 +19799,9 @@ func (a *App) serverHostBoundary(w http.ResponseWriter, r *http.Request) bool {
 	}
 	ownerDomain := ""
 	if a.publicBoundary {
+		if a.publicCatalog == nil {
+			return false
+		}
 		// The owner publishes this identity with the site policy; the public
 		// boundary cannot consult the control database for hostname routing.
 		decision := a.publicCatalog.LookupRequest(publicsite.Lookup{Host: parentDomain}, r.Context().Done())

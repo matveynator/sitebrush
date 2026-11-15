@@ -10,7 +10,7 @@ type Budget struct {
 	next time.Time
 }
 
-// Record gives each worker at most one percent of sustained wall time. The
+// Record reserves 99 units of idle time per unit of measured work. The
 // public observer and four analytics workers together target five percent
 // of one CPU; request admission and runtime overhead still need measurement.
 func (budget *Budget) Record(started time.Time) {

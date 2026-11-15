@@ -14391,6 +14391,19 @@ func TestServerReservedSubdomainsAndWWWRedirect(t *testing.T) {
 	publicBoundary := &App{storagePath: application.storagePath, storageRealRoot: application.storageRealRoot, publicBoundary: true}
 	boundaryRequest := httptest.NewRequest(http.MethodGet, "http://www.sitebrush.com/private", nil)
 	boundaryResponse := httptest.NewRecorder()
+	if publicBoundary.serverHostBoundary(boundaryResponse, boundaryRequest) {
+		t.Fatal("public boundary redirected without an owner-issued catalog")
+	}
+	stopCatalog := make(chan struct{})
+	defer close(stopCatalog)
+	if err := publicsite.Write(application.storagePath, publicsite.Policy{Domain: "sitebrush.com", ServerOwner: true}); err != nil {
+		t.Fatal(err)
+	}
+	publicBoundary.publicCatalog = publicsite.NewCatalog(application.storagePath, stopCatalog)
+	if err := publicBoundary.publicCatalog.SetMemory(true); err != nil {
+		t.Fatal(err)
+	}
+	boundaryResponse = httptest.NewRecorder()
 	if !publicBoundary.serverHostBoundary(boundaryResponse, boundaryRequest) || boundaryResponse.Header().Get("Location") != "http://sitebrush.com/private" {
 		t.Fatalf("public boundary did not redirect www: %d %s", boundaryResponse.Code, boundaryResponse.Header().Get("Location"))
 	}
