@@ -24478,15 +24478,24 @@ func (a *App) publicTrialSiteWS(w http.ResponseWriter, r *http.Request) {
 func (a *App) publicTrialAllowed(r *http.Request) bool {
 	availability := a.publicTrialAvailabilityForRequest(r.Context())
 	if !availability.Enabled {
+		log.Printf("public trial denied host=%s reason=%s wildcard=%s external_ip=%s", r.Host, availability.ReasonKey, availability.WildcardDomain, availability.ExternalIP)
 		return false
 	}
 	requestDomain := normalizeDomainName(a.siteDomain(r.Context(), r))
 	ownerDomain := ""
-	_ = a.withServerControlDatabaseRead(r.Context(), "public-trial-allowed", func(database *sql.DB) error {
+	err := a.withServerControlDatabaseRead(r.Context(), "public-trial-allowed", func(database *sql.DB) error {
 		ownerDomain, _ = (hostingandsupport.Store{DB: database}).OwnerDomain(r.Context())
 		return nil
 	})
-	return requestDomain != "" && requestDomain == normalizeDomainName(ownerDomain)
+	if err != nil {
+		log.Printf("public trial denied host=%s reason=owner_domain_read error=%v", r.Host, err)
+		return false
+	}
+	allowed := requestDomain != "" && requestDomain == normalizeDomainName(ownerDomain)
+	if !allowed {
+		log.Printf("public trial denied host=%s reason=owner_domain_mismatch request_domain=%s owner_domain=%s", r.Host, requestDomain, ownerDomain)
+	}
+	return allowed
 }
 
 func (a *App) publicTrialAdmissionLimits(ctx context.Context) publicTrialAdmissionLimits {
@@ -24640,6 +24649,7 @@ func (a *App) publicTrialAvailabilityForRequest(ctx context.Context) publicTrial
 		return nil
 	})
 	if err != nil {
+		log.Printf("public trial availability failed: read registration settings: %v", err)
 		return publicTrialAvailability{ReasonKey: "public_trial_disabled_owner_domain"}
 	}
 	return a.publicTrialAvailabilityForSettings(ctx, ownerDomain, automaticRegistrationEnabled, publicTrialEnabled)
