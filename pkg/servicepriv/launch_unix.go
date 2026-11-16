@@ -19,8 +19,8 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/systeminit"
 )
 
-// Launch owns only startup privileges and process lifetime. The worker owns
-// all HTTP handling, databases, and update state.
+// Launch owns startup privileges, storage permission repair, and process
+// lifetime. The worker owns HTTP handling, databases, and update state.
 func Launch(arguments []string, storagePath string, httpPort int, tlsEnabled bool) error {
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("service startup needs root to prepare ports and drop privileges")
@@ -79,6 +79,9 @@ func Launch(arguments []string, storagePath string, httpPort int, tlsEnabled boo
 	if err := command.Start(); err != nil {
 		return fmt.Errorf("start unprivileged service: %w", err)
 	}
+	repairSession := make(chan struct{})
+	defer close(repairSession)
+	go repairServiceStorage(storagePath, account.Uid, account.Gid, repairSession)
 	for _, file := range files {
 		_ = file.Close()
 	}
