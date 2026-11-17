@@ -3,6 +3,7 @@ module github.com/matveynator/sitebrush/v2
 go 1.27.4
 
 require (
+	github.com/google/pprof v0.0.0-20250317173921-a4b03ec1a45e
 	github.com/gen2brain/vpx v0.2.1
 	github.com/go-webauthn/webauthn v0.17.4
 	github.com/jackc/pgx/v5 v5.9.2

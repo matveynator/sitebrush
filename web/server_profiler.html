@@ -1,0 +1,12 @@
+{{define "server-profiler"}}
+<section class="profiler-panel card p-4 my-4" id="server-profiler" data-profiler data-csrf="{{.AccountCSRF}}">
+ <div class="profiler-heading"><div><h2>Профилировщик Go</h2><p>Запись по кнопке · история до 10 минут · временные данные до 64 МиБ</p></div><button type="button" data-profiler-expand>Развернуть</button></div>
+ <div class="profiler-toolbar"><button type="button" data-profiler-start>● Записать 30 секунд</button><button type="button" data-profiler-cancel>Остановить</button><select data-profiler-role aria-label="Процесс"><option value="public">Публичный сервер</option><option value="application">Основное приложение</option></select><select data-profiler-history aria-label="Запись"></select><button type="button" data-profiler-delete>Удалить запись</button></div>
+ <p data-profiler-status role="status"></p><p class="text-danger" data-profiler-error role="alert"></p>
+ <div class="profiler-toolbar" data-profiler-tabs><button type="button" data-view="functions">Функции CPU</button><button type="button" data-view="graph">Граф вызовов</button><button type="button" data-view="memory">Память</button><button type="button" data-view="stages">Задержки запросов</button><button type="button" data-view="goroutines">Goroutine</button></div>
+ <p data-profiler-summary></p><label>Поиск функции <input type="search" data-profiler-search></label>
+ <div data-profiler-content class="profiler-content"></div><div class="profiler-toolbar"><button type="button" data-profiler-back>Назад</button><span data-profiler-page></span><button type="button" data-profiler-next>Далее</button></div>
+ <p class="small text-muted">CPU показывает работу процессора. Ожидание сети, диска и каналов смотрите отдельно в задержках и состояниях goroutine. Доли функций с учётом вызовов нельзя складывать.</p>
+</section>
+<link rel="stylesheet" href="/p/static/server_profiler.css"><script defer src="/p/static/server_profiler.js"></script>
+{{end}}
