@@ -4,7 +4,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../../web/static/server_profiler.js'), 'utf8');
 
-function fixture() {
+function fixture(options = {}) {
   class Element {
     constructor(tag) {
       this.tagName = tag;
@@ -20,6 +20,8 @@ function fixture() {
     appendChild(child) {this.children.push(child);}
     setAttribute(name, content) {this.attributes[name] = content;}
     addEventListener(name, callback) {this[name + 'Callback'] = callback;}
+    focus() {this.focused = true;}
+    select() {this.selectedText = true;}
     showModal() {this.open = true;}
     close() {this.open = false; if (this.closeCallback) this.closeCallback();}
   }
@@ -37,6 +39,7 @@ function fixture() {
   const handlers = new Map();
   const timers = new Map();
   const sockets = [];
+  const copied = [];
   let timerID = 0;
   const window = {
     addEventListener: (name, callback) => handlers.set(name, callback),
@@ -51,14 +54,17 @@ function fixture() {
       const command = JSON.parse(encoded);
       this.commands.push(command);
       const report = {
-        id: 'fresh-' + command.role, finished: new Date().toISOString(), cpu: 100, heap: 200, gc: 0, matches: 2,
+        runID: 'fixture-run', pid: command.role === 'public' ? 202 : 101, user:'fixture', system:'openbsd', architecture:'amd64', version:'test', started:new Date().toISOString(), network:{requests:command.role === 'public' ? 20 : 9}, id: 'fresh-' + command.role, finished: new Date().toISOString(), cpu: 100, heap: 200, gc: 0, matches: 2,
         functions: [
           {id: 1, name: 'main.handle', file: 'sitebrush.go', line: 10, kind: 'application', self: 20, total: 100, samples: 10},
           {id: 2, name: 'runtime.work', file: 'runtime.go', line: 20, kind: 'runtime', self: 80, total: 80, samples: 8}
         ],
         groups: [{kind: 'application', self: 20}, {kind: 'runtime', self: 80}]
       };
-      const response = {role: command.role, busy: false, reports: [report]};
+      const response = {protocol:1, role: command.role, runID: command.runID || 'fixture-run', busy: false, reports: [report]};
+      if (command.action === 'capabilities') response.targets = options.targets || ['application', 'public'];
+      if (command.action === 'export') response.text = 'Report for ' + command.role;
+      if (options.publicUnavailable && command.role === 'public') {response.error = 'Public contact unavailable'; response.reports = [];}
       if (command.action === 'report') {
         if (command.view === 'function') {
           report.detail = {
@@ -76,6 +82,7 @@ function fixture() {
   vm.runInNewContext(source, {
     window, WebSocket: Socket, location: {protocol: 'https:', host: 'owner.example'},
     document: {querySelector: () => root, createElement: tag => new Element(tag)},
+    navigator: {clipboard: {writeText: async text => {if(options.copyDenied)throw new Error('Denied');copied.push(text);}}},
     console
   });
   async function settle() {
@@ -91,7 +98,7 @@ function fixture() {
   function findButton(caption) {
     return descendants(element('[data-profiler-content]')).find(node => node.tagName === 'button' && node.textContent.includes(caption));
   }
-  return {nodes, handlers, timers, sockets, settle, tabs, findButton};
+  return {nodes, handlers, timers, sockets, settle, tabs, findButton, copied, descendants};
 }
 
 (async function testRestoration() {
@@ -125,6 +132,8 @@ function fixture() {
   }
   const tablePanel = fixture();
   await tablePanel.settle();
+  tablePanel.nodes.get('[data-profiler-details]').toggleCallback({target:{open:true}});
+  await tablePanel.settle();
   tablePanel.findButton('Собственное CPU').onclick();
   await tablePanel.settle();
   let reports = tablePanel.sockets.flatMap(socket => socket.commands).filter(command => command.action === 'report');
@@ -146,5 +155,32 @@ function fixture() {
   tablePanel.nodes.get('[data-profiler-close]').onclick();
   await new Promise(resolve => setImmediate(resolve));
   assert.ok(tablePanel.sockets.every(socket => socket.readyState === 3), 'Expanded details retain no viewing contacts after close');
-  console.log('Profiler dashboard lifecycle and function navigation scenarios passed');
+  for (const copyDenied of [false,true]) {
+    const single = fixture({targets:['application'],copyDenied});
+    await single.settle();
+    assert.ok(single.sockets.flatMap(socket=>socket.commands).every(command=>command.role==='application'),'Single-process mode never contacts an absent public process');
+    assert.equal(single.nodes.get('[data-profiler-copy]').disabled,false,'Whole-measurement text is prepared independently of detail views');
+    await single.nodes.get('[data-profiler-copy]').onclick();
+    if(copyDenied) {
+      assert.equal(single.nodes.get('[data-profiler-copy-fallback]').hidden,false);
+      assert.equal(single.nodes.get('[data-profiler-copy-text]').selectedText,true);
+    } else {
+      assert.ok(single.copied[0].includes('Report for application'));
+      assert.ok(single.copied[0].includes('найти узкие места'));
+    }
+    single.nodes.get('[data-profiler-close]').onclick();
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(single.nodes.get('[data-profiler-copy-text]').value,'','Closing discards prepared report text');
+  }
+  const split = fixture();
+  await split.settle();
+  await split.nodes.get('[data-profiler-copy]').onclick();
+  assert.ok(split.copied[0].includes('Report for public')&&split.copied[0].includes('Report for application'),'Export contains both source reports');
+  assert.ok(split.copied[0].includes('CPU 0.00 мс'),'Report contains an aggregate CPU summary');
+  assert.ok(split.copied[0].includes('Внешних HTTP-запросов: 20.'),'External request counts are not added to internal requests');
+  const partial = fixture({publicUnavailable:true});
+  await partial.settle();
+  await partial.nodes.get('[data-profiler-copy]').onclick();
+  assert.ok(partial.copied[0].includes('Данные отсутствуют: Public contact unavailable'),'Expected unreachable process remains an explicit partial report');
+  console.log('Profiler dashboard lifecycle, overview, export and function navigation scenarios passed');
 })().catch(error => {console.error(error); process.exitCode = 1;});

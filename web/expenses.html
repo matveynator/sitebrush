@@ -16,6 +16,7 @@
 </head>
 <body class="technical-page bg-body expenses-page">
 <main class="container billing-page">
+{{if .ShowProfiler}}{{template "server-profiler" .}}{{end}}
 <script type="application/json" id="mail-journal-labels">{{.MailJournalLabelsJSON}}</script>
 <div data-mail-settings data-mode="statistics" data-csrf="{{.AccountCSRF}}" data-language="{{.LanguageCode}}"></div>
 <p class="small" data-mail-feedback role="status"></p>
@@ -2107,7 +2108,6 @@
   {{end}}
 
   {{end}}
-{{if .ShowProfiler}}{{template "server-profiler" .}}{{end}}
 </main>
 <div class="modal fade" id="demoRefreshModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg demo-refresh-modal-dialog"><div class="modal-content">

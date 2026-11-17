@@ -99,3 +99,12 @@
  .profiler-summary { gap:10px 16px; }
  .profiler-content { max-height:50vh; }
 }
+
+.profiler-overview { margin:16px 0; overflow:auto; }
+.profiler-overview>p { padding:10px 12px; background:#eef5e9; border-left:3px solid #7e9e6a; color:#37532c; }
+.profiler-overview table { width:100%; border-collapse:collapse; font-size:12px; }
+.profiler-overview td,.profiler-overview th { padding:8px; text-align:left; border:1px solid #d9e1e8; }
+.profiler-overview th { background:#dce5ed; }
+.profiler-explanation { color:#657887; font-size:12px; }
+#server-profiler-dialog details>summary { padding:12px; cursor:pointer; background:#eaf0f5; border:1px solid #cad5de; color:#34536b; }
+#server-profiler-dialog [data-profiler-copy-text] { width:100%; background:#fff; color:#25313d; font:12px/1.5 monospace; }

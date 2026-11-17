@@ -221,6 +221,7 @@ func (front *Front) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			defer uploadstream.ClearReadDeadline(w)
 		}
 	}
+	r = r.WithContext(context.WithValue(r.Context(), proxyServerHeaderKey{}, w.Header().Get("Server")))
 	target := &url.URL{Scheme: "http", Host: state.Address}
 	r = r.WithContext(context.WithValue(r.Context(), proxyTargetKey{}, target))
 	started = requesttiming.Start(r)
@@ -237,6 +238,7 @@ func installationHost(host string) bool {
 }
 
 type proxyTargetKey struct{}
+type proxyServerHeaderKey struct{}
 
 // net/http owns transport synchronization. The selected address still comes
 // exclusively from the Front.State owner and remains local to this request.
@@ -270,6 +272,14 @@ func newProxy(front *Front) *httputil.ReverseProxy {
 			scheme = "https"
 		}
 		request.Out.Header.Set(SchemeHeader, scheme)
+	}, ModifyResponse: func(response *http.Response) error {
+		response.Header.Del("Server")
+		if response.Request != nil {
+			if software, _ := response.Request.Context().Value(proxyServerHeaderKey{}).(string); software == "SiteBrush" {
+				response.Header.Set("Server", "SiteBrush")
+			}
+		}
+		return nil
 	}, ErrorHandler: func(writer http.ResponseWriter, request *http.Request, proxyError error) {
 		if !front.public(writer, request, true) {
 			http.Error(writer, "temporarily unavailable", http.StatusServiceUnavailable)
