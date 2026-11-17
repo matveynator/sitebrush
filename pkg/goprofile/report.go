@@ -457,6 +457,30 @@ func collect(directory, role, version string, started time.Time, timings *reques
 	report.Heap = after.HeapAlloc
 	report.GC = after.NumGC - before.NumGC
 	report.Allocated = after.TotalAlloc - before.TotalAlloc
+	// End traffic observations before allocating and decoding diagnostic reports.
+	if timings != nil {
+		if last, snapshotErr := timings.Snapshot(stop); snapshotErr == nil && timingsReady {
+			report.Network = requesttiming.HTTPMetrics{Requests: last.HTTP.Requests - first.HTTP.Requests, Received: last.HTTP.Received - first.HTTP.Received, Sent: last.HTTP.Sent - first.HTTP.Sent, Errors: last.HTTP.Errors - first.HTTP.Errors, WriteErrors: last.HTTP.WriteErrors - first.HTTP.WriteErrors}
+			for index, current := range last.Stages {
+				old := first.Stages[index]
+				count := current.Count - old.Count
+				if count == 0 {
+					continue
+				}
+				delta := current
+				delta.Count = count
+				for bucket := range delta.Buckets {
+					delta.Buckets[bucket] -= old.Buckets[bucket]
+				}
+				report.Stages = append(report.Stages, Stage{Name: current.Stage, Count: count, MeanMS: float64(current.TotalNS-old.TotalNS) / float64(count) / 1e6, P95MS: float64(delta.PercentileUpperBound(95)) / 1e6})
+			}
+			if first.Incomplete || last.Incomplete {
+				report.Truncated = true
+			}
+		} else {
+			report.Truncated = true
+		}
+	}
 	var heap bytes.Buffer
 	heapErr := pprof.Lookup("heap").WriteTo(&limitedWriter{target: &heap, remaining: profileLimit}, 0)
 	report.Goroutines, err = captureGoroutineStates(64 << 10)
@@ -484,29 +508,6 @@ func collect(directory, role, version string, started time.Time, timings *reques
 		}
 	} else {
 		report.Truncated = true
-	}
-	if timings != nil {
-		if last, snapshotErr := timings.Snapshot(stop); snapshotErr == nil && timingsReady {
-			report.Network = requesttiming.HTTPMetrics{Requests: last.HTTP.Requests - first.HTTP.Requests, Received: last.HTTP.Received - first.HTTP.Received, Sent: last.HTTP.Sent - first.HTTP.Sent, Errors: last.HTTP.Errors - first.HTTP.Errors, WriteErrors: last.HTTP.WriteErrors - first.HTTP.WriteErrors}
-			for index, current := range last.Stages {
-				old := first.Stages[index]
-				count := current.Count - old.Count
-				if count == 0 {
-					continue
-				}
-				delta := current
-				delta.Count = count
-				for bucket := range delta.Buckets {
-					delta.Buckets[bucket] -= old.Buckets[bucket]
-				}
-				report.Stages = append(report.Stages, Stage{Name: current.Stage, Count: count, MeanMS: float64(current.TotalNS-old.TotalNS) / float64(count) / 1e6, P95MS: float64(delta.PercentileUpperBound(95)) / 1e6})
-			}
-			if first.Incomplete || last.Incomplete {
-				report.Truncated = true
-			}
-		} else {
-			report.Truncated = true
-		}
 	}
 }
 
