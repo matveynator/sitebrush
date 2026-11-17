@@ -2829,7 +2829,7 @@ func TestHostingAndSupportTemplateRendersServerView(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	parsedTemplate, err := template.New("expenses.html").Parse(string(templateBytes))
+	parsedTemplate, err := parseEmbeddedPageTemplate("expenses.html", templateBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2959,7 +2959,7 @@ func TestExpensesTemplateShowsOnlyLocalServerAndEnabledDemoOutsideSitebrushCom(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	parsedTemplate, err := template.New("expenses.html").Parse(string(templateBytes))
+	parsedTemplate, err := parseEmbeddedPageTemplate("expenses.html", templateBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3191,7 +3191,11 @@ func TestSimplifiedExpensesShowsLocalSiteDeletionControls(t *testing.T) {
 	if !servers[0].Clients[0].Sites[0].CanDelete || servers[1].Clients[0].Sites[0].CanDelete || len(servers[1].Clients[0].Sites[0].AdminAccounts) != 0 {
 		t.Fatal("site deletion controls must belong only to the local installation")
 	}
-	parsedTemplate, err := template.ParseFS(embeddedWebFiles, "web/expenses.html")
+	expensesSource, err := fs.ReadFile(embeddedWebFiles, "web/expenses.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsedTemplate, err := parseEmbeddedPageTemplate("expenses.html", expensesSource)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -15778,7 +15782,7 @@ func TestSimplifiedExpensesShowsTestDriveUnderRegistrationAfterExplicitPermissio
 	if err != nil {
 		t.Fatal(err)
 	}
-	parsedTemplate, err := template.New("expenses.html").Parse(string(templateBytes))
+	parsedTemplate, err := parseEmbeddedPageTemplate("expenses.html", templateBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31478,7 +31482,11 @@ func TestMailMonitorPanelMergedLocalServerAndRemoteScope(t *testing.T) {
 		t.Fatalf("server page must show statistics and a security link: %+v", servers[0])
 	}
 	view["T"] = translationsForLanguageCode("ru")
-	expensesTemplate, err := template.ParseFS(embeddedWebFiles, "web/expenses.html")
+	expensesSource, err := fs.ReadFile(embeddedWebFiles, "web/expenses.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expensesTemplate, err := parseEmbeddedPageTemplate("expenses.html", expensesSource)
 	if err != nil {
 		t.Fatal(err)
 	}

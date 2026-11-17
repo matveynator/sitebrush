@@ -430,12 +430,11 @@ func collect(directory, role, version string, started time.Time, timings *reques
 	} else {
 		report.Truncated = true
 	}
-	var goroutines bytes.Buffer
-	if err := pprof.Lookup("goroutine").WriteTo(&limitedWriter{target: &goroutines, remaining: 64 << 10}, 1); err != nil {
-		goroutines.WriteString("\n[goroutine output truncated]")
+	report.Goroutines, err = captureGoroutineStates(64 << 10)
+	if err != nil {
 		report.Truncated = true
 	}
-	report.Goroutines = goroutines.String()
+
 	if timings != nil {
 		if last, snapshotErr := timings.Snapshot(stop); snapshotErr == nil && timingsReady {
 			for index, current := range last.Stages {
@@ -570,4 +569,31 @@ func reserveArtifacts(records []artifact, reserved int64) ([]artifact, bool) {
 		removed = true
 	}
 	return records, removed
+}
+
+// Preserve the beginning of a state-bearing stack dump even when one runtime write exceeds the budget.
+type stackPrefixWriter struct {
+	output    io.Writer
+	remaining int64
+}
+
+func (writer *stackPrefixWriter) Write(payload []byte) (int, error) {
+	length := min(int64(len(payload)), writer.remaining)
+	count, err := writer.output.Write(payload[:length])
+	writer.remaining -= int64(count)
+	if err != nil {
+		return count, err
+	}
+	if count < len(payload) {
+		return count, io.ErrShortWrite
+	}
+	return count, nil
+}
+func captureGoroutineStates(limit int64) (string, error) {
+	var output bytes.Buffer
+	err := pprof.Lookup("goroutine").WriteTo(&stackPrefixWriter{output: &output, remaining: limit}, 2)
+	if err != nil {
+		output.WriteString("\n[goroutine output truncated]")
+	}
+	return output.String(), err
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	profile "github.com/google/pprof/profile"
 	"io"
+	"strings"
 	"testing"
 	"time"
 )
@@ -79,5 +80,29 @@ func TestCaptureOwnerRejectsRemoteConfiguration(t *testing.T) {
 	}
 	if state := session.Exchange(Command{Action: "status"}, nil); state.Busy || len(state.Reports) != 0 {
 		t.Fatal("idle profiler started collecting")
+	}
+}
+
+func blockedProfileGoroutine(ready chan<- struct{}, release <-chan struct{}) {
+	close(ready)
+	<-release
+}
+
+func TestGoroutineCaptureIncludesStatesAndBoundedPrefix(t *testing.T) {
+	ready := make(chan struct{})
+	release := make(chan struct{})
+	go blockedProfileGoroutine(ready, release)
+	defer close(release)
+	<-ready
+	dump, err := captureGoroutineStates(1 << 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(dump, "[chan receive]") || !strings.Contains(dump, "blockedProfileGoroutine") {
+		t.Fatal("goroutine states missing from stack dump")
+	}
+	prefix, err := captureGoroutineStates(128)
+	if err == nil || !strings.HasPrefix(prefix, "goroutine ") || !strings.Contains(prefix, "[goroutine output truncated]") || len(prefix) > 128+len("\n[goroutine output truncated]") {
+		t.Fatal("oversized dump lost its bounded prefix", len(prefix), err)
 	}
 }

@@ -2,54 +2,61 @@
  'use strict';
  const root = document.querySelector('[data-profiler]');
  if (!root) return;
- const model = {role:'public',view:'functions',page:0,search:'',selected:'',focus:0,states:{},report:null,more:false,error:'',pending:false,stopped:false,refreshing:false,pollTimer:null,searchTimer:null};
+ const model = {role:'public',view:'functions',page:0,search:'',selected:'',focus:0,states:{},report:null,more:false,error:'',pending:false,stopped:false,refreshing:false,pollTimer:null,searchTimer:null,generation:0,cancelPending:null};
  const sockets = {};
  const queue = [];
  function element(selector) { return root.querySelector(selector); }
  function formatBytes(count) { return ((count || 0)/1048576).toFixed(1)+' МиБ'; }
  function duration(count) { return ((count || 0)/1e6).toFixed(2)+' мс'; }
  function request(role, command) {
-  return new Promise(function enqueue(resolve,reject) {queue.push({role:role,command:command,resolve:resolve,reject:reject});drain();});
+  return new Promise(function enqueue(resolve,reject) {if(model.stopped){reject(new Error("Страница приостановлена"));return;}queue.push({role:role,command:command,resolve:resolve,reject:reject});drain();});
  }
  function drain() {
   if (model.pending || !queue.length || model.stopped) return;
   model.pending=true;
   const job=queue.shift();
   let settled=false;
+  let deadline=null;
+  const generation=model.generation;
   let socket=sockets[job.role];
-  function fail(message) {if(settled)return;settled=true;model.pending=false;job.reject(new Error(message));drain();}
+  function fail(message) {if(settled)return;settled=true;window.clearTimeout(deadline);if(generation===model.generation){model.pending=false;model.cancelPending=null;}job.reject(new Error(message));if(generation===model.generation)drain();}
+  model.cancelPending=function abandonJob(){fail('Связь со страницей приостановлена');};
   function send() {
-   const deadline=window.setTimeout(function closeUnanswered(){socket.close();},10000);
+   if(settled||generation!==model.generation)return;
+   deadline=window.setTimeout(function closeUnanswered(){socket.close();},10000);
    socket.onmessage=function receive(event){
-    window.clearTimeout(deadline);settled=true;socket.onclose=function idleDisconnected(){sockets[job.role]=null;};
+    if(settled||generation!==model.generation)return;
+    window.clearTimeout(deadline);settled=true;model.cancelPending=null;socket.onclose=function idleDisconnected(){if(sockets[job.role]===socket)sockets[job.role]=null;};
     try {const response=JSON.parse(event.data);model.states[job.role]=response;model.pending=false;job.resolve(response);}catch(error){model.pending=false;job.reject(error);}
     drain();
    };
-   socket.onclose=function disconnected(){window.clearTimeout(deadline);sockets[job.role]=null;fail('Связь с профилировщиком прервана');};
+   socket.onclose=function disconnected(){window.clearTimeout(deadline);if(sockets[job.role]===socket)sockets[job.role]=null;fail('Связь с профилировщиком прервана');};
    socket.send(JSON.stringify(Object.assign({},job.command,{role:job.role,csrf:root.dataset.csrf})));
   }
   if (socket && socket.readyState===WebSocket.OPEN) {send();return;}
   socket=new WebSocket((location.protocol==='https:'?'wss:':'ws:')+'//'+location.host+'/?server_profiler_ws');sockets[job.role]=socket;
-  socket.onopen=send;socket.onerror=function connectionError(){model.error='Профилировщик недоступен';render();};socket.onclose=function openingFailed(){sockets[job.role]=null;fail('Не удалось подключиться');};
+  socket.onopen=send;socket.onerror=function connectionError(){if(model.stopped||generation!==model.generation)return;model.error='Профилировщик недоступен';render();};socket.onclose=function openingFailed(){if(sockets[job.role]===socket)sockets[job.role]=null;fail('Не удалось подключиться');};
  }
- function reportError(error){model.error=error.message;render();}
+ function reportError(error){if(model.stopped)return;model.error=error.message;render();}
  function refresh(){
   if(model.stopped||model.refreshing)return;
   model.refreshing=true;window.clearTimeout(model.pollTimer);
+  const generation=model.generation;
   Promise.all(['public','application'].map(function readRole(role){return request(role,{action:'status'});})).then(function updated(){
+   if(model.stopped||generation!==model.generation)return;
    const state=model.states[model.role];
    if(state && state.reports && state.reports.length && !state.reports.some(function matches(report){return report.id===model.selected;})){model.selected=state.reports[0].id;model.page=0;loadReport();}
    if(state && (!state.reports || !state.reports.length)){model.selected='';model.report=null;}
    render();
-  }).catch(reportError).finally(function nextRefresh(){model.refreshing=false;window.clearTimeout(model.pollTimer);if(!model.stopped)model.pollTimer=window.setTimeout(refresh,2000);});
+  }).catch(function failedRefresh(error){if(generation===model.generation)reportError(error);}).finally(function nextRefresh(){if(generation!==model.generation)return;model.refreshing=false;window.clearTimeout(model.pollTimer);if(!model.stopped)model.pollTimer=window.setTimeout(refresh,2000);});
  }
  function loadReport(){
   if(!model.selected){model.report=null;render();return;}
-  const selection=model.selected;const role=model.role;const view=model.view;
+  const selection=model.selected;const role=model.role;const view=model.view;const generation=model.generation;
   request(role,{action:'report',id:selection,view:view,page:model.page,search:model.search}).then(function loaded(response){
-   if(selection!==model.selected||role!==model.role||view!==model.view)return;
+   if(model.stopped||generation!==model.generation||selection!==model.selected||role!==model.role||view!==model.view)return;
    model.report=response.report||null;model.more=response.more;model.error=response.error||'';model.focus=0;render();
-  }).catch(reportError);
+  }).catch(function failedReport(error){if(generation===model.generation)reportError(error);});
  }
  function textCell(row,text){const cell=document.createElement('td');cell.textContent=text;row.appendChild(cell);return cell;}
  function table(headers){const output=document.createElement('table');const heading=document.createElement('tr');headers.forEach(function title(label){const cell=document.createElement('th');cell.textContent=label;heading.appendChild(cell);});output.appendChild(heading);return output;}
@@ -100,6 +107,21 @@
  root.querySelectorAll('[data-view]').forEach(function tab(button){button.onclick=function choose(){model.view=button.dataset.view;model.page=0;loadReport();};});
  element('[data-profiler-next]').onclick=function next(){model.page++;loadReport();};element('[data-profiler-back]').onclick=function previous(){model.page=Math.max(0,model.page-1);loadReport();};
  element('[data-profiler-expand]').onclick=function expand(){root.classList.toggle('profiler-fullscreen');};
- window.addEventListener('pagehide',function disconnected(){model.stopped=true;Object.values(sockets).forEach(function close(socket){if(socket)socket.close();});});
+ function suspendProfiler(){
+  if(model.stopped)return;
+  model.stopped=true;
+  window.clearTimeout(model.pollTimer);window.clearTimeout(model.searchTimer);
+  if(model.cancelPending)model.cancelPending();
+  queue.splice(0).forEach(function abandonQueued(job){job.reject(new Error('Страница приостановлена'));});
+  model.generation++;model.pending=false;model.refreshing=false;model.cancelPending=null;
+  Object.keys(sockets).forEach(function disconnectRole(role){const socket=sockets[role];sockets[role]=null;if(socket)socket.close();});
+ }
+ function resumeProfiler(){
+  if(!model.stopped)return;
+  model.stopped=false;model.error='';model.selected='';model.report=null;model.more=false;model.page=0;
+  refresh();render();
+ }
+ window.addEventListener('pagehide',suspendProfiler);
+ window.addEventListener('pageshow',resumeProfiler);
  refresh();render();
 })();
