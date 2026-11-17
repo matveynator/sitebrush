@@ -87,6 +87,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/domainregistration"
 	"github.com/matveynator/sitebrush/v2/pkg/expenses"
 	"github.com/matveynator/sitebrush/v2/pkg/geoip"
+	"github.com/matveynator/sitebrush/v2/pkg/goprofile"
 	"github.com/matveynator/sitebrush/v2/pkg/hostingandsupport"
 	"github.com/matveynator/sitebrush/v2/pkg/httpsecurity"
 	"github.com/matveynator/sitebrush/v2/pkg/ignite"
@@ -9965,9 +9966,29 @@ type serverRunConfig struct {
 	DesktopMode          bool
 	Debug                bool
 	RequestTimings       bool
+	Profiler             bool
+	ProfilerLogOutput    string
 	UpdateProbation      bool
 	UpdateChild          bool
 	PublicProxy          bool
+}
+
+func startProcessProfiler(config serverRunConfig, role string, stop <-chan struct{}) (*goprofile.Session, error) {
+	if !config.Profiler {
+		return nil, nil
+	}
+	return goprofile.Start(role, CompileVersion, firstNonEmpty(config.ProfilerLogOutput, "console"), stop)
+}
+
+func profilerChildArguments(config serverRunConfig) []string {
+	if !config.Profiler {
+		return nil
+	}
+	arguments := []string{"--profiler"}
+	if config.ProfilerLogOutput != "" && config.ProfilerLogOutput != "console" {
+		arguments = append(arguments, "--logfile", config.ProfilerLogOutput)
+	}
+	return arguments
 }
 
 func printSitebrushUsage(output io.Writer, flagSet *flag.FlagSet) {
@@ -10117,14 +10138,18 @@ func helpWasRequested(args []string) bool {
 }
 
 func printVisibleFlagDefaults(output io.Writer, flagSet *flag.FlagSet) {
-	visibleFlagNames := []string{"cli", "debug", "desktop", "install", "path", "port", "uninstall", "upgrade", "version"}
+	visibleFlagNames := []string{"cli", "debug", "desktop", "install", "path", "port", "uninstall", "upgrade", "version", "profiler"}
 	for _, flagName := range visibleFlagNames {
 		currentFlag := flagSet.Lookup(flagName)
 		if currentFlag == nil {
 			continue
 		}
 		if currentFlag.DefValue == "false" || currentFlag.DefValue == "true" {
-			fmt.Fprintf(output, "  -%s\n    \t%s\n", currentFlag.Name, currentFlag.Usage)
+			flagPrefix := "-"
+			if flagName == "profiler" {
+				flagPrefix = "--"
+			}
+			fmt.Fprintf(output, "  %s%s\n    \t%s\n", flagPrefix, currentFlag.Name, currentFlag.Usage)
 			continue
 		}
 		fmt.Fprintf(output, "  -%s string\n    \t%s (default %q)\n", currentFlag.Name, currentFlag.Usage, currentFlag.DefValue)
@@ -10178,6 +10203,7 @@ func main() {
 	versionMode := flag.Bool("version", false, "print version and exit")
 	debugMode := flag.Bool("debug", false, "enable verbose HTTP and database diagnostic logs")
 	requestTimings := flag.Bool("request-timings", false, "collect asynchronous request stage timings and log counters every 30 seconds")
+	profiler := flag.Bool("profiler", false, "enable local Go pprof; process addresses and curl commands go to the console or --logfile; curl -o saves profiles in the client current directory")
 	legacyStoragePath := flag.String("storage-path", "", "")
 	legacyDBPath := flag.String("db-path", "", "")
 	legacyDBType := flag.String("db-type", "", "")
@@ -10446,10 +10472,16 @@ func main() {
 		}
 		return
 	}
+	profilerLogOutput := "console"
+	if strings.TrimSpace(*logFile) != "" {
+		profilerLogOutput = *logFile
+	} else if os.Getenv("SITEBRUSH_LOG_PIPE") == "1" {
+		profilerLogOutput = filepath.Join(effectiveStoragePath, "storage", "logs", "sitebrush.log")
+	}
 	serverConfig := serverRunConfig{
 		ParsedPorts: parsedPorts, StoragePath: effectiveStoragePath, DBPath: effectiveDBPath,
 		AllowStorageFallback: !storagePathWasProvided && !dbPathWasProvided, PortWasProvided: flagWasProvided("port"),
-		DesktopMode: desktopMode, Debug: *debugMode, RequestTimings: *requestTimings,
+		DesktopMode: desktopMode, Debug: *debugMode, RequestTimings: *requestTimings, Profiler: *profiler, ProfilerLogOutput: profilerLogOutput,
 		UpdateProbation: *updateProbation, UpdateChild: *serverChild, PublicProxy: *publicProxy,
 	}
 	if *serviceWorker {
@@ -10572,6 +10604,11 @@ func logShutdownDone(format string, args ...any) {
 }
 
 func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
+	profilerSession, profilerErr := startProcessProfiler(config, "application", ctx.Done())
+	if profilerErr != nil {
+		return profilerErr
+	}
+	defer profilerSession.Close()
 
 	if !config.UpdateProbation {
 		if err := systeminit.Init(); err != nil {
@@ -58624,6 +58661,7 @@ func runSupervisedSitebrush(ctx context.Context, config serverRunConfig) error {
 		if config.RequestTimings {
 			arguments = append(arguments, "-request-timings")
 		}
+		arguments = append(arguments, profilerChildArguments(config)...)
 		catalog, catalogErr := serverReleaseCatalog(publicKey)
 		if catalogErr != nil {
 			return catalogErr
@@ -58642,6 +58680,7 @@ func runSupervisedSitebrush(ctx context.Context, config serverRunConfig) error {
 	if config.RequestTimings {
 		arguments = append(arguments, "-request-timings")
 	}
+	arguments = append(arguments, profilerChildArguments(config)...)
 	catalog, err := serverReleaseCatalog(publicKey)
 	if err != nil {
 		return err
@@ -61813,7 +61852,7 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 		http.NotFound(w, r)
 		return true
 	}
-	if !paused && decision.Administrator && (decision.Frozen || decision.File.Mode == "page_password" || fileName == "" && decision.Password.Path != "") {
+	if !paused && hasSitebrushSessionCookie(r) && (decision.Frozen || decision.File.Mode == "page_password" || fileName == "" && decision.Password.Path != "") {
 		return false
 	}
 	if _, found := r.Context().Value(publicDecisionContextKey{}).(publicsite.Decision); !found {
@@ -62069,7 +62108,7 @@ func newPublicHTTPFront(application *App, secret string, stop <-chan struct{}) *
 			}
 			return true
 		}
-		if lookup.PrivateTestDrive || !paused && lookup.Administrator && (lookup.Frozen || lookup.File.Mode == "page_password" || !strings.HasPrefix(r.URL.Path, "/p/") && lookup.Password.Path != "") || lookup.File.Mode == "token" {
+		if lookup.PrivateTestDrive || !paused && hasSitebrushSessionCookie(r) && (lookup.Frozen || lookup.File.Mode == "page_password" || !strings.HasPrefix(r.URL.Path, "/p/") && lookup.Password.Path != "") || lookup.File.Mode == "token" {
 			return false
 		}
 		if application.throttleGuard != nil {
@@ -62208,6 +62247,17 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 		return nil, nil, "", err
 	}
 	application := &App{storagePath: storagePath, storageRealRoot: storageRoot, publicBoundary: true}
+	profilerSession, profilerErr := startProcessProfiler(config, "public", ctx.Done())
+	if profilerErr != nil {
+		return nil, nil, "", profilerErr
+	}
+	profilerReady := false
+	defer func() {
+		if !profilerReady {
+			profilerSession.Close()
+		}
+	}()
+
 	application.requestTimings = startRequestTimingCounters(config.RequestTimings, ctx.Done(), "public")
 	application.publicStreamer = publicsite.NewStreamer()
 	application.publicCatalog = publicsite.NewCatalog(storagePath, ctx.Done())
@@ -62347,6 +62397,7 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 		}
 	}
 	closeBoundary := func() {
+		profilerSession.Close()
 		server.Close()
 		if tlsServer != nil {
 			tlsServer.Close()
@@ -62354,6 +62405,7 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 		closeGuards()
 	}
 	log.Printf("PUBLIC SiteBrush HTTP port=%d HTTPS port=%d", front.HTTPPort, front.HTTPSPort)
+	profilerReady = true
 	return front, closeBoundary, secret, nil
 }
 

@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"flag"
 	"fmt"
 	stdhtml "html"
 	"html/template"
@@ -35927,6 +35928,11 @@ func TestAuthenticatedMenuFrontKeepsGuestAndMaintenanceStatic(t *testing.T) {
 		if err := front.Set(strings.TrimPrefix(backend.URL, "http://"), paused); err != nil {
 			t.Fatal(err)
 		}
+		if !paused {
+			if err := front.PolicyEnabled(); err != nil {
+				t.Fatal(err)
+			}
+		}
 		request := httptest.NewRequest(http.MethodGet, "https://"+domain+"/", nil)
 		request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: token})
 		response := httptest.NewRecorder()
@@ -35981,5 +35987,55 @@ func TestPublishedAdministratorSessionTracksLoginRenewalAndLogout(t *testing.T) 
 	}
 	if application.publicRequestDecision(request).Administrator {
 		t.Fatal("logged-out cookie retained the administrator route")
+	}
+}
+
+func TestProfilerFlagPropagationAndDisabledMode(t *testing.T) {
+	session, err := startProcessProfiler(serverRunConfig{}, "application", nil)
+	if err != nil || session != nil {
+		t.Fatal("disabled profiling created a listener", err)
+	}
+	if arguments := profilerChildArguments(serverRunConfig{}); len(arguments) != 0 {
+		t.Fatal(arguments)
+	}
+	arguments := profilerChildArguments(serverRunConfig{Profiler: true, ProfilerLogOutput: "/chosen/sitebrush.log"})
+	if !reflect.DeepEqual(arguments, []string{"--profiler", "--logfile", "/chosen/sitebrush.log"}) {
+		t.Fatal("profiling configuration lost in child", arguments)
+	}
+	flagSet := flag.NewFlagSet("profiler", flag.ContinueOnError)
+	flagSet.Bool("profiler", false, "enable local Go profiling; curl -o saves profiles in the client current directory")
+	if err := flagSet.Parse([]string{"--profiler"}); err != nil {
+		t.Fatal(err)
+	}
+	var usage bytes.Buffer
+	printVisibleFlagDefaults(&usage, flagSet)
+	if !strings.Contains(usage.String(), "--profiler") || !strings.Contains(usage.String(), "curl -o") {
+		t.Fatal("missing profiler help", usage.String())
+	}
+}
+
+func TestProfilerRoutesRemainOutsidePublicWebsite(t *testing.T) {
+	root := t.TempDir()
+	stop := make(chan struct{})
+	defer close(stop)
+	application := &App{storagePath: root, storageRealRoot: root, publicBoundary: true, db: panicSQLExecutor{t: t}}
+	application.publicCatalog = publicsite.NewCatalog(root, stop)
+	if err := publicsite.Write(root, publicsite.Policy{Domain: "profiler.example"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.publicCatalog.SetMemory(true); err != nil {
+		t.Fatal(err)
+	}
+	profiler, err := startProcessProfiler(serverRunConfig{Profiler: true}, "public", stop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer profiler.Close()
+	for _, path := range []string{"/debug/pprof/", "/debug/pprof/profile?seconds=1", "/debug/pprof/heap"} {
+		response := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "https://profiler.example"+path, nil)
+		if !application.servePublicPublished(response, request, false) || response.Code != http.StatusNotFound {
+			t.Fatalf("diagnostics escaped into public routing: %s %d", path, response.Code)
+		}
 	}
 }
