@@ -235,6 +235,7 @@ type App struct {
 	publicProxy           bool
 	publicStreamer        *publicsite.Streamer
 	publicCatalog         *publicsite.Catalog
+	publicStaticMode      publicsite.StaticMode
 	requestTimings        *requesttiming.Collector
 	profiler              *goprofile.Session
 	publicPublication     chan publicPublicationTask
@@ -9960,6 +9961,7 @@ type listenPorts struct {
 }
 
 type serverRunConfig struct {
+	PublicStaticMode     publicsite.StaticMode
 	ParsedPorts          listenPorts
 	InheritedHTTP        net.Listener
 	InheritedHTTPS       net.Listener
@@ -10142,7 +10144,7 @@ func helpWasRequested(args []string) bool {
 }
 
 func printVisibleFlagDefaults(output io.Writer, flagSet *flag.FlagSet) {
-	visibleFlagNames := []string{"cli", "debug", "desktop", "install", "path", "port", "uninstall", "upgrade", "version", "profiler"}
+	visibleFlagNames := []string{"cli", "debug", "desktop", "install", "path", "port", "uninstall", "upgrade", "version", "profiler", "public-static-mode"}
 	for _, flagName := range visibleFlagNames {
 		currentFlag := flagSet.Lookup(flagName)
 		if currentFlag == nil {
@@ -10206,6 +10208,7 @@ func main() {
 	updateTargetVersion := flag.String("update-target-version", "", "internal expected compiled release identity")
 	versionMode := flag.Bool("version", false, "print version and exit")
 	debugMode := flag.Bool("debug", false, "enable verbose HTTP and database diagnostic logs")
+	publicStaticMode := flag.String("public-static-mode", firstNonEmpty(os.Getenv("SITEBRUSH_PUBLIC_STATIC_MODE"), "snapshot"), "public file delivery: legacy, http10, roots, html, or snapshot")
 	requestTimings := flag.Bool("request-timings", false, "collect asynchronous request stage timings and log counters every 30 seconds")
 	profiler := flag.Bool("profiler", false, "enable owner load-test recording at /?expenses; 30-second reports are kept temporarily and deleted after viewing; status goes to console or --logfile")
 	legacyStoragePath := flag.String("storage-path", "", "")
@@ -10238,6 +10241,10 @@ func main() {
 		return
 	}
 	flag.Parse()
+	parsedStaticMode, staticModeErr := publicsite.ParseStaticMode(*publicStaticMode)
+	if staticModeErr != nil {
+		log.Fatal(staticModeErr)
+	}
 	if *updateTargetVersion != "" && *updateTargetVersion != CompileVersion {
 		log.Fatal("release binary does not match its signed version identity")
 	}
@@ -10483,7 +10490,8 @@ func main() {
 		profilerLogOutput = filepath.Join(effectiveStoragePath, "storage", "logs", "sitebrush.log")
 	}
 	serverConfig := serverRunConfig{
-		ParsedPorts: parsedPorts, StoragePath: effectiveStoragePath, DBPath: effectiveDBPath,
+		PublicStaticMode: parsedStaticMode,
+		ParsedPorts:      parsedPorts, StoragePath: effectiveStoragePath, DBPath: effectiveDBPath,
 		AllowStorageFallback: !storagePathWasProvided && !dbPathWasProvided, PortWasProvided: flagWasProvided("port"),
 		DesktopMode: desktopMode, Debug: *debugMode, RequestTimings: *requestTimings, Profiler: *profiler, ProfilerLogOutput: profilerLogOutput,
 		UpdateProbation: *updateProbation, UpdateChild: *serverChild, PublicProxy: *publicProxy,
@@ -10871,6 +10879,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 
 	address := "localhost:" + strconv.Itoa(listenPort)
 
+	application.publicStaticMode = config.PublicStaticMode
 	application.publicStreamer = publicsite.NewStreamer()
 	application.publicCatalog = publicsite.NewCatalog(effectiveStoragePath, ctx.Done())
 	application.startPublicPublication(ctx.Done())
@@ -11104,7 +11113,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 			restoredHandler.ServeHTTP(w, r)
 		})
 	}
-	server := newSitebrushHTTPServer(httpHandler, application.requestTimings)
+	server := newSitebrushHTTPServerWithMode(httpHandler, application.publicStaticMode, application.requestTimings)
 	server.ConnState = sitebrushConnStateLogger("HTTP", config.Debug)
 	serverErrors := make(chan error, 1)
 	go func() {
@@ -11199,8 +11208,12 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 }
 
 func newSitebrushHTTPServer(handler http.Handler, timings ...*requesttiming.Collector) *http.Server {
+	return newSitebrushHTTPServerWithMode(handler, publicsite.StaticSnapshot, timings...)
+}
+
+func newSitebrushHTTPServerWithMode(handler http.Handler, mode publicsite.StaticMode, timings ...*requesttiming.Collector) *http.Server {
 	server := &http.Server{
-		Handler:           keepAliveHandler(handler),
+		Handler:           keepAliveHandlerWithMode(handler, mode),
 		ReadTimeout:       sitebrushHTTPReadTimeout,
 		WriteTimeout:      sitebrushHTTPWriteTimeout,
 		IdleTimeout:       sitebrushHTTPIdleTimeout,
@@ -11625,6 +11638,10 @@ func (a *App) preloadChrootStorage(ctx context.Context) startupChrootPreloadStat
 }
 
 func keepAliveHandler(next http.Handler) http.Handler {
+	return keepAliveHandlerWithMode(next, publicsite.StaticSnapshot)
+}
+
+func keepAliveHandlerWithMode(next http.Handler, mode publicsite.StaticMode) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if shouldSendExplicitHTTP11KeepAlive(r) {
 			r.Close = false
@@ -11636,6 +11653,7 @@ func keepAliveHandler(next http.Handler) http.Handler {
 		if shouldBufferHTTP10KeepAlive(r) {
 			r.Close = false
 			writer := newHTTP10KeepAliveResponseWriter(w, r.Method)
+			writer.legacy = !mode.Enabled(publicsite.StaticHTTP10)
 			next.ServeHTTP(writer, r)
 			writer.finish()
 			return
@@ -11679,6 +11697,8 @@ type http10KeepAliveResponseWriter struct {
 	statusCode  int
 	wroteHeader bool
 	overflowed  bool
+	direct      bool
+	legacy      bool
 }
 
 func newHTTP10KeepAliveResponseWriter(w http.ResponseWriter, method string) *http10KeepAliveResponseWriter {
@@ -11693,15 +11713,35 @@ func (writer *http10KeepAliveResponseWriter) WriteHeader(statusCode int) {
 	if writer.wroteHeader {
 		return
 	}
+	// Informational responses do not commit the final response headers.
+	if statusCode >= 100 && statusCode < 200 && statusCode != http.StatusSwitchingProtocols {
+		writer.ResponseWriter.WriteHeader(statusCode)
+		return
+	}
 	writer.statusCode = statusCode
 	writer.wroteHeader = true
+	if writer.legacy {
+		return
+	}
+	if statusCode == http.StatusSwitchingProtocols {
+		writer.direct = true
+		writer.ResponseWriter.WriteHeader(statusCode)
+		return
+	}
+	length, lengthErr := strconv.ParseInt(writer.Header().Get("Content-Length"), 10, 64)
+	if writer.method == http.MethodHead || !httpStatusAllowsBody(statusCode) || lengthErr == nil && length >= 0 {
+		writer.direct = true
+		writer.Header().Set("Connection", "keep-alive")
+		writer.Header().Set("Keep-Alive", "timeout=65")
+		writer.ResponseWriter.WriteHeader(statusCode)
+	}
 }
 
 func (writer *http10KeepAliveResponseWriter) Write(payload []byte) (int, error) {
 	if !writer.wroteHeader {
 		writer.WriteHeader(http.StatusOK)
 	}
-	if writer.overflowed {
+	if writer.overflowed || writer.direct {
 		return writer.ResponseWriter.Write(payload)
 	}
 	if writer.body.Len()+len(payload) > sitebrushHTTP10KeepAliveBufferLimit {
@@ -11711,8 +11751,24 @@ func (writer *http10KeepAliveResponseWriter) Write(payload []byte) (int, error) 
 	return writer.body.Write(payload)
 }
 
+func (writer *http10KeepAliveResponseWriter) ReadFrom(source io.Reader) (int64, error) {
+	if !writer.wroteHeader {
+		writer.WriteHeader(http.StatusOK)
+	}
+	if writer.direct || writer.overflowed {
+		if receiver, supported := writer.ResponseWriter.(io.ReaderFrom); supported {
+			return receiver.ReadFrom(source)
+		}
+		return io.Copy(struct{ io.Writer }{writer.ResponseWriter}, source)
+	}
+	return io.Copy(struct{ io.Writer }{writer}, source)
+}
+
 func (writer *http10KeepAliveResponseWriter) Flush() {
-	if !writer.overflowed {
+	if !writer.wroteHeader {
+		writer.WriteHeader(http.StatusOK)
+	}
+	if !writer.overflowed && !writer.direct {
 		writer.commitWithoutKeepAlive()
 	}
 	if flusher, ok := writer.ResponseWriter.(http.Flusher); ok {
@@ -11729,7 +11785,7 @@ func (writer *http10KeepAliveResponseWriter) Hijack() (net.Conn, *bufio.ReadWrit
 }
 
 func (writer *http10KeepAliveResponseWriter) finish() {
-	if writer.overflowed {
+	if writer.overflowed || writer.direct {
 		return
 	}
 	if httpStatusAllowsBody(writer.statusCode) && writer.Header().Get("Content-Length") == "" {
@@ -11744,6 +11800,7 @@ func (writer *http10KeepAliveResponseWriter) finish() {
 }
 
 func (writer *http10KeepAliveResponseWriter) commitWithoutKeepAlive() {
+	writer.wroteHeader = true
 	writer.overflowed = true
 	writer.Header().Del("Connection")
 	writer.Header().Del("Keep-Alive")
@@ -11964,7 +12021,7 @@ func listenTLSForAutoCert() (net.Listener, error) {
 }
 
 func (a *App) serveTLSWithAutoCert(ctx context.Context, tlsListener net.Listener, tlsConfig *tls.Config, handler http.Handler) {
-	tlsServer := newSitebrushHTTPServer(handler, a.requestTimings)
+	tlsServer := newSitebrushHTTPServerWithMode(handler, a.publicStaticMode, a.requestTimings)
 	tlsServer.TLSConfig = tlsConfig
 	tlsServer.ErrorLog = log.New(problemLogWriter{application: a}, "", 0)
 	tlsServer.ConnState = sitebrushConnStateLogger("HTTPS", a.debug)
@@ -58689,7 +58746,7 @@ func runSupervisedSitebrush(ctx context.Context, config serverRunConfig) error {
 		if catalogErr != nil {
 			return catalogErr
 		}
-		return appupdate.Run(appupdate.Options{Catalog: &catalog, StoragePath: storagePath, Executable: executable, Version: CompileVersion, Compatibility: appupdate.CurrentCompatibility(), Arguments: arguments, PublicKey: publicKey, Output: os.Stdout}, ctx.Done())
+		return appupdate.Run(appupdate.Options{Catalog: &catalog, Environment: []string{"SITEBRUSH_PUBLIC_STATIC_MODE=" + config.PublicStaticMode.String()}, StoragePath: storagePath, Executable: executable, Version: CompileVersion, Compatibility: appupdate.CurrentCompatibility(), Arguments: arguments, PublicKey: publicKey, Output: os.Stdout}, ctx.Done())
 	}
 	front, frontClose, secret, frontErr := startPublicSiteBoundary(ctx, storagePath, config)
 	if frontErr != nil {
@@ -58708,7 +58765,7 @@ func runSupervisedSitebrush(ctx context.Context, config serverRunConfig) error {
 	if err != nil {
 		return err
 	}
-	return appupdate.Run(appupdate.Options{Catalog: &catalog, PublicState: front.Set, PublicSecurity: front.Security, PublicThrottle: front.Throttle, PublicPolicy: front.Policy, PublicProfiler: front.Profiler, PublicObservations: front.PullObservations, PublicCertificate: front.Certificate, Environment: []string{"SITEBRUSH_PUBLIC_POLICY_CHANNEL=1", "SITEBRUSH_PUBLIC_CONTACT=" + secret, "SITEBRUSH_PUBLIC_HTTP_PORT=" + strconv.Itoa(front.HTTPPort), "SITEBRUSH_PUBLIC_HTTPS_PORT=" + strconv.Itoa(front.HTTPSPort)}, StoragePath: storagePath, Executable: executable, Version: CompileVersion, Compatibility: appupdate.CurrentCompatibility(), Arguments: arguments, PublicKey: publicKey, Output: os.Stdout}, ctx.Done())
+	return appupdate.Run(appupdate.Options{Catalog: &catalog, PublicState: front.Set, PublicSecurity: front.Security, PublicThrottle: front.Throttle, PublicPolicy: front.Policy, PublicProfiler: front.Profiler, PublicObservations: front.PullObservations, PublicCertificate: front.Certificate, Environment: []string{"SITEBRUSH_PUBLIC_STATIC_MODE=" + config.PublicStaticMode.String(), "SITEBRUSH_PUBLIC_POLICY_CHANNEL=1", "SITEBRUSH_PUBLIC_CONTACT=" + secret, "SITEBRUSH_PUBLIC_HTTP_PORT=" + strconv.Itoa(front.HTTPPort), "SITEBRUSH_PUBLIC_HTTPS_PORT=" + strconv.Itoa(front.HTTPSPort)}, StoragePath: storagePath, Executable: executable, Version: CompileVersion, Compatibility: appupdate.CurrentCompatibility(), Arguments: arguments, PublicKey: publicKey, Output: os.Stdout}, ctx.Done())
 }
 
 func runManualUpgrade(storagePath, databasePath, port string, debug bool, policies ...appupdate.BackupPolicy) error {
@@ -62288,6 +62345,7 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 	application.requestTimings = startRequestTimingCounters(config.RequestTimings || config.Profiler, ctx.Done(), "public")
 	application.profiler = profilerSession
 	profilerSession.SetTimings(application.requestTimings)
+	application.publicStaticMode = config.PublicStaticMode
 	application.publicStreamer = publicsite.NewStreamer()
 	application.publicCatalog = publicsite.NewCatalog(storagePath, ctx.Done())
 	application.autoCertCertificateCache = startAutoCertCertificateMemoryCache(ctx, filepath.Join(application.storageRootDir(), "letsencrypt"))
@@ -62386,7 +62444,7 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 
 	application.startPublicSecurityObservations(ctx.Done())
 	front.HTTPPort = port
-	server := newSitebrushHTTPServer(front, application.requestTimings)
+	server := newSitebrushHTTPServerWithMode(front, application.publicStaticMode, application.requestTimings)
 	go func() {
 		if serveErr := server.Serve(listener); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 			log.Printf("PUBLIC HTTP: %v", serveErr)
@@ -62419,7 +62477,7 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 				return front, func() { server.Close(); closeGuards() }, secret, nil
 			}
 			tlsConfig := application.publicTLSConfig(fallback, front.ObserveTLS)
-			tlsServer = newSitebrushHTTPServer(front, application.requestTimings)
+			tlsServer = newSitebrushHTTPServerWithMode(front, application.publicStaticMode, application.requestTimings)
 			tlsServer.TLSConfig = tlsConfig
 			go func() {
 				if serveErr := tlsServer.ServeTLS(tlsListener, "", ""); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
