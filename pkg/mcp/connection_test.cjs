@@ -59,13 +59,25 @@ async function checkConnectionAndEditor() {
         }
       }
       let publicMenuPaused = false;
+      let holdPublicMenuReplies = true;
       await page.routeWebSocket(/sitebrush_menu_ws/, function routePublicMenu(socket) {
-        if (publicMenuPaused) {
+        if (holdPublicMenuReplies) {
+          socket.onMessage(function holdAccountReply() {});
+        } else if (publicMenuPaused) {
           socket.onMessage(function showUpdatingMenu() { socket.send(JSON.stringify({updating: true, message: 'Идёт обновление сайта, подождите.'})); });
         } else {
           socket.connectToServer();
         }
       });
+      await page.goto(fixtureURL + '/');
+      const firstMenu = await page.evaluate(() => {
+        document.querySelector('h1').dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 20, clientY: 20}));
+        const host = document.getElementById('SiteBrushMenuBox');
+        const root = host && (host.shadowRoot || host);
+        return {ready: Boolean(root && root.querySelector('a[href*="profile"]')), guest: Boolean(root && root.querySelector('a[href*="login"]'))};
+      });
+      assert.deepEqual(firstMenu, {ready: true, guest: false}, 'First paint contains the administrator menu before any account WebSocket reply');
+      holdPublicMenuReplies = false;
       await page.goto(fixtureURL + '/public-fixture');
       assert.equal(await page.evaluate(() => performance.getEntriesByType('resource').some(resource => resource.name.includes('/guest_menu.'))), false, 'Guest menu is not downloaded with the page');
       await page.waitForFunction(() => performance.getEntriesByType('resource').some(resource => resource.name.includes('/analytics.js')));

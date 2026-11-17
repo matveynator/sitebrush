@@ -14457,7 +14457,7 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	domainFrozen := false
 	if isAdmin {
 		domainFrozen = a.isDomainFrozen(r.Context(), domain)
-		if !domainFrozen && isStaticPageRequest(r) && a.servePublishedStaticFileForAdmin(w, r, domain, pagePath, adminEmail) {
+		if !domainFrozen && publicOrdinaryRequest(r) && a.servePublishedStaticFileForAdmin(w, r, domain, pagePath, adminEmail) {
 			return
 		}
 	}
@@ -19097,6 +19097,10 @@ func (a *App) renewAccountSession(w http.ResponseWriter, r *http.Request, domain
 		return false
 	}
 	if updated > 0 {
+		if err := a.publicPublicationRequest("refresh", domain); err != nil {
+			http.Error(w, "account session publication temporarily unavailable", http.StatusServiceUnavailable)
+			return false
+		}
 		setAccountSessionCookie(w, r, token, now)
 	}
 	return true
@@ -22385,7 +22389,14 @@ func (a *App) clearDemoSiteContent(ctx context.Context, domain string) error {
 func (a *App) logout(w http.ResponseWriter, r *http.Request) {
 	a.scheduleDemoSiteDeletionForLogout(r)
 	if cookie, err := r.Cookie("sitebrush_session"); err == nil {
-		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM sessions WHERE token=?`, cookie.Value)
+		if _, deleteErr := a.db.ExecContext(r.Context(), `DELETE FROM sessions WHERE token=?`, cookie.Value); deleteErr != nil {
+			http.Error(w, "account logout temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if publishErr := a.publicPublicationRequest("refresh", a.siteDomain(r.Context(), r)); publishErr != nil {
+			http.Error(w, "account session publication temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
 	}
 	httpsecurity.SetSensitiveCookie(w, r, &http.Cookie{Name: "sitebrush_session", Value: "", Expires: time.Unix(0, 0), MaxAge: -1})
 	httpsecurity.RedirectLocal(w, r, requestedReturnTarget(r), http.StatusFound)
@@ -46699,6 +46710,7 @@ func (a *App) createSessionForDomain(w http.ResponseWriter, r *http.Request, ctx
 func (a *App) createSessionForDomainWithIPTrust(w http.ResponseWriter, r *http.Request, ctx context.Context, domain string, email string, trustIP bool) string {
 	token, sessionErr := a.createSessionForDomainToken(r, ctx, domain, email, trustIP)
 	if sessionErr != nil {
+		log.Printf("AUTH create session failed: %v", sessionErr)
 		return ""
 	}
 	a.storeProfileSessionDetails(r.WithContext(ctx), token)
@@ -46727,6 +46739,9 @@ func (a *App) createSessionForDomainToken(r *http.Request, ctx context.Context, 
 	})
 	if sessionErr != nil {
 		return "", sessionErr
+	}
+	if err := a.publicPublicationRequest("refresh", sessionDomain); err != nil {
+		return "", fmt.Errorf("publish account session: %w", err)
 	}
 	return token, nil
 }
@@ -47232,6 +47247,10 @@ func (a *App) revisionMenuSummary(ctx context.Context, domain string, pagePath s
 func (a *App) serveManagedPageContent(w http.ResponseWriter, r *http.Request, domain, pagePath, content, sourceType string, isAdmin bool, adminEmail string, domainFrozen bool) {
 	a.logContentDelivery(w, sourceType)
 	if pageContentKind(pagePath, content) == "html" {
+		if isAdmin {
+			w.Header().Set("Cache-Control", "private, no-store")
+			w.Header().Add("Vary", "Cookie")
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if a.pendingTrialRegistration(r.Context(), domain) {
 			w.Header().Set("X-Robots-Tag", "noindex, nofollow")
@@ -48259,6 +48278,9 @@ func buildGuestContextMenuScriptTemplate(translations map[string]string) string 
   const currentPagePath = "` + guestContextMenuPagePathPlaceholder + `";
   const currentDomainName = "` + guestContextMenuDomainPlaceholder + `";
   function buildSitebrushGuestMenuEntries(showStandardMenuHint) {
+    if (window.sitebrushPublicMenuMode === "updating") {
+      return ["<ul class='SiteBrushMenuList'><li class='SiteBrushContextMenu SiteBrushContextMenuLink'>` + template.JSEscapeString(template.HTMLEscapeString(translationOrDefault(translations, "menu_updating", "The site is being updated. Please wait."))) + `</li></ul>"];
+    }
     const menuEntries = [
       "<ul class='SiteBrushMenuList'>",
       "<li class='SiteBrushContextMenu SiteBrushDomainMenuItem'><a href='/' class='SiteBrushContextMenuLink'>" + currentDomainName + "</a></li>",
@@ -58033,6 +58055,9 @@ func (a *App) openPublicSiteFile(domain, directory, relative string) (*os.File, 
 	return site.Open(relative)
 }
 func (a *App) servePublishedStaticFileFromDisk(w http.ResponseWriter, r *http.Request, domain, pagePath string, injectPublicMenu bool) bool {
+	return a.servePublishedStaticFileWithMenu(w, r, domain, pagePath, injectPublicMenu, false)
+}
+func (a *App) servePublishedStaticFileWithMenu(w http.ResponseWriter, r *http.Request, domain, pagePath string, injectPublicMenu, updating bool) bool {
 	if decision, found := r.Context().Value(publicDecisionContextKey{}).(publicsite.Decision); found && decision.PageHidden {
 		return false
 	}
@@ -58085,6 +58110,9 @@ func (a *App) servePublishedStaticFileFromDisk(w http.ResponseWriter, r *http.Re
 	menuAttribute := ""
 	if injectPublicMenu {
 		menuAttribute = ` data-menu="guest_menu.` + template.HTMLEscapeString(language) + `.js"`
+		if updating {
+			menuAttribute += ` data-menu-mode="updating"`
+		}
 	}
 	layoutAttribute := ""
 	if decision, found := r.Context().Value(publicDecisionContextKey{}).(publicsite.Decision); found && decision.Layout != "" {
@@ -58150,27 +58178,22 @@ func (a *App) servePublishedStaticFileForAdmin(w http.ResponseWriter, r *http.Re
 	if statErr != nil || fileInfo.IsDir() {
 		return false
 	}
-	staticContentKind, staticContent, kindErr := a.publishedStaticContentKind(staticFilePath, pagePath)
-	if kindErr != nil {
+	staticFile, openErr := a.openFileInsideStorage(staticFilePath)
+	if openErr != nil {
 		return false
 	}
+	defer staticFile.Close()
+	staticContentKind := pageContentKind(pagePath, "")
+	if staticContentKind == "file" {
+		prefix := make([]byte, 512)
+		count, _ := staticFile.ReadAt(prefix, 0)
+		staticContentKind = pageContentKind(pagePath, string(prefix[:count]))
+	}
 	if staticContentKind != "html" {
-		staticFile, openErr := a.openFileInsideStorage(staticFilePath)
-		if openErr != nil {
-			return false
-		}
-		defer staticFile.Close()
 		a.logContentDelivery(w, "static-file")
 		w.Header().Set("Content-Type", contentTypeForManagedPage(pagePath, ""))
 		http.ServeContent(w, r, filepath.Base(staticFilePath), fileInfo.ModTime(), staticFile)
 		return true
-	}
-	if staticContent == nil {
-		var readErr error
-		staticContent, readErr = a.readFileInsideStorage(staticFilePath)
-		if readErr != nil {
-			return false
-		}
 	}
 	revisionID, revisionCount := a.revisionMenuSummary(r.Context(), domain, pagePath)
 	_, pagePasswordProtected := a.pagePasswordRuleFromPrefixFile(domain, pagePath)
@@ -58178,9 +58201,21 @@ func (a *App) servePublishedStaticFileForAdmin(w http.ResponseWriter, r *http.Re
 	storageUsage := a.storedDomainStorageUsage(r.Context(), domain)
 	storageUsageLabel := formatFileSize(storageUsage.totalBytes()) + " / " + formatFileSize(storageUsage.LimitBytes)
 	menuScript := buildContextMenuScript(true, isServerManager, false, pagePasswordProtected, !a.isDemoSiteDomain(r.Context(), domain), pagePath, domain, revisionID, revisionCount, storageUsageLabel, accountCSRF(r), translationsForRequest(r))
+	layoutAttribute := ""
+	if decision := a.publicRequestDecision(r); decision.Layout != "" {
+		layoutAttribute = ` data-analytics-layout="` + template.HTMLEscapeString(decision.Layout) + `"`
+	}
+	menuScript += `<script async src="/p/static/visitor.js?v=` + url.QueryEscape(CompileVersion) + `" data-sitebrush-owned="true"` + layoutAttribute + `></script>`
 	a.logContentDelivery(w, "static-file")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(injectMenuScriptIntoHTML(string(staticContent), menuScript)))
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Add("Vary", "Cookie")
+	request := r.Clone(r.Context())
+	request.Header.Del("If-None-Match")
+	request.Header.Del("If-Modified-Since")
+	if streamErr := a.publicStreamer.HTML(w, request, staticFile, menuScript, CompileVersion+"-admin"); streamErr != nil {
+		log.Printf("published administrator page unavailable: %v", streamErr)
+	}
 	return true
 }
 
@@ -61433,7 +61468,37 @@ func (a *App) writePublicPolicyWithNotifier(domain string, notify func(string, s
 	}); err != nil {
 		return err
 	}
+	// Session routing is separate from server-management privileges.
+	restrictedEmails := make(map[string]bool)
+	if err = read(`SELECT email FROM admin_ip_policies WHERE domain=?`, func(rows *sql.Rows) error {
+		var email string
+		if scanErr := rows.Scan(&email); scanErr != nil {
+			return scanErr
+		}
+		restrictedEmails[email] = true
+		return nil
+	}); err != nil {
+		return err
+	}
+	allowedAddresses := make(map[string][]string)
+	if err = read(`SELECT email,client_ip FROM admin_allowed_ips WHERE domain=?`, func(rows *sql.Rows) error {
+		var email, address string
+		if scanErr := rows.Scan(&email, &address); scanErr != nil {
+			return scanErr
+		}
+		allowedAddresses[email] = append(allowedAddresses[email], address)
+		return nil
+	}); err != nil {
+		return err
+	}
 	for _, session := range ownerSessions {
+		if accountauth.SessionActive(session.used, time.Now()) {
+			digest := sha256.Sum256([]byte(session.token))
+			policy.AdministratorSessions = append(policy.AdministratorSessions, publicsite.AdministratorSession{
+				Hash: hex.EncodeToString(digest[:]), Expires: session.used + int64(accountauth.SessionTTL/time.Second),
+				IPRestricted: restrictedEmails[session.email], AllowedIPs: allowedAddresses[session.email],
+			})
+		}
 		if accountauth.SessionActive(session.used, time.Now()) && a.isServerManagerEmail(ctx, domain, session.email) {
 			digest := sha256.Sum256([]byte(session.token))
 			policy.OwnerSessions = append(policy.OwnerSessions, publicsite.Session{Hash: hex.EncodeToString(digest[:]), Expires: session.used + int64(accountauth.SessionTTL/time.Second)})
@@ -61523,6 +61588,10 @@ func (a *App) publicRequestDecision(r *http.Request) publicsite.Decision {
 	started := requesttiming.Start(r)
 	host := domainFromRequest(r)
 	lookup := publicsite.Lookup{Host: host, Path: cleanPath(r.URL.Path), File: publicAssetFileNameFromPath(r.URL.Path, host), ClientIP: accountClientIP(r)}
+	if cookie, cookieErr := r.Cookie("sitebrush_session"); cookieErr == nil && cookie.Value != "" {
+		digest := sha256.Sum256([]byte(cookie.Value))
+		lookup.SessionHash = hex.EncodeToString(digest[:])
+	}
 	requesttiming.Finish(r, requesttiming.Domain, started)
 	started = requesttiming.Start(r)
 	decision := a.publicCatalog.LookupRequest(lookup, r.Context().Done())
@@ -61646,6 +61715,17 @@ func publicOrdinaryRequest(r *http.Request) bool {
 	return true
 }
 
+// A session hint selects a handler, never grants access or changes publication state.
+func publicAdministratorPageRequest(r *http.Request, decision publicsite.Decision) bool {
+	if !decision.Administrator || !publicOrdinaryRequest(r) || strings.HasPrefix(r.URL.Path, "/p/") {
+		return false
+	}
+	if decision.ResourceFile != "" {
+		return false
+	}
+	return pageContentKind(r.URL.Path, "") == "html"
+}
+
 func publicMissingPageRequest(r *http.Request, pagePath string) bool {
 	return publicOrdinaryRequest(r) && !strings.HasPrefix(pagePath, "/p/") && pageContentKind(pagePath, "") == "html"
 }
@@ -61723,19 +61803,23 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 			return true
 		}
 	}
+	if !paused && publicAdministratorPageRequest(r, decision) {
+		return false
+	}
 	if decision.Hidden || decision.PageHidden && fileName == "" && decision.Chroot.Path == "" {
-		if hasSitebrushSessionCookie(r) && a.isAdminRequest(r) {
+		if decision.Administrator {
 			return false
 		}
 		http.NotFound(w, r)
 		return true
 	}
-	if !paused && hasSitebrushSessionCookie(r) && (decision.Frozen || decision.File.Mode == "page_password" || fileName == "" && decision.Password.Path != "") {
+	if !paused && decision.Administrator && (decision.Frozen || decision.File.Mode == "page_password" || fileName == "" && decision.Password.Path != "") {
 		return false
 	}
 	if _, found := r.Context().Value(publicDecisionContextKey{}).(publicsite.Decision); !found {
 		r = withPublicRequestDecision(r, decision)
 	}
+	w.Header().Add("Vary", "Cookie")
 	domain := decision.Domain
 	hideMenu := decision.Stealth && !decision.AdminAllowed
 	if decision.Stealth && w.Header().Get("Cache-Control") == "" {
@@ -61845,7 +61929,7 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 		serveContentWithDownloadObservation(w, r, pagePath, info.ModTime(), info.Size(), file)
 		return true
 	}
-	if a.servePublishedStaticFileFromDisk(w, r, domain, pagePath, !hideMenu) {
+	if a.servePublishedStaticFileWithMenu(w, r, domain, pagePath, !hideMenu, paused) {
 		return true
 	}
 	if decision.Chroot.Path != "" {
@@ -61985,7 +62069,7 @@ func newPublicHTTPFront(application *App, secret string, stop <-chan struct{}) *
 			}
 			return true
 		}
-		if lookup.PrivateTestDrive || !paused && hasSitebrushSessionCookie(r) && (lookup.Frozen || lookup.File.Mode == "page_password" || !strings.HasPrefix(r.URL.Path, "/p/") && lookup.Password.Path != "") || lookup.File.Mode == "token" {
+		if lookup.PrivateTestDrive || !paused && lookup.Administrator && (lookup.Frozen || lookup.File.Mode == "page_password" || !strings.HasPrefix(r.URL.Path, "/p/") && lookup.Password.Path != "") || lookup.File.Mode == "token" {
 			return false
 		}
 		if application.throttleGuard != nil {
