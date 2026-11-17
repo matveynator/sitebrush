@@ -103,11 +103,20 @@ func TestFunctionSymbolCategories(t *testing.T) {
 	for name, want := range map[string]string{
 		"main.serve": "application",
 		"github.com/matveynator/sitebrush/v2/pkg/publicsite.(*Front).Serve": "application",
-		"runtime.gcDrain":                                   "runtime",
-		"internal/runtime/maps.(*Map).get":                  "runtime",
-		"net/http.(*conn).serve":                            "standard",
-		"syscall.Syscall":                                   "standard",
-		"github.com/matveynator/netchan/v2.(*Channel).Send": "library",
+		"runtime.gcDrain":                  "runtime",
+		"internal/runtime/maps.(*Map).get": "runtime",
+		"net/http.(*conn).serve":           "standard",
+		"syscall.Syscall":                  "standard",
+		"time.Now":                         "standard",
+		"os.Open":                          "standard",
+		"sync.(*Pool).Get":                 "standard",
+		"fmt.Sprintf":                      "standard",
+		"crypto/tls.(*Conn).Write":         "standard",
+		"slices.SortFunc[github.com/example/project.Record]":          "standard",
+		"sync/atomic.Pointer[github.com/example/project.Record].Load": "standard",
+		"github.com/matveynator/netchan/v2.(*Channel).Send":           "library",
+		"github.com/example/project.Sort[net/http.Request]":           "library",
+		"gopkg.in/yaml.v3.Marshal":                                    "library",
 	} {
 		if actual := functionKind(name); actual != want {
 			t.Fatalf("%s: got %s, want %s", name, actual, want)

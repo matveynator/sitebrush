@@ -24,12 +24,15 @@ type FunctionDetail struct {
 
 // Categories describe symbol ownership; only self costs form an additive CPU breakdown.
 func functionKind(name string) string {
+	// Type arguments can contain import paths; only the symbol's own package identifies its category.
+	symbol, _, _ := strings.Cut(name, "[")
+	firstPathSegment, _, hasPackagePath := strings.Cut(symbol, "/")
 	switch {
 	case strings.HasPrefix(name, "main."), strings.HasPrefix(name, "github.com/matveynator/sitebrush/"):
 		return "application"
 	case strings.HasPrefix(name, "runtime."), strings.HasPrefix(name, "internal/runtime/"):
 		return "runtime"
-	case !strings.Contains(strings.SplitN(name, "/", 2)[0], "."), strings.HasPrefix(name, "vendor/"):
+	case !hasPackagePath, !strings.Contains(firstPathSegment, "."), strings.HasPrefix(name, "vendor/"):
 		return "standard"
 	default:
 		return "library"
