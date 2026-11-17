@@ -78,40 +78,6 @@ The site owner can still edit the website directly in the browser.
 
 ---
 
-## Test Drive and subdomains
-
-Test Drive and ordinary site creation use separate forms. A visitor chooses a subdomain label and an email address, completes CAPTCHA once per trusted browser session, and enters a private Test Drive over HTTP. Its welcome page offers **Copy an existing site** and **Create a new site**. Other browsers receive a neutral page until the email code activates the site. A private copy does not ask for a public search-indexing decision.
-
-A small save reminder appears after 60 seconds and a dismissible confirmation dialog after three minutes. Confirmation uses a six-digit code in a localized HTML email containing no link or user-created content. Codes and pending Test Drives last 24 hours; activity extends the private session. A Test Drive accepts at most three distinct email addresses, and resending has a 60-second default cooldown. Trials without a pending code use the configured idle TTL (30 minutes by default).
-
-Automatic certificate issuance requires a completed administrator registration. Private trials, pending mail challenges, temporary editor accounts and forced renewals cannot bypass this condition. Existing valid certificates are reused from persistent storage, and ACME retry deadlines remain in force. After activation, an HTTP editor capability lasts up to 30 minutes; visiting HTTPS with that capability rotates it into a normal Secure account session. Ordinary registration also accepts its email code over HTTP, creates the account, and retains the confirmation until HTTPS can install the permanent browser session. Routine login uses the existing one-time email-code flow over HTTPS.
-
-Installation registration and server statistics over signed NetChan messages remain available when the central mail relay is disabled. `SERVER_REGISTRY` diagnostics retain both NetChan and HTTPS fallback errors; local SMTP delivery alone does not confirm successful central registration.
-
-The control database stores Test Drive status, timestamps, verification counts, client IPs, and user agent for the administrator panel and rate limits. The hosting settings `test_drive_idle_minutes`, `test_drive_resend_seconds`, `test_drive_active_per_session`, `test_drive_active_per_ip`, `test_drive_daily_per_session`, `test_drive_daily_per_ip`, `test_drive_name_checks_soft_minute`, `test_drive_name_checks_hard_minute`, `test_drive_mail_per_email_hour`, `test_drive_mail_per_ip_hour`, `test_drive_mail_per_session_hour`, and `test_drive_mail_per_trial` override their respective defaults. CAPTCHA trust belongs to the current browser session and is reset after suspicious activity or rate-limit violations.
-
----
-
-## Registration analytics
-
-SiteBrush Analytics keeps server-confirmed registration stages in the existing control database. The registration funnel counts only public, Test Drive, and Ignite self-service flows. `site_created` means a site was provisioned, including a private Test Drive copy; `public_site_created` means it became public; `user_created` means its account was committed; `registration_completed` means the workflow reached its own final state. Cohorts count attempts started during the selected 1, 7, 30, or 90 days, while outcome totals count events occurring during that period, including delayed email confirmations. Only an installation administrator on that installation's main domain can see aggregate registration totals, and only while self-registration or Test Drive is enabled. Disabling registration hides the report without deleting retained events. Subdomains and additional sites keep their own browser Analytics without registration totals. Browser form activity remains a separate observation.
-
-Each attempt uses a random, non-authorizing correlation value; analytics stores its digest, hashed workflow source references, a hashed site scope, bounded stage names, and timestamps. It stores no email address, IP address, password, confirmation code, CAPTCHA answer, or authentication token. Unique event keys prevent retry counts. Analytics attempts, events, and source links are removed after 120 days; pending attempts expire after their workflow deadline and are shown separately from failures. Existing installations receive append-only control-database migrations, and historical browser analytics remains intact. Committed workflow and account outbox records replay confirmed outcomes after a transient analytics write failure or restart.
-
-## Create a site with an AI assistant
-
-SiteBrush creates and edits new websites, copies public pages from an older site, and helps redesign them. Ignite starts by asking what the owner wants to make and whether they have an old site or a design example. The simple starting point is a public site on `sitebrush.com` with a SiteBrush subdomain; the owner can add a domain they already own later in Site Settings. [Installing the server application](#install-the-server-version) gives an owner control over data, rules, and capacity. The platform-specific installation blocks detect `amd64` or `arm64` automatically, so the owner need not know their CPU architecture. The assistant does not claim to have installed anything without access to that server.
-
-For inspiration, the owner can send a link from [Awwwards](https://www.awwwards.com/), its [website gallery](https://www.awwwards.com/websites/), [Dribbble](https://dribbble.com/tags/web-design-inspiration), [Readymag](https://readymag.com/examples), or [Siteinspire](https://www.siteinspire.com). The assistant can use the visual direction to make a distinct SiteBrush page, or redesign imported pages while preserving verified public content.
-
-The main domain of a SiteBrush server serves `https://<server-domain>/?ignite` when **Allow self registration** is enabled. Ignite can suggest and check a third-level site name, provide a normal link to browser CAPTCHA, send a six-digit email code, verify that code, and create the new site. The server constructs the full domain from the selected name and its configured main domain. The same setting disables both browser self registration and Ignite.
-
-The ChatGPT SiteBrush integration in `integrations/chatgpt/` connects to `https://sitebrush.com/?sitebrush_agent` by default. The user may explicitly select another public HTTPS SiteBrush server; the gateway forwards only Ignite registration calls to that server's `/?ignite`. The selected server handles CAPTCHA, email verification, and site creation. The gateway never receives editing credentials.
-
-After creation, Ignite returns the site ID, domain, HTTPS readiness, and `https://<new-site>/?mcp`. The owner chooses whether to add that address manually with **Plugins → Add custom MCP server**, or have the assistant prepare a private plugin through Plugin Creator. Both use the full site domain as the display name and OAuth; an existing plugin for the same endpoint is reused. Plugin Creator can prepare the plugin and the assistant can install it when UI control is available, but the owner still completes SiteBrush login and consent. After `sitebrush_get_access` confirms the connection, the assistant can make the first requested site draft and explain how to call the domain-named plugin with `@` in ChatGPT Work. Ignite itself has no tools for editing existing sites or connecting custom domains. For copying an older public site, the connected assistant can call `sitebrush_import_site`, check `sitebrush_get_import_status`, inspect the saved drafts, and revise them; the browser import flow remains available. Shared headers, navigation, and footers use `SiteBrush-Template` blocks across pages.
-
----
-
 ## Before and after
 
 ### Before
@@ -166,26 +132,6 @@ It follows the pages and referenced resources and imports the files the site nee
 
 ### 2. Edit
 
-Double-click or double-tap an image in the visual editor to change its source,
-frame dimensions, fit and crop position. Replacement uploads use the site's
-normal file storage after preparing a cropped, resized preview for the current
-frame, with a 2× pixel budget for sharp displays. Fill / Crop is the default;
-External image URLs use the validated server downloader and do not need browser
-CORS permission. Crop position accepts percentages from 0% to 100% and the
-left/center/right/top/bottom keywords; unsupported positions are rejected before Save.
-Fit shows the whole image, and Stretch requires an explicit choice. GIF, WebP and APNG
-animation and SVG vector content are preserved. Existing gallery links receive a
-separate full-resolution version; an unlinked image stores only its preview.
-Cancel or Close discards the dialog draft; Save saves the whole page. Existing
-CSS sizing and frame proportions are preserved unless you resize the frame.
-
-HTML mode provides Undo, Redo, Cancel, Save and Back to Visual in one compact row,
-including on narrow phones. Undo/Redo history lasts for the open editor session,
-including switches between visual and HTML modes. Save writes the HTML directly; Back applies it to the visual draft
-without saving, and Cancel restores the draft from before entering HTML mode.
-The source editor starts at the beginning and preserves untouched document
-metadata during visual edits.
-
 Open the website normally.
 
 * **Desktop:** right-click an element
@@ -193,13 +139,7 @@ Open the website normally.
 
 Edit text, pictures, buttons, menus, page blocks, or HTML.
 
-### 3. Publish
 
-Prepare changes without disturbing the version visitors are currently seeing.
-
-Publish when everything is ready.
-
-Visitors continue receiving ordinary static files.
 
 ---
 
@@ -269,45 +209,6 @@ That means you can take an existing site and start editing it without first rebu
 The result remains ordinary static HTML.
 
 ---
-
-## Public response speed
-
-Published guest pages and public assets bypass SQL. Menu code loads when opened;
-analytics starts after the page load and can skip new observations under pressure.
-Confirmed server-owner IPs can run load tests across the installation; site-admin
-IPs are exempt from automatic load limits only on their own site, without cookies.
-
-See [load-test commands, measured results, and manual checks](doc/static-load-checks.md).
-
-## Server updates
-
-The launcher keeps the public HTTP and HTTPS listeners open while the editor process stops, migrates its databases, starts, or rolls back. Published pages and public files continue to load. Editing pauses, and the right-click menu displays an update notice. Password protection and file access restrictions still apply; downloads requiring a database transaction wait until the editor is available.
-
-The server owner sees a newer signed release at the bottom of the SiteBrush menu. The launcher checks at startup and every 15 minutes. Unchecking every backup group skips backup scanning and copying; shutdown and migration have separate progress stages. The update panel shows the running launcher version as well as the application version.
-
-Existing installations need the new application and launcher, followed by one service restart, to enable persistent public listeners. Updating only a child process leaves the old launcher running. Before enabling the unprivileged service, update any older selected application that cannot use the persistent public listeners.
-
-## Service journal and process roles
-
-By default, an interactive SiteBrush process prints logs to its terminal (stdout and stderr), including `go run sitebrush.go`. The system service installer configures a rotating journal at `<data directory>/storage/logs/sitebrush.log` on all supported platforms. An existing Unix service launched with `-service-runtime` also uses this default when no custom logfile is specified. To redirect any invocation to a different file, use `-logfile /var/log/sitebrush.log` (an absolute path ending in `.log`); for example, `sitebrush -port 8080 -path /srv/sitebrush -logfile /var/log/sitebrush.log`. Pass the flag with `-install` to retain that choice in the generated service definition.
-
-The active file is rotated at UTC midnight and compressed as `<log-name>-YYYY-MM-DD-000001.log.gz` in the same directory; archives are retained for 30 days. The application is the sole log writer, so native service manager file redirects must not write a second unrotated copy. The destination directory must already exist for `-logfile`, with write permission for the service launcher or Windows service account; SiteBrush does not chmod a custom parent directory. The active file is private (`0600` where supported). Old per-site logs under the default storage directory remain readable until their 30-day cleanup; no new per-site logs are created. Watch the default journal with `tail -f /data1/sitebrush/storage/logs/sitebrush.log` on OpenBSD when `/data1/sitebrush` is the chosen data directory.
-
-On Unix, `-service-runtime` starts the root launcher. It applies process tuning and opens ports 80 and 443, then starts a worker as the dedicated `_sitebrush` account on OpenBSD (or the platform's corresponding service account). The launcher remains as root to own the listeners and forward shutdown signals. The worker and its supervised update child run without root privileges. Re-run `sitebrush -install -path /data1/sitebrush -port 80,443` after updating an older OpenBSD installation to replace a service definition that starts the whole server as root.
-
-An older direct OpenBSD process has `role=server uid=0` in the journal and is not controlled by an rc.d script that looks for `-service-runtime`. Before reinstalling the service, identify its current parent PID with `ps axww -o pid,ppid,user,command | grep '[s]itebrush'`, send `kill -TERM <parent-pid>` to that verified process, and wait for it and its child to exit. Then run `sitebrush -install -path /data1/sitebrush -port 80,443`. A correct restart logs `role=service-launcher uid=0`, `role=service-worker` with a nonzero UID, and a nonzero UID for `role=server-child`; `rcctl stop sitebrush` controls the launcher. Direct root starts of an installed OpenBSD service are promoted to that launcher role automatically.
-
-The flags `-service-worker`, `-public-proxy`, `-server-child`, and `-update-target-version` are internal: they identify the unprivileged worker, the private HTTP backend behind the updater, the supervised application process, and the signed release identity. They are added by SiteBrush and should not be set in a service definition manually.
-
-At each Unix service startup, the root launcher starts one background pass over the selected data directory to repair files copied with the wrong owner or permissions. It assigns the dedicated service UID/GID, uses private directories (`0700`) and files (`0600`), and preserves owner execution (`0700`) for executable files such as update binaries. The worker starts without waiting for the scan; affected operations can be retried after the journal reports `storage permission repair finished`. The pass reads small batches with pauses, stops with the launcher, skips symbolic links, multiply linked files, special files and other filesystems, and continues after individual errors. The first 20 errors and final counters appear in the common journal. Parent directories outside the selected root are not modified and must already allow service-user traversal. A root directory that prevents the worker from starting still requires administrator repair before startup.
-
-A `403` on `?test_drive` or `?trial_site_domain_check` also depends on registration and Test Drive settings, the main domain, and wildcard DNS pointing to the detected public IP. These checks are independent of demo file permissions. Look for `public trial denied` in the journal for the rejected condition; permission repair does not enable disabled registration or bypass DNS checks.
-
-On OpenBSD, the installer creates `/etc/login.conf.d/sitebrush` with an `openfiles` limit of 65536 and rebuilds that class before restarting the service. The class applies to the launcher and its unprivileged children. Site databases open their readers when first needed, so a server with many registered sites does not keep every site's connections open at startup. The startup report in the journal shows the effective file limit.
-
-When moving a data directory between operating systems, install and start the native SiteBrush binary. The update supervisor then replaces the copied platform's selected binary with the native launcher while preserving the databases. It rejects an unfinished update or recovery state that must be resolved on the original machine first.
-
-For a new server without a domain, open its IP address over HTTPS and compare the fallback certificate SHA-256 fingerprint printed by `sitebrush -install` on the server. Enter the one-time first administrator code from that command. The code expires after 15 minutes; `sitebrush -setup-code -path /data1/sitebrush` issues a new one only while no server owner or other site exists. The initial installer gives ownership of the code file to the dedicated service account.
 
 ## Best suited for
 
@@ -543,76 +444,3 @@ http://your-domain.example
 
 
 
-## Reversible site freezing
-
-`?freeze` keeps visitors on the published site and records the current page and
-published revision selections, file versions, redirects, folder mappings and
-content protection properties. Repeating freeze keeps the original checkpoint.
-No ZIP backup or second copy of the whole site is created. Files use private,
-content-addressed versions, sharing unchanged bodies where the filesystem permits.
-The history consumes site storage and remains included in its quota.
-
-Before publication, choose **Discard changes and unfreeze** beside **Publish
-changes** in the SiteBrush menu, or open `?unfreeze`. Review the list and confirm.
-Restoration moves the selected versions directly, without propagating
-SiteBrush-Template blocks, inserting editorial revisions or publishing drafts that
-already existed before freezing. New pages, revisions and files remain in history
-and are hidden from the current site. **Freeze history** (`?unfreeze&history`)
-lets the owner inspect retained page revisions and download retained files.
-
-Accounts, sessions, OAuth grants, analytics, other sites and server settings are
-outside this rollback. Content passwords and file access modes are restored, but
-revoked download tokens and consumed one-use links are never revived. Confirmed
-restoration continues after the browser disconnects and resumes after a server
-restart. Publication ends the cancellation window; failed publication preserves
-it until the durable publication completion stage. A freeze made by an older
-version without a checkpoint cannot reconstruct its earlier state. Restart the
-launcher after installing this feature so it can serve pinned file versions.
-
-Manual acceptance:
-
-1. Make an unpublished draft, freeze, edit two pages sharing a template, replace
-   an existing file and upload a new file. Guests should retain the published
-   page and existing file while the editor shows the draft changes.
-2. Review and confirm cancellation. Check both original page sources, the
-   pre-existing draft, old file contents, redirects and content passwords. New
-   pages/files should disappear publicly and remain accessible in owner history.
-3. Start an AI import, cancel the freeze, then wait. No old task should modify
-   the restored site. Repeat a freeze and publish; cancellation should disappear.
-4. Interrupt the process during restoration, restart it, and check that the same
-   restoration completes. Revoke or consume a file token during the freeze;
-   cancellation must not make that old token usable again.
-
-## Git commit identity
-
-Set an explicit identity in each development checkout before committing. Use an
-email address verified in GitHub **Settings → Emails**; for a private address,
-copy the exact noreply address shown there instead of constructing its numeric
-prefix yourself.
-
-```sh
-git config --local user.useConfigOnly true
-git config --local user.name 'Your Name'
-git config --local user.email 'your-verified-address@example.com'
-git var GIT_AUTHOR_IDENT
-git var GIT_COMMITTER_IDENT
-```
-
-Replace the example name and email with your own. `GIT_AUTHOR_*` and
-`GIT_COMMITTER_*` environment variables can override Git configuration, so check
-both identities in automated workspaces. SiteBrush CI compares the numeric ID
-and login in `ID+LOGIN@users.noreply.github.com` addresses against GitHub for
-commit authors, committers and `Co-authored-by` trailers. For the repository
-owner `matveynator`, GitHub reports ID `26712073`; the `1970409+matveynator`
-address from issue #258 belongs to a different account and is rejected.
-
-
-### Public web server addresses
-
-SiteBrush discovers every IPv4/IPv6 address on every interface with Go's native APIs on Windows, Linux, macOS, FreeBSD and OpenBSD. Public addresses on active interfaces, including additional aliases, are accepted for wildcard Test Drive DNS, new-site address checks, domain DNS checks and automatic TLS. An interface enumeration failure is reported without discarding other interfaces. The inventory refreshes every minute. Outgoing IP discovery runs separately and cannot block local aliases.
-
-The installation owner can configure **Public web server IP addresses** in `?expenses`: refresh interfaces, add public NAT/proxy addresses (one per line), and select a preferred address or Automatic. Settings persist in the control database. Automatic prefers an allowed address in the main domain's DNS, then IPv4, then IPv6. The preferred IP controls DNS suggestions, not the other allowed addresses. A disappeared preferred interface address is shown as unavailable; it is never silently converted into a manual address.
-
-Manual addresses are administrator declarations, not proof of ownership or Internet reachability. Private/reserved addresses, URLs, ports and CIDR notation are rejected. Configure A/AAAA records and wildcard DNS to point to the intended public address, and configure NAT forwarding or proxy routing separately. Domain TXT verification and ACME certificate validation still apply. A proxy terminating TLS must handle its certificate and ACME routing appropriately. This setting changes web DNS expectations only; operating-system networking, outgoing mail and installation identity remain separate. External verification over NetChan is not included.
-
-The web address inventory owns configuration in one channel process. Interface scans and serialized persistence run in bounded workers and return results through channels, keeping inventory reads available during slow I/O. Closing a settings WebSocket closes its consumer session and cancels pending work. Database cancellation is adapted to context only at the legacy database dispatcher and database/sql boundary; settings are written using a transaction with portable SELECT/INSERT/UPDATE queries.
