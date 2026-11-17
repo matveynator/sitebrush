@@ -193,6 +193,12 @@ func (session *Session) run(role, version string, stop <-chan struct{}) {
 		for _, record := range records {
 			closeArtifact(record)
 		}
+		// Shutdown waits for file owners before removing their directory, including Windows delete-on-close files.
+		for _, record := range records {
+			if record.done != nil {
+				<-record.done
+			}
+		}
 	}()
 	completed := make(chan capture, 1)
 	var cancel chan struct{}
