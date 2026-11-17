@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"flag"
 	"fmt"
 	stdhtml "html"
 	"html/template"
@@ -32940,6 +32941,15 @@ func TestMCPConnectionAndAIEditorBrowser(t *testing.T) {
 		t.Fatal(err)
 	}
 	cookie := newAdminSessionCookie(t, application, "editor@example.org")
+	stopPublic := make(chan struct{})
+	defer close(stopPublic)
+	application.publicCatalog = publicsite.NewCatalog(application.storagePath, stopPublic)
+	if err := application.writePublicPolicy("localhost"); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.publicCatalog.SetMemory(true); err != nil {
+		t.Fatal(err)
+	}
 	staticFiles, _ := fs.Sub(embeddedWebFiles, "web/static")
 	router := http.NewServeMux()
 	var assetErr error
@@ -34642,7 +34652,7 @@ func TestLocalhostPublicRootAndAuthenticatedMenuDuringCatalogPreload(t *testing.
 	defer menuServer.Close()
 	for _, ready := range []bool{false, true} {
 		if ready {
-			if err := publicsite.Write(application.storagePath, publicsite.Policy{Domain: "localhost"}); err != nil {
+			if err := publicsite.Write(application.storagePath, publicsite.Policy{Domain: "localhost", AdministratorSessions: []publicsite.AdministratorSession{{Hash: fmt.Sprintf("%x", sha256.Sum256([]byte(ownerCookie.Value))), Expires: time.Now().Add(time.Hour).Unix()}}}); err != nil {
 				t.Fatal(err)
 			}
 			if err := application.publicCatalog.Reload("localhost"); err != nil {
@@ -34664,10 +34674,13 @@ func TestLocalhostPublicRootAndAuthenticatedMenuDuringCatalogPreload(t *testing.
 					t.Fatalf("bare localhost was redirected or lost public contents: %d %q", response.Code, response.Header().Get("Location"))
 				}
 				administratorMenu := strings.Contains(response.Body.String(), "initializeSitebrushContextMenuForAdmin")
-				if administratorMenu != (role == "owner" && !ready) {
+				if administratorMenu != (role == "owner") {
 					t.Fatalf("wrong menu for %s: administrator=%t", role, administratorMenu)
 				}
-				if ready && (!strings.Contains(response.Body.String(), "/p/static/visitor.js") || !strings.Contains(response.Body.String(), `data-menu="guest_menu.`)) {
+				if role == "owner" && (response.Header().Get("Cache-Control") != "private, no-store" || strings.Contains(response.Body.String(), `data-menu="guest_menu.`)) {
+					t.Fatal("administrator HTML was cacheable or retained the guest bootstrap")
+				}
+				if ready && role != "owner" && (!strings.Contains(response.Body.String(), "/p/static/visitor.js") || !strings.Contains(response.Body.String(), `data-menu="guest_menu.`)) {
 					t.Fatal("published HTML lost its authenticated menu transport")
 				}
 				configuration, err := websocket.NewConfig("ws"+strings.TrimPrefix(menuServer.URL, "http")+"/?sitebrush_menu_ws", "http://localhost:777")
@@ -35848,5 +35861,181 @@ func TestPublicIPSocketReaderClosesConsumerSessionOnDisconnect(t *testing.T) {
 	case <-session:
 	case <-time.After(time.Second):
 		t.Fatal("disconnect did not close consumer session")
+	}
+}
+
+func TestAuthenticatedMenuFrontKeepsGuestAndMaintenanceStatic(t *testing.T) {
+	root := t.TempDir()
+	stop := make(chan struct{})
+	defer close(stop)
+	application := &App{storagePath: root, storageRealRoot: root, publicBoundary: true, publicStreamer: publicsite.NewStreamer()}
+	application.publicCatalog = publicsite.NewCatalog(root, stop)
+	const domain = "menu.example"
+	const token = "active-site-administrator"
+	policy := publicsite.Policy{Domain: domain, AdministratorSessions: []publicsite.AdministratorSession{{Hash: fmt.Sprintf("%x", sha256.Sum256([]byte(token))), Expires: time.Now().Add(time.Hour).Unix()}}}
+	if err := publicsite.Write(root, policy); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.publicCatalog.SetMemory(true); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(application.domainStaticDir(domain), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(application.domainStaticDir(domain), "index.html"), []byte("<html><body>published menu page</body></html>"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(application.domainStaticDir(domain), "style.css"), []byte("body{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// A separate backend makes accidental guest proxying visible without SQL.
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if cookie, err := r.Cookie("sitebrush_session"); err != nil || cookie.Value != token {
+			t.Error("guest reached backend")
+		}
+		w.Header().Set("Cache-Control", "private, no-store")
+		io.WriteString(w, "ready administrator menu")
+	}))
+	front := newPublicHTTPFront(application, "menu-fixture", stop)
+	if err := front.Set(strings.TrimPrefix(backend.URL, "http://"), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := front.PolicyEnabled(); err != nil {
+		t.Fatal(err)
+	}
+	defer backend.Close()
+	application.db = panicSQLExecutor{t: t}
+	for _, scenario := range []struct{ cookie, path, expected string }{
+		{"", "/", "published menu page"},
+		{"expired", "/", "published menu page"},
+		{token, "/?utm_source=test", "ready administrator menu"},
+		{token, "/style.css", "body{}"},
+	} {
+		for _, method := range []string{http.MethodGet, http.MethodHead} {
+			request := httptest.NewRequest(method, "https://"+domain+scenario.path, nil)
+			if scenario.cookie != "" {
+				request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: scenario.cookie})
+			}
+			response := httptest.NewRecorder()
+			front.ServeHTTP(response, request)
+			if response.Code != http.StatusOK || method == http.MethodGet && !strings.Contains(response.Body.String(), scenario.expected) || method == http.MethodHead && response.Body.Len() != 0 {
+				t.Fatalf("%s %+v: %d %s", method, scenario, response.Code, response.Body.String())
+			}
+		}
+	}
+	backend.Close()
+	for _, paused := range []bool{false, true} {
+		if err := front.Set(strings.TrimPrefix(backend.URL, "http://"), paused); err != nil {
+			t.Fatal(err)
+		}
+		if !paused {
+			if err := front.PolicyEnabled(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		request := httptest.NewRequest(http.MethodGet, "https://"+domain+"/", nil)
+		request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: token})
+		response := httptest.NewRecorder()
+		front.ServeHTTP(response, request)
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "published menu page") || !strings.Contains(response.Body.String(), `data-menu-mode="updating"`) {
+			t.Fatalf("paused=%t: %d %s", paused, response.Code, response.Body.String())
+		}
+	}
+}
+
+func TestPublishedAdministratorSessionTracksLoginRenewalAndLogout(t *testing.T) {
+	application, database := newTestApplication(t)
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('localhost','menu@example.org','unused',1)`); err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	defer close(stop)
+	application.publicCatalog = publicsite.NewCatalog(application.storagePath, stop)
+	application.startPublicPublication(stop)
+	cookie := newAdminSessionCookie(t, application, "menu@example.org")
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/", nil)
+	request.RemoteAddr = "127.0.0.1:12345"
+	request.AddCookie(cookie)
+	before := application.publicRequestDecision(request)
+	if !before.Administrator {
+		t.Fatal("new session was not published before returning its cookie")
+	}
+	now := time.Now()
+	if _, err := database.Exec(`UPDATE sessions SET last_used_at=? WHERE token=?`, now.Add(-3*time.Minute).Unix(), cookie.Value); err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	if !application.renewAccountSession(response, request, "localhost", "menu@example.org", cookie.Value, now, now.Add(-3*time.Minute).Unix()) {
+		t.Fatal(response.Body.String())
+	}
+	// Inspect the durable deadline without a second authentication lookup.
+	var policy publicsite.Policy
+	encoded, err := os.ReadFile(publicsite.PolicyPath(application.storagePath, "localhost"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(encoded, &policy); err != nil {
+		t.Fatal(err)
+	}
+	if len(policy.AdministratorSessions) != 1 || policy.AdministratorSessions[0].Expires != now.Unix()+int64(accountauth.SessionTTL/time.Second) {
+		t.Fatal("session renewal was not published", policy.AdministratorSessions)
+	}
+	response = httptest.NewRecorder()
+	application.logout(response, request)
+	if response.Code != http.StatusFound {
+		t.Fatal(response.Body.String())
+	}
+	if application.publicRequestDecision(request).Administrator {
+		t.Fatal("logged-out cookie retained the administrator route")
+	}
+}
+
+func TestProfilerFlagPropagationAndDisabledMode(t *testing.T) {
+	session, err := startProcessProfiler(serverRunConfig{}, "application", nil)
+	if err != nil || session != nil {
+		t.Fatal("disabled profiling created a listener", err)
+	}
+	if arguments := profilerChildArguments(serverRunConfig{}); len(arguments) != 0 {
+		t.Fatal(arguments)
+	}
+	arguments := profilerChildArguments(serverRunConfig{Profiler: true, ProfilerLogOutput: "/chosen/sitebrush.log"})
+	if !reflect.DeepEqual(arguments, []string{"--profiler", "--logfile", "/chosen/sitebrush.log"}) {
+		t.Fatal("profiling configuration lost in child", arguments)
+	}
+	flagSet := flag.NewFlagSet("profiler", flag.ContinueOnError)
+	flagSet.Bool("profiler", false, "enable local Go profiling; curl -o saves profiles in the client current directory")
+	if err := flagSet.Parse([]string{"--profiler"}); err != nil {
+		t.Fatal(err)
+	}
+	var usage bytes.Buffer
+	printVisibleFlagDefaults(&usage, flagSet)
+	if !strings.Contains(usage.String(), "--profiler") || !strings.Contains(usage.String(), "curl -o") {
+		t.Fatal("missing profiler help", usage.String())
+	}
+}
+
+func TestProfilerRoutesRemainOutsidePublicWebsite(t *testing.T) {
+	root := t.TempDir()
+	stop := make(chan struct{})
+	defer close(stop)
+	application := &App{storagePath: root, storageRealRoot: root, publicBoundary: true, db: panicSQLExecutor{t: t}}
+	application.publicCatalog = publicsite.NewCatalog(root, stop)
+	if err := publicsite.Write(root, publicsite.Policy{Domain: "profiler.example"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.publicCatalog.SetMemory(true); err != nil {
+		t.Fatal(err)
+	}
+	profiler, err := startProcessProfiler(serverRunConfig{Profiler: true}, "public", stop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer profiler.Close()
+	for _, path := range []string{"/debug/pprof/", "/debug/pprof/profile?seconds=1", "/debug/pprof/heap"} {
+		response := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "https://profiler.example"+path, nil)
+		if !application.servePublicPublished(response, request, false) || response.Code != http.StatusNotFound {
+			t.Fatalf("diagnostics escaped into public routing: %s %d", path, response.Code)
+		}
 	}
 }

@@ -444,3 +444,39 @@ http://your-domain.example
 
 
 
+
+
+## Go profiling
+
+Add `--profiler` to the existing server arguments and restart the service with the new build. Profiling is disabled by default. On an installed service, retain the existing `-service-runtime`, `-path`, `-port` and logging arguments.
+
+Each public/application process opens its own `127.0.0.1` diagnostic port and logs its role, PID, build version, address and a ready-to-copy capture command. Ports can change after a restart. The journal goes to the console for a foreground run, to `--logfile` when supplied, or to `storage/logs/sitebrush.log` beneath the installed service's data directory. The privileged service launcher does not start another profiler.
+
+The profile is the HTTP response saved by `curl -o`. A relative output filename is written in the **curl client's current directory**, not automatically inside the server's data directory. Run these commands on the SiteBrush server, substituting the ports printed for `public` and `application`:
+
+```sh
+curl --fail --max-time 40 -o ./cpu-public.pprof 'http://127.0.0.1:PUBLIC_PORT/debug/pprof/profile?seconds=30' &
+public_capture_pid=$!
+curl --fail --max-time 40 -o ./cpu-application.pprof 'http://127.0.0.1:APPLICATION_PORT/debug/pprof/profile?seconds=30' &
+application_capture_pid=$!
+wait "$public_capture_pid"
+wait "$application_capture_pid"
+```
+
+While those captures are running, run the existing benchmark from the separate load-generator machine:
+
+```sh
+ab -k -c 500 -n 10000 http://vz.sitebrush.com/
+```
+
+Keep both profiles and a copy of the **exact executable used by each profiled PID**; the public process and the updated application may use different binaries. On a machine with Go installed, inspect each profile with its matching binary:
+
+```sh
+go tool pprof -top ./sitebrush-public-binary ./cpu-public.pprof
+go tool pprof -top -cum ./sitebrush-public-binary ./cpu-public.pprof
+go tool pprof -top ./sitebrush-application-binary ./cpu-application.pprof
+```
+
+Additional local endpoints are `/debug/pprof/heap`, `/debug/pprof/allocs`, and `/debug/pprof/goroutine?debug=2`. Save the first two using `curl -o`, then use `go tool pprof -alloc_space` to inspect cumulative allocation cost. To measure allocations specifically during a benchmark, capture `/debug/pprof/allocs?seconds=30` in a separate run. CPU captures default to 30 seconds; explicit durations must be between 1 and 120 seconds. Only one CPU capture can run per process at a time.
+
+The diagnostic listener is separate from website ports and accepts the printed loopback address. It closes when its process stops. Keep `-debug` off during performance measurements; `-request-timings` can provide complementary request-stage counters. Profiled throughput includes profiling overhead and should not be used as the final comparison against nginx.

@@ -38,44 +38,54 @@ type Session struct {
 	Hash    string
 	Expires int64
 }
+
+// AdministratorSession is a routing hint; the database owner still authorizes access.
+type AdministratorSession struct {
+	Hash         string
+	Expires      int64
+	IPRestricted bool
+	AllowedIPs   []string
+}
+
 type TrustedIP struct {
 	Address string
 	Expires int64
 }
 
 type Policy struct {
-	RoutingVersion    int
-	Versioned         bool
-	DemoSite          bool
-	PrivateTestDrive  bool
-	ServerOwner       bool
-	NoIndex           bool
-	RobotsOverride    bool
-	ResourcePaths     map[string]string
-	ResourceTypes     map[string]string
-	PublishedVersions map[string]string
-	ChrootVersions    map[string]string
-	FileVersions      map[string]string
-	FileAliases       map[string]string
-	ChrootAliases     map[string]string
-	ChrootListings    map[string][]string
-	Hidden            map[string]bool
-	Layouts           map[string]string
-	TrustedIPs        []TrustedIP
-	ServerIPs         []TrustedIP
-	Chroots           []Chroot
-	Domain            string
-	Frozen            bool
-	Stealth           bool
-	AllowedIPs        []string
-	Aliases           []string
-	Files             []FileRule
-	Passwords         []dirprotect.Rule
-	Redirects         []Redirect
-	OwnerSessions     []Session
-	DeletionReason    string
-	DeletionDeadline  string
-	DeletionDebtLabel string
+	RoutingVersion        int
+	Versioned             bool
+	DemoSite              bool
+	PrivateTestDrive      bool
+	ServerOwner           bool
+	NoIndex               bool
+	RobotsOverride        bool
+	ResourcePaths         map[string]string
+	ResourceTypes         map[string]string
+	PublishedVersions     map[string]string
+	ChrootVersions        map[string]string
+	FileVersions          map[string]string
+	FileAliases           map[string]string
+	ChrootAliases         map[string]string
+	ChrootListings        map[string][]string
+	Hidden                map[string]bool
+	Layouts               map[string]string
+	TrustedIPs            []TrustedIP
+	ServerIPs             []TrustedIP
+	Chroots               []Chroot
+	Domain                string
+	Frozen                bool
+	Stealth               bool
+	AllowedIPs            []string
+	Aliases               []string
+	Files                 []FileRule
+	Passwords             []dirprotect.Rule
+	Redirects             []Redirect
+	OwnerSessions         []Session
+	AdministratorSessions []AdministratorSession
+	DeletionReason        string
+	DeletionDeadline      string
+	DeletionDebtLabel     string
 }
 type Lookup struct {
 	ClientIP    string
@@ -114,6 +124,7 @@ type Decision struct {
 	File              FileRule
 	Redirect          string
 	Owner             bool
+	Administrator     bool
 	Found             bool
 	DeletionReason    string
 	DeletionDeadline  string
@@ -266,12 +277,13 @@ type Catalog struct {
 	stop    <-chan struct{}
 }
 type cachedPolicy struct {
-	blocked   bool
-	files     map[string]FileRule
-	redirects map[string]string
-	policy    Policy
-	modified  time.Time
-	size      int64
+	administrators map[string]AdministratorSession
+	blocked        bool
+	files          map[string]FileRule
+	redirects      map[string]string
+	policy         Policy
+	modified       time.Time
+	size           int64
 }
 
 func NewCatalog(root string, stop <-chan struct{}) *Catalog {
@@ -324,6 +336,7 @@ func NewCatalog(root string, stop <-chan struct{}) *Catalog {
 					return cachedPolicy{}, false
 				}
 				cached = cachedPolicy{policy: policy, modified: info.ModTime(), size: info.Size(), files: make(map[string]FileRule, len(policy.Files)), redirects: make(map[string]string, len(policy.Redirects))}
+				cached.administrators = administratorSessionIndex(policy.AdministratorSessions)
 				for _, rule := range policy.Files {
 					cached.files[rule.Name] = admittedFileRule(rule)
 				}
@@ -511,6 +524,12 @@ func NewCatalog(root string, stop <-chan struct{}) *Catalog {
 						current = next
 						decision.Redirect = current
 					}
+					if task.query.SessionHash != "" {
+						session, exists := cached.administrators[task.query.SessionHash]
+						decision.Administrator = exists && session.Expires > time.Now().Unix() &&
+							(!session.IPRestricted || trustedIPAddresses(session.AllowedIPs, task.query.ClientIP)) &&
+							(!policy.Stealth || decision.AdminAllowed)
+					}
 					for _, session := range policy.OwnerSessions {
 						if session.Hash == task.query.SessionHash && session.Expires > time.Now().Unix() {
 							decision.Owner = true
@@ -672,6 +691,7 @@ func loadPolicies(root, domain string) (map[string]cachedPolicy, error) {
 			return nil, errors.New("public policy cache is full")
 		}
 		cached := cachedPolicy{policy: policy, size: int64(len(encoded)), files: make(map[string]FileRule), redirects: make(map[string]string)}
+		cached.administrators = administratorSessionIndex(policy.AdministratorSessions)
 		for _, rule := range policy.Files {
 			cached.files[rule.Name] = admittedFileRule(rule)
 		}
@@ -746,6 +766,25 @@ func hiddenVersionPath(hidden map[string]bool, tree, name string) bool {
 			break
 		}
 		name = parent
+	}
+	return false
+}
+
+// The catalog participant owns these indexes together with its policy snapshots.
+func administratorSessionIndex(sessions []AdministratorSession) map[string]AdministratorSession {
+	index := make(map[string]AdministratorSession, len(sessions))
+	for _, session := range sessions {
+		if session.Hash != "" {
+			index[session.Hash] = session
+		}
+	}
+	return index
+}
+func trustedIPAddresses(addresses []string, clientIP string) bool {
+	for _, address := range addresses {
+		if containsIP(address, clientIP) {
+			return true
+		}
 	}
 	return false
 }

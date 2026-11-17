@@ -4,6 +4,7 @@
   window.sitebrushVisitorServicesInstalled = true;
   const loaderScript = document.currentScript;
   const menuAsset = loaderScript ? loaderScript.dataset.menu : '';
+  window.sitebrushPublicMenuMode = loaderScript ? loaderScript.dataset.menuMode || 'guest' : 'guest';
   const visitorModel = {menuRequested: false, pressTimer: null, pressPoint: null, suppressGestureClick: false, suppressClickUntil: 0};
   function loadGuestMenu(browserEvent) {
     if (!menuAsset || browserEvent.ctrlKey || window.__sitebrushContextMenuInitialized) return;

@@ -5,6 +5,7 @@
     document.dispatchEvent(new CustomEvent('sitebrush-account-state', {detail: {status: status}}));
   }
   window.sitebrushRefreshMenu = function refreshPublicMenu(menuPoint) {
+    if (window.sitebrushPublicMenuMode === 'updating') return;
     const menuHost = document.getElementById('SiteBrushMenuBox');
     if (!menuHost) return;
     if (typeof WebSocket !== 'function') { reportGuestAccountStatus('unavailable'); return; }

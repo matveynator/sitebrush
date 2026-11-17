@@ -294,3 +294,55 @@ func TestFrozenCatalogResolvesPinnedFolderLinksAndHidesNewAssets(t *testing.T) {
 		})
 	}
 }
+
+func TestAdministratorSessionRoutingSeparatesServerPrivileges(t *testing.T) {
+	for _, memory := range []bool{false, true} {
+		t.Run(strconv.FormatBool(memory), func(t *testing.T) {
+			root := t.TempDir()
+			stop := make(chan struct{})
+			defer close(stop)
+			policy := Policy{Domain: "site.test", Aliases: []string{"alias.test"}, AdministratorSessions: []AdministratorSession{
+				{Hash: "active", Expires: time.Now().Add(time.Hour).Unix()},
+				{Hash: "expired", Expires: 1},
+				{Hash: "restricted", Expires: time.Now().Add(time.Hour).Unix(), IPRestricted: true, AllowedIPs: []string{"192.0.2.0/24"}},
+				{Hash: "deny-all", Expires: time.Now().Add(time.Hour).Unix(), IPRestricted: true},
+			}}
+			if err := Write(root, policy); err != nil {
+				t.Fatal(err)
+			}
+			catalog := NewCatalog(root, stop)
+			if err := catalog.SetMemory(memory); err != nil {
+				t.Fatal(err)
+			}
+			for _, scenario := range []struct {
+				hash, host, address string
+				administrator       bool
+			}{
+				{"active", "site.test", "198.51.100.1", true},
+				{"active", "alias.test", "198.51.100.1", true},
+				{"active", "foreign.test", "198.51.100.1", false},
+				{"", "site.test", "198.51.100.1", false},
+				{"unknown", "site.test", "198.51.100.1", false},
+				{"expired", "site.test", "198.51.100.1", false},
+				{"restricted", "site.test", "192.0.2.4", true},
+				{"restricted", "site.test", "198.51.100.1", false},
+				{"deny-all", "site.test", "192.0.2.4", false},
+			} {
+				decision := catalog.Lookup(Lookup{Host: scenario.host, SessionHash: scenario.hash, ClientIP: scenario.address})
+				if decision.Administrator != scenario.administrator || decision.Owner {
+					t.Fatalf("%+v: %+v", scenario, decision)
+				}
+			}
+			policy.AdministratorSessions = nil
+			if err := Write(root, policy); err != nil {
+				t.Fatal(err)
+			}
+			if err := catalog.Reload(policy.Domain); err != nil {
+				t.Fatal(err)
+			}
+			if catalog.Lookup(Lookup{Host: "alias.test", SessionHash: "active"}).Administrator {
+				t.Fatal("revoked session retained its route")
+			}
+		})
+	}
+}
