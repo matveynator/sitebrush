@@ -605,3 +605,14 @@ and login in `ID+LOGIN@users.noreply.github.com` addresses against GitHub for
 commit authors, committers and `Co-authored-by` trailers. For the repository
 owner `matveynator`, GitHub reports ID `26712073`; the `1970409+matveynator`
 address from issue #258 belongs to a different account and is rejected.
+
+
+### Public web server addresses
+
+SiteBrush discovers every IPv4/IPv6 address on every interface with Go's native APIs on Windows, Linux, macOS, FreeBSD and OpenBSD. Public addresses on active interfaces, including additional aliases, are accepted for wildcard Test Drive DNS, new-site address checks, domain DNS checks and automatic TLS. An interface enumeration failure is reported without discarding other interfaces. The inventory refreshes every minute. Outgoing IP discovery runs separately and cannot block local aliases.
+
+The installation owner can configure **Public web server IP addresses** in `?expenses`: refresh interfaces, add public NAT/proxy addresses (one per line), and select a preferred address or Automatic. Settings persist in the control database. Automatic prefers an allowed address in the main domain's DNS, then IPv4, then IPv6. The preferred IP controls DNS suggestions, not the other allowed addresses. A disappeared preferred interface address is shown as unavailable; it is never silently converted into a manual address.
+
+Manual addresses are administrator declarations, not proof of ownership or Internet reachability. Private/reserved addresses, URLs, ports and CIDR notation are rejected. Configure A/AAAA records and wildcard DNS to point to the intended public address, and configure NAT forwarding or proxy routing separately. Domain TXT verification and ACME certificate validation still apply. A proxy terminating TLS must handle its certificate and ACME routing appropriately. This setting changes web DNS expectations only; operating-system networking, outgoing mail and installation identity remain separate. External verification over NetChan is not included.
+
+The web address inventory owns configuration in one channel process. Interface scans and serialized persistence run in bounded workers and return results through channels, keeping inventory reads available during slow I/O. Closing a settings WebSocket closes its consumer session and cancels pending work. Database cancellation is adapted to context only at the legacy database dispatcher and database/sql boundary; settings are written using a transaction with portable SELECT/INSERT/UPDATE queries.

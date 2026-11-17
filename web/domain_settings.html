@@ -87,7 +87,7 @@
           <p class="hint">{{index .T "domain_settings_custom_domain_dns_hint"}}</p>
           <div class="dns-record-list compact-record-list">
             <div class="dns-record-row">
-              <span class="dns-record-type">A</span>
+              <span class="dns-record-type">{{.ExternalIPRecordType}}</span>
               <span class="dns-record-field"><span>{{index .T "domain_settings_dns_host_label"}}</span><code>@</code></span>
               <span class="dns-record-field"><span>{{index .T "domain_settings_dns_value_label"}}</span><code>{{.ExternalIP}}</code></span>
               <span class="dns-record-help">{{index .T "domain_settings_dns_a_help"}}</span>
@@ -168,7 +168,7 @@
           </div>
           {{if $.ExternalIP}}
           <div class="dns-record-row">
-            <span class="dns-record-type">A</span>
+            <span class="dns-record-type">{{$.ExternalIPRecordType}}</span>
             <span class="dns-record-field"><span>{{index $.T "domain_settings_dns_host_label"}}</span><code>{{.DNSHostName}}</code></span>
             <span class="dns-record-field"><span>{{index $.T "domain_settings_dns_value_label"}}</span><code>{{$.ExternalIP}}</code></span>
             <span class="dns-record-help">{{index $.T "domain_settings_dns_a_help"}}</span>

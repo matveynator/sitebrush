@@ -105,6 +105,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/requesttiming"
 	"github.com/matveynator/sitebrush/v2/pkg/revisioncontent"
 	"github.com/matveynator/sitebrush/v2/pkg/securitysync"
+	"github.com/matveynator/sitebrush/v2/pkg/serverip"
 	"github.com/matveynator/sitebrush/v2/pkg/serviceinstall"
 	"github.com/matveynator/sitebrush/v2/pkg/servicepriv"
 	"github.com/matveynator/sitebrush/v2/pkg/shutdownsignals"
@@ -280,6 +281,7 @@ type App struct {
 	grabCancels                    *grabCancelTracker
 	trialPreviews                  *publicTrialPreviewStore
 	paidTrialSlots                 chan struct{}
+	webPublicIPs                   *serverip.Process
 	publicTrialAvailability        chan publicTrialAvailabilityRequest
 	publishTracker                 *publishProgressTracker
 	analyticsEvents                chan siteAnalyticsEvent
@@ -10715,7 +10717,8 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application.guestStaticHTMLCache = startGuestStaticHTMLCacheWorker(ctx, defaultGuestStaticHTMLCacheLimitBytes)
 	application.authIPFailureCache = startAuthIPFailureCacheWorker(ctx)
 	application.registrationConfirmations = startEmailConfirmationMemoryWorker(ctx)
-	application.publicTrialAvailability = startPublicTrialAvailabilityWorker(ctx.Done())
+	application.publicTrialAvailability = startPublicTrialAvailabilityWorker(ctx.Done(), application.checkWebPublicTrialWildcard)
+	application.startWebPublicIPs(ctx.Done())
 	application.hostingSupportEvents = application.startHostingSupportEventWorker(ctx.Done())
 	application.geoIP = geoip.NewResolver(filepath.Join(application.storageRootDir(), "geoip"))
 	certificateCacheDir := filepath.Join(application.storageRootDir(), "letsencrypt")
@@ -14245,6 +14248,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	}
 	if hasQueryFlag(r, "text") {
 		a.editRawPage(w, r)
+		return
+	}
+	if hasQueryFlag(r, "public_ip_settings_ws") {
+		a.publicIPSettingsWebSocket(w, r)
 		return
 	}
 	if hasQueryFlag(r, "certificate_renew_ws") {
@@ -24671,6 +24678,9 @@ func (a *App) publicTrialAvailabilityForSettings(ctx context.Context, ownerDomai
 		return availability
 	}
 	if a.publicTrialAvailability == nil {
+		if a.webPublicIPs != nil {
+			return a.checkWebPublicTrialWildcard(ownerDomain)
+		}
 		return checkPublicTrialWildcard(ownerDomain)
 	}
 	reply := make(chan publicTrialAvailability, 1)
@@ -24700,7 +24710,11 @@ func (a *App) invalidatePublicTrialAvailability() {
 	}
 }
 
-func startPublicTrialAvailabilityWorker(stop <-chan struct{}) chan publicTrialAvailabilityRequest {
+func startPublicTrialAvailabilityWorker(stop <-chan struct{}, probes ...func(string) publicTrialAvailability) chan publicTrialAvailabilityRequest {
+	probe := checkPublicTrialWildcard
+	if len(probes) > 0 {
+		probe = probes[0]
+	}
 	requests := make(chan publicTrialAvailabilityRequest, 32)
 	results := make(chan publicTrialAvailabilityProbeResult, 8)
 	go func() {
@@ -24728,7 +24742,7 @@ func startPublicTrialAvailabilityWorker(stop <-chan struct{}) chan publicTrialAv
 					jobGeneration = generation
 					inFlightGeneration[ownerDomain] = jobGeneration
 					go func(domain string, currentGeneration uint64) {
-						result := publicTrialAvailabilityProbeResult{ownerDomain: domain, generation: currentGeneration, availability: checkPublicTrialWildcard(domain)}
+						result := publicTrialAvailabilityProbeResult{ownerDomain: domain, generation: currentGeneration, availability: probe(domain)}
 						select {
 						case results <- result:
 						case <-stop:
@@ -24769,7 +24783,16 @@ func checkPublicTrialWildcard(ownerDomain string) publicTrialAvailability {
 		availability.ReasonKey = "public_trial_disabled_external_ip"
 		return availability
 	}
-	availability.ExternalIP = externalIP.String()
+	return checkPublicTrialWildcardAddresses(ownerDomain, []net.IP{externalIP})
+}
+
+func checkPublicTrialWildcardAddresses(ownerDomain string, serverIPs []net.IP) publicTrialAvailability {
+	availability := publicTrialAvailability{WildcardDomain: "*." + ownerDomain, CheckedAt: time.Now().UTC()}
+	if len(serverIPs) == 0 {
+		availability.ReasonKey = "public_trial_disabled_external_ip"
+		return availability
+	}
+	availability.ExternalIP = serverIPs[0].String()
 	type lookupResult struct {
 		ipRecords []net.IP
 		err       error
@@ -24789,7 +24812,7 @@ func checkPublicTrialWildcard(ownerDomain string) publicTrialAvailability {
 			return availability
 		}
 		for _, ipRecord := range result.ipRecords {
-			if ipRecord == nil || !ipRecord.Equal(externalIP) {
+			if !domainIPRecordsMatchAll([]net.IP{ipRecord}, serverIPs) {
 				availability.ReasonKey = "public_trial_disabled_wildcard_mismatch"
 				return availability
 			}
@@ -29910,6 +29933,7 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 		"ShowCentralRegistry":        snapshot.ShowCentralRegistry,
 		"ShowDemo":                   snapshot.DemoSettings.Enabled && normalizeDomainName(snapshot.DemoSettings.Domain) != "",
 		"SimplifiedExpenses":         true,
+		"CanConfigurePublicIPs":      a.updateAuthorized(r),
 		"ExpenseServers":             expenseServers,
 		"MailJournalLabelsJSON":      mailJournalLabelsJSON(translations),
 	}
@@ -41670,7 +41694,19 @@ func (a *App) registrationDomainAddressSetupView(ctx context.Context, siteDomain
 	if parentDomain, found := a.hostingAndSupportParentDomainForThirdLevelSite(ctx, registrationDomain); found {
 		setupFromAddress = "sitebrush@" + parentDomain
 	}
-	serverIPs, externalIP, err := detectServerIPCandidates(ctx)
+	var serverIPs []net.IP
+	var externalIP string
+	var err error
+	if a.webPublicIPs != nil {
+		// Registration checks inbound web routing; mail discovery describes the
+		// outgoing route and cannot validate a separately configured NAT address.
+		var snapshot serverip.Snapshot
+		snapshot, err = a.webIPSnapshot(ctx.Done())
+		serverIPs = snapshot.Candidates()
+		externalIP = snapshot.Primary(nil)
+	} else {
+		serverIPs, externalIP, err = detectServerIPCandidates(ctx)
+	}
 	if err != nil {
 		return emailDNSSetupViewForLanguage(languageCode, registrationDomain, setupFromAddress, "SERVER_IP"), true
 	}
@@ -41680,6 +41716,9 @@ func (a *App) registrationDomainAddressSetupView(ctx context.Context, siteDomain
 	}
 	ipRecords, ipErr := lookupIPRecords(registrationDomain)
 	domainPointsToServer := ipErr == nil && ipRecordsAllowAnyServerIP(ipRecords, serverIPs)
+	if a.webPublicIPs != nil {
+		domainPointsToServer = ipErr == nil && domainIPRecordsMatchAll(ipRecords, serverIPs)
+	}
 	if domainPointsToServer {
 		return EmailDNSSetupView{}, false
 	}
@@ -52248,6 +52287,305 @@ func dedupeIPStrings(ipStrings []string) []string {
 	return dedupedIPStrings
 }
 
+// === Installation public web addresses ===
+
+const webPublicIPSettingsKey = "web_public_ip_settings"
+
+func (a *App) startWebPublicIPs(stop <-chan struct{}) {
+	settings := serverip.Settings{}
+	if err := a.withServerControlDatabaseRead(context.Background(), "public-ip-load", func(database *sql.DB) error {
+		var encoded string
+		err := database.QueryRow(`SELECT value FROM server_settings WHERE name=?`, webPublicIPSettingsKey).Scan(&encoded)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if err = json.Unmarshal([]byte(encoded), &settings); err != nil {
+			return err
+		}
+		settings, err = serverip.Normalize(settings)
+		return err
+	}); err != nil {
+		log.Printf("public IP settings read failed: %v", err)
+		settings = serverip.Settings{}
+	}
+	a.webPublicIPs = serverip.Start(settings, a.saveWebPublicIPSettings, stop)
+	// Outgoing discovery is optional evidence and never delays local addresses.
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			detected, err := detectPublicAutomaticSSLServerIPs()
+			observed := []string{}
+			if err != nil {
+				log.Printf("public IP outgoing discovery unavailable: %v", err)
+			}
+			if err == nil {
+				for _, ip := range detected {
+					observed = append(observed, ip.String())
+				}
+			}
+			if _, exchangeErr := serverip.Exchange(a.webPublicIPs, serverip.Request{Action: "observed", Observed: observed}, stop); exchangeErr != nil {
+				return
+			}
+			a.invalidatePublicTrialAvailability()
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+}
+
+// This adapter translates the consumer's channel lifetime only at the legacy
+// database dispatcher and database/sql boundary. The transaction owns the write.
+func (a *App) saveWebPublicIPSettings(next serverip.Settings, stop <-chan struct{}) error {
+	select {
+	case <-stop:
+		return errors.New("public IP settings consumer stopped")
+	default:
+	}
+	encoded, err := json.Marshal(next)
+	if err != nil {
+		return err
+	}
+	boundary, cancel := context.WithCancel(context.Background())
+	finished := make(chan struct{})
+	defer close(finished)
+	defer cancel()
+	go func() {
+		select {
+		case <-stop:
+			cancel()
+		case <-finished:
+		}
+	}()
+	persist := func(database *sql.DB) error {
+		transaction, beginErr := database.BeginTx(boundary, nil)
+		if beginErr != nil {
+			return beginErr
+		}
+		defer transaction.Rollback()
+		var previous string
+		var writeErr error
+		readErr := transaction.QueryRowContext(boundary, `SELECT value FROM server_settings WHERE name=?`, webPublicIPSettingsKey).Scan(&previous)
+		if errors.Is(readErr, sql.ErrNoRows) {
+			_, writeErr = transaction.ExecContext(boundary, `INSERT INTO server_settings(name,value,updated_at) VALUES(?,?,?)`, webPublicIPSettingsKey, string(encoded), time.Now().UTC().Format(time.RFC3339))
+		} else if readErr != nil {
+			return readErr
+		} else {
+			_, writeErr = transaction.ExecContext(boundary, `UPDATE server_settings SET value=?,updated_at=? WHERE name=?`, string(encoded), time.Now().UTC().Format(time.RFC3339), webPublicIPSettingsKey)
+		}
+		if writeErr != nil {
+			return writeErr
+		}
+		return transaction.Commit()
+	}
+	completed := make(chan error, 1)
+	entered := make(chan struct{})
+	dispatchErr := a.withServerControlDatabaseWrite(boundary, "public-ip-save", func(database *sql.DB) error {
+		close(entered)
+		result := persist(database)
+		completed <- result
+		return result
+	})
+	select {
+	case <-entered:
+		// Cancellation may race a successful commit. Publish the transaction's
+		// actual outcome before releasing the inventory owner's save slot.
+		return <-completed
+	default:
+		return dispatchErr
+	}
+}
+
+func (a *App) webIPSnapshot(stop <-chan struct{}) (serverip.Snapshot, error) {
+	return serverip.Exchange(a.webPublicIPs, serverip.Request{}, stop)
+}
+
+func (a *App) webIPCandidates() ([]net.IP, error) {
+	snapshot, err := a.webIPSnapshot(nil)
+	if err != nil {
+		return nil, err
+	}
+	candidates := snapshot.Candidates()
+	if len(candidates) == 0 {
+		return nil, errors.New("no public web server addresses configured")
+	}
+	return candidates, nil
+}
+
+func (a *App) webPrimaryIP(stop <-chan struct{}, domain string) (string, error) {
+	snapshot, err := a.webIPSnapshot(stop)
+	if err != nil {
+		return "", err
+	}
+	if snapshot.Settings.Preferred != "" {
+		return snapshot.Primary(nil), nil
+	}
+	type dnsResult struct {
+		records []net.IP
+		err     error
+	}
+	results := make(chan dnsResult, 1)
+	go func() {
+		records, lookupErr := lookupIPRecords(domain)
+		select {
+		case results <- dnsResult{records, lookupErr}:
+		case <-stop:
+		}
+	}()
+	select {
+	case <-stop:
+		return "", errors.New("public IP selection canceled")
+	case result := <-results:
+		if result.err != nil {
+			log.Printf("public IP DNS suggestion lookup failed domain=%s error=%v", domain, result.err)
+		}
+		return snapshot.Primary(result.records), nil
+	}
+}
+
+func (a *App) checkWebPublicTrialWildcard(domain string) publicTrialAvailability {
+	candidates, err := a.webIPCandidates()
+	if err != nil {
+		return publicTrialAvailability{WildcardDomain: "*." + domain, ReasonKey: "public_trial_disabled_external_ip"}
+	}
+	availability := checkPublicTrialWildcardAddresses(domain, candidates)
+	primary, primaryErr := a.webPrimaryIP(a.webPublicIPs.Done(), domain)
+	if primaryErr != nil {
+		log.Printf("public trial IP selection failed: %v", primaryErr)
+	}
+	availability.ExternalIP = primary
+	return availability
+}
+
+// This capability is installation-wide. A site administrator cannot configure
+// another site's routing expectations merely by opening the WebSocket URL.
+func (a *App) publicIPSettingsWebSocket(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet || !a.updateAuthorized(r) || !adminMutationSourceAllowed(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	origin, originErr := url.Parse(r.Header.Get("Origin"))
+	if originErr != nil || origin.User != nil || !strings.EqualFold(origin.Host, r.Host) || !strings.EqualFold(origin.Scheme, requestScheme(r)) {
+		http.Error(w, "origin required", http.StatusForbidden)
+		return
+	}
+	if a.webPublicIPs == nil {
+		http.Error(w, "public IP inventory unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	ownerDomain := a.serverOwnerDomain(r.Context())
+	websocket.Server{Handshake: func(*websocket.Config, *http.Request) error { return nil }, Handler: func(connection *websocket.Conn) {
+		defer connection.Close()
+		connection.MaxPayloadBytes = 16 << 10
+		session := make(chan struct{})
+		requests := make(chan publicIPSettingsCommand, 1)
+		go receivePublicIPSettings(connection, requests, session)
+		for {
+			var request publicIPSettingsCommand
+			select {
+			case <-session:
+				return
+			case request = <-requests:
+			}
+			authorized := make(chan bool, 1)
+			go func() {
+				allowed := a.updateAuthorized(r)
+				select {
+				case authorized <- allowed:
+				case <-session:
+				}
+			}()
+			select {
+			case <-session:
+				return
+			case allowed := <-authorized:
+				if !allowed {
+					return
+				}
+			}
+			if request.CSRF != accountCSRF(r) {
+				return
+			}
+			if request.Action != "get" && request.Action != "refresh" && request.Action != "save" {
+				return
+			}
+			snapshot, requestErr := serverip.Exchange(a.webPublicIPs, serverip.Request{Action: request.Action, Settings: request.Settings}, session)
+			if requestErr == nil && request.Action != "get" {
+				a.invalidatePublicTrialAvailability()
+				if a.automaticSSL != nil {
+					select {
+					case a.automaticSSL <- automaticSSLRequest{action: "refresh_ips"}:
+					case <-session:
+						return
+					}
+				}
+			}
+			primary, primaryErr := a.webPrimaryIP(session, ownerDomain)
+			if requestErr == nil {
+				requestErr = primaryErr
+			}
+			response := struct {
+				Snapshot serverip.Snapshot `json:"snapshot"`
+				Primary  string            `json:"primary"`
+				Error    string            `json:"error,omitempty"`
+			}{Snapshot: snapshot, Primary: primary}
+			if requestErr != nil {
+				response.Error = requestErr.Error()
+			}
+			if websocket.JSON.Send(connection, response) != nil {
+				return
+			}
+		}
+	}}.ServeHTTP(w, r)
+}
+
+type publicIPSettingsCommand struct {
+	Action   string            `json:"action"`
+	Settings serverip.Settings `json:"settings"`
+	CSRF     string            `json:"csrf"`
+}
+
+// The reader owns session closure and keeps observing disconnects while a
+// command is running. A full input queue terminates an abusive connection.
+func receivePublicIPSettings(connection *websocket.Conn, requests chan<- publicIPSettingsCommand, session chan<- struct{}) {
+	defer close(session)
+	defer connection.Close()
+	for {
+		var request publicIPSettingsCommand
+		if websocket.JSON.Receive(connection, &request) != nil {
+			return
+		}
+		select {
+		case requests <- request:
+		default:
+			return
+		}
+	}
+}
+
+func domainDNSMatchesWebIPs(domain string, candidates []net.IP) bool {
+	records, err := lookupIPRecords(domain)
+	return err == nil && domainIPRecordsMatchAll(records, candidates)
+}
+
+func publicIPDNSRecordType(ip string) string {
+	if parsed := net.ParseIP(ip); parsed != nil && parsed.To4() == nil {
+		return "AAAA"
+	}
+	return "A"
+}
+
 func detectServerExternalIP(ctx context.Context) (string, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.ipify.org", nil)
 	if err != nil {
@@ -53451,7 +53789,13 @@ func (a *App) refreshDomainAliasVerification(ctx context.Context, siteDomain str
 		_, _ = a.db.ExecContext(ctx, `UPDATE domain_aliases SET verification_token=? WHERE primary_domain=? AND alias_domain=?`, verificationToken, siteDomain, aliasDomain)
 	}
 	txtVerified := domainTXTRecordMatches(aliasDomain, verificationToken)
-	aRecordVerified := domainARecordMatches(aliasDomain, externalIP)
+	aRecordVerified := false
+	if a.webPublicIPs != nil {
+		addresses, addressErr := a.webIPCandidates()
+		aRecordVerified = addressErr == nil && domainDNSMatchesWebIPs(aliasDomain, addresses)
+	} else {
+		aRecordVerified = domainARecordMatches(aliasDomain, externalIP)
+	}
 	lastCheckedAt := time.Now().Format(time.RFC3339)
 	_, _ = a.db.ExecContext(ctx, `UPDATE domain_aliases SET is_verified=?, dns_a_ok=?, last_checked_at=? WHERE primary_domain=? AND alias_domain=?`,
 		boolToInt(txtVerified), boolToInt(aRecordVerified), lastCheckedAt, siteDomain, aliasDomain)
@@ -53675,7 +54019,11 @@ func nextAutomaticSSLRenewalAuditTime(now time.Time, random io.Reader) (time.Tim
 }
 
 func (a *App) runAutomaticSSLProcess(stop <-chan struct{}, certificateManager automaticSSLIssuer, requests chan automaticSSLRequest) {
-	a.runAutomaticSSLProcessWithIPDetection(stop, certificateManager, requests, detectPublicAutomaticSSLServerIPs)
+	detectIPs := detectPublicAutomaticSSLServerIPs
+	if a.webPublicIPs != nil {
+		detectIPs = a.webIPCandidates
+	}
+	a.runAutomaticSSLProcessWithIPDetection(stop, certificateManager, requests, detectIPs)
 }
 func (a *App) runAutomaticSSLProcessWithIPDetection(stop <-chan struct{}, certificateManager automaticSSLIssuer, requests chan automaticSSLRequest, detectIPs func() ([]net.IP, error)) {
 	// This goroutine exclusively owns scheduling state; workers return immutable results through channels.
@@ -53776,6 +54124,13 @@ func (a *App) runAutomaticSSLProcessWithIPDetection(stop <-chan struct{}, certif
 		case <-stop:
 			return
 		case request := <-requests:
+			if request.action == "refresh_ips" {
+				serverIPs = nil
+				serverIPsCheckedAt = time.Time{}
+				ipRetryAt = time.Time{}
+				startIPDetection()
+				continue
+			}
 			if request.action == "ips" && request.ipResponse != nil {
 				now := time.Now()
 				if len(serverIPs) > 0 && now.Sub(serverIPsCheckedAt) < automaticSSLRefreshInterval {
@@ -53926,6 +54281,13 @@ func automaticSSLObservationAdmitted(action string, alreadyObserved bool, observ
 }
 
 func (a *App) automaticSSLServerIPs(ctx context.Context) ([]net.IP, error) {
+	if a.webPublicIPs != nil {
+		snapshot, err := a.webIPSnapshot(ctx.Done())
+		if err != nil {
+			return nil, err
+		}
+		return snapshot.Candidates(), nil
+	}
 	if a.automaticSSL == nil {
 		return detectPublicAutomaticSSLServerIPs()
 	}
@@ -54392,6 +54754,13 @@ func (a *App) automaticSSLRegistrationComplete(ctx context.Context, domain strin
 
 func (a *App) precheckDomainAutomaticSSL(ctx context.Context, domain string, serverIPs []net.IP) (DomainAutomaticSSLSetting, error) {
 	setting := a.domainAutomaticSSLSetting(ctx, domain)
+	if a.webPublicIPs != nil {
+		var inventoryErr error
+		serverIPs, inventoryErr = a.webIPCandidates()
+		if inventoryErr != nil {
+			return setting, fmt.Errorf("public web IP inventory: %w", inventoryErr)
+		}
+	}
 	if setting.Domain == "" {
 		return setting, fmt.Errorf("automatic SSL domain %q is invalid", domain)
 	}
@@ -54419,7 +54788,7 @@ func (a *App) precheckDomainAutomaticSSL(ctx context.Context, domain string, ser
 		a.recordDomainAutomaticSSLFailure(ctx, setting.Domain, err.Error(), automaticSSLRetryDelayEligibility)
 		return setting, err
 	}
-	setting.Enabled = domainIPRecordsMatchAll(publicRecords, serverIPs)
+	setting.Enabled = domainIPRecordsMatchAll(ipRecords, serverIPs)
 	setting.LastCheckedAt = time.Now().UTC().Format(time.RFC3339)
 	a.upsertDomainAutomaticSSLSetting(ctx, setting)
 	if domainFromContext(ctx) != setting.Domain {
@@ -54450,7 +54819,19 @@ func (a *App) refreshDomainAutomaticSSL(ctx context.Context, domain string, serv
 	if !setting.Available || setting.ManuallyDisabled {
 		return setting
 	}
-	setting.Enabled = domainARecordMatchesAny(setting.Domain, serverIPs)
+	if a.webPublicIPs != nil {
+		var inventoryErr error
+		serverIPs, inventoryErr = a.webIPCandidates()
+		if inventoryErr != nil {
+			setting.Enabled = false
+			setting.LastFailureReason = inventoryErr.Error()
+			setting.LastFailedAt = time.Now().UTC().Format(time.RFC3339)
+			a.upsertDomainAutomaticSSLSetting(ctx, setting)
+			a.logDomainEvent(domain, "AUTOCERT public web IP inventory failed: %v", inventoryErr)
+			return setting
+		}
+	}
+	setting.Enabled = domainDNSMatchesWebIPs(setting.Domain, serverIPs)
 	setting.LastCheckedAt = time.Now().UTC().Format(time.RFC3339)
 	a.upsertDomainAutomaticSSLSetting(ctx, setting)
 	if domainFromContext(ctx) != setting.Domain {
@@ -54839,6 +55220,13 @@ func (a *App) domainSettingsPage(w http.ResponseWriter, r *http.Request) {
 	}
 	serverIPs, externalIPErr := a.automaticSSLServerIPs(r.Context())
 	externalIP := firstAutomaticSSLIPv4(serverIPs)
+	if a.webPublicIPs != nil {
+		var primaryErr error
+		externalIP, primaryErr = a.webPrimaryIP(r.Context().Done(), siteDomain)
+		if primaryErr != nil {
+			externalIPErr = primaryErr
+		}
+	}
 	domainAliases, err := a.listDomainAliases(r.Context(), siteDomain)
 	if err != nil {
 		http.Error(w, "failed to load domain aliases", http.StatusInternalServerError)
@@ -54878,6 +55266,7 @@ func (a *App) domainSettingsPage(w http.ResponseWriter, r *http.Request) {
 		"CanAddAlias":                    len(domainAliases) < 10,
 		"ReturnPath":                     returnPath,
 		"ExternalIP":                     externalIP,
+		"ExternalIPRecordType":           publicIPDNSRecordType(externalIP),
 		"ExternalIPError":                externalIPError,
 		"ExternalIPs":                    ipListForLog(serverIPs),
 		"AutomaticSSL":                   automaticSSLSetting,
@@ -61282,7 +61671,7 @@ func sitebrushControlQueryFlag(flag string) bool {
 		"backup", "backup_import", "backup_download", "native_pick_files", "native_save_backup",
 		"hosting_and_support", "expenses", "billing", "hosting_invoice", "billing_schedule",
 		"hosting_and_support_demo_payment", "hosting_and_support_backup_download", "billing_backup_download",
-		"service_mail_relay", "hosting_snapshot", "mail_delivery_ws", "mail_monitor_ws", "certificate_renew_ws",
+		"public_ip_settings_ws", "service_mail_relay", "hosting_snapshot", "mail_delivery_ws", "mail_monitor_ws", "certificate_renew_ws",
 	} {
 		if flag == selector {
 			return true
