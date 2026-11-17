@@ -229,6 +229,7 @@ jobs:
           npm ci --ignore-scripts
           node document_test.cjs
           node ../../pkg/appupdate/server_update_test.cjs
+          node ../../pkg/goprofile/dashboard_test.cjs
           node ../../pkg/imageprepare/image_replacement_test.cjs
           node ../../pkg/analytics/browser_test.cjs
           node ../../pkg/accountpasskey/browser_test.cjs

@@ -236,6 +236,7 @@ type App struct {
 	publicStreamer        *publicsite.Streamer
 	publicCatalog         *publicsite.Catalog
 	requestTimings        *requesttiming.Collector
+	profiler              *goprofile.Session
 	publicPublication     chan publicPublicationTask
 	publicPublicationDone <-chan struct{}
 	publicBoundary        bool
@@ -10203,7 +10204,7 @@ func main() {
 	versionMode := flag.Bool("version", false, "print version and exit")
 	debugMode := flag.Bool("debug", false, "enable verbose HTTP and database diagnostic logs")
 	requestTimings := flag.Bool("request-timings", false, "collect asynchronous request stage timings and log counters every 30 seconds")
-	profiler := flag.Bool("profiler", false, "enable local Go pprof; process addresses and curl commands go to the console or --logfile; curl -o saves profiles in the client current directory")
+	profiler := flag.Bool("profiler", false, "enable owner load-test recording at /?expenses; 30-second reports are kept temporarily and deleted after viewing; status goes to console or --logfile")
 	legacyStoragePath := flag.String("storage-path", "", "")
 	legacyDBPath := flag.String("db-path", "", "")
 	legacyDBType := flag.String("db-type", "", "")
@@ -10670,7 +10671,9 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	var siteDatabaseRouter *perSiteDBRouter
 	aiCapabilityStatePath := filepath.Join(storageRealRoot, "security", "ai-capabilities.json")
 	application := &App{storagePath: effectiveStoragePath, storageRealRoot: storageRealRoot, dbPath: effectiveDBPath, debug: config.Debug, desktopMode: config.DesktopMode, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), grabCancels: newGrabCancelTracker(), trialPreviews: newPublicTrialPreviewStore(), paidTrialSlots: make(chan struct{}, 2), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 1024), analyticsLosses: make(chan string, 64), browserAnalyticsLosses: make(chan string, 64), browserAnalytics: make(chan browserAnalyticsEnvelope, 512), analyticsConnections: make(chan struct{}, 128), aiCapabilities: nil}
-	application.requestTimings = startRequestTimingCounters(config.RequestTimings, ctx.Done(), "application")
+	application.requestTimings = startRequestTimingCounters(config.RequestTimings || config.Profiler, ctx.Done(), "application")
+	application.profiler = profilerSession
+	profilerSession.SetTimings(application.requestTimings)
 	application.developmentMode = CompileVersion == "dev" && !config.UpdateChild
 	application.updateActivation = activation
 
@@ -14321,6 +14324,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	}
 	if hasQueryFlag(r, "server_update") || hasQueryFlag(r, "server_update_ws") {
 		a.serverUpdatePage(w, r)
+		return
+	}
+	if hasQueryFlag(r, "server_profiler_ws") {
+		a.serverProfilerSocket(w, r)
 		return
 	}
 	if hasQueryFlag(r, "expenses") || hasQueryFlag(r, "hosting_and_support") || hasQueryFlag(r, "billing") {
@@ -28746,6 +28753,7 @@ func (a *App) expensesPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	view["Status"] = status
+	view["ShowProfiler"] = a.profiler != nil && a.updateAuthorized(r)
 	a.render(w, r, "expenses.html", view)
 }
 
@@ -49353,6 +49361,14 @@ func parseEmbeddedPageTemplate(templateName string, source []byte) (*template.Te
 	if err != nil {
 		return nil, err
 	}
+	if templateName == "expenses.html" {
+		fragment, readErr := fs.ReadFile(embeddedWebFiles, "web/server_profiler.html")
+		if readErr != nil {
+			return nil, readErr
+		}
+		_, parseErr := parsedTemplate.New("server_profiler.html").Parse(string(fragment))
+		return parsedTemplate, parseErr
+	}
 	if templateName != "edit.html" {
 		return parsedTemplate, nil
 	}
@@ -58685,7 +58701,7 @@ func runSupervisedSitebrush(ctx context.Context, config serverRunConfig) error {
 	if err != nil {
 		return err
 	}
-	return appupdate.Run(appupdate.Options{Catalog: &catalog, PublicState: front.Set, PublicSecurity: front.Security, PublicThrottle: front.Throttle, PublicPolicy: front.Policy, PublicObservations: front.PullObservations, PublicCertificate: front.Certificate, Environment: []string{"SITEBRUSH_PUBLIC_POLICY_CHANNEL=1", "SITEBRUSH_PUBLIC_CONTACT=" + secret, "SITEBRUSH_PUBLIC_HTTP_PORT=" + strconv.Itoa(front.HTTPPort), "SITEBRUSH_PUBLIC_HTTPS_PORT=" + strconv.Itoa(front.HTTPSPort)}, StoragePath: storagePath, Executable: executable, Version: CompileVersion, Compatibility: appupdate.CurrentCompatibility(), Arguments: arguments, PublicKey: publicKey, Output: os.Stdout}, ctx.Done())
+	return appupdate.Run(appupdate.Options{Catalog: &catalog, PublicState: front.Set, PublicSecurity: front.Security, PublicThrottle: front.Throttle, PublicPolicy: front.Policy, PublicProfiler: front.Profiler, PublicObservations: front.PullObservations, PublicCertificate: front.Certificate, Environment: []string{"SITEBRUSH_PUBLIC_POLICY_CHANNEL=1", "SITEBRUSH_PUBLIC_CONTACT=" + secret, "SITEBRUSH_PUBLIC_HTTP_PORT=" + strconv.Itoa(front.HTTPPort), "SITEBRUSH_PUBLIC_HTTPS_PORT=" + strconv.Itoa(front.HTTPSPort)}, StoragePath: storagePath, Executable: executable, Version: CompileVersion, Compatibility: appupdate.CurrentCompatibility(), Arguments: arguments, PublicKey: publicKey, Output: os.Stdout}, ctx.Done())
 }
 
 func runManualUpgrade(storagePath, databasePath, port string, debug bool, policies ...appupdate.BackupPolicy) error {
@@ -61775,7 +61791,7 @@ func sitebrushControlQueryFlag(flag string) bool {
 		"ai_provider_status", "ai_provider_models", "ai_provider_save", "ai_provider_delete",
 		"ai_execute", "ai_execute_ws", "ai_apply", "ai_background",
 		"login", "logout", "login_link", "register", "recover", "profile", "email_confirm", "https_status",
-		"server_update", "server_update_ws", "server_update_client_error", "settings", "properties", "domain", "analytics",
+		"server_profiler_ws", "server_update", "server_update_ws", "server_update_client_error", "settings", "properties", "domain", "analytics",
 		"visual", "edit", "editraw", "text", "save", "delete", "files", "revisions",
 		"revision_preview", "revision_restore", "revision_delete", "revision_toggle", "tree",
 		"freeze", "unfreeze", "unfreeze_ws", "publish", "publish_events", "publish_preview",
@@ -62258,7 +62274,9 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 		}
 	}()
 
-	application.requestTimings = startRequestTimingCounters(config.RequestTimings, ctx.Done(), "public")
+	application.requestTimings = startRequestTimingCounters(config.RequestTimings || config.Profiler, ctx.Done(), "public")
+	application.profiler = profilerSession
+	profilerSession.SetTimings(application.requestTimings)
 	application.publicStreamer = publicsite.NewStreamer()
 	application.publicCatalog = publicsite.NewCatalog(storagePath, ctx.Done())
 	application.autoCertCertificateCache = startAutoCertCertificateMemoryCache(ctx, filepath.Join(application.storageRootDir(), "letsencrypt"))
@@ -62326,6 +62344,9 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 	}
 	front.Guest = localPublicPolicyGuest(front, secret, front.Guest)
 	front.Security = application.attackGuard.Relay
+	if profilerSession != nil {
+		front.Profiler = profilerSession.Relay
+	}
 	if application.throttleGuard != nil {
 		front.Throttle = application.throttleGuard.Relay
 	}
@@ -65462,4 +65483,76 @@ func callIgniteServer(ctx context.Context, client *http.Client, serverDomain, op
 	}
 	decoded["server"] = serverDomain
 	return decoded, nil
+}
+
+// The website boundary authenticates commands; process owners retain all capture state.
+func (a *App) profilerCommand(role string, command goprofile.Command, stop <-chan struct{}) goprofile.State {
+	if role == "application" {
+		return a.profiler.Exchange(command, stop)
+	}
+	if role != "public" || !a.publicProxy {
+		return goprofile.State{Error: "Process unavailable"}
+	}
+	encoded, err := json.Marshal(command)
+	if err != nil {
+		return goprofile.State{Error: err.Error()}
+	}
+	response, err := appupdate.Exchange(a.storagePath, appupdate.Request{Action: "public_profiler", Detail: string(encoded)}, stop)
+	if err != nil {
+		return goprofile.State{Error: err.Error()}
+	}
+	if response.Error != "" {
+		return goprofile.State{Error: response.Error}
+	}
+	var state goprofile.State
+	if err = json.Unmarshal([]byte(response.Detail), &state); err != nil {
+		state.Error = err.Error()
+	}
+	return state
+}
+func (a *App) serverProfilerSocket(w http.ResponseWriter, r *http.Request) {
+	if a.profiler == nil {
+		http.NotFound(w, r)
+		return
+	}
+	if !publicMenuOriginAllowed(r) || !a.updateAuthorized(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	websocket.Handler(func(connection *websocket.Conn) {
+		defer connection.Close()
+		connection.MaxPayloadBytes = 4096
+		viewer := randomAccessToken()
+		role := ""
+		defer func() {
+			if role != "" {
+				a.profilerCommand(role, goprofile.Command{Action: "release", Viewer: viewer}, a.publicPublicationDone)
+			}
+		}()
+		for {
+			connection.SetReadDeadline(time.Now().Add(45 * time.Second))
+			var command struct {
+				goprofile.Command
+				Role string `json:"role"`
+				CSRF string `json:"csrf"`
+			}
+			if websocket.JSON.Receive(connection, &command) != nil {
+				return
+			}
+			if command.CSRF == "" || subtle.ConstantTimeCompare([]byte(command.CSRF), []byte(accountCSRF(r))) != 1 || !a.updateAuthorized(r) {
+				return
+			}
+			if role == "" {
+				role = command.Role
+			} else if role != command.Role {
+				return
+			}
+			command.Viewer = viewer
+			state := a.profilerCommand(role, command.Command, r.Context().Done())
+			connection.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if websocket.JSON.Send(connection, state) != nil {
+				return
+			}
+		}
+	}).ServeHTTP(w, r)
 }

@@ -446,37 +446,20 @@ http://your-domain.example
 
 
 
-## Go profiling
+## Load-test profiler
 
-Add `--profiler` to the existing server arguments and restart the service with the new build. Profiling is disabled by default. On an installed service, retain the existing `-service-runtime`, `-path`, `-port` and logging arguments.
-
-Each public/application process opens its own `127.0.0.1` diagnostic port and logs its role, PID, build version, address and a ready-to-copy capture command. Ports can change after a restart. The journal goes to the console for a foreground run, to `--logfile` when supplied, or to `storage/logs/sitebrush.log` beneath the installed service's data directory. The privileged service launcher does not start another profiler.
-
-The profile is the HTTP response saved by `curl -o`. A relative output filename is written in the **curl client's current directory**, not automatically inside the server's data directory. Run these commands on the SiteBrush server, substituting the ports printed for `public` and `application`:
+Start SiteBrush with `--profiler`, sign in as the local server owner and open `/?expenses`. The bottom button opens the load-test dialog. Choose **Record 30 seconds**, then generate the load externally, for example:
 
 ```sh
-curl --fail --max-time 40 -o ./cpu-public.pprof 'http://127.0.0.1:PUBLIC_PORT/debug/pprof/profile?seconds=30' &
-public_capture_pid=$!
-curl --fail --max-time 40 -o ./cpu-application.pprof 'http://127.0.0.1:APPLICATION_PORT/debug/pprof/profile?seconds=30' &
-application_capture_pid=$!
-wait "$public_capture_pid"
-wait "$application_capture_pid"
+ab -k -c 500 -n 10000 https://sitebrush.com/
 ```
 
-While those captures are running, run the existing benchmark from the separate load-generator machine:
+The modal uses a Webgrind-style function table: sortable self/inclusive CPU costs, percent/millisecond/microsecond units, category and function/file filters, a colored CPU breakdown and expandable caller/callee tables. Relationships and sample counts come from sampled Go stacks, not exact function invocation counts. Sorting and filtering apply to the complete report before pagination.
 
-```sh
-ab -k -c 500 -n 10000 http://vz.sitebrush.com/
-```
+SiteBrush records the public process and the application separately. The modal shows self/cumulative CPU function costs, sampled source-file/line CPU costs, a call graph, sampled live heap costs, total allocations and GC counts during the recording, goroutine waiting states, and HTTP timing/traffic counters. HTTP traffic counts response/request bodies, excludes headers/TLS/retransmissions, and must not be summed across public/application processes because proxied requests appear at both boundaries. The profiler does not generate traffic and does not expose separate profiling ports or require Go, Graphviz or manual files.
 
-Keep both profiles and a copy of the **exact executable used by each profiled PID**; the public process and the updated application may use different binaries. On a machine with Go installed, inspect each profile with its matching binary:
+Closing the dialog closes its viewing contacts: server-side cleanup cancels that viewer's pending recordings and releases its raw/derived temporary files. Other viewing sessions are isolated. Navigating away ends the viewing session; returning starts a fresh session. If a connection silently disappears, the read deadline ends its session. A ten-minute retention ceiling and a 32 MiB budget per process (64 MiB for the usual pair) provide additional bounds.
 
-```sh
-go tool pprof -top ./sitebrush-public-binary ./cpu-public.pprof
-go tool pprof -top -cum ./sitebrush-public-binary ./cpu-public.pprof
-go tool pprof -top ./sitebrush-application-binary ./cpu-application.pprof
-```
+Temporary files are private, unlinked on Unix and marked delete-on-close on Windows. Their descriptors are closed after viewing/expiration, releasing disk space; empty temporary directories are removed as well. No profile content enters SQL or backups. The option and the modal are available only on the local installation to its authorized server owner. Without `--profiler` no capture participant or diagnostic listener is started.
 
-Additional local endpoints are `/debug/pprof/heap`, `/debug/pprof/allocs`, and `/debug/pprof/goroutine?debug=2`. Save the first two using `curl -o`, then use `go tool pprof -alloc_space` to inspect cumulative allocation cost. To measure allocations specifically during a benchmark, capture `/debug/pprof/allocs?seconds=30` in a separate run. CPU captures default to 30 seconds; explicit durations must be between 1 and 120 seconds. Only one CPU capture can run per process at a time.
-
-The diagnostic listener is separate from website ports and accepts the printed loopback address. It closes when its process stops. Keep `-debug` off during performance measurements; `-request-timings` can provide complementary request-stage counters. Profiled throughput includes profiling overhead and should not be used as the final comparison against nginx.
+CPU profiles measure sampled processor work, not waiting time. Source line costs identify sampled locations and do not include full source-code text. Heap costs represent sampled retained memory; total allocations are measured process-wide. Timing and traffic counters may be partial under pressure; the interface marks partial reports. Profiled throughput includes profiler overhead.

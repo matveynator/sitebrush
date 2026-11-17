@@ -39,6 +39,7 @@ type Options struct {
 	PublicThrottle     func([]byte) ([]byte, error)
 	PublicObservations func([]byte) ([]byte, error)
 	PublicPolicy       func([]byte) ([]byte, error)
+	PublicProfiler     func([]byte) ([]byte, error)
 	PublicCertificate  func(string) error
 	Environment        []string
 	shutdown           <-chan struct{}
@@ -146,6 +147,29 @@ func Run(options Options, stop <-chan struct{}) error {
 		if err := verifiedStart(store, worker, state.Current, false); err != nil {
 			return err
 		}
+	}
+	var profilerRequests chan Request
+	if options.PublicProfiler != nil {
+		profilerRequests = make(chan Request, 16)
+		go func() {
+			for {
+				select {
+				case <-stop:
+					return
+				case job := <-profilerRequests:
+					encoded, err := options.PublicProfiler([]byte(job.Detail))
+					result := Response{Detail: string(encoded)}
+					if err != nil {
+						result.Error = err.Error()
+					}
+					select {
+					case job.Reply <- result:
+					case <-stop:
+						return
+					}
+				}
+			}
+		}()
 	}
 	requests := make(chan Request, 16)
 	sessions := make(chan struct{}, 16)
@@ -330,6 +354,18 @@ func Run(options Options, stop <-chan struct{}) error {
 					response.Error = observationErr.Error()
 				} else {
 					response.Detail = string(encoded)
+				}
+			case "public_profiler":
+				response = Response{}
+				if profilerRequests == nil {
+					response.Error = "Profiler unavailable"
+					break
+				}
+				select {
+				case profilerRequests <- request:
+					continue
+				default:
+					response.Error = "Profiler queue is full"
 				}
 			case "public_policy":
 				response = Response{}

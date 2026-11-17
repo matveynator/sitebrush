@@ -61,3 +61,27 @@ func TestFullOrStoppedCollectorNeverWaitsForHTTP(t *testing.T) {
 		t.Fatal("stopped collector accepted work")
 	}
 }
+
+func TestHTTPBodyTrafficCounters(t *testing.T) {
+	stop := make(chan struct{})
+	defer close(stop)
+	collector := New(stop)
+	handler := collector.Middleware(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if _, err := io.Copy(io.Discard, request.Body); err != nil {
+			t.Error(err)
+		}
+		writer.WriteHeader(http.StatusCreated)
+		if _, err := io.WriteString(writer, "reply"); err != nil {
+			t.Error(err)
+		}
+	}))
+	request := httptest.NewRequest(http.MethodPost, "http://example.test/", strings.NewReader("request"))
+	handler.ServeHTTP(httptest.NewRecorder(), request)
+	report, err := collector.Snapshot(stop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.HTTP.Requests != 1 || report.HTTP.Received != 7 || report.HTTP.Sent != 5 || report.HTTP.Errors != 0 {
+		t.Fatal(report.HTTP)
+	}
+}

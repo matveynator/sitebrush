@@ -98,6 +98,7 @@ type Front struct {
 	Security     func([]byte) ([]byte, error)
 	Throttle     func([]byte) ([]byte, error)
 	Policy       func([]byte) ([]byte, error)
+	Profiler     func([]byte) ([]byte, error)
 	ResetPolicy  func() error
 	Certificate  func(string) error
 	observations chan string
