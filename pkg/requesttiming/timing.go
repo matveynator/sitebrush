@@ -37,7 +37,15 @@ func (stage Stage) String() string {
 	return [...]string{"accepted_to_request", "front_state", "domain", "policy", "attack_guard", "throttle_guard", "public_handler", "first_write", "certificate", "attack_queue", "attack_work", "throttle_queue", "throttle_work", "proxy_metadata", "proxy_backend"}[stage]
 }
 
+type HTTPMetrics struct {
+	Requests    uint64 `json:"requests"`
+	Received    uint64 `json:"received"`
+	Sent        uint64 `json:"sent"`
+	Errors      uint64 `json:"errors"`
+	WriteErrors uint64 `json:"writeErrors"`
+}
 type Event struct {
+	HTTP      HTTPMetrics
 	Durations [stageCount]time.Duration
 	Present   uint16
 }
@@ -51,6 +59,7 @@ type Counter struct {
 }
 
 type Report struct {
+	HTTP           HTTPMetrics
 	Stages         [stageCount]Counter
 	DroppedMinimum uint64
 	Incomplete     bool
@@ -99,6 +108,11 @@ func (collector *Collector) run() {
 }
 
 func (report *Report) record(event Event) {
+	report.HTTP.Requests += event.HTTP.Requests
+	report.HTTP.Received += event.HTTP.Received
+	report.HTTP.Sent += event.HTTP.Sent
+	report.HTTP.Errors += event.HTTP.Errors
+	report.HTTP.WriteErrors += event.HTTP.WriteErrors
 	for stage, duration := range event.Durations {
 		if event.Present&(1<<stage) == 0 {
 			continue
@@ -236,7 +250,16 @@ func (collector *Collector) Middleware(next http.Handler) http.Handler {
 			}
 		}
 		request = request.WithContext(context.WithValue(request.Context(), traceKey{}, measurement))
+		if request.Header.Get("Upgrade") == "" {
+			measurement.event.HTTP.Requests = 1
+			if request.Body != nil {
+				request.Body = &countedBody{ReadCloser: request.Body, metrics: &measurement.event.HTTP}
+			}
+		}
 		next.ServeHTTP(&responseWriter{ResponseWriter: writer, measurement: measurement}, request)
+		if request.Header.Get("Upgrade") != "" {
+			measurement.event.HTTP = HTTPMetrics{}
+		}
 		collector.Observe(measurement.event)
 	})
 }
@@ -259,18 +282,31 @@ func (writer *responseWriter) WriteHeader(status int) {
 	if status >= 200 || status == http.StatusSwitchingProtocols {
 		writer.firstWrite()
 	}
+	if status >= 400 {
+		writer.measurement.event.HTTP.Errors = 1
+	}
 	writer.ResponseWriter.WriteHeader(status)
 }
 func (writer *responseWriter) Write(body []byte) (int, error) {
 	writer.firstWrite()
-	return writer.ResponseWriter.Write(body)
+	count, err := writer.ResponseWriter.Write(body)
+	writer.measurement.event.HTTP.Sent += uint64(max(count, 0))
+	if err != nil {
+		writer.measurement.event.HTTP.WriteErrors++
+	}
+	return count, err
 }
 func (writer *responseWriter) ReadFrom(source io.Reader) (int64, error) {
 	writer.firstWrite()
 	if receiver, found := writer.ResponseWriter.(io.ReaderFrom); found {
-		return receiver.ReadFrom(source)
+		count, err := receiver.ReadFrom(source)
+		writer.measurement.event.HTTP.Sent += uint64(max(count, 0))
+		if err != nil {
+			writer.measurement.event.HTTP.WriteErrors++
+		}
+		return count, err
 	}
-	return io.Copy(struct{ io.Writer }{writer.ResponseWriter}, source)
+	return io.Copy(struct{ io.Writer }{writer}, source)
 }
 func (writer *responseWriter) Flush() {
 	writer.firstWrite()
@@ -278,4 +314,16 @@ func (writer *responseWriter) Flush() {
 }
 func (writer *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return http.NewResponseController(writer.ResponseWriter).Hijack()
+}
+
+// Each HTTP handler owns its byte counts; only the completed observation crosses the collector channel.
+type countedBody struct {
+	io.ReadCloser
+	metrics *HTTPMetrics
+}
+
+func (body *countedBody) Read(destination []byte) (int, error) {
+	count, err := body.ReadCloser.Read(destination)
+	body.metrics.Received += uint64(max(count, 0))
+	return count, err
 }

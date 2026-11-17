@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"runtime"
 	"runtime/pprof"
@@ -24,6 +23,7 @@ const storageLimit = 32 << 20
 const profileLimit = 8 << 20
 
 type Command struct {
+	Viewer string `json:"viewer,omitempty"`
 	Action string `json:"action"`
 	ID     string `json:"id,omitempty"`
 	Page   int    `json:"page,omitempty"`
@@ -50,23 +50,26 @@ type Stage struct {
 	P95MS  float64 `json:"p95MS"`
 }
 type Report struct {
-	ID         string     `json:"id"`
-	Role       string     `json:"role"`
-	PID        int        `json:"pid"`
-	Version    string     `json:"version"`
-	Started    time.Time  `json:"started"`
-	Finished   time.Time  `json:"finished"`
-	Expires    time.Time  `json:"expires"`
-	CPU        int64      `json:"cpu"`
-	Functions  []Function `json:"functions,omitempty"`
-	Frames     []Frame    `json:"frames,omitempty"`
-	Heap       uint64     `json:"heap"`
-	GC         uint32     `json:"gc"`
-	Memory     []Function `json:"memory,omitempty"`
-	Goroutines string     `json:"goroutines,omitempty"`
-	Stages     []Stage    `json:"stages,omitempty"`
-	Truncated  bool       `json:"truncated"`
-	Error      string     `json:"error,omitempty"`
+	Code       []Function                `json:"code,omitempty"`
+	Network    requesttiming.HTTPMetrics `json:"network"`
+	Allocated  uint64                    `json:"allocated"`
+	ID         string                    `json:"id"`
+	Role       string                    `json:"role"`
+	PID        int                       `json:"pid"`
+	Version    string                    `json:"version"`
+	Started    time.Time                 `json:"started"`
+	Finished   time.Time                 `json:"finished"`
+	Expires    time.Time                 `json:"expires"`
+	CPU        int64                     `json:"cpu"`
+	Functions  []Function                `json:"functions,omitempty"`
+	Frames     []Frame                   `json:"frames,omitempty"`
+	Heap       uint64                    `json:"heap"`
+	GC         uint32                    `json:"gc"`
+	Memory     []Function                `json:"memory,omitempty"`
+	Goroutines string                    `json:"goroutines,omitempty"`
+	Stages     []Stage                   `json:"stages,omitempty"`
+	Truncated  bool                      `json:"truncated"`
+	Error      string                    `json:"error,omitempty"`
 }
 type State struct {
 	Role    string    `json:"role"`
@@ -86,6 +89,7 @@ type task struct {
 	configure bool
 }
 type artifact struct {
+	viewer       string
 	meta         Report
 	raw, summary *os.File
 	size         int64
@@ -147,13 +151,14 @@ func closeArtifact(record artifact) {
 		record.summary.Close()
 	}
 }
-func (session *Session) run(role, version string, server *http.Server, served <-chan error, stop <-chan struct{}) {
+func (session *Session) run(role, version string, stop <-chan struct{}) {
 	defer close(session.done)
-	defer server.Close()
-	directory, dirErr := os.MkdirTemp("", "sitebrush-profiler-")
-	if dirErr == nil {
-		defer os.RemoveAll(directory)
-	}
+	var directory string
+	defer func() {
+		if directory != "" {
+			os.RemoveAll(directory)
+		}
+	}()
 	var records []artifact
 	defer func() {
 		for _, record := range records {
@@ -162,12 +167,19 @@ func (session *Session) run(role, version string, server *http.Server, served <-
 	}()
 	completed := make(chan capture, 1)
 	var cancel chan struct{}
+	var capturingViewer string
 	var started time.Time
 	var timings *requesttiming.Collector
 	evicted := false
 	timer := time.NewTicker(time.Second)
 	defer timer.Stop()
-	prune := func() { records = expireArtifacts(records, time.Now()) }
+	cleanupDirectory := func() {
+		if len(records) == 0 && cancel == nil && directory != "" {
+			os.RemoveAll(directory)
+			directory = ""
+		}
+	}
+	prune := func() { records = expireArtifacts(records, time.Now()); cleanupDirectory() }
 	defer func() {
 		if cancel != nil {
 			close(cancel)
@@ -181,12 +193,11 @@ func (session *Session) run(role, version string, server *http.Server, served <-
 			return
 		case <-session.closes:
 			return
-		case <-served:
-			return
 		case <-timer.C:
 			prune()
 		case result := <-completed:
 			cancel = nil
+			result.artifact.viewer = capturingViewer
 			records = append(records, result.artifact)
 		case request := <-session.tasks:
 			select {
@@ -208,21 +219,26 @@ func (session *Session) run(role, version string, server *http.Server, served <-
 					state.Error = "A recording is already running"
 					break
 				}
-				if dirErr != nil {
-					state.Error = dirErr.Error()
-					break
+				if directory == "" {
+					created, dirErr := os.MkdirTemp("", "sitebrush-profiler-")
+					if dirErr != nil {
+						state.Error = dirErr.Error()
+						break
+					}
+					directory = created
 				}
 				// Reserve space for the bounded raw profile and its derived report before starting work.
 				var removed bool
 				records, removed = reserveArtifacts(records, 2*profileLimit)
 				evicted = evicted || removed
 				started = time.Now()
+				capturingViewer = request.command.Viewer
 				cancel = make(chan struct{})
 				go collect(directory, role, version, started, timings, cancel, stop, completed)
 				state.Busy = true
 				state.Started = started
 			case "cancel":
-				if cancel != nil {
+				if cancel != nil && capturingViewer == request.command.Viewer {
 					close(cancel)
 					result := <-completed
 					closeArtifact(result.artifact)
@@ -231,17 +247,33 @@ func (session *Session) run(role, version string, server *http.Server, served <-
 				state.Busy = false
 			case "delete":
 				for index, record := range records {
-					if record.meta.ID == request.command.ID {
+					if record.meta.ID == request.command.ID && record.viewer == request.command.Viewer {
 						closeArtifact(record)
 						records = append(records[:index], records[index+1:]...)
 						break
 					}
 				}
+			case "release":
+				if cancel != nil && capturingViewer == request.command.Viewer {
+					close(cancel)
+					result := <-completed
+					closeArtifact(result.artifact)
+					cancel = nil
+				}
+				retained := records[:0]
+				for _, record := range records {
+					if record.viewer == request.command.Viewer {
+						closeArtifact(record)
+					} else {
+						retained = append(retained, record)
+					}
+				}
+				records = retained
 			case "status":
 			case "report":
 				state.Error = "Recording expired or unavailable"
 				for _, record := range records {
-					if record.meta.ID == request.command.ID {
+					if record.meta.ID == request.command.ID && record.viewer == request.command.Viewer {
 						var report Report
 						if record.summary == nil {
 							report = record.meta
@@ -258,9 +290,13 @@ func (session *Session) run(role, version string, server *http.Server, served <-
 			default:
 				state.Error = "Unknown profiler command"
 			}
+			cleanupDirectory()
+			state.Busy = cancel != nil
 			state.Evicted = evicted
 			for index := len(records) - 1; index >= 0; index-- {
-				state.Reports = append(state.Reports, records[index].meta)
+				if records[index].viewer == request.command.Viewer {
+					state.Reports = append(state.Reports, records[index].meta)
+				}
 			}
 			select {
 			case request.reply <- state:
@@ -273,6 +309,8 @@ func (session *Session) run(role, version string, server *http.Server, served <-
 }
 func reportPage(report Report, view string, page int, search string, more *bool) Report {
 	functions, frames, memory, goroutines, stages := report.Functions, report.Frames, report.Memory, report.Goroutines, report.Stages
+	code := report.Code
+	report.Code = nil
 	report.Functions = nil
 	report.Frames = nil
 	report.Memory = nil
@@ -284,6 +322,12 @@ func reportPage(report Report, view string, page int, search string, more *bool)
 	switch view {
 	case "graph":
 		report.Frames = frames
+	case "code":
+		if len(code) > 200 {
+			code = code[:200]
+			report.Truncated = true
+		}
+		report.Functions = code
 	case "memory":
 		report.Memory = memory
 	case "goroutines":
@@ -364,6 +408,7 @@ func collect(directory, role, version string, started time.Time, timings *reques
 			}
 		}
 		record.meta = report
+		record.meta.Code = nil
 		record.meta.Functions = nil
 		record.meta.Frames = nil
 		record.meta.Memory = nil
@@ -406,19 +451,29 @@ func collect(directory, role, version string, started time.Time, timings *reques
 	if report.Error != "" {
 		return
 	}
-	parsed, err := parseProfile(raw)
-	if err != nil {
-		report.Error = err.Error()
-		return
-	}
-	report.Functions, report.Frames, report.CPU, report.Truncated = aggregate(parsed, "cpu", 1200)
+	// Snapshot memory before decoding the CPU report, so analysis allocations do not dominate the load sample.
 	var after runtime.MemStats
 	runtime.ReadMemStats(&after)
 	report.Heap = after.HeapAlloc
 	report.GC = after.NumGC - before.NumGC
+	report.Allocated = after.TotalAlloc - before.TotalAlloc
 	var heap bytes.Buffer
-	if err := pprof.Lookup("heap").WriteTo(&limitedWriter{target: &heap, remaining: profileLimit}, 0); err == nil {
-		if parsedHeap, parseErr := profile.ParseData(heap.Bytes()); parseErr == nil {
+	heapErr := pprof.Lookup("heap").WriteTo(&limitedWriter{target: &heap, remaining: profileLimit}, 0)
+	report.Goroutines, err = captureGoroutineStates(64 << 10)
+	if err != nil {
+		report.Truncated = true
+	}
+	parsed, parseErr := parseProfile(raw)
+	if parseErr != nil {
+		report.Error = parseErr.Error()
+		return
+	}
+	var cpuTruncated bool
+	report.Functions, report.Frames, report.CPU, cpuTruncated = aggregate(parsed, "cpu", 1200)
+	report.Truncated = report.Truncated || cpuTruncated
+	report.Code = sampledCode(parsed, "cpu")
+	if heapErr == nil {
+		if parsedHeap, decodeErr := profile.ParseData(heap.Bytes()); decodeErr == nil {
 			report.Memory, _, _, _ = aggregate(parsedHeap, "inuse_space", 0)
 			if len(report.Memory) > 100 {
 				report.Memory = report.Memory[:100]
@@ -430,13 +485,9 @@ func collect(directory, role, version string, started time.Time, timings *reques
 	} else {
 		report.Truncated = true
 	}
-	report.Goroutines, err = captureGoroutineStates(64 << 10)
-	if err != nil {
-		report.Truncated = true
-	}
-
 	if timings != nil {
 		if last, snapshotErr := timings.Snapshot(stop); snapshotErr == nil && timingsReady {
+			report.Network = requesttiming.HTTPMetrics{Requests: last.HTTP.Requests - first.HTTP.Requests, Received: last.HTTP.Received - first.HTTP.Received, Sent: last.HTTP.Sent - first.HTTP.Sent, Errors: last.HTTP.Errors - first.HTTP.Errors, WriteErrors: last.HTTP.WriteErrors - first.HTTP.WriteErrors}
 			for index, current := range last.Stages {
 				old := first.Stages[index]
 				count := current.Count - old.Count
@@ -596,4 +647,44 @@ func captureGoroutineStates(limit int64) (string, error) {
 		output.WriteString("\n[goroutine output truncated]")
 	}
 	return output.String(), err
+}
+
+// Sample locations identify executing code, rather than attributing a function's entire cost to its entry line.
+func sampledCode(parsed *profile.Profile, kind string) []Function {
+	index := -1
+	for sampleIndex, sampleType := range parsed.SampleType {
+		if sampleType.Type == kind {
+			index = sampleIndex
+			break
+		}
+	}
+	if index < 0 {
+		return nil
+	}
+	costs := make(map[string]*Function)
+	for _, sample := range parsed.Sample {
+		if len(sample.Location) == 0 || index >= len(sample.Value) || sample.Value[index] <= 0 {
+			continue
+		}
+		location := sample.Location[0]
+		if len(location.Line) == 0 || location.Line[0].Function == nil {
+			continue
+		}
+		line := location.Line[0]
+		function := line.Function
+		key := fmt.Sprintf("%s:%d:%s", function.Filename, line.Line, function.Name)
+		cost := costs[key]
+		if cost == nil {
+			cost = &Function{Name: function.Name, File: function.Filename, Line: line.Line}
+			costs[key] = cost
+		}
+		cost.Self += sample.Value[index]
+		cost.Total = cost.Self
+	}
+	ranked := make([]Function, 0, len(costs))
+	for _, cost := range costs {
+		ranked = append(ranked, *cost)
+	}
+	sort.Slice(ranked, func(left, right int) bool { return ranked[left].Self > ranked[right].Self })
+	return ranked
 }

@@ -2,7 +2,7 @@
  'use strict';
  const root = document.querySelector('[data-profiler]');
  if (!root) return;
- const model = {role:'public',view:'functions',page:0,search:'',selected:'',focus:0,states:{},report:null,more:false,error:'',pending:false,stopped:false,refreshing:false,pollTimer:null,searchTimer:null,generation:0,cancelPending:null};
+ const model = {role:'public',view:'functions',page:0,search:'',selected:'',focus:0,states:{},report:null,more:false,error:'',pending:false,stopped:true,refreshing:false,pollTimer:null,searchTimer:null,generation:0,cancelPending:null};
  const sockets = {};
  const queue = [];
  function element(selector) { return root.querySelector(selector); }
@@ -88,14 +88,15 @@
   element('[data-profiler-error]').textContent=model.error||state.error||(report&&report.error)||'';
   if(state.evicted)element('[data-profiler-status]').textContent+=' Старейшие записи удалены по ограничению размера.';
   element('[data-profiler-start]').disabled=['public','application'].some(function busy(role){return model.states[role]&&model.states[role].busy;});
-  element('[data-profiler-summary]').textContent=report?'CPU: '+duration(report.cpu)+' · Память: '+formatBytes(report.heap)+' · GC за запись: '+report.gc+(report.truncated?' · Данные частичные':''):'';
+  element('[data-profiler-summary]').textContent=report?'CPU: '+duration(report.cpu)+' · Память: '+formatBytes(report.heap)+' · Выделено за запись: '+formatBytes(report.allocated)+' · GC за запись: '+report.gc+(report.truncated?' · Данные частичные':''):'';
   root.querySelectorAll('[data-view]').forEach(function tab(button){button.setAttribute('aria-selected',String(button.dataset.view===model.view));});
   const content=element('[data-profiler-content]');content.replaceChildren();
   if(!report){content.textContent='Нажмите «Записать 30 секунд», затем создайте нагрузку на сайт.';return;}
   if(model.view==='graph'){renderGraph(content,report);}
+  else if(model.view==='network'){const network=report.network||{};const output=document.createElement('p');output.textContent='За запись: '+(network.requests||0)+' HTTP-запросов · Получено тел: '+formatBytes(network.received)+' · Отправлено тел: '+formatBytes(network.sent)+' · HTTP ошибок: '+(network.errors||0)+' · Ошибок записи: '+(network.writeErrors||0)+'. Заголовки, TLS и повторные TCP-передачи в эти байты не входят. Внутренний трафик приложения и внешние ответы публичного сервера показаны отдельно; их нельзя складывать.';content.appendChild(output);}
   else if(model.view==='goroutines'){const output=document.createElement('pre');output.textContent=report.goroutines||'Нет данных';content.appendChild(output);}
   else if(model.view==='stages'){const output=table(['Стадия','Запросов','Среднее, мс','p95 ≤ мс']);(report.stages||[]).forEach(function stage(stageReport){const row=document.createElement('tr');textCell(row,stageReport.name);textCell(row,stageReport.count);textCell(row,stageReport.meanMS.toFixed(3));textCell(row,stageReport.p95MS.toFixed(3));output.appendChild(row);});content.appendChild(output);}
-  else{const memory=model.view==='memory';const output=table(['Функция',memory?'Собственная память':'Собственное CPU',memory?'Память с вызовами':'CPU с вызовами','Доля']);(memory?report.memory||[]:report.functions||[]).filter(function search(functionReport){return functionReport.name.toLowerCase().includes(model.search.toLowerCase());}).forEach(function functionRow(functionReport){const row=document.createElement('tr');const cell=textCell(row,functionReport.name);cell.title=functionReport.file+':'+functionReport.line;cell.style.cursor='pointer';cell.onclick=function selectFunction(){showFunction(functionReport.name);};textCell(row,memory?formatBytes(functionReport.self):duration(functionReport.self));textCell(row,memory?formatBytes(functionReport.total):duration(functionReport.total));textCell(row,memory?'—':(100*functionReport.total/(report.cpu||1)).toFixed(1)+'%');output.appendChild(row);});content.appendChild(output);}
+  else{const memory=model.view==='memory';const output=table(['Функция',memory?'Собственная память':'Собственное CPU',memory?'Память с вызовами':'CPU с вызовами','Доля']);(memory?report.memory||[]:report.functions||[]).filter(function search(functionReport){return functionReport.name.toLowerCase().includes(model.search.toLowerCase());}).forEach(function functionRow(functionReport){const row=document.createElement('tr');const cell=textCell(row,functionReport.name);cell.title=functionReport.file+':'+functionReport.line;const locationLabel=document.createElement('small');locationLabel.className='profiler-source';locationLabel.textContent=cell.title;cell.appendChild(locationLabel);cell.style.cursor='pointer';cell.onclick=function selectFunction(){showFunction(functionReport.name);};textCell(row,memory?formatBytes(functionReport.self):duration(functionReport.self));textCell(row,memory?formatBytes(functionReport.total):duration(functionReport.total));textCell(row,memory?'—':(100*functionReport.total/(report.cpu||1)).toFixed(1)+'%');output.appendChild(row);});content.appendChild(output);}
   element('[data-profiler-page]').textContent='Страница '+(model.page+1);element('[data-profiler-back]').disabled=model.page===0;element('[data-profiler-next]').disabled=!model.more||model.view!=='functions';
  }
  element('[data-profiler-start]').onclick=function start(){model.error='';Promise.all(['public','application'].map(function capture(role){return request(role,{action:'start'});})).then(refresh).catch(reportError);};
@@ -106,7 +107,7 @@
  element('[data-profiler-search]').oninput=function search(event){model.search=event.target.value;if(model.view==='functions'){model.page=0;window.clearTimeout(model.searchTimer);model.searchTimer=window.setTimeout(loadReport,250);}else{render();}};
  root.querySelectorAll('[data-view]').forEach(function tab(button){button.onclick=function choose(){model.view=button.dataset.view;model.page=0;loadReport();};});
  element('[data-profiler-next]').onclick=function next(){model.page++;loadReport();};element('[data-profiler-back]').onclick=function previous(){model.page=Math.max(0,model.page-1);loadReport();};
- element('[data-profiler-expand]').onclick=function expand(){root.classList.toggle('profiler-fullscreen');};
+ element('[data-profiler-expand]').onclick=function expand(){element('[data-profiler-dialog]').classList.toggle('profiler-fullscreen');};
  function suspendProfiler(){
   if(model.stopped)return;
   model.stopped=true;
@@ -117,10 +118,13 @@
   Object.keys(sockets).forEach(function disconnectRole(role){const socket=sockets[role];sockets[role]=null;if(socket)socket.close();});
  }
  function resumeProfiler(){
-  if(!model.stopped)return;
-  model.stopped=false;model.error='';model.selected='';model.report=null;model.more=false;model.page=0;
+  if(!model.stopped||!element('[data-profiler-dialog]').open)return;
+  model.stopped=false;model.states={};model.error='';model.selected='';model.report=null;model.more=false;model.page=0;
   refresh();render();
  }
+ element('[data-profiler-open]').onclick=function openDialog(){element('[data-profiler-dialog]').showModal();resumeProfiler();};
+ element('[data-profiler-close]').onclick=function closeDialog(){element('[data-profiler-dialog]').close();};
+ element('[data-profiler-dialog]').addEventListener('close',suspendProfiler);
  window.addEventListener('pagehide',suspendProfiler);
  window.addEventListener('pageshow',resumeProfiler);
  refresh();render();

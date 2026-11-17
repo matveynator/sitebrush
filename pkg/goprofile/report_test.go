@@ -106,3 +106,34 @@ func TestGoroutineCaptureIncludesStatesAndBoundedPrefix(t *testing.T) {
 		t.Fatal("oversized dump lost its bounded prefix", len(prefix), err)
 	}
 }
+
+func TestViewingReleaseCancelsOnlyItsOwnCapture(t *testing.T) {
+	stop := make(chan struct{})
+	defer close(stop)
+	session, err := Start("application", "fixture", "console", stop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	state := session.Exchange(Command{Action: "start", Viewer: "first-view"}, nil)
+	if state.Error != "" || !state.Busy {
+		t.Fatal(state)
+	}
+	state = session.Exchange(Command{Action: "release", Viewer: "another-view"}, nil)
+	if !state.Busy {
+		t.Fatal("another viewer cancelled the recording")
+	}
+	state = session.Exchange(Command{Action: "release", Viewer: "first-view"}, nil)
+	if state.Busy || len(state.Reports) != 0 {
+		t.Fatal("view release retained its recording", state)
+	}
+}
+
+func TestSampledCodeRetainsLeafLine(t *testing.T) {
+	function := &profile.Function{ID: 1, Name: "work", Filename: "worker.go"}
+	parsed := &profile.Profile{SampleType: []*profile.ValueType{{Type: "cpu", Unit: "nanoseconds"}}, Sample: []*profile.Sample{{Value: []int64{123}, Location: []*profile.Location{{Line: []profile.Line{{Function: function, Line: 42}}}}}}}
+	locations := sampledCode(parsed, "cpu")
+	if len(locations) != 1 || locations[0].Line != 42 || locations[0].Self != 123 {
+		t.Fatal(locations)
+	}
+}

@@ -10204,7 +10204,7 @@ func main() {
 	versionMode := flag.Bool("version", false, "print version and exit")
 	debugMode := flag.Bool("debug", false, "enable verbose HTTP and database diagnostic logs")
 	requestTimings := flag.Bool("request-timings", false, "collect asynchronous request stage timings and log counters every 30 seconds")
-	profiler := flag.Bool("profiler", false, "enable local Go pprof; process addresses and curl commands go to the console or --logfile; curl -o saves profiles in the client current directory")
+	profiler := flag.Bool("profiler", false, "enable owner load-test recording at /?expenses; 30-second reports are kept temporarily and deleted after viewing; status goes to console or --logfile")
 	legacyStoragePath := flag.String("storage-path", "", "")
 	legacyDBPath := flag.String("db-path", "", "")
 	legacyDBType := flag.String("db-type", "", "")
@@ -65486,6 +65486,30 @@ func callIgniteServer(ctx context.Context, client *http.Client, serverDomain, op
 }
 
 // The website boundary authenticates commands; process owners retain all capture state.
+func (a *App) profilerCommand(role string, command goprofile.Command, stop <-chan struct{}) goprofile.State {
+	if role == "application" {
+		return a.profiler.Exchange(command, stop)
+	}
+	if role != "public" || !a.publicProxy {
+		return goprofile.State{Error: "Process unavailable"}
+	}
+	encoded, err := json.Marshal(command)
+	if err != nil {
+		return goprofile.State{Error: err.Error()}
+	}
+	response, err := appupdate.Exchange(a.storagePath, appupdate.Request{Action: "public_profiler", Detail: string(encoded)}, stop)
+	if err != nil {
+		return goprofile.State{Error: err.Error()}
+	}
+	if response.Error != "" {
+		return goprofile.State{Error: response.Error}
+	}
+	var state goprofile.State
+	if err = json.Unmarshal([]byte(response.Detail), &state); err != nil {
+		state.Error = err.Error()
+	}
+	return state
+}
 func (a *App) serverProfilerSocket(w http.ResponseWriter, r *http.Request) {
 	if a.profiler == nil {
 		http.NotFound(w, r)
@@ -65498,8 +65522,15 @@ func (a *App) serverProfilerSocket(w http.ResponseWriter, r *http.Request) {
 	websocket.Handler(func(connection *websocket.Conn) {
 		defer connection.Close()
 		connection.MaxPayloadBytes = 4096
+		viewer := randomAccessToken()
+		role := ""
+		defer func() {
+			if role != "" {
+				a.profilerCommand(role, goprofile.Command{Action: "release", Viewer: viewer}, a.publicPublicationDone)
+			}
+		}()
 		for {
-			connection.SetReadDeadline(time.Now().Add(60 * time.Second))
+			connection.SetReadDeadline(time.Now().Add(45 * time.Second))
 			var command struct {
 				goprofile.Command
 				Role string `json:"role"`
@@ -65508,28 +65539,16 @@ func (a *App) serverProfilerSocket(w http.ResponseWriter, r *http.Request) {
 			if websocket.JSON.Receive(connection, &command) != nil {
 				return
 			}
-			if subtle.ConstantTimeCompare([]byte(command.CSRF), []byte(accountCSRF(r))) != 1 || command.CSRF == "" || !a.updateAuthorized(r) {
+			if command.CSRF == "" || subtle.ConstantTimeCompare([]byte(command.CSRF), []byte(accountCSRF(r))) != 1 || !a.updateAuthorized(r) {
 				return
 			}
-			var state goprofile.State
-			if command.Role == "application" {
-				state = a.profiler.Exchange(command.Command, r.Context().Done())
-			} else if command.Role == "public" && a.publicProxy {
-				encoded, err := json.Marshal(command.Command)
-				if err != nil {
-					return
-				}
-				response, err := appupdate.Exchange(a.storagePath, appupdate.Request{Action: "public_profiler", Detail: string(encoded)}, r.Context().Done())
-				if err != nil {
-					state.Error = err.Error()
-				} else if response.Error != "" {
-					state.Error = response.Error
-				} else if err = json.Unmarshal([]byte(response.Detail), &state); err != nil {
-					state.Error = err.Error()
-				}
-			} else {
-				state.Error = "Process unavailable"
+			if role == "" {
+				role = command.Role
+			} else if role != command.Role {
+				return
 			}
+			command.Viewer = viewer
+			state := a.profilerCommand(role, command.Command, r.Context().Done())
 			connection.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if websocket.JSON.Send(connection, state) != nil {
 				return

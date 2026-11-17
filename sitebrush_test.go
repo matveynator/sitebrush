@@ -36011,13 +36011,13 @@ func TestProfilerFlagPropagationAndDisabledMode(t *testing.T) {
 		t.Fatal("profiling configuration lost in child", arguments)
 	}
 	flagSet := flag.NewFlagSet("profiler", flag.ContinueOnError)
-	flagSet.Bool("profiler", false, "enable local Go profiling; curl -o saves profiles in the client current directory")
+	flagSet.Bool("profiler", false, "enable owner load-test profiling at /?expenses")
 	if err := flagSet.Parse([]string{"--profiler"}); err != nil {
 		t.Fatal(err)
 	}
 	var usage bytes.Buffer
 	printVisibleFlagDefaults(&usage, flagSet)
-	if !strings.Contains(usage.String(), "--profiler") || !strings.Contains(usage.String(), "curl -o") {
+	if !strings.Contains(usage.String(), "--profiler") || !strings.Contains(usage.String(), "/?expenses") {
 		t.Fatal("missing profiler help", usage.String())
 	}
 }

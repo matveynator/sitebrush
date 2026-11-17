@@ -7,7 +7,7 @@ const source = fs.readFileSync(path.join(__dirname, '../../web/static/server_pro
 function fixture() {
   const nodes = new Map();
   function element(selector) {
-    if (!nodes.has(selector)) nodes.set(selector, {textContent: '', disabled: false, replaceChildren() {}, appendChild() {}, setAttribute() {}, classList: {toggle() {}}});
+    if (!nodes.has(selector)) nodes.set(selector, {textContent: '', disabled: false, replaceChildren() {}, appendChild() {}, setAttribute() {}, classList: {toggle() {}}, addEventListener(name, callback) {if(name === 'close')this.closeCallback = callback;else this[name] = callback;}, showModal() {this.open = true;}, close() {this.open = false; if(this.closeCallback)this.closeCallback();}});
     return nodes.get(selector);
   }
   const root = {dataset: {csrf: 'fixture'}, querySelector: element, querySelectorAll: () => [], classList: {toggle() {}}};
@@ -45,6 +45,7 @@ function fixture() {
       await new Promise(resolve => setImmediate(resolve));
     }
   }
+  element('[data-profiler-open]').onclick();
   return {nodes, handlers, timers, sockets, settle};
 }
 
@@ -63,10 +64,15 @@ function fixture() {
     await panel.settle();
     const restored = panel.sockets.filter(socket => !previous.includes(socket));
     assert.ok(restored.length >= 2, 'Restoration reconnects both roles');
-    assert.ok(restored.flatMap(socket => socket.commands).some(command => command.action === 'report'), 'Restoration reloads retained history');
+    assert.ok(restored.flatMap(socket => socket.commands).some(command => command.action === 'report'), 'Restoration refreshes its new viewing session');
     panel.nodes.get('[data-profiler-start]').onclick();
     await panel.settle();
     assert.equal(restored.flatMap(socket => socket.commands).filter(command => command.action === 'start').length, 2, 'Recording remains usable after restoration');
+    panel.nodes.get('[data-profiler-close]').onclick();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.ok(restored.every(socket => socket.readyState === 3), 'Closing the dialog terminates viewing contacts for server cleanup');
+    panel.nodes.get('[data-profiler-open]').onclick();
+    await panel.settle();
     const contacts = panel.sockets.length;
     panel.handlers.get('pageshow')({persisted: true});
     await panel.settle();
