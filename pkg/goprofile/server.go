@@ -18,6 +18,7 @@ type Session struct {
 	address string
 	closes  chan struct{}
 	done    chan struct{}
+	tasks   chan task
 }
 
 // Start binds only loopback. Each process gets its own port, including during updates.
@@ -29,24 +30,11 @@ func Start(role, version, logOutput string, stop <-chan struct{}) (*Session, err
 	if err != nil {
 		return nil, fmt.Errorf("open profiler listener: %w", err)
 	}
-	session := &Session{address: listener.Addr().String(), closes: make(chan struct{}), done: make(chan struct{})}
+	session := &Session{address: listener.Addr().String(), closes: make(chan struct{}), done: make(chan struct{}), tasks: make(chan task, 16)}
 	server := &http.Server{Handler: diagnosticHandler(role, version), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 15 * time.Second, MaxHeaderBytes: 16 << 10}
 	served := make(chan error, 1)
 	go func() { served <- server.Serve(listener) }()
-	go func() {
-		defer close(session.done)
-		select {
-		case <-stop:
-		case <-session.closes:
-		case serveErr := <-served:
-			if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
-				log.Printf("PROFILER role=%s serve error=%v", role, serveErr)
-			}
-		}
-		if closeErr := server.Close(); closeErr != nil {
-			log.Printf("PROFILER role=%s close error=%v", role, closeErr)
-		}
-	}()
+	go session.run(role, version, server, served, stop)
 	filename := fmt.Sprintf("cpu-%s-%d.pprof", role, os.Getpid())
 	log.Printf("PROFILER role=%s pid=%d version=%q url=http://%s/debug/pprof/ journal=%q", role, os.Getpid(), version, session.address, logOutput)
 	log.Printf("PROFILER role=%s capture: curl --fail --max-time 40 -o ./%s 'http://%s/debug/pprof/profile?seconds=30'", role, filename, session.address)

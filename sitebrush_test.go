@@ -36039,3 +36039,58 @@ func TestProfilerRoutesRemainOutsidePublicWebsite(t *testing.T) {
 		}
 	}
 }
+
+func TestProfilerPanelAuthorizationAndPlacement(t *testing.T) {
+	application, _ := newTestApplication(t)
+	request := httptest.NewRequest(http.MethodGet, "https://localhost/?server_profiler_ws", nil)
+	response := httptest.NewRecorder()
+	application.serverProfilerSocket(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatal("disabled profiler exposed a route", response.Code)
+	}
+	stop := make(chan struct{})
+	defer close(stop)
+	profiler, err := startProcessProfiler(serverRunConfig{Profiler: true}, "application", stop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer profiler.Close()
+	application.profiler = profiler
+	request.Header.Set("Origin", "https://foreign.example")
+	response = httptest.NewRecorder()
+	application.serverProfilerSocket(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatal("cross-origin profiler accepted", response.Code)
+	}
+	request.Header.Set("Origin", "https://localhost")
+	response = httptest.NewRecorder()
+	application.serverProfilerSocket(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatal("anonymous profiler accepted", response.Code)
+	}
+	markup, err := fs.ReadFile(embeddedWebFiles, "web/expenses.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(markup), `{{if .ShowProfiler}}{{template "server-profiler" .}}{{end}}`) {
+		t.Fatal("profiler missing from shared expenses footer")
+	}
+}
+
+func TestProfilerExpensesFragmentIsAssociated(t *testing.T) {
+	source, err := fs.ReadFile(embeddedWebFiles, "web/expenses.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := parseEmbeddedPageTemplate("expenses.html", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err = parsed.ExecuteTemplate(&output, "server-profiler", map[string]any{"AccountCSRF": "fixture"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "data-profiler") {
+		t.Fatal("profiler template missing")
+	}
+}
