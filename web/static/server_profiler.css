@@ -1,21 +1,24 @@
-.profiler-panel {
+/* The expenses page enforces its control theme with important declarations; keep this diagnostic dialog self-contained. */
+#server-profiler-dialog {
  --profiler-application:#5b9b44; --profiler-runtime:#ca7544; --profiler-standard:#5289ad; --profiler-library:#9270ad;
  width:min(1440px,96vw); max-width:96vw; max-height:94vh; padding:0; overflow:auto;
  border:1px solid #7e8b98; border-radius:5px; background:#fff; color:#27333d;
  font:13px/1.45 Arial,Helvetica,sans-serif; box-shadow:0 20px 80px #0005; color-scheme:light;
 }
-.profiler-panel::backdrop { background:rgba(18,27,38,.65); }
-.profiler-panel * { box-sizing:border-box; }
-.profiler-panel [hidden] { display:none!important; }
-.profiler-panel button,.profiler-panel input,.profiler-panel select {
- min-height:29px; max-width:100%; margin:0; padding:4px 9px; border:1px solid #acb8c2; border-radius:3px;
- background:linear-gradient(#fff,#e9edf1); color:#25313d; font:inherit;
+#server-profiler-dialog::backdrop { background:rgba(18,27,38,.65); }
+#server-profiler-dialog * { box-sizing:border-box; }
+#server-profiler-dialog [hidden] { display:none!important; }
+#server-profiler-dialog button,#server-profiler-dialog input,#server-profiler-dialog select {
+ min-height:29px !important; max-width:100% !important; margin:0 !important; padding:4px 9px !important; border:1px solid #acb8c2 !important; border-radius:3px !important;
+ background:linear-gradient(#fff,#e9edf1) !important; color:#25313d !important; font:inherit !important;
 }
-.profiler-panel input { background:#fff; }
-.profiler-panel button { cursor:pointer; }
-.profiler-panel button:hover { border-color:#547e9e; background:#e8f0f7; }
-.profiler-panel button:focus-visible,.profiler-panel input:focus-visible,.profiler-panel select:focus-visible { outline:2px solid #287cac; outline-offset:2px; }
-.profiler-panel button:disabled { opacity:.45; cursor:default; }
+#server-profiler-dialog button { display:inline-block; box-shadow:none !important; }
+#server-profiler-dialog select { padding-inline-end:24px !important; }
+#server-profiler-dialog input { background:#fff !important; }
+#server-profiler-dialog button { cursor:pointer !important; }
+#server-profiler-dialog button:hover { border-color:#547e9e !important; background:#e8f0f7 !important; }
+#server-profiler-dialog button:focus-visible,#server-profiler-dialog input:focus-visible,#server-profiler-dialog select:focus-visible { outline:2px solid #287cac !important; outline-offset:2px !important; }
+#server-profiler-dialog button:disabled { opacity:.45 !important; cursor:default !important; }
 .profiler-heading { display:flex; justify-content:space-between; align-items:center; gap:16px; padding:15px 20px; border-bottom:1px solid #8f9caa; background:linear-gradient(#f7f9fc,#d5dce5); }
 .profiler-brand h2 { margin:0; color:#334657; font:25px/1.2 Arial,Helvetica,sans-serif; letter-spacing:-1px; }
 .profiler-brand h2 strong { font-weight:normal; color:#5a7e97; }
@@ -25,8 +28,8 @@
 .profiler-toolbar label input,.profiler-toolbar label select { font-size:12px; color:#27333d; }
 .profiler-actions { align-items:center; }
 .profiler-controls { padding:12px 20px 8px; background:#f1f4f7; border-bottom:1px solid #c8d0d8; }
-.profiler-panel [data-profiler-history] { width:270px; }
-.profiler-panel [data-profiler-start] { border-color:#527e3f; background:linear-gradient(#78aa5f,#578640); color:white; font-weight:bold; }
+#server-profiler-dialog [data-profiler-history] { width:270px; }
+#server-profiler-dialog [data-profiler-start] { border-color:#527e3f !important; background:linear-gradient(#78aa5f,#578640) !important; color:white !important; font-weight:bold !important; }
 .profiler-recording { display:flex; align-items:center; gap:12px; margin-top:8px; font-size:11px; color:#62717f; min-height:20px; }
 .profiler-recording progress { width:150px; height:8px; accent-color:#629b48; }
 .profiler-main { padding:16px 20px; }
@@ -44,8 +47,8 @@
 .profiler-breakdown-bar span,.profiler-kind-dot { background:var(--profiler-kind-color,#9caab4); }
 .profiler-kind-dot { display:inline-block; width:8px; height:8px; margin-right:5px; border-radius:1px; }
 .profiler-tabs { display:flex; flex-wrap:wrap; gap:3px; border-bottom:1px solid #a5b5c3; }
-.profiler-panel .profiler-tabs button { padding:7px 11px; border-color:transparent; border-radius:3px 3px 0 0; background:transparent; color:#5d7486; }
-.profiler-panel .profiler-tabs button[aria-selected=true] { border-color:#a5b5c3; border-bottom-color:#dce5ed; background:#dce5ed; color:#283f50; font-weight:bold; }
+#server-profiler-dialog .profiler-tabs button { padding:7px 11px !important; border-color:transparent !important; border-radius:3px 3px 0 0 !important; background:transparent !important; color:#5d7486 !important; }
+#server-profiler-dialog .profiler-tabs button[aria-selected=true] { border-color:#a5b5c3 !important; border-bottom-color:#dce5ed !important; background:#dce5ed !important; color:#283f50 !important; font-weight:bold !important; }
 .profiler-filters { padding:10px 0; }
 .profiler-search { flex:1 1 230px; }
 .profiler-content { overflow:auto; max-height:54vh; min-height:160px; border:1px solid #cad3dc; }
@@ -56,12 +59,12 @@
 .profiler-content tbody>tr:hover { background:#e5eff6; }
 .profiler-content tr.profiler-row-selected { background:#e4eedc; }
 .profiler-content th[aria-sort] { padding:0; }
-.profiler-panel .profiler-sort { width:100%; min-height:30px; padding:6px 8px; border:0; border-radius:0; background:transparent; color:inherit; font-weight:bold; text-align:inherit; white-space:nowrap; }
+#server-profiler-dialog .profiler-sort { width:100% !important; min-height:30px !important; padding:6px 8px !important; border:0 !important; border-radius:0 !important; background:transparent !important; color:inherit !important; font-weight:bold !important; text-align:inherit !important; white-space:nowrap !important; }
 .profiler-content .profiler-number { text-align:right; white-space:nowrap; font:12px/1.6 ui-monospace,Consolas,monospace; font-variant-numeric:tabular-nums; }
 .profiler-content .profiler-rank { width:30px; color:#718392; text-align:right; }
 .profiler-function-cell { min-width:240px; overflow-wrap:anywhere; }
-.profiler-panel .profiler-function-link { padding:0; min-height:0; border:0; background:transparent; color:#285a7e; text-align:left; font:12px/1.6 ui-monospace,Consolas,monospace; overflow-wrap:anywhere; }
-.profiler-panel .profiler-function-link:hover { background:transparent; text-decoration:underline; }
+#server-profiler-dialog .profiler-function-link { padding:0 !important; min-height:0 !important; border:0 !important; background:transparent !important; color:#285a7e !important; text-align:left !important; font:12px/1.6 ui-monospace,Consolas,monospace !important; overflow-wrap:anywhere !important; }
+#server-profiler-dialog .profiler-function-link:hover { background:transparent !important; text-decoration:underline !important; }
 .profiler-source { display:block; margin-top:2px; color:#6c7c87; font:10px/1.4 ui-monospace,Consolas,monospace; overflow-wrap:anywhere; }
 .profiler-cost { display:flex; flex-direction:column; align-items:end; min-width:90px; gap:3px; }
 .profiler-cost-track { width:100%; height:4px; border-radius:2px; overflow:hidden; background:#dfe6ec; }
@@ -86,10 +89,10 @@
 .profiler-detail { padding:10px; background:#eef3f7; font-size:11px; overflow-wrap:anywhere; }
 .profiler-network { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:14px; padding:20px; }
 .profiler-network p { grid-column:1/-1; color:#6d7d88; font-size:11px; }
-.profiler-fullscreen { width:calc(100vw - 24px); max-width:none; max-height:calc(100vh - 24px); }
+#server-profiler-dialog.profiler-fullscreen { width:calc(100vw - 24px); max-width:none; max-height:calc(100vh - 24px); }
 .profiler-fullscreen .profiler-content { max-height:65vh; }
 @media(max-width:700px) {
- .profiler-panel { width:98vw; max-width:98vw; }
+ #server-profiler-dialog { width:98vw; max-width:98vw; }
  .profiler-heading,.profiler-controls,.profiler-main { padding:12px; }
  .profiler-heading { align-items:start; flex-direction:column; }
  .profiler-call-columns { grid-template-columns:1fr; }

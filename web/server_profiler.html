@@ -1,7 +1,7 @@
 {{define "server-profiler"}}
 <section class="my-4" id="server-profiler" data-profiler data-csrf="{{.AccountCSRF}}">
  <button type="button" data-profiler-open>Профилирование внешней нагрузки · 30 секунд</button>
- <dialog class="profiler-panel" data-profiler-dialog aria-labelledby="profiler-title">
+ <dialog id="server-profiler-dialog" class="profiler-panel" data-profiler-dialog aria-labelledby="profiler-title">
   <header class="profiler-heading">
    <div class="profiler-brand"><h2 id="profiler-title">SiteBrush <strong>profiler</strong></h2><p>Анализ нагрузки в браузере</p></div>
    <div class="profiler-toolbar profiler-actions">
