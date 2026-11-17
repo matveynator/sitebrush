@@ -22,6 +22,7 @@ const storageLimit = 32 << 20
 const profileLimit = 8 << 20
 
 type Command struct {
+	RunID     string  `json:"runID,omitempty"`
 	Function  int     `json:"function,omitempty"`
 	Sort      string  `json:"sort,omitempty"`
 	Ascending bool    `json:"ascending,omitempty"`
@@ -57,40 +58,50 @@ type Stage struct {
 	P95MS  float64 `json:"p95MS"`
 }
 type Report struct {
-	Calls      []Call                    `json:"calls,omitempty"`
-	Groups     []Group                   `json:"groups,omitempty"`
-	Detail     *FunctionDetail           `json:"detail,omitempty"`
-	Matches    int                       `json:"matches"`
-	Code       []Function                `json:"code,omitempty"`
-	Network    requesttiming.HTTPMetrics `json:"network"`
-	Allocated  uint64                    `json:"allocated"`
-	ID         string                    `json:"id"`
-	Role       string                    `json:"role"`
-	PID        int                       `json:"pid"`
-	Version    string                    `json:"version"`
-	Started    time.Time                 `json:"started"`
-	Finished   time.Time                 `json:"finished"`
-	Expires    time.Time                 `json:"expires"`
-	CPU        int64                     `json:"cpu"`
-	Functions  []Function                `json:"functions,omitempty"`
-	Frames     []Frame                   `json:"frames,omitempty"`
-	Heap       uint64                    `json:"heap"`
-	GC         uint32                    `json:"gc"`
-	Memory     []Function                `json:"memory,omitempty"`
-	Goroutines string                    `json:"goroutines,omitempty"`
-	Stages     []Stage                   `json:"stages,omitempty"`
-	Truncated  bool                      `json:"truncated"`
-	Error      string                    `json:"error,omitempty"`
+	RunID           string                    `json:"runID"`
+	System          string                    `json:"system"`
+	Architecture    string                    `json:"architecture"`
+	GoVersion       string                    `json:"goVersion"`
+	User            string                    `json:"user"`
+	CaptureFinished time.Time                 `json:"captureFinished"`
+	Calls           []Call                    `json:"calls,omitempty"`
+	Groups          []Group                   `json:"groups,omitempty"`
+	Detail          *FunctionDetail           `json:"detail,omitempty"`
+	Matches         int                       `json:"matches"`
+	Code            []Function                `json:"code,omitempty"`
+	Network         requesttiming.HTTPMetrics `json:"network"`
+	Allocated       uint64                    `json:"allocated"`
+	ID              string                    `json:"id"`
+	Role            string                    `json:"role"`
+	PID             int                       `json:"pid"`
+	Version         string                    `json:"version"`
+	Started         time.Time                 `json:"started"`
+	Finished        time.Time                 `json:"finished"`
+	Expires         time.Time                 `json:"expires"`
+	CPU             int64                     `json:"cpu"`
+	Functions       []Function                `json:"functions,omitempty"`
+	Frames          []Frame                   `json:"frames,omitempty"`
+	Heap            uint64                    `json:"heap"`
+	GC              uint32                    `json:"gc"`
+	Memory          []Function                `json:"memory,omitempty"`
+	Goroutines      string                    `json:"goroutines,omitempty"`
+	Stages          []Stage                   `json:"stages,omitempty"`
+	Truncated       bool                      `json:"truncated"`
+	Error           string                    `json:"error,omitempty"`
 }
 type State struct {
-	Role    string    `json:"role"`
-	Busy    bool      `json:"busy"`
-	Started time.Time `json:"started"`
-	Reports []Report  `json:"reports"`
-	Report  *Report   `json:"report,omitempty"`
-	More    bool      `json:"more"`
-	Error   string    `json:"error,omitempty"`
-	Evicted bool      `json:"evicted"`
+	Protocol int       `json:"protocol"`
+	RunID    string    `json:"runID,omitempty"`
+	Targets  []string  `json:"targets,omitempty"`
+	Text     string    `json:"text,omitempty"`
+	Role     string    `json:"role"`
+	Busy     bool      `json:"busy"`
+	Started  time.Time `json:"started"`
+	Reports  []Report  `json:"reports"`
+	Report   *Report   `json:"report,omitempty"`
+	More     bool      `json:"more"`
+	Error    string    `json:"error,omitempty"`
+	Evicted  bool      `json:"evicted"`
 }
 type task struct {
 	command   Command
@@ -100,6 +111,9 @@ type task struct {
 	configure bool
 }
 type artifact struct {
+	done         chan struct{}
+	reader       chan readTask
+	session      chan struct{}
 	viewer       string
 	meta         Report
 	raw, summary *os.File
@@ -155,6 +169,10 @@ func (session *Session) Relay(encoded []byte) ([]byte, error) {
 	return json.Marshal(session.Exchange(command, nil))
 }
 func closeArtifact(record artifact) {
+	if record.session != nil {
+		close(record.session)
+		return
+	}
 	if record.raw != nil {
 		record.raw.Close()
 	}
@@ -178,7 +196,9 @@ func (session *Session) run(role, version string, stop <-chan struct{}) {
 	}()
 	completed := make(chan capture, 1)
 	var cancel chan struct{}
+	var discarded bool
 	var capturingViewer string
+	var capturingRun string
 	var started time.Time
 	var timings *requesttiming.Collector
 	evicted := false
@@ -186,14 +206,19 @@ func (session *Session) run(role, version string, stop <-chan struct{}) {
 	defer timer.Stop()
 	cleanupDirectory := func() {
 		if len(records) == 0 && cancel == nil && directory != "" {
-			os.RemoveAll(directory)
-			directory = ""
+			if err := os.RemoveAll(directory); err == nil {
+				directory = ""
+			}
 		}
 	}
 	prune := func() { records = expireArtifacts(records, time.Now()); cleanupDirectory() }
 	defer func() {
 		if cancel != nil {
-			close(cancel)
+			select {
+			case <-cancel:
+			default:
+				close(cancel)
+			}
 			result := <-completed
 			closeArtifact(result.artifact)
 		}
@@ -209,7 +234,13 @@ func (session *Session) run(role, version string, stop <-chan struct{}) {
 		case result := <-completed:
 			cancel = nil
 			result.artifact.viewer = capturingViewer
-			records = append(records, result.artifact)
+			if discarded {
+				closeArtifact(result.artifact)
+				discarded = false
+				cleanupDirectory()
+			} else {
+				records = append(records, ownArtifact(result.artifact, stop))
+			}
 		case request := <-session.tasks:
 			select {
 			case <-request.abandoned:
@@ -217,7 +248,8 @@ func (session *Session) run(role, version string, stop <-chan struct{}) {
 			default:
 			}
 			prune()
-			state := State{Role: role, Busy: cancel != nil, Started: started, Evicted: evicted}
+			state := State{Protocol: 1, Role: role, Busy: cancel != nil, Started: started, Evicted: evicted}
+			var selected *artifact
 			switch request.command.Action {
 			case "timings":
 				if request.configure {
@@ -244,16 +276,18 @@ func (session *Session) run(role, version string, stop <-chan struct{}) {
 				evicted = evicted || removed
 				started = time.Now()
 				capturingViewer = request.command.Viewer
+				capturingRun = request.command.RunID
+				if capturingRun == "" {
+					capturingRun = fmt.Sprintf("%d-%d", os.Getpid(), started.UnixNano())
+				}
 				cancel = make(chan struct{})
-				go collect(directory, role, version, started, timings, cancel, stop, completed)
+				go collect(directory, role, version, capturingRun, started, timings, cancel, stop, completed)
 				state.Busy = true
 				state.Started = started
 			case "cancel":
-				if cancel != nil && capturingViewer == request.command.Viewer {
+				if cancel != nil && capturingViewer == request.command.Viewer && !discarded {
 					close(cancel)
-					result := <-completed
-					closeArtifact(result.artifact)
-					cancel = nil
+					discarded = true
 				}
 				state.Busy = false
 			case "delete":
@@ -265,11 +299,9 @@ func (session *Session) run(role, version string, stop <-chan struct{}) {
 					}
 				}
 			case "release":
-				if cancel != nil && capturingViewer == request.command.Viewer {
+				if cancel != nil && capturingViewer == request.command.Viewer && !discarded {
 					close(cancel)
-					result := <-completed
-					closeArtifact(result.artifact)
-					cancel = nil
+					discarded = true
 				}
 				retained := records[:0]
 				for _, record := range records {
@@ -281,19 +313,11 @@ func (session *Session) run(role, version string, stop <-chan struct{}) {
 				}
 				records = retained
 			case "status":
-			case "report":
+			case "report", "export":
 				state.Error = "Recording expired or unavailable"
-				for _, record := range records {
-					if record.meta.ID == request.command.ID && record.viewer == request.command.Viewer {
-						var report Report
-						if record.summary == nil {
-							report = record.meta
-						} else if err := json.NewDecoder(io.NewSectionReader(record.summary, 0, record.size)).Decode(&report); err != nil {
-							state.Error = err.Error()
-							break
-						}
-						report = reportPage(report, request.command, &state.More)
-						state.Report = &report
+				for index := range records {
+					if records[index].meta.ID == request.command.ID && records[index].viewer == request.command.Viewer {
+						selected = &records[index]
 						state.Error = ""
 						break
 					}
@@ -303,10 +327,19 @@ func (session *Session) run(role, version string, stop <-chan struct{}) {
 			}
 			cleanupDirectory()
 			state.Busy = cancel != nil
+			state.RunID = capturingRun
 			state.Evicted = evicted
 			for index := len(records) - 1; index >= 0; index-- {
 				if records[index].viewer == request.command.Viewer {
 					state.Reports = append(state.Reports, records[index].meta)
+				}
+			}
+			if selected != nil {
+				select {
+				case selected.reader <- readTask{task: request, state: state}:
+					continue
+				default:
+					state.Error = "Report reader is busy"
 				}
 			}
 			select {
@@ -350,11 +383,14 @@ func parseProfile(file *os.File) (*profile.Profile, error) {
 	}
 	return profile.ParseUncompressed(decoded)
 }
-func collect(directory, role, version string, started time.Time, timings *requesttiming.Collector, cancel, stop <-chan struct{}, completed chan<- capture) {
-	report := Report{ID: fmt.Sprintf("%d-%d", os.Getpid(), started.UnixNano()), Role: role, PID: os.Getpid(), Version: version, Started: started}
+func collect(directory, role, version, runID string, started time.Time, timings *requesttiming.Collector, cancel, stop <-chan struct{}, completed chan<- capture) {
+	report := Report{RunID: runID, System: runtime.GOOS, Architecture: runtime.GOARCH, GoVersion: runtime.Version(), User: processUser(), ID: fmt.Sprintf("%d-%d", os.Getpid(), started.UnixNano()), Role: role, PID: os.Getpid(), Version: version, Started: started}
 	record := artifact{}
 	defer func() {
 		report.Finished = time.Now()
+		if report.CaptureFinished.IsZero() {
+			report.CaptureFinished = report.Finished
+		}
 		report.Expires = report.Finished.Add(retention)
 		summary, err := temporaryProfile(directory)
 		if err == nil {
@@ -373,6 +409,7 @@ func collect(directory, role, version string, started time.Time, timings *reques
 			}
 		}
 		record.meta = report
+		record.meta.Groups = nil
 		record.meta.Calls = nil
 		record.meta.Detail = nil
 		record.meta.Code = nil
@@ -398,6 +435,7 @@ func collect(directory, role, version string, started time.Time, timings *reques
 		first, snapshotErr = timings.Snapshot(stop)
 		timingsReady = snapshotErr == nil
 	}
+	report.Started = time.Now()
 	if err = pprof.StartCPUProfile(&limitedWriter{target: raw, remaining: profileLimit}); err != nil {
 		report.Error = err.Error()
 		return
@@ -411,6 +449,7 @@ func collect(directory, role, version string, started time.Time, timings *reques
 		report.Error = "Process stopped"
 	}
 	timer.Stop()
+	report.CaptureFinished = time.Now()
 	pprof.StopCPUProfile()
 	if info, statErr := raw.Stat(); statErr == nil {
 		record.size = info.Size()

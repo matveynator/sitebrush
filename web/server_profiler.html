@@ -11,18 +11,24 @@
   </header>
   <div class="profiler-controls">
    <div class="profiler-toolbar">
-    <label>Процесс <select data-profiler-role><option value="public">Публичный сервер</option><option value="application">Основное приложение</option></select></label>
     <label>Запись <select data-profiler-history aria-label="Запись"><option>Нет записей</option></select></label>
-    <button type="button" data-profiler-start>● Записать 30 секунд</button>
+    <button type="button" data-profiler-start>● Записать работу сервера — 30 секунд</button>
     <button type="button" data-profiler-cancel>Остановить</button>
+    <button type="button" data-profiler-copy disabled>Скопировать отчёт для ИИ</button>
     <button type="button" data-profiler-delete>Удалить запись</button>
    </div>
    <div class="profiler-recording"><span data-profiler-status role="status"></span><progress data-profiler-progress max="30" value="0" aria-label="Ход записи"></progress></div>
   </div>
   <main class="profiler-main">
    <p class="profiler-error" data-profiler-error role="alert" hidden></p>
+   <p data-profiler-mode class="profiler-explanation"></p>
+   <p data-profiler-copy-status role="status"></p>
+   <label data-profiler-copy-fallback hidden>Скопируйте текст вручную<textarea data-profiler-copy-text readonly rows="12" aria-label="Отчёт для ИИ"></textarea></label>
    <div class="profiler-summary" data-profiler-summary></div>
    <div class="profiler-breakdown" data-profiler-breakdown aria-label="Распределение собственного CPU"></div>
+   <section data-profiler-overview class="profiler-overview"></section>
+   <details data-profiler-details><summary>Подробности: функции, память и задержки</summary>
+   <div class="profiler-toolbar profiler-filters"><label>Часть сервера <select data-profiler-role></select></label><span data-profiler-process class="profiler-explanation"></span></div>
    <nav class="profiler-tabs" role="tablist" aria-label="Данные профиля" data-profiler-tabs>
     <button type="button" role="tab" data-view="functions">Функции CPU</button><button type="button" role="tab" data-view="graph">Граф вызовов</button><button type="button" role="tab" data-view="code">Строки кода CPU</button><button type="button" role="tab" data-view="memory">Память</button><button type="button" role="tab" data-view="stages">Задержки запросов</button><button type="button" role="tab" data-view="network">Сеть HTTP</button><button type="button" role="tab" data-view="goroutines">Goroutine</button>
    </nav>
@@ -34,6 +40,7 @@
    </div>
    <div data-profiler-content class="profiler-content"></div>
    <div class="profiler-toolbar profiler-pagination" data-profiler-pagination><span data-profiler-count></span><button type="button" data-profiler-back>← Назад</button><span data-profiler-page></span><button type="button" data-profiler-next>Далее →</button></div>
+   </details>
    <footer class="profiler-footer">Собственное CPU — работа самой функции; с вызовами — вместе с её потомками. Образцы показывают присутствие в выборке CPU, а не число вызовов. Ожидание сети и каналов смотрите в задержках и состояниях goroutine. Временные данные удаляются при закрытии окна; предельный срок хранения — 10 минут.</footer>
   </main>
  </dialog>

@@ -3,7 +3,7 @@
  const root = document.querySelector('[data-profiler]');
  if (!root) return;
  const model = {
-  role:'public', view:'functions', page:0, search:'', selected:'', focus:0,
+  role:'application', targets:[], selectedRun:'', overviewParts:{}, overviewKey:'', exportText:'', exportKey:'', exportRevision:0, copyStatus:'', copyFallback:false, detailsOpen:false, view:'functions', page:0, search:'', selected:'', focus:0,
   sort:'total', ascending:false, kind:'', minimum:0, unit:'percent',
   expanded:0, detail:null, detailPending:false, detailError:'',
   detailsRevision:0, reportRevision:0, states:{}, report:null, more:false,
@@ -98,35 +98,138 @@
   model.error=error.message;
   render();
  }
+ function availableMeasurements() {
+  const measurements=new Map();
+  model.targets.forEach(function processReports(role) {
+   const state=model.states[role]||{};
+   (state.reports||[]).forEach(function record(report) {
+    const identifier=report.runID||report.id;
+    if(!measurements.has(identifier))measurements.set(identifier,{id:identifier,started:report.started,parts:{}});
+    measurements.get(identifier).parts[role]=report;
+   });
+  });
+  return Array.from(measurements.values()).sort(function newest(first,second){return Date.parse(second.started)-Date.parse(first.started);});
+ }
+ function measurementPart(role) {
+  const measurement=availableMeasurements().find(function selected(record){return record.id===model.selectedRun;});
+  return measurement&&measurement.parts[role];
+ }
+ function processLabel(role) {
+  if(role==='public')return 'Приём запросов и отдача файлов';
+  if(model.targets.length===1)return 'Сайт и приложение в одном процессе';
+  return 'Приложение: вход, редактор и база';
+ }
+ function measurementKey() {
+  return model.selectedRun+model.targets.map(function part(role) {
+   const record=measurementPart(role);
+   return role+':'+(record?record.id:'missing')+':'+((model.states[role]||{}).error||'');
+  }).join('|');
+ }
  function refresh() {
-  if(model.stopped||model.refreshing)return;
+  if(model.stopped||model.refreshing||!model.targets.length)return;
   model.refreshing=true;
   window.clearTimeout(model.pollTimer);
   const generation=model.generation;
-  Promise.all(['public','application'].map(function readRole(role) {
-   return request(role,{action:'status'});
-  })).then(function updated() {
+  Promise.all(model.targets.map(function readRole(role){return request(role,{action:'status'}).then(function compatible(state) {
+    if(!state.error&&state.protocol!==1) {
+     state.error='Эта часть сервера использует старый протокол профилирования. Нужен полный перезапуск службы после обновления.';
+     state.reports=[];
+    }
+    return state;
+   });})).then(function updated() {
    if(model.stopped||generation!==model.generation)return;
-   const state=model.states[model.role];
-   if(state&&state.reports&&state.reports.length&&!state.reports.some(function matches(report){return report.id===model.selected;})) {
-    model.selected=state.reports[0].id;
-    model.page=0;
-    resetDetails();
-    loadReport();
-   }
-   if(state&&(!state.reports||!state.reports.length)) {
-    model.selected='';
-    model.report=null;
+   const records=availableMeasurements();
+   const capturing=model.targets.some(function active(role){const state=model.states[role]||{};return state.busy&&state.runID===model.selectedRun;});
+   if(!records.some(function selected(record){return record.id===model.selectedRun;})&&!capturing) {
+    model.selectedRun=records.length?records[0].id:'';
     resetDetails();
    }
+   if(measurementKey()!==model.overviewKey)loadOverview();
+   else if(!model.exportKey&&model.selectedRun)prepareExport();
    render();
-  }).catch(function failedRefresh(error) {
-   if(generation===model.generation)reportError(error);
-  }).finally(function nextRefresh() {
+  }).catch(function failedRefresh(error){if(generation===model.generation)reportError(error);}).finally(function nextRefresh() {
    if(generation!==model.generation)return;
    model.refreshing=false;
-   window.clearTimeout(model.pollTimer);
    if(!model.stopped)model.pollTimer=window.setTimeout(refresh,2000);
+  });
+ }
+ function loadOverview() {
+  const generation=model.generation;
+  const key=measurementKey();
+  model.overviewKey=key;
+  model.overviewParts={};
+  model.exportText='';
+  model.exportKey='';
+  model.copyStatus='';
+  model.copyFallback=false;
+  const expected=model.targets.filter(function available(role){return Boolean(measurementPart(role));});
+  Promise.all(expected.map(function overview(role) {
+   return request(role,{action:'report',id:measurementPart(role).id,view:'overview'}).then(function received(response){return {role:role,report:response.report,error:response.error};});
+  })).then(function loaded(parts) {
+   if(model.stopped||generation!==model.generation||key!==measurementKey())return;
+   parts.forEach(function keep(part) {
+    model.overviewParts[part.role]=part.report||{error:part.error||'Результат недоступен',role:part.role};
+   });
+   if(model.detailsOpen)loadReport();
+   prepareExport();
+   render();
+  }).catch(function failedOverview(error){if(generation===model.generation&&key===measurementKey()){model.overviewKey='';reportError(error);}});
+ }
+ function overviewReport() {
+  const summary={cpu:0,heap:0,allocated:0,gc:0,groups:[],functions:[],stages:[],network:null,truncated:false};
+  const counted=new Set();
+  const groups=new Map();
+  model.targets.forEach(function include(role) {
+   const report=model.overviewParts[role];
+   if(!report||report.error||counted.has(report.pid))return;
+   counted.add(report.pid);
+   summary.cpu+=report.cpu||0;
+   summary.heap+=report.heap||0;
+   summary.allocated+=report.allocated||0;
+   summary.gc+=report.gc||0;
+   summary.truncated=summary.truncated||report.truncated;
+   (report.groups||[]).forEach(function group(portion){groups.set(portion.kind,(groups.get(portion.kind)||0)+portion.self);});
+   (report.functions||[]).forEach(function functionCost(functionReport){summary.functions.push(Object.assign({},functionReport,{processRole:role}));});
+   (report.stages||[]).forEach(function stage(stageReport){summary.stages.push(Object.assign({},stageReport,{processRole:role}));});
+  });
+  groups.forEach(function group(self,kind){summary.groups.push({kind:kind,self:self});});
+  const external=model.overviewParts[model.targets.includes('public')?'public':'application'];
+  if(external&&!external.error)summary.network=external.network;
+  summary.functions.sort(function hottest(first,second){return second.self-first.self;});
+  summary.stages.sort(function slowest(first,second){return second.meanMS-first.meanMS;});
+  return summary;
+ }
+ function prepareExport() {
+  if(!model.selectedRun||model.stopped)return;
+  const key=measurementKey();
+  if(model.exportKey===key)return;
+  model.exportKey=key;
+  const revision=++model.exportRevision;
+  const generation=model.generation;
+  const summary=overviewReport();
+  const intro=[
+   '# Отчёт о работе SiteBrush под внешней нагрузкой',
+   'Цель анализа: найти узкие места и архитектурные причины медленной отдачи статики; предложить изменения кода на основании измерений.',
+   'Замер: '+model.selectedRun,
+   'Измерены процессы, обслуживающие сайт. Служебный запускатель (если используется) не обслуживает HTTP-нагрузку и не включён в запись.',
+   'По измеренным процессам: CPU '+duration(summary.cpu)+'; живая память Go '+formatBytes(summary.heap)+'; выделено '+formatBytes(summary.allocated)+'; сборок мусора '+summary.gc+'.',
+   'Внешних HTTP-запросов: '+(summary.network?summary.network.requests:'нет данных')+'. Данные внутренних границ ниже нельзя складывать с внешними запросами и трафиком.',
+   'Результаты ab и nginx не измеряются этим отчётом; для сравнения приложите их отдельно.',
+   'Это выборочные измерения CPU и памяти; наблюдения не доказывают причин задержек.'
+  ];
+  Promise.all(model.targets.map(function exportProcess(role) {
+   const record=measurementPart(role);
+   if(!record)return Promise.resolve('## '+processLabel(role)+'\nДанные отсутствуют: '+((model.states[role]||{}).error||'результат не получен или ещё готовится')+'\n');
+   return request(role,{action:'export',id:record.id}).then(function exported(response){return response.text||'## '+processLabel(role)+'\nОшибка: '+(response.error||'нет текста')+'\n';});
+  })).then(function exported(parts) {
+   if(model.stopped||generation!==model.generation||revision!==model.exportRevision||key!==measurementKey())return;
+   model.exportText=intro.join('\n')+'\n\n'+parts.join('\n\n');
+   render();
+  }).catch(function failedExport(error) {
+   if(generation!==model.generation||revision!==model.exportRevision)return;
+   model.exportKey='';
+   model.copyStatus='Не удалось подготовить отчёт: '+error.message;
+   render();
   });
  }
  function tabularView() {
@@ -140,6 +243,8 @@
   model.detailError='';
  }
  function loadReport() {
+  const selectedPart=measurementPart(model.role);
+  model.selected=selectedPart?selectedPart.id:"";
   if(!model.selected){model.report=null;render();return;}
   const selection=model.selected;
   const role=model.role;
@@ -390,7 +495,7 @@
   appendStatistic(summary,'Живая память',formatBytes(report.heap));
   appendStatistic(summary,'Выделено за запись',formatBytes(report.allocated));
   appendStatistic(summary,'Сборок мусора',report.gc);
-  appendStatistic(summary,'HTTP-запросов',(report.network||{}).requests||0);
+  appendStatistic(summary,'Внешних HTTP-запросов',report.network?report.network.requests:'Нет данных');
   const bar=document.createElement('div');
   bar.className='profiler-breakdown-bar';
   const groups=report.groups||[];
@@ -442,13 +547,15 @@
   appendParagraph(output,'Учтены тела HTTP-запросов и ответов. Заголовки, TLS и повторные TCP-передачи не входят. Трафик публичного сервера и приложения нельзя складывать: проксируемые запросы проходят обе границы.');
   content.appendChild(output);
  }
+ function stageLabel(name) {
+  return {accepted_to_request:'Приём соединения → запрос',front_state:'Ожидание состояния публичного сервера',domain:'Проверка домена',policy:'Политика доступа',attack_guard:'Защита от атак',throttle_guard:'Ограничение нагрузки',public_handler:'Публичная обработка до первого ответа',first_write:'До первого ответа',certificate:'TLS-сертификат',attack_queue:'Очередь защиты от атак',attack_work:'Работа защиты от атак',throttle_queue:'Очередь ограничения нагрузки',throttle_work:'Работа ограничения нагрузки',proxy_metadata:'Метаданные прокси',proxy_backend:'Ожидание приложения за прокси'}[name]||name;
+ }
  function renderStages(content,report) {
   const output=table(['Этап обработки','Запросов','Среднее, мс','p95 ≤ мс']);
   const body=document.createElement('tbody');
-  const names={accepted_to_request:'Приём соединения → запрос',front_state:'Ожидание состояния публичного сервера',domain:'Проверка домена',policy:'Политика доступа',attack_guard:'Защита от атак',throttle_guard:'Ограничение нагрузки',public_handler:'Публичная обработка до первого ответа',first_write:'До первого ответа',certificate:'TLS-сертификат',attack_queue:'Очередь защиты от атак',attack_work:'Работа защиты от атак',throttle_queue:'Очередь ограничения нагрузки',throttle_work:'Работа ограничения нагрузки',proxy_metadata:'Метаданные прокси',proxy_backend:'Ожидание приложения за прокси'};
   (report.stages||[]).slice().sort(function slowest(first,second){return second.meanMS-first.meanMS;}).forEach(function stage(stageReport) {
    const row=document.createElement('tr');
-   textCell(row,names[stageReport.name]||stageReport.name);
+   textCell(row,stageLabel(stageReport.name));
    textCell(row,stageReport.count,'profiler-number');
    textCell(row,stageReport.meanMS.toFixed(3),'profiler-number');
    textCell(row,stageReport.p95MS.toFixed(3),'profiler-number');
@@ -466,29 +573,70 @@
   appendParagraph(empty,'Запустите запись на 30 секунд и создайте нагрузку внешним ab. Затем откройте самые затратные функции и их связи.');
   content.appendChild(empty);
  }
+ function renderOverview(summary) {
+  const panel=element('[data-profiler-overview]');
+  panel.replaceChildren();
+  const reports=Object.values(model.overviewParts).filter(function measured(report){return Boolean(report.pid);});
+  if(!reports.length){renderEmpty(panel);return;}
+  const hottest=summary.functions[0];
+  const slowest=summary.stages[0];
+  if(hottest)appendParagraph(panel,'Больше всего собственного времени процессора: '+hottest.name+' — '+duration(hottest.self)+' ('+(100*hottest.self/(summary.cpu||1)).toFixed(1)+'%).');
+  if(slowest)appendParagraph(panel,'Наибольшее среднее время измеренного этапа: '+stageLabel(slowest.name)+' — '+slowest.meanMS.toFixed(3)+' мс; p95 ≤ '+slowest.p95MS.toFixed(3)+' мс.');
+  const missing=model.targets.filter(function unavailable(role){return !model.overviewParts[role]||model.overviewParts[role].error;});
+  if(missing.length)appendParagraph(panel,'Замер пока неполный: '+missing.map(function name(role){return processLabel(role)+' ('+((model.states[role]||{}).error||'результат ещё не получен')+')';}).join('; '));
+  if(summary.truncated)appendParagraph(panel,'Часть измерений сокращена или пропущена под нагрузкой; это отмечено в отчёте.');
+  const output=table(['Что выполнялось','Где','Работа процессора самой функции']);
+  const body=document.createElement('tbody');
+  summary.functions.slice(0,10).forEach(function hotspot(functionReport) {
+   const row=document.createElement('tr');
+   functionCell(row,functionReport,false);
+   textCell(row,processLabel(functionReport.processRole));
+   textCell(row,duration(functionReport.self),'profiler-number');
+   body.appendChild(row);
+  });
+  output.appendChild(body);
+  panel.appendChild(output);
+ }
  function render() {
-  const state=model.states[model.role]||{};
   const report=model.report;
+  const summary=overviewReport();
   const history=element('[data-profiler-history]');
   history.replaceChildren();
-  (state.reports||[]).forEach(function option(record) {
+  availableMeasurements().forEach(function option(record) {
    const choice=document.createElement('option');
    choice.value=record.id;
-   choice.textContent=new Date(record.finished).toLocaleTimeString()+' · PID '+record.pid+' · v'+record.version;
-   choice.selected=record.id===model.selected;
+   choice.textContent=new Date(record.started).toLocaleTimeString()+' · замер сервера';
+   choice.selected=record.id===model.selectedRun;
    history.appendChild(choice);
   });
-  const elapsed=state.busy?Math.min(30,Math.max(0,Math.floor((Date.now()-Date.parse(state.started))/1000))):0;
+  const busy=model.targets.map(function state(role){return model.states[role]||{};}).filter(function capturing(state){return state.busy;});
+  const elapsed=busy.length?Math.min(30,Math.max(0,Math.floor((Date.now()-Date.parse(busy[0].started))/1000))):0;
   element('[data-profiler-progress]').value=elapsed;
-  element('[data-profiler-progress]').hidden=!state.busy;
-  element('[data-profiler-status]').textContent=state.busy?'Запись… осталось '+(30-elapsed)+' с.':'Готов к записи · '+(state.reports||[]).length+' временных записей'+(report&&report.truncated?' · Данные частичные':'');
-  if(state.evicted)element('[data-profiler-status]').textContent+=' · Старейшие записи удалены по ограничению размера';
-  const error=model.error||state.error||(report&&report.error)||'';
+  element('[data-profiler-progress]').hidden=!busy.length;
+  element('[data-profiler-status]').textContent=busy.length?'Записываем работу сервера… осталось '+(30-elapsed)+' с.':'Готов к записи';
+  const processErrors=model.targets.map(function failed(role){const state=model.states[role]||{};return state.error?processLabel(role)+': '+state.error:'';}).filter(Boolean);
+  const error=model.error||processErrors.join('; ');
   element('[data-profiler-error]').textContent=error;
   element('[data-profiler-error]').hidden=!error;
-  element('[data-profiler-start]').disabled=model.stopped||['public','application'].some(function busy(role){return model.states[role]&&model.states[role].busy;});
-  element('[data-profiler-cancel]').disabled=!['public','application'].some(function busy(role){return model.states[role]&&model.states[role].busy;});
-  element('[data-profiler-delete]').disabled=!model.selected;
+  element('[data-profiler-start]').disabled=model.stopped||!model.targets.length||Boolean(busy.length);
+  element('[data-profiler-cancel]').disabled=!busy.length;
+  element('[data-profiler-delete]').disabled=!model.selectedRun||Boolean(busy.length);
+  element('[data-profiler-copy]').disabled=!model.exportText||Boolean(busy.length);
+  element('[data-profiler-copy-status]').textContent=model.copyStatus||(!busy.length&&model.selectedRun&&!model.exportText?'Готовим текстовый отчёт…':'');
+  element('[data-profiler-copy-fallback]').hidden=!model.copyFallback;
+  element('[data-profiler-copy-text]').value=model.exportText;
+  element('[data-profiler-mode]').textContent=model.targets.length>1?'Замер охватывает отдачу файлов посетителям и работу приложения. Выбирать процессы вручную не нужно.':'Один процесс обслуживает сайт и приложение; замер охватывает его работу целиком.';
+  const roles=element('[data-profiler-role]');
+  roles.replaceChildren();
+  model.targets.forEach(function option(role) {
+   const choice=document.createElement('option');
+   choice.value=role;
+   choice.textContent=processLabel(role);
+   choice.selected=model.role===role;
+   roles.appendChild(choice);
+  });
+  const process=model.overviewParts[model.role];
+  element('[data-profiler-process]').textContent=process&&process.pid?'PID '+process.pid+' · '+process.user+' · '+process.system+'/'+process.architecture+' · SiteBrush '+process.version:'Результат этой части сервера ещё не получен';
   element('[data-profiler-role]').value=model.role;
   element('[data-profiler-search]').value=model.search;
   element('[data-profiler-kind]').value=model.kind;
@@ -498,8 +646,9 @@
   element('[data-profiler-unit]').disabled=model.view==='memory';
   element('[data-profiler-filters]').hidden=!tabularView();
   element('[data-profiler-pagination]').hidden=!tabularView()||!report;
+  renderSummary(model.selectedRun?summary:null);
+  renderOverview(summary);
   root.querySelectorAll('[data-view]').forEach(function tab(button){button.setAttribute('aria-selected',String(button.dataset.view===model.view));});
-  renderSummary(report);
   const content=element('[data-profiler-content]');
   content.replaceChildren();
   if(!report){renderEmpty(content);return;}
@@ -518,27 +667,62 @@
  }
  element('[data-profiler-start]').onclick=function start() {
   model.error='';
-  Promise.all(['public','application'].map(function capture(role){return request(role,{action:'start'});})).then(refresh).catch(reportError);
+  model.copyStatus='';
+  model.exportText='';
+  request('application',{action:'start'}).then(function applicationStarted(state) {
+   if(state.error)throw new Error(state.error);
+   model.selectedRun=state.runID;
+   if(model.targets.includes('public')) {
+    if((model.states.public||{}).protocol!==1)return {error:'Для записи отдачи файлов нужен полный перезапуск службы после обновления.'};
+    return request('public',{action:'start',runID:state.runID});
+   }
+  }).then(function started(state) {
+   if(state&&state.error)model.error='Запись части сервера недоступна: '+state.error;
+   return refresh();
+  }).catch(reportError);
  };
  element('[data-profiler-cancel]').onclick=function cancel() {
-  Promise.all(['public','application'].map(function stop(role){return request(role,{action:'cancel'});})).then(refresh).catch(reportError);
+  Promise.all(model.targets.map(function stop(role){return request(role,{action:'cancel'});})).then(refresh).catch(reportError);
  };
  element('[data-profiler-delete]').onclick=function remove() {
-  request(model.role,{action:'delete',id:model.selected}).then(function deleted(){model.selected='';resetDetails();refresh();}).catch(reportError);
+  Promise.all(model.targets.map(function removePart(role) {
+   const record=measurementPart(role);
+   return record?request(role,{action:'delete',id:record.id}):Promise.resolve();
+  })).then(function deleted(){model.selectedRun='';model.overviewKey='';model.overviewParts={};model.exportText='';model.exportKey='';model.exportRevision++;resetDetails();refresh();}).catch(reportError);
  };
  element('[data-profiler-role]').onchange=function role(event) {
   model.role=event.target.value;
-  model.selected='';
-  model.report=null;
-  resetDetails();
-  refresh();
- };
- element('[data-profiler-history]').onchange=function select(event) {
-  model.selected=event.target.value;
-  model.page=0;
   model.report=null;
   resetDetails();
   loadReport();
+ };
+ element('[data-profiler-history]').onchange=function select(event) {
+  model.selectedRun=event.target.value;
+  model.page=0;
+  model.report=null;
+  resetDetails();
+  loadOverview();
+ };
+ element('[data-profiler-details]').addEventListener('toggle',function details(event) {
+  model.detailsOpen=event.target.open;
+  if(model.detailsOpen)loadReport();
+ });
+ element('[data-profiler-copy]').onclick=async function copyReport() {
+  if(!model.exportText)return;
+  const text=model.exportText;
+  const generation=model.generation;
+  try {
+   await navigator.clipboard.writeText(text);
+   if(model.stopped||generation!==model.generation||model.exportText!==text)return;
+   model.copyStatus='Отчёт скопирован. Его можно вставить в ИИ для анализа.';
+   model.copyFallback=false;
+  } catch(error) {
+   if(model.stopped||generation!==model.generation||model.exportText!==text)return;
+   model.copyStatus='Браузер запретил копирование. Скопируйте выделенный текст вручную.';
+   model.copyFallback=true;
+  }
+  render();
+  if(model.copyFallback){element('[data-profiler-copy-text]').focus();element('[data-profiler-copy-text]').select();}
  };
  element('[data-profiler-search]').oninput=function search(event) {
   model.search=event.target.value;
@@ -584,6 +768,11 @@
   model.refreshing=false;
   model.cancelPending=null;
   resetDetails();
+  model.overviewParts={};model.overviewKey='';model.exportText='';model.exportKey='';model.exportRevision++;model.copyFallback=false;model.report=null;
+  model.selectedRun='';model.selected='';model.states={};
+  element('[data-profiler-copy-text]').value='';
+  element('[data-profiler-overview]').replaceChildren();
+  element('[data-profiler-content]').replaceChildren();
   Object.keys(sockets).forEach(function disconnectRole(role) {
    const socket=sockets[role];
    sockets[role]=null;
@@ -596,10 +785,20 @@
   model.states={};
   model.error='';
   model.selected='';
+  model.selectedRun='';
   model.report=null;
   model.more=false;
   model.page=0;
-  refresh();
+  model.targets=[];
+  const generation=model.generation;
+  request('application',{action:'capabilities'}).then(function capabilities(state) {
+   if(model.stopped||generation!==model.generation)return;
+   if(state.error||!state.targets||!state.targets.length)throw new Error(state.error||'Сервер не сообщил режим профилирования');
+   model.targets=state.targets;
+   model.role=state.targets.includes('public')?'public':'application';
+   refresh();
+   render();
+  }).catch(function unavailable(error){if(generation===model.generation)reportError(error);});
   render();
  }
  element('[data-profiler-open]').onclick=function openDialog(){element('[data-profiler-dialog]').showModal();resumeProfiler();};

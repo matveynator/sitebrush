@@ -124,7 +124,16 @@ func TestViewingReleaseCancelsOnlyItsOwnCapture(t *testing.T) {
 		t.Fatal("another viewer cancelled the recording")
 	}
 	state = session.Exchange(Command{Action: "release", Viewer: "first-view"}, nil)
-	if state.Busy || len(state.Reports) != 0 {
+	deadline := time.After(5 * time.Second)
+	for state.Busy {
+		select {
+		case <-deadline:
+			t.Fatal("view release did not finish cancellation")
+		default:
+		}
+		state = session.Exchange(Command{Action: "status", Viewer: "first-view"}, nil)
+	}
+	if len(state.Reports) != 0 {
 		t.Fatal("view release retained its recording", state)
 	}
 }

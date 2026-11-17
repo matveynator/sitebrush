@@ -9626,6 +9626,9 @@ func (writer *securityNotFoundWriter) ReadFrom(reader io.Reader) (int64, error) 
 
 func (a *App) securityResponseHeadersMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if decision, found := r.Context().Value(publicDecisionContextKey{}).(publicsite.Decision); found {
+			publicsite.ApplyServerHeader(w.Header(), decision)
+		}
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		if !adminResponseIsolationRequired(r) {
 			next.ServeHTTP(w, r)
@@ -13311,6 +13314,12 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 	})))
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Del("Server")
+		if a.publicCatalog != nil && (embeddedStaticRequest(r) || !publicOrdinaryRequest(r)) {
+			decision := a.publicRequestDecision(r)
+			r = withPublicRequestDecision(r, decision)
+			publicsite.ApplyServerHeader(w.Header(), decision)
+		}
 		if a.servePendingSiteBoundary(w, r) {
 			return
 		}
@@ -13377,9 +13386,8 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 		// per-site policy. Test Drive candidates use the owner-issued route;
 		// the backend validates capabilities after admission.
 		//
-		// Host-only Lookup is intentional: do not cache this decision in the
-		// request context because publicRequestDecision also contains path/file
-		// information for ordinary published requests.
+		// Reuse the request's complete policy decision for host admission and
+		// response identity; no separate branding lookup may touch SQL.
 		if a.publicCatalog != nil &&
 			!publicOrdinaryRequest(r) &&
 			!httpsecurity.IsLocalRequest(r) &&
@@ -13387,10 +13395,7 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 			!testDriveSessionRequest {
 			host := domainFromRequest(r)
 			if host != "" {
-				hostDecision := a.publicCatalog.Lookup(publicsite.Lookup{
-					Host:     host,
-					ClientIP: accountClientIP(r),
-				})
+				hostDecision := a.publicRequestDecision(r)
 				if !hostDecision.Found && !hostDecision.Known && !a.newSiteOnboardingRequest(r, host) {
 					unknownPublic.ServeHTTP(w, r)
 					return
@@ -13409,6 +13414,7 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 				httpsecurity.IsLocalRequest(r)) {
 			decision := a.publicRequestDecision(r)
 			r = withPublicRequestDecision(r, decision)
+			publicsite.ApplyServerHeader(w.Header(), decision)
 
 			trustedPublicRequest := a.publicLoadTrusted(r, decision)
 
@@ -13472,6 +13478,7 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 
 		if a.publicCatalog != nil && publicOrdinaryRequest(r) {
 			decision := a.publicRequestDecision(r)
+			publicsite.ApplyServerHeader(w.Header(), decision)
 			if decision.PrivateTestDrive {
 				if a.controlDatabase == nil {
 					serveSecurityUnavailable(w)
@@ -61834,6 +61841,7 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 		fileName = publicAssetFileNameFromPath(r.URL.Path, host)
 	}
 	decision := a.publicRequestDecision(r)
+	publicsite.ApplyServerHeader(w.Header(), decision)
 	// Only the database owner may validate a private Test Drive capability.
 	if decision.PrivateTestDrive {
 		return false
@@ -62067,6 +62075,7 @@ func newPublicHTTPFront(application *App, secret string, stop <-chan struct{}) *
 			// backend remains responsible for checking the live capability.
 			decision := application.publicRequestDecision(r)
 			r = withPublicRequestDecision(r, decision)
+			publicsite.ApplyServerHeader(w.Header(), decision)
 			if decision.PrivateTestDrive {
 				return false
 			}
@@ -62115,6 +62124,7 @@ func newPublicHTTPFront(application *App, secret string, stop <-chan struct{}) *
 
 		lookup := application.publicRequestDecision(r)
 		r = withPublicRequestDecision(r, lookup)
+		publicsite.ApplyServerHeader(w.Header(), lookup)
 		if !lookup.Found {
 			if lookup.Known {
 				w.Header().Set("Retry-After", "2")
@@ -62155,6 +62165,7 @@ func newPublicHTTPFront(application *App, secret string, stop <-chan struct{}) *
 			return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 				lookup := application.publicRequestDecision(request)
 				request = withPublicRequestDecision(request, lookup)
+				publicsite.ApplyServerHeader(writer.Header(), lookup)
 				captured := &statusCapturingResponseWriter{ResponseWriter: writer}
 				protected.ServeHTTP(captured, request)
 				domain := lookup.Domain
@@ -65547,7 +65558,24 @@ func (a *App) serverProfilerSocket(w http.ResponseWriter, r *http.Request) {
 			} else if role != command.Role {
 				return
 			}
+			if len(command.RunID) > 64 {
+				return
+			}
+			if command.Action == "start" && command.RunID == "" {
+				command.RunID = randomAccessToken()
+			}
 			command.Viewer = viewer
+			if command.Action == "capabilities" && role == "application" {
+				targets := []string{"application"}
+				if a.publicProxy {
+					targets = []string{"application", "public"}
+				}
+				connection.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				if websocket.JSON.Send(connection, goprofile.State{Protocol: 1, Role: role, Targets: targets}) != nil {
+					return
+				}
+				continue
+			}
 			state := a.profilerCommand(role, command.Command, r.Context().Done())
 			connection.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if websocket.JSON.Send(connection, state) != nil {

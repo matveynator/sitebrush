@@ -59,6 +59,11 @@ func reportPage(report Report, command Command, more *bool) Report {
 	report.Goroutines, report.Stages, report.Detail = "", nil, nil
 	*more = false
 	switch command.View {
+	case "overview":
+		sortFunctions(functions, "self", false)
+		report.Functions = functions[:min(20, len(functions))]
+		report.Stages = stages
+		return report
 	case "graph":
 		report.Frames = frames
 		return report

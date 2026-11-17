@@ -36081,8 +36081,12 @@ func TestProfilerPanelAuthorizationAndPlacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(markup), `{{if .ShowProfiler}}{{template "server-profiler" .}}{{end}}`) {
-		t.Fatal("profiler missing from shared expenses footer")
+		t.Fatal("profiler missing from expenses panel")
 	}
+	if strings.Index(string(markup), `{{template "server-profiler" .}}`) > strings.Index(string(markup), `<header class="page-header`) {
+		t.Fatal("profiler controls are below the expenses heading")
+	}
+
 }
 
 func TestProfilerExpensesFragmentIsAssociated(t *testing.T) {
@@ -36100,5 +36104,57 @@ func TestProfilerExpensesFragmentIsAssociated(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "data-profiler") {
 		t.Fatal("profiler template missing")
+	}
+}
+
+func TestServerSoftwarePublicResponsesRespectStealthWithoutSQL(t *testing.T) {
+	application, _ := newTestApplication(t)
+	stop := make(chan struct{})
+	defer close(stop)
+	application.publicCatalog = publicsite.NewCatalog(application.storagePath, stop)
+	application.publicStreamer = publicsite.NewStreamer()
+	policy := publicsite.Policy{Domain: "example.org", AllowedIPs: []string{"198.51.100.50"}}
+	filename := filepath.Join(application.domainStaticDir(policy.Domain), "index.html")
+	if err := os.MkdirAll(filepath.Dir(filename), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filename, []byte("<html><body>Static</body></html>"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := publicsite.Write(application.storagePath, policy); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.publicCatalog.SetMemory(true); err != nil {
+		t.Fatal(err)
+	}
+	application.db = panicSQLExecutor{t: t}
+	handler := application.siteHTTPHandler(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		t.Fatal("static request reached the application")
+	}))
+	for _, stealth := range []bool{false, true, false} {
+		policy.Stealth = stealth
+		if err := publicsite.Write(application.storagePath, policy); err != nil {
+			t.Fatal(err)
+		}
+		if err := application.publicCatalog.Reload(policy.Domain); err != nil {
+			t.Fatal(err)
+		}
+		for _, scheme := range []string{"http", "https"} {
+			for _, method := range []string{http.MethodGet, http.MethodHead} {
+				for _, path := range []string{"/", "/missing", "/p/static/server_profiler.css"} {
+					request := httptest.NewRequest(method, scheme+"://example.org"+path, nil)
+					request.RemoteAddr = "198.51.100.50:12345"
+					response := httptest.NewRecorder()
+					handler.ServeHTTP(response, request)
+					expected := "SiteBrush"
+					if stealth {
+						expected = ""
+					}
+					if actual := response.Header().Get("Server"); actual != expected {
+						t.Fatalf("%s %s stealth=%t: got %q want %q", method, request.URL, stealth, actual, expected)
+					}
+				}
+			}
+		}
 	}
 }
