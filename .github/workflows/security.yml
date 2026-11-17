@@ -117,6 +117,10 @@ jobs:
         run: >-
           go test -count=1 -timeout=180s .
           -run '^Test(AutomaticSSLRequiresCompletedRegistration|AutomaticSSLReusesPersistedCertificate|RegistrationAndTestDriveCodes|AccountRegistration|NewSiteConfirmation|SitebrushNetChanRegistration|ServerWWWAliasSSL|ConfirmedRegistrationQueues)'
+      - name: Test public web IP inventory and session cancellation
+        run: >-
+          go test -count=1 -timeout=180s .
+          -run '^Test(PublicIP|PublicTrialWildcard|RegistrationDNSGate|DomainSettingsAliasSuggestions)'
       - name: Test concise mail journal and transport attribution
         run: >-
           go test -count=1 -timeout=180s -covermode=atomic

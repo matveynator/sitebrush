@@ -35783,3 +35783,70 @@ func TestDomainSettingsAliasSuggestionsUseSelectedIPRecordType(t *testing.T) {
 		})
 	}
 }
+
+func TestPublicIPSettingsPortablePersistenceAndCancellation(t *testing.T) {
+	application := newRouterTestApplication(t)
+	first := serverip.Settings{Manual: []string{"46.4.4.46"}, Preferred: "46.4.4.46"}
+	second := serverip.Settings{Manual: []string{"1.1.1.1"}, Preferred: "1.1.1.1"}
+	for _, settings := range []serverip.Settings{first, second} {
+		if err := application.saveWebPublicIPSettings(settings, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stopped := make(chan struct{})
+	close(stopped)
+	if err := application.saveWebPublicIPSettings(first, stopped); err == nil {
+		t.Fatal("closed session saved settings")
+	}
+	if err := application.withServerControlDatabaseRead(context.Background(), "public-ip-regression-read", func(database *sql.DB) error {
+		var encoded string
+		if err := database.QueryRow(`SELECT value FROM server_settings WHERE name=?`, webPublicIPSettingsKey).Scan(&encoded); err != nil {
+			return err
+		}
+		var stored serverip.Settings
+		if err := json.Unmarshal([]byte(encoded), &stored); err != nil {
+			return err
+		}
+		if !reflect.DeepEqual(stored, second) {
+			t.Errorf("canceled save changed committed configuration: %+v", stored)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPublicIPSocketReaderClosesConsumerSessionOnDisconnect(t *testing.T) {
+	sessions := make(chan (<-chan struct{}), 1)
+	commands := make(chan publicIPSettingsCommand, 1)
+	server := httptest.NewServer(websocket.Server{Handshake: func(*websocket.Config, *http.Request) error { return nil }, Handler: func(connection *websocket.Conn) {
+		session := make(chan struct{})
+		sessions <- session
+		receivePublicIPSettings(connection, commands, session)
+	}})
+	defer server.Close()
+	configuration, err := websocket.NewConfig("ws"+strings.TrimPrefix(server.URL, "http"), server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := websocket.DialConfig(configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	session := <-sessions
+	if err := websocket.JSON.Send(connection, publicIPSettingsCommand{Action: "get"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-commands:
+	case <-time.After(time.Second):
+		t.Fatal("reader lost command")
+	}
+	connection.Close()
+	select {
+	case <-session:
+	case <-time.After(time.Second):
+		t.Fatal("disconnect did not close consumer session")
+	}
+}

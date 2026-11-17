@@ -153,6 +153,8 @@ type Process struct {
 	done     chan struct{}
 }
 
+func (process *Process) Done() <-chan struct{} { return process.done }
+
 type Request struct {
 	Action   string
 	Settings Settings
@@ -165,88 +167,189 @@ type Result struct {
 	Err      error
 }
 
-// Start owns configuration, persistence ordering, and interface discovery. Each
-// reply contains a copy; callers never share the owner's mutable slices.
-func Start(settings Settings, save func(Settings) error, stop <-chan struct{}) *Process {
+// Each worker receives ownership of a job and returns it through the owner's
+// result channel. Filesystem and database latency never occupy the select loop.
+type scanResult struct {
+	request   Request
+	addresses []Address
+	failures  []string
+	err       error
+}
+type saveResult struct {
+	request  Request
+	settings Settings
+	err      error
+}
+
+func Start(settings Settings, save func(Settings, <-chan struct{}) error, stop <-chan struct{}) *Process {
+	return start(settings, save, Enumerate, stop)
+}
+
+func start(settings Settings, save func(Settings, <-chan struct{}) error, scan func() ([]Address, []string), stop <-chan struct{}) *Process {
 	process := &Process{requests: make(chan Request), done: make(chan struct{})}
-	requests := process.requests
-	go func() {
-		defer close(process.done)
-		addresses, failures := Enumerate()
-		observed := []string{}
-		ticker := time.NewTicker(time.Minute)
-		defer ticker.Stop()
-		snapshot := func() Snapshot {
-			result := Snapshot{Addresses: append([]Address(nil), addresses...), Settings: Settings{Manual: append([]string(nil), settings.Manual...), Preferred: settings.Preferred}, Errors: append([]string(nil), failures...)}
-			for _, ip := range settings.Manual {
-				result.Addresses = append(result.Addresses, Address{IP: ip, Active: true, Public: true, Source: "manual"})
+	initialSettings := copySettings(settings)
+	go run(process, initialSettings, save, scan, stop)
+	return process
+}
+
+func run(process *Process, settings Settings, save func(Settings, <-chan struct{}) error, scan func() ([]Address, []string), stop <-chan struct{}) {
+	defer close(process.done)
+	scans := make(chan scanResult)
+	saves := make(chan saveResult)
+	scanBusy, saveBusy := true, false
+	go scanInterfaces(scan, Request{}, scans, stop)
+	addresses := []Address{}
+	failures := []string{"interface discovery pending"}
+	observed := []string{}
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	snapshot := func() Snapshot { return inventorySnapshot(settings, addresses, failures, observed) }
+	for {
+		select {
+		case <-stop:
+			return
+		case result := <-scans:
+			scanBusy = false
+			if result.err == nil {
+				addresses, failures = result.addresses, result.failures
 			}
-			for _, ip := range observed {
-				result.Addresses = append(result.Addresses, Address{IP: ip, Active: true, Public: true, Source: "outgoing"})
+			reply(result.request, Result{Snapshot: snapshot(), Err: result.err}, stop)
+		case result := <-saves:
+			saveBusy = false
+			if result.err == nil {
+				settings = result.settings
 			}
-			return result
-		}
-		for {
-			select {
-			case <-stop:
-				return
-			case <-ticker.C:
-				addresses, failures = Enumerate()
-			case request := <-requests:
-				select {
-				case <-request.Stop:
+			reply(result.request, Result{Snapshot: snapshot(), Err: result.err}, stop)
+		case <-ticker.C:
+			if !scanBusy {
+				scanBusy = true
+				go scanInterfaces(scan, Request{}, scans, stop)
+			}
+		case request := <-process.requests:
+			if sessionError(request.Stop, stop) != nil {
+				continue
+			}
+			var err error
+			switch request.Action {
+			case "save":
+				if saveBusy {
+					err = errors.New("public IP settings are already being saved")
+					break
+				}
+				var normalized Settings
+				normalized, err = Normalize(request.Settings)
+				if err == nil {
+					proposed := inventorySnapshot(normalized, addresses, failures, observed)
+					if normalized.Preferred != "" && proposed.Primary(nil) == "" {
+						err = errors.New("preferred IP is not an active public address or a manual address")
+					}
+				}
+				if err == nil {
+					saveBusy = true
+					go saveSettings(save, normalized, request, saves, stop)
 					continue
-				default:
 				}
-				var err error
-				switch request.Action {
-				case "save":
-					var normalized Settings
-					normalized, err = Normalize(request.Settings)
-					if err == nil {
-						proposed := snapshot()
-						proposed.Settings = normalized
-						proposed.Addresses = slices.DeleteFunc(proposed.Addresses, func(address Address) bool { return address.Source == "manual" })
-						for _, ip := range normalized.Manual {
-							proposed.Addresses = append(proposed.Addresses, Address{IP: ip, Active: true, Public: true, Source: "manual"})
-						}
-						if normalized.Preferred != "" && proposed.Primary(nil) == "" {
-							err = errors.New("preferred IP is not an active public address or a manual address")
-						}
-						if err == nil && save != nil {
-							err = save(normalized)
-						}
-						if err == nil {
-							settings = normalized
-						}
-					}
-				case "refresh":
-					addresses, failures = Enumerate()
-				case "observed":
-					normalized, normalizeErr := Normalize(Settings{Manual: request.Observed})
-					err = normalizeErr
-					if err == nil {
-						observed = normalized.Manual
-					}
+			case "refresh":
+				if scanBusy {
+					err = errors.New("interface discovery is already running")
+					break
 				}
-				if request.Reply != nil {
-					select {
-					case request.Reply <- Result{Snapshot: snapshot(), Err: err}:
-					case <-request.Stop:
-					case <-stop:
-						return
-					}
+				scanBusy = true
+				go scanInterfaces(scan, request, scans, stop)
+				continue
+			case "observed":
+				var normalized Settings
+				normalized, err = Normalize(Settings{Manual: request.Observed})
+				if err == nil {
+					observed = normalized.Manual
 				}
 			}
+			reply(request, Result{Snapshot: snapshot(), Err: err}, stop)
+		}
+	}
+}
+
+func inventorySnapshot(settings Settings, addresses []Address, failures, observed []string) Snapshot {
+	result := Snapshot{Addresses: append([]Address(nil), addresses...), Settings: copySettings(settings), Errors: append([]string(nil), failures...)}
+	for _, ip := range settings.Manual {
+		result.Addresses = append(result.Addresses, Address{IP: ip, Active: true, Public: true, Source: "manual"})
+	}
+	for _, ip := range observed {
+		result.Addresses = append(result.Addresses, Address{IP: ip, Active: true, Public: true, Source: "outgoing"})
+	}
+	return result
+}
+
+func copySettings(settings Settings) Settings {
+	return Settings{Manual: append([]string(nil), settings.Manual...), Preferred: settings.Preferred}
+}
+
+func sessionError(consumer, owner <-chan struct{}) error {
+	select {
+	case <-consumer:
+		return errors.New("server IP consumer stopped")
+	case <-owner:
+		return errors.New("server IP owner stopped")
+	default:
+		return nil
+	}
+}
+
+func scanInterfaces(scan func() ([]Address, []string), request Request, results chan<- scanResult, stop <-chan struct{}) {
+	result := scanResult{request: request, err: sessionError(request.Stop, stop)}
+	if result.err == nil {
+		result.addresses, result.failures = scan()
+	}
+	// Completion releases the bounded worker slot even after a consumer leaves.
+	select {
+	case results <- result:
+	case <-stop:
+	}
+}
+
+func saveSettings(save func(Settings, <-chan struct{}) error, settings Settings, request Request, results chan<- saveResult, stop <-chan struct{}) {
+	session := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(session)
+		select {
+		case <-stop:
+		case <-request.Stop:
+		case <-finished:
 		}
 	}()
-	return process
+	err := sessionError(request.Stop, stop)
+	if err == nil && save != nil {
+		err = save(copySettings(settings), session)
+	}
+	close(finished)
+	// A committed write remains authoritative even after its consumer disconnects.
+	select {
+	case results <- saveResult{request, settings, err}:
+	case <-stop:
+	}
+}
+
+func reply(request Request, result Result, stop <-chan struct{}) {
+	if request.Reply == nil || sessionError(request.Stop, stop) != nil {
+		return
+	}
+	select {
+	case request.Reply <- result:
+	case <-request.Stop:
+	case <-stop:
+	}
 }
 
 func Exchange(process *Process, request Request, stop <-chan struct{}) (Snapshot, error) {
 	if process == nil {
 		return Snapshot{}, errors.New("server IP inventory is unavailable")
 	}
+	if err := sessionError(stop, process.done); err != nil {
+		return Snapshot{}, err
+	}
+	request.Settings = copySettings(request.Settings)
+	request.Observed = append([]string(nil), request.Observed...)
 	request.Reply = make(chan Result, 1)
 	request.Stop = stop
 	select {
@@ -257,10 +360,10 @@ func Exchange(process *Process, request Request, stop <-chan struct{}) (Snapshot
 		return Snapshot{}, errors.New("server IP request canceled")
 	}
 	select {
-	case <-process.done:
-		return Snapshot{}, errors.New("server IP owner stopped")
 	case result := <-request.Reply:
 		return result.Snapshot, result.Err
+	case <-process.done:
+		return Snapshot{}, errors.New("server IP owner stopped")
 	case <-stop:
 		return Snapshot{}, errors.New("server IP response canceled")
 	}

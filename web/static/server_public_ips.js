@@ -14,6 +14,8 @@
   const socket = new WebSocket(protocol + '//' + location.host + location.pathname + '?public_ip_settings_ws');
 
   function render() {
+    manualInputElement.disabled = model.busy;
+    preferredSelectElement.disabled = model.busy;
     saveButtonElement.disabled = model.busy;
     refreshButtonElement.disabled = model.busy;
     statusElement.textContent = model.message;
@@ -51,7 +53,11 @@
     model.failed = false;
     model.message = labels.working;
     render();
-    socket.send(JSON.stringify({ action: action, csrf: panelElement.dataset.csrf, settings: { manual: model.manual.split(/[\s,;]+/).filter(Boolean), preferred: model.preferred } }));
+    try {
+      socket.send(JSON.stringify({ action: action, csrf: panelElement.dataset.csrf, settings: { manual: model.manual.split(/[\s,;]+/).filter(Boolean), preferred: model.preferred } }));
+    } catch (sendError) {
+      model.busy = false; model.failed = true; model.message = String(sendError); render();
+    }
   }
   socket.addEventListener('open', function load() { model.busy = false; submit('get'); });
   socket.addEventListener('message', function receive(messageEvent) {
