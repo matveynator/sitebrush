@@ -274,8 +274,10 @@ func newProxy(front *Front) *httputil.ReverseProxy {
 		request.Out.Header.Set(SchemeHeader, scheme)
 	}, ModifyResponse: func(response *http.Response) error {
 		response.Header.Del("Server")
-		if software, _ := response.Request.Context().Value(proxyServerHeaderKey{}).(string); software == "SiteBrush" {
-			response.Header.Set("Server", "SiteBrush")
+		if response.Request != nil {
+			if software, _ := response.Request.Context().Value(proxyServerHeaderKey{}).(string); software == "SiteBrush" {
+				response.Header.Set("Server", "SiteBrush")
+			}
 		}
 		return nil
 	}, ErrorHandler: func(writer http.ResponseWriter, request *http.Request, proxyError error) {
