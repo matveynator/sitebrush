@@ -41694,7 +41694,19 @@ func (a *App) registrationDomainAddressSetupView(ctx context.Context, siteDomain
 	if parentDomain, found := a.hostingAndSupportParentDomainForThirdLevelSite(ctx, registrationDomain); found {
 		setupFromAddress = "sitebrush@" + parentDomain
 	}
-	serverIPs, externalIP, err := detectServerIPCandidates(ctx)
+	var serverIPs []net.IP
+	var externalIP string
+	var err error
+	if a.webPublicIPs != nil {
+		// Registration checks inbound web routing; mail discovery describes the
+		// outgoing route and cannot validate a separately configured NAT address.
+		var snapshot serverip.Snapshot
+		snapshot, err = a.webIPSnapshot(ctx.Done())
+		serverIPs = snapshot.Candidates()
+		externalIP = snapshot.Primary(nil)
+	} else {
+		serverIPs, externalIP, err = detectServerIPCandidates(ctx)
+	}
 	if err != nil {
 		return emailDNSSetupViewForLanguage(languageCode, registrationDomain, setupFromAddress, "SERVER_IP"), true
 	}
@@ -41704,6 +41716,9 @@ func (a *App) registrationDomainAddressSetupView(ctx context.Context, siteDomain
 	}
 	ipRecords, ipErr := lookupIPRecords(registrationDomain)
 	domainPointsToServer := ipErr == nil && ipRecordsAllowAnyServerIP(ipRecords, serverIPs)
+	if a.webPublicIPs != nil {
+		domainPointsToServer = ipErr == nil && domainIPRecordsMatchAll(ipRecords, serverIPs)
+	}
 	if domainPointsToServer {
 		return EmailDNSSetupView{}, false
 	}
