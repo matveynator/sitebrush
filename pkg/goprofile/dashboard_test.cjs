@@ -5,12 +5,35 @@ const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../../web/static/server_profiler.js'), 'utf8');
 
 function fixture() {
+  class Element {
+    constructor(tag) {
+      this.tagName = tag;
+      this.textContent = '';
+      this.children = [];
+      this.attributes = {};
+      this.style = {};
+      this.dataset = {};
+      this.disabled = false;
+      this.classList = {toggle() {}};
+    }
+    replaceChildren() {this.children = []; this.textContent = '';}
+    appendChild(child) {this.children.push(child);}
+    setAttribute(name, content) {this.attributes[name] = content;}
+    addEventListener(name, callback) {this[name + 'Callback'] = callback;}
+    showModal() {this.open = true;}
+    close() {this.open = false; if (this.closeCallback) this.closeCallback();}
+  }
   const nodes = new Map();
   function element(selector) {
-    if (!nodes.has(selector)) nodes.set(selector, {textContent: '', disabled: false, replaceChildren() {}, appendChild() {}, setAttribute() {}, classList: {toggle() {}}, addEventListener(name, callback) {if(name === 'close')this.closeCallback = callback;else this[name] = callback;}, showModal() {this.open = true;}, close() {this.open = false; if(this.closeCallback)this.closeCallback();}});
+    if (!nodes.has(selector)) nodes.set(selector, new Element('div'));
     return nodes.get(selector);
   }
-  const root = {dataset: {csrf: 'fixture'}, querySelector: element, querySelectorAll: () => [], classList: {toggle() {}}};
+  const tabs = ['functions', 'graph', 'code', 'memory', 'stages', 'network', 'goroutines'].map(view => {
+    const button = new Element('button');
+    button.dataset.view = view;
+    return button;
+  });
+  const root = {dataset: {csrf: 'fixture'}, querySelector: element, querySelectorAll: () => tabs};
   const handlers = new Map();
   const timers = new Map();
   const sockets = [];
@@ -27,16 +50,32 @@ function fixture() {
     send(encoded) {
       const command = JSON.parse(encoded);
       this.commands.push(command);
-      const report = {id: 'fresh-' + command.role, finished: new Date().toISOString(), cpu: 0, heap: 0, gc: 0, functions: []};
+      const report = {
+        id: 'fresh-' + command.role, finished: new Date().toISOString(), cpu: 100, heap: 200, gc: 0, matches: 2,
+        functions: [
+          {id: 1, name: 'main.handle', file: 'sitebrush.go', line: 10, kind: 'application', self: 20, total: 100, samples: 10},
+          {id: 2, name: 'runtime.work', file: 'runtime.go', line: 20, kind: 'runtime', self: 80, total: 80, samples: 8}
+        ],
+        groups: [{kind: 'application', self: 20}, {kind: 'runtime', self: 80}]
+      };
       const response = {role: command.role, busy: false, reports: [report]};
-      if (command.action === 'report') response.report = report;
+      if (command.action === 'report') {
+        if (command.view === 'function') {
+          report.detail = {
+            function: report.functions[command.function - 1],
+            callers: command.function === 2 ? [report.functions[0]] : [],
+            callees: command.function === 1 ? [report.functions[1]] : []
+          };
+        }
+        response.report = report;
+      }
       queueMicrotask(() => this.onmessage({data: JSON.stringify(response)}));
     }
     close() {this.readyState = 3; this.delayedClose = this.onclose;}
   }
   vm.runInNewContext(source, {
     window, WebSocket: Socket, location: {protocol: 'https:', host: 'owner.example'},
-    document: {querySelector: () => root, createElement: () => element('created')},
+    document: {querySelector: () => root, createElement: tag => new Element(tag)},
     console
   });
   async function settle() {
@@ -46,7 +85,13 @@ function fixture() {
     }
   }
   element('[data-profiler-open]').onclick();
-  return {nodes, handlers, timers, sockets, settle};
+  function descendants(parent) {
+    return [parent, ...parent.children.flatMap(descendants)];
+  }
+  function findButton(caption) {
+    return descendants(element('[data-profiler-content]')).find(node => node.tagName === 'button' && node.textContent.includes(caption));
+  }
+  return {nodes, handlers, timers, sockets, settle, tabs, findButton};
 }
 
 (async function testRestoration() {
@@ -78,5 +123,28 @@ function fixture() {
     await panel.settle();
     assert.equal(panel.sockets.length, contacts, 'Repeated pageshow does not create another poller');
   }
-  console.log('Profiler dashboard back-forward restoration scenarios passed');
+  const tablePanel = fixture();
+  await tablePanel.settle();
+  tablePanel.findButton('Собственное CPU').onclick();
+  await tablePanel.settle();
+  let reports = tablePanel.sockets.flatMap(socket => socket.commands).filter(command => command.action === 'report');
+  assert.equal(reports.at(-1).sort, 'self', 'Sorting requests the entire report before server paging');
+  tablePanel.nodes.get('[data-profiler-kind]').onchange({target: {value: 'application'}});
+  await tablePanel.settle();
+  reports = tablePanel.sockets.flatMap(socket => socket.commands).filter(command => command.action === 'report');
+  assert.equal(reports.at(-1).kind, 'application', 'Category filters go to the report owner');
+  tablePanel.findButton('main.handle').onclick();
+  await tablePanel.settle();
+  let details = tablePanel.sockets.flatMap(socket => socket.commands).filter(command => command.view === 'function');
+  assert.equal(details.at(-1).function, 1, 'Expanding a function requests sampled relationships');
+  tablePanel.findButton('↳ Перейти').onclick();
+  await tablePanel.settle();
+  details = tablePanel.sockets.flatMap(socket => socket.commands).filter(command => command.view === 'function');
+  assert.equal(details.at(-1).function, 2, 'Following a relationship opens the related function');
+  tablePanel.nodes.get('[data-profiler-unit]').onchange({target: {value: 'ms'}});
+  assert.ok(tablePanel.findButton('Собственное CPU'), 'Changing units keeps the table usable');
+  tablePanel.nodes.get('[data-profiler-close]').onclick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(tablePanel.sockets.every(socket => socket.readyState === 3), 'Expanded details retain no viewing contacts after close');
+  console.log('Profiler dashboard lifecycle and function navigation scenarios passed');
 })().catch(error => {console.error(error); process.exitCode = 1;});

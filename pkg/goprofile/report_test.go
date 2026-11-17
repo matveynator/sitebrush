@@ -15,21 +15,21 @@ func TestRecursiveCostsAndReportPaging(t *testing.T) {
 		{ID: 1, Line: []profile.Line{{Function: function, Line: 2}}},
 		{ID: 2, Line: []profile.Line{{Function: function, Line: 1}}},
 	}}}}
-	functions, frames, total, truncated := aggregate(parsed, "cpu", 100)
+	functions, frames, _, total, truncated := aggregate(parsed, "cpu", 100)
 	if total != 10 || truncated || len(functions) != 1 || functions[0].Self != 10 || functions[0].Total != 10 || len(frames) != 3 {
 		t.Fatal(functions, frames, total, truncated)
 	}
-	_, _, _, truncated = aggregate(parsed, "cpu", 1)
+	_, _, _, _, truncated = aggregate(parsed, "cpu", 1)
 	if !truncated {
 		t.Fatal("missing truncation marker")
 	}
 	report := Report{Functions: functions, Frames: frames}
 	more := false
-	page := reportPage(report, "functions", 0, "absent", &more)
+	page := reportPage(report, Command{View: "functions", Search: "absent"}, &more)
 	if len(page.Functions) != 0 {
 		t.Fatal("search did not filter")
 	}
-	page = reportPage(report, "functions", 0, "recursive", &more)
+	page = reportPage(report, Command{View: "functions", Search: "recursive"}, &more)
 	if len(page.Functions) != 1 || len(page.Frames) != 0 {
 		t.Fatal("unbounded report page")
 	}

@@ -11,7 +11,6 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"sort"
-	"strings"
 	"time"
 
 	profile "github.com/google/pprof/profile"
@@ -23,19 +22,27 @@ const storageLimit = 32 << 20
 const profileLimit = 8 << 20
 
 type Command struct {
-	Viewer string `json:"viewer,omitempty"`
-	Action string `json:"action"`
-	ID     string `json:"id,omitempty"`
-	Page   int    `json:"page,omitempty"`
-	View   string `json:"view,omitempty"`
-	Search string `json:"search,omitempty"`
+	Function  int     `json:"function,omitempty"`
+	Sort      string  `json:"sort,omitempty"`
+	Ascending bool    `json:"ascending,omitempty"`
+	Kind      string  `json:"kind,omitempty"`
+	Minimum   float64 `json:"minimum,omitempty"`
+	Viewer    string  `json:"viewer,omitempty"`
+	Action    string  `json:"action"`
+	ID        string  `json:"id,omitempty"`
+	Page      int     `json:"page,omitempty"`
+	View      string  `json:"view,omitempty"`
+	Search    string  `json:"search,omitempty"`
 }
 type Function struct {
-	Name  string `json:"name"`
-	File  string `json:"file"`
-	Line  int64  `json:"line"`
-	Self  int64  `json:"self"`
-	Total int64  `json:"total"`
+	ID      int    `json:"id"`
+	Kind    string `json:"kind"`
+	Samples int64  `json:"samples"`
+	Name    string `json:"name"`
+	File    string `json:"file"`
+	Line    int64  `json:"line"`
+	Self    int64  `json:"self"`
+	Total   int64  `json:"total"`
 }
 type Frame struct {
 	Name   string `json:"name"`
@@ -50,6 +57,10 @@ type Stage struct {
 	P95MS  float64 `json:"p95MS"`
 }
 type Report struct {
+	Calls      []Call                    `json:"calls,omitempty"`
+	Groups     []Group                   `json:"groups,omitempty"`
+	Detail     *FunctionDetail           `json:"detail,omitempty"`
+	Matches    int                       `json:"matches"`
 	Code       []Function                `json:"code,omitempty"`
 	Network    requesttiming.HTTPMetrics `json:"network"`
 	Allocated  uint64                    `json:"allocated"`
@@ -281,7 +292,7 @@ func (session *Session) run(role, version string, stop <-chan struct{}) {
 							state.Error = err.Error()
 							break
 						}
-						report = reportPage(report, request.command.View, request.command.Page, request.command.Search, &state.More)
+						report = reportPage(report, request.command, &state.More)
 						state.Report = &report
 						state.Error = ""
 						break
@@ -306,52 +317,6 @@ func (session *Session) run(role, version string, stop <-chan struct{}) {
 			}
 		}
 	}
-}
-func reportPage(report Report, view string, page int, search string, more *bool) Report {
-	functions, frames, memory, goroutines, stages := report.Functions, report.Frames, report.Memory, report.Goroutines, report.Stages
-	code := report.Code
-	report.Code = nil
-	report.Functions = nil
-	report.Frames = nil
-	report.Memory = nil
-	report.Goroutines = ""
-	report.Stages = nil
-	if page < 0 {
-		page = 0
-	}
-	switch view {
-	case "graph":
-		report.Frames = frames
-	case "code":
-		if len(code) > 200 {
-			code = code[:200]
-			report.Truncated = true
-		}
-		report.Functions = code
-	case "memory":
-		report.Memory = memory
-	case "goroutines":
-		report.Goroutines = goroutines
-	case "stages":
-		report.Stages = stages
-	default:
-		if search != "" {
-			filtered := make([]Function, 0, len(functions))
-			for _, function := range functions {
-				if strings.Contains(strings.ToLower(function.Name), strings.ToLower(search)) {
-					filtered = append(filtered, function)
-				}
-			}
-			functions = filtered
-		}
-		begin := min(page, len(functions)/50+1) * 50
-		if begin < len(functions) {
-			end := min(begin+50, len(functions))
-			report.Functions = functions[begin:end]
-			*more = end < len(functions)
-		}
-	}
-	return report
 }
 
 type limitedWriter struct {
@@ -408,6 +373,8 @@ func collect(directory, role, version string, started time.Time, timings *reques
 			}
 		}
 		record.meta = report
+		record.meta.Calls = nil
+		record.meta.Detail = nil
 		record.meta.Code = nil
 		record.meta.Functions = nil
 		record.meta.Frames = nil
@@ -493,12 +460,13 @@ func collect(directory, role, version string, started time.Time, timings *reques
 		return
 	}
 	var cpuTruncated bool
-	report.Functions, report.Frames, report.CPU, cpuTruncated = aggregate(parsed, "cpu", 1200)
+	report.Functions, report.Frames, report.Calls, report.CPU, cpuTruncated = aggregate(parsed, "cpu", 1200)
+	report.Groups = functionGroups(report.Functions)
 	report.Truncated = report.Truncated || cpuTruncated
 	report.Code = sampledCode(parsed, "cpu")
 	if heapErr == nil {
 		if parsedHeap, decodeErr := profile.ParseData(heap.Bytes()); decodeErr == nil {
-			report.Memory, _, _, _ = aggregate(parsedHeap, "inuse_space", 0)
+			report.Memory, _, _, _, _ = aggregate(parsedHeap, "inuse_space", 0)
 			if len(report.Memory) > 100 {
 				report.Memory = report.Memory[:100]
 				report.Truncated = true
@@ -512,7 +480,7 @@ func collect(directory, role, version string, started time.Time, timings *reques
 }
 
 // Cumulative function costs count recursive occurrences once per sample; the flame tree retains each call path.
-func aggregate(parsed *profile.Profile, kind string, maxFrames int) ([]Function, []Frame, int64, bool) {
+func aggregate(parsed *profile.Profile, kind string, maxFrames int) ([]Function, []Frame, []Call, int64, bool) {
 	sampleIndex := -1
 	for index, sampleType := range parsed.SampleType {
 		if sampleType.Type == kind {
@@ -521,9 +489,10 @@ func aggregate(parsed *profile.Profile, kind string, maxFrames int) ([]Function,
 		}
 	}
 	if sampleIndex < 0 {
-		return nil, nil, 0, false
+		return nil, nil, nil, 0, false
 	}
 	functions := make(map[string]*Function)
+	calls := make(map[[2]int]*Call)
 	frames := []Frame{{Name: "all samples", Parent: -1}}
 	edges := make(map[string]int)
 	var total int64
@@ -539,6 +508,15 @@ func aggregate(parsed *profile.Profile, kind string, maxFrames int) ([]Function,
 		total += weight
 		frames[0].Total += weight
 		seen := make(map[string]bool)
+		seenCalls := make(map[[2]int]bool)
+		var caller *Function
+		observations := int64(1)
+		for observationIndex, observationType := range parsed.SampleType {
+			if observationType.Type == "samples" && observationIndex < len(sample.Value) {
+				observations = sample.Value[observationIndex]
+				break
+			}
+		}
 		parent := 0
 		graphStopped := false
 		leaf := ""
@@ -553,13 +531,33 @@ func aggregate(parsed *profile.Profile, kind string, maxFrames int) ([]Function,
 				key := name + "\x00" + line.Function.Filename
 				function := functions[key]
 				if function == nil {
-					function = &Function{Name: name, File: line.Function.Filename, Line: line.Line}
+					function = &Function{ID: len(functions) + 1, Name: name, File: line.Function.Filename, Line: line.Line, Kind: functionKind(name)}
 					functions[key] = function
 				}
 				if !seen[key] {
 					function.Total += weight
+					function.Samples += observations
 					seen[key] = true
 				}
+				// Deduplicate recursive edges per sample, just as inclusive function costs are deduplicated.
+				if maxFrames > 0 && caller != nil {
+					pair := [2]int{caller.ID, function.ID}
+					if !seenCalls[pair] {
+						call := calls[pair]
+						if call == nil && len(calls) < 8192 {
+							call = &Call{Caller: caller.ID, Callee: function.ID}
+							calls[pair] = call
+						}
+						if call != nil {
+							call.Total += weight
+							call.Samples += observations
+						} else {
+							truncated = true
+						}
+						seenCalls[pair] = true
+					}
+				}
+				caller = function
 				leaf = key
 				if maxFrames > 0 && !graphStopped {
 					edge := fmt.Sprintf("%d\x00%s", parent, key)
@@ -594,7 +592,17 @@ func aggregate(parsed *profile.Profile, kind string, maxFrames int) ([]Function,
 		}
 		return ranked[left].Total > ranked[right].Total
 	})
-	return ranked, frames, total, truncated
+	relationships := make([]Call, 0, len(calls))
+	for _, call := range calls {
+		relationships = append(relationships, *call)
+	}
+	sort.Slice(relationships, func(left, right int) bool {
+		if relationships[left].Caller == relationships[right].Caller {
+			return relationships[left].Callee < relationships[right].Callee
+		}
+		return relationships[left].Caller < relationships[right].Caller
+	})
+	return ranked, frames, relationships, total, truncated
 }
 
 func expireArtifacts(records []artifact, now time.Time) []artifact {
@@ -676,7 +684,7 @@ func sampledCode(parsed *profile.Profile, kind string) []Function {
 		key := fmt.Sprintf("%s:%d:%s", function.Filename, line.Line, function.Name)
 		cost := costs[key]
 		if cost == nil {
-			cost = &Function{Name: function.Name, File: function.Filename, Line: line.Line}
+			cost = &Function{Name: function.Name, File: function.Filename, Line: line.Line, Kind: functionKind(function.Name)}
 			costs[key] = cost
 		}
 		cost.Self += sample.Value[index]

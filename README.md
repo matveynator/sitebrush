@@ -454,6 +454,8 @@ Start SiteBrush with `--profiler`, sign in as the local server owner and open `/
 ab -k -c 500 -n 10000 https://sitebrush.com/
 ```
 
+The modal uses a Webgrind-style function table: sortable self/inclusive CPU costs, percent/millisecond/microsecond units, category and function/file filters, a colored CPU breakdown and expandable caller/callee tables. Relationships and sample counts come from sampled Go stacks, not exact function invocation counts. Sorting and filtering apply to the complete report before pagination.
+
 SiteBrush records the public process and the application separately. The modal shows self/cumulative CPU function costs, sampled source-file/line CPU costs, a call graph, sampled live heap costs, total allocations and GC counts during the recording, goroutine waiting states, and HTTP timing/traffic counters. HTTP traffic counts response/request bodies, excludes headers/TLS/retransmissions, and must not be summed across public/application processes because proxied requests appear at both boundaries. The profiler does not generate traffic and does not expose separate profiling ports or require Go, Graphviz or manual files.
 
 Closing the dialog closes its viewing contacts: server-side cleanup cancels that viewer's pending recordings and releases its raw/derived temporary files. Other viewing sessions are isolated. Navigating away ends the viewing session; returning starts a fresh session. If a connection silently disappears, the read deadline ends its session. A ten-minute retention ceiling and a 32 MiB budget per process (64 MiB for the usual pair) provide additional bounds.

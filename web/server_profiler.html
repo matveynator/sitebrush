@@ -1,16 +1,42 @@
 {{define "server-profiler"}}
 <section class="my-4" id="server-profiler" data-profiler data-csrf="{{.AccountCSRF}}">
  <button type="button" data-profiler-open>Профилирование внешней нагрузки · 30 секунд</button>
- <dialog class="profiler-panel p-4" data-profiler-dialog aria-label="Профилирование нагрузки">
- <button type="button" data-profiler-close>Закрыть и очистить временные данные</button>
- <div class="profiler-heading"><div><h2>Профилировщик Go</h2><p>Нагрузку создаёт внешний ab · запись 30 секунд · очистка после просмотра · страховочный срок 10 минут</p></div><button type="button" data-profiler-expand>Развернуть</button></div>
- <div class="profiler-toolbar"><button type="button" data-profiler-start>● Записать 30 секунд</button><button type="button" data-profiler-cancel>Остановить</button><select data-profiler-role aria-label="Процесс"><option value="public">Публичный сервер</option><option value="application">Основное приложение</option></select><select data-profiler-history aria-label="Запись"></select><button type="button" data-profiler-delete>Удалить запись</button></div>
- <p data-profiler-status role="status"></p><p class="text-danger" data-profiler-error role="alert"></p>
- <div class="profiler-toolbar" data-profiler-tabs><button type="button" data-view="functions">Функции CPU</button><button type="button" data-view="graph">Граф вызовов</button><button type="button" data-view="code">Строки кода CPU</button><button type="button" data-view="network">Сеть HTTP</button><button type="button" data-view="memory">Память</button><button type="button" data-view="stages">Задержки запросов</button><button type="button" data-view="goroutines">Goroutine</button></div>
- <p data-profiler-summary></p><label>Поиск функции <input type="search" data-profiler-search></label>
- <div data-profiler-content class="profiler-content"></div><div class="profiler-toolbar"><button type="button" data-profiler-back>Назад</button><span data-profiler-page></span><button type="button" data-profiler-next>Далее</button></div>
- <p class="small text-muted">CPU показывает работу процессора. Ожидание сети, диска и каналов смотрите отдельно в задержках и состояниях goroutine. Доли функций с учётом вызовов нельзя складывать.</p>
-</dialog>
+ <dialog class="profiler-panel" data-profiler-dialog aria-labelledby="profiler-title">
+  <header class="profiler-heading">
+   <div class="profiler-brand"><h2 id="profiler-title">SiteBrush <strong>profiler</strong></h2><p>Анализ нагрузки в браузере</p></div>
+   <div class="profiler-toolbar profiler-actions">
+    <button type="button" data-profiler-expand aria-label="Развернуть окно">⛶ Развернуть</button>
+    <button type="button" data-profiler-close>Закрыть и очистить</button>
+   </div>
+  </header>
+  <div class="profiler-controls">
+   <div class="profiler-toolbar">
+    <label>Процесс <select data-profiler-role><option value="public">Публичный сервер</option><option value="application">Основное приложение</option></select></label>
+    <label>Запись <select data-profiler-history aria-label="Запись"><option>Нет записей</option></select></label>
+    <button type="button" data-profiler-start>● Записать 30 секунд</button>
+    <button type="button" data-profiler-cancel>Остановить</button>
+    <button type="button" data-profiler-delete>Удалить запись</button>
+   </div>
+   <div class="profiler-recording"><span data-profiler-status role="status"></span><progress data-profiler-progress max="30" value="0" aria-label="Ход записи"></progress></div>
+  </div>
+  <main class="profiler-main">
+   <p class="profiler-error" data-profiler-error role="alert" hidden></p>
+   <div class="profiler-summary" data-profiler-summary></div>
+   <div class="profiler-breakdown" data-profiler-breakdown aria-label="Распределение собственного CPU"></div>
+   <nav class="profiler-tabs" role="tablist" aria-label="Данные профиля" data-profiler-tabs>
+    <button type="button" role="tab" data-view="functions">Функции CPU</button><button type="button" role="tab" data-view="graph">Граф вызовов</button><button type="button" role="tab" data-view="code">Строки кода CPU</button><button type="button" role="tab" data-view="memory">Память</button><button type="button" role="tab" data-view="stages">Задержки запросов</button><button type="button" role="tab" data-view="network">Сеть HTTP</button><button type="button" role="tab" data-view="goroutines">Goroutine</button>
+   </nav>
+   <div class="profiler-toolbar profiler-filters" data-profiler-filters>
+    <label class="profiler-search">Фильтр <input type="search" data-profiler-search placeholder="Функция или файл" autocomplete="off"></label>
+    <label>Категория <select data-profiler-kind><option value="">Все функции</option><option value="application">SiteBrush</option><option value="runtime">Go runtime</option><option value="standard">Стандартная библиотека</option><option value="library">Зависимости</option></select></label>
+    <label>Мин. доля CPU <select data-profiler-minimum><option value="0">Все</option><option value="0.1">0,1%</option><option value="1">1%</option><option value="5">5%</option></select></label>
+    <label>Затраты в <select data-profiler-unit><option value="percent">процентах</option><option value="ms">миллисекундах</option><option value="us">микросекундах</option></select></label>
+   </div>
+   <div data-profiler-content class="profiler-content"></div>
+   <div class="profiler-toolbar profiler-pagination" data-profiler-pagination><span data-profiler-count></span><button type="button" data-profiler-back>← Назад</button><span data-profiler-page></span><button type="button" data-profiler-next>Далее →</button></div>
+   <footer class="profiler-footer">Собственное CPU — работа самой функции; с вызовами — вместе с её потомками. Образцы показывают присутствие в выборке CPU, а не число вызовов. Ожидание сети и каналов смотрите в задержках и состояниях goroutine. Временные данные удаляются при закрытии окна; предельный срок хранения — 10 минут.</footer>
+  </main>
+ </dialog>
 </section>
 <link rel="stylesheet" href="/p/static/server_profiler.css"><script defer src="/p/static/server_profiler.js"></script>
 {{end}}
