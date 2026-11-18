@@ -10880,9 +10880,6 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	address := "localhost:" + strconv.Itoa(listenPort)
 
 	application.publicStaticMode = config.PublicStaticMode
-	if application.publicStaticMode.Enabled(publicsite.StaticSnapshot) {
-		application.publicStaticMode = publicsite.StaticHTML
-	}
 	application.publicStreamer = publicsite.NewStreamer()
 	application.publicCatalog = publicsite.NewCatalog(effectiveStoragePath, ctx.Done(), application.publicRuntimeOptions())
 	application.startPublicPublication(ctx.Done())
@@ -62425,9 +62422,6 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 	application.profiler = profilerSession
 	profilerSession.SetTimings(application.requestTimings)
 	application.publicStaticMode = config.PublicStaticMode
-	if application.publicStaticMode.Enabled(publicsite.StaticSnapshot) {
-		application.publicStaticMode = publicsite.StaticHTML
-	}
 	application.publicStreamer = publicsite.NewStreamer()
 	application.publicCatalog = publicsite.NewCatalog(storagePath, ctx.Done(), application.publicRuntimeOptions())
 	application.autoCertCertificateCache = startAutoCertCertificateMemoryCache(ctx, filepath.Join(application.storageRootDir(), "letsencrypt"))
