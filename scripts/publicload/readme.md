@@ -107,3 +107,26 @@ CGO_ENABLED=0 go test . -run '^$' \
 На macOS длинная серия новых соединений может исчерпать исходящие TCP-порты и получить `can't assign requested address`. Такой прогон не подходит для сравнения производительности сервера. Для повторяемой серии используйте отдельный Linux-стенд или одинаковые локальные Linux-контейнеры; не смешивайте их результаты с macOS.
 
 Строгость security проверяется отдельно от скорости. Подтверждённое ограничение возвращает 429; недоступное обязательное решение — 503 без обхода защиты. Заполненная очередь аналитики не меняет ответ посетителю. В режиме обновления лимиты принадлежат публичному процессу; при несовместимом старом child переход откладывается до согласования возможностей и перезапуска launcher.
+# Prepared public responses
+
+In `snapshot` mode, `--public-ram-cache-mib=512` prepares small published HTML,
+static files and known public resources up to 256 KiB per final representation.
+Publication records source fingerprints; preparation verifies them beneath the
+site's `os.Root` before atomically installing immutable bodies. Legacy policies
+without these optional fingerprints continue using the safe file path.
+
+The budget covers unique payloads, reservations and generations still borrowed
+by requests. It is not an RSS limit: Go metadata, collection, connections and
+preparation scratch space are separate. Identical representations share bytes.
+The split application does not allocate a second copy of the public RAM cache.
+`--public-ram-cache-mib=0` disables admission and restores file delivery.
+
+An ordinary cache hit uses prepared headers and one body write. Range and
+conditional requests use `http.ServeContent` over shared bytes; no source file
+is opened. Private, password, token, registration and personalized responses
+keep their existing handlers. Oversized objects and cache misses retain safe
+streaming. A stale or blocked generation fails closed rather than falling back.
+
+Compare the same published route with budget `0` and `512`, then compare nginx
+using identical response bodies and recorded configuration. Benchmark and
+profiling runs remain manual and are not required CI stages.

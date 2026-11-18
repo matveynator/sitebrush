@@ -36000,6 +36000,83 @@ func TestPublishedAdministratorSessionTracksLoginRenewalAndLogout(t *testing.T) 
 	}
 }
 
+func TestPublicRAMServingPreparesOrdinaryPagesAndResources(t *testing.T) {
+	root := t.TempDir()
+	domain := "ram.example"
+	application := &App{storagePath: root, storageRealRoot: root, publicBoundary: true, publicStaticMode: publicsite.StaticSnapshot, publicRAMCacheBytes: 1 << 20, publicStreamer: publicsite.NewStreamer(), db: panicSQLExecutor{t: t}}
+	staticDirectory := filepath.Join(root, "storage", "static", domainStorageName(domain))
+	filesDirectory := filepath.Join(root, "storage", "files", domainStorageName(domain))
+	for _, directory := range []string{staticDirectory, filesDirectory} {
+		if err := os.MkdirAll(directory, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for filename, body := range map[string]string{filepath.Join(staticDirectory, "index.html"): "<html><head></head><body>public RAM</body></html>", filepath.Join(staticDirectory, "style.css"): "body {color:green}", filepath.Join(filesDirectory, "app.js"): "console.log('ready')", filepath.Join(filesDirectory, "manual.txt"): "public manual"} {
+		if err := os.WriteFile(filename, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	policy := publicsite.Policy{Domain: domain, Layouts: map[string]string{"/": "layout", "/index.html": "layout"}, ResourcePaths: map[string]string{"/app.js": "app.js"}, ResourceTypes: map[string]string{"/app.js": "application/javascript"}, Files: []publicsite.FileRule{{Name: "manual.txt", Mode: "public"}, {Name: "private.txt", Mode: "token"}}}
+	if err := application.preparePublicRAMSources(&policy); err != nil {
+		t.Fatal(err)
+	}
+	if policy.PreparedPages["/"] == "" || policy.PreparedPages["/style.css"] == "" || policy.PreparedFiles["app.js"] == "" {
+		t.Fatal("ordinary publication has no immutable versions")
+	}
+	if err := publicsite.Write(root, policy); err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	defer close(stop)
+	application.publicCatalog = publicsite.NewCatalog(root, stop, application.publicRuntimeOptions())
+	if err := application.publicCatalog.SetMemory(true); err != nil {
+		t.Fatal(err)
+	}
+	for _, filename := range []string{filepath.Join(staticDirectory, "index.html"), filepath.Join(staticDirectory, "style.css"), filepath.Join(filesDirectory, "app.js"), filepath.Join(filesDirectory, "manual.txt")} {
+		if err := os.Remove(filename); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for pathname, expected := range map[string]string{"/": "public RAM", "/style.css": "body {color:green}", "/app.js": "console.log('ready')", "/p/manual.txt": "public manual"} {
+		request := httptest.NewRequest(http.MethodGet, "https://"+domain+pathname, nil)
+		request.Header.Set("Accept-Language", "en")
+		response := httptest.NewRecorder()
+		if !application.servePublicPublished(response, request, false) || response.Code != http.StatusOK || !strings.Contains(response.Body.String(), expected) {
+			t.Fatalf("%s: %d %s", pathname, response.Code, response.Body.String())
+		}
+		if pathname == "/" && !strings.Contains(response.Body.String(), "visitor.js") {
+			t.Fatal("prepared bootstrap missing")
+		}
+		request.Header.Set("If-None-Match", response.Header().Get("ETag"))
+		cached := httptest.NewRecorder()
+		if !application.servePublicPublished(cached, request, false) || cached.Code != http.StatusNotModified || cached.Body.Len() != 0 {
+			t.Fatalf("conditional %s: %d", pathname, cached.Code)
+		}
+	}
+	private := httptest.NewRecorder()
+	if application.servePublicPublished(private, httptest.NewRequest("GET", "https://"+domain+"/p/private.txt", nil), false) {
+		t.Fatal("token download escaped its dynamic handler")
+	}
+	if err := application.publicCatalog.Block(domain); err != nil {
+		t.Fatal(err)
+	}
+	blocked := httptest.NewRecorder()
+	if application.servePublicPublished(blocked, httptest.NewRequest("GET", "https://"+domain+"/", nil), false) && blocked.Code == http.StatusOK {
+		t.Fatal("blocked site used cached body")
+	}
+}
+
+func TestPublicRAMConfigurationReachesChildren(t *testing.T) {
+	configuration := serverRunConfig{PublicStaticMode: publicsite.StaticSnapshot, PublicRAMCacheBytes: 512 << 20}
+	if actual := publicRuntimeEnvironment(configuration); !reflect.DeepEqual(actual, []string{"SITEBRUSH_PUBLIC_STATIC_MODE=snapshot", "SITEBRUSH_PUBLIC_RAM_CACHE_MIB=512"}) {
+		t.Fatal(actual)
+	}
+	application := &App{publicProxy: true, publicRAMCacheBytes: 512 << 20}
+	if application.publicRuntimeOptions().RAMCacheBytes != 0 {
+		t.Fatal("application proxy allocated another public RAM cache")
+	}
+}
+
 func TestProfilerFlagPropagationAndDisabledMode(t *testing.T) {
 	session, err := startProcessProfiler(serverRunConfig{}, "application", nil)
 	if err != nil || session != nil {

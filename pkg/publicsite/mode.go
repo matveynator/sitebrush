@@ -1,6 +1,11 @@
 package publicsite
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+	"strconv"
+	"strings"
+)
 
 // StaticMode keeps each optimization independently reversible without changing
 // the authorization protocol or the public listener.
@@ -48,4 +53,12 @@ func (mode StaticMode) rank() int {
 	default:
 		return 4
 	}
+}
+
+func ParseRAMCacheMiB(input string) (int64, error) {
+	amount, err := strconv.ParseInt(strings.TrimSpace(input), 10, 64)
+	if err != nil || amount < 0 || amount > (1<<63-1)/(1<<20) {
+		return 0, errors.New("RAM cache size must be a nonnegative MiB count")
+	}
+	return amount << 20, nil
 }

@@ -64,6 +64,8 @@ type Policy struct {
 	ResourcePaths         map[string]string
 	ResourceTypes         map[string]string
 	PublishedVersions     map[string]string
+	PreparedPages         map[string]string
+	PreparedFiles         map[string]string
 	ChrootVersions        map[string]string
 	FileVersions          map[string]string
 	FileAliases           map[string]string
@@ -302,6 +304,9 @@ func NewCatalog(root string, stop <-chan struct{}, options ...RuntimeOptions) *C
 	catalog := &Catalog{root: root, updates: make(chan catalogUpdate), tasks: make(chan lookupTask, 1024), stop: stop}
 	if len(options) != 0 && options[0].Mode.Enabled(StaticRoots) {
 		catalog.runtime = &PublicRuntime{options: options[0]}
+		if options[0].Mode.Enabled(StaticSnapshot) && options[0].RAMCacheBytes > 0 {
+			catalog.runtime.cache = newRAMCache(options[0].RAMCacheBytes, stop)
+		}
 	}
 
 	go func() {
