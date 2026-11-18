@@ -92,25 +92,26 @@ type stateTask struct {
 	reply chan State
 }
 type Front struct {
-	Guest        func(http.ResponseWriter, *http.Request) bool
-	HTTPPort     int
-	HTTPSPort    int
-	Security     func([]byte) ([]byte, error)
-	Throttle     func([]byte) ([]byte, error)
-	Policy       func([]byte) ([]byte, error)
-	Profiler     func([]byte) ([]byte, error)
-	ResetPolicy  func() error
-	Certificate  func(string) error
-	observations chan string
-	pulls        chan observationPull
-	events       chan publicObservation
-	losses       chan string
-	tasks        chan stateTask
-	stop         <-chan struct{}
-	secret       string
-	public       func(http.ResponseWriter, *http.Request, bool) bool
-	handler      http.Handler
-	proxy        *httputil.ReverseProxy
+	Guest           func(http.ResponseWriter, *http.Request) bool
+	HTTPPort        int
+	HTTPSPort       int
+	Security        func([]byte) ([]byte, error)
+	Throttle        func([]byte) ([]byte, error)
+	Policy          func([]byte) ([]byte, error)
+	Profiler        func([]byte) ([]byte, error)
+	ProfilerSession func([]byte, <-chan struct{}) ([]byte, error)
+	ResetPolicy     func() error
+	Certificate     func(string) error
+	observations    chan string
+	pulls           chan observationPull
+	events          chan publicObservation
+	losses          chan string
+	tasks           chan stateTask
+	stop            <-chan struct{}
+	secret          string
+	public          func(http.ResponseWriter, *http.Request, bool) bool
+	handler         http.Handler
+	proxy           *httputil.ReverseProxy
 }
 
 func NewFront(secret string, public func(http.ResponseWriter, *http.Request, bool) bool, stop <-chan struct{}, admission ...func(http.Handler) http.Handler) *Front {

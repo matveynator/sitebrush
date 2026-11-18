@@ -159,6 +159,10 @@ func (session *Session) SetTimings(timings *requesttiming.Collector) {
 	}
 }
 func (session *Session) Relay(encoded []byte) ([]byte, error) {
+	return session.RelaySession(encoded, nil)
+}
+
+func (session *Session) RelaySession(encoded []byte, abandoned <-chan struct{}) ([]byte, error) {
 	if len(encoded) > 4096 {
 		return nil, errors.New("profiler command too large")
 	}
@@ -166,7 +170,7 @@ func (session *Session) Relay(encoded []byte) ([]byte, error) {
 	if err := json.Unmarshal(encoded, &command); err != nil {
 		return nil, err
 	}
-	return json.Marshal(session.Exchange(command, nil))
+	return json.Marshal(session.Exchange(command, abandoned))
 }
 func closeArtifact(record artifact) {
 	if record.session != nil {
@@ -264,6 +268,11 @@ func (session *Session) run(role, version string, stop <-chan struct{}) {
 					state.Error = "Unknown profiler command"
 				}
 			case "start":
+				// A fallback contact may retry a command whose reply was lost.
+				// The viewer and run identify the same recording across transports.
+				if request.command.RunID != "" && capturingRun == request.command.RunID && capturingViewer == request.command.Viewer {
+					break
+				}
 				if cancel != nil {
 					state.Error = "A recording is already running"
 					break

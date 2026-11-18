@@ -61852,41 +61852,87 @@ func (a *App) notifyPublicPolicyWithPreference(action, domain string, fallback *
 // The public boundary is a separate process. A loopback contact keeps policy
 // publication available when the supervisor's NetChan contact is interrupted.
 func (a *App) exchangePublicPolicyFallback(encoded []byte) error {
-	port, err := strconv.Atoi(os.Getenv("SITEBRUSH_PUBLIC_HTTP_PORT"))
-	if err != nil || port < 1 || port > 65535 {
-		return errors.New("public boundary loopback port is unavailable")
-	}
-	secret := os.Getenv("SITEBRUSH_PUBLIC_CONTACT")
-	if secret == "" {
-		return errors.New("public boundary contact is unavailable")
-	}
-	request, err := http.NewRequest(http.MethodPost, "http://127.0.0.1/.well-known/sitebrush-public-policy", bytes.NewReader(encoded))
-	if err != nil {
-		return err
-	}
-	request.Header.Set(publicsite.InternalHeader, secret)
-	// The request URL is fixed. Only the validated local listener port varies;
-	// the transport never resolves a host or follows an external redirect.
-	dialer := &net.Dialer{Timeout: 3 * time.Second}
-	transport := &http.Transport{Proxy: nil, DisableKeepAlives: true, DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return dialer.DialContext(ctx, "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
-	}}
-	client := &http.Client{Timeout: 3 * time.Second, Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	}}
-	response, err := client.Do(request)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("public boundary returned %s", response.Status)
-	}
-	return nil
+	_, err := a.exchangePublicLoopback("/.well-known/sitebrush-public-policy", encoded, a.publicPublicationDone)
+	return err
 }
 
 // HTTP is only the authenticated local boundary adapter when NetChan fails.
 // Its fixed dial target cannot follow request hosts, proxies, or redirects.
+func (a *App) exchangePublicLoopback(endpoint string, encoded []byte, stop <-chan struct{}) ([]byte, error) {
+	if len(encoded) > 4096 {
+		return nil, errors.New("public boundary command is too large")
+	}
+	expectedStatus := http.StatusNoContent
+	deadline := 3 * time.Second
+	switch endpoint {
+	case "/.well-known/sitebrush-public-policy":
+	case "/.well-known/sitebrush-public-profiler":
+		expectedStatus = http.StatusOK
+		deadline = 10 * time.Second
+	default:
+		return nil, errors.New("unknown public boundary contact")
+	}
+	select {
+	case <-stop:
+		return nil, errors.New("public boundary contact stopped")
+	default:
+	}
+	port, err := strconv.Atoi(os.Getenv("SITEBRUSH_PUBLIC_HTTP_PORT"))
+	if err != nil || port < 1 || port > 65535 {
+		return nil, errors.New("public boundary loopback port is unavailable")
+	}
+	secret := os.Getenv("SITEBRUSH_PUBLIC_CONTACT")
+	if secret == "" {
+		return nil, errors.New("public boundary contact is unavailable")
+	}
+	request, err := http.NewRequest(http.MethodPost, "http://127.0.0.1/.well-known/sitebrush-public-policy", bytes.NewReader(encoded))
+	if err != nil {
+		return nil, err
+	}
+	request.URL.Path = endpoint
+	request.Header.Set(publicsite.InternalHeader, secret)
+	// Context is confined to net/http; the publication/viewer session owns cancellation.
+	requestContext, cancelRequest := context.WithCancel(context.Background())
+	defer cancelRequest()
+	request = request.WithContext(requestContext)
+	finished := make(chan struct{})
+	defer close(finished)
+	go func() {
+		select {
+		case <-stop:
+			cancelRequest()
+		case <-finished:
+		}
+	}()
+	dialer := &net.Dialer{Timeout: 3 * time.Second}
+	transport := &http.Transport{Proxy: nil, DisableKeepAlives: true, DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return dialer.DialContext(ctx, "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	}}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Timeout: deadline, Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != expectedStatus {
+		return nil, fmt.Errorf("public boundary returned %s", response.Status)
+	}
+	const responseLimit = 32 << 20
+	if response.ContentLength > responseLimit {
+		return nil, errors.New("public boundary response is too large")
+	}
+	reply, err := io.ReadAll(io.LimitReader(response.Body, responseLimit+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(reply) > responseLimit {
+		return nil, errors.New("public boundary response is too large")
+	}
+	return reply, nil
+}
 
 func (a *App) publicAdminIPAllowed(domain, clientIP string) bool {
 	return a.publicCatalog.Lookup(publicsite.Lookup{Host: domain, ClientIP: clientIP}).AdminAllowed
@@ -62492,6 +62538,7 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 	front.Security = application.attackGuard.Relay
 	if profilerSession != nil {
 		front.Profiler = profilerSession.Relay
+		front.ProfilerSession = profilerSession.RelaySession
 	}
 	if application.throttleGuard != nil {
 		front.Throttle = application.throttleGuard.Relay
@@ -62578,7 +62625,7 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 
 func localPublicPolicyGuest(front *publicsite.Front, secret string, next func(http.ResponseWriter, *http.Request) bool) func(http.ResponseWriter, *http.Request) bool {
 	return func(w http.ResponseWriter, r *http.Request) bool {
-		if r.URL.Path != "/.well-known/sitebrush-public-policy" {
+		if r.URL.Path != "/.well-known/sitebrush-public-policy" && r.URL.Path != "/.well-known/sitebrush-public-profiler" {
 			return next(w, r)
 		}
 		if secret == "" || !requestRemoteIsLoopback(r) || subtle.ConstantTimeCompare([]byte(r.Header.Get(publicsite.InternalHeader)), []byte(secret)) != 1 {
@@ -62594,9 +62641,38 @@ func localPublicPolicyGuest(front *publicsite.Front, secret string, next func(ht
 			http.Error(w, "invalid public policy change", http.StatusBadRequest)
 			return true
 		}
-		if _, err := front.Policy(encoded); err != nil {
-			log.Printf("PUBLIC policy loopback change rejected: %v", err)
-			http.Error(w, "public policy change failed", http.StatusServiceUnavailable)
+		contact := front.Policy
+		profiling := r.URL.Path == "/.well-known/sitebrush-public-profiler"
+		if profiling {
+			contact = front.Profiler
+		}
+		if contact == nil {
+			http.Error(w, "public contact is unavailable", http.StatusServiceUnavailable)
+			return true
+		}
+		var reply []byte
+		var contactErr error
+		if profiling && front.ProfilerSession != nil {
+			reply, contactErr = front.ProfilerSession(encoded, r.Context().Done())
+		} else {
+			reply, contactErr = contact(encoded)
+		}
+		if contactErr != nil {
+			log.Printf("PUBLIC loopback contact rejected path=%q: %v", r.URL.Path, contactErr)
+			http.Error(w, "public contact failed", http.StatusServiceUnavailable)
+			return true
+		}
+		if profiling {
+			if len(reply) > 32<<20 {
+				http.Error(w, "public profiler response is too large", http.StatusServiceUnavailable)
+				return true
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("Content-Length", strconv.Itoa(len(reply)))
+			if _, writeErr := w.Write(reply); writeErr != nil {
+				log.Printf("PUBLIC profiler loopback response failed: %v", writeErr)
+			}
 			return true
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -65639,13 +65715,50 @@ func (a *App) profilerCommand(role string, command goprofile.Command, stop <-cha
 	if role != "public" || !a.publicProxy {
 		return goprofile.State{Error: "Process unavailable"}
 	}
+	contact := func(request appupdate.Request, session <-chan struct{}) (appupdate.Response, error) {
+		return appupdate.Exchange(a.storagePath, request, session, func(event appupdate.ContactEvent) {
+			if event.Error != nil || event.Stage == "abort" {
+				log.Printf("PROFILER public NetChan action=%q client_pid=%d stage=%q address=%q error_type=%T error=%v", command.Action, os.Getpid(), event.Stage, event.Address, event.Error, event.Error)
+			}
+		})
+	}
+	return a.publicProfilerCommand(command, stop, contact)
+}
+
+func (a *App) publicProfilerCommand(command goprofile.Command, stop <-chan struct{}, contact func(appupdate.Request, <-chan struct{}) (appupdate.Response, error)) goprofile.State {
+	select {
+	case <-stop:
+		return goprofile.State{Error: "Profiler contact stopped"}
+	default:
+	}
+	if command.Action == "start" && command.RunID == "" {
+		command.RunID = randomAccessToken()
+	}
 	encoded, err := json.Marshal(command)
 	if err != nil {
 		return goprofile.State{Error: err.Error()}
 	}
-	response, err := appupdate.Exchange(a.storagePath, appupdate.Request{Action: "public_profiler", Detail: string(encoded)}, stop)
+	if len(encoded) > 4096 {
+		return goprofile.State{Error: "Profiler command too large"}
+	}
+	response, err := contact(appupdate.Request{Action: "public_profiler", Detail: string(encoded)}, stop)
 	if err != nil {
-		return goprofile.State{Error: err.Error()}
+		select {
+		case <-stop:
+			return goprofile.State{Error: "Profiler contact stopped"}
+		default:
+		}
+		if !appupdate.IsContactTransportFailure(err) {
+			log.Printf("PROFILER public contact rejected action=%q error_type=%T error=%v", command.Action, err, err)
+			return goprofile.State{Error: err.Error()}
+		}
+		log.Printf("PROFILER public transport unavailable action=%q; using authenticated loopback fallback: %v", command.Action, err)
+		reply, fallbackErr := a.exchangePublicLoopback("/.well-known/sitebrush-public-profiler", encoded, stop)
+		if fallbackErr != nil {
+			log.Printf("PROFILER public loopback failed action=%q: %v", command.Action, fallbackErr)
+			return goprofile.State{Error: fmt.Sprintf("public profiler: %v; local fallback: %v", err, fallbackErr)}
+		}
+		response = appupdate.Response{Detail: string(reply)}
 	}
 	if response.Error != "" {
 		return goprofile.State{Error: response.Error}
@@ -65654,8 +65767,12 @@ func (a *App) profilerCommand(role string, command goprofile.Command, stop <-cha
 	if err = json.Unmarshal([]byte(response.Detail), &state); err != nil {
 		state.Error = err.Error()
 	}
+	if state.Error == "" && state.Role != "public" {
+		return goprofile.State{Error: "Invalid public profiler process identity"}
+	}
 	return state
 }
+
 func (a *App) serverProfilerSocket(w http.ResponseWriter, r *http.Request) {
 	if a.profiler == nil {
 		http.NotFound(w, r)

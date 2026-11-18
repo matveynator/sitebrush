@@ -71,6 +71,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/dirprotect"
 	"github.com/matveynator/sitebrush/v2/pkg/expenses"
 	"github.com/matveynator/sitebrush/v2/pkg/geoip"
+	"github.com/matveynator/sitebrush/v2/pkg/goprofile"
 	"github.com/matveynator/sitebrush/v2/pkg/hostingandsupport"
 	"github.com/matveynator/sitebrush/v2/pkg/httpsecurity"
 	"github.com/matveynator/sitebrush/v2/pkg/ignite"
@@ -36019,6 +36020,263 @@ func TestProfilerFlagPropagationAndDisabledMode(t *testing.T) {
 	printVisibleFlagDefaults(&usage, flagSet)
 	if !strings.Contains(usage.String(), "--profiler") || !strings.Contains(usage.String(), "/?expenses") {
 		t.Fatal("missing profiler help", usage.String())
+	}
+}
+
+func newPublicProfilerFallbackFixture(t *testing.T, relay func([]byte) ([]byte, error)) (*App, *publicsite.Front, chan struct{}) {
+	t.Helper()
+	stop := make(chan struct{})
+	front := publicsite.NewFront("profiler-contact", func(http.ResponseWriter, *http.Request, bool) bool { return false }, stop)
+	front.Profiler = relay
+	front.Guest = localPublicPolicyGuest(front, "profiler-contact", func(http.ResponseWriter, *http.Request) bool { return false })
+	server := httptest.NewServer(front)
+	t.Cleanup(server.Close)
+	t.Cleanup(func() {
+		select {
+		case <-stop:
+		default:
+			close(stop)
+		}
+	})
+	t.Setenv("SITEBRUSH_PUBLIC_HTTP_PORT", strconv.Itoa(server.Listener.Addr().(*net.TCPAddr).Port))
+	t.Setenv("SITEBRUSH_PUBLIC_CONTACT", "profiler-contact")
+	return &App{publicProxy: true, storagePath: t.TempDir()}, front, stop
+}
+
+func unavailablePublicProfilerContact(appupdate.Request, <-chan struct{}) (appupdate.Response, error) {
+	return appupdate.Response{}, &appupdate.ContactTransportError{Stage: "fixture", Cause: net.ErrClosed}
+}
+
+func TestPublicProfilerFallbackForwardsOperationsAndPublicMetrics(t *testing.T) {
+	received := make(chan goprofile.Command, 16)
+	expected := goprofile.State{Role: "public", Report: &goprofile.Report{Role: "public", PID: 4242, CPU: 12345, Allocated: 98765, Goroutines: "public goroutines", Network: requesttiming.HTTPMetrics{Requests: 42, Sent: 1024}, Stages: []goprofile.Stage{{Name: "policy", Count: 42}}}}
+	application, _, _ := newPublicProfilerFallbackFixture(t, func(encoded []byte) ([]byte, error) {
+		var command goprofile.Command
+		if err := json.Unmarshal(encoded, &command); err != nil {
+			return nil, err
+		}
+		received <- command
+		return json.Marshal(expected)
+	})
+	for _, command := range []goprofile.Command{
+		{Action: "start", Viewer: "owner", RunID: "run-1"},
+		{Action: "status", Viewer: "owner"},
+		{Action: "report", Viewer: "owner", ID: "report-1", View: "functions", Page: 2, Kind: "cpu", Sort: "self", Search: "serve"},
+		{Action: "report", Viewer: "owner", ID: "report-1", View: "details", Function: 7, Minimum: 1},
+		{Action: "export", Viewer: "owner", ID: "report-1"},
+		{Action: "release", Viewer: "owner"},
+	} {
+		state := application.publicProfilerCommand(command, nil, unavailablePublicProfilerContact)
+		if !reflect.DeepEqual(state, expected) {
+			t.Fatalf("operation=%s state=%+v", command.Action, state)
+		}
+		if forwarded := <-received; !reflect.DeepEqual(forwarded, command) {
+			t.Fatalf("changed command: %+v want %+v", forwarded, command)
+		}
+	}
+}
+
+func TestPublicProfilerUsesNetChanAndNeverFallsBackOnRejection(t *testing.T) {
+	fallbackCalls := make(chan struct{}, 1)
+	application, _, _ := newPublicProfilerFallbackFixture(t, func([]byte) ([]byte, error) {
+		fallbackCalls <- struct{}{}
+		return []byte(`{"role":"public"}`), nil
+	})
+	for _, scenario := range []struct {
+		name      string
+		response  appupdate.Response
+		err       error
+		wantError bool
+	}{
+		{"available", appupdate.Response{Detail: `{"role":"public"}`}, nil, false},
+		{"explicit rejection", appupdate.Response{Error: "forbidden"}, errors.New("forbidden"), true},
+		{"returned rejection", appupdate.Response{Error: "denied"}, nil, true},
+		{"bad identity", appupdate.Response{}, errors.New("invalid supervisor identity"), true},
+		{"TLS rejection", appupdate.Response{}, &appupdate.ContactTransportError{Stage: "dial", Cause: errors.New("tls: bad certificate")}, true},
+		{"bad result", appupdate.Response{Detail: "invalid JSON"}, nil, true},
+		{"wrong process", appupdate.Response{Detail: `{"role":"application"}`}, nil, true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			state := application.publicProfilerCommand(goprofile.Command{Action: "status", Viewer: "owner"}, nil, func(appupdate.Request, <-chan struct{}) (appupdate.Response, error) {
+				return scenario.response, scenario.err
+			})
+			if (state.Error != "") != scenario.wantError {
+				t.Fatalf("state=%+v", state)
+			}
+			select {
+			case <-fallbackCalls:
+				t.Fatal("fallback bypassed primary reply/rejection")
+			default:
+			}
+		})
+	}
+}
+
+func TestPublicProfilerLoopbackAuthenticationAndRequestBounds(t *testing.T) {
+	accepted := make(chan struct{}, 1)
+	_, front, _ := newPublicProfilerFallbackFixture(t, func([]byte) ([]byte, error) {
+		accepted <- struct{}{}
+		return []byte(`{"role":"public"}`), nil
+	})
+	handler := localPublicPolicyGuest(front, "profiler-contact", func(http.ResponseWriter, *http.Request) bool { return false })
+	for _, scenario := range []struct {
+		remote, secret, method, body string
+		status                       int
+	}{
+		{"192.0.2.1:1234", "profiler-contact", "POST", `{}`, 404},
+		{"127.0.0.1:1234", "wrong", "POST", `{}`, 404},
+		{"127.0.0.1:1234", "", "POST", `{}`, 404},
+		{"127.0.0.1:1234", "profiler-contact", "GET", `{}`, 405},
+		{"127.0.0.1:1234", "profiler-contact", "POST", strings.Repeat("x", 4097), 400},
+		{"127.0.0.1:1234", "profiler-contact", "POST", `{}`, 200},
+	} {
+		request := httptest.NewRequest(scenario.method, "http://localhost/.well-known/sitebrush-public-profiler", strings.NewReader(scenario.body))
+		request.RemoteAddr = scenario.remote
+		request.Header.Set(publicsite.InternalHeader, scenario.secret)
+		response := httptest.NewRecorder()
+		if !handler(response, request) || response.Code != scenario.status {
+			t.Fatalf("remote=%s method=%s status=%d want=%d", scenario.remote, scenario.method, response.Code, scenario.status)
+		}
+	}
+	if len(accepted) != 1 {
+		t.Fatalf("accepted %d requests", len(accepted))
+	}
+}
+
+func TestPublicProfilerFallbackConcurrentRequestsAndRunIdentity(t *testing.T) {
+	received := make(chan goprofile.Command, 32)
+	application, _, _ := newPublicProfilerFallbackFixture(t, func(encoded []byte) ([]byte, error) {
+		var command goprofile.Command
+		if err := json.Unmarshal(encoded, &command); err != nil {
+			return nil, err
+		}
+		received <- command
+		return json.Marshal(goprofile.State{Role: "public", RunID: command.RunID, Report: &goprofile.Report{PID: 4242, CPU: int64(command.Page)}})
+	})
+	results := make(chan goprofile.State, 16)
+	for page := 0; page < cap(results); page++ {
+		go func(pageNumber int) {
+			results <- application.publicProfilerCommand(goprofile.Command{Action: "report", Viewer: "owner", Page: pageNumber}, nil, unavailablePublicProfilerContact)
+		}(page)
+	}
+	seen := make(map[int64]bool)
+	for count := 0; count < cap(results); count++ {
+		select {
+		case state := <-results:
+			if state.Error != "" || state.Report == nil || seen[state.Report.CPU] {
+				t.Fatalf("lost or mixed concurrent reply: %+v", state)
+			}
+			seen[state.Report.CPU] = true
+		case <-time.After(5 * time.Second):
+			t.Fatal("concurrent profiler requests blocked")
+		}
+	}
+	for len(received) > 0 {
+		<-received
+	}
+	primaryCommand := make(chan goprofile.Command, 1)
+	state := application.publicProfilerCommand(goprofile.Command{Action: "start", Viewer: "owner"}, nil, func(request appupdate.Request, stop <-chan struct{}) (appupdate.Response, error) {
+		var command goprofile.Command
+		if err := json.Unmarshal([]byte(request.Detail), &command); err != nil {
+			return appupdate.Response{}, err
+		}
+		primaryCommand <- command
+		return unavailablePublicProfilerContact(request, stop)
+	})
+	primary, fallback := <-primaryCommand, <-received
+	if primary.RunID == "" || primary.RunID != fallback.RunID || state.RunID != primary.RunID {
+		t.Fatalf("retry changed recording identity: %+v %+v %+v", primary, fallback, state)
+	}
+}
+
+func TestPublicProfilerFallbackCancellationAndShutdown(t *testing.T) {
+	application, front, boundaryStop := newPublicProfilerFallbackFixture(t, func([]byte) ([]byte, error) { return []byte(`{"role":"public"}`), nil })
+	started, abandoned := make(chan struct{}), make(chan struct{})
+	front.ProfilerSession = func(_ []byte, done <-chan struct{}) ([]byte, error) {
+		close(started)
+		<-done
+		close(abandoned)
+		return nil, errors.New("viewer disconnected")
+	}
+	stop := make(chan struct{})
+	result := make(chan goprofile.State, 1)
+	go func() {
+		result <- application.publicProfilerCommand(goprofile.Command{Action: "status"}, stop, unavailablePublicProfilerContact)
+	}()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("fallback did not start")
+	}
+	close(stop)
+	select {
+	case state := <-result:
+		if state.Error == "" {
+			t.Fatal("cancelled contact succeeded")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancellation blocked")
+	}
+	select {
+	case <-abandoned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("request outlived its viewer")
+	}
+	front.ProfilerSession = nil
+	session, err := goprofile.Start("public", "fixture", "console", boundaryStop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	front.Profiler = session.Relay
+	front.ProfilerSession = session.RelaySession
+	state := application.publicProfilerCommand(goprofile.Command{Action: "status"}, nil, unavailablePublicProfilerContact)
+	if state.Error != "" || state.Role != "public" {
+		t.Fatal(state)
+	}
+	close(boundaryStop)
+	session.Close()
+	state = application.publicProfilerCommand(goprofile.Command{Action: "status"}, nil, unavailablePublicProfilerContact)
+	if state.Error == "" {
+		t.Fatal("stopped public profiler remained available")
+	}
+	application.profiler = session
+	if state = application.profilerCommand("application", goprofile.Command{Action: "status"}, nil); state.Error == "" {
+		t.Fatal("application profiler ignored session shutdown")
+	}
+	applicationStop := make(chan struct{})
+	defer close(applicationStop)
+	applicationSession, err := goprofile.Start("application", "fixture", "console", applicationStop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer applicationSession.Close()
+	application.profiler = applicationSession
+	state = application.profilerCommand("application", goprofile.Command{Action: "status"}, nil)
+	if state.Error != "" || state.Role != "application" {
+		t.Fatalf("public transport failure affected application profiling: %+v", state)
+	}
+}
+
+func TestPublicProfilerFallbackRequestAndResponseBounds(t *testing.T) {
+	called := make(chan struct{}, 1)
+	application := &App{}
+	state := application.publicProfilerCommand(goprofile.Command{Action: "report", Search: strings.Repeat("x", 4096)}, nil, func(appupdate.Request, <-chan struct{}) (appupdate.Response, error) {
+		called <- struct{}{}
+		return appupdate.Response{}, nil
+	})
+	if state.Error == "" || len(called) != 0 {
+		t.Fatalf("oversized command reached transport: %+v", state)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa((32<<20)+1))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	t.Setenv("SITEBRUSH_PUBLIC_HTTP_PORT", strconv.Itoa(server.Listener.Addr().(*net.TCPAddr).Port))
+	t.Setenv("SITEBRUSH_PUBLIC_CONTACT", "profiler-contact")
+	if _, err := application.exchangePublicLoopback("/.well-known/sitebrush-public-profiler", []byte(`{}`), nil); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("response limit was not enforced: %v", err)
 	}
 }
 
