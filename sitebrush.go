@@ -58240,7 +58240,7 @@ func (a *App) preparePublicRAMSources(policy *publicsite.Policy) error {
 			sourceRoots[directory] = sourceRoot
 		}
 		file, openErr := sourceRoot.Open(relative)
-		if os.IsNotExist(openErr) {
+		if publicsite.MissingSource(openErr) {
 			return "", nil
 		}
 		if openErr != nil {

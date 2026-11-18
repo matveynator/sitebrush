@@ -134,7 +134,7 @@ func (runtime *PublicRuntime) prepareHTMLPath(generation *publicGeneration, poli
 		return nil
 	}
 	info, err := root.Stat(relative)
-	if os.IsNotExist(err) {
+	if MissingSource(err) {
 		return nil
 	}
 	if err != nil {
@@ -144,7 +144,7 @@ func (runtime *PublicRuntime) prepareHTMLPath(generation *publicGeneration, poli
 		return nil
 	}
 	file, err := root.Open(relative)
-	if os.IsNotExist(err) {
+	if MissingSource(err) {
 		return nil
 	}
 	if err != nil {

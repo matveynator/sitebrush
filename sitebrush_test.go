@@ -36172,6 +36172,50 @@ func TestPublicRAMPublicationAcknowledgesReadyBodiesAndRevocation(t *testing.T) 
 	}
 }
 
+func TestPublicRAMMalformedImportedRouteDoesNotBlockStartup(t *testing.T) {
+	root := t.TempDir()
+	application := &App{storagePath: root, storageRealRoot: root, publicStaticMode: publicsite.StaticSnapshot, publicRAMCacheBytes: 1 << 20, publicStreamer: publicsite.NewStreamer(), publicBoundary: true, db: panicSQLExecutor{t: t}}
+	for _, domain := range []string{"kavtrans.sitebrush.ru", "portnov.sitebrush.ru", "sitebrush.ru"} {
+		static := filepath.Join(root, "storage", "static", domainStorageName(domain))
+		if err := os.MkdirAll(static, 0700); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"index.html", "index.php"} {
+			if err := os.WriteFile(filepath.Join(static, name), []byte("<html><head></head><body>healthy "+domain+"</body></html>"), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		policy := publicsite.Policy{Domain: domain, Layouts: map[string]string{"/": "root", "/index.php/index.php/gornolyzhnye_kurorty_kavkaza.php": "missing"}}
+		if err := application.preparePublicRAMSources(&policy); err != nil {
+			t.Fatal("missing optional route blocked policy", domain, err)
+		}
+		if err := publicsite.Write(root, policy); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stop := make(chan struct{})
+	defer close(stop)
+	application.publicCatalog = publicsite.NewCatalog(root, stop, application.publicRuntimeOptions())
+	if err := application.publicCatalog.SetMemory(true); err != nil {
+		t.Fatal("healthy sites left loading", err)
+	}
+	for _, domain := range []string{"kavtrans.sitebrush.ru", "portnov.sitebrush.ru", "sitebrush.ru"} {
+		output := httptest.NewRecorder()
+		if !application.servePublicPublished(output, httptest.NewRequest("GET", "https://"+domain+"/", nil), false) || output.Code != 200 || !strings.Contains(output.Body.String(), "healthy "+domain) {
+			t.Fatal(domain, output.Code, output.Body.String())
+		}
+		decision := application.publicCatalog.Lookup(publicsite.Lookup{Host: domain, Path: "/index.php/index.php/gornolyzhnye_kurorty_kavkaza.php"})
+		file, err := application.publicCatalog.OpenPublished(decision, "index.php/index.php/gornolyzhnye_kurorty_kavkaza.php", "")
+		if file != nil {
+			file.Close()
+			t.Fatal("invalid route opened another source")
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("missing route was not classified", err)
+		}
+	}
+}
+
 func TestProfilerFlagPropagationAndDisabledMode(t *testing.T) {
 	session, err := startProcessProfiler(serverRunConfig{}, "application", nil)
 	if err != nil || session != nil {

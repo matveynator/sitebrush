@@ -260,6 +260,9 @@ func (catalog *Catalog) OpenPublished(decision Decision, relative, version strin
 	file, err := root.Open(relative)
 	if err != nil {
 		generation.release()
+		if MissingSource(err) {
+			return nil, os.ErrNotExist
+		}
 		return nil, err
 	}
 	if !catalog.runtime.admits(decision.Domain, generation) {
