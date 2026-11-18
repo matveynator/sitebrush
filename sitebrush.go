@@ -62117,6 +62117,14 @@ func (a *App) exchangePublicLoopback(endpoint string, encoded []byte, stop <-cha
 	deadline := 3 * time.Second
 	switch endpoint {
 	case "/.well-known/sitebrush-public-policy":
+		var change publicsite.Change
+		if json.Unmarshal(encoded, &change) != nil {
+			return nil, errors.New("invalid public policy change")
+		}
+		if change.Action == "enable" || change.Action == "refresh" {
+			// Snapshot preparation scales with publication size, not HTTP latency.
+			deadline = 2 * time.Minute
+		}
 	case "/.well-known/sitebrush-public-profiler":
 		expectedStatus = http.StatusOK
 		deadline = 10 * time.Second
@@ -62759,6 +62767,7 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 	}
 	front := newPublicHTTPFront(application, secret, ctx.Done())
 	front.ResetPolicy = func() error { return application.publicCatalog.SetMemory(false) }
+	enablePolicy := publicsite.NewPolicyEnabler(front, func() error { return application.publicCatalog.SetMemory(true) }, ctx.Done())
 	front.Policy = func(encoded []byte) ([]byte, error) {
 		var change publicsite.Change
 		if len(encoded) > 4096 || json.Unmarshal(encoded, &change) != nil {
@@ -62768,22 +62777,7 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 		case "freeze_versions":
 			return []byte("1"), nil
 		case "enable":
-			state, stateErr := front.Current()
-			if stateErr != nil {
-				return nil, stateErr
-			}
-			if state.Address != change.Address || state.Paused {
-				return nil, fmt.Errorf("policy publisher is not serving: requested=%q active=%q paused=%t", change.Address, state.Address, state.Paused)
-			}
-			if !state.PolicyReady {
-				if policyErr := application.publicCatalog.SetMemory(true); policyErr != nil {
-					return nil, policyErr
-				}
-				if policyErr := front.PolicyEnabled(); policyErr != nil {
-					return nil, policyErr
-				}
-			}
-			return nil, nil
+			return nil, enablePolicy(change.Address)
 		case "block":
 			return nil, application.publicCatalog.Block(change.Domain)
 		case "open":
