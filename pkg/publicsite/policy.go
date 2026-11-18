@@ -57,6 +57,7 @@ type Policy struct {
 	Versioned             bool
 	DemoSite              bool
 	PrivateTestDrive      bool
+	PendingRegistration   bool
 	ServerOwner           bool
 	NoIndex               bool
 	RobotsOverride        bool
@@ -95,40 +96,42 @@ type Lookup struct {
 	SessionHash string
 }
 type Decision struct {
-	PageHidden        bool
-	DemoSite          bool
-	PrivateTestDrive  bool
-	ServerOwner       bool
-	NoIndex           bool
-	RobotsOverride    bool
-	ResourceFile      string
-	ResourceType      string
-	ResourceVersion   string
-	ChrootEntries     []string
-	ChrootDirectory   bool
-	ChrootName        string
-	Versioned         bool
-	PageVersion       string
-	ChrootVersion     string
-	Hidden            bool
-	Layout            string
-	AdminAllowed      bool
-	LoadTrusted       bool
-	Known             bool
-	Chroot            Chroot
-	Domain            string
-	Frozen            bool
-	Stealth           bool
-	AllowedIPs        []string
-	Password          dirprotect.Rule
-	File              FileRule
-	Redirect          string
-	Owner             bool
-	Administrator     bool
-	Found             bool
-	DeletionReason    string
-	DeletionDeadline  string
-	DeletionDebtLabel string
+	generation          *publicGeneration
+	PageHidden          bool
+	DemoSite            bool
+	PrivateTestDrive    bool
+	PendingRegistration bool
+	ServerOwner         bool
+	NoIndex             bool
+	RobotsOverride      bool
+	ResourceFile        string
+	ResourceType        string
+	ResourceVersion     string
+	ChrootEntries       []string
+	ChrootDirectory     bool
+	ChrootName          string
+	Versioned           bool
+	PageVersion         string
+	ChrootVersion       string
+	Hidden              bool
+	Layout              string
+	AdminAllowed        bool
+	LoadTrusted         bool
+	Known               bool
+	Chroot              Chroot
+	Domain              string
+	Frozen              bool
+	Stealth             bool
+	AllowedIPs          []string
+	Password            dirprotect.Rule
+	File                FileRule
+	Redirect            string
+	Owner               bool
+	Administrator       bool
+	Found               bool
+	DeletionReason      string
+	DeletionDeadline    string
+	DeletionDebtLabel   string
 }
 
 func policyName(domain string) string {
@@ -269,8 +272,17 @@ type catalogUpdate struct {
 	blocked  bool
 	memory   *bool
 	reply    chan error
+	prepared map[string]*publicGeneration
+	revision *catalogRevision
+	ticket   chan catalogRevision
+}
+
+type catalogRevision struct {
+	site  uint64
+	reset uint64
 }
 type Catalog struct {
+	runtime *PublicRuntime
 	root    string
 	updates chan catalogUpdate
 	tasks   chan lookupTask
@@ -286,14 +298,23 @@ type cachedPolicy struct {
 	size           int64
 }
 
-func NewCatalog(root string, stop <-chan struct{}) *Catalog {
-	catalog := &Catalog{root: root, updates: make(chan catalogUpdate, 16), tasks: make(chan lookupTask, 1024), stop: stop}
+func NewCatalog(root string, stop <-chan struct{}, options ...RuntimeOptions) *Catalog {
+	catalog := &Catalog{root: root, updates: make(chan catalogUpdate), tasks: make(chan lookupTask, 1024), stop: stop}
+	if len(options) != 0 && options[0].Mode.Enabled(StaticRoots) {
+		catalog.runtime = &PublicRuntime{options: options[0]}
+	}
+
 	go func() {
+		if catalog.runtime != nil {
+			defer catalog.runtime.close()
+		}
 		policies := make(map[string]cachedPolicy)
 		var usedBytes int64
 		memory := false
 		serverTrust := serverTrustCache{}
 		blocked := make(map[string]bool)
+		revisions := make(map[string]uint64)
+		var sequence, reset uint64
 		storage, rootErr := os.OpenRoot(root)
 		if rootErr == nil {
 			defer storage.Close()
@@ -358,6 +379,30 @@ func NewCatalog(root string, stop <-chan struct{}) *Catalog {
 			case <-stop:
 				return
 			case update := <-catalog.updates:
+				if update.ticket != nil {
+					sequence++
+					revisions[update.domain] = sequence
+					update.ticket <- catalogRevision{site: sequence, reset: reset}
+					continue
+				}
+				if update.revision != nil {
+					current := revisions[update.domain]
+					if update.domain == "" {
+						current = sequence
+					}
+					if update.revision.site != current || update.revision.reset != reset {
+						retireGenerations(update.prepared)
+						update.reply <- errors.New("public publication changed during preparation")
+						continue
+					}
+				}
+				sequence++
+				if update.memory != nil {
+					reset++
+					revisions = make(map[string]uint64)
+				} else {
+					revisions[update.domain] = sequence
+				}
 				if update.memory != nil {
 					memory = *update.memory
 					policies = update.policies
@@ -392,6 +437,9 @@ func NewCatalog(root string, stop <-chan struct{}) *Catalog {
 				}
 				if rootErr == nil {
 					serverTrust.refresh(storage, true, stop)
+				}
+				if catalog.runtime != nil {
+					catalog.runtime.publish(policies, blocked, serverTrust, memory, update)
 				}
 				update.reply <- nil
 			case task := <-catalog.tasks:
@@ -435,105 +483,13 @@ func NewCatalog(root string, stop <-chan struct{}) *Catalog {
 					}
 				}
 				if found {
-					decision = Decision{Layout: policy.Layouts[task.query.Path], Known: true, Domain: policy.Domain, Frozen: policy.Frozen, Stealth: policy.Stealth, Found: true, DemoSite: policy.DemoSite, PrivateTestDrive: policy.PrivateTestDrive, ServerOwner: policy.ServerOwner, NoIndex: policy.NoIndex, RobotsOverride: policy.RobotsOverride, ResourceFile: policy.ResourcePaths[task.query.Path], ResourceType: policy.ResourceTypes[task.query.Path], DeletionReason: policy.DeletionReason, DeletionDeadline: policy.DeletionDeadline, DeletionDebtLabel: policy.DeletionDebtLabel}
-					decision.PageHidden = policy.Hidden["page\x00"+task.query.Path]
-					decision.PageVersion = policy.PublishedVersions[task.query.Path]
-					decision.Versioned = policy.Versioned
-
-					if task.query.ClientIP == "" {
-						decision.AllowedIPs = append([]string(nil), policy.AllowedIPs...)
+					if !memory && rootErr == nil && !trustedIPAddresses(policy.AllowedIPs, task.query.ClientIP) && !trustedIP(policy.TrustedIPs, task.query.ClientIP) {
+						serverTrust.refresh(storage, false, stop)
 					}
-					for _, rule := range policy.AllowedIPs {
-						if containsIP(rule, task.query.ClientIP) {
-							decision.AdminAllowed = true
-							break
-						}
-					}
-					decision.LoadTrusted = decision.AdminAllowed || trustedIP(policy.TrustedIPs, task.query.ClientIP)
-					if !decision.LoadTrusted {
-						if !memory && rootErr == nil {
-							serverTrust.refresh(storage, false, stop)
-						}
-						decision.LoadTrusted = !serverTrust.blocked && !blocked[serverTrust.domain] && trustedIP(serverTrust.rules, task.query.ClientIP)
-					}
-					for _, rule := range policy.Passwords {
-						if dirprotect.HasProtectedPrefix(task.query.Path, rule.Path) && len(rule.Path) >= len(decision.Password.Path) {
-							decision.Password = rule
-						}
-					}
-					decision.File = cached.files[task.query.File]
-					if policy.Versioned && policy.Frozen && decision.ResourceFile != "" {
-						decision.ResourceVersion = policy.FileVersions[decision.ResourceFile]
-						if decision.ResourceVersion == "" || hiddenVersionPath(policy.Hidden, "files", decision.ResourceFile) {
-							decision.Hidden = true
-						}
-					}
-					if policy.Versioned && policy.Frozen && task.query.File != "" {
-						resolved := resolveVersionPath(task.query.File, policy.FileAliases)
-						decision.File.Version = policy.FileVersions[resolved]
-						if resolved != task.query.File {
-							targetRule := cached.files[resolved]
-							if targetRule.Mode != "" && targetRule.Mode != "public" {
-								decision.File.Mode = "hidden"
-							}
-						}
-					}
-					if decision.File.Mode == "hidden" || hiddenVersionPath(policy.Hidden, "files", task.query.File) || policy.Versioned && policy.Frozen && task.query.File != "" && decision.File.Version == "" {
-						decision.Hidden = true
-						decision.File.Mode = "hidden"
-					}
-
-					if decision.File.Mode == "page_password" {
-						decision.Password = dirprotect.Rule{}
-						for _, rule := range policy.Passwords {
-							if dirprotect.HasProtectedPrefix(decision.File.ProtectedPath, rule.Path) && len(rule.Path) >= len(decision.Password.Path) {
-								decision.Password = rule
-							}
-						}
-					}
-					for _, location := range policy.Chroots {
-						if (task.query.Path == location.Path || strings.HasPrefix(task.query.Path, strings.TrimSuffix(location.Path, "/")+"/")) && len(location.Path) > len(decision.Chroot.Path) {
-							decision.Chroot = location
-						}
-					}
-					if decision.Chroot.Path != "" {
-						relative := filepath.ToSlash(filepath.Join(strings.TrimPrefix(decision.Chroot.Directory, "/"), strings.TrimPrefix(strings.TrimPrefix(task.query.Path, decision.Chroot.Path), "/")))
-						resolved := resolveVersionPath(relative, policy.ChrootAliases)
-						decision.ChrootVersion = policy.ChrootVersions[resolved]
-						decision.ChrootName = filepath.Base(task.query.Path)
-						if decision.ChrootVersion == "" {
-							decision.ChrootVersion = policy.ChrootVersions[filepath.ToSlash(filepath.Join(resolved, "index.html"))]
-							if decision.ChrootVersion != "" {
-								decision.ChrootName = "index.html"
-							}
-						}
-						if entries, exists := policy.ChrootListings[resolved]; exists && decision.ChrootVersion == "" {
-							decision.ChrootDirectory = true
-							decision.ChrootEntries = append([]string(nil), entries...)
-						}
-						if decision.PageVersion == "" && policy.Layouts[task.query.Path] == "" && (hiddenVersionPath(policy.Hidden, "chroot", relative) || policy.Versioned && policy.Frozen && decision.ChrootVersion == "" && !decision.ChrootDirectory) {
-							decision.Hidden = true
-						}
-					}
-					current := task.query.Path
-					for attempt := 0; attempt < 16; attempt++ {
-						next := cached.redirects[current]
-						if next == "" || next == current || next == task.query.Path {
-							break
-						}
-						current = next
-						decision.Redirect = current
-					}
-					if task.query.SessionHash != "" {
-						session, exists := cached.administrators[task.query.SessionHash]
-						decision.Administrator = exists && session.Expires > time.Now().Unix() &&
-							(!session.IPRestricted || trustedIPAddresses(session.AllowedIPs, task.query.ClientIP)) &&
-							(!policy.Stealth || decision.AdminAllowed)
-					}
-					for _, session := range policy.OwnerSessions {
-						if session.Hash == task.query.SessionHash && session.Expires > time.Now().Unix() {
-							decision.Owner = true
-							break
+					decision = decidePolicy(task.query, cached, serverTrust, blocked[serverTrust.domain])
+					if catalog.runtime != nil {
+						if snapshot := catalog.runtime.current.Load(); snapshot != nil {
+							decision.generation = snapshot.roots[decision.Domain]
 						}
 					}
 				}
@@ -552,6 +508,18 @@ func (catalog *Catalog) Lookup(query Lookup) Decision {
 	return catalog.LookupRequest(query, nil)
 }
 func (catalog *Catalog) LookupRequest(query Lookup, done <-chan struct{}) Decision {
+	select {
+	case <-done:
+		return Decision{}
+	case <-catalog.stop:
+		return Decision{Known: true}
+	default:
+	}
+	if catalog.runtime != nil && catalog.runtime.options.Mode.Enabled(StaticSnapshot) {
+		if snapshot := catalog.runtime.current.Load(); snapshot != nil && snapshot.memory {
+			return snapshot.lookup(query)
+		}
+	}
 	reply := make(chan Decision, 1)
 	select {
 	case catalog.tasks <- lookupTask{query: query, reply: reply, done: done}:
@@ -587,6 +555,14 @@ func syncPolicyDirectory(root *os.Root, name string) error {
 // Disk compatibility remains available until both processes use acknowledged
 // policy updates. Only the catalog participant owns its in-memory snapshot.
 func (catalog *Catalog) SetMemory(enabled bool) error {
+	update := catalogUpdate{memory: &enabled}
+	if enabled && catalog.runtime != nil {
+		var err error
+		update.revision, err = catalog.reserve("")
+		if err != nil {
+			return err
+		}
+	}
 	var policies map[string]cachedPolicy
 	if enabled {
 		var err error
@@ -595,14 +571,37 @@ func (catalog *Catalog) SetMemory(enabled bool) error {
 			return err
 		}
 	}
-	return catalog.update(catalogUpdate{policies: policies, memory: &enabled})
+	update.policies = policies
+	if enabled && catalog.runtime != nil {
+		var err error
+		update.prepared, err = catalog.runtime.prepare(policies, catalog.stop, true)
+		if err != nil {
+			return err
+		}
+	}
+	return catalog.update(update)
 }
 func (catalog *Catalog) Reload(domain string) error {
+	update := catalogUpdate{domain: domain}
+	if catalog.runtime != nil {
+		var err error
+		update.revision, err = catalog.reserve(domain)
+		if err != nil {
+			return err
+		}
+	}
 	policies, err := loadPolicies(catalog.root, domain)
 	if err != nil {
-		return err
+		return errors.Join(err, catalog.Block(domain))
 	}
-	return catalog.update(catalogUpdate{policies: policies, domain: domain, blocked: policies[domain].blocked})
+	update.policies, update.blocked = policies, policies[domain].blocked
+	if catalog.runtime != nil {
+		update.prepared, err = catalog.runtime.prepare(policies, catalog.stop, false)
+		if err != nil {
+			return errors.Join(err, catalog.Block(domain))
+		}
+	}
+	return catalog.update(update)
 }
 func (catalog *Catalog) Open(domain string) error {
 	return catalog.update(catalogUpdate{domain: domain})
@@ -610,11 +609,29 @@ func (catalog *Catalog) Open(domain string) error {
 func (catalog *Catalog) Block(domain string) error {
 	return catalog.update(catalogUpdate{domain: domain, blocked: true})
 }
+
+// A later block or reset invalidates in-flight preparation before it can
+// replace the live snapshot. Preparation never owns the right to reopen a site.
+func (catalog *Catalog) reserve(domain string) (*catalogRevision, error) {
+	ticket := make(chan catalogRevision, 1)
+	select {
+	case catalog.updates <- catalogUpdate{domain: domain, ticket: ticket}:
+	case <-catalog.stop:
+		return nil, errors.New("public catalog stopped")
+	}
+	select {
+	case revision := <-ticket:
+		return &revision, nil
+	case <-catalog.stop:
+		return nil, errors.New("public catalog stopped")
+	}
+}
 func (catalog *Catalog) update(update catalogUpdate) error {
 	update.reply = make(chan error, 1)
 	select {
 	case catalog.updates <- update:
 	case <-catalog.stop:
+		retireGenerations(update.prepared)
 		return errors.New("public catalog stopped")
 	}
 	select {
@@ -787,4 +804,108 @@ func trustedIPAddresses(addresses []string, clientIP string) bool {
 		}
 	}
 	return false
+}
+
+// Both readers use one policy calculation; only acquisition differs.
+func decidePolicy(query Lookup, cached cachedPolicy, serverTrust serverTrustCache, serverBlocked bool) Decision {
+	policy := cached.policy
+	decision := Decision{Layout: policy.Layouts[query.Path], Known: true, Domain: policy.Domain, Frozen: policy.Frozen, Stealth: policy.Stealth, Found: true, DemoSite: policy.DemoSite, PrivateTestDrive: policy.PrivateTestDrive, PendingRegistration: policy.PendingRegistration, ServerOwner: policy.ServerOwner, NoIndex: policy.NoIndex, RobotsOverride: policy.RobotsOverride, ResourceFile: policy.ResourcePaths[query.Path], ResourceType: policy.ResourceTypes[query.Path], DeletionReason: policy.DeletionReason, DeletionDeadline: policy.DeletionDeadline, DeletionDebtLabel: policy.DeletionDebtLabel}
+	decision.PageHidden = policy.Hidden["page\x00"+query.Path]
+	decision.PageVersion = policy.PublishedVersions[query.Path]
+	decision.Versioned = policy.Versioned
+
+	if query.ClientIP == "" {
+		decision.AllowedIPs = append([]string(nil), policy.AllowedIPs...)
+	}
+	for _, rule := range policy.AllowedIPs {
+		if containsIP(rule, query.ClientIP) {
+			decision.AdminAllowed = true
+			break
+		}
+	}
+	decision.LoadTrusted = decision.AdminAllowed || trustedIP(policy.TrustedIPs, query.ClientIP)
+	if !decision.LoadTrusted {
+		decision.LoadTrusted = !serverTrust.blocked && !serverBlocked && trustedIP(serverTrust.rules, query.ClientIP)
+	}
+	for _, rule := range policy.Passwords {
+		if dirprotect.HasProtectedPrefix(query.Path, rule.Path) && len(rule.Path) >= len(decision.Password.Path) {
+			decision.Password = rule
+		}
+	}
+	decision.File = cached.files[query.File]
+	if policy.Versioned && policy.Frozen && decision.ResourceFile != "" {
+		decision.ResourceVersion = policy.FileVersions[decision.ResourceFile]
+		if decision.ResourceVersion == "" || hiddenVersionPath(policy.Hidden, "files", decision.ResourceFile) {
+			decision.Hidden = true
+		}
+	}
+	if policy.Versioned && policy.Frozen && query.File != "" {
+		resolved := resolveVersionPath(query.File, policy.FileAliases)
+		decision.File.Version = policy.FileVersions[resolved]
+		if resolved != query.File {
+			targetRule := cached.files[resolved]
+			if targetRule.Mode != "" && targetRule.Mode != "public" {
+				decision.File.Mode = "hidden"
+			}
+		}
+	}
+	if decision.File.Mode == "hidden" || hiddenVersionPath(policy.Hidden, "files", query.File) || policy.Versioned && policy.Frozen && query.File != "" && decision.File.Version == "" {
+		decision.Hidden = true
+		decision.File.Mode = "hidden"
+	}
+
+	if decision.File.Mode == "page_password" {
+		decision.Password = dirprotect.Rule{}
+		for _, rule := range policy.Passwords {
+			if dirprotect.HasProtectedPrefix(decision.File.ProtectedPath, rule.Path) && len(rule.Path) >= len(decision.Password.Path) {
+				decision.Password = rule
+			}
+		}
+	}
+	for _, location := range policy.Chroots {
+		if (query.Path == location.Path || strings.HasPrefix(query.Path, strings.TrimSuffix(location.Path, "/")+"/")) && len(location.Path) > len(decision.Chroot.Path) {
+			decision.Chroot = location
+		}
+	}
+	if decision.Chroot.Path != "" {
+		relative := filepath.ToSlash(filepath.Join(strings.TrimPrefix(decision.Chroot.Directory, "/"), strings.TrimPrefix(strings.TrimPrefix(query.Path, decision.Chroot.Path), "/")))
+		resolved := resolveVersionPath(relative, policy.ChrootAliases)
+		decision.ChrootVersion = policy.ChrootVersions[resolved]
+		decision.ChrootName = filepath.Base(query.Path)
+		if decision.ChrootVersion == "" {
+			decision.ChrootVersion = policy.ChrootVersions[filepath.ToSlash(filepath.Join(resolved, "index.html"))]
+			if decision.ChrootVersion != "" {
+				decision.ChrootName = "index.html"
+			}
+		}
+		if entries, exists := policy.ChrootListings[resolved]; exists && decision.ChrootVersion == "" {
+			decision.ChrootDirectory = true
+			decision.ChrootEntries = append([]string(nil), entries...)
+		}
+		if decision.PageVersion == "" && policy.Layouts[query.Path] == "" && (hiddenVersionPath(policy.Hidden, "chroot", relative) || policy.Versioned && policy.Frozen && decision.ChrootVersion == "" && !decision.ChrootDirectory) {
+			decision.Hidden = true
+		}
+	}
+	current := query.Path
+	for attempt := 0; attempt < 16; attempt++ {
+		next := cached.redirects[current]
+		if next == "" || next == current || next == query.Path {
+			break
+		}
+		current = next
+		decision.Redirect = current
+	}
+	if query.SessionHash != "" {
+		session, exists := cached.administrators[query.SessionHash]
+		decision.Administrator = exists && session.Expires > time.Now().Unix() &&
+			(!session.IPRestricted || trustedIPAddresses(session.AllowedIPs, query.ClientIP)) &&
+			(!policy.Stealth || decision.AdminAllowed)
+	}
+	for _, session := range policy.OwnerSessions {
+		if session.Hash == query.SessionHash && session.Expires > time.Now().Unix() {
+			decision.Owner = true
+			break
+		}
+	}
+	return decision
 }
