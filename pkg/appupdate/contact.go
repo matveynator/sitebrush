@@ -14,11 +14,13 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/matveynator/netchan/v2"
+	"github.com/matveynator/netchan/v2/pkg/transport"
 )
 
 // Once the application has received a one-shot reply, teardown must release its
@@ -231,33 +233,68 @@ func tlsIdentity(store *os.Root, create bool) (*tls.Config, error) {
 
 // Exchange returns through a consumer-owned reply channel. No network request
 // can acquire ownership of an operation simply by supplying a callback address.
-func Exchange(storagePath string, request Request, stop <-chan struct{}) (Response, error) {
+func Exchange(storagePath string, request Request, stop <-chan struct{}, observers ...func(ContactEvent)) (Response, error) {
+	var diagnostics *contactDiagnostics
+	if len(observers) != 0 && observers[0] != nil {
+		diagnostics = &contactDiagnostics{address: Address(storagePath), observe: observers[0], failures: make(chan error, 16), stop: stop}
+	}
+	select {
+	case <-stop:
+		return Response{}, errors.New("update request canceled")
+	default:
+	}
 	store, err := os.OpenRoot(filepath.Join(storagePath, Directory))
 	if err != nil {
+		diagnostics.record("identity-unavailable", err)
 		return Response{}, err
 	}
 	defer store.Close()
 	configuration, err := tlsIdentity(store, false)
 	if err != nil {
+		diagnostics.record("identity-unavailable", err)
 		return Response{}, err
 	}
-	connection, err := netchan.Dial[wireRequest](Address(storagePath), netchan.Config{Capacity: 4, TLS: configuration})
-	if err != nil {
-		return Response{}, fmt.Errorf("update supervisor NetChan dial: %w", err)
+	connectionConfig := netchan.Config{Capacity: 4, TLS: configuration}
+	if diagnostics != nil {
+		connectionConfig.Transports = []transport.Driver{diagnosticContactDriver{diagnostics: diagnostics}}
 	}
+	connection, err := netchan.Dial[wireRequest](Address(storagePath), connectionConfig)
+	if err != nil {
+		select {
+		case <-stop:
+			diagnostics.record("session-canceled", err)
+			return Response{}, errors.New("update request canceled")
+		default:
+		}
+		return Response{}, diagnostics.failure("netchan-dial", fmt.Errorf("update supervisor NetChan dial: %w", err))
+	}
+	diagnostics.record("root-channel-open", nil)
 	graceful := false
 	defer func() {
 		if graceful {
+			diagnostics.record("graceful-close", nil)
 			closeContact(connection, contactCloseGrace)
 		} else {
+			diagnostics.record("abort", nil)
 			_ = connection.Abort()
 		}
 	}()
 	timer := time.NewTimer(15 * time.Second)
 	defer timer.Stop()
 	if err := sendChannel(connection.Send, wireRequest{Protocol: Protocol, Action: request.Action, ManifestHash: request.ManifestHash, Detail: request.Detail}, stop, 5*time.Second); err != nil {
-		return Response{}, err
+		select {
+		case <-stop:
+			return Response{}, err
+		default:
+		}
+		if err.Error() == "channel contact timed out" {
+			err = errors.Join(err, os.ErrDeadlineExceeded)
+		} else if err.Error() == "channel contact terminated" {
+			err = errors.Join(err, net.ErrClosed)
+		}
+		return Response{}, diagnostics.failure("request-send", err)
 	}
+	diagnostics.record("request-sent", nil)
 	// NetChan can close a logical session before delivering a response.
 	// Preserve its transport error instead of masking it as a generic
 	// "channel closed". A transient transport error can be retried by
@@ -268,22 +305,30 @@ func Exchange(storagePath string, request Request, stop <-chan struct{}) (Respon
 		select {
 		case response, open := <-connection.Receive:
 			if !open {
-				return Response{}, contactFailure("supervisor reply contact terminated", transportError)
+				return Response{}, diagnostics.failure("reply-closed", contactFailure("supervisor reply contact terminated", firstContactFailure(transportError)))
 			}
 			graceful = true
-			return decodeContactResult(response)
+			result, decodeErr := decodeContactResult(response)
+			if decodeErr != nil {
+				diagnostics.record("target-rejected", decodeErr)
+			} else {
+				diagnostics.record("reply-received", nil)
+			}
+			return result, decodeErr
 		case problem, open := <-transportErrors:
 			if !open {
 				transportErrors = nil
 			} else if problem != nil {
 				transportError = problem
+				diagnostics.record("logical-session-error", problem)
 			}
 		case <-stop:
+			diagnostics.record("session-canceled", nil)
 			return Response{}, errors.New("update request canceled")
 		case <-connection.Done:
-			return Response{}, contactFailure("update supervisor disconnected", transportError)
+			return Response{}, diagnostics.failure("session-closed", contactFailure("update supervisor disconnected", firstContactFailure(transportError)))
 		case <-timer.C:
-			return Response{}, contactFailure("update supervisor timed out", transportError)
+			return Response{}, diagnostics.failure("reply-timeout", contactFailure("update supervisor timed out", errors.Join(os.ErrDeadlineExceeded, transportError)))
 		}
 	}
 }
@@ -293,4 +338,11 @@ func contactFailure(message string, transportError error) error {
 		return fmt.Errorf("%s: %w", message, transportError)
 	}
 	return errors.New(message)
+}
+
+func firstContactFailure(problem error) error {
+	if problem != nil {
+		return problem
+	}
+	return net.ErrClosed
 }

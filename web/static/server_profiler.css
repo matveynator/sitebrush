@@ -1,4 +1,4 @@
-/* The expenses page enforces its control theme with important declarations; keep this diagnostic dialog self-contained. */
+/* Server settings enforce their control theme with important declarations; keep this diagnostic dialog self-contained. */
 #server-profiler-dialog {
  --profiler-application:#5b9b44; --profiler-runtime:#ca7544; --profiler-standard:#5289ad; --profiler-library:#9270ad;
  width:min(1440px,96vw); max-width:96vw; max-height:94vh; padding:0; overflow:auto;
@@ -106,5 +106,5 @@
 .profiler-overview td,.profiler-overview th { padding:8px; text-align:left; border:1px solid #d9e1e8; }
 .profiler-overview th { background:#dce5ed; }
 .profiler-explanation { color:#657887; font-size:12px; }
-#server-profiler-dialog details>summary { padding:12px; cursor:pointer; background:#eaf0f5; border:1px solid #cad5de; color:#34536b; }
+#server-profiler-dialog [data-profiler-details] { margin-top:14px; }
 #server-profiler-dialog [data-profiler-copy-text] { width:100%; background:#fff; color:#25313d; font:12px/1.5 monospace; }

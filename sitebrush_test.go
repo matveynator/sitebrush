@@ -71,6 +71,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/dirprotect"
 	"github.com/matveynator/sitebrush/v2/pkg/expenses"
 	"github.com/matveynator/sitebrush/v2/pkg/geoip"
+	"github.com/matveynator/sitebrush/v2/pkg/goprofile"
 	"github.com/matveynator/sitebrush/v2/pkg/hostingandsupport"
 	"github.com/matveynator/sitebrush/v2/pkg/httpsecurity"
 	"github.com/matveynator/sitebrush/v2/pkg/ignite"
@@ -2964,7 +2965,7 @@ func TestExpensesTemplateShowsOnlyLocalServerAndEnabledDemoOutsideSitebrushCom(t
 		t.Fatal(err)
 	}
 	application := &App{}
-	request := httptest.NewRequest(http.MethodGet, "https://owner.example/?expenses", nil)
+	request := httptest.NewRequest(http.MethodGet, "https://owner.example/?server-settings", nil)
 	baseSnapshot := hostingAndSupportPanelSnapshot{
 		Version:    hostingAndSupportPanelSnapshotVersion,
 		MainDomain: "owner.example",
@@ -3077,7 +3078,7 @@ func TestExpensesTemplateShowsOnlyLocalServerAndEnabledDemoOutsideSitebrushCom(t
 
 func TestExpensesTitlesUseServerScopeInEveryLanguage(t *testing.T) {
 	for languageCode, translations := range translationCatalog {
-		for _, translationKey := range []string{"expenses_title", "expenses_central_title", "menu_expenses", "menu_expenses_central"} {
+		for _, translationKey := range []string{"expenses_title", "expenses_central_title", "menu_expenses", "menu_expenses_central", "server_profiler_open"} {
 			if strings.TrimSpace(translations[translationKey]) == "" {
 				t.Fatalf("language %s is missing %s", languageCode, translationKey)
 			}
@@ -3097,7 +3098,7 @@ func TestExpensesTitlesUseServerScopeInEveryLanguage(t *testing.T) {
 		{name: "central English server", language: "en", mainDomain: "sitebrush.com", expected: "Server settings"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			request := httptest.NewRequest(http.MethodGet, "https://"+testCase.mainDomain+"/?expenses", nil)
+			request := httptest.NewRequest(http.MethodGet, "https://"+testCase.mainDomain+"/?server-settings", nil)
 			request.Header.Set("Accept-Language", testCase.language)
 			view := application.hostingAndSupportPanelView(request, hostingAndSupportPanelSnapshot{MainDomain: testCase.mainDomain})
 			if title := view["Title"]; title != testCase.expected {
@@ -3665,7 +3666,7 @@ func TestSaveServerExpensePolicyUsesOnlyMonthlyServerPrice(t *testing.T) {
 	form.Set("monthly_server_expense", "75.00")
 	form.Set("currency", "EUR")
 	form.Set("free_site_threshold_mb", "100")
-	request := httptest.NewRequest(http.MethodPost, "http://localhost/?expenses", strings.NewReader(form.Encode()))
+	request := httptest.NewRequest(http.MethodPost, "http://localhost/?server-settings", strings.NewReader(form.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	status := application.saveServerExpensePolicyFromForm(request)
 	if status != translationsForLanguageCode("ru")["expenses_server_policy_saved"] {
@@ -5197,8 +5198,8 @@ func TestServerManagerEmailTreatsLoopbackAsLocalhost(t *testing.T) {
 		t.Fatal("non-owner admin was accepted for effective localhost")
 	}
 	menuScript := buildContextMenuScript(true, true, false, false, true, "/", "example.com", 0, 0, "", "", translationsForLanguageCode("ru"))
-	if !strings.Contains(menuScript, "?expenses") {
-		t.Fatal("server manager menu does not contain expenses link")
+	if !strings.Contains(menuScript, "?server-settings") {
+		t.Fatal("server manager menu does not contain server settings link")
 	}
 	if !strings.Contains(menuScript, "Настройки сервера") {
 		t.Fatal("regular server menu does not use the server settings title")
@@ -13760,7 +13761,7 @@ func TestExternalSiteImportPrimaryActionsUseThemeStyles(t *testing.T) {
 }
 
 func TestPublicTrialEmbedKeepsWidgetLiveAndVersioned(t *testing.T) {
-	request := httptest.NewRequest(http.MethodGet, "https://sitebrush.example/?expenses", nil)
+	request := httptest.NewRequest(http.MethodGet, "https://sitebrush.example/?server-settings", nil)
 	embedHTML := publicTrialSignupEmbedHTML(request, translationsForLanguageCode("ru"))
 	if !strings.Contains(embedHTML, `data-sitebrush-live-asset`) {
 		t.Fatalf("public trial embed does not preserve the live widget: %s", embedHTML)
@@ -27681,7 +27682,7 @@ func TestServerUpdateRequiresServerOwnerAndNeverMutatesOnGET(t *testing.T) {
 			result := httptest.NewRecorder()
 			application.serverUpdatePage(result, request)
 			if email == "owner@example.com" {
-				if result.Code != http.StatusSeeOther || result.Header().Get("Location") != "/?expenses#server-update" {
+				if result.Code != http.StatusSeeOther || result.Header().Get("Location") != "/?server-settings#server-update" {
 					t.Fatalf("owner redirect=%d %s", result.Code, result.Header().Get("Location"))
 				}
 				embedded := httptest.NewRequest(http.MethodGet, "http://localhost/?server_update&embedded", nil)
@@ -29149,6 +29150,7 @@ func TestProtectedServicePagesOfferLoginAndKeepReturnPath(t *testing.T) {
 func TestPublicFastPathKeepsServiceQueriesDynamic(t *testing.T) {
 	for _, target := range []string{
 		"/?mcp", "/?oauth=resource", "/?ai_provider_status", "/?ai_provider_models",
+		"/?server-settings", "/?expenses",
 		"/?ai_apply", "/?grab_retry", "/?trial_site_suggest", "/?publish_preview",
 		"/?tree", "/?mail_monitor_ws", "/?hosting_invoice&token=invoice",
 		"/?billing_schedule&token=schedule", "/?hosting_and_support_backup_download&token=backup",
@@ -31475,7 +31477,7 @@ func TestMailMonitorPanelMergedLocalServerAndRemoteScope(t *testing.T) {
 	enableMailMonitorForTest(t, application)
 	application.recordMailMonitorEvent(context.Background(), mailmonitor.Event{Kind: "invoice", Stage: "queued", Recipient: "local@example.com"})
 	snapshot := hostingAndSupportPanelSnapshot{Servers: []hostingandsupport.ServerView{{ID: "merged-local", Name: "Local", Local: true}, {ID: "remote", Name: "Remote"}}}
-	request := httptest.NewRequest(http.MethodGet, "http://localhost/?expenses&mail_server=merged-local", nil)
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/?server-settings&mail_server=merged-local", nil)
 	view := application.hostingAndSupportPanelView(request, snapshot)
 	servers := view["ExpenseServers"].([]simplifiedExpenseServerView)
 	if servers[0].MailLastDay.Queued != 1 || len(servers[0].MailOperations) != 0 || servers[0].MailExpanded || !strings.Contains(servers[0].MailSecurityURL, "tab=security") {
@@ -31512,7 +31514,7 @@ func TestMailMonitorPanelMergedLocalServerAndRemoteScope(t *testing.T) {
 	if !servers[1].MailSelected || len(servers[1].MailOperations) != 0 {
 		t.Fatal("remote journal leaked local messages")
 	}
-	request = httptest.NewRequest(http.MethodGet, "http://localhost/?expenses&mail_server=unknown", nil)
+	request = httptest.NewRequest(http.MethodGet, "http://localhost/?server-settings&mail_server=unknown", nil)
 	servers = application.hostingAndSupportPanelView(request, snapshot)["ExpenseServers"].([]simplifiedExpenseServerView)
 	if !servers[0].MailSelected || servers[0].MailExpanded {
 		t.Fatal("unknown server selected an unrestricted journal")
@@ -31578,7 +31580,7 @@ func TestMailJournalSnapshotKeepsIncidentsInSecurityAnalytics(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	statistics, err := application.mailJournalSnapshot(httptest.NewRequest(http.MethodGet, "http://localhost/?expenses&mail_server=local", nil))
+	statistics, err := application.mailJournalSnapshot(httptest.NewRequest(http.MethodGet, "http://localhost/?server-settings&mail_server=local", nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32116,7 +32118,7 @@ func TestMailCancellationTombstoneAndSMTPStartBoundary(t *testing.T) {
 
 func TestMailJournalWebSocketRejectsUnauthenticatedRequests(t *testing.T) {
 	application, _ := newTestApplication(t)
-	request := httptest.NewRequest(http.MethodGet, "https://localhost/?expenses&mail_monitor_ws", nil)
+	request := httptest.NewRequest(http.MethodGet, "https://localhost/?server-settings&mail_monitor_ws", nil)
 	response := httptest.NewRecorder()
 	application.mailJournalWebSocket(response, request)
 	if response.Code != http.StatusForbidden {
@@ -32145,7 +32147,7 @@ func TestMailControlRequiresCentralAuthorityAndOwnsCancellation(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	manager := httptest.NewRequest(http.MethodGet, "https://sitebrush.com/?expenses", nil)
+	manager := httptest.NewRequest(http.MethodGet, "https://sitebrush.com/?server-settings", nil)
 	manager.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "mail-owner"})
 	if !central.isServerManagerRequest(manager) {
 		t.Fatal("test owner session unavailable")
@@ -36011,14 +36013,271 @@ func TestProfilerFlagPropagationAndDisabledMode(t *testing.T) {
 		t.Fatal("profiling configuration lost in child", arguments)
 	}
 	flagSet := flag.NewFlagSet("profiler", flag.ContinueOnError)
-	flagSet.Bool("profiler", false, "enable owner load-test profiling at /?expenses")
+	flagSet.Bool("profiler", false, "enable owner load-test profiling at /?server-settings")
 	if err := flagSet.Parse([]string{"--profiler"}); err != nil {
 		t.Fatal(err)
 	}
 	var usage bytes.Buffer
 	printVisibleFlagDefaults(&usage, flagSet)
-	if !strings.Contains(usage.String(), "--profiler") || !strings.Contains(usage.String(), "/?expenses") {
+	if !strings.Contains(usage.String(), "--profiler") || !strings.Contains(usage.String(), "/?server-settings") {
 		t.Fatal("missing profiler help", usage.String())
+	}
+}
+
+func newPublicProfilerFallbackFixture(t *testing.T, relay func([]byte) ([]byte, error)) (*App, *publicsite.Front, chan struct{}) {
+	t.Helper()
+	stop := make(chan struct{})
+	front := publicsite.NewFront("profiler-contact", func(http.ResponseWriter, *http.Request, bool) bool { return false }, stop)
+	front.Profiler = relay
+	front.Guest = localPublicPolicyGuest(front, "profiler-contact", func(http.ResponseWriter, *http.Request) bool { return false })
+	server := httptest.NewServer(front)
+	t.Cleanup(server.Close)
+	t.Cleanup(func() {
+		select {
+		case <-stop:
+		default:
+			close(stop)
+		}
+	})
+	t.Setenv("SITEBRUSH_PUBLIC_HTTP_PORT", strconv.Itoa(server.Listener.Addr().(*net.TCPAddr).Port))
+	t.Setenv("SITEBRUSH_PUBLIC_CONTACT", "profiler-contact")
+	return &App{publicProxy: true, storagePath: t.TempDir()}, front, stop
+}
+
+func unavailablePublicProfilerContact(appupdate.Request, <-chan struct{}) (appupdate.Response, error) {
+	return appupdate.Response{}, &appupdate.ContactTransportError{Stage: "fixture", Cause: net.ErrClosed}
+}
+
+func TestPublicProfilerFallbackForwardsOperationsAndPublicMetrics(t *testing.T) {
+	received := make(chan goprofile.Command, 16)
+	expected := goprofile.State{Role: "public", Report: &goprofile.Report{Role: "public", PID: 4242, CPU: 12345, Allocated: 98765, Goroutines: "public goroutines", Network: requesttiming.HTTPMetrics{Requests: 42, Sent: 1024}, Stages: []goprofile.Stage{{Name: "policy", Count: 42}}}}
+	application, _, _ := newPublicProfilerFallbackFixture(t, func(encoded []byte) ([]byte, error) {
+		var command goprofile.Command
+		if err := json.Unmarshal(encoded, &command); err != nil {
+			return nil, err
+		}
+		received <- command
+		return json.Marshal(expected)
+	})
+	for _, command := range []goprofile.Command{
+		{Action: "start", Viewer: "owner", RunID: "run-1"},
+		{Action: "status", Viewer: "owner"},
+		{Action: "report", Viewer: "owner", ID: "report-1", View: "functions", Page: 2, Kind: "cpu", Sort: "self", Search: "serve"},
+		{Action: "report", Viewer: "owner", ID: "report-1", View: "details", Function: 7, Minimum: 1},
+		{Action: "export", Viewer: "owner", ID: "report-1"},
+		{Action: "release", Viewer: "owner"},
+	} {
+		state := application.publicProfilerCommand(command, nil, unavailablePublicProfilerContact)
+		if !reflect.DeepEqual(state, expected) {
+			t.Fatalf("operation=%s state=%+v", command.Action, state)
+		}
+		if forwarded := <-received; !reflect.DeepEqual(forwarded, command) {
+			t.Fatalf("changed command: %+v want %+v", forwarded, command)
+		}
+	}
+}
+
+func TestPublicProfilerUsesNetChanAndNeverFallsBackOnRejection(t *testing.T) {
+	fallbackCalls := make(chan struct{}, 1)
+	application, _, _ := newPublicProfilerFallbackFixture(t, func([]byte) ([]byte, error) {
+		fallbackCalls <- struct{}{}
+		return []byte(`{"role":"public"}`), nil
+	})
+	for _, scenario := range []struct {
+		name      string
+		response  appupdate.Response
+		err       error
+		wantError bool
+	}{
+		{"available", appupdate.Response{Detail: `{"role":"public"}`}, nil, false},
+		{"explicit rejection", appupdate.Response{Error: "forbidden"}, errors.New("forbidden"), true},
+		{"returned rejection", appupdate.Response{Error: "denied"}, nil, true},
+		{"bad identity", appupdate.Response{}, errors.New("invalid supervisor identity"), true},
+		{"TLS rejection", appupdate.Response{}, &appupdate.ContactTransportError{Stage: "dial", Cause: errors.New("tls: bad certificate")}, true},
+		{"bad result", appupdate.Response{Detail: "invalid JSON"}, nil, true},
+		{"wrong process", appupdate.Response{Detail: `{"role":"application"}`}, nil, true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			state := application.publicProfilerCommand(goprofile.Command{Action: "status", Viewer: "owner"}, nil, func(appupdate.Request, <-chan struct{}) (appupdate.Response, error) {
+				return scenario.response, scenario.err
+			})
+			if (state.Error != "") != scenario.wantError {
+				t.Fatalf("state=%+v", state)
+			}
+			select {
+			case <-fallbackCalls:
+				t.Fatal("fallback bypassed primary reply/rejection")
+			default:
+			}
+		})
+	}
+}
+
+func TestPublicProfilerLoopbackAuthenticationAndRequestBounds(t *testing.T) {
+	accepted := make(chan struct{}, 1)
+	_, front, _ := newPublicProfilerFallbackFixture(t, func([]byte) ([]byte, error) {
+		accepted <- struct{}{}
+		return []byte(`{"role":"public"}`), nil
+	})
+	handler := localPublicPolicyGuest(front, "profiler-contact", func(http.ResponseWriter, *http.Request) bool { return false })
+	for _, scenario := range []struct {
+		remote, secret, method, body string
+		status                       int
+	}{
+		{"192.0.2.1:1234", "profiler-contact", "POST", `{}`, 404},
+		{"127.0.0.1:1234", "wrong", "POST", `{}`, 404},
+		{"127.0.0.1:1234", "", "POST", `{}`, 404},
+		{"127.0.0.1:1234", "profiler-contact", "GET", `{}`, 405},
+		{"127.0.0.1:1234", "profiler-contact", "POST", strings.Repeat("x", 4097), 400},
+		{"127.0.0.1:1234", "profiler-contact", "POST", `{}`, 200},
+	} {
+		request := httptest.NewRequest(scenario.method, "http://localhost/.well-known/sitebrush-public-profiler", strings.NewReader(scenario.body))
+		request.RemoteAddr = scenario.remote
+		request.Header.Set(publicsite.InternalHeader, scenario.secret)
+		response := httptest.NewRecorder()
+		if !handler(response, request) || response.Code != scenario.status {
+			t.Fatalf("remote=%s method=%s status=%d want=%d", scenario.remote, scenario.method, response.Code, scenario.status)
+		}
+	}
+	if len(accepted) != 1 {
+		t.Fatalf("accepted %d requests", len(accepted))
+	}
+}
+
+func TestPublicProfilerFallbackConcurrentRequestsAndRunIdentity(t *testing.T) {
+	received := make(chan goprofile.Command, 32)
+	application, _, _ := newPublicProfilerFallbackFixture(t, func(encoded []byte) ([]byte, error) {
+		var command goprofile.Command
+		if err := json.Unmarshal(encoded, &command); err != nil {
+			return nil, err
+		}
+		received <- command
+		return json.Marshal(goprofile.State{Role: "public", RunID: command.RunID, Report: &goprofile.Report{PID: 4242, CPU: int64(command.Page)}})
+	})
+	results := make(chan goprofile.State, 16)
+	for page := 0; page < cap(results); page++ {
+		go func(pageNumber int) {
+			results <- application.publicProfilerCommand(goprofile.Command{Action: "report", Viewer: "owner", Page: pageNumber}, nil, unavailablePublicProfilerContact)
+		}(page)
+	}
+	seen := make(map[int64]bool)
+	for count := 0; count < cap(results); count++ {
+		select {
+		case state := <-results:
+			if state.Error != "" || state.Report == nil || seen[state.Report.CPU] {
+				t.Fatalf("lost or mixed concurrent reply: %+v", state)
+			}
+			seen[state.Report.CPU] = true
+		case <-time.After(5 * time.Second):
+			t.Fatal("concurrent profiler requests blocked")
+		}
+	}
+	for len(received) > 0 {
+		<-received
+	}
+	primaryCommand := make(chan goprofile.Command, 1)
+	state := application.publicProfilerCommand(goprofile.Command{Action: "start", Viewer: "owner"}, nil, func(request appupdate.Request, stop <-chan struct{}) (appupdate.Response, error) {
+		var command goprofile.Command
+		if err := json.Unmarshal([]byte(request.Detail), &command); err != nil {
+			return appupdate.Response{}, err
+		}
+		primaryCommand <- command
+		return unavailablePublicProfilerContact(request, stop)
+	})
+	primary, fallback := <-primaryCommand, <-received
+	if primary.RunID == "" || primary.RunID != fallback.RunID || state.RunID != primary.RunID {
+		t.Fatalf("retry changed recording identity: %+v %+v %+v", primary, fallback, state)
+	}
+}
+
+func TestPublicProfilerFallbackCancellationAndShutdown(t *testing.T) {
+	application, front, boundaryStop := newPublicProfilerFallbackFixture(t, func([]byte) ([]byte, error) { return []byte(`{"role":"public"}`), nil })
+	started, abandoned := make(chan struct{}), make(chan struct{})
+	front.ProfilerSession = func(_ []byte, done <-chan struct{}) ([]byte, error) {
+		close(started)
+		<-done
+		close(abandoned)
+		return nil, errors.New("viewer disconnected")
+	}
+	stop := make(chan struct{})
+	result := make(chan goprofile.State, 1)
+	go func() {
+		result <- application.publicProfilerCommand(goprofile.Command{Action: "status"}, stop, unavailablePublicProfilerContact)
+	}()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("fallback did not start")
+	}
+	close(stop)
+	select {
+	case state := <-result:
+		if state.Error == "" {
+			t.Fatal("cancelled contact succeeded")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancellation blocked")
+	}
+	select {
+	case <-abandoned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("request outlived its viewer")
+	}
+	front.ProfilerSession = nil
+	session, err := goprofile.Start("public", "fixture", "console", boundaryStop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	front.Profiler = session.Relay
+	front.ProfilerSession = session.RelaySession
+	state := application.publicProfilerCommand(goprofile.Command{Action: "status"}, nil, unavailablePublicProfilerContact)
+	if state.Error != "" || state.Role != "public" {
+		t.Fatal(state)
+	}
+	close(boundaryStop)
+	session.Close()
+	state = application.publicProfilerCommand(goprofile.Command{Action: "status"}, nil, unavailablePublicProfilerContact)
+	if state.Error == "" {
+		t.Fatal("stopped public profiler remained available")
+	}
+	application.profiler = session
+	if state = application.profilerCommand("application", goprofile.Command{Action: "status"}, nil); state.Error == "" {
+		t.Fatal("application profiler ignored session shutdown")
+	}
+	applicationStop := make(chan struct{})
+	defer close(applicationStop)
+	applicationSession, err := goprofile.Start("application", "fixture", "console", applicationStop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer applicationSession.Close()
+	application.profiler = applicationSession
+	state = application.profilerCommand("application", goprofile.Command{Action: "status"}, nil)
+	if state.Error != "" || state.Role != "application" {
+		t.Fatalf("public transport failure affected application profiling: %+v", state)
+	}
+}
+
+func TestPublicProfilerFallbackRequestAndResponseBounds(t *testing.T) {
+	called := make(chan struct{}, 1)
+	application := &App{}
+	state := application.publicProfilerCommand(goprofile.Command{Action: "report", Search: strings.Repeat("x", 4096)}, nil, func(appupdate.Request, <-chan struct{}) (appupdate.Response, error) {
+		called <- struct{}{}
+		return appupdate.Response{}, nil
+	})
+	if state.Error == "" || len(called) != 0 {
+		t.Fatalf("oversized command reached transport: %+v", state)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa((32<<20)+1))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	t.Setenv("SITEBRUSH_PUBLIC_HTTP_PORT", strconv.Itoa(server.Listener.Addr().(*net.TCPAddr).Port))
+	t.Setenv("SITEBRUSH_PUBLIC_CONTACT", "profiler-contact")
+	if _, err := application.exchangePublicLoopback("/.well-known/sitebrush-public-profiler", []byte(`{}`), nil); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("response limit was not enforced: %v", err)
 	}
 }
 
@@ -36050,6 +36309,18 @@ func TestProfilerRoutesRemainOutsidePublicWebsite(t *testing.T) {
 
 func TestProfilerPanelAuthorizationAndPlacement(t *testing.T) {
 	application, _ := newTestApplication(t)
+	for _, target := range []string{"/?server-settings", "/?expenses"} {
+		request := httptest.NewRequest(http.MethodGet, "https://localhost"+target, nil)
+		response := httptest.NewRecorder()
+		application.route(response, request)
+		destination, err := url.Parse(response.Header().Get("Location"))
+		if response.Code != http.StatusFound || err != nil || !destination.Query().Has("login") && !destination.Query().Has("register") {
+			t.Fatalf("anonymous settings request %s escaped authorization: status=%d location=%q", target, response.Code, response.Header().Get("Location"))
+		}
+		if shouldRecordAnalyticsRequest(request) {
+			t.Fatalf("settings request %s recorded as a public visit", target)
+		}
+	}
 	request := httptest.NewRequest(http.MethodGet, "https://localhost/?server_profiler_ws", nil)
 	response := httptest.NewRecorder()
 	application.serverProfilerSocket(response, request)
@@ -36081,10 +36352,13 @@ func TestProfilerPanelAuthorizationAndPlacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(markup), `{{if .ShowProfiler}}{{template "server-profiler" .}}{{end}}`) {
-		t.Fatal("profiler missing from expenses panel")
+		t.Fatal("profiler missing from server settings")
 	}
-	if strings.Index(string(markup), `{{template "server-profiler" .}}`) > strings.Index(string(markup), `<header class="page-header`) {
-		t.Fatal("profiler controls are below the expenses heading")
+	headerStart := strings.Index(string(markup), `<header class="page-header server-settings-header`)
+	profilerStart := strings.Index(string(markup), `{{template "server-profiler" .}}`)
+	headerEnd := strings.Index(string(markup), `</header>`)
+	if headerStart < 0 || profilerStart < headerStart || profilerStart > headerEnd {
+		t.Fatal("profiler launch button is outside the server heading")
 	}
 
 }
@@ -36098,12 +36372,15 @@ func TestProfilerExpensesFragmentIsAssociated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var output bytes.Buffer
-	if err = parsed.ExecuteTemplate(&output, "server-profiler", map[string]any{"AccountCSRF": "fixture"}); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(output.String(), "data-profiler") {
-		t.Fatal("profiler template missing")
+	for languageCode, translations := range translationCatalog {
+		var output bytes.Buffer
+		if err = parsed.ExecuteTemplate(&output, "server-profiler", map[string]any{"AccountCSRF": "fixture", "T": translations}); err != nil {
+			t.Fatal(err)
+		}
+		label := strings.TrimSpace(translations["server_profiler_open"])
+		if label == "" || !strings.Contains(output.String(), "data-profiler") || !strings.Contains(output.String(), template.HTMLEscapeString(label)) {
+			t.Fatalf("profiler launch label missing for %s", languageCode)
+		}
 	}
 }
 

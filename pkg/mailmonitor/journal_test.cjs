@@ -39,6 +39,7 @@ class WebSocket {
 vm.runInNewContext(fs.readFileSync(path.join(root, 'web/static/mail_journal.js'), 'utf8'), {document, WebSocket, URL, Intl, Date, console, navigator: {language: 'ru'}, window: {location: {href: 'https://sitebrush.com/?analytics&tab=security&mail_server=central#mail-monitor-0', protocol: 'https:'}, setTimeout: () => 1}});
 assert.equal(connection.address.searchParams.get('tab'), 'security');
 assert.ok(!connection.address.searchParams.has('expenses'), 'security journal stays in security analytics');
+assert.ok(!connection.address.searchParams.has('server-settings'), 'security journal does not request server settings');
 function descendants(element) { return [element, ...element.children.flatMap(descendants)]; }
 function text(element) { return [element.textContent, ...element.children.map(text)].join(' '); }
 function snapshot(stage, steps) {
@@ -89,7 +90,8 @@ selectorElements.set('[data-mail-journal]', []);
 selectorElements.set('[data-mail-blocks]', []);
 selectorElements.set('[data-mail-abuse]', []);
 vm.runInNewContext(fs.readFileSync(path.join(root, 'web/static/mail_journal.js'), 'utf8'), {document, WebSocket, URL, Intl, Date, console, navigator: {language: 'ru'}, window: {location: {href: 'https://sitebrush.com/?expenses', protocol: 'https:'}, setTimeout: () => 1}});
-assert.ok(connection.address.searchParams.has('expenses'));
+assert.ok(connection.address.searchParams.has('server-settings'), 'legacy settings links use the canonical WebSocket route');
+assert.ok(!connection.address.searchParams.has('expenses'));
 assert.ok(!connection.address.searchParams.has('analytics'), 'server counters do not request the security journal');
 connection.handlers.message({data: JSON.stringify(snapshot('recovery_complete', []))});
 assert.equal(counter.textContent, '1 / 1', 'statistics keep live delivery counters');

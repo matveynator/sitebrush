@@ -16,12 +16,12 @@
 </head>
 <body class="technical-page bg-body expenses-page">
 <main class="container billing-page">
-{{if .ShowProfiler}}{{template "server-profiler" .}}{{end}}
 <script type="application/json" id="mail-journal-labels">{{.MailJournalLabelsJSON}}</script>
 <div data-mail-settings data-mode="statistics" data-csrf="{{.AccountCSRF}}" data-language="{{.LanguageCode}}"></div>
 <p class="small" data-mail-feedback role="status"></p>
-  <header class="page-header mb-4">
+  <header class="page-header server-settings-header mb-4">
     <h1 class="section-heading"><img src="/p/static/sitebrush-app-icon.png" class="section-icon" alt=""><a href="/">{{.Domain}}</a> <small class="text-muted">| {{.Title}}</small></h1>
+    {{if .ShowProfiler}}{{template "server-profiler" .}}{{end}}
   </header>
 
   {{if .Status}}<div class="alert alert-info billing-status" role="alert">{{.Status}}</div>{{end}}
@@ -265,7 +265,7 @@
                   {{if $site.CanEditQuota}}
                   <div class="modal fade" id="simpleQuota{{$serverIndex}}_{{$clientIndex}}_{{$siteIndex}}" tabindex="-1" aria-hidden="true">
                     <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
-                      <form method="post" action="?expenses"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+                      <form method="post" action="?server-settings"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
                         <div class="modal-header"><h2 class="modal-title h5">{{index $.T "billing_quota_change_title"}}</h2><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button></div>
                         <div class="modal-body">
                           <p><strong>{{$site.Domain}}</strong></p>
@@ -281,7 +281,7 @@
                   {{if $site.CanDelete}}
                   <div class="modal fade" id="simpleDelete{{$serverIndex}}_{{$clientIndex}}_{{$siteIndex}}" tabindex="-1" aria-hidden="true">
                     <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
-                      <form method="post" action="?expenses"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}"><input type="hidden" name="domain" value="{{$site.Domain}}">
+                      <form method="post" action="?server-settings"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}"><input type="hidden" name="domain" value="{{$site.Domain}}">
                         <div class="modal-header"><h2 class="modal-title h5">Сайт {{$site.Domain}}</h2><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button></div>
                         <div class="modal-body">
                           {{if $site.DeletionReason}}<p class="alert alert-warning">Ожидает удаления до {{$site.DeletionDeadline}}. Причина: {{if eq $site.DeletionReason "nonpayment"}}неоплата{{else}}заявка на удаление{{end}}.</p>{{end}}
@@ -295,7 +295,7 @@
                   </div>
                   {{end}}
                   {{if $site.AdminAccounts}}<details class="expense-simple-site-accounts"><summary>Учётные записи администраторов {{$site.Domain}}</summary>
-                    {{range $site.AdminAccounts}}<form method="post" action="?expenses" class="border rounded p-2 mt-2"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}"><input type="hidden" name="domain" value="{{$site.Domain}}"><input type="hidden" name="confirm_domain" value="{{$site.Domain}}"><input type="hidden" name="email" value="{{.Email}}">
+                    {{range $site.AdminAccounts}}<form method="post" action="?server-settings" class="border rounded p-2 mt-2"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}"><input type="hidden" name="domain" value="{{$site.Domain}}"><input type="hidden" name="confirm_domain" value="{{$site.Domain}}"><input type="hidden" name="email" value="{{.Email}}">
                       <strong>{{.Email}}</strong>{{if .DeleteAfter}} <span class="text-warning">ожидает удаления до {{.DeleteAfter}}</span>{{end}}
                       {{if .Protected}}<p class="text-muted mb-0">Учётная запись владельца сервера защищена от удаления.</p>{{else}}<label class="d-block mt-2">Действие<select name="billing_action" class="form-select form-select-sm">{{if .DeleteAfter}}<option value="restore_account">Восстановить учётную запись</option>{{else}}<option value="queue_account">Удалить через 90 дней</option>{{end}}<option value="delete_account_now">Удалить сейчас</option></select></label><label class="d-block mt-2">Введите email<input name="confirm_email" type="email" class="form-control form-control-sm" autocomplete="off" required></label><button type="submit" class="btn btn-outline-danger btn-sm mt-2">Подтвердить</button>{{end}}
                     </form>{{end}}
@@ -303,7 +303,7 @@
                   {{end}}
                 </div>
                 {{if $client.BillingCustomerID}}
-                <form method="post" action="?expenses" class="billing-plan-form"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+                <form method="post" action="?server-settings" class="billing-plan-form"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
                   <input type="hidden" name="billing_action" value="billing_customer_schedule">
                   <input type="hidden" name="customer_id" value="{{$client.BillingCustomerID}}">
                   <label>{{index $.T "billing_invoice_day"}} <input type="number" name="invoice_day" class="form-control" min="1" max="28" value="{{$client.InvoiceDay}}" required></label>
@@ -325,7 +325,7 @@
         {{if $server.Local}}
         <div class="modal fade" id="expenseSettings{{$serverIndex}}" tabindex="-1" aria-hidden="true">
           <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
-            <form method="post" action="?expenses"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+            <form method="post" action="?server-settings"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
               <div class="modal-header"><h2 class="modal-title h5">{{index $.T "expenses_settings_title"}}</h2><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button></div>
               <div class="modal-body billing-plan-form">
                 <input type="hidden" name="billing_action" value="save_server_expense_policy">
@@ -1136,7 +1136,7 @@
             <div class="alert alert-warning mb-2">{{index $.T "billing_server_cost_required"}}</div>
             {{end}}
             {{if $server.Local}}
-            <form method="post" action="?expenses" class="billing-plan-form"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+            <form method="post" action="?server-settings" class="billing-plan-form"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
               <input type="hidden" name="billing_action" value="save_server_expense_policy">
               <label>{{index $.T "expenses_calculation_mode"}}
                 <select name="expense_mode" class="form-control">
@@ -1184,7 +1184,7 @@
                   {{if $site.CanEditQuota}}
                   <div class="modal fade" id="hostingQuotaModal{{$serverIndex}}_{{$clientIndex}}_{{$siteIndex}}" tabindex="-1" aria-hidden="true">
                     <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
-                      <form method="post" action="?expenses"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+                      <form method="post" action="?server-settings"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
                         <div class="modal-header">
                           <h2 class="modal-title h5">{{index $.T "billing_quota_change_title"}}</h2>
                           <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button>
@@ -1390,7 +1390,7 @@
                   <h3 class="billing-user-subtitle">{{index $.T "billing_schedule_title"}}</h3>
                   <p class="text-muted small">{{if $user.AutomaticBillingEnabled}}{{index $.T "billing_schedule_active"}}{{else}}{{index $.T "billing_schedule_inactive"}}{{end}}</p>
                 </div>
-                <form method="post" action="?expenses" class="billing-plan-form"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+                <form method="post" action="?server-settings" class="billing-plan-form"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
                   <input type="hidden" name="billing_action" value="billing_customer_schedule">
                   <input type="hidden" name="customer_id" value="{{$user.BillingCustomerID}}">
                   <label>{{index $.T "billing_invoice_day"}} <input type="number" name="invoice_day" class="form-control" min="1" max="28" value="{{$user.InvoiceDay}}" required></label>
@@ -1528,7 +1528,7 @@
           <h2>Ключ sitebrush.com</h2>
           <p class="text-muted">Private key хранится только на sitebrush.com. Public key встраивается в сборку SiteBrush, чтобы snapshot уходил по HTTPS, подписанно и зашифрованно.</p>
         </div>
-        <form method="post" action="?expenses"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+        <form method="post" action="?server-settings"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
           <input type="hidden" name="billing_action" value="generate_sitebrush_com_key">
           <button type="submit" class="btn btn-outline-primary"><img src="/p/static/save-page.png" alt="">Сгенерировать keypair</button>
         </form>
@@ -1550,7 +1550,7 @@
   <section class="card billing-card hosting-tab-panel-hidden" data-hosting-tab-panel="settings">
     <div class="card-body">
       <h2>{{index .T "billing_plans_title"}}</h2>
-      <form method="post" action="?expenses" class="billing-plan-form"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+      <form method="post" action="?server-settings" class="billing-plan-form"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
         <input type="hidden" name="billing_action" value="save_plan">
         <label>{{index .T "billing_plan_name"}} <input name="name" type="text" class="form-control" placeholder="Free / Pro / Business" required></label>
         <label>{{index .T "billing_quota"}} <input name="quota" type="text" class="form-control" placeholder="10gb" required></label>
@@ -1568,7 +1568,7 @@
           <span><button type="button" class="btn btn-link btn-sm p-0 align-baseline" data-bs-toggle="modal" data-bs-target="#billingPlanModal{{.ID}}">{{.Name}}</button> · {{.QuotaLabel}} · {{index $.T "billing_sites_short"}} {{.SiteLimit}} · {{index $.T "billing_reports_short"}} {{.AnalyticsReportLimit}} · {{.Price}} {{.Currency}}/{{.BillingPeriod}}{{if .IsDefault}} · {{index $.T "billing_default_suffix"}}{{end}}</span>
           <div class="d-flex gap-2">
             <button type="button" class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#billingPlanEditModal{{.ID}}"><img src="/p/static/pencil.png" alt="">{{index $.T "billing_edit"}}</button>
-            <form method="post" action="?expenses"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+            <form method="post" action="?server-settings"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
               <input type="hidden" name="billing_action" value="delete_plan">
               <input type="hidden" name="plan_id" value="{{.ID}}">
               <button type="submit" class="btn btn-outline-danger btn-sm"><img src="/p/static/cross.png" alt="">{{index $.T "billing_delete"}}</button>
@@ -1599,7 +1599,7 @@
         </div>
         <div class="modal fade" id="billingPlanEditModal{{.ID}}" tabindex="-1" aria-hidden="true">
           <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
-            <form method="post" action="?expenses" data-billing-ajax-save><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+            <form method="post" action="?server-settings" data-billing-ajax-save><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
               <div class="modal-header">
                 <h5 class="modal-title">{{index $.T "billing_edit_plan_title"}} {{.Name}}</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button>
@@ -1636,7 +1636,7 @@
           <p class="text-muted">История хранится персонально у клиента; общий ввод новых счетов больше не используется.</p>
         </div>
       </div>
-      <form method="post" action="?expenses" class="billing-plan-form"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+      <form method="post" action="?server-settings" class="billing-plan-form"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
         <input type="hidden" name="billing_action" value="create_invoice">
         <label>Клиент <input name="customer_email" type="email" class="form-control" placeholder="client@example.com" required></label>
         <label>Сайт <input name="domain" type="text" class="form-control" placeholder="example.com" required></label>
@@ -1673,17 +1673,17 @@
             {{if .Notes}}<div class="text-muted small">{{.Notes}}</div>{{end}}
           </div>
           <div class="billing-site-form">
-            <form method="post" action="?expenses"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+            <form method="post" action="?server-settings"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
               <input type="hidden" name="billing_action" value="mark_invoice_paid">
               <input type="hidden" name="invoice_id" value="{{.ID}}">
               <button type="submit" class="btn btn-success btn-sm">Оплачен</button>
             </form>
-            <form method="post" action="?expenses"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+            <form method="post" action="?server-settings"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
               <input type="hidden" name="billing_action" value="mark_invoice_payment_error">
               <input type="hidden" name="invoice_id" value="{{.ID}}">
               <button type="submit" class="btn btn-outline-danger btn-sm">Ошибка оплаты</button>
             </form>
-            <form method="post" action="?expenses"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+            <form method="post" action="?server-settings"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
               <input type="hidden" name="billing_action" value="cancel_invoice">
               <input type="hidden" name="invoice_id" value="{{.ID}}">
               <button type="submit" class="btn btn-outline-secondary btn-sm">Отменить</button>
@@ -1698,7 +1698,7 @@
         <summary>Способы оплаты</summary>
         <div class="billing-plan-list mt-3">
           {{range .PaymentProviders}}
-          <form method="post" action="?expenses" class="billing-plan-row"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+          <form method="post" action="?server-settings" class="billing-plan-row"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
             <input type="hidden" name="billing_action" value="save_payment_provider">
             <input type="hidden" name="provider" value="{{.Provider}}">
             <label class="checkbox-row"><input type="checkbox" name="enabled" value="1" {{if .Enabled}}checked{{end}}><span>{{.DisplayName}}</span></label>
@@ -1721,7 +1721,7 @@
       </div>
       {{template "registration-settings-form" .}}
       {{if .ShowCommissionSetting}}
-      <form method="post" action="?expenses" class="billing-registration-settings-form mt-3"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+      <form method="post" action="?server-settings" class="billing-registration-settings-form mt-3"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
         <input type="hidden" name="billing_action" value="sitebrush_commission">
         <label>{{index .T "billing_commission_percent"}}
           <div class="input-group"><input type="number" name="commission_percent" class="form-control" min="0" max="100" step="0.01" value="{{.CommissionPercent}}" required><span class="input-group-text">%</span></div>
@@ -1746,7 +1746,7 @@
         <h2>{{index .T "billing_add_site_title"}}</h2>
         <p class="text-muted">{{index .T "billing_add_site_hint"}}</p>
       </div>
-      <form method="post" action="?expenses" class="billing-create-form"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+      <form method="post" action="?server-settings" class="billing-create-form"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
         <input type="hidden" name="billing_action" value="create_site">
         <label>{{index .T "billing_domain"}} <input name="domain" type="text" class="form-control" placeholder="example.com" required></label>
         <label>{{index .T "billing_admin_email"}} <input name="email" type="email" class="form-control" placeholder="admin@example.com" required></label>
@@ -1782,7 +1782,7 @@
           </div>
           <div class="modal fade" id="approveSiteRequestModal{{$requestIndex}}" tabindex="-1" aria-hidden="true">
             <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
-              <form method="post" action="?expenses"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+              <form method="post" action="?server-settings"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
                 <div class="modal-header">
                   <h5 class="modal-title">{{index $.T "billing_approve_title"}} {{$request.Domain}}</h5>
                   <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button>
@@ -1804,7 +1804,7 @@
           </div>
           <div class="modal fade" id="rejectSiteRequestModal{{$requestIndex}}" tabindex="-1" aria-hidden="true">
             <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
-              <form method="post" action="?expenses"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+              <form method="post" action="?server-settings"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
                 <div class="modal-header">
                   <h5 class="modal-title">{{index $.T "billing_reject_title"}} {{$request.Domain}}</h5>
                   <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button>
@@ -1862,7 +1862,7 @@
             <div class="text-muted small">Расчёт: {{$site.BillingUsageLabel}} · {{$site.BillingPriceLabel}} · {{$site.BillingStatusText}}</div>
             <div class="small">{{range $certificate := $site.CertificateDomains}}<div>{{if $certificate.Valid}}<span class="status-ok">{{$certificate.Domain}} · {{index $.T "domain_settings_ssl_valid"}} · {{$certificate.ExpiresAt}} ({{$certificate.Remaining}})</span>{{else}}<span class="status-bad">{{$certificate.Domain}} · {{index $.T "domain_settings_ssl_invalid"}}{{if $certificate.LastError}} · {{$certificate.LastError}}{{end}}</span>{{end}} {{if $certificate.CanRenew}}<button type="button" class="btn btn-outline-primary btn-sm" data-certificate-renew="{{$certificate.Domain}}">{{index $.T "domain_settings_ssl_renew_now"}}</button><span data-certificate-renew-status="{{$certificate.Domain}}" aria-live="polite"></span>{{end}}</div>{{end}}</div>
           </div>
-          {{if not $site.IsDemo}}<form method="post" action="?expenses" class="billing-site-form" data-billing-ajax-save><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+          {{if not $site.IsDemo}}<form method="post" action="?server-settings" class="billing-site-form" data-billing-ajax-save><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
             <input type="hidden" name="billing_action" value="update_site">
             <input type="hidden" name="domain" value="{{$site.Domain}}">
             <label>{{index $.T "billing_quota"}} <input name="quota" type="text" class="form-control form-control-sm" value="{{$site.QuotaInput}}"></label>
@@ -1880,7 +1880,7 @@
           </div>
           <div class="modal fade" id="deleteSiteModal{{$siteIndex}}" tabindex="-1" aria-hidden="true">
             <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
-              <form method="post" action="?expenses"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+              <form method="post" action="?server-settings"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
                 <div class="modal-header">
                   <h5 class="modal-title">Сайт {{$site.Domain}}</h5>
                   <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button>
@@ -1906,7 +1906,7 @@
           </div>
           {{end}}
           {{if $site.AdminAccounts}}<details class="mt-3"><summary>Учетные записи администраторов сайта</summary>
-            {{range $site.AdminAccounts}}<form method="post" action="?expenses" class="border rounded p-2 mt-2"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}"><input type="hidden" name="domain" value="{{$site.Domain}}"><input type="hidden" name="confirm_domain" value="{{$site.Domain}}"><input type="hidden" name="email" value="{{.Email}}">
+            {{range $site.AdminAccounts}}<form method="post" action="?server-settings" class="border rounded p-2 mt-2"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}"><input type="hidden" name="domain" value="{{$site.Domain}}"><input type="hidden" name="confirm_domain" value="{{$site.Domain}}"><input type="hidden" name="email" value="{{.Email}}">
               <strong>{{.Email}}</strong>{{if .DeleteAfter}} <span class="text-warning">ожидает удаления до {{.DeleteAfter}}</span>{{end}}
               {{if .Protected}}<p class="text-muted mb-0">Учетная запись владельца сервера защищена от удаления.</p>{{else}}<label class="d-block mt-2">Действие<select name="billing_action" class="form-select form-select-sm">{{if .DeleteAfter}}<option value="restore_account">Восстановить учетную запись</option>{{else}}<option value="queue_account">Удалить через 90 дней</option>{{end}}<option value="delete_account_now">Удалить сейчас</option></select></label>
               <label class="d-block mt-2">Введите email<input name="confirm_email" type="email" class="form-control form-control-sm" autocomplete="off" required></label><button type="submit" class="btn btn-outline-danger btn-sm mt-2">Подтвердить</button>{{end}}
@@ -1950,7 +1950,7 @@
           <p class="text-muted">{{index .T "billing_service_mail_hint"}}</p>
         </div>
       </div>
-      <form method="post" action="?expenses" class="billing-service-mail-settings-form" data-billing-ajax-save><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+      <form method="post" action="?server-settings" class="billing-service-mail-settings-form" data-billing-ajax-save><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
         <input type="hidden" name="billing_action" value="service_mail_settings">
         <label class="checkbox-row">
           <input type="checkbox" name="service_mail_relay_enabled" value="1" {{if .ServiceMailRelayEnabled}}checked{{end}}>
@@ -1973,7 +1973,7 @@
             <div class="text-muted small">{{index $.T "billing_service_mail_key"}}: {{.PublicKey}}</div>
             <div class="text-muted small">IP: {{.LastIP}} · {{index $.T "billing_service_mail_sent"}}: {{.SentCount}} · {{index $.T "billing_service_mail_errors"}}: {{.ErrorCount}} · {{index $.T "billing_service_mail_last"}}: {{.LastSeenAt}}</div>
           </div>
-          <form method="post" action="?expenses" class="billing-site-form"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+          <form method="post" action="?server-settings" class="billing-site-form"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
             <input type="hidden" name="installation_id" value="{{.InstallationID}}">
             {{if .Blocked}}
             <input type="hidden" name="billing_action" value="unblock_service_mail_installation">
@@ -1988,7 +1988,7 @@
         <div class="empty">{{index .T "billing_service_mail_empty"}}</div>
         {{end}}
       </div>
-      <form method="post" action="?expenses" class="billing-service-mail-block-form mt-3"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+      <form method="post" action="?server-settings" class="billing-service-mail-block-form mt-3"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
         <input type="hidden" name="billing_action" value="add_service_mail_block">
         <label>{{index .T "billing_service_mail_block_scope"}}
           <select name="scope" class="form-control">
@@ -2015,7 +2015,7 @@
         {{range .ServiceMailBlocks}}
         <div class="billing-plan-row">
           <span>{{.Scope}}: {{.Value}} · {{.Reason}} · {{.CreatedAt}}</span>
-          <form method="post" action="?expenses"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+          <form method="post" action="?server-settings"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
             <input type="hidden" name="billing_action" value="delete_service_mail_block">
             <input type="hidden" name="block_id" value="{{.ID}}">
             <button type="submit" class="btn btn-outline-primary btn-sm">{{index $.T "billing_service_mail_remove_block"}}</button>
@@ -2025,7 +2025,7 @@
       </div>
       {{end}}
       {{if .ServiceMailEvents}}
-      <form method="post" action="?expenses" class="billing-service-mail-log-panel mt-3" data-service-mail-log-panel><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+      <form method="post" action="?server-settings" class="billing-service-mail-log-panel mt-3" data-service-mail-log-panel><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
         <input type="hidden" name="billing_action" value="delete_service_mail_events">
         <div class="billing-service-mail-log-toolbar">
           <label>Дата логов
@@ -2091,7 +2091,7 @@
             <span>{{index $.T "billing_backup_token_status"}} {{.TokenStatus}}</span>
             {{if .DownloadedAt}}<span>{{index $.T "billing_backup_downloaded_at"}} {{.DownloadedAt}}</span>{{end}}
           </div>
-          <form method="post" action="?expenses" class="billing-backup-actions" data-billing-ajax-save><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+          <form method="post" action="?server-settings" class="billing-backup-actions" data-billing-ajax-save><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
             <input type="hidden" name="billing_action" value="update_backup_retention">
             <input type="hidden" name="backup_id" value="{{.ID}}">
             <label>{{index $.T "billing_backup_retention_days"}}
@@ -3244,7 +3244,7 @@
 </html>
 
 {{define "registration-settings-form"}}
-<form method="post" action="?expenses" class="billing-registration-settings-form" data-billing-ajax-save><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+<form method="post" action="?server-settings" class="billing-registration-settings-form" data-billing-ajax-save><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
   <input type="hidden" name="billing_action" value="registration_settings">
   <label class="checkbox-row">
     <input type="checkbox" name="auto_registration_enabled" value="1" {{if .AutoRegistrationEnabled}}checked{{end}} data-auto-registration-toggle>
@@ -3281,7 +3281,7 @@
 {{end}}
 
 {{define "demo-settings-form"}}
-<form method="post" action="?expenses" class="billing-demo-settings-form" data-billing-ajax-save><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+<form method="post" action="?server-settings" class="billing-demo-settings-form" data-billing-ajax-save><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
   <input type="hidden" name="billing_action" value="demo_settings">
   <input type="hidden" name="refresh_demo_site" value="0" data-refresh-demo-site-input>
   <label>{{index .T "billing_demo_max_site_size"}} <input name="demo_site_max_size" class="form-control" value="{{.DemoMaxSize}}" required></label>

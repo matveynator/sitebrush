@@ -3091,6 +3091,10 @@ body.technical-page.analytics-page {
 
 /* Server expenses and the standalone copy form share the same surface hierarchy. */
 .technical-page.expenses-page { font-size: 14px; }
+.technical-page .server-settings-header { flex-direction: row; flex-wrap: wrap; }
+.technical-page .server-settings-header .section-heading { flex: 1 1 280px; width: auto; }
+.technical-page .server-settings-header [data-profiler] { flex: 0 0 auto; margin-left: auto; }
+.technical-page .server-settings-header [data-profiler-open] { white-space: nowrap; }
 .technical-page.expenses-page .expense-simple-summary {
     padding: 24px;
     background: var(--theme-card);

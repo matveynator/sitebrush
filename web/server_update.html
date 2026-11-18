@@ -11,7 +11,7 @@
 <body class="technical-page">
 <main class="container" data-server-update data-csrf="{{.AccountCSRF}}" data-server-version="{{.ServerVersion}}"
   data-log-empty="{{index .T "update_log_empty"}}" data-waiting="{{index .T "update_connecting"}}" data-unavailable="{{index .T "update_unavailable"}}">
-  {{if not .Embedded}}<header class="page-header"><h1>{{index .T "update_title"}}</h1><a href="/?expenses#server-update">{{index .T "menu_expenses"}}</a></header>{{end}}
+  {{if not .Embedded}}<header class="page-header"><h1>{{index .T "update_title"}}</h1><a href="/?server-settings#server-update">{{index .T "menu_expenses"}}</a></header>{{end}}
   <p class="update-introduction">{{index .T "update_maintenance_notice"}}</p>
   <section class="update-versions" aria-label="{{index .T "update_versions"}}">
     <div class="update-card"><span>{{index .T "update_running_version"}}</span><strong data-update-current>—</strong><small data-update-selected hidden></small><small data-update-launcher-version></small></div>

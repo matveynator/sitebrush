@@ -448,7 +448,7 @@ http://your-domain.example
 
 ## Load-test profiler
 
-Start SiteBrush with `--profiler`, sign in as the local server owner and open `/?expenses`. The button at the top opens the load-test dialog. A single recording automatically covers the available serving processes; standalone mode does not offer a nonexistent public process. The default overview summarizes the server, and **Details** retains the Webgrind-style tables. Choose **Record 30 seconds**, then generate the load externally, for example:
+Start SiteBrush with `--profiler`, sign in as the local server owner and open `/?server-settings`. The profiler button on the right of the server logo and name opens the load-test dialog. The former `/?expenses` address remains available for existing links. A single recording automatically covers the available serving processes; standalone mode does not offer a nonexistent public process. The first screen shows per-process statistics and the full Webgrind-style function tables. Choose **Record 30 seconds**, then generate the load externally, for example:
 
 ```sh
 ab -k -c 500 -n 10000 https://sitebrush.com/

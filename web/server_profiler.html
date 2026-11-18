@@ -1,6 +1,6 @@
 {{define "server-profiler"}}
-<section class="my-4" id="server-profiler" data-profiler data-csrf="{{.AccountCSRF}}">
- <button type="button" data-profiler-open>Профилирование внешней нагрузки · 30 секунд</button>
+<section id="server-profiler" data-profiler data-csrf="{{.AccountCSRF}}">
+ <button type="button" class="btn btn-outline-primary" data-profiler-open aria-haspopup="dialog" aria-controls="server-profiler-dialog">{{index .T "server_profiler_open"}}</button>
  <dialog id="server-profiler-dialog" class="profiler-panel" data-profiler-dialog aria-labelledby="profiler-title">
   <header class="profiler-heading">
    <div class="profiler-brand"><h2 id="profiler-title">SiteBrush <strong>profiler</strong></h2><p>Анализ нагрузки в браузере</p></div>
@@ -27,8 +27,8 @@
    <div class="profiler-summary" data-profiler-summary></div>
    <div class="profiler-breakdown" data-profiler-breakdown aria-label="Распределение собственного CPU"></div>
    <section data-profiler-overview class="profiler-overview"></section>
-   <details data-profiler-details><summary>Подробности: функции, память и задержки</summary>
-   <div class="profiler-toolbar profiler-filters"><label>Часть сервера <select data-profiler-role></select></label><span data-profiler-process class="profiler-explanation"></span></div>
+   <section data-profiler-details aria-label="Полная статистика профилировщика">
+   <div class="profiler-toolbar profiler-filters"><label>Статистика процесса <select data-profiler-role></select></label><span data-profiler-process class="profiler-explanation"></span></div>
    <nav class="profiler-tabs" role="tablist" aria-label="Данные профиля" data-profiler-tabs>
     <button type="button" role="tab" data-view="functions">Функции CPU</button><button type="button" role="tab" data-view="graph">Граф вызовов</button><button type="button" role="tab" data-view="code">Строки кода CPU</button><button type="button" role="tab" data-view="memory">Память</button><button type="button" role="tab" data-view="stages">Задержки запросов</button><button type="button" role="tab" data-view="network">Сеть HTTP</button><button type="button" role="tab" data-view="goroutines">Goroutine</button>
    </nav>
@@ -40,7 +40,7 @@
    </div>
    <div data-profiler-content class="profiler-content"></div>
    <div class="profiler-toolbar profiler-pagination" data-profiler-pagination><span data-profiler-count></span><button type="button" data-profiler-back>← Назад</button><span data-profiler-page></span><button type="button" data-profiler-next>Далее →</button></div>
-   </details>
+   </section>
    <footer class="profiler-footer">Собственное CPU — работа самой функции; с вызовами — вместе с её потомками. Образцы показывают присутствие в выборке CPU, а не число вызовов. Ожидание сети и каналов смотрите в задержках и состояниях goroutine. Временные данные удаляются при закрытии окна; предельный срок хранения — 10 минут.</footer>
   </main>
  </dialog>

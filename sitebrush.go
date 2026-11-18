@@ -235,6 +235,7 @@ type App struct {
 	publicProxy           bool
 	publicStreamer        *publicsite.Streamer
 	publicCatalog         *publicsite.Catalog
+	publicStaticMode      publicsite.StaticMode
 	requestTimings        *requesttiming.Collector
 	profiler              *goprofile.Session
 	publicPublication     chan publicPublicationTask
@@ -4626,7 +4627,7 @@ func shouldRecordAnalyticsRequest(r *http.Request) bool {
 		return true
 	}
 	query := r.URL.Query()
-	for _, skippedFlag := range []string{"analytics", "expenses", "hosting_and_support", "billing", "grab_events", "grab_ws", "revision_preview", "publish_events", "captcha"} {
+	for _, skippedFlag := range []string{"analytics", "server-settings", "expenses", "hosting_and_support", "billing", "grab_events", "grab_ws", "revision_preview", "publish_events", "captcha"} {
 		if _, found := query[skippedFlag]; found {
 			return false
 		}
@@ -9960,6 +9961,7 @@ type listenPorts struct {
 }
 
 type serverRunConfig struct {
+	PublicStaticMode     publicsite.StaticMode
 	ParsedPorts          listenPorts
 	InheritedHTTP        net.Listener
 	InheritedHTTPS       net.Listener
@@ -10142,7 +10144,7 @@ func helpWasRequested(args []string) bool {
 }
 
 func printVisibleFlagDefaults(output io.Writer, flagSet *flag.FlagSet) {
-	visibleFlagNames := []string{"cli", "debug", "desktop", "install", "path", "port", "uninstall", "upgrade", "version", "profiler"}
+	visibleFlagNames := []string{"cli", "debug", "desktop", "install", "path", "port", "uninstall", "upgrade", "version", "profiler", "public-static-mode"}
 	for _, flagName := range visibleFlagNames {
 		currentFlag := flagSet.Lookup(flagName)
 		if currentFlag == nil {
@@ -10206,8 +10208,9 @@ func main() {
 	updateTargetVersion := flag.String("update-target-version", "", "internal expected compiled release identity")
 	versionMode := flag.Bool("version", false, "print version and exit")
 	debugMode := flag.Bool("debug", false, "enable verbose HTTP and database diagnostic logs")
+	publicStaticMode := flag.String("public-static-mode", firstNonEmpty(os.Getenv("SITEBRUSH_PUBLIC_STATIC_MODE"), "snapshot"), "public file delivery: legacy, http10, roots, html, or snapshot")
 	requestTimings := flag.Bool("request-timings", false, "collect asynchronous request stage timings and log counters every 30 seconds")
-	profiler := flag.Bool("profiler", false, "enable owner load-test recording at /?expenses; 30-second reports are kept temporarily and deleted after viewing; status goes to console or --logfile")
+	profiler := flag.Bool("profiler", false, "enable owner load-test recording at /?server-settings; 30-second reports are kept temporarily and deleted after viewing; status goes to console or --logfile")
 	legacyStoragePath := flag.String("storage-path", "", "")
 	legacyDBPath := flag.String("db-path", "", "")
 	legacyDBType := flag.String("db-type", "", "")
@@ -10238,6 +10241,10 @@ func main() {
 		return
 	}
 	flag.Parse()
+	parsedStaticMode, staticModeErr := publicsite.ParseStaticMode(*publicStaticMode)
+	if staticModeErr != nil {
+		log.Fatal(staticModeErr)
+	}
 	if *updateTargetVersion != "" && *updateTargetVersion != CompileVersion {
 		log.Fatal("release binary does not match its signed version identity")
 	}
@@ -10483,7 +10490,8 @@ func main() {
 		profilerLogOutput = filepath.Join(effectiveStoragePath, "storage", "logs", "sitebrush.log")
 	}
 	serverConfig := serverRunConfig{
-		ParsedPorts: parsedPorts, StoragePath: effectiveStoragePath, DBPath: effectiveDBPath,
+		PublicStaticMode: parsedStaticMode,
+		ParsedPorts:      parsedPorts, StoragePath: effectiveStoragePath, DBPath: effectiveDBPath,
 		AllowStorageFallback: !storagePathWasProvided && !dbPathWasProvided, PortWasProvided: flagWasProvided("port"),
 		DesktopMode: desktopMode, Debug: *debugMode, RequestTimings: *requestTimings, Profiler: *profiler, ProfilerLogOutput: profilerLogOutput,
 		UpdateProbation: *updateProbation, UpdateChild: *serverChild, PublicProxy: *publicProxy,
@@ -10871,8 +10879,9 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 
 	address := "localhost:" + strconv.Itoa(listenPort)
 
+	application.publicStaticMode = config.PublicStaticMode
 	application.publicStreamer = publicsite.NewStreamer()
-	application.publicCatalog = publicsite.NewCatalog(effectiveStoragePath, ctx.Done())
+	application.publicCatalog = publicsite.NewCatalog(effectiveStoragePath, ctx.Done(), application.publicRuntimeOptions())
 	application.startPublicPublication(ctx.Done())
 	application.publicPolicyContact = config.PublicProxy && os.Getenv("SITEBRUSH_PUBLIC_POLICY_CHANNEL") == "1"
 	if application.publicPolicyContact {
@@ -11104,7 +11113,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 			restoredHandler.ServeHTTP(w, r)
 		})
 	}
-	server := newSitebrushHTTPServer(httpHandler, application.requestTimings)
+	server := newSitebrushHTTPServerWithMode(httpHandler, application.publicStaticMode, application.requestTimings)
 	server.ConnState = sitebrushConnStateLogger("HTTP", config.Debug)
 	serverErrors := make(chan error, 1)
 	go func() {
@@ -11199,8 +11208,12 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 }
 
 func newSitebrushHTTPServer(handler http.Handler, timings ...*requesttiming.Collector) *http.Server {
+	return newSitebrushHTTPServerWithMode(handler, publicsite.StaticSnapshot, timings...)
+}
+
+func newSitebrushHTTPServerWithMode(handler http.Handler, mode publicsite.StaticMode, timings ...*requesttiming.Collector) *http.Server {
 	server := &http.Server{
-		Handler:           keepAliveHandler(handler),
+		Handler:           keepAliveHandlerWithMode(handler, mode),
 		ReadTimeout:       sitebrushHTTPReadTimeout,
 		WriteTimeout:      sitebrushHTTPWriteTimeout,
 		IdleTimeout:       sitebrushHTTPIdleTimeout,
@@ -11625,6 +11638,10 @@ func (a *App) preloadChrootStorage(ctx context.Context) startupChrootPreloadStat
 }
 
 func keepAliveHandler(next http.Handler) http.Handler {
+	return keepAliveHandlerWithMode(next, publicsite.StaticSnapshot)
+}
+
+func keepAliveHandlerWithMode(next http.Handler, mode publicsite.StaticMode) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if shouldSendExplicitHTTP11KeepAlive(r) {
 			r.Close = false
@@ -11636,6 +11653,7 @@ func keepAliveHandler(next http.Handler) http.Handler {
 		if shouldBufferHTTP10KeepAlive(r) {
 			r.Close = false
 			writer := newHTTP10KeepAliveResponseWriter(w, r.Method)
+			writer.legacy = !mode.Enabled(publicsite.StaticHTTP10)
 			next.ServeHTTP(writer, r)
 			writer.finish()
 			return
@@ -11679,6 +11697,8 @@ type http10KeepAliveResponseWriter struct {
 	statusCode  int
 	wroteHeader bool
 	overflowed  bool
+	direct      bool
+	legacy      bool
 }
 
 func newHTTP10KeepAliveResponseWriter(w http.ResponseWriter, method string) *http10KeepAliveResponseWriter {
@@ -11693,15 +11713,35 @@ func (writer *http10KeepAliveResponseWriter) WriteHeader(statusCode int) {
 	if writer.wroteHeader {
 		return
 	}
+	// Informational responses do not commit the final response headers.
+	if statusCode >= 100 && statusCode < 200 && statusCode != http.StatusSwitchingProtocols {
+		writer.ResponseWriter.WriteHeader(statusCode)
+		return
+	}
 	writer.statusCode = statusCode
 	writer.wroteHeader = true
+	if writer.legacy {
+		return
+	}
+	if statusCode == http.StatusSwitchingProtocols {
+		writer.direct = true
+		writer.ResponseWriter.WriteHeader(statusCode)
+		return
+	}
+	length, lengthErr := strconv.ParseInt(writer.Header().Get("Content-Length"), 10, 64)
+	if writer.method == http.MethodHead || !httpStatusAllowsBody(statusCode) || lengthErr == nil && length >= 0 {
+		writer.direct = true
+		writer.Header().Set("Connection", "keep-alive")
+		writer.Header().Set("Keep-Alive", "timeout=65")
+		writer.ResponseWriter.WriteHeader(statusCode)
+	}
 }
 
 func (writer *http10KeepAliveResponseWriter) Write(payload []byte) (int, error) {
 	if !writer.wroteHeader {
 		writer.WriteHeader(http.StatusOK)
 	}
-	if writer.overflowed {
+	if writer.overflowed || writer.direct {
 		return writer.ResponseWriter.Write(payload)
 	}
 	if writer.body.Len()+len(payload) > sitebrushHTTP10KeepAliveBufferLimit {
@@ -11711,8 +11751,26 @@ func (writer *http10KeepAliveResponseWriter) Write(payload []byte) (int, error) 
 	return writer.body.Write(payload)
 }
 
+// Delegation preserves net/http's platform file-transfer path. The fallback
+// deliberately exposes only Write, so io.Copy cannot recurse into ReadFrom.
+func (writer *http10KeepAliveResponseWriter) ReadFrom(source io.Reader) (int64, error) {
+	if !writer.wroteHeader {
+		writer.WriteHeader(http.StatusOK)
+	}
+	if writer.direct || writer.overflowed {
+		if receiver, supported := writer.ResponseWriter.(io.ReaderFrom); supported {
+			return receiver.ReadFrom(source)
+		}
+		return io.Copy(struct{ io.Writer }{writer.ResponseWriter}, source)
+	}
+	return io.Copy(struct{ io.Writer }{writer}, source)
+}
+
 func (writer *http10KeepAliveResponseWriter) Flush() {
-	if !writer.overflowed {
+	if !writer.wroteHeader {
+		writer.WriteHeader(http.StatusOK)
+	}
+	if !writer.overflowed && !writer.direct {
 		writer.commitWithoutKeepAlive()
 	}
 	if flusher, ok := writer.ResponseWriter.(http.Flusher); ok {
@@ -11729,7 +11787,7 @@ func (writer *http10KeepAliveResponseWriter) Hijack() (net.Conn, *bufio.ReadWrit
 }
 
 func (writer *http10KeepAliveResponseWriter) finish() {
-	if writer.overflowed {
+	if writer.overflowed || writer.direct {
 		return
 	}
 	if httpStatusAllowsBody(writer.statusCode) && writer.Header().Get("Content-Length") == "" {
@@ -11744,6 +11802,7 @@ func (writer *http10KeepAliveResponseWriter) finish() {
 }
 
 func (writer *http10KeepAliveResponseWriter) commitWithoutKeepAlive() {
+	writer.wroteHeader = true
 	writer.overflowed = true
 	writer.Header().Del("Connection")
 	writer.Header().Del("Keep-Alive")
@@ -11964,7 +12023,7 @@ func listenTLSForAutoCert() (net.Listener, error) {
 }
 
 func (a *App) serveTLSWithAutoCert(ctx context.Context, tlsListener net.Listener, tlsConfig *tls.Config, handler http.Handler) {
-	tlsServer := newSitebrushHTTPServer(handler, a.requestTimings)
+	tlsServer := newSitebrushHTTPServerWithMode(handler, a.publicStaticMode, a.requestTimings)
 	tlsServer.TLSConfig = tlsConfig
 	tlsServer.ErrorLog = log.New(problemLogWriter{application: a}, "", 0)
 	tlsServer.ConnState = sitebrushConnStateLogger("HTTPS", a.debug)
@@ -14337,7 +14396,7 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.serverProfilerSocket(w, r)
 		return
 	}
-	if hasQueryFlag(r, "expenses") || hasQueryFlag(r, "hosting_and_support") || hasQueryFlag(r, "billing") {
+	if hasQueryFlag(r, "server-settings") || hasQueryFlag(r, "expenses") || hasQueryFlag(r, "hosting_and_support") || hasQueryFlag(r, "billing") {
 		a.expensesPage(w, r)
 		return
 	}
@@ -24692,7 +24751,13 @@ func (a *App) trialImportWait(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) trialRegistrationOverlayHTML(r *http.Request, domain string) string {
-	if !a.pendingTrialRegistration(r.Context(), domain) {
+	pending := false
+	if decision, found := r.Context().Value(publicDecisionContextKey{}).(publicsite.Decision); found && decision.Found && a.publicCatalog != nil && a.publicCatalog.RuntimeEnabled() {
+		pending = decision.PendingRegistration
+	} else {
+		pending = a.pendingTrialRegistration(r.Context(), domain)
+	}
+	if !pending {
 		return ""
 	}
 	return `<style data-sitebrush-owned="true">
@@ -29257,7 +29322,7 @@ func (a *App) hostingAndSupportDemoPaymentPage(w http.ResponseWriter, r *http.Re
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = io.WriteString(w, `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SiteBrush.com demo payment</title><link href="/p/static/technical_pages.css" rel="stylesheet"></head><body class="technical-page bg-body"><main class="container billing-page py-5"><section class="card billing-card"><div class="card-body"><p class="text-muted">SiteBrush.com demo payments</p><h1>Демо-оплата счёта `+template.HTMLEscapeString(invoiceNumber)+`</h1><p>Платёжная страница подготовлена как демо-настройка первого этапа. Реальное списание здесь не выполняется.</p><a class="btn btn-primary" href="/?expenses">Вернуться в «Серверы и расходы»</a></div></section></main></body></html>`)
+	_, _ = io.WriteString(w, `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SiteBrush.com demo payment</title><link href="/p/static/technical_pages.css" rel="stylesheet"></head><body class="technical-page bg-body"><main class="container billing-page py-5"><section class="card billing-card"><div class="card-body"><p class="text-muted">SiteBrush.com demo payments</p><h1>Демо-оплата счёта `+template.HTMLEscapeString(invoiceNumber)+`</h1><p>Платёжная страница подготовлена как демо-настройка первого этапа. Реальное списание здесь не выполняется.</p><a class="btn btn-primary" href="/?server-settings">Вернуться в «Настройки сервера»</a></div></section></main></body></html>`)
 }
 
 func (a *App) redirectToHostingAndSupportMainDomain(w http.ResponseWriter, r *http.Request) bool {
@@ -31816,7 +31881,7 @@ func (a *App) enqueueSiteRegistrationRequestOwnerEmails(ctx context.Context, r *
 		"Тариф: " + hostingAndSupportPlanEmailLabel(plan),
 		"",
 		"Откройте биллинг, чтобы активировать или отклонить заявку:",
-		absoluteURLForPath(r, "/?expenses"),
+		absoluteURLForPath(r, "/?server-settings"),
 	}, "\n")
 	fromAddress := a.emailFromAddress(a.siteDomain(r.Context(), r))
 	for _, ownerEmail := range ownerEmails {
@@ -47644,7 +47709,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
 	}
 	updateMenuLink := ""
 	if isServerManager {
-		updateMenuLink = "<a href='/?expenses#server-update' class='SiteBrushContextMenuUpdate' hidden>" + template.HTMLEscapeString(translationOrDefault(translations, "update_title", "SiteBrush updates")) + "</a>"
+		updateMenuLink = "<a href='/?server-settings#server-update' class='SiteBrushContextMenuUpdate' hidden>" + template.HTMLEscapeString(translationOrDefault(translations, "update_title", "SiteBrush updates")) + "</a>"
 	}
 	copyrightMenuEntry := fmt.Sprintf("<li class='SiteBrushContextMenu ContextMenuCopyright'><div class='SiteBrushContextMenuFooter'><a href='%s' class='SiteBrushContextMenuFooterLink' target='_blank' rel='noopener noreferrer'>sitebrush</a>%s<a href='%s' class='SiteBrushContextMenuVersion' download>%s</a></div>%s</li>", sitebrushHomeURL, storageUsageHTML, serverBinaryDownloadURL, compiledVersionLabel, updateMenuLink)
 	if isAdmin {
@@ -47663,7 +47728,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
 		}
 		hostingAndSupportEntry := ""
 		if isServerManager {
-			hostingAndSupportEntry = "<li class='SiteBrushContextMenu SiteBrushSeparatedMenuItem SiteBrushPrivilegedMenuItem'><a href='?expenses' class='SiteBrushContextMenuLink'><img src='/p/static/sitebrush-app-icon.png' class='SiteBrushMenuIcon' alt=''>" + hostingAndSupportLabel + "</a></li>"
+			hostingAndSupportEntry = "<li class='SiteBrushContextMenu SiteBrushSeparatedMenuItem SiteBrushPrivilegedMenuItem'><a href='?server-settings' class='SiteBrushContextMenuLink'><img src='/p/static/sitebrush-app-icon.png' class='SiteBrushMenuIcon' alt=''>" + hostingAndSupportLabel + "</a></li>"
 		}
 		logoutEntry := ""
 		if showLogout {
@@ -58080,15 +58145,60 @@ func hasSitebrushSessionCookie(r *http.Request) bool {
 	return err == nil
 }
 
+func (a *App) publicRuntimeOptions() publicsite.RuntimeOptions {
+	root := a.storageRealRoot
+	if root == "" {
+		root = a.storagePath
+	}
+	return publicsite.RuntimeOptions{
+		Mode: a.publicStaticMode, Root: root, StorageName: domainStorageName,
+		StaticPath:       func(pathname string) string { return staticRelativePathForPage(cleanPath(pathname)) },
+		HTMLFile:         func(pathname, prefix string) bool { return pageContentKind(pathname, prefix) == "html" },
+		PrepareBootstrap: preparePublicHTMLBootstraps,
+	}
+}
+
+func preparePublicHTMLBootstraps(policy publicsite.Policy, pathname string) map[publicsite.HTMLVariantKey]string {
+	decision := publicsite.Decision{Layout: policy.Layouts[pathname], DeletionReason: policy.DeletionReason, DeletionDeadline: policy.DeletionDeadline, DeletionDebtLabel: policy.DeletionDebtLabel}
+	bootstraps := make(map[publicsite.HTMLVariantKey]string)
+	for language := range guestContextMenuTemplates {
+		for _, menu := range []bool{false, true} {
+			for _, updating := range []bool{false, true} {
+				key := publicsite.HTMLVariantKey{Language: language, Menu: menu, Updating: updating}
+				bootstraps[key] = publicHTMLBootstrap(decision, key)
+			}
+		}
+	}
+	return bootstraps
+}
+
+func publicHTMLBootstrap(decision publicsite.Decision, key publicsite.HTMLVariantKey) string {
+	menuAttribute := ""
+	if key.Menu {
+		menuAttribute = ` data-menu="guest_menu.` + template.HTMLEscapeString(key.Language) + `.js"`
+		if key.Updating {
+			menuAttribute += ` data-menu-mode="updating"`
+		}
+	}
+	layoutAttribute := ""
+	if decision.Layout != "" {
+		layoutAttribute = ` data-analytics-layout="` + template.HTMLEscapeString(decision.Layout) + `"`
+	}
+	return `<script async src="/p/static/visitor.js?v=` + url.QueryEscape(CompileVersion) + `" data-sitebrush-owned="true"` + menuAttribute + layoutAttribute + `></script>` + siteDebtOverlayHTML(decision)
+}
+
 // The published tree is opened beneath its own site root. Read-only delivery
 // never prepares storage directories or repeats the writer's jail setup.
 func (a *App) openPublishedStaticFile(domain, pagePath string) (*os.File, error) {
 	return a.openPublicSiteFile(domain, "static", staticRelativePathForPage(cleanPath(pagePath)))
 }
-func (a *App) openSiteVersion(domain, digest string) (*os.File, error) {
+func (a *App) openSiteVersion(domain, digest string, decisions ...publicsite.Decision) (*os.File, error) {
 	decoded, err := hex.DecodeString(digest)
 	if err != nil || len(decoded) != 32 || digest != strings.ToLower(digest) {
 		return nil, errors.New("invalid file version")
+	}
+	if a.publicCatalog != nil && a.publicCatalog.RuntimeEnabled() {
+		return a.publicCatalog.OpenFile(domain, "versions", digest, decisions...)
 	}
 	root, err := os.OpenRoot(filepath.Dir(a.storageRootDir()))
 	if err != nil {
@@ -58097,7 +58207,10 @@ func (a *App) openSiteVersion(domain, digest string) (*os.File, error) {
 	defer root.Close()
 	return root.Open(sitefreeze.ObjectPath(domain, digest))
 }
-func (a *App) openPublicSiteFile(domain, directory, relative string) (*os.File, error) {
+func (a *App) openPublicSiteFile(domain, directory, relative string, decisions ...publicsite.Decision) (*os.File, error) {
+	if a.publicCatalog != nil && a.publicCatalog.RuntimeEnabled() {
+		return a.publicCatalog.OpenFile(domain, directory, relative, decisions...)
+	}
 	rootPath, err := a.storageJailRootPath()
 	if err != nil {
 		return nil, err
@@ -58122,33 +58235,45 @@ func (a *App) servePublishedStaticFileWithMenu(w http.ResponseWriter, r *http.Re
 		return false
 	}
 	pagePath = cleanPath(pagePath)
-	file, err := a.openPublishedStaticFile(domain, pagePath)
-	if decision, found := r.Context().Value(publicDecisionContextKey{}).(publicsite.Decision); found && decision.PageVersion != "" {
-		if file != nil {
-			file.Close()
-		}
-		file, err = a.openSiteVersion(domain, decision.PageVersion)
+	decision := a.publicRequestDecision(r)
+	if decision.PageHidden {
+		return false
 	}
-	if decision, found := r.Context().Value(publicDecisionContextKey{}).(publicsite.Decision); found && decision.Versioned && decision.Frozen {
-		if decision.PageVersion == "" {
-			if file != nil {
-				file.Close()
-			}
-			if decision.Chroot.Path != "" {
-				return false
-			}
-			http.NotFound(w, r)
-			return true
+	if decision.Found {
+		r = withPublicRequestDecision(r, decision)
+	}
+	version := decision.PageVersion
+	if decision.Versioned && decision.Frozen && version == "" {
+		if decision.Chroot.Path != "" {
+			return false
 		}
-		if err != nil {
-			http.Error(w, "published version is unavailable", http.StatusServiceUnavailable)
-			return true
+		http.NotFound(w, r)
+		return true
+	}
+	var publication *publicsite.PublishedFile
+	var err error
+	if a.publicCatalog != nil && a.publicCatalog.RuntimeEnabled() {
+		publication, err = a.publicCatalog.OpenPublished(decision, staticRelativePathForPage(pagePath), version)
+	} else {
+		var source *os.File
+		if version != "" {
+			source, err = a.openSiteVersion(domain, version, decision)
+		} else {
+			source, err = a.openPublishedStaticFile(domain, pagePath)
+		}
+		if err == nil {
+			publication = &publicsite.PublishedFile{File: source}
 		}
 	}
 	if err != nil {
+		if version != "" || a.publicCatalog != nil && a.publicCatalog.RuntimeEnabled() && !os.IsNotExist(err) {
+			http.Error(w, "published version is unavailable", http.StatusServiceUnavailable)
+			return true
+		}
 		return false
 	}
-	defer file.Close()
+	defer publication.Close()
+	file := publication.File
 	kind := pageContentKind(pagePath, "")
 	if kind == "file" {
 		prefix := make([]byte, 512)
@@ -58167,32 +58292,25 @@ func (a *App) servePublishedStaticFileWithMenu(w http.ResponseWriter, r *http.Re
 	}
 	a.logContentDelivery(w, "static-file")
 	language := preferredLanguageCode(r.Header.Get("Accept-Language"))
-	menuAttribute := ""
-	if injectPublicMenu {
-		menuAttribute = ` data-menu="guest_menu.` + template.HTMLEscapeString(language) + `.js"`
-		if updating {
-			menuAttribute += ` data-menu-mode="updating"`
+	variantKey := publicsite.HTMLVariantKey{Language: language, Menu: injectPublicMenu, Updating: updating}
+	prepared := a.publicCatalog != nil && a.publicCatalog.RuntimeEnabled() && a.publicStaticMode.Enabled(publicsite.StaticHTML) && !decision.PrivateTestDrive && decision.Password.Path == "" && !hasSitebrushSessionCookie(r)
+	bootstrap := ""
+	overlay := a.trialRegistrationOverlayHTML(r, domain)
+	if !prepared || overlay != "" {
+		prepared = false
+		bootstrap = publicHTMLBootstrap(decision, variantKey)
+		if overlay != "" {
+			w.Header().Set("X-Robots-Tag", "noindex, nofollow")
+			w.Header().Set("Cache-Control", "no-store")
+			bootstrap += overlay
 		}
-	}
-	layoutAttribute := ""
-	if decision, found := r.Context().Value(publicDecisionContextKey{}).(publicsite.Decision); found && decision.Layout != "" {
-		layoutAttribute = ` data-analytics-layout="` + template.HTMLEscapeString(decision.Layout) + `"`
-	}
-	bootstrap := `<script async src="/p/static/visitor.js?v=` + url.QueryEscape(CompileVersion) + `" data-sitebrush-owned="true"` + menuAttribute + layoutAttribute + `></script>`
-	if decision, found := r.Context().Value(publicDecisionContextKey{}).(publicsite.Decision); found {
-		bootstrap += siteDebtOverlayHTML(decision)
-	}
-	if overlay := a.trialRegistrationOverlayHTML(r, domain); overlay != "" {
-		w.Header().Set("X-Robots-Tag", "noindex, nofollow")
-		w.Header().Set("Cache-Control", "no-store")
-		bootstrap += overlay
 	}
 	// The public boundary has no site database. Its policy snapshot already owns
 	// demo membership, so static responses do not enter the control plane.
 	demoSite := false
-	if a.publicBoundary {
-		demoSite = a.publicRequestDecision(r).DemoSite
-	} else {
+	if decision.Found {
+		demoSite = decision.DemoSite
+	} else if !a.publicBoundary {
 		demoSite = a.isDemoSiteDomain(r.Context(), domain)
 	}
 	if demoSite {
@@ -58210,6 +58328,14 @@ func (a *App) servePublishedStaticFileWithMenu(w http.ResponseWriter, r *http.Re
 	redirect := ""
 	if decision, found := r.Context().Value(publicDecisionContextKey{}).(publicsite.Decision); found && decision.Password.Path == "" && requestCanUseCanonicalTrailingSlash(r, pagePath) {
 		redirect = canonicalTrailingSlashURL(r, pagePath)
+	}
+	if prepared {
+		if streamErr := a.publicStreamer.Prepared(w, r, file, publication.HTML, variantKey, redirect); streamErr != nil {
+			w.Header().Del("ETag")
+			w.Header().Set("Cache-Control", "no-store")
+			http.Error(w, "published HTML is unavailable", http.StatusServiceUnavailable)
+		}
+		return true
 	}
 	if streamErr := a.publicStreamer.HTML(w, r, file, bootstrap, CompileVersion+"-"+language+"-"+strconv.FormatBool(injectPublicMenu), redirect); streamErr != nil {
 		return false
@@ -58689,7 +58815,7 @@ func runSupervisedSitebrush(ctx context.Context, config serverRunConfig) error {
 		if catalogErr != nil {
 			return catalogErr
 		}
-		return appupdate.Run(appupdate.Options{Catalog: &catalog, StoragePath: storagePath, Executable: executable, Version: CompileVersion, Compatibility: appupdate.CurrentCompatibility(), Arguments: arguments, PublicKey: publicKey, Output: os.Stdout}, ctx.Done())
+		return appupdate.Run(appupdate.Options{Catalog: &catalog, Environment: []string{"SITEBRUSH_PUBLIC_STATIC_MODE=" + config.PublicStaticMode.String()}, StoragePath: storagePath, Executable: executable, Version: CompileVersion, Compatibility: appupdate.CurrentCompatibility(), Arguments: arguments, PublicKey: publicKey, Output: os.Stdout}, ctx.Done())
 	}
 	front, frontClose, secret, frontErr := startPublicSiteBoundary(ctx, storagePath, config)
 	if frontErr != nil {
@@ -58708,7 +58834,7 @@ func runSupervisedSitebrush(ctx context.Context, config serverRunConfig) error {
 	if err != nil {
 		return err
 	}
-	return appupdate.Run(appupdate.Options{Catalog: &catalog, PublicState: front.Set, PublicSecurity: front.Security, PublicThrottle: front.Throttle, PublicPolicy: front.Policy, PublicProfiler: front.Profiler, PublicObservations: front.PullObservations, PublicCertificate: front.Certificate, Environment: []string{"SITEBRUSH_PUBLIC_POLICY_CHANNEL=1", "SITEBRUSH_PUBLIC_CONTACT=" + secret, "SITEBRUSH_PUBLIC_HTTP_PORT=" + strconv.Itoa(front.HTTPPort), "SITEBRUSH_PUBLIC_HTTPS_PORT=" + strconv.Itoa(front.HTTPSPort)}, StoragePath: storagePath, Executable: executable, Version: CompileVersion, Compatibility: appupdate.CurrentCompatibility(), Arguments: arguments, PublicKey: publicKey, Output: os.Stdout}, ctx.Done())
+	return appupdate.Run(appupdate.Options{Catalog: &catalog, PublicState: front.Set, PublicSecurity: front.Security, PublicThrottle: front.Throttle, PublicPolicy: front.Policy, PublicProfiler: front.Profiler, PublicObservations: front.PullObservations, PublicCertificate: front.Certificate, Environment: []string{"SITEBRUSH_PUBLIC_STATIC_MODE=" + config.PublicStaticMode.String(), "SITEBRUSH_PUBLIC_POLICY_CHANNEL=1", "SITEBRUSH_PUBLIC_CONTACT=" + secret, "SITEBRUSH_PUBLIC_HTTP_PORT=" + strconv.Itoa(front.HTTPPort), "SITEBRUSH_PUBLIC_HTTPS_PORT=" + strconv.Itoa(front.HTTPSPort)}, StoragePath: storagePath, Executable: executable, Version: CompileVersion, Compatibility: appupdate.CurrentCompatibility(), Arguments: arguments, PublicKey: publicKey, Output: os.Stdout}, ctx.Done())
 }
 
 func runManualUpgrade(storagePath, databasePath, port string, debug bool, policies ...appupdate.BackupPolicy) error {
@@ -59228,7 +59354,7 @@ func (a *App) serverUpdatePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !hasQueryFlag(r, "embedded") {
-		httpsecurity.RedirectLocal(w, r, "/?expenses#server-update", http.StatusSeeOther)
+		httpsecurity.RedirectLocal(w, r, "/?server-settings#server-update", http.StatusSeeOther)
 		return
 	}
 	_, centralErr := a.centralAnnouncementIdentity()
@@ -61143,14 +61269,13 @@ func (a *App) refreshSelectedPublicPolicies(domains []string) (bool, []string, e
 				failures = append(failures, fmt.Errorf("%s: refresh: %w; inspect blocked policy: %v", domain, err, statErr))
 				continue
 			}
-			if refreshErr := a.notifyPublicPolicyWithPreference("refresh", domain, &fallbackPolicyContact); refreshErr != nil {
-				sealed = false
-				failures = append(failures, fmt.Errorf("%s: refresh: %w; notify blocked policy: %v", domain, err, refreshErr))
-				continue
-			}
 			if blockErr := a.notifyPublicPolicyWithPreference("block", domain, &fallbackPolicyContact); blockErr != nil {
 				sealed = false
 				failures = append(failures, fmt.Errorf("%s: refresh: %w; notify block: %v", domain, err, blockErr))
+				continue
+			}
+			if refreshErr := a.notifyPublicPolicyWithPreference("refresh", domain, &fallbackPolicyContact); refreshErr != nil {
+				failures = append(failures, fmt.Errorf("%s: refresh: %w; notify blocked policy: %v", domain, err, refreshErr))
 				continue
 			}
 			failures = append(failures, fmt.Errorf("%s: %w", domain, err))
@@ -61318,6 +61443,9 @@ func (a *App) writePublicPolicy(domain string) error {
 func (a *App) writePublicPolicyWithNotifier(domain string, notify func(string, string) error) error {
 	ctx := contextWithDomain(context.Background(), domain)
 	policy := publicsite.Policy{Domain: domain}
+	if a.publicStaticMode.Enabled(publicsite.StaticRoots) {
+		policy.PendingRegistration = a.pendingTrialRegistration(ctx, domain)
+	}
 	if a.controlDatabase != nil {
 		if err := a.withServerControlDatabaseRead(ctx, "public-site-deletion", func(database *sql.DB) error {
 			// The owner publishes private routing before the launcher can
@@ -61682,6 +61810,9 @@ func (a *App) notifyPublicPolicyWithPreference(action, domain string, fallback *
 			err = a.publicCatalog.Reload(domain)
 		}
 		if err != nil {
+			if action == "refresh" {
+				return errors.Join(err, a.notifyPublicPolicyWithPreference("block", domain, fallback))
+			}
 			return err
 		}
 	}
@@ -61721,37 +61852,86 @@ func (a *App) notifyPublicPolicyWithPreference(action, domain string, fallback *
 // The public boundary is a separate process. A loopback contact keeps policy
 // publication available when the supervisor's NetChan contact is interrupted.
 func (a *App) exchangePublicPolicyFallback(encoded []byte) error {
+	_, err := a.exchangePublicLoopback("/.well-known/sitebrush-public-policy", encoded, a.publicPublicationDone)
+	return err
+}
+
+// HTTP is only the authenticated local boundary adapter when NetChan fails.
+// Its fixed dial target cannot follow request hosts, proxies, or redirects.
+func (a *App) exchangePublicLoopback(endpoint string, encoded []byte, stop <-chan struct{}) ([]byte, error) {
+	if len(encoded) > 4096 {
+		return nil, errors.New("public boundary command is too large")
+	}
+	expectedStatus := http.StatusNoContent
+	deadline := 3 * time.Second
+	switch endpoint {
+	case "/.well-known/sitebrush-public-policy":
+	case "/.well-known/sitebrush-public-profiler":
+		expectedStatus = http.StatusOK
+		deadline = 10 * time.Second
+	default:
+		return nil, errors.New("unknown public boundary contact")
+	}
+	select {
+	case <-stop:
+		return nil, errors.New("public boundary contact stopped")
+	default:
+	}
 	port, err := strconv.Atoi(os.Getenv("SITEBRUSH_PUBLIC_HTTP_PORT"))
 	if err != nil || port < 1 || port > 65535 {
-		return errors.New("public boundary loopback port is unavailable")
+		return nil, errors.New("public boundary loopback port is unavailable")
 	}
 	secret := os.Getenv("SITEBRUSH_PUBLIC_CONTACT")
 	if secret == "" {
-		return errors.New("public boundary contact is unavailable")
+		return nil, errors.New("public boundary contact is unavailable")
 	}
 	request, err := http.NewRequest(http.MethodPost, "http://127.0.0.1/.well-known/sitebrush-public-policy", bytes.NewReader(encoded))
 	if err != nil {
-		return err
+		return nil, err
 	}
+	request.URL.Path = endpoint
 	request.Header.Set(publicsite.InternalHeader, secret)
-	// The request URL is fixed. Only the validated local listener port varies;
-	// the transport never resolves a host or follows an external redirect.
+	// Context is confined to net/http; the publication/viewer session owns cancellation.
+	requestContext, cancelRequest := context.WithCancel(context.Background())
+	defer cancelRequest()
+	request = request.WithContext(requestContext)
+	finished := make(chan struct{})
+	defer close(finished)
+	go func() {
+		select {
+		case <-stop:
+			cancelRequest()
+		case <-finished:
+		}
+	}()
 	dialer := &net.Dialer{Timeout: 3 * time.Second}
 	transport := &http.Transport{Proxy: nil, DisableKeepAlives: true, DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return dialer.DialContext(ctx, "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 	}}
-	client := &http.Client{Timeout: 3 * time.Second, Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error {
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Timeout: deadline, Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}}
 	response, err := client.Do(request)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("public boundary returned %s", response.Status)
+	if response.StatusCode != expectedStatus {
+		return nil, fmt.Errorf("public boundary returned %s", response.Status)
 	}
-	return nil
+	const responseLimit = 32 << 20
+	if response.ContentLength > responseLimit {
+		return nil, errors.New("public boundary response is too large")
+	}
+	reply, err := io.ReadAll(io.LimitReader(response.Body, responseLimit+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(reply) > responseLimit {
+		return nil, errors.New("public boundary response is too large")
+	}
+	return reply, nil
 }
 
 func (a *App) publicAdminIPAllowed(domain, clientIP string) bool {
@@ -61811,7 +61991,7 @@ func sitebrushControlQueryFlag(flag string) bool {
 		"test_drive", "test_drive_start", "test_drive_handoff", "test_drive_handoff_ready", "test_drive_welcome", "test_drive_source", "test_drive_activation", "test_drive_status", "test_drive_email", "test_drive_verify", "test_drive_activate", "test_drive_captcha", "test_drive_check_captcha", "test_drive_ws", "test_drive_entry_ws",
 		"demo_grab_preview", "demo_grab_refresh", "site_request",
 		"backup", "backup_import", "backup_download", "native_pick_files", "native_save_backup",
-		"hosting_and_support", "expenses", "billing", "hosting_invoice", "billing_schedule",
+		"server-settings", "hosting_and_support", "expenses", "billing", "hosting_invoice", "billing_schedule",
 		"hosting_and_support_demo_payment", "hosting_and_support_backup_download", "billing_backup_download",
 		"public_ip_settings_ws", "service_mail_relay", "hosting_snapshot", "mail_delivery_ws", "mail_monitor_ws", "certificate_renew_ws",
 	} {
@@ -61925,12 +62105,12 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 		default:
 			return false
 		}
-		file, openErr := a.openPublicSiteFile(domain, "files", filepath.FromSlash(fileName))
+		file, openErr := a.openPublicSiteFile(domain, "files", filepath.FromSlash(fileName), decision)
 		if decision.File.Version != "" {
 			if file != nil {
 				file.Close()
 			}
-			file, openErr = a.openSiteVersion(domain, decision.File.Version)
+			file, openErr = a.openSiteVersion(domain, decision.File.Version, decision)
 		}
 		if openErr != nil {
 			http.NotFound(w, r)
@@ -61961,7 +62141,7 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 		return true
 	}
 	if decision.ResourceFile != "" {
-		file, openErr := a.openPublicSiteFile(domain, "files", filepath.FromSlash(decision.ResourceFile))
+		file, openErr := a.openPublicSiteFile(domain, "files", filepath.FromSlash(decision.ResourceFile), decision)
 		if decision.Frozen && decision.Versioned {
 			if file != nil {
 				file.Close()
@@ -61971,7 +62151,7 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 				http.NotFound(w, r)
 				return true
 			}
-			file, openErr = a.openSiteVersion(domain, version)
+			file, openErr = a.openSiteVersion(domain, version, decision)
 		}
 		if openErr != nil {
 			http.NotFound(w, r)
@@ -62012,7 +62192,7 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 		}
 
 		if decision.ChrootVersion != "" {
-			file, openErr := a.openSiteVersion(domain, decision.ChrootVersion)
+			file, openErr := a.openSiteVersion(domain, decision.ChrootVersion, decision)
 			if openErr != nil {
 				http.NotFound(w, r)
 				return true
@@ -62288,8 +62468,9 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 	application.requestTimings = startRequestTimingCounters(config.RequestTimings || config.Profiler, ctx.Done(), "public")
 	application.profiler = profilerSession
 	profilerSession.SetTimings(application.requestTimings)
+	application.publicStaticMode = config.PublicStaticMode
 	application.publicStreamer = publicsite.NewStreamer()
-	application.publicCatalog = publicsite.NewCatalog(storagePath, ctx.Done())
+	application.publicCatalog = publicsite.NewCatalog(storagePath, ctx.Done(), application.publicRuntimeOptions())
 	application.autoCertCertificateCache = startAutoCertCertificateMemoryCache(ctx, filepath.Join(application.storageRootDir(), "letsencrypt"))
 	staticFiles, err := fs.Sub(embeddedWebFiles, "web/static")
 	if err != nil {
@@ -62357,6 +62538,7 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 	front.Security = application.attackGuard.Relay
 	if profilerSession != nil {
 		front.Profiler = profilerSession.Relay
+		front.ProfilerSession = profilerSession.RelaySession
 	}
 	if application.throttleGuard != nil {
 		front.Throttle = application.throttleGuard.Relay
@@ -62386,7 +62568,7 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 
 	application.startPublicSecurityObservations(ctx.Done())
 	front.HTTPPort = port
-	server := newSitebrushHTTPServer(front, application.requestTimings)
+	server := newSitebrushHTTPServerWithMode(front, application.publicStaticMode, application.requestTimings)
 	go func() {
 		if serveErr := server.Serve(listener); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 			log.Printf("PUBLIC HTTP: %v", serveErr)
@@ -62419,7 +62601,7 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 				return front, func() { server.Close(); closeGuards() }, secret, nil
 			}
 			tlsConfig := application.publicTLSConfig(fallback, front.ObserveTLS)
-			tlsServer = newSitebrushHTTPServer(front, application.requestTimings)
+			tlsServer = newSitebrushHTTPServerWithMode(front, application.publicStaticMode, application.requestTimings)
 			tlsServer.TLSConfig = tlsConfig
 			go func() {
 				if serveErr := tlsServer.ServeTLS(tlsListener, "", ""); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
@@ -62443,7 +62625,7 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 
 func localPublicPolicyGuest(front *publicsite.Front, secret string, next func(http.ResponseWriter, *http.Request) bool) func(http.ResponseWriter, *http.Request) bool {
 	return func(w http.ResponseWriter, r *http.Request) bool {
-		if r.URL.Path != "/.well-known/sitebrush-public-policy" {
+		if r.URL.Path != "/.well-known/sitebrush-public-policy" && r.URL.Path != "/.well-known/sitebrush-public-profiler" {
 			return next(w, r)
 		}
 		if secret == "" || !requestRemoteIsLoopback(r) || subtle.ConstantTimeCompare([]byte(r.Header.Get(publicsite.InternalHeader)), []byte(secret)) != 1 {
@@ -62459,9 +62641,38 @@ func localPublicPolicyGuest(front *publicsite.Front, secret string, next func(ht
 			http.Error(w, "invalid public policy change", http.StatusBadRequest)
 			return true
 		}
-		if _, err := front.Policy(encoded); err != nil {
-			log.Printf("PUBLIC policy loopback change rejected: %v", err)
-			http.Error(w, "public policy change failed", http.StatusServiceUnavailable)
+		contact := front.Policy
+		profiling := r.URL.Path == "/.well-known/sitebrush-public-profiler"
+		if profiling {
+			contact = front.Profiler
+		}
+		if contact == nil {
+			http.Error(w, "public contact is unavailable", http.StatusServiceUnavailable)
+			return true
+		}
+		var reply []byte
+		var contactErr error
+		if profiling && front.ProfilerSession != nil {
+			reply, contactErr = front.ProfilerSession(encoded, r.Context().Done())
+		} else {
+			reply, contactErr = contact(encoded)
+		}
+		if contactErr != nil {
+			log.Printf("PUBLIC loopback contact rejected path=%q: %v", r.URL.Path, contactErr)
+			http.Error(w, "public contact failed", http.StatusServiceUnavailable)
+			return true
+		}
+		if profiling {
+			if len(reply) > 32<<20 {
+				http.Error(w, "public profiler response is too large", http.StatusServiceUnavailable)
+				return true
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("Content-Length", strconv.Itoa(len(reply)))
+			if _, writeErr := w.Write(reply); writeErr != nil {
+				log.Printf("PUBLIC profiler loopback response failed: %v", writeErr)
+			}
 			return true
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -65504,13 +65715,50 @@ func (a *App) profilerCommand(role string, command goprofile.Command, stop <-cha
 	if role != "public" || !a.publicProxy {
 		return goprofile.State{Error: "Process unavailable"}
 	}
+	contact := func(request appupdate.Request, session <-chan struct{}) (appupdate.Response, error) {
+		return appupdate.Exchange(a.storagePath, request, session, func(event appupdate.ContactEvent) {
+			if event.Error != nil || event.Stage == "abort" {
+				log.Printf("PROFILER public NetChan action=%q client_pid=%d stage=%q address=%q error_type=%T error=%v", command.Action, os.Getpid(), event.Stage, event.Address, event.Error, event.Error)
+			}
+		})
+	}
+	return a.publicProfilerCommand(command, stop, contact)
+}
+
+func (a *App) publicProfilerCommand(command goprofile.Command, stop <-chan struct{}, contact func(appupdate.Request, <-chan struct{}) (appupdate.Response, error)) goprofile.State {
+	select {
+	case <-stop:
+		return goprofile.State{Error: "Profiler contact stopped"}
+	default:
+	}
+	if command.Action == "start" && command.RunID == "" {
+		command.RunID = randomAccessToken()
+	}
 	encoded, err := json.Marshal(command)
 	if err != nil {
 		return goprofile.State{Error: err.Error()}
 	}
-	response, err := appupdate.Exchange(a.storagePath, appupdate.Request{Action: "public_profiler", Detail: string(encoded)}, stop)
+	if len(encoded) > 4096 {
+		return goprofile.State{Error: "Profiler command too large"}
+	}
+	response, err := contact(appupdate.Request{Action: "public_profiler", Detail: string(encoded)}, stop)
 	if err != nil {
-		return goprofile.State{Error: err.Error()}
+		select {
+		case <-stop:
+			return goprofile.State{Error: "Profiler contact stopped"}
+		default:
+		}
+		if !appupdate.IsContactTransportFailure(err) {
+			log.Printf("PROFILER public contact rejected action=%q error_type=%T error=%v", command.Action, err, err)
+			return goprofile.State{Error: err.Error()}
+		}
+		log.Printf("PROFILER public transport unavailable action=%q; using authenticated loopback fallback: %v", command.Action, err)
+		reply, fallbackErr := a.exchangePublicLoopback("/.well-known/sitebrush-public-profiler", encoded, stop)
+		if fallbackErr != nil {
+			log.Printf("PROFILER public loopback failed action=%q: %v", command.Action, fallbackErr)
+			return goprofile.State{Error: fmt.Sprintf("public profiler: %v; local fallback: %v", err, fallbackErr)}
+		}
+		response = appupdate.Response{Detail: string(reply)}
 	}
 	if response.Error != "" {
 		return goprofile.State{Error: response.Error}
@@ -65519,8 +65767,12 @@ func (a *App) profilerCommand(role string, command goprofile.Command, stop <-cha
 	if err = json.Unmarshal([]byte(response.Detail), &state); err != nil {
 		state.Error = err.Error()
 	}
+	if state.Error == "" && state.Role != "public" {
+		return goprofile.State{Error: "Invalid public profiler process identity"}
+	}
 	return state
 }
+
 func (a *App) serverProfilerSocket(w http.ResponseWriter, r *http.Request) {
 	if a.profiler == nil {
 		http.NotFound(w, r)
