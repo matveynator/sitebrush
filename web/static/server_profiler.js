@@ -650,6 +650,16 @@
    body.appendChild(row);
   });
   output.appendChild(body);parent.appendChild(output);
+  model.targets.forEach(function cacheDiagnostics(role) {
+   const report=model.overviewParts[role];const cache=report&&report.ramCache;if(!cache)return;
+   const reasons=Object.keys(cache.missReasons||{}).sort();
+   if(reasons.length)appendParagraph(parent,processLabel(role)+': RAM misses — '+reasons.map(function describe(reason){return (reason||'unknown')+': '+cache.missReasons[reason];}).join(', '));
+   const sites=cache.sites||[];if(!sites.length)return;
+   const siteTable=table(['Домен','Маршрутов в RAM','Варианты /','Причина отсутствия вариантов']);
+   const siteBody=document.createElement('tbody');
+   sites.forEach(function siteDiagnostics(site){const row=document.createElement('tr');textCell(row,site.domain);textCell(row,String(site.routes));textCell(row,(site.rootVariants||[]).join(', ')||'—');textCell(row,site.rootMiss||'—');siteBody.appendChild(row);});
+   siteTable.appendChild(siteBody);parent.appendChild(siteTable);
+  });
   appendParagraph(parent,'RAM учитывает подготовку и используемые поколения, отдельно от RSS. Счётчики goroutine приблизительные. Подробные отсчёты доступны во вкладке Goroutine.');
  }
  function renderRuntime(content,report) {

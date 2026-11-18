@@ -1,6 +1,9 @@
 package publicsite
 
-import "errors"
+import (
+	"errors"
+	"log"
+)
 
 type policyEnableRequest struct {
 	address string
@@ -85,6 +88,7 @@ func (front *Front) preparePolicy(address string, prepare func() error) error {
 		if current.revision != state.revision || current.Address != address || current.Paused || !current.PolicyReady {
 			return errors.New("public policy publisher changed during preparation")
 		}
+		log.Printf("PUBLIC policy state=ready address=%q paused=%t", current.Address, current.Paused)
 		return nil
 	case <-front.stop:
 		return errors.New("public server stopped")

@@ -23,6 +23,7 @@ type RuntimeOptions struct {
 	PrepareBootstrap func(Policy, string) map[HTMLVariantKey]string
 	RAMCacheBytes    int64
 	ContentType      func(string, string) string
+	DefaultLanguage  string
 }
 
 type PublicRuntime struct {
@@ -70,15 +71,19 @@ func (snapshot *PublicSnapshot) lookup(query Lookup) Decision {
 const retiredGeneration uint64 = 1 << 63
 
 type publicGeneration struct {
-	roots     map[string]*os.Root
-	html      map[string]*PreparedHTML
-	ram       map[string]*preparedRAMFile
-	assets    map[string]*preparedRAMFile
-	ramBodies map[string]*ramBody
-	ramLeases []uint64
-	cache     *ramCache
-	readers   atomic.Uint64
-	released  chan struct{}
+	pendingRAM  []ramCandidate
+	references  map[string][]string
+	pageSources map[string]string
+	ramMisses   map[string]string
+	roots       map[string]*os.Root
+	html        map[string]*PreparedHTML
+	ram         map[string]*preparedRAMFile
+	assets      map[string]*preparedRAMFile
+	ramBodies   map[string]*ramBody
+	ramLeases   []uint64
+	cache       *ramCache
+	readers     atomic.Uint64
+	released    chan struct{}
 }
 
 // PublishedFile pins its roots until Close. Generic OpenFile callers need the
@@ -306,7 +311,7 @@ func (runtime *PublicRuntime) prepare(policies map[string]cachedPolicy, stop <-c
 		if skipBlocked && cached.blocked {
 			continue
 		}
-		generation := &publicGeneration{roots: make(map[string]*os.Root), html: make(map[string]*PreparedHTML), ram: make(map[string]*preparedRAMFile), assets: make(map[string]*preparedRAMFile), ramBodies: make(map[string]*ramBody), cache: runtime.cache, released: make(chan struct{})}
+		generation := &publicGeneration{references: make(map[string][]string), pageSources: make(map[string]string), ramMisses: make(map[string]string), roots: make(map[string]*os.Root), html: make(map[string]*PreparedHTML), ram: make(map[string]*preparedRAMFile), assets: make(map[string]*preparedRAMFile), ramBodies: make(map[string]*ramBody), cache: runtime.cache, released: make(chan struct{})}
 		prepared[domain] = generation
 		directories := map[string]string{
 			"static":   filepath.Join("storage", "static", runtime.options.StorageName(domain)),
@@ -334,6 +339,10 @@ func (runtime *PublicRuntime) prepare(policies map[string]cachedPolicy, stop <-c
 			retireGenerations(prepared)
 			return nil, err
 		}
+	}
+	if err = runtime.admitRAM(prepared, policies, stop); err != nil {
+		retireGenerations(prepared)
+		return nil, err
 	}
 	return prepared, nil
 }

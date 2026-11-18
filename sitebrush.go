@@ -58182,8 +58182,8 @@ func (a *App) publicRuntimeOptions() publicsite.RuntimeOptions {
 		ramCacheBytes = 0
 	}
 	return publicsite.RuntimeOptions{
-		RAMCacheBytes: ramCacheBytes,
-		Mode:          a.publicStaticMode, Root: root, StorageName: domainStorageName,
+		RAMCacheBytes: ramCacheBytes, DefaultLanguage: preferredLanguageCode(""),
+		Mode: a.publicStaticMode, Root: root, StorageName: domainStorageName,
 		StaticPath:       func(pathname string) string { return staticRelativePathForPage(cleanPath(pathname)) },
 		HTMLFile:         func(pathname, prefix string) bool { return pageContentKind(pathname, prefix) == "html" },
 		PrepareBootstrap: preparePublicHTMLBootstraps,
@@ -58311,6 +58311,11 @@ func (a *App) preparePublicRAMSources(policy *publicsite.Policy) error {
 		if walkErr != nil {
 			return walkErr
 		}
+	}
+	// The public router serves index.html at /. Legacy page indexes may contain
+	// only the filename; both routes must receive the same source fingerprint.
+	if version := policy.PreparedPages["/"+filepath.ToSlash(staticRelativePathForPage("/"))]; version != "" && policy.PreparedPages["/"] == "" {
+		policy.PreparedPages["/"] = version
 	}
 	names := make(map[string]bool)
 	for _, name := range policy.ResourcePaths {
@@ -58517,24 +58522,40 @@ func (a *App) servePublishedStaticFileWithMenu(w http.ResponseWriter, r *http.Re
 // Eligibility and current-generation admission precede borrowing immutable bytes.
 func (a *App) servePreparedPublicResponse(w http.ResponseWriter, r *http.Request, domain, pagePath string, decision publicsite.Decision, injectPublicMenu, updating bool) bool {
 	if a.publicRAMCacheBytes == 0 || a.publicCatalog == nil || decision.PrivateTestDrive || decision.Password.Path != "" || r.Method != http.MethodGet && r.Method != http.MethodHead {
+		reason := "restricted"
+		if a.publicRAMCacheBytes == 0 || a.publicCatalog == nil {
+			reason = "disabled"
+		} else if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			reason = "method"
+		}
+		requesttiming.MarkRAM(r, false, reason)
 		return false
 	}
+	var reason string
 	key := publicsite.HTMLVariantKey{Language: preferredLanguageCode(r.Header.Get("Accept-Language")), Menu: injectPublicMenu, Updating: updating}
-	response, found, err := a.publicCatalog.AcquirePrepared(decision, pagePath, key)
+	var response *publicsite.PreparedResponse
+	var found bool
+	var err error
 	if decision.PageVersion == "" && decision.ResourceFile == "" && decision.File.Name != "" {
-		response, found, err = a.publicCatalog.AcquirePreparedFile(decision, decision.File.Name)
+		response, found, err = a.publicCatalog.AcquirePreparedFile(decision, decision.File.Name, &reason)
+	} else {
+		response, found, err = a.publicCatalog.AcquirePrepared(decision, pagePath, key, &reason)
 	}
+
 	if err != nil {
+		requesttiming.MarkRAM(r, false, reason)
+		a.logProblemEvent("public RAM lookup unavailable domain=%q path=%q reason=%q: %v", domain, pagePath, reason, err)
 		http.Error(w, "published version is unavailable", http.StatusServiceUnavailable)
 		return true
 	}
 	if !found {
-		requesttiming.MarkRAM(r, false)
+		requesttiming.MarkRAM(r, false, reason)
 		return false
 	}
 	defer response.Close()
 	if response.HTML() {
 		if hasSitebrushSessionCookie(r) || decision.PendingRegistration {
+			requesttiming.MarkRAM(r, false, "personalized")
 			return false
 		}
 		var redirect string

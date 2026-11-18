@@ -43,3 +43,34 @@ func TestPolicyEnableSharesPreparationAndRejectsRestart(t *testing.T) {
 		t.Fatalf("state=%+v error=%v", state, err)
 	}
 }
+
+func TestPolicyEnableConcurrentRequestsPrepareOnce(t *testing.T) {
+	stop := make(chan struct{})
+	defer close(stop)
+	front := NewFront("secret", nil, stop)
+	if err := front.Set("publisher", false); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{}, 16)
+	finish := make(chan struct{})
+	enable := NewPolicyEnabler(front, func() error { started <- struct{}{}; <-finish; return nil }, stop)
+	replies := make(chan error, 16)
+	for range 16 {
+		go func() { replies <- enable("publisher") }()
+	}
+	<-started
+	close(finish)
+	for range 16 {
+		select {
+		case err := <-replies:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("enable did not finish")
+		}
+	}
+	if len(started) != 0 {
+		t.Fatal("concurrent requests repeated preparation")
+	}
+}

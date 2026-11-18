@@ -10,8 +10,9 @@ import (
 
 type RAMReport struct {
 	publicsite.RAMCacheStats
-	Hits   uint64 `json:"hits"`
-	Misses uint64 `json:"misses"`
+	Hits        uint64            `json:"hits"`
+	Misses      uint64            `json:"misses"`
+	MissReasons map[string]uint64 `json:"missReasons,omitempty"`
 }
 
 type RuntimeSample struct {

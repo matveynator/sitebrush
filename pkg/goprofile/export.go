@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/matveynator/sitebrush/v2/pkg/requesttiming"
 )
 
 const exportLimit = 120 << 10
@@ -56,6 +58,14 @@ func exportText(report Report) string {
 	if report.RAM != nil {
 		text.line("\n### Готовые RAM-ответы")
 		text.line("Бюджет: %d байт; занято: %d байт; уникальных тел: %d; попаданий: %d; промахов: %d", report.RAM.Limit, report.RAM.Bytes, report.RAM.Bodies, report.RAM.Hits, report.RAM.Misses)
+		for _, reason := range requesttiming.RAMMissReasons() {
+			if count := report.RAM.MissReasons[reason]; count != 0 {
+				text.line("RAM miss %s: %d", reason, count)
+			}
+		}
+		for _, site := range report.RAM.Sites {
+			text.line("RAM domain=%s routes=%d root_variants=%s root_miss=%s", site.Domain, site.Routes, strings.Join(site.RootVariants, ", "), site.RootMiss)
+		}
 		text.line("Бюджет включает подготовку и поколения с читателями; метаданные, временные буферы и RSS процесса считаются отдельно.")
 	}
 	if report.Runtime != nil {

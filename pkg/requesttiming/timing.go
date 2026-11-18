@@ -48,6 +48,7 @@ type HTTPMetrics struct {
 	WriteErrors uint64 `json:"writeErrors"`
 }
 type Event struct {
+	RAMReason  string
 	RAM        RAMMetrics
 	connection net.Conn
 	transition bool
@@ -61,8 +62,9 @@ type Event struct {
 }
 
 type RAMMetrics struct {
-	Hits   uint64 `json:"hits"`
-	Misses uint64 `json:"misses"`
+	Reasons [15]uint64 `json:"reasons"`
+	Hits    uint64     `json:"hits"`
+	Misses  uint64     `json:"misses"`
 }
 
 type Counter struct {
@@ -149,6 +151,14 @@ func (collector *Collector) run() {
 func (report *Report) record(event Event) {
 	report.RAM.Hits += event.RAM.Hits
 	report.RAM.Misses += event.RAM.Misses
+	if event.RAM.Misses != 0 {
+		for index, reason := range RAMMissReasons() {
+			if reason == event.RAMReason {
+				report.RAM.Reasons[index] += event.RAM.Misses
+				break
+			}
+		}
+	}
 	report.HTTP.Requests += event.HTTP.Requests
 	report.HTTP.Received += event.HTTP.Received
 	report.HTTP.Sent += event.HTTP.Sent
@@ -385,4 +395,8 @@ func (body *countedBody) Read(destination []byte) (int, error) {
 	count, err := body.ReadCloser.Read(destination)
 	body.metrics.Received += uint64(max(count, 0))
 	return count, err
+}
+
+func RAMMissReasons() [15]string {
+	return [15]string{"disabled", "restricted", "missing_generation", "stale_generation", "no_prepared_object", "missing_version", "missing_source", "too_large", "variant", "budget", "personalized", "method", "version_mismatch", "resource_mismatch", ""}
 }

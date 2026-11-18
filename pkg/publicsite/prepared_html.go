@@ -131,10 +131,12 @@ func (runtime *PublicRuntime) prepareHTMLPath(generation *publicGeneration, poli
 	}
 	root := generation.roots[directory]
 	if root == nil {
+		generation.ramMisses[pathname] = "missing_source"
 		return nil
 	}
 	info, err := root.Stat(relative)
 	if MissingSource(err) {
+		generation.ramMisses[pathname] = "missing_source"
 		return nil
 	}
 	if err != nil {
@@ -145,6 +147,7 @@ func (runtime *PublicRuntime) prepareHTMLPath(generation *publicGeneration, poli
 	}
 	file, err := root.Open(relative)
 	if MissingSource(err) {
+		generation.ramMisses[pathname] = "missing_source"
 		return nil
 	}
 	if err != nil {
@@ -157,6 +160,9 @@ func (runtime *PublicRuntime) prepareHTMLPath(generation *publicGeneration, poli
 	}
 	if !info.Mode().IsRegular() {
 		return nil
+	}
+	if info.Size() > MaximumRAMRepresentationBytes {
+		generation.ramMisses[pathname] = "too_large"
 	}
 	if runtime.options.HTMLFile != nil {
 		var prefix [512]byte

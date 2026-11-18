@@ -36016,7 +36016,7 @@ func TestPublicRAMServingPreparesOrdinaryPagesAndResources(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	policy := publicsite.Policy{Domain: domain, Layouts: map[string]string{"/": "layout", "/index.html": "layout"}, ResourcePaths: map[string]string{"/app.js": "app.js"}, ResourceTypes: map[string]string{"/app.js": "application/javascript"}, Files: []publicsite.FileRule{{Name: "manual.txt", Mode: "public"}, {Name: "archive.zip", Mode: "public"}, {Name: "private.txt", Mode: "token"}}}
+	policy := publicsite.Policy{Domain: domain, Layouts: map[string]string{"/index.html": "layout"}, ResourcePaths: map[string]string{"/app.js": "app.js"}, ResourceTypes: map[string]string{"/app.js": "application/javascript"}, Files: []publicsite.FileRule{{Name: "manual.txt", Mode: "public"}, {Name: "archive.zip", Mode: "public"}, {Name: "private.txt", Mode: "token"}}}
 	if err := application.preparePublicRAMSources(&policy); err != nil {
 		t.Fatal(err)
 	}

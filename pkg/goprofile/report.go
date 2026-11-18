@@ -522,7 +522,12 @@ recording:
 	if timings != nil {
 		if last, snapshotErr := timings.Snapshot(stop); snapshotErr == nil && timingsReady {
 			report.Network = requesttiming.HTTPMetrics{Requests: last.HTTP.Requests - first.HTTP.Requests, Received: last.HTTP.Received - first.HTTP.Received, Sent: last.HTTP.Sent - first.HTTP.Sent, Errors: last.HTTP.Errors - first.HTTP.Errors, WriteErrors: last.HTTP.WriteErrors - first.HTTP.WriteErrors}
-			report.RAM = &RAMReport{Hits: last.RAM.Hits - first.RAM.Hits, Misses: last.RAM.Misses - first.RAM.Misses}
+			report.RAM = &RAMReport{Hits: last.RAM.Hits - first.RAM.Hits, Misses: last.RAM.Misses - first.RAM.Misses, MissReasons: make(map[string]uint64)}
+			for index, reason := range requesttiming.RAMMissReasons() {
+				if count := last.RAM.Reasons[index] - first.RAM.Reasons[index]; count != 0 {
+					report.RAM.MissReasons[reason] = count
+				}
+			}
 			for index, current := range last.Stages {
 				old := first.Stages[index]
 				count := current.Count - old.Count
