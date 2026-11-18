@@ -219,14 +219,15 @@
     const socketURL = new URL(window.location.href);
     socketURL.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     socketURL.searchParams.set('mail_monitor_ws', '1');
+    socketURL.searchParams.delete('expenses');
     if (securityView) {
-      socketURL.searchParams.delete('expenses');
+      socketURL.searchParams.delete('server-settings');
       socketURL.searchParams.set('analytics', '');
       socketURL.searchParams.set('tab', 'security');
     } else {
       socketURL.searchParams.delete('analytics');
       socketURL.searchParams.delete('tab');
-      socketURL.searchParams.set('expenses', '');
+      socketURL.searchParams.set('server-settings', '');
     }
     socketURL.hash = '';
     journalModel.connection = new WebSocket(socketURL);

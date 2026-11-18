@@ -2965,7 +2965,7 @@ func TestExpensesTemplateShowsOnlyLocalServerAndEnabledDemoOutsideSitebrushCom(t
 		t.Fatal(err)
 	}
 	application := &App{}
-	request := httptest.NewRequest(http.MethodGet, "https://owner.example/?expenses", nil)
+	request := httptest.NewRequest(http.MethodGet, "https://owner.example/?server-settings", nil)
 	baseSnapshot := hostingAndSupportPanelSnapshot{
 		Version:    hostingAndSupportPanelSnapshotVersion,
 		MainDomain: "owner.example",
@@ -3078,7 +3078,7 @@ func TestExpensesTemplateShowsOnlyLocalServerAndEnabledDemoOutsideSitebrushCom(t
 
 func TestExpensesTitlesUseServerScopeInEveryLanguage(t *testing.T) {
 	for languageCode, translations := range translationCatalog {
-		for _, translationKey := range []string{"expenses_title", "expenses_central_title", "menu_expenses", "menu_expenses_central"} {
+		for _, translationKey := range []string{"expenses_title", "expenses_central_title", "menu_expenses", "menu_expenses_central", "server_profiler_open"} {
 			if strings.TrimSpace(translations[translationKey]) == "" {
 				t.Fatalf("language %s is missing %s", languageCode, translationKey)
 			}
@@ -3098,7 +3098,7 @@ func TestExpensesTitlesUseServerScopeInEveryLanguage(t *testing.T) {
 		{name: "central English server", language: "en", mainDomain: "sitebrush.com", expected: "Server settings"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			request := httptest.NewRequest(http.MethodGet, "https://"+testCase.mainDomain+"/?expenses", nil)
+			request := httptest.NewRequest(http.MethodGet, "https://"+testCase.mainDomain+"/?server-settings", nil)
 			request.Header.Set("Accept-Language", testCase.language)
 			view := application.hostingAndSupportPanelView(request, hostingAndSupportPanelSnapshot{MainDomain: testCase.mainDomain})
 			if title := view["Title"]; title != testCase.expected {
@@ -3666,7 +3666,7 @@ func TestSaveServerExpensePolicyUsesOnlyMonthlyServerPrice(t *testing.T) {
 	form.Set("monthly_server_expense", "75.00")
 	form.Set("currency", "EUR")
 	form.Set("free_site_threshold_mb", "100")
-	request := httptest.NewRequest(http.MethodPost, "http://localhost/?expenses", strings.NewReader(form.Encode()))
+	request := httptest.NewRequest(http.MethodPost, "http://localhost/?server-settings", strings.NewReader(form.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	status := application.saveServerExpensePolicyFromForm(request)
 	if status != translationsForLanguageCode("ru")["expenses_server_policy_saved"] {
@@ -5198,8 +5198,8 @@ func TestServerManagerEmailTreatsLoopbackAsLocalhost(t *testing.T) {
 		t.Fatal("non-owner admin was accepted for effective localhost")
 	}
 	menuScript := buildContextMenuScript(true, true, false, false, true, "/", "example.com", 0, 0, "", "", translationsForLanguageCode("ru"))
-	if !strings.Contains(menuScript, "?expenses") {
-		t.Fatal("server manager menu does not contain expenses link")
+	if !strings.Contains(menuScript, "?server-settings") {
+		t.Fatal("server manager menu does not contain server settings link")
 	}
 	if !strings.Contains(menuScript, "Настройки сервера") {
 		t.Fatal("regular server menu does not use the server settings title")
@@ -13761,7 +13761,7 @@ func TestExternalSiteImportPrimaryActionsUseThemeStyles(t *testing.T) {
 }
 
 func TestPublicTrialEmbedKeepsWidgetLiveAndVersioned(t *testing.T) {
-	request := httptest.NewRequest(http.MethodGet, "https://sitebrush.example/?expenses", nil)
+	request := httptest.NewRequest(http.MethodGet, "https://sitebrush.example/?server-settings", nil)
 	embedHTML := publicTrialSignupEmbedHTML(request, translationsForLanguageCode("ru"))
 	if !strings.Contains(embedHTML, `data-sitebrush-live-asset`) {
 		t.Fatalf("public trial embed does not preserve the live widget: %s", embedHTML)
@@ -27682,7 +27682,7 @@ func TestServerUpdateRequiresServerOwnerAndNeverMutatesOnGET(t *testing.T) {
 			result := httptest.NewRecorder()
 			application.serverUpdatePage(result, request)
 			if email == "owner@example.com" {
-				if result.Code != http.StatusSeeOther || result.Header().Get("Location") != "/?expenses#server-update" {
+				if result.Code != http.StatusSeeOther || result.Header().Get("Location") != "/?server-settings#server-update" {
 					t.Fatalf("owner redirect=%d %s", result.Code, result.Header().Get("Location"))
 				}
 				embedded := httptest.NewRequest(http.MethodGet, "http://localhost/?server_update&embedded", nil)
@@ -29150,6 +29150,7 @@ func TestProtectedServicePagesOfferLoginAndKeepReturnPath(t *testing.T) {
 func TestPublicFastPathKeepsServiceQueriesDynamic(t *testing.T) {
 	for _, target := range []string{
 		"/?mcp", "/?oauth=resource", "/?ai_provider_status", "/?ai_provider_models",
+		"/?server-settings", "/?expenses",
 		"/?ai_apply", "/?grab_retry", "/?trial_site_suggest", "/?publish_preview",
 		"/?tree", "/?mail_monitor_ws", "/?hosting_invoice&token=invoice",
 		"/?billing_schedule&token=schedule", "/?hosting_and_support_backup_download&token=backup",
@@ -31476,7 +31477,7 @@ func TestMailMonitorPanelMergedLocalServerAndRemoteScope(t *testing.T) {
 	enableMailMonitorForTest(t, application)
 	application.recordMailMonitorEvent(context.Background(), mailmonitor.Event{Kind: "invoice", Stage: "queued", Recipient: "local@example.com"})
 	snapshot := hostingAndSupportPanelSnapshot{Servers: []hostingandsupport.ServerView{{ID: "merged-local", Name: "Local", Local: true}, {ID: "remote", Name: "Remote"}}}
-	request := httptest.NewRequest(http.MethodGet, "http://localhost/?expenses&mail_server=merged-local", nil)
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/?server-settings&mail_server=merged-local", nil)
 	view := application.hostingAndSupportPanelView(request, snapshot)
 	servers := view["ExpenseServers"].([]simplifiedExpenseServerView)
 	if servers[0].MailLastDay.Queued != 1 || len(servers[0].MailOperations) != 0 || servers[0].MailExpanded || !strings.Contains(servers[0].MailSecurityURL, "tab=security") {
@@ -31513,7 +31514,7 @@ func TestMailMonitorPanelMergedLocalServerAndRemoteScope(t *testing.T) {
 	if !servers[1].MailSelected || len(servers[1].MailOperations) != 0 {
 		t.Fatal("remote journal leaked local messages")
 	}
-	request = httptest.NewRequest(http.MethodGet, "http://localhost/?expenses&mail_server=unknown", nil)
+	request = httptest.NewRequest(http.MethodGet, "http://localhost/?server-settings&mail_server=unknown", nil)
 	servers = application.hostingAndSupportPanelView(request, snapshot)["ExpenseServers"].([]simplifiedExpenseServerView)
 	if !servers[0].MailSelected || servers[0].MailExpanded {
 		t.Fatal("unknown server selected an unrestricted journal")
@@ -31579,7 +31580,7 @@ func TestMailJournalSnapshotKeepsIncidentsInSecurityAnalytics(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	statistics, err := application.mailJournalSnapshot(httptest.NewRequest(http.MethodGet, "http://localhost/?expenses&mail_server=local", nil))
+	statistics, err := application.mailJournalSnapshot(httptest.NewRequest(http.MethodGet, "http://localhost/?server-settings&mail_server=local", nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32117,7 +32118,7 @@ func TestMailCancellationTombstoneAndSMTPStartBoundary(t *testing.T) {
 
 func TestMailJournalWebSocketRejectsUnauthenticatedRequests(t *testing.T) {
 	application, _ := newTestApplication(t)
-	request := httptest.NewRequest(http.MethodGet, "https://localhost/?expenses&mail_monitor_ws", nil)
+	request := httptest.NewRequest(http.MethodGet, "https://localhost/?server-settings&mail_monitor_ws", nil)
 	response := httptest.NewRecorder()
 	application.mailJournalWebSocket(response, request)
 	if response.Code != http.StatusForbidden {
@@ -32146,7 +32147,7 @@ func TestMailControlRequiresCentralAuthorityAndOwnsCancellation(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	manager := httptest.NewRequest(http.MethodGet, "https://sitebrush.com/?expenses", nil)
+	manager := httptest.NewRequest(http.MethodGet, "https://sitebrush.com/?server-settings", nil)
 	manager.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "mail-owner"})
 	if !central.isServerManagerRequest(manager) {
 		t.Fatal("test owner session unavailable")
@@ -36012,13 +36013,13 @@ func TestProfilerFlagPropagationAndDisabledMode(t *testing.T) {
 		t.Fatal("profiling configuration lost in child", arguments)
 	}
 	flagSet := flag.NewFlagSet("profiler", flag.ContinueOnError)
-	flagSet.Bool("profiler", false, "enable owner load-test profiling at /?expenses")
+	flagSet.Bool("profiler", false, "enable owner load-test profiling at /?server-settings")
 	if err := flagSet.Parse([]string{"--profiler"}); err != nil {
 		t.Fatal(err)
 	}
 	var usage bytes.Buffer
 	printVisibleFlagDefaults(&usage, flagSet)
-	if !strings.Contains(usage.String(), "--profiler") || !strings.Contains(usage.String(), "/?expenses") {
+	if !strings.Contains(usage.String(), "--profiler") || !strings.Contains(usage.String(), "/?server-settings") {
 		t.Fatal("missing profiler help", usage.String())
 	}
 }
@@ -36308,6 +36309,18 @@ func TestProfilerRoutesRemainOutsidePublicWebsite(t *testing.T) {
 
 func TestProfilerPanelAuthorizationAndPlacement(t *testing.T) {
 	application, _ := newTestApplication(t)
+	for _, target := range []string{"/?server-settings", "/?expenses"} {
+		request := httptest.NewRequest(http.MethodGet, "https://localhost"+target, nil)
+		response := httptest.NewRecorder()
+		application.route(response, request)
+		destination, err := url.Parse(response.Header().Get("Location"))
+		if response.Code != http.StatusFound || err != nil || !destination.Query().Has("login") && !destination.Query().Has("register") {
+			t.Fatalf("anonymous settings request %s escaped authorization: status=%d location=%q", target, response.Code, response.Header().Get("Location"))
+		}
+		if shouldRecordAnalyticsRequest(request) {
+			t.Fatalf("settings request %s recorded as a public visit", target)
+		}
+	}
 	request := httptest.NewRequest(http.MethodGet, "https://localhost/?server_profiler_ws", nil)
 	response := httptest.NewRecorder()
 	application.serverProfilerSocket(response, request)
@@ -36339,10 +36352,13 @@ func TestProfilerPanelAuthorizationAndPlacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(markup), `{{if .ShowProfiler}}{{template "server-profiler" .}}{{end}}`) {
-		t.Fatal("profiler missing from expenses panel")
+		t.Fatal("profiler missing from server settings")
 	}
-	if strings.Index(string(markup), `{{template "server-profiler" .}}`) > strings.Index(string(markup), `<header class="page-header`) {
-		t.Fatal("profiler controls are below the expenses heading")
+	headerStart := strings.Index(string(markup), `<header class="page-header server-settings-header`)
+	profilerStart := strings.Index(string(markup), `{{template "server-profiler" .}}`)
+	headerEnd := strings.Index(string(markup), `</header>`)
+	if headerStart < 0 || profilerStart < headerStart || profilerStart > headerEnd {
+		t.Fatal("profiler launch button is outside the server heading")
 	}
 
 }
@@ -36356,12 +36372,15 @@ func TestProfilerExpensesFragmentIsAssociated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var output bytes.Buffer
-	if err = parsed.ExecuteTemplate(&output, "server-profiler", map[string]any{"AccountCSRF": "fixture"}); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(output.String(), "data-profiler") {
-		t.Fatal("profiler template missing")
+	for languageCode, translations := range translationCatalog {
+		var output bytes.Buffer
+		if err = parsed.ExecuteTemplate(&output, "server-profiler", map[string]any{"AccountCSRF": "fixture", "T": translations}); err != nil {
+			t.Fatal(err)
+		}
+		label := strings.TrimSpace(translations["server_profiler_open"])
+		if label == "" || !strings.Contains(output.String(), "data-profiler") || !strings.Contains(output.String(), template.HTMLEscapeString(label)) {
+			t.Fatalf("profiler launch label missing for %s", languageCode)
+		}
 	}
 }
 

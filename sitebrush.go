@@ -4627,7 +4627,7 @@ func shouldRecordAnalyticsRequest(r *http.Request) bool {
 		return true
 	}
 	query := r.URL.Query()
-	for _, skippedFlag := range []string{"analytics", "expenses", "hosting_and_support", "billing", "grab_events", "grab_ws", "revision_preview", "publish_events", "captcha"} {
+	for _, skippedFlag := range []string{"analytics", "server-settings", "expenses", "hosting_and_support", "billing", "grab_events", "grab_ws", "revision_preview", "publish_events", "captcha"} {
 		if _, found := query[skippedFlag]; found {
 			return false
 		}
@@ -10210,7 +10210,7 @@ func main() {
 	debugMode := flag.Bool("debug", false, "enable verbose HTTP and database diagnostic logs")
 	publicStaticMode := flag.String("public-static-mode", firstNonEmpty(os.Getenv("SITEBRUSH_PUBLIC_STATIC_MODE"), "snapshot"), "public file delivery: legacy, http10, roots, html, or snapshot")
 	requestTimings := flag.Bool("request-timings", false, "collect asynchronous request stage timings and log counters every 30 seconds")
-	profiler := flag.Bool("profiler", false, "enable owner load-test recording at /?expenses; 30-second reports are kept temporarily and deleted after viewing; status goes to console or --logfile")
+	profiler := flag.Bool("profiler", false, "enable owner load-test recording at /?server-settings; 30-second reports are kept temporarily and deleted after viewing; status goes to console or --logfile")
 	legacyStoragePath := flag.String("storage-path", "", "")
 	legacyDBPath := flag.String("db-path", "", "")
 	legacyDBType := flag.String("db-type", "", "")
@@ -14396,7 +14396,7 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.serverProfilerSocket(w, r)
 		return
 	}
-	if hasQueryFlag(r, "expenses") || hasQueryFlag(r, "hosting_and_support") || hasQueryFlag(r, "billing") {
+	if hasQueryFlag(r, "server-settings") || hasQueryFlag(r, "expenses") || hasQueryFlag(r, "hosting_and_support") || hasQueryFlag(r, "billing") {
 		a.expensesPage(w, r)
 		return
 	}
@@ -29322,7 +29322,7 @@ func (a *App) hostingAndSupportDemoPaymentPage(w http.ResponseWriter, r *http.Re
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = io.WriteString(w, `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SiteBrush.com demo payment</title><link href="/p/static/technical_pages.css" rel="stylesheet"></head><body class="technical-page bg-body"><main class="container billing-page py-5"><section class="card billing-card"><div class="card-body"><p class="text-muted">SiteBrush.com demo payments</p><h1>Демо-оплата счёта `+template.HTMLEscapeString(invoiceNumber)+`</h1><p>Платёжная страница подготовлена как демо-настройка первого этапа. Реальное списание здесь не выполняется.</p><a class="btn btn-primary" href="/?expenses">Вернуться в «Серверы и расходы»</a></div></section></main></body></html>`)
+	_, _ = io.WriteString(w, `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SiteBrush.com demo payment</title><link href="/p/static/technical_pages.css" rel="stylesheet"></head><body class="technical-page bg-body"><main class="container billing-page py-5"><section class="card billing-card"><div class="card-body"><p class="text-muted">SiteBrush.com demo payments</p><h1>Демо-оплата счёта `+template.HTMLEscapeString(invoiceNumber)+`</h1><p>Платёжная страница подготовлена как демо-настройка первого этапа. Реальное списание здесь не выполняется.</p><a class="btn btn-primary" href="/?server-settings">Вернуться в «Настройки сервера»</a></div></section></main></body></html>`)
 }
 
 func (a *App) redirectToHostingAndSupportMainDomain(w http.ResponseWriter, r *http.Request) bool {
@@ -31881,7 +31881,7 @@ func (a *App) enqueueSiteRegistrationRequestOwnerEmails(ctx context.Context, r *
 		"Тариф: " + hostingAndSupportPlanEmailLabel(plan),
 		"",
 		"Откройте биллинг, чтобы активировать или отклонить заявку:",
-		absoluteURLForPath(r, "/?expenses"),
+		absoluteURLForPath(r, "/?server-settings"),
 	}, "\n")
 	fromAddress := a.emailFromAddress(a.siteDomain(r.Context(), r))
 	for _, ownerEmail := range ownerEmails {
@@ -47709,7 +47709,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
 	}
 	updateMenuLink := ""
 	if isServerManager {
-		updateMenuLink = "<a href='/?expenses#server-update' class='SiteBrushContextMenuUpdate' hidden>" + template.HTMLEscapeString(translationOrDefault(translations, "update_title", "SiteBrush updates")) + "</a>"
+		updateMenuLink = "<a href='/?server-settings#server-update' class='SiteBrushContextMenuUpdate' hidden>" + template.HTMLEscapeString(translationOrDefault(translations, "update_title", "SiteBrush updates")) + "</a>"
 	}
 	copyrightMenuEntry := fmt.Sprintf("<li class='SiteBrushContextMenu ContextMenuCopyright'><div class='SiteBrushContextMenuFooter'><a href='%s' class='SiteBrushContextMenuFooterLink' target='_blank' rel='noopener noreferrer'>sitebrush</a>%s<a href='%s' class='SiteBrushContextMenuVersion' download>%s</a></div>%s</li>", sitebrushHomeURL, storageUsageHTML, serverBinaryDownloadURL, compiledVersionLabel, updateMenuLink)
 	if isAdmin {
@@ -47728,7 +47728,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
 		}
 		hostingAndSupportEntry := ""
 		if isServerManager {
-			hostingAndSupportEntry = "<li class='SiteBrushContextMenu SiteBrushSeparatedMenuItem SiteBrushPrivilegedMenuItem'><a href='?expenses' class='SiteBrushContextMenuLink'><img src='/p/static/sitebrush-app-icon.png' class='SiteBrushMenuIcon' alt=''>" + hostingAndSupportLabel + "</a></li>"
+			hostingAndSupportEntry = "<li class='SiteBrushContextMenu SiteBrushSeparatedMenuItem SiteBrushPrivilegedMenuItem'><a href='?server-settings' class='SiteBrushContextMenuLink'><img src='/p/static/sitebrush-app-icon.png' class='SiteBrushMenuIcon' alt=''>" + hostingAndSupportLabel + "</a></li>"
 		}
 		logoutEntry := ""
 		if showLogout {
@@ -59354,7 +59354,7 @@ func (a *App) serverUpdatePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !hasQueryFlag(r, "embedded") {
-		httpsecurity.RedirectLocal(w, r, "/?expenses#server-update", http.StatusSeeOther)
+		httpsecurity.RedirectLocal(w, r, "/?server-settings#server-update", http.StatusSeeOther)
 		return
 	}
 	_, centralErr := a.centralAnnouncementIdentity()
@@ -61991,7 +61991,7 @@ func sitebrushControlQueryFlag(flag string) bool {
 		"test_drive", "test_drive_start", "test_drive_handoff", "test_drive_handoff_ready", "test_drive_welcome", "test_drive_source", "test_drive_activation", "test_drive_status", "test_drive_email", "test_drive_verify", "test_drive_activate", "test_drive_captcha", "test_drive_check_captcha", "test_drive_ws", "test_drive_entry_ws",
 		"demo_grab_preview", "demo_grab_refresh", "site_request",
 		"backup", "backup_import", "backup_download", "native_pick_files", "native_save_backup",
-		"hosting_and_support", "expenses", "billing", "hosting_invoice", "billing_schedule",
+		"server-settings", "hosting_and_support", "expenses", "billing", "hosting_invoice", "billing_schedule",
 		"hosting_and_support_demo_payment", "hosting_and_support_backup_download", "billing_backup_download",
 		"public_ip_settings_ws", "service_mail_relay", "hosting_snapshot", "mail_delivery_ws", "mail_monitor_ws", "certificate_renew_ws",
 	} {
