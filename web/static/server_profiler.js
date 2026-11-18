@@ -627,6 +627,10 @@
   if(summary.truncated)appendParagraph(panel,'Часть измерений сокращена или пропущена под нагрузкой; это отмечено в отчёте.');
  }
 
+ function ramPolicySummary(policy) {
+  if(!policy)return 'Нет данных';
+  return 'routing='+policy.routingVersion+' frozen='+policy.frozen+' versioned='+policy.versioned+' private='+policy.privateTestDrive+' pending='+policy.pendingRegistration+' stealth='+policy.stealth+'; fingerprints='+policy.preparedPages+'/'+policy.preparedFiles+'; root='+policy.rootPrepared+' index='+policy.indexPrepared+' published='+policy.rootPublished+'; IP admin/server='+policy.administratorIPRules+'/'+policy.serverIPRules;
+ }
  function renderDiagnostics(parent) {
   const reports=model.targets.map(function participant(role){return model.overviewParts[role];}).filter(Boolean);
   if(!reports.some(function available(report){return report.ramCache||report.runtime;}))return;
@@ -655,9 +659,9 @@
    const reasons=Object.keys(cache.missReasons||{}).sort();
    if(reasons.length)appendParagraph(parent,processLabel(role)+': RAM misses — '+reasons.map(function describe(reason){return (reason||'unknown')+': '+cache.missReasons[reason];}).join(', '));
    const sites=cache.sites||[];if(!sites.length)return;
-   const siteTable=table(['Домен','Маршрутов в RAM','Варианты /','Причина отсутствия вариантов']);
+   const siteTable=table(['Домен','Маршрутов в RAM','Варианты /','Причина отсутствия вариантов','Политика публикации','Восстановлено страниц / файлов']);
    const siteBody=document.createElement('tbody');
-   sites.forEach(function siteDiagnostics(site){const row=document.createElement('tr');textCell(row,site.domain);textCell(row,String(site.routes));textCell(row,(site.rootVariants||[]).join(', ')||'—');textCell(row,site.rootMiss||'—');siteBody.appendChild(row);});
+   sites.forEach(function siteDiagnostics(site){const row=document.createElement('tr');textCell(row,site.domain);textCell(row,String(site.routes));textCell(row,(site.rootVariants||[]).join(', ')||'—');textCell(row,site.rootMiss||'—');textCell(row,ramPolicySummary(site.policy));textCell(row,typeof site.recoveredPages==='number'?site.recoveredPages+' / '+site.recoveredFiles+(site.rootRecovered?' (включая /)':''):'Нет данных');siteBody.appendChild(row);});
    siteTable.appendChild(siteBody);parent.appendChild(siteTable);
   });
   appendParagraph(parent,'RAM учитывает подготовку и используемые поколения, отдельно от RSS. Счётчики goroutine приблизительные. Подробные отсчёты доступны во вкладке Goroutine.');

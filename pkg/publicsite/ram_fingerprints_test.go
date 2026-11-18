@@ -59,7 +59,7 @@ func legacyRAMFixture(t *testing.T, mutate func(*Policy)) (*Catalog, string, <-c
 }
 
 func TestRAMRecoversOrdinaryLegacySourcesBeforeRequests(t *testing.T) {
-	catalog, root, _ := legacyRAMFixture(t, func(policy *Policy) { policy.AllowedIPs = []string{"198.51.100.10"} })
+	catalog, root, stop := legacyRAMFixture(t, func(policy *Policy) { policy.AllowedIPs = []string{"198.51.100.10"} })
 	if err := catalog.SetMemory(true); err != nil {
 		t.Fatal(err)
 	}
@@ -100,6 +100,23 @@ func TestRAMRecoversOrdinaryLegacySourcesBeforeRequests(t *testing.T) {
 	denied := catalog.Lookup(Lookup{Host: "vz.sitebrush.com", Path: "/p/token.txt", File: "token.txt"})
 	if response, found, err = catalog.AcquirePreparedFile(denied, "token.txt"); err != nil || found || response != nil {
 		t.Fatal("token file entered RAM", found, err)
+	}
+	stats, err := catalog.RAMStats(stop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	matched := false
+	for _, site := range stats.Sites {
+		if site.Domain != "vz.sitebrush.com" {
+			continue
+		}
+		matched = true
+		if site.Policy == nil || site.Policy.Frozen || site.Policy.Versioned || site.Policy.RootPrepared || site.Policy.IndexPrepared || site.Policy.AdministratorIPRules != 1 || !site.RootRecovered || site.RecoveredPages == 0 || site.RecoveredFiles == 0 {
+			t.Fatalf("incorrect policy diagnostics: %+v %+v", site, site.Policy)
+		}
+	}
+	if !matched {
+		t.Fatal("domain missing from diagnostics")
 	}
 	policyAfter, err := os.ReadFile(PolicyPath(root, "vz.sitebrush.com"))
 	if err != nil || string(policyBefore) != string(policyAfter) {

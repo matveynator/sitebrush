@@ -314,6 +314,9 @@ func (runtime *PublicRuntime) prepare(policies map[string]cachedPolicy, stop <-c
 			continue
 		}
 		generation := &publicGeneration{references: make(map[string][]string), pageSources: make(map[string]string), ramMisses: make(map[string]string), roots: make(map[string]*os.Root), html: make(map[string]*PreparedHTML), ram: make(map[string]*preparedRAMFile), assets: make(map[string]*preparedRAMFile), ramBodies: make(map[string]*ramBody), cache: runtime.cache, released: make(chan struct{})}
+		if reason := runtime.ramPageReason(cached.policy, "/"); reason != "" {
+			generation.ramMisses["/"] = reason
+		}
 		prepared[domain] = generation
 		directories := map[string]string{
 			"static":   filepath.Join("storage", "static", runtime.options.StorageName(domain)),

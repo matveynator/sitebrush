@@ -3,16 +3,40 @@ package publicsite
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
 )
 
 const MaximumRAMRepresentationBytes = 256 << 10
 
+// Policy diagnostics expose only flags and counts, never addresses, credentials
+// or fingerprints. A nil policy keeps older profiler participants recognizable.
+type RAMPolicyStats struct {
+	RoutingVersion       int  `json:"routingVersion"`
+	Frozen               bool `json:"frozen"`
+	Versioned            bool `json:"versioned"`
+	PrivateTestDrive     bool `json:"privateTestDrive"`
+	PendingRegistration  bool `json:"pendingRegistration"`
+	Stealth              bool `json:"stealth"`
+	AdministratorIPRules int  `json:"administratorIPRules"`
+	ServerIPRules        int  `json:"serverIPRules"`
+	PreparedPages        int  `json:"preparedPages"`
+	PreparedFiles        int  `json:"preparedFiles"`
+	PublishedPages       int  `json:"publishedPages"`
+	RootPrepared         bool `json:"rootPrepared"`
+	IndexPrepared        bool `json:"indexPrepared"`
+	RootPublished        bool `json:"rootPublished"`
+}
+
 type RAMSiteStats struct {
-	Domain       string   `json:"domain"`
-	Routes       int      `json:"routes"`
-	RootVariants []string `json:"rootVariants,omitempty"`
-	RootMiss     string   `json:"rootMiss,omitempty"`
+	Policy         *RAMPolicyStats `json:"policy,omitempty"`
+	RecoveredPages int             `json:"recoveredPages"`
+	RecoveredFiles int             `json:"recoveredFiles"`
+	RootRecovered  bool            `json:"rootRecovered"`
+	Domain         string          `json:"domain"`
+	Routes         int             `json:"routes"`
+	RootVariants   []string        `json:"rootVariants,omitempty"`
+	RootMiss       string          `json:"rootMiss,omitempty"`
 }
 
 type RAMCacheStats struct {
@@ -177,7 +201,11 @@ func (catalog *Catalog) RAMStats(stop <-chan struct{}) (RAMCacheStats, error) {
 	result, err := catalog.runtime.cache.exchange(ramJob{action: "stats"}, stop)
 	if snapshot := catalog.runtime.current.Load(); snapshot != nil {
 		for domain, generation := range snapshot.roots {
-			site := RAMSiteStats{Domain: domain, RootMiss: generation.ramMisses["/"]}
+			policy := snapshot.policies[domain].policy
+			indexPath := "/" + filepath.ToSlash(catalog.runtime.options.StaticPath("/"))
+			site := RAMSiteStats{Domain: domain, RootMiss: generation.ramMisses["/"], RecoveredPages: generation.recoveredPages, RecoveredFiles: generation.recoveredFiles,
+				Policy: &RAMPolicyStats{RoutingVersion: policy.RoutingVersion, Frozen: policy.Frozen, Versioned: policy.Versioned, PrivateTestDrive: policy.PrivateTestDrive, PendingRegistration: policy.PendingRegistration, Stealth: policy.Stealth,
+					AdministratorIPRules: len(policy.AllowedIPs), ServerIPRules: len(policy.ServerIPs), PreparedPages: len(policy.PreparedPages), PreparedFiles: len(policy.PreparedFiles), PublishedPages: len(policy.PublishedVersions), RootPrepared: policy.PreparedPages["/"] != "", IndexPrepared: policy.PreparedPages[indexPath] != "", RootPublished: policy.PublishedVersions["/"] != ""}}
 			for _, response := range generation.ram {
 				if len(response.variants) != 0 {
 					site.Routes++
@@ -185,6 +213,7 @@ func (catalog *Catalog) RAMStats(stop <-chan struct{}) (RAMCacheStats, error) {
 			}
 			if response := generation.ram["/"]; response != nil {
 				site.RootMiss = response.reason
+				site.RootRecovered = response.recovered
 				for variant := range response.variants {
 					site.RootVariants = append(site.RootVariants, fmt.Sprintf("%s/menu=%t/updating=%t", variant.Language, variant.Menu, variant.Updating))
 				}
@@ -195,6 +224,9 @@ func (catalog *Catalog) RAMStats(stop <-chan struct{}) (RAMCacheStats, error) {
 			}
 			if len(site.RootVariants) == 0 && site.RootMiss == "" {
 				site.RootMiss = "no_prepared_object"
+			}
+			if reason := catalog.runtime.ramPageReason(policy, "/"); reason != "" {
+				site.RootMiss = reason
 			}
 			result.stats.Sites = append(result.stats.Sites, site)
 		}

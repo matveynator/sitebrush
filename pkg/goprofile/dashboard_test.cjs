@@ -60,7 +60,7 @@ function fixture(options = {}) {
           {id: 2, name: 'runtime.work', file: 'runtime.go', line: 20, kind: 'runtime', self: 80, total: 80, samples: 8}
         ],
         groups: [{kind: 'application', self: 20}, {kind: 'runtime', self: 80}],
-        ramCache:{limit:536870912,bytes:6962,bodies:1,hits:17,misses:2},runtime:{samples:[{elapsedMS:0,counts:{'/sched/goroutines:goroutines':42,'/sched/goroutines/runnable:goroutines':3}}],scheduler:{p95MS:0.25}}
+        ramCache:{limit:536870912,bytes:6962,bodies:1,hits:17,misses:2,sites:[{domain:'vz.sitebrush.com',routes:1,rootVariants:['ru/menu=true/updating=false'],rootRecovered:true,recoveredPages:2,recoveredFiles:1,policy:{routingVersion:3,frozen:false,versioned:false,privateTestDrive:false,pendingRegistration:false,stealth:false,preparedPages:0,preparedFiles:0,rootPrepared:false,indexPrepared:false,rootPublished:false,administratorIPRules:0,serverIPRules:0}}]},runtime:{samples:[{elapsedMS:0,counts:{'/sched/goroutines:goroutines':42,'/sched/goroutines/runnable:goroutines':3}}],scheduler:{p95MS:0.25}}
       };
       const response = {protocol:1, role: command.role, runID: command.runID || 'fixture-run', busy: false, reports: [report]};
       if (command.action === 'capabilities') response.targets = options.targets || ['application', 'public'];
@@ -141,6 +141,7 @@ function fixture(options = {}) {
   const processStatistics=tablePanel.descendants(tablePanel.nodes.get('[data-profiler-overview]')).map(node=>node.textContent).join(' ');
   assert.ok(processStatistics.includes('101')&&processStatistics.includes('202'),'The first screen lists both process PIDs');
   assert.ok(processStatistics.includes('17 / 2')&&processStatistics.includes('Готовые RAM-ответы'),'The overview includes real cache counters');
+  assert.ok(processStatistics.includes('vz.sitebrush.com')&&processStatistics.includes('frozen=false versioned=false')&&processStatistics.includes('2 / 1 (включая /)'),'Policy flags and recovered fingerprints are visible separately');
   tablePanel.findButton('Собственное CPU').onclick();
   await tablePanel.settle();
   let reports = tablePanel.sockets.flatMap(socket => socket.commands).filter(command => command.action === 'report');
