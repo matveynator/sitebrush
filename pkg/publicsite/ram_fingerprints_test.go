@@ -261,3 +261,27 @@ func TestRAMRootAliasPreservesRouteBootstrapWithAndWithoutCache(t *testing.T) {
 		}
 	}
 }
+
+func TestRAMRecoveryDoesNotSubstituteStaticHTMLForResourceAlias(t *testing.T) {
+	catalog, root, _ := legacyRAMFixture(t, func(policy *Policy) { policy.ResourcePaths["/"] = "overlay.html" })
+	filename := filepath.Join(root, "storage", "files", "vz.sitebrush.com", "overlay.html")
+	if err := os.WriteFile(filename, []byte("<html><body>resource overlay</body></html>"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.SetMemory(true); err != nil {
+		t.Fatal(err)
+	}
+	decision := catalog.Lookup(Lookup{Host: "vz.sitebrush.com", Path: "/"})
+	var reason string
+	response, found, err := catalog.AcquirePrepared(decision, "/", HTMLVariantKey{Language: "en"}, &reason)
+	if err != nil || response != nil || found || reason != "resource_mismatch" {
+		t.Fatal("static HTML replaced the authoritative resource route", found, reason, err)
+	}
+}
+
+func TestRAMRecoveryNeverReplacesExistingResourceFingerprint(t *testing.T) {
+	catalog, _, _ := legacyRAMFixture(t, func(policy *Policy) { policy.PreparedFiles = map[string]string{"style.css": strings.Repeat("0", 64)} })
+	if err := catalog.SetMemory(true); err == nil {
+		t.Fatal("existing resource fingerprint was replaced by a live hash")
+	}
+}

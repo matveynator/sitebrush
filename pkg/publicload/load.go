@@ -16,6 +16,7 @@ import (
 )
 
 type Options struct {
+	ErrorSamples   int
 	URL            string
 	Requests       int
 	Concurrency    int
@@ -33,6 +34,7 @@ type Percentiles struct {
 }
 
 type Report struct {
+	Anomalies           []ResponseAnomaly `json:",omitempty"`
 	Requests            int
 	Successful          int
 	TransportErrors     int
@@ -87,6 +89,9 @@ type traceEvent struct {
 }
 
 type sample struct {
+	anomaly                                          *ResponseAnomaly
+	declaredBytes                                    int64
+	etag                                             string
 	dns, tcp, tls, connectionWait, wait, ttfb, total time.Duration
 	status                                           int
 	bytes                                            int64
@@ -100,7 +105,7 @@ type sample struct {
 
 // A worker owns its trace channel and sample slice. Callbacks transfer events
 // instead of mutating the worker's measurements from transport goroutines.
-func requestSample(client *http.Client, template *http.Request, options Options, worker int) sample {
+func requestSample(client *http.Client, template *http.Request, options Options, worker int, capture *anomalyBody) sample {
 	events := make(chan traceEvent, 32)
 	lost := make(chan struct{}, 1)
 	observe := func(event traceEvent) {
@@ -134,7 +139,10 @@ func requestSample(client *http.Client, template *http.Request, options Options,
 		GotConn:              func(info httptrace.GotConnInfo) { observe(traceEvent{stage: gotConnection, reused: info.Reused}) },
 		GetConn:              func(string) { observe(traceEvent{stage: getConnection}) },
 	}
-	result := sample{}
+	result := sample{declaredBytes: -1}
+	if capture != nil {
+		capture.reset()
+	}
 	request := template.Clone(httptrace.WithClientTrace(template.Context(), trace))
 	if options.PrepareRequest != nil {
 		options.PrepareRequest(request, worker)
@@ -146,7 +154,12 @@ func requestSample(client *http.Client, template *http.Request, options Options,
 	} else {
 		result.status = response.StatusCode
 		result.protocol = response.Proto
-		if options.ExpectedSHA256 == "" {
+		if capture != nil {
+			result.declaredBytes = response.ContentLength
+			result.etag = response.Header.Get("ETag")
+			result.bytes, err = io.Copy(capture, response.Body)
+			result.digest = hex.EncodeToString(capture.digest.Sum(nil))
+		} else if options.ExpectedSHA256 == "" {
 			result.bytes, err = io.Copy(io.Discard, response.Body)
 		} else {
 			digest := sha256.New()
@@ -162,6 +175,7 @@ func requestSample(client *http.Client, template *http.Request, options Options,
 		}
 	}
 	result.total = time.Since(started)
+	result.anomaly = captureAnomaly(result, options, capture)
 	var dnsAt, tlsAt, writtenAt, connectionAt time.Time
 	connections := make(map[string]time.Time)
 	for {
@@ -221,6 +235,17 @@ func requestSample(client *http.Client, template *http.Request, options Options,
 func Run(client *http.Client, options Options, stop <-chan struct{}) (Report, error) {
 	if client == nil || options.Requests <= 0 || options.Concurrency <= 0 {
 		return Report{}, errors.New("load test requires a client, positive request count and concurrency")
+	}
+	if options.ErrorSamples < 0 || options.ErrorSamples > maximumErrorSamples {
+		return Report{}, errors.New("error samples must be between 0 and 16")
+	}
+	var sampleTickets <-chan struct{}
+	if options.ErrorSamples > 0 {
+		tickets := make(chan struct{}, options.ErrorSamples)
+		for range options.ErrorSamples {
+			tickets <- struct{}{}
+		}
+		sampleTickets = tickets
 	}
 	template, err := http.NewRequest(http.MethodGet, options.URL, nil)
 	if err != nil {
@@ -282,6 +307,10 @@ func Run(client *http.Client, options Options, stop <-chan struct{}) (Report, er
 				}
 			}()
 			workerTemplate := template.WithContext(boundary)
+			var capture *anomalyBody
+			if options.ErrorSamples > 0 {
+				capture = newAnomalyBody(sampleTickets)
+			}
 			samples := make([]sample, 0, count)
 			<-start
 			defer func() { results <- samples }()
@@ -304,7 +333,7 @@ func Run(client *http.Client, options Options, stop <-chan struct{}) (Report, er
 						return
 					}
 				}
-				samples = append(samples, requestSample(client, workerTemplate, options, worker))
+				samples = append(samples, requestSample(client, workerTemplate, options, worker, capture))
 			}
 		}(worker, count)
 	}
@@ -315,6 +344,9 @@ func Run(client *http.Client, options Options, stop <-chan struct{}) (Report, er
 	for worker := 0; worker < concurrency; worker++ {
 		for _, result := range <-results {
 			report.Requests++
+			if result.anomaly != nil {
+				report.Anomalies = append(report.Anomalies, *result.anomaly)
+			}
 			report.Bytes += result.bytes
 			report.Statuses[result.status]++
 			report.Protocols[result.protocol]++
@@ -341,7 +373,7 @@ func Run(client *http.Client, options Options, stop <-chan struct{}) (Report, er
 				}
 			} else if result.status < 200 || result.status >= 300 {
 				report.Non2xx++
-			} else if options.ExpectedBytes > 0 && result.bytes != options.ExpectedBytes {
+			} else if options.ExpectedBytes > 0 && result.bytes != options.ExpectedBytes || options.ErrorSamples > 0 && result.declaredBytes >= 0 && result.bytes != result.declaredBytes {
 				report.LengthMismatches++
 			} else if options.ExpectedSHA256 != "" && result.digest != options.ExpectedSHA256 {
 				report.ContentMismatches++

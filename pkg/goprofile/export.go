@@ -68,7 +68,7 @@ func exportText(report Report) string {
 			if len(variants) > 8 {
 				variants = variants[:8]
 			}
-			text.line("RAM domain=%s routes=%d root_variants_count=%d root_variants=%s root_miss=%s recovered_pages=%d recovered_files=%d root_recovered=%t", site.Domain, site.Routes, len(site.RootVariants), strings.Join(variants, ", "), site.RootMiss, site.RecoveredPages, site.RecoveredFiles, site.RootRecovered)
+			text.line("RAM domain=%s routes=%d root_variants_count=%d root_variants_sample=%s root_miss=%s recovered_pages=%d recovered_files=%d root_recovered=%t", site.Domain, site.Routes, len(site.RootVariants), strings.Join(variants, ", "), site.RootMiss, site.RecoveredPages, site.RecoveredFiles, site.RootRecovered)
 			if policy := site.Policy; policy != nil {
 				text.line("RAM policy domain=%s routing=%d frozen=%t versioned=%t private=%t pending=%t stealth=%t admin_ip_rules=%d server_ip_rules=%d prepared_pages=%d prepared_files=%d published_pages=%d root_prepared=%t index_prepared=%t root_published=%t", site.Domain, policy.RoutingVersion, policy.Frozen, policy.Versioned, policy.PrivateTestDrive, policy.PendingRegistration, policy.Stealth, policy.AdministratorIPRules, policy.ServerIPRules, policy.PreparedPages, policy.PreparedFiles, policy.PublishedPages, policy.RootPrepared, policy.IndexPrepared, policy.RootPublished)
 			}

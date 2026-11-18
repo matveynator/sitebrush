@@ -113,8 +113,10 @@ CGO_ENABLED=0 go test . -run '^$' \
 In `snapshot` mode, `--public-ram-cache-mib=512` prepares small published HTML,
 static files and known public resources up to 256 KiB per final representation.
 Publication records source fingerprints; preparation verifies them beneath the
-site's `os.Root` before atomically installing immutable bodies. Legacy policies
-without these optional fingerprints continue using the safe file path.
+site's `os.Root` before atomically installing immutable bodies. Ordinary non-frozen, non-versioned legacy policies recover absent fingerprints
+during generation preparation, never during a GET. Existing fingerprints and
+checkpoint versions remain authoritative. The public process never rewrites
+policy JSON; the next normal publication persists current fingerprints.
 
 The budget covers unique payloads, reservations and generations still borrowed
 by requests. It is not an RSS limit: Go metadata, collection, connections and
@@ -148,3 +150,20 @@ metrics remain unavailable; approximate gauges need not add up to the total.
 The first screen includes RAM occupancy, budget, body count, hits and misses;
 the Goroutine tab shows the runtime samples. The copied report includes both.
 Diagnostic observation is present only with profiling or request timings enabled.
+
+
+## Ограниченная выборка неправильных ответов
+
+Опция `-error-samples` по умолчанию равна `0`. Значения от 1 до 16 включают сохранение не более указанного числа аномальных ответов за один прогон, суммарно по всем конкурентным клиентам. Пример отдельного диагностического запуска:
+
+```sh
+go run ./scripts/publicload -url http://vz.sitebrush.com/ -requests 10000 -concurrency 500 -bytes 6962 -error-samples 16
+```
+
+Замените `6962` фактической длиной свежего контрольного ответа. Для проверки содержимого той же длины передайте его SHA256 через `-sha256`. Поле `Anomalies` содержит причину, HTTP-статус и протокол, объявленный/ожидаемый/полученный размер, ETag, SHA256 фактически прочитанных байтов, ошибку чтения и первые 1024 байта тела. UTF-8 выводится как текст; бинарный префикс — как hex с явным указанием кодировки. Все счётчики ошибок продолжают учитывать весь прогон, даже когда места для образцов закончились.
+
+Этот режим добавляет хеширование и сбор префикса в клиенте. Для сравнительных RPS-прогонов оставляйте его выключенным. Клиент использует HTTP/1.1 по умолчанию и показывает фактический протокол: такой запуск не является воспроизведением исходного `ab -k` по HTTP/1.0. Ни 16 ошибок ApacheBench, ни их причину нельзя восстановить из одних агрегированных чисел. Профиль за 30 секунд также не охватывает весь 65-секундный прогон.
+
+В профилировщике `rootPrepared`/`indexPrepared` описывают исходную политику, а `rootRecovered` и счётчики восстановления — подготовленное поколение. Поэтому `rootPrepared=false` вместе с `rootRecovered=true` и RAM hits означает успешное восстановление старых метаданных. Серверный список доверенных IP для нагрузочных тестов сохраняется и не отключает RAM у публичных сайтов.
+
+После подтверждённых RAM hits сравните бюджеты 0/512 МиБ при 500/1000/10000 соединениях. Сопоставляйте одинаковые итоговые тела и протоколы; текущие 6810 байт nginx и 6962 байта SiteBrush — разные ответы. Клиентские хвосты сравнивайте с серверными стадиями, учитывая потерянные наблюдения и исключённые оборванные соединения. Это ручная приёмка, а не обязательный этап CI.

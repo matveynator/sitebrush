@@ -89,7 +89,7 @@ func (catalog *Catalog) acquireRAM(decision Decision, pathname string, key HTMLV
 		}
 	case prepared.resource == "" && decision.PageVersion != "" && prepared.version != decision.PageVersion:
 		cause = "version_mismatch"
-	case prepared.resource != "" && prepared.resource != decision.ResourceFile && (!asset || prepared.resource != decision.File.Name):
+	case asset && prepared.resource != decision.File.Name || !asset && prepared.resource != decision.ResourceFile:
 		cause = "resource_mismatch"
 	case prepared.variants[key] == nil:
 		variant, exists := prepared.prepared.variants[key]

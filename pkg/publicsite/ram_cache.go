@@ -201,11 +201,15 @@ func (catalog *Catalog) RAMStats(stop <-chan struct{}) (RAMCacheStats, error) {
 	result, err := catalog.runtime.cache.exchange(ramJob{action: "stats"}, stop)
 	if snapshot := catalog.runtime.current.Load(); snapshot != nil {
 		for domain, generation := range snapshot.roots {
-			policy := snapshot.policies[domain].policy
+			cached, policyKnown := snapshot.policies[domain]
+			policy := cached.policy
 			indexPath := "/" + filepath.ToSlash(catalog.runtime.options.StaticPath("/"))
 			site := RAMSiteStats{Domain: domain, RootMiss: generation.ramMisses["/"], RecoveredPages: generation.recoveredPages, RecoveredFiles: generation.recoveredFiles,
 				Policy: &RAMPolicyStats{RoutingVersion: policy.RoutingVersion, Frozen: policy.Frozen, Versioned: policy.Versioned, PrivateTestDrive: policy.PrivateTestDrive, PendingRegistration: policy.PendingRegistration, Stealth: policy.Stealth,
 					AdministratorIPRules: len(policy.AllowedIPs), ServerIPRules: len(policy.ServerIPs), PreparedPages: len(policy.PreparedPages), PreparedFiles: len(policy.PreparedFiles), PublishedPages: len(policy.PublishedVersions), RootPrepared: policy.PreparedPages["/"] != "", IndexPrepared: policy.PreparedPages[indexPath] != "", RootPublished: policy.PublishedVersions["/"] != ""}}
+			if !policyKnown {
+				site.Policy = nil
+			}
 			for _, response := range generation.ram {
 				if len(response.variants) != 0 {
 					site.Routes++
@@ -225,7 +229,7 @@ func (catalog *Catalog) RAMStats(stop <-chan struct{}) (RAMCacheStats, error) {
 			if len(site.RootVariants) == 0 && site.RootMiss == "" {
 				site.RootMiss = "no_prepared_object"
 			}
-			if reason := catalog.runtime.ramPageReason(policy, "/"); reason != "" {
+			if reason := catalog.runtime.ramPageReason(policy, "/"); policyKnown && reason != "" {
 				site.RootMiss = reason
 			}
 			result.stats.Sites = append(result.stats.Sites, site)
