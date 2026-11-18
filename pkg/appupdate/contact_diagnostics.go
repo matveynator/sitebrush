@@ -47,13 +47,15 @@ func recoverableContactFailure(problem error) bool {
 	if errors.As(problem, &verification) || errors.As(problem, &authority) || errors.As(problem, &hostname) || errors.As(problem, &certificate) || errors.As(problem, &record) || strings.Contains(problem.Error(), "tls:") {
 		return false
 	}
-	for _, rejection := range []error{netchan.ErrSessionRejected, netchan.ErrSessionExpired, netchan.ErrSchemaMismatch, netchan.ErrMalformedFrame, netchan.ErrPayloadLimit, netchan.ErrUnsupportedType} {
+	for _, rejection := range []error{netchan.ErrSessionRejected, netchan.ErrSchemaMismatch, netchan.ErrMalformedFrame, netchan.ErrPayloadLimit, netchan.ErrUnsupportedType} {
 		if errors.Is(problem, rejection) {
 			return false
 		}
 	}
 	var network net.Error
-	return errors.As(problem, &network) || errors.Is(problem, net.ErrClosed) || errors.Is(problem, netchan.ErrChannelClosed) || errors.Is(problem, io.EOF) || errors.Is(problem, io.ErrUnexpectedEOF) || errors.Is(problem, os.ErrDeadlineExceeded)
+	// A lost resumable session terminates an already authenticated contact;
+	// it does not reject the caller's identity or the requested operation.
+	return errors.As(problem, &network) || errors.Is(problem, net.ErrClosed) || errors.Is(problem, netchan.ErrChannelClosed) || errors.Is(problem, netchan.ErrSessionExpired) || errors.Is(problem, io.EOF) || errors.Is(problem, io.ErrUnexpectedEOF) || errors.Is(problem, os.ErrDeadlineExceeded)
 }
 
 type contactDiagnostics struct {
