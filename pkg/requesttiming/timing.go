@@ -30,11 +30,14 @@ const (
 	ThrottleWork
 	ProxyMetadata
 	ProxyBackend
+	HandlerComplete
+	BodyWrite
+	HTTP1ResponseComplete
 	stageCount
 )
 
 func (stage Stage) String() string {
-	return [...]string{"accepted_to_request", "front_state", "domain", "policy", "attack_guard", "throttle_guard", "public_handler", "first_write", "certificate", "attack_queue", "attack_work", "throttle_queue", "throttle_work", "proxy_metadata", "proxy_backend"}[stage]
+	return [...]string{"accepted_to_request", "front_state", "domain", "policy", "attack_guard", "throttle_guard", "public_handler", "first_write", "certificate", "attack_queue", "attack_work", "throttle_queue", "throttle_work", "proxy_metadata", "proxy_backend", "handler_complete", "body_write", "http1_response_complete"}[stage]
 }
 
 type HTTPMetrics struct {
@@ -45,9 +48,21 @@ type HTTPMetrics struct {
 	WriteErrors uint64 `json:"writeErrors"`
 }
 type Event struct {
-	HTTP      HTTPMetrics
-	Durations [stageCount]time.Duration
-	Present   uint16
+	RAM        RAMMetrics
+	connection net.Conn
+	transition bool
+	state      http.ConnState
+	protocol   int
+	started    time.Time
+	at         time.Time
+	HTTP       HTTPMetrics
+	Durations  [stageCount]time.Duration
+	Present    uint32
+}
+
+type RAMMetrics struct {
+	Hits   uint64 `json:"hits"`
+	Misses uint64 `json:"misses"`
 }
 
 type Counter struct {
@@ -59,6 +74,7 @@ type Counter struct {
 }
 
 type Report struct {
+	RAM            RAMMetrics
 	HTTP           HTTPMetrics
 	Stages         [stageCount]Counter
 	DroppedMinimum uint64
@@ -80,6 +96,31 @@ func New(stop <-chan struct{}) *Collector {
 
 func (collector *Collector) run() {
 	var report Report
+	connections := make(map[net.Conn]connectionTiming)
+	var cutoff time.Time
+	// A lost transition must not pair one request with a later request's Idle.
+	// Discard queued correlations on loss; HTTP totals still report partial data.
+	lost := func() { report.DroppedMinimum++; report.Incomplete = true; clear(connections); cutoff = time.Now() }
+	consume := func(event Event) {
+		select {
+		case <-collector.losses:
+			lost()
+		default:
+		}
+		if event.transition {
+			recordConnectionTiming(&report, connections, event, cutoff)
+			return
+		}
+		report.record(event)
+		if event.connection != nil && event.started.After(cutoff) {
+			if current, found := connections[event.connection]; found && !event.started.Before(current.active) {
+				current.started = event.started
+				current.finished = event.at
+				current.protocol = event.protocol
+				connections[event.connection] = current
+			}
+		}
+	}
 	for stage := range report.Stages {
 		report.Stages[stage].Stage = Stage(stage).String()
 	}
@@ -88,26 +129,26 @@ func (collector *Collector) run() {
 		case <-collector.stop:
 			return
 		case <-collector.losses:
-			report.DroppedMinimum++
-			report.Incomplete = true
+			lost()
 		case reply := <-collector.reports:
 			for pending := len(collector.events); pending > 0; pending-- {
-				report.record(<-collector.events)
+				consume(<-collector.events)
 			}
 			select {
 			case <-collector.losses:
-				report.DroppedMinimum++
-				report.Incomplete = true
+				lost()
 			default:
 			}
 			reply <- report
 		case event := <-collector.events:
-			report.record(event)
+			consume(event)
 		}
 	}
 }
 
 func (report *Report) record(event Event) {
+	report.RAM.Hits += event.RAM.Hits
+	report.RAM.Misses += event.RAM.Misses
 	report.HTTP.Requests += event.HTTP.Requests
 	report.HTTP.Received += event.HTTP.Received
 	report.HTTP.Sent += event.HTTP.Sent
@@ -198,11 +239,16 @@ type trace struct {
 }
 type traceKey struct{}
 type acceptedKey struct{}
+type connectionKey struct{}
 
-func (collector *Collector) ConnContext(parent context.Context, _ net.Conn) context.Context {
+func (collector *Collector) ConnContext(parent context.Context, connection net.Conn) context.Context {
 	accepted := make(chan time.Time, 1)
 	accepted <- time.Now()
-	return context.WithValue(parent, acceptedKey{}, (<-chan time.Time)(accepted))
+	parent = context.WithValue(parent, acceptedKey{}, (<-chan time.Time)(accepted))
+	if connection != nil {
+		parent = context.WithValue(parent, connectionKey{}, connection)
+	}
+	return parent
 }
 
 func Start(request *http.Request) time.Time {
@@ -259,6 +305,13 @@ func (collector *Collector) Middleware(next http.Handler) http.Handler {
 		next.ServeHTTP(&responseWriter{ResponseWriter: writer, measurement: measurement}, request)
 		if request.Header.Get("Upgrade") != "" {
 			measurement.event.HTTP = HTTPMetrics{}
+		} else {
+			measurement.event.at = time.Now()
+			measurement.event.started = measurement.started
+			measurement.event.connection, _ = request.Context().Value(connectionKey{}).(net.Conn)
+			measurement.event.protocol = request.ProtoMajor
+			measurement.event.Durations[HandlerComplete] = measurement.event.at.Sub(measurement.started)
+			measurement.event.Present |= 1 << HandlerComplete
 		}
 		collector.Observe(measurement.event)
 	})
@@ -289,7 +342,10 @@ func (writer *responseWriter) WriteHeader(status int) {
 }
 func (writer *responseWriter) Write(body []byte) (int, error) {
 	writer.firstWrite()
+	started := time.Now()
 	count, err := writer.ResponseWriter.Write(body)
+	writer.measurement.event.Durations[BodyWrite] += time.Since(started)
+	writer.measurement.event.Present |= 1 << BodyWrite
 	writer.measurement.event.HTTP.Sent += uint64(max(count, 0))
 	if err != nil {
 		writer.measurement.event.HTTP.WriteErrors++
@@ -299,7 +355,10 @@ func (writer *responseWriter) Write(body []byte) (int, error) {
 func (writer *responseWriter) ReadFrom(source io.Reader) (int64, error) {
 	writer.firstWrite()
 	if receiver, found := writer.ResponseWriter.(io.ReaderFrom); found {
+		started := time.Now()
 		count, err := receiver.ReadFrom(source)
+		writer.measurement.event.Durations[BodyWrite] += time.Since(started)
+		writer.measurement.event.Present |= 1 << BodyWrite
 		writer.measurement.event.HTTP.Sent += uint64(max(count, 0))
 		if err != nil {
 			writer.measurement.event.HTTP.WriteErrors++

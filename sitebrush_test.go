@@ -36011,12 +36011,12 @@ func TestPublicRAMServingPreparesOrdinaryPagesAndResources(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for filename, body := range map[string]string{filepath.Join(staticDirectory, "index.html"): "<html><head></head><body>public RAM</body></html>", filepath.Join(staticDirectory, "style.css"): "body {color:green}", filepath.Join(filesDirectory, "app.js"): "console.log('ready')", filepath.Join(filesDirectory, "manual.txt"): "public manual"} {
+	for filename, body := range map[string]string{filepath.Join(staticDirectory, "index.html"): "<html><head></head><body>public RAM</body></html>", filepath.Join(staticDirectory, "style.css"): "body {color:green}", filepath.Join(filesDirectory, "app.js"): "console.log('ready')", filepath.Join(filesDirectory, "manual.txt"): "public manual", filepath.Join(filesDirectory, "archive.zip"): "public archive"} {
 		if err := os.WriteFile(filename, []byte(body), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	policy := publicsite.Policy{Domain: domain, Layouts: map[string]string{"/": "layout", "/index.html": "layout"}, ResourcePaths: map[string]string{"/app.js": "app.js"}, ResourceTypes: map[string]string{"/app.js": "application/javascript"}, Files: []publicsite.FileRule{{Name: "manual.txt", Mode: "public"}, {Name: "private.txt", Mode: "token"}}}
+	policy := publicsite.Policy{Domain: domain, Layouts: map[string]string{"/": "layout", "/index.html": "layout"}, ResourcePaths: map[string]string{"/app.js": "app.js"}, ResourceTypes: map[string]string{"/app.js": "application/javascript"}, Files: []publicsite.FileRule{{Name: "manual.txt", Mode: "public"}, {Name: "archive.zip", Mode: "public"}, {Name: "private.txt", Mode: "token"}}}
 	if err := application.preparePublicRAMSources(&policy); err != nil {
 		t.Fatal(err)
 	}
@@ -36032,17 +36032,20 @@ func TestPublicRAMServingPreparesOrdinaryPagesAndResources(t *testing.T) {
 	if err := application.publicCatalog.SetMemory(true); err != nil {
 		t.Fatal(err)
 	}
-	for _, filename := range []string{filepath.Join(staticDirectory, "index.html"), filepath.Join(staticDirectory, "style.css"), filepath.Join(filesDirectory, "app.js"), filepath.Join(filesDirectory, "manual.txt")} {
+	for _, filename := range []string{filepath.Join(staticDirectory, "index.html"), filepath.Join(staticDirectory, "style.css"), filepath.Join(filesDirectory, "app.js"), filepath.Join(filesDirectory, "manual.txt"), filepath.Join(filesDirectory, "archive.zip")} {
 		if err := os.Remove(filename); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for pathname, expected := range map[string]string{"/": "public RAM", "/style.css": "body {color:green}", "/app.js": "console.log('ready')", "/p/manual.txt": "public manual"} {
+	for pathname, expected := range map[string]string{"/": "public RAM", "/style.css": "body {color:green}", "/app.js": "console.log('ready')", "/p/manual.txt": "public manual", "/p/archive.zip": "public archive"} {
 		request := httptest.NewRequest(http.MethodGet, "https://"+domain+pathname, nil)
 		request.Header.Set("Accept-Language", "en")
 		response := httptest.NewRecorder()
 		if !application.servePublicPublished(response, request, false) || response.Code != http.StatusOK || !strings.Contains(response.Body.String(), expected) {
 			t.Fatalf("%s: %d %s", pathname, response.Code, response.Body.String())
+		}
+		if downloadableAssetName(pathname) && response.Header().Get("X-SiteBrush-Download-Complete") != "1" {
+			t.Fatal("RAM download was not observed", pathname)
 		}
 		if pathname == "/" && !strings.Contains(response.Body.String(), "visitor.js") {
 			t.Fatal("prepared bootstrap missing")
@@ -36053,6 +36056,21 @@ func TestPublicRAMServingPreparesOrdinaryPagesAndResources(t *testing.T) {
 			t.Fatalf("conditional %s: %d", pathname, cached.Code)
 		}
 	}
+	for _, scenario := range []struct{ method, rangeHeader string }{{"HEAD", ""}, {"GET", "bytes=0-2"}} {
+		request := httptest.NewRequest(scenario.method, "https://"+domain+"/p/archive.zip", nil)
+		request.Header.Set("Range", scenario.rangeHeader)
+		response := httptest.NewRecorder()
+		application.servePublicPublished(response, request, false)
+		if response.Header().Get("X-SiteBrush-Download-Complete") != "" {
+			t.Fatal("partial RAM download was observed", scenario)
+		}
+	}
+	broken := &interruptedDownloadWriter{header: make(http.Header)}
+	application.servePublicPublished(broken, httptest.NewRequest("GET", "https://"+domain+"/p/archive.zip", nil), false)
+	if broken.Header().Get("X-SiteBrush-Download-Complete") != "" {
+		t.Fatal("broken RAM download was observed")
+	}
+
 	private := httptest.NewRecorder()
 	if application.servePublicPublished(private, httptest.NewRequest("GET", "https://"+domain+"/p/private.txt", nil), false) {
 		t.Fatal("token download escaped its dynamic handler")
@@ -36074,6 +36092,83 @@ func TestPublicRAMConfigurationReachesChildren(t *testing.T) {
 	application := &App{publicProxy: true, publicRAMCacheBytes: 512 << 20}
 	if application.publicRuntimeOptions().RAMCacheBytes != 0 {
 		t.Fatal("application proxy allocated another public RAM cache")
+	}
+}
+
+func TestPublicRAMDiscoveryRejectsEscapesWithoutBlockingHealthyPages(t *testing.T) {
+	root := t.TempDir()
+	application := &App{storagePath: root, storageRealRoot: root, publicStaticMode: publicsite.StaticSnapshot, publicRAMCacheBytes: 1 << 20}
+	domain := "manifest.example"
+	static := filepath.Join(root, "storage", "static", domainStorageName(domain))
+	if err := os.MkdirAll(static, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(static, "index.html"), []byte("<html>published</html>"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	neighbor := filepath.Join(root, "neighbor.css")
+	if err := os.WriteFile(neighbor, []byte("confidential neighbor bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(neighbor, filepath.Join(static, "escape.css")); err != nil {
+		t.Skip("symlink unavailable:", err)
+	}
+	policy := publicsite.Policy{Domain: domain, Layouts: map[string]string{"/": "layout"}}
+	if err := application.preparePublicRAMSources(&policy); err != nil {
+		t.Fatal("optional escape blocked publication", err)
+	}
+	if policy.PreparedPages["/"] == "" || policy.PreparedPages["/escape.css"] != "" {
+		t.Fatal("source manifest crossed its site root", policy.PreparedPages)
+	}
+	if err := os.WriteFile(filepath.Join(static, "index.html"), []byte("<html>unpublished change</html>"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := publicsite.Write(root, policy); err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	defer close(stop)
+	catalog := publicsite.NewCatalog(root, stop, application.publicRuntimeOptions())
+	if err := catalog.SetMemory(true); err == nil {
+		t.Fatal("source changed after publication fingerprint was admitted")
+	}
+}
+
+func TestPublicRAMPublicationAcknowledgesReadyBodiesAndRevocation(t *testing.T) {
+	application, database := newTestApplication(t)
+	application.publicStaticMode = publicsite.StaticSnapshot
+	application.publicRAMCacheBytes = 1 << 20
+	stop := make(chan struct{})
+	defer close(stop)
+	application.publicCatalog = publicsite.NewCatalog(application.storagePath, stop, application.publicRuntimeOptions())
+	if err := application.publicCatalog.SetMemory(true); err != nil {
+		t.Fatal(err)
+	}
+	application.startPublicPublication(stop)
+	for _, body := range []string{"<html><head></head><body>first generation</body></html>", "<html><head></head><body>second generation</body></html>"} {
+		if err := application.publicPublicationRequest("protect", "localhost"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := database.Exec(`INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES('localhost','/','Published',?)`, body); err != nil {
+			t.Fatal(err)
+		}
+		application.writePublishedStaticHTML("localhost", "/", body)
+		blocked := httptest.NewRecorder()
+		if application.servePublicPublished(blocked, httptest.NewRequest("GET", "http://localhost/", nil), false) && blocked.Code == http.StatusOK {
+			t.Fatal("publication barrier returned a cached body")
+		}
+		if err := application.publicPublicationRequest("unprotect", "localhost"); err != nil {
+			t.Fatal(err)
+		}
+		response := httptest.NewRecorder()
+		request := httptest.NewRequest("GET", "http://localhost/", nil)
+		if !application.servePublicPublished(response, request, false) || response.Code != http.StatusOK || !strings.Contains(response.Body.String(), strings.TrimSuffix(strings.TrimPrefix(body, "<html><head></head><body>"), "</body></html>")) {
+			t.Fatal("acknowledged publication is stale", response.Code, response.Body.String())
+		}
+		stats, err := application.publicCatalog.RAMStats(nil)
+		if err != nil || stats.Bodies == 0 {
+			t.Fatal("publication did not prepare RAM", stats, err)
+		}
 	}
 }
 

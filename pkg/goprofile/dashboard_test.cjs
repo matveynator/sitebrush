@@ -59,7 +59,8 @@ function fixture(options = {}) {
           {id: 1, name: 'main.handle', file: 'sitebrush.go', line: 10, kind: 'application', self: 20, total: 100, samples: 10},
           {id: 2, name: 'runtime.work', file: 'runtime.go', line: 20, kind: 'runtime', self: 80, total: 80, samples: 8}
         ],
-        groups: [{kind: 'application', self: 20}, {kind: 'runtime', self: 80}]
+        groups: [{kind: 'application', self: 20}, {kind: 'runtime', self: 80}],
+        ramCache:{limit:536870912,bytes:6962,bodies:1,hits:17,misses:2},runtime:{samples:[{elapsedMS:0,counts:{'/sched/goroutines:goroutines':42,'/sched/goroutines/runnable:goroutines':3}}],scheduler:{p95MS:0.25}}
       };
       const response = {protocol:1, role: command.role, runID: command.runID || 'fixture-run', busy: false, reports: [report]};
       if (command.action === 'capabilities') response.targets = options.targets || ['application', 'public'];
@@ -139,6 +140,7 @@ function fixture(options = {}) {
   assert.ok(tablePanel.findButton('Собственное CPU'), 'Full statistics load without expanding another panel');
   const processStatistics=tablePanel.descendants(tablePanel.nodes.get('[data-profiler-overview]')).map(node=>node.textContent).join(' ');
   assert.ok(processStatistics.includes('101')&&processStatistics.includes('202'),'The first screen lists both process PIDs');
+  assert.ok(processStatistics.includes('17 / 2')&&processStatistics.includes('Готовые RAM-ответы'),'The overview includes real cache counters');
   tablePanel.findButton('Собственное CPU').onclick();
   await tablePanel.settle();
   let reports = tablePanel.sockets.flatMap(socket => socket.commands).filter(command => command.action === 'report');
@@ -157,6 +159,9 @@ function fixture(options = {}) {
   assert.equal(details.at(-1).function, 2, 'Following a relationship opens the related function');
   tablePanel.nodes.get('[data-profiler-unit]').onchange({target: {value: 'ms'}});
   assert.ok(tablePanel.findButton('Собственное CPU'), 'Changing units keeps the table usable');
+  tablePanel.tabs.find(button=>button.dataset.view==='goroutines').onclick();
+  await tablePanel.settle();
+  assert.ok(tablePanel.descendants(tablePanel.nodes.get('[data-profiler-content]')).some(node=>node.textContent==='Готовы к выполнению'),'Runtime samples are available with goroutine states');
   tablePanel.nodes.get('[data-profiler-close]').onclick();
   await new Promise(resolve => setImmediate(resolve));
   assert.ok(tablePanel.sockets.every(socket => socket.readyState === 3), 'Expanded details retain no viewing contacts after close');

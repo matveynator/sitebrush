@@ -4377,6 +4377,16 @@ func sitebrushConnStateLogger(protocol string, debug bool) func(net.Conn, http.C
 	}
 }
 
+func combinedConnState(first, second func(net.Conn, http.ConnState)) func(net.Conn, http.ConnState) {
+	if first == nil {
+		return second
+	}
+	if second == nil {
+		return first
+	}
+	return func(connection net.Conn, state http.ConnState) { first(connection, state); second(connection, state) }
+}
+
 func (a *App) logDomainEvent(domain string, format string, args ...any) {
 	cleanDomain := normalizeDomainName(domain)
 	if cleanDomain == "" {
@@ -10890,6 +10900,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application.publicRAMCacheBytes = config.PublicRAMCacheBytes
 	application.publicStreamer = publicsite.NewStreamer()
 	application.publicCatalog = publicsite.NewCatalog(effectiveStoragePath, ctx.Done(), application.publicRuntimeOptions())
+	profilerSession.SetPublicCache(application.publicCatalog)
 	application.startPublicPublication(ctx.Done())
 	application.publicPolicyContact = config.PublicProxy && os.Getenv("SITEBRUSH_PUBLIC_POLICY_CHANNEL") == "1"
 	if application.publicPolicyContact {
@@ -11122,7 +11133,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 		})
 	}
 	server := newSitebrushHTTPServerWithMode(httpHandler, application.publicStaticMode, application.requestTimings)
-	server.ConnState = sitebrushConnStateLogger("HTTP", config.Debug)
+	server.ConnState = combinedConnState(server.ConnState, sitebrushConnStateLogger("HTTP", config.Debug))
 	serverErrors := make(chan error, 1)
 	go func() {
 		serverErrors <- server.Serve(listener)
@@ -11231,6 +11242,7 @@ func newSitebrushHTTPServerWithMode(handler http.Handler, mode publicsite.Static
 	if len(timings) > 0 && timings[0] != nil {
 		server.Handler = timings[0].Middleware(server.Handler)
 		server.ConnContext = timings[0].ConnContext
+		server.ConnState = timings[0].ConnState
 	}
 	return server
 }
@@ -12034,7 +12046,7 @@ func (a *App) serveTLSWithAutoCert(ctx context.Context, tlsListener net.Listener
 	tlsServer := newSitebrushHTTPServerWithMode(handler, a.publicStaticMode, a.requestTimings)
 	tlsServer.TLSConfig = tlsConfig
 	tlsServer.ErrorLog = log.New(problemLogWriter{application: a}, "", 0)
-	tlsServer.ConnState = sitebrushConnStateLogger("HTTPS", a.debug)
+	tlsServer.ConnState = combinedConnState(tlsServer.ConnState, sitebrushConnStateLogger("HTTPS", a.debug))
 	tlsAddress := tlsListener.Addr().String()
 	a.logProblemEvent("HTTPS server enabled on %s with TLS", tlsAddress)
 	serverStopped := make(chan struct{})
@@ -53284,15 +53296,22 @@ func (a *App) serveFileInsideStorage(w http.ResponseWriter, r *http.Request, fil
 // written without a transport error. HEAD, ranges and conditional hits stay
 // outside the server-confirmed download count.
 func serveContentWithDownloadObservation(w http.ResponseWriter, r *http.Request, name string, modified time.Time, size int64, content io.ReadSeeker) {
+	_ = serveWithDownloadObservation(w, r, name, size, func(writer http.ResponseWriter) error {
+		http.ServeContent(writer, r, name, modified, content)
+		return nil
+	})
+}
+
+func serveWithDownloadObservation(w http.ResponseWriter, r *http.Request, name string, size int64, serve func(http.ResponseWriter) error) error {
 	if r.Method != http.MethodGet || r.Header.Get("Range") != "" || !downloadableAssetName(name) {
-		http.ServeContent(w, r, name, modified, content)
-		return
+		return serve(w)
 	}
 	captured := &statusCapturingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
-	http.ServeContent(captured, r, name, modified, content)
-	if captured.statusCode == http.StatusOK && !captured.writeFailed && size > 0 && captured.bytesWritten == size {
+	err := serve(captured)
+	if err == nil && captured.statusCode == http.StatusOK && !captured.writeFailed && size > 0 && captured.bytesWritten == size {
 		w.Header().Set("X-SiteBrush-Download-Complete", "1")
 	}
+	return err
 }
 
 func downloadableAssetName(name string) bool {
@@ -58266,7 +58285,10 @@ func (a *App) preparePublicRAMSources(policy *publicsite.Policy) error {
 	if static != nil {
 		walkErr := fs.WalkDir(static.FS(), ".", func(relative string, entry fs.DirEntry, visitErr error) error {
 			if visitErr != nil {
-				return visitErr
+				if entry != nil && entry.IsDir() {
+					return fs.SkipDir
+				}
+				return nil
 			}
 			if entry.IsDir() {
 				return nil
@@ -58276,7 +58298,9 @@ func (a *App) preparePublicRAMSources(policy *publicsite.Policy) error {
 			}
 			version, retainErr := retain(filepath.Join(staticDirectory, relative))
 			if retainErr != nil {
-				return retainErr
+				// Optional discoveries never make unrelated published pages unavailable.
+				// Known page entries were verified above through the same site root.
+				return nil
 			}
 			if version != "" {
 				policy.PreparedPages["/"+filepath.ToSlash(relative)] = version
@@ -58313,7 +58337,8 @@ func (a *App) preparePublicRAMSources(policy *publicsite.Policy) error {
 		}
 		version, retainErr := retain(filepath.Join("storage", "files", domainStorageName(policy.Domain), filepath.FromSlash(name)))
 		if retainErr != nil {
-			return retainErr
+			// An unavailable optional resource keeps its existing authorized file path.
+			continue
 		}
 		if version != "" {
 			policy.PreparedFiles[name] = version
@@ -58504,11 +58529,12 @@ func (a *App) servePreparedPublicResponse(w http.ResponseWriter, r *http.Request
 		return true
 	}
 	if !found {
+		requesttiming.MarkRAM(r, false)
 		return false
 	}
 	defer response.Close()
 	if response.HTML() {
-		if hasSitebrushSessionCookie(r) || a.trialRegistrationOverlayHTML(r, domain) != "" {
+		if hasSitebrushSessionCookie(r) || decision.PendingRegistration {
 			return false
 		}
 		var redirect string
@@ -58519,7 +58545,13 @@ func (a *App) servePreparedPublicResponse(w http.ResponseWriter, r *http.Request
 		}
 	}
 	a.logContentDelivery(w, "static-file")
-	if err = response.ServeHTTP(w, r); err != nil {
+	requesttiming.MarkRAM(r, true)
+	if response.HTML() {
+		err = response.ServeHTTP(w, r)
+	} else {
+		err = serveWithDownloadObservation(w, r, pagePath, response.Size(), func(writer http.ResponseWriter) error { return response.ServeHTTP(writer, r) })
+	}
+	if err != nil {
 		a.logProblemEvent("public RAM response write failed: %v", err)
 	}
 	return true
@@ -62698,6 +62730,7 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 	application.publicRAMCacheBytes = config.PublicRAMCacheBytes
 	application.publicStreamer = publicsite.NewStreamer()
 	application.publicCatalog = publicsite.NewCatalog(storagePath, ctx.Done(), application.publicRuntimeOptions())
+	profilerSession.SetPublicCache(application.publicCatalog)
 	application.autoCertCertificateCache = startAutoCertCertificateMemoryCache(ctx, filepath.Join(application.storageRootDir(), "letsencrypt"))
 	staticFiles, err := fs.Sub(embeddedWebFiles, "web/static")
 	if err != nil {

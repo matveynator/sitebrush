@@ -3,6 +3,7 @@ package goprofile
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -52,10 +53,25 @@ func exportText(report Report) string {
 	text.line("HTTP-трафик приложения за прокси внутренний: его нельзя складывать с внешним трафиком.")
 	text.line("Данные частичные: %t; ошибка записи: %s", report.Truncated, report.Error)
 	text.line("CPU — выборка процессорной работы, не время ожидания. Образцы — не число вызовов. Живая память — выборка удерживаемой памяти; это не RSS процесса.")
+	if report.RAM != nil {
+		text.line("\n### Готовые RAM-ответы")
+		text.line("Бюджет: %d байт; занято: %d байт; уникальных тел: %d; попаданий: %d; промахов: %d", report.RAM.Limit, report.RAM.Bytes, report.RAM.Bodies, report.RAM.Hits, report.RAM.Misses)
+		text.line("Бюджет включает подготовку и поколения с читателями; метаданные, временные буферы и RSS процесса считаются отдельно.")
+	}
+	if report.Runtime != nil {
+		text.line("\n### Планировщик Go во время записи")
+		text.line("Доступные runtime/metrics: %s", strings.Join(report.Runtime.Supported, ", "))
+		for _, sample := range report.Runtime.Samples {
+			text.line("t=%d мс; goroutine всего=%s running=%s runnable=%s waiting=%s syscall/cgo=%s; GOMAXPROCS=%s", sample.ElapsedMS, runtimeCount(sample, "/sched/goroutines:goroutines"), runtimeCount(sample, "/sched/goroutines/running:goroutines"), runtimeCount(sample, "/sched/goroutines/runnable:goroutines"), runtimeCount(sample, "/sched/goroutines/waiting:goroutines"), runtimeCount(sample, "/sched/goroutines/not-in-go:goroutines"), runtimeCount(sample, "/sched/gomaxprocs:threads"))
+		}
+		text.line("Ожидание планировщика: наблюдений %d; p95 <= %s мс; p99 <= %s мс", report.Runtime.Scheduler.Count, runtimeBound(report.Runtime.Scheduler.P95MS), runtimeBound(report.Runtime.Scheduler.P99MS))
+		text.line("Goroutine-счётчики приблизительные и не обязаны складываться в общее число. Нет данных означает отсутствие метрики или конечной границы.")
+	}
 	text.line("\n### Задержки запросов")
 	for _, stage := range report.Stages {
-		text.line("%s: наблюдений %d; среднее %.3f мс; p95 <= %.3f мс", stage.Name, stage.Count, stage.MeanMS, stage.P95MS)
+		text.line("%s: наблюдений %d; среднее %.3f мс; p90 <= %.3f мс; p95 <= %.3f мс; p99 <= %.3f мс", stage.Name, stage.Count, stage.MeanMS, stage.P90MS, stage.P95MS, stage.P99MS)
 	}
+	text.line("handler_complete — завершение обработчика; body_write — суммарное время вызовов записи тела; http1_response_complete — HTTP/1 keep-alive Active→Idle после финального flush net/http. Это серверные границы, а не подтверждение получения клиентом. HTTP/2 и оборванные соединения в последнюю стадию не входят.")
 	functions := append([]Function(nil), report.Functions...)
 	sortFunctions(functions, "self", false)
 	text.functions("Функции по собственному CPU, нс", functions, 50)
@@ -74,6 +90,21 @@ func exportText(report Report) string {
 		text.line("%s", stack)
 	}
 	return text.finish()
+}
+
+func runtimeCount(sample RuntimeSample, name string) string {
+	count, found := sample.Counts[name]
+	if !found {
+		return "нет данных"
+	}
+	return strconv.FormatUint(count, 10)
+}
+
+func runtimeBound(bound *float64) string {
+	if bound == nil {
+		return "нет данных"
+	}
+	return fmt.Sprintf("%.3f", *bound)
 }
 func (text *textReport) functions(title string, functions []Function, limit int) {
 	text.line("\n### %s", title)

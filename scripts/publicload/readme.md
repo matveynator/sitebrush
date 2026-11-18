@@ -107,7 +107,8 @@ CGO_ENABLED=0 go test . -run '^$' \
 На macOS длинная серия новых соединений может исчерпать исходящие TCP-порты и получить `can't assign requested address`. Такой прогон не подходит для сравнения производительности сервера. Для повторяемой серии используйте отдельный Linux-стенд или одинаковые локальные Linux-контейнеры; не смешивайте их результаты с macOS.
 
 Строгость security проверяется отдельно от скорости. Подтверждённое ограничение возвращает 429; недоступное обязательное решение — 503 без обхода защиты. Заполненная очередь аналитики не меняет ответ посетителю. В режиме обновления лимиты принадлежат публичному процессу; при несовместимом старом child переход откладывается до согласования возможностей и перезапуска launcher.
-# Prepared public responses
+
+## Prepared public responses
 
 In `snapshot` mode, `--public-ram-cache-mib=512` prepares small published HTML,
 static files and known public resources up to 256 KiB per final representation.
@@ -130,3 +131,20 @@ streaming. A stale or blocked generation fails closed rather than falling back.
 Compare the same published route with budget `0` and `512`, then compare nginx
 using identical response bodies and recorded configuration. Benchmark and
 profiling runs remain manual and are not required CI stages.
+
+## Response and scheduler diagnostics
+
+The existing profiler now includes `handler_complete`, cumulative `body_write`
+time and `http1_response_complete`, with p90/p95/p99 histogram upper bounds.
+HTTP/1 completion uses the server's Active-to-Idle transition after its final
+buffer flush. It covers keep-alive responses, excludes HTTP/2 and interrupted
+connections, and does not confirm client receipt. No extra socket wrapper or
+forced Flush changes platform file-transfer behavior. Lost observations discard
+pending connection correlations and explicitly mark the report incomplete.
+
+During a recording, runtime gauges are sampled once per second: goroutines,
+running/runnable/waiting, syscall/cgo, GOMAXPROCS and scheduler latency. Missing
+metrics remain unavailable; approximate gauges need not add up to the total.
+The first screen includes RAM occupancy, budget, body count, hits and misses;
+the Goroutine tab shows the runtime samples. The copied report includes both.
+Diagnostic observation is present only with profiling or request timings enabled.

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	profile "github.com/google/pprof/profile"
+	"github.com/matveynator/sitebrush/v2/pkg/publicsite"
 	"github.com/matveynator/sitebrush/v2/pkg/requesttiming"
 )
 
@@ -56,8 +57,12 @@ type Stage struct {
 	Count  uint64  `json:"count"`
 	MeanMS float64 `json:"meanMS"`
 	P95MS  float64 `json:"p95MS"`
+	P90MS  float64 `json:"p90MS"`
+	P99MS  float64 `json:"p99MS"`
 }
 type Report struct {
+	RAM             *RAMReport                `json:"ramCache,omitempty"`
+	Runtime         *RuntimeReport            `json:"runtime,omitempty"`
 	RunID           string                    `json:"runID"`
 	System          string                    `json:"system"`
 	Architecture    string                    `json:"architecture"`
@@ -104,6 +109,7 @@ type State struct {
 	Evicted  bool      `json:"evicted"`
 }
 type task struct {
+	cache     *publicsite.Catalog
 	command   Command
 	reply     chan State
 	abandoned <-chan struct{}
@@ -144,12 +150,21 @@ func (session *Session) Exchange(command Command, abandoned <-chan struct{}) Sta
 	}
 }
 func (session *Session) SetTimings(timings *requesttiming.Collector) {
+	session.configure(task{command: Command{Action: "timings"}, timings: timings, configure: true})
+}
+
+func (session *Session) SetPublicCache(cache *publicsite.Catalog) {
+	session.configure(task{command: Command{Action: "ram-cache"}, cache: cache, configure: true})
+}
+
+func (session *Session) configure(configuration task) {
 	if session == nil {
 		return
 	}
 	reply := make(chan State, 1)
+	configuration.reply = reply
 	select {
-	case session.tasks <- task{command: Command{Action: "timings"}, reply: reply, timings: timings, configure: true}:
+	case session.tasks <- configuration:
 	case <-session.done:
 		return
 	}
@@ -211,6 +226,7 @@ func (session *Session) run(role, version string, stop <-chan struct{}) {
 	var capturingRun string
 	var started time.Time
 	var timings *requesttiming.Collector
+	var cache *publicsite.Catalog
 	evicted := false
 	timer := time.NewTicker(time.Second)
 	defer timer.Stop()
@@ -267,6 +283,12 @@ func (session *Session) run(role, version string, stop <-chan struct{}) {
 				} else {
 					state.Error = "Unknown profiler command"
 				}
+			case "ram-cache":
+				if request.configure {
+					cache = request.cache
+				} else {
+					state.Error = "Unknown profiler command"
+				}
 			case "start":
 				// A fallback contact may retry a command whose reply was lost.
 				// The viewer and run identify the same recording across transports.
@@ -296,7 +318,7 @@ func (session *Session) run(role, version string, stop <-chan struct{}) {
 					capturingRun = fmt.Sprintf("%d-%d", os.Getpid(), started.UnixNano())
 				}
 				cancel = make(chan struct{})
-				go collect(directory, role, version, capturingRun, started, timings, cancel, stop, completed)
+				go collect(directory, role, version, capturingRun, started, timings, cache, cancel, stop, completed)
 				state.Busy = true
 				state.Started = started
 			case "cancel":
@@ -398,7 +420,7 @@ func parseProfile(file *os.File) (*profile.Profile, error) {
 	}
 	return profile.ParseUncompressed(decoded)
 }
-func collect(directory, role, version, runID string, started time.Time, timings *requesttiming.Collector, cancel, stop <-chan struct{}, completed chan<- capture) {
+func collect(directory, role, version, runID string, started time.Time, timings *requesttiming.Collector, cache *publicsite.Catalog, cancel, stop <-chan struct{}, completed chan<- capture) {
 	report := Report{RunID: runID, System: runtime.GOOS, Architecture: runtime.GOARCH, GoVersion: runtime.Version(), User: processUser(), ID: fmt.Sprintf("%d-%d", os.Getpid(), started.UnixNano()), Role: role, PID: os.Getpid(), Version: version, Started: started}
 	record := artifact{}
 	defer func() {
@@ -433,6 +455,7 @@ func collect(directory, role, version, runID string, started time.Time, timings 
 		record.meta.Memory = nil
 		record.meta.Goroutines = ""
 		record.meta.Stages = nil
+		record.meta.Runtime = nil
 		completed <- capture{artifact: record}
 	}()
 	raw, err := temporaryProfile(directory)
@@ -441,6 +464,8 @@ func collect(directory, role, version, runID string, started time.Time, timings 
 		return
 	}
 	record.raw = raw
+	sampler := newRuntimeSampler()
+	report.Runtime = &RuntimeReport{Supported: sampler.supported()}
 	var before runtime.MemStats
 	runtime.ReadMemStats(&before)
 	var first requesttiming.Report
@@ -451,19 +476,34 @@ func collect(directory, role, version, runID string, started time.Time, timings 
 		timingsReady = snapshotErr == nil
 	}
 	report.Started = time.Now()
+	report.Runtime.Samples = append(report.Runtime.Samples, sampler.sample(report.Started))
 	if err = pprof.StartCPUProfile(&limitedWriter{target: raw, remaining: profileLimit}); err != nil {
 		report.Error = err.Error()
 		return
 	}
 	timer := time.NewTimer(30 * time.Second)
-	select {
-	case <-timer.C:
-	case <-cancel:
-		report.Error = "Recording cancelled"
-	case <-stop:
-		report.Error = "Process stopped"
+	sampling := time.NewTicker(time.Second)
+recording:
+	for {
+		select {
+		case <-timer.C:
+			break recording
+		case <-sampling.C:
+			if len(report.Runtime.Samples) < 31 {
+				report.Runtime.Samples = append(report.Runtime.Samples, sampler.sample(report.Started))
+			}
+		case <-cancel:
+			report.Error = "Recording cancelled"
+			break recording
+		case <-stop:
+			report.Error = "Process stopped"
+			break recording
+		}
 	}
+	sampling.Stop()
 	timer.Stop()
+	report.Runtime.Samples = append(report.Runtime.Samples, sampler.sample(report.Started))
+	report.Runtime.Scheduler = sampler.scheduler()
 	report.CaptureFinished = time.Now()
 	pprof.StopCPUProfile()
 	if info, statErr := raw.Stat(); statErr == nil {
@@ -482,6 +522,7 @@ func collect(directory, role, version, runID string, started time.Time, timings 
 	if timings != nil {
 		if last, snapshotErr := timings.Snapshot(stop); snapshotErr == nil && timingsReady {
 			report.Network = requesttiming.HTTPMetrics{Requests: last.HTTP.Requests - first.HTTP.Requests, Received: last.HTTP.Received - first.HTTP.Received, Sent: last.HTTP.Sent - first.HTTP.Sent, Errors: last.HTTP.Errors - first.HTTP.Errors, WriteErrors: last.HTTP.WriteErrors - first.HTTP.WriteErrors}
+			report.RAM = &RAMReport{Hits: last.RAM.Hits - first.RAM.Hits, Misses: last.RAM.Misses - first.RAM.Misses}
 			for index, current := range last.Stages {
 				old := first.Stages[index]
 				count := current.Count - old.Count
@@ -493,13 +534,24 @@ func collect(directory, role, version, runID string, started time.Time, timings 
 				for bucket := range delta.Buckets {
 					delta.Buckets[bucket] -= old.Buckets[bucket]
 				}
-				report.Stages = append(report.Stages, Stage{Name: current.Stage, Count: count, MeanMS: float64(current.TotalNS-old.TotalNS) / float64(count) / 1e6, P95MS: float64(delta.PercentileUpperBound(95)) / 1e6})
+				report.Stages = append(report.Stages, Stage{Name: current.Stage, Count: count, MeanMS: float64(current.TotalNS-old.TotalNS) / float64(count) / 1e6, P90MS: float64(delta.PercentileUpperBound(90)) / 1e6, P95MS: float64(delta.PercentileUpperBound(95)) / 1e6, P99MS: float64(delta.PercentileUpperBound(99)) / 1e6})
 			}
 			if first.Incomplete || last.Incomplete {
 				report.Truncated = true
 			}
 		} else {
 			report.Truncated = true
+		}
+	}
+	if cache != nil {
+		stats, statsErr := cache.RAMStats(stop)
+		if statsErr != nil {
+			report.Truncated = true
+		} else {
+			if report.RAM == nil {
+				report.RAM = &RAMReport{}
+			}
+			report.RAM.RAMCacheStats = stats
 		}
 	}
 	var heap bytes.Buffer

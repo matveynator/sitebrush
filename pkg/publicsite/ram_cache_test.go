@@ -206,6 +206,56 @@ func TestRAMOwnerBoundsStagingAndCancellation(t *testing.T) {
 	}
 }
 
+func TestRAMPublicationSwitchKeepsOnlyBorrowedOldBodies(t *testing.T) {
+	catalog, policy, source := ramFixture(t, 1<<20, nil)
+	previous := acquireRAM(t, catalog, "/")
+	replacementSource := strings.Replace(source, "immutable", "replacement", 1)
+	digest := sha256.Sum256([]byte(replacementSource))
+	version := hex.EncodeToString(digest[:])
+	if err := os.WriteFile(filepath.Join(catalog.root, sitefreeze.ObjectPath(policy.Domain, version)), []byte(replacementSource), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for pathname := range policy.PublishedVersions {
+		policy.PublishedVersions[pathname] = version
+	}
+	if err := Write(catalog.root, policy); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.Reload(policy.Domain); err != nil {
+		t.Fatal(err)
+	}
+	current := acquireRAM(t, catalog, "/")
+	defer current.Close()
+	for _, scenario := range []struct {
+		response *PreparedResponse
+		word     string
+	}{{previous, "immutable"}, {current, "replacement"}} {
+		output := httptest.NewRecorder()
+		if err := scenario.response.ServeHTTP(output, httptest.NewRequest("GET", "http://ram.test/", nil)); err != nil || !strings.Contains(output.Body.String(), scenario.word) {
+			t.Fatal("mixed publication", output.Body.String(), err)
+		}
+	}
+	stats, err := catalog.RAMStats(nil)
+	if err != nil || stats.Bodies != 4 {
+		t.Fatal("borrowed generation released early", stats, err)
+	}
+	previous.Close()
+	deadline := time.Now().Add(time.Second)
+	for {
+		stats, err = catalog.RAMStats(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stats.Bodies == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("retired bodies kept their budget", stats)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestRAMReadersDoNotShareMutableResponses(t *testing.T) {
 	catalog, _, _ := ramFixture(t, 1<<20, nil)
 	results := make(chan error, 64)

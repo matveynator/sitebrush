@@ -570,17 +570,17 @@
   content.appendChild(output);
  }
  function stageLabel(name) {
-  return {accepted_to_request:'Приём соединения → запрос',front_state:'Ожидание состояния публичного сервера',domain:'Проверка домена',policy:'Политика доступа',attack_guard:'Защита от атак',throttle_guard:'Ограничение нагрузки',public_handler:'Публичная обработка до первого ответа',first_write:'До первого ответа',certificate:'TLS-сертификат',attack_queue:'Очередь защиты от атак',attack_work:'Работа защиты от атак',throttle_queue:'Очередь ограничения нагрузки',throttle_work:'Работа ограничения нагрузки',proxy_metadata:'Метаданные прокси',proxy_backend:'Ожидание приложения за прокси'}[name]||name;
+  return {accepted_to_request:'Приём соединения → запрос',front_state:'Ожидание состояния публичного сервера',domain:'Проверка домена',policy:'Политика доступа',attack_guard:'Защита от атак',throttle_guard:'Ограничение нагрузки',public_handler:'Публичная обработка до первого ответа',first_write:'До первого ответа',certificate:'TLS-сертификат',attack_queue:'Очередь защиты от атак',attack_work:'Работа защиты от атак',throttle_queue:'Очередь ограничения нагрузки',throttle_work:'Работа ограничения нагрузки',proxy_metadata:'Метаданные прокси',proxy_backend:'Ожидание приложения за прокси',handler_complete:'Завершение обработчика',body_write:'Вызовы записи тела',http1_response_complete:'HTTP/1 keep-alive: завершение ответа после flush'}[name]||name;
  }
  function renderStages(content,report) {
-  const output=table(['Этап обработки','Запросов','Среднее, мс','p95 ≤ мс']);
+  const output=table(['Этап обработки','Наблюдений','Среднее, мс','p90 ≤ мс','p95 ≤ мс','p99 ≤ мс']);
   const body=document.createElement('tbody');
   (report.stages||[]).slice().sort(function slowest(first,second){return second.meanMS-first.meanMS;}).forEach(function stage(stageReport) {
    const row=document.createElement('tr');
    textCell(row,stageLabel(stageReport.name));
    textCell(row,stageReport.count,'profiler-number');
    textCell(row,stageReport.meanMS.toFixed(3),'profiler-number');
-   textCell(row,stageReport.p95MS.toFixed(3),'profiler-number');
+   ['p90MS','p95MS','p99MS'].forEach(function bound(key){textCell(row,typeof stageReport[key]==='number'?stageReport[key].toFixed(3):'—','profiler-number');});
    body.appendChild(row);
   });
   output.appendChild(body);
@@ -623,7 +623,47 @@
   output.appendChild(body);
   panel.appendChild(output);
   if(model.targets.includes('public'))appendParagraph(panel,'Внешние HTTP-запросы учитываются публичным процессом. Запросы приложения за прокси показаны отдельно и не прибавляются к ним.');
+  renderDiagnostics(panel);
   if(summary.truncated)appendParagraph(panel,'Часть измерений сокращена или пропущена под нагрузкой; это отмечено в отчёте.');
+ }
+
+ function renderDiagnostics(parent) {
+  const reports=model.targets.map(function participant(role){return model.overviewParts[role];}).filter(Boolean);
+  if(!reports.some(function available(report){return report.ramCache||report.runtime;}))return;
+  const heading=document.createElement('h3');heading.textContent='Готовые RAM-ответы и планировщик Go';parent.appendChild(heading);
+  const output=table(['Процесс','RAM / бюджет','Тел','Попаданий / промахов','Пик runnable','Пик waiting','Планировщик p95 ≤ мс']);
+  const body=document.createElement('tbody');
+  model.targets.forEach(function participant(role) {
+   const report=model.overviewParts[role];if(!report||report.error)return;
+   const row=document.createElement('tr');textCell(row,processLabel(role));
+   const cache=report.ramCache;
+   textCell(row,cache?(cache.limit?formatBytes(cache.bytes)+' / '+formatBytes(cache.limit):'Выключен'):'Нет данных');
+   textCell(row,cache?String(cache.bodies):'—');
+   textCell(row,cache?cache.hits+' / '+cache.misses:'—');
+   const samples=report.runtime&&report.runtime.samples||[];
+   ['/sched/goroutines/runnable:goroutines','/sched/goroutines/waiting:goroutines'].forEach(function peak(name) {
+    const counts=samples.map(function count(sample){return sample.counts&&sample.counts[name];}).filter(function available(count){return typeof count==='number';});
+    textCell(row,counts.length?String(Math.max(...counts)):'Нет данных');
+   });
+   const scheduler=report.runtime&&report.runtime.scheduler;
+   textCell(row,scheduler&&typeof scheduler.p95MS==='number'?scheduler.p95MS.toFixed(3):'Нет данных');
+   body.appendChild(row);
+  });
+  output.appendChild(body);parent.appendChild(output);
+  appendParagraph(parent,'RAM учитывает подготовку и используемые поколения, отдельно от RSS. Счётчики goroutine приблизительные. Подробные отсчёты доступны во вкладке Goroutine.');
+ }
+ function renderRuntime(content,report) {
+  if(!report.runtime)return;
+  const heading=document.createElement('h3');heading.textContent='Планировщик Go во время записи';content.appendChild(heading);
+  const output=table(['Время, мс','Всего goroutine','Выполняются','Готовы к выполнению','Ожидают','В syscall/cgo','GOMAXPROCS']);
+  const body=document.createElement('tbody');
+  (report.runtime.samples||[]).forEach(function sample(record) {
+   const row=document.createElement('tr');textCell(row,String(record.elapsedMS));
+   ['/sched/goroutines:goroutines','/sched/goroutines/running:goroutines','/sched/goroutines/runnable:goroutines','/sched/goroutines/waiting:goroutines','/sched/goroutines/not-in-go:goroutines','/sched/gomaxprocs:threads'].forEach(function metric(name){const count=record.counts&&record.counts[name];textCell(row,typeof count==='number'?String(count):'Нет данных');});
+   body.appendChild(row);
+  });
+  output.appendChild(body);content.appendChild(output);
+  appendParagraph(content,'Значения получены раз в секунду через runtime/metrics. Отсутствующая метрика обозначается явно; приблизительные счётчики не обязаны складываться в общее число.');
  }
 
  function render() {
@@ -687,6 +727,7 @@
    const output=document.createElement('pre');
    output.textContent=report.goroutines||'Нет данных';
    content.appendChild(output);
+   renderRuntime(content,report);
   } else if(model.view==='stages')renderStages(content,report);
   else renderFunctions(content,report);
   element('[data-profiler-count]').textContent='Функций по фильтру: '+(report.matches||0);

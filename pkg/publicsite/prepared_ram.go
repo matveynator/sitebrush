@@ -78,7 +78,8 @@ func (catalog *Catalog) acquireRAM(decision Decision, pathname string, key HTMLV
 	return &PreparedResponse{contentType: prepared.contentType, html: prepared.html, generation: generation, body: prepared.variants[key], prepared: prepared.prepared, etag: prepared.prepared.variants[key].etag}, true, nil
 }
 
-func (response *PreparedResponse) HTML() bool { return response.html }
+func (response *PreparedResponse) HTML() bool  { return response.html }
+func (response *PreparedResponse) Size() int64 { return int64(len(response.body.bytes)) }
 
 func (runtime *PublicRuntime) retainRAMBody(generation *publicGeneration, identity string, size int64, stop <-chan struct{}, fill func([]byte)) (*ramBody, error) {
 	if body := generation.ramBodies[identity]; body != nil {
@@ -279,6 +280,9 @@ func (runtime *PublicRuntime) ramEligible(policy Policy, pathname string) bool {
 func ramPageVersion(policy Policy, pathname string) string {
 	if version := policy.PublishedVersions[pathname]; version != "" {
 		return version
+	}
+	if policy.Frozen {
+		return ""
 	}
 	return policy.PreparedPages[pathname]
 }
