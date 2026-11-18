@@ -277,7 +277,11 @@ func (catalog *Catalog) OpenPublished(decision Decision, relative, version strin
 		generation.release()
 		return nil, errors.New("public publication changed while opening its file")
 	}
-	return &PublishedFile{File: file, HTML: generation.html[directory+"\x00"+relative], generation: generation}, nil
+	prepared := generation.html[preparedHTMLKey(directory, relative, decision.pathname)]
+	if prepared == nil {
+		prepared = generation.html[directory+"\x00"+relative]
+	}
+	return &PublishedFile{File: file, HTML: prepared, generation: generation}, nil
 }
 
 // Preparation runs in the caller's publication session, before transferring

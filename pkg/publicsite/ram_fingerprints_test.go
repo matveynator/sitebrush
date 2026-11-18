@@ -12,7 +12,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/dirprotect"
 )
 
-func legacyRAMFixture(t *testing.T, mutate func(*Policy)) (*Catalog, string, <-chan struct{}) {
+func legacyRAMFixture(t *testing.T, mutate func(*Policy), limits ...int64) (*Catalog, string, <-chan struct{}) {
 	t.Helper()
 	root := t.TempDir()
 	stop := make(chan struct{})
@@ -52,9 +52,12 @@ func legacyRAMFixture(t *testing.T, mutate func(*Policy)) (*Catalog, string, <-c
 			}
 			return strings.TrimPrefix(pathname, "/")
 		},
-		HTMLFile: func(_ string, prefix string) bool { return strings.Contains(prefix, "<html>") }, PrepareBootstrap: func(Policy, string) map[HTMLVariantKey]string {
-			return map[HTMLVariantKey]string{{Language: "en"}: "<script>bootstrap</script>"}
+		HTMLFile: func(_ string, prefix string) bool { return strings.Contains(prefix, "<html>") }, PrepareBootstrap: func(policy Policy, pathname string) map[HTMLVariantKey]string {
+			return map[HTMLVariantKey]string{{Language: "en"}: `<script data-layout="` + policy.Layouts[pathname] + `">bootstrap</script>`}
 		}}
+	if len(limits) != 0 {
+		options.RAMCacheBytes = limits[0]
+	}
 	return NewCatalog(root, stop, options), root, stop
 }
 
@@ -213,6 +216,48 @@ func TestRAMRecoveredResponseValidatorsAndRanges(t *testing.T) {
 		}
 		if scenario.method == http.MethodHead && recorder.Body.Len() != 0 {
 			t.Fatal("HEAD returned a body")
+		}
+	}
+}
+
+func TestRAMRootAliasPreservesRouteBootstrapWithAndWithoutCache(t *testing.T) {
+	for _, limit := range []int64{0, 1 << 20} {
+		catalog, _, _ := legacyRAMFixture(t, nil, limit)
+		if err := catalog.SetMemory(true); err != nil {
+			t.Fatal(err)
+		}
+		for _, pathname := range []string{"/", "/index.html", "/unindexed-alias"} {
+			decision := catalog.Lookup(Lookup{Host: "vz.sitebrush.com", Path: pathname})
+			publication, err := catalog.OpenPublished(decision, "index.html", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			baseline := httptest.NewRecorder()
+			err = NewStreamer().Prepared(baseline, httptest.NewRequest("GET", "http://vz.sitebrush.com"+pathname, nil), publication.File, publication.HTML, HTMLVariantKey{Language: "en"}, "")
+			publication.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected := `data-layout=""`
+			if pathname != "/" {
+				expected = `data-layout="legacy"`
+			}
+			if !strings.Contains(baseline.Body.String(), expected) {
+				t.Fatalf("limit=%d path=%s lost bootstrap: %s", limit, pathname, baseline.Body.String())
+			}
+			if limit == 0 || pathname == "/unindexed-alias" {
+				continue
+			}
+			response, found, err := catalog.AcquirePrepared(decision, pathname, HTMLVariantKey{Language: "en"})
+			if err != nil || !found {
+				t.Fatal(found, err)
+			}
+			actual := httptest.NewRecorder()
+			err = response.ServeHTTP(actual, httptest.NewRequest("GET", "http://vz.sitebrush.com"+pathname, nil))
+			response.Close()
+			if err != nil || actual.Body.String() != baseline.Body.String() || actual.Header().Get("ETag") != baseline.Header().Get("ETag") {
+				t.Fatal("RAM and file route representations differ", err)
+			}
 		}
 	}
 }
