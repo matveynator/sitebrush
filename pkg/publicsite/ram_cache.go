@@ -1,13 +1,25 @@
 package publicsite
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+	"sort"
+)
 
 const MaximumRAMRepresentationBytes = 256 << 10
 
+type RAMSiteStats struct {
+	Domain       string   `json:"domain"`
+	Routes       int      `json:"routes"`
+	RootVariants []string `json:"rootVariants,omitempty"`
+	RootMiss     string   `json:"rootMiss,omitempty"`
+}
+
 type RAMCacheStats struct {
-	Limit  int64 `json:"limit"`
-	Bytes  int64 `json:"bytes"`
-	Bodies int   `json:"bodies"`
+	Sites  []RAMSiteStats `json:"sites,omitempty"`
+	Limit  int64          `json:"limit"`
+	Bytes  int64          `json:"bytes"`
+	Bodies int            `json:"bodies"`
 }
 
 type ramBody struct {
@@ -163,5 +175,32 @@ func (catalog *Catalog) RAMStats(stop <-chan struct{}) (RAMCacheStats, error) {
 		return RAMCacheStats{}, nil
 	}
 	result, err := catalog.runtime.cache.exchange(ramJob{action: "stats"}, stop)
+	if snapshot := catalog.runtime.current.Load(); snapshot != nil {
+		for domain, generation := range snapshot.roots {
+			site := RAMSiteStats{Domain: domain, RootMiss: generation.ramMisses["/"]}
+			for _, response := range generation.ram {
+				if len(response.variants) != 0 {
+					site.Routes++
+				}
+			}
+			if response := generation.ram["/"]; response != nil {
+				site.RootMiss = response.reason
+				for variant := range response.variants {
+					site.RootVariants = append(site.RootVariants, fmt.Sprintf("%s/menu=%t/updating=%t", variant.Language, variant.Menu, variant.Updating))
+				}
+				sort.Strings(site.RootVariants)
+				if len(site.RootVariants) == len(response.prepared.variants) {
+					site.RootMiss = ""
+				}
+			}
+			if len(site.RootVariants) == 0 && site.RootMiss == "" {
+				site.RootMiss = "no_prepared_object"
+			}
+			result.stats.Sites = append(result.stats.Sites, site)
+		}
+		sort.Slice(result.stats.Sites, func(first, second int) bool {
+			return result.stats.Sites[first].Domain < result.stats.Sites[second].Domain
+		})
+	}
 	return result.stats, err
 }

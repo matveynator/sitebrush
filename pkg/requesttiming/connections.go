@@ -48,7 +48,7 @@ func recordConnectionTiming(report *Report, connections map[net.Conn]connectionT
 }
 
 // Only the request's own trace changes; aggregation occurs after serving it.
-func MarkRAM(request *http.Request, hit bool) {
+func MarkRAM(request *http.Request, hit bool, reason ...string) {
 	measurement, found := request.Context().Value(traceKey{}).(*trace)
 	if !found {
 		return
@@ -57,5 +57,8 @@ func MarkRAM(request *http.Request, hit bool) {
 		measurement.event.RAM.Hits++
 	} else {
 		measurement.event.RAM.Misses++
+		if len(reason) != 0 {
+			measurement.event.RAMReason = reason[0]
+		}
 	}
 }

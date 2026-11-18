@@ -58182,8 +58182,8 @@ func (a *App) publicRuntimeOptions() publicsite.RuntimeOptions {
 		ramCacheBytes = 0
 	}
 	return publicsite.RuntimeOptions{
-		RAMCacheBytes: ramCacheBytes,
-		Mode:          a.publicStaticMode, Root: root, StorageName: domainStorageName,
+		RAMCacheBytes: ramCacheBytes, DefaultLanguage: preferredLanguageCode(""),
+		Mode: a.publicStaticMode, Root: root, StorageName: domainStorageName,
 		StaticPath:       func(pathname string) string { return staticRelativePathForPage(cleanPath(pathname)) },
 		HTMLFile:         func(pathname, prefix string) bool { return pageContentKind(pathname, prefix) == "html" },
 		PrepareBootstrap: preparePublicHTMLBootstraps,
@@ -58240,7 +58240,7 @@ func (a *App) preparePublicRAMSources(policy *publicsite.Policy) error {
 			sourceRoots[directory] = sourceRoot
 		}
 		file, openErr := sourceRoot.Open(relative)
-		if os.IsNotExist(openErr) {
+		if publicsite.MissingSource(openErr) {
 			return "", nil
 		}
 		if openErr != nil {
@@ -58311,6 +58311,11 @@ func (a *App) preparePublicRAMSources(policy *publicsite.Policy) error {
 		if walkErr != nil {
 			return walkErr
 		}
+	}
+	// The public router serves index.html at /. Legacy page indexes may contain
+	// only the filename; both routes must receive the same source fingerprint.
+	if version := policy.PreparedPages["/"+filepath.ToSlash(staticRelativePathForPage("/"))]; version != "" && policy.PreparedPages["/"] == "" {
+		policy.PreparedPages["/"] = version
 	}
 	names := make(map[string]bool)
 	for _, name := range policy.ResourcePaths {
@@ -58517,24 +58522,40 @@ func (a *App) servePublishedStaticFileWithMenu(w http.ResponseWriter, r *http.Re
 // Eligibility and current-generation admission precede borrowing immutable bytes.
 func (a *App) servePreparedPublicResponse(w http.ResponseWriter, r *http.Request, domain, pagePath string, decision publicsite.Decision, injectPublicMenu, updating bool) bool {
 	if a.publicRAMCacheBytes == 0 || a.publicCatalog == nil || decision.PrivateTestDrive || decision.Password.Path != "" || r.Method != http.MethodGet && r.Method != http.MethodHead {
+		reason := "restricted"
+		if a.publicRAMCacheBytes == 0 || a.publicCatalog == nil {
+			reason = "disabled"
+		} else if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			reason = "method"
+		}
+		requesttiming.MarkRAM(r, false, reason)
 		return false
 	}
+	var reason string
 	key := publicsite.HTMLVariantKey{Language: preferredLanguageCode(r.Header.Get("Accept-Language")), Menu: injectPublicMenu, Updating: updating}
-	response, found, err := a.publicCatalog.AcquirePrepared(decision, pagePath, key)
+	var response *publicsite.PreparedResponse
+	var found bool
+	var err error
 	if decision.PageVersion == "" && decision.ResourceFile == "" && decision.File.Name != "" {
-		response, found, err = a.publicCatalog.AcquirePreparedFile(decision, decision.File.Name)
+		response, found, err = a.publicCatalog.AcquirePreparedFile(decision, decision.File.Name, &reason)
+	} else {
+		response, found, err = a.publicCatalog.AcquirePrepared(decision, pagePath, key, &reason)
 	}
+
 	if err != nil {
+		requesttiming.MarkRAM(r, false, reason)
+		a.logProblemEvent("public RAM lookup unavailable domain=%q path=%q reason=%q: %v", domain, pagePath, reason, err)
 		http.Error(w, "published version is unavailable", http.StatusServiceUnavailable)
 		return true
 	}
 	if !found {
-		requesttiming.MarkRAM(r, false)
+		requesttiming.MarkRAM(r, false, reason)
 		return false
 	}
 	defer response.Close()
 	if response.HTML() {
 		if hasSitebrushSessionCookie(r) || decision.PendingRegistration {
+			requesttiming.MarkRAM(r, false, "personalized")
 			return false
 		}
 		var redirect string
@@ -62117,6 +62138,14 @@ func (a *App) exchangePublicLoopback(endpoint string, encoded []byte, stop <-cha
 	deadline := 3 * time.Second
 	switch endpoint {
 	case "/.well-known/sitebrush-public-policy":
+		var change publicsite.Change
+		if json.Unmarshal(encoded, &change) != nil {
+			return nil, errors.New("invalid public policy change")
+		}
+		if change.Action == "enable" || change.Action == "refresh" {
+			// Snapshot preparation scales with publication size, not HTTP latency.
+			deadline = 2 * time.Minute
+		}
 	case "/.well-known/sitebrush-public-profiler":
 		expectedStatus = http.StatusOK
 		deadline = 10 * time.Second
@@ -62759,6 +62788,7 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 	}
 	front := newPublicHTTPFront(application, secret, ctx.Done())
 	front.ResetPolicy = func() error { return application.publicCatalog.SetMemory(false) }
+	enablePolicy := publicsite.NewPolicyEnabler(front, func() error { return application.publicCatalog.SetMemory(true) }, ctx.Done())
 	front.Policy = func(encoded []byte) ([]byte, error) {
 		var change publicsite.Change
 		if len(encoded) > 4096 || json.Unmarshal(encoded, &change) != nil {
@@ -62768,22 +62798,7 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 		case "freeze_versions":
 			return []byte("1"), nil
 		case "enable":
-			state, stateErr := front.Current()
-			if stateErr != nil {
-				return nil, stateErr
-			}
-			if state.Address != change.Address || state.Paused {
-				return nil, fmt.Errorf("policy publisher is not serving: requested=%q active=%q paused=%t", change.Address, state.Address, state.Paused)
-			}
-			if !state.PolicyReady {
-				if policyErr := application.publicCatalog.SetMemory(true); policyErr != nil {
-					return nil, policyErr
-				}
-				if policyErr := front.PolicyEnabled(); policyErr != nil {
-					return nil, policyErr
-				}
-			}
-			return nil, nil
+			return nil, enablePolicy(change.Address)
 		case "block":
 			return nil, application.publicCatalog.Block(change.Domain)
 		case "open":

@@ -82,14 +82,16 @@ type Change struct {
 }
 
 type State struct {
+	revision    uint64
 	PolicyReady bool
 	Address     string
 	Paused      bool
 	Draining    bool
 }
 type stateTask struct {
-	next  *State
-	reply chan State
+	enable *State
+	next   *State
+	reply  chan State
 }
 type Front struct {
 	Guest           func(http.ResponseWriter, *http.Request) bool
@@ -130,10 +132,15 @@ func NewFront(secret string, public func(http.ResponseWriter, *http.Request, boo
 			case task := <-front.tasks:
 				if task.next != nil {
 					previousAddress := state.Address
+					revision := state.revision + 1
 					state = *task.next
+					state.revision = revision
 					if state.Paused && state.Address == "" {
 						state.Address = previousAddress
 					}
+				}
+				if task.enable != nil && task.enable.revision == state.revision && task.enable.Address == state.Address && !state.Paused {
+					state.PolicyReady = true
 				}
 				task.reply <- state
 			}

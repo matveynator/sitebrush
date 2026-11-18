@@ -2,15 +2,12 @@ package publicsite
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"io"
 	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -24,6 +21,7 @@ type preparedRAMFile struct {
 	prepared    *PreparedHTML
 	version     string
 	variants    map[HTMLVariantKey]*ramBody
+	reason      string
 }
 
 // A response borrows its generation until the HTTP writer has consumed the body.
@@ -44,24 +42,32 @@ func (response *PreparedResponse) Close() {
 	}
 }
 
-func (catalog *Catalog) AcquirePrepared(decision Decision, pathname string, key HTMLVariantKey) (*PreparedResponse, bool, error) {
-	return catalog.acquireRAM(decision, pathname, key, false)
+func (catalog *Catalog) AcquirePrepared(decision Decision, pathname string, key HTMLVariantKey, reason ...*string) (*PreparedResponse, bool, error) {
+	return catalog.acquireRAM(decision, pathname, key, false, reason...)
 }
 
-func (catalog *Catalog) AcquirePreparedFile(decision Decision, filename string) (*PreparedResponse, bool, error) {
-	return catalog.acquireRAM(decision, filename, HTMLVariantKey{}, true)
+func (catalog *Catalog) AcquirePreparedFile(decision Decision, filename string, reason ...*string) (*PreparedResponse, bool, error) {
+	return catalog.acquireRAM(decision, filename, HTMLVariantKey{}, true, reason...)
 }
 
-func (catalog *Catalog) acquireRAM(decision Decision, pathname string, key HTMLVariantKey, asset bool) (*PreparedResponse, bool, error) {
+func (catalog *Catalog) acquireRAM(decision Decision, pathname string, key HTMLVariantKey, asset bool, reason ...*string) (*PreparedResponse, bool, error) {
+	miss := func(cause string) {
+		if len(reason) != 0 && reason[0] != nil {
+			*reason[0] = cause
+		}
+	}
 	if catalog == nil || catalog.runtime == nil || catalog.runtime.cache == nil {
+		miss("disabled")
 		return nil, false, nil
 	}
 	generation := decision.generation
 	if !decision.Found || generation == nil || !generation.acquire() {
+		miss("missing_generation")
 		return nil, false, errors.New("public publication is unavailable")
 	}
 	if !catalog.runtime.admits(decision.Domain, generation) {
 		generation.release()
+		miss("stale_generation")
 		return nil, false, errors.New("public publication changed before RAM delivery")
 	}
 	prepared := generation.ram[pathname]
@@ -71,7 +77,29 @@ func (catalog *Catalog) acquireRAM(decision Decision, pathname string, key HTMLV
 	if prepared != nil && !prepared.html {
 		key = HTMLVariantKey{}
 	}
-	if prepared == nil || prepared.resource == "" && decision.PageVersion != "" && prepared.version != decision.PageVersion || prepared.resource != "" && prepared.resource != decision.ResourceFile && (!asset || prepared.resource != decision.File.Name) || prepared.variants[key] == nil {
+	cause := ""
+	switch {
+	case prepared == nil:
+		cause = generation.ramMisses[pathname]
+		if cause == "" {
+			cause = "no_prepared_object"
+		}
+	case prepared.resource == "" && decision.PageVersion != "" && prepared.version != decision.PageVersion:
+		cause = "version_mismatch"
+	case prepared.resource != "" && prepared.resource != decision.ResourceFile && (!asset || prepared.resource != decision.File.Name):
+		cause = "resource_mismatch"
+	case prepared.variants[key] == nil:
+		variant, exists := prepared.prepared.variants[key]
+		if !exists {
+			cause = "variant"
+		} else if prepared.prepared.info.Size()+int64(len(variant.bootstrap)) > MaximumRAMRepresentationBytes {
+			cause = "too_large"
+		} else {
+			cause = prepared.reason
+		}
+	}
+	if cause != "" {
+		miss(cause)
 		generation.release()
 		return nil, false, nil
 	}
@@ -81,7 +109,7 @@ func (catalog *Catalog) acquireRAM(decision Decision, pathname string, key HTMLV
 func (response *PreparedResponse) HTML() bool  { return response.html }
 func (response *PreparedResponse) Size() int64 { return int64(len(response.body.bytes)) }
 
-func (runtime *PublicRuntime) retainRAMBody(generation *publicGeneration, identity string, size int64, stop <-chan struct{}, fill func([]byte)) (*ramBody, error) {
+func (runtime *PublicRuntime) retainRAMBody(generation *publicGeneration, identity string, size int64, stop <-chan struct{}, fill func([]byte) error) (*ramBody, error) {
 	if body := generation.ramBodies[identity]; body != nil {
 		return body, nil
 	}
@@ -93,7 +121,9 @@ func (runtime *PublicRuntime) retainRAMBody(generation *publicGeneration, identi
 	body := reservation.body
 	if body == nil {
 		payload := make([]byte, size)
-		fill(payload)
+		if err := fill(payload); err != nil {
+			return nil, err
+		}
 		committed, commitErr := runtime.cache.exchange(ramJob{action: "commit", ticket: reservation.ticket, body: &ramBody{bytes: payload, length: strconv.Itoa(len(payload))}}, stop)
 		if commitErr != nil {
 			return nil, commitErr
@@ -112,19 +142,17 @@ func (runtime *PublicRuntime) prepareRAMPlain(generation *publicGeneration, poli
 		return nil, err
 	}
 	if !info.Mode().IsRegular() || info.Size() > MaximumRAMRepresentationBytes {
+		generation.ramMisses[pathname] = "too_large"
 		return nil, nil
 	}
-	source := make([]byte, info.Size())
-	if _, err = io.ReadFull(io.NewSectionReader(file, 0, info.Size()), source); err != nil {
-		return nil, err
-	}
-	digest := sha256.Sum256(source)
-	if hex.EncodeToString(digest[:]) != version {
-		return nil, errors.New("public resource version changed during RAM preparation")
+	var prefix [512]byte
+	count, readErr := file.ReadAt(prefix[:], 0)
+	if readErr != nil && readErr != io.EOF {
+		return nil, readErr
 	}
 	contentType := mime.TypeByExtension(filepath.Ext(pathname))
 	if runtime.options.ContentType != nil {
-		contentType = runtime.options.ContentType(pathname, string(source[:min(512, len(source))]))
+		contentType = runtime.options.ContentType(pathname, string(prefix[:count]))
 	}
 	if resource != "" {
 		if override := policy.ResourceTypes[pathname]; override != "" {
@@ -136,15 +164,17 @@ func (runtime *PublicRuntime) prepareRAMPlain(generation *publicGeneration, poli
 		}
 	}
 	if contentType == "" {
-		contentType = http.DetectContentType(source[:min(512, len(source))])
-	}
-	body, err := runtime.retainRAMBody(generation, policy.Domain+"\x00raw\x00"+version, int64(len(source)), stop, func(destination []byte) { copy(destination, source) })
-	if err != nil || body == nil {
-		return nil, err
+		contentType = http.DetectContentType(prefix[:count])
 	}
 	key := HTMLVariantKey{}
 	prepared := &PreparedHTML{info: info, modified: info.ModTime(), lastModified: info.ModTime().UTC().Format(http.TimeFormat), variants: map[HTMLVariantKey]htmlVariant{key: {etag: `"` + version + `"`}}}
-	return &preparedRAMFile{contentType: contentType, resource: resource, prepared: prepared, version: version, variants: map[HTMLVariantKey]*ramBody{key: body}}, nil
+	result := &preparedRAMFile{contentType: contentType, resource: resource, prepared: prepared, version: version, variants: make(map[HTMLVariantKey]*ramBody), reason: "budget"}
+	directory, relative := runtime.ramSource(policy, pathname, resource)
+	generation.pendingRAM = append(generation.pendingRAM, ramCandidate{generation: generation, response: result, pathname: pathname, domain: policy.Domain, directory: directory, relative: relative, size: info.Size(), version: version, identity: policy.Domain + "\x00raw\x00" + version})
+	if strings.Contains(contentType, "text/css") {
+		generation.references[pathname] = readRAMReferences(file, false, stop)
+	}
+	return result, nil
 }
 
 func (runtime *PublicRuntime) prepareRAMStatic(generation *publicGeneration, policy Policy, pathname string, file *os.File, stop <-chan struct{}) error {
@@ -173,7 +203,6 @@ func (runtime *PublicRuntime) prepareRAMAssets(generation *publicGeneration, pol
 	for name := range versions {
 		names = append(names, name)
 	}
-	sort.Strings(names)
 	for _, name := range names {
 		select {
 		case <-stop:
@@ -197,7 +226,7 @@ func (runtime *PublicRuntime) prepareRAMAssets(generation *publicGeneration, pol
 			relative = versions[name]
 		}
 		file, err := root.Open(relative)
-		if os.IsNotExist(err) {
+		if MissingSource(err) {
 			continue
 		}
 		if err != nil {
@@ -233,6 +262,7 @@ func (runtime *PublicRuntime) prepareRAMAssets(generation *publicGeneration, pol
 				continue
 			}
 			generation.ram[pathname] = &alias
+			generation.references[pathname] = generation.references[name]
 		}
 	}
 	return nil
@@ -288,62 +318,35 @@ func ramPageVersion(policy Policy, pathname string) string {
 }
 
 func (runtime *PublicRuntime) prepareRAM(generation *publicGeneration, policy Policy, pathname string, file *os.File, prepared *PreparedHTML, stop <-chan struct{}) error {
-	if !runtime.ramEligible(policy, pathname) || prepared.info.Size() > MaximumRAMRepresentationBytes {
+	if runtime.cache != nil && !policy.PrivateTestDrive && !policy.PendingRegistration && !policy.Stealth && len(policy.AllowedIPs) == 0 && !hiddenVersionPath(policy.Hidden, "page", pathname) {
+		generation.pageSources[pathname] = runtime.options.StaticPath(pathname)
+		generation.references[pathname] = readRAMReferences(file, true, stop)
+	}
+
+	if prepared.info.Size() > MaximumRAMRepresentationBytes {
+		generation.ramMisses[pathname] = "too_large"
+		return nil
+	}
+	if !runtime.ramEligible(policy, pathname) {
+		generation.ramMisses[pathname] = "restricted"
+		if ramPageVersion(policy, pathname) == "" {
+			generation.ramMisses[pathname] = "missing_version"
+		}
 		return nil
 	}
 	version := ramPageVersion(policy, pathname)
-	source := make([]byte, prepared.info.Size())
-	if _, err := io.ReadFull(io.NewSectionReader(file, 0, int64(len(source))), source); err != nil {
-		return err
-	}
-	digest := sha256.Sum256(source)
-	if hex.EncodeToString(digest[:]) != version || prepared.sourceVersion != version {
+	if prepared.sourceVersion != version {
 		return errors.New("published HTML version changed during RAM preparation")
 	}
-	variants := make(map[HTMLVariantKey]*ramBody)
-	keys := make([]HTMLVariantKey, 0, len(prepared.variants))
-	for key := range prepared.variants {
-		keys = append(keys, key)
-	}
-	sort.Slice(keys, func(first, second int) bool {
-		left, right := keys[first], keys[second]
-		if left.Language != right.Language {
-			return left.Language < right.Language
-		}
-		if left.Menu != right.Menu {
-			return left.Menu
-		}
-		return !left.Updating && right.Updating
-	})
-	for _, key := range keys {
-		select {
-		case <-stop:
-			return errors.New("RAM preparation stopped")
-		default:
-		}
-		variant := prepared.variants[key]
-		size := int64(len(source) + len(variant.bootstrap))
+	result := &preparedRAMFile{html: true, contentType: "text/html; charset=utf-8", prepared: prepared, version: version, variants: make(map[HTMLVariantKey]*ramBody), reason: "budget"}
+	generation.ram[pathname] = result
+	directory, relative := runtime.ramSource(policy, pathname, "")
+	for key, variant := range prepared.variants {
+		size := prepared.info.Size() + int64(len(variant.bootstrap))
 		if size > MaximumRAMRepresentationBytes {
 			continue
 		}
-		identity := policy.Domain + "\x00" + variant.etag
-
-		body, err := runtime.retainRAMBody(generation, identity, size, stop, func(payload []byte) {
-			position := int(prepared.insertion)
-			copy(payload, source[:position])
-			copy(payload[position:], variant.bootstrap)
-			copy(payload[position+len(variant.bootstrap):], source[position:])
-		})
-		if err != nil {
-			return err
-		}
-		if body != nil {
-			variants[key] = body
-		}
-
-	}
-	if len(variants) != 0 {
-		generation.ram[pathname] = &preparedRAMFile{html: true, contentType: "text/html; charset=utf-8", prepared: prepared, version: version, variants: variants}
+		generation.pendingRAM = append(generation.pendingRAM, ramCandidate{generation: generation, response: result, pathname: pathname, domain: policy.Domain, directory: directory, relative: relative, key: key, size: size, version: version, identity: policy.Domain + "\x00" + variant.etag, bootstrap: variant.bootstrap, insertion: prepared.insertion})
 	}
 	return nil
 }

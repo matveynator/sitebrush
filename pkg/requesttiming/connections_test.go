@@ -153,3 +153,16 @@ type discardTimingResponse struct{}
 func (discardTimingResponse) Header() http.Header            { return make(http.Header) }
 func (discardTimingResponse) Write(body []byte) (int, error) { return len(body), nil }
 func (discardTimingResponse) WriteHeader(int)                {}
+
+func TestRAMMissReasonUsesExistingObservation(t *testing.T) {
+	var report Report
+	report.record(Event{RAM: RAMMetrics{Misses: 3}, RAMReason: "budget"})
+	for index, reason := range RAMMissReasons() {
+		if reason == "budget" && report.RAM.Reasons[index] != 3 {
+			t.Fatal("miss reason was not aggregated")
+		}
+	}
+	if report.RAM.Misses != 3 {
+		t.Fatal("miss total changed")
+	}
+}
