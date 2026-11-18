@@ -106,5 +106,5 @@
 .profiler-overview td,.profiler-overview th { padding:8px; text-align:left; border:1px solid #d9e1e8; }
 .profiler-overview th { background:#dce5ed; }
 .profiler-explanation { color:#657887; font-size:12px; }
-#server-profiler-dialog details>summary { padding:12px; cursor:pointer; background:#eaf0f5; border:1px solid #cad5de; color:#34536b; }
+#server-profiler-dialog [data-profiler-details] { margin-top:14px; }
 #server-profiler-dialog [data-profiler-copy-text] { width:100%; background:#fff; color:#25313d; font:12px/1.5 monospace; }

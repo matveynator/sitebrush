@@ -75,6 +75,8 @@ function fixture(options = {}) {
         }
         response.report = report;
       }
+      if(options.applicationStatusPending&&command.role==='application'&&command.action==='status')return;
+      if(options.publicDisconnected&&command.role==='public'){queueMicrotask(()=>{this.readyState=3;this.onclose();});return;}
       queueMicrotask(() => this.onmessage({data: JSON.stringify(response)}));
     }
     close() {this.readyState = 3; this.delayedClose = this.onclose;}
@@ -132,8 +134,9 @@ function fixture(options = {}) {
   }
   const tablePanel = fixture();
   await tablePanel.settle();
-  tablePanel.nodes.get('[data-profiler-details]').toggleCallback({target:{open:true}});
-  await tablePanel.settle();
+  assert.ok(tablePanel.findButton('Собственное CPU'), 'Full statistics load without expanding another panel');
+  const processStatistics=tablePanel.descendants(tablePanel.nodes.get('[data-profiler-overview]')).map(node=>node.textContent).join(' ');
+  assert.ok(processStatistics.includes('101')&&processStatistics.includes('202'),'The first screen lists both process PIDs');
   tablePanel.findButton('Собственное CPU').onclick();
   await tablePanel.settle();
   let reports = tablePanel.sockets.flatMap(socket => socket.commands).filter(command => command.action === 'report');
@@ -178,6 +181,14 @@ function fixture(options = {}) {
   assert.ok(split.copied[0].includes('Report for public')&&split.copied[0].includes('Report for application'),'Export contains both source reports');
   assert.ok(split.copied[0].includes('CPU 0.00 мс'),'Report contains an aggregate CPU summary');
   assert.ok(split.copied[0].includes('Внешних HTTP-запросов: 20.'),'External request counts are not added to internal requests');
+  const parallel = fixture({applicationStatusPending:true});
+  await parallel.settle();
+  assert.ok(parallel.sockets.flatMap(socket=>socket.commands).some(command=>command.role==='public'&&command.action==='report'&&command.view==='functions'),'A pending application status cannot block public statistics');
+  parallel.nodes.get('[data-profiler-close]').onclick();
+  const disconnected = fixture({publicDisconnected:true});
+  await disconnected.settle();
+  assert.ok(disconnected.findButton('Собственное CPU'),'Application statistics remain visible when the public contact disconnects');
+  assert.ok(disconnected.sockets.flatMap(socket=>socket.commands).some(command=>command.role==='application'&&command.action==='report'&&command.view==='functions'),'An available report is selected automatically');
   const partial = fixture({publicUnavailable:true});
   await partial.settle();
   await partial.nodes.get('[data-profiler-copy]').onclick();

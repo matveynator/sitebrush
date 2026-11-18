@@ -3,12 +3,12 @@
  const root = document.querySelector('[data-profiler]');
  if (!root) return;
  const model = {
-  role:'application', targets:[], selectedRun:'', overviewParts:{}, overviewKey:'', exportText:'', exportKey:'', exportRevision:0, copyStatus:'', copyFallback:false, detailsOpen:false, view:'functions', page:0, search:'', selected:'', focus:0,
+  role:'application', roleSelected:false, targets:[], selectedRun:'', overviewParts:{}, overviewKey:'', exportText:'', exportKey:'', exportRevision:0, copyStatus:'', copyFallback:false, view:'functions', page:0, search:'', selected:'', focus:0,
   sort:'total', ascending:false, kind:'', minimum:0, unit:'percent',
   expanded:0, detail:null, detailPending:false, detailError:'',
   detailsRevision:0, reportRevision:0, states:{}, report:null, more:false,
-  error:'', pending:false, stopped:true, refreshing:false,
-  pollTimer:null, searchTimer:null, generation:0, cancelPending:null
+  error:'', pendingRoles:{}, stopped:true, refreshing:false,
+  pollTimer:null, searchTimer:null, generation:0, cancelPendingRoles:{}
  };
  const sockets = {};
  const queue = [];
@@ -23,18 +23,20 @@
   return ((count||0)/1e6).toFixed(2)+' мс';
  }
 
- // One queued command owns the response handler; generations invalidate suspended-page replies.
+ // Each process owns one response handler; a failed contact cannot stall another process.
  function request(role,command) {
   return new Promise(function enqueue(resolve,reject) {
    if(model.stopped){reject(new Error('Страница приостановлена'));return;}
    queue.push({role:role,command:command,resolve:resolve,reject:reject});
-   drain();
+   drain(role);
   });
  }
- function drain() {
-  if(model.pending||!queue.length||model.stopped)return;
-  model.pending=true;
-  const job=queue.shift();
+ function drain(role) {
+  if(model.pendingRoles[role]||model.stopped)return;
+  const queuedIndex=queue.findIndex(function sameProcess(queued){return queued.role===role;});
+  if(queuedIndex<0)return;
+  model.pendingRoles[role]=true;
+  const job=queue.splice(queuedIndex,1)[0];
   const generation=model.generation;
   let settled=false;
   let socket=sockets[job.role];
@@ -43,28 +45,28 @@
    settled=true;
    window.clearTimeout(deadline);
    if(generation===model.generation) {
-    model.pending=false;
-    model.cancelPending=null;
+    model.pendingRoles[role]=false;
+    delete model.cancelPendingRoles[role];
    }
    job.reject(new Error(message));
-   if(generation===model.generation)drain();
+   if(generation===model.generation)drain(role);
   }
   const deadline=window.setTimeout(function closeUnanswered() {
    if(socket)socket.close();
    fail('Истекло время ожидания профилировщика');
-  },10000);
-  model.cancelPending=function abandonJob(){fail('Связь со страницей приостановлена');};
+  },role==='public'?30000:10000);
+  model.cancelPendingRoles[role]=function abandonJob(){fail('Связь со страницей приостановлена');};
   function send() {
    if(settled||generation!==model.generation)return;
    socket.onmessage=function receive(event) {
     if(settled||generation!==model.generation)return;
     window.clearTimeout(deadline);
     settled=true;
-    model.cancelPending=null;
+    delete model.cancelPendingRoles[role];
     socket.onclose=function idleDisconnected() {
      if(sockets[job.role]===socket)sockets[job.role]=null;
     };
-    model.pending=false;
+    model.pendingRoles[role]=false;
     try {
      const response=JSON.parse(event.data);
      model.states[job.role]=response;
@@ -72,7 +74,7 @@
     } catch(error) {
      job.reject(error);
     }
-    drain();
+    drain(role);
    };
    socket.onclose=function disconnected() {
     if(sockets[job.role]===socket)sockets[job.role]=null;
@@ -125,29 +127,45 @@
    return role+':'+(record?record.id:'missing')+':'+((model.states[role]||{}).error||'');
   }).join('|');
  }
+ function updateMeasurements() {
+  if(model.stopped)return;
+  const records=availableMeasurements();
+  const capturing=model.targets.some(function active(role){const state=model.states[role]||{};return state.busy&&state.runID===model.selectedRun;});
+  if(!records.some(function selected(record){return record.id===model.selectedRun;})&&!capturing) {
+   model.selectedRun=records.length?records[0].id:'';
+   resetDetails();
+  }
+  if(!model.roleSelected&&model.targets.includes('public')&&measurementPart('public')&&model.role!=='public') {
+   model.role='public';model.page=0;model.report=null;resetDetails();
+  }
+  if(!measurementPart(model.role)) {
+   const availableRole=model.targets.find(function hasReport(role){return Boolean(measurementPart(role));});
+   if(availableRole&&availableRole!==model.role){model.role=availableRole;model.page=0;model.report=null;resetDetails();}
+  }
+  if(measurementKey()!==model.overviewKey)loadOverview();
+  else if(!model.exportKey&&model.selectedRun)prepareExport();
+  render();
+ }
  function refresh() {
   if(model.stopped||model.refreshing||!model.targets.length)return;
   model.refreshing=true;
   window.clearTimeout(model.pollTimer);
   const generation=model.generation;
-  Promise.all(model.targets.map(function readRole(role){return request(role,{action:'status'}).then(function compatible(state) {
+  Promise.all(model.targets.map(function readRole(role) {
+   return request(role,{action:'status'}).then(function compatible(state) {
+    if(model.stopped||generation!==model.generation)return;
     if(!state.error&&state.protocol!==1) {
      state.error='Эта часть сервера использует старый протокол профилирования. Нужен полный перезапуск службы после обновления.';
      state.reports=[];
+     state.incompatible=true;
     }
-    return state;
-   });})).then(function updated() {
-   if(model.stopped||generation!==model.generation)return;
-   const records=availableMeasurements();
-   const capturing=model.targets.some(function active(role){const state=model.states[role]||{};return state.busy&&state.runID===model.selectedRun;});
-   if(!records.some(function selected(record){return record.id===model.selectedRun;})&&!capturing) {
-    model.selectedRun=records.length?records[0].id:'';
-    resetDetails();
-   }
-   if(measurementKey()!==model.overviewKey)loadOverview();
-   else if(!model.exportKey&&model.selectedRun)prepareExport();
-   render();
-  }).catch(function failedRefresh(error){if(generation===model.generation)reportError(error);}).finally(function nextRefresh() {
+    updateMeasurements();
+   }).catch(function unavailable(error) {
+    if(model.stopped||generation!==model.generation)return;
+    model.states[role]={role:role,error:error.message,reports:[]};
+    updateMeasurements();
+   });
+  })).catch(function failedRefresh(error){if(generation===model.generation)reportError(error);}).finally(function nextRefresh() {
    if(generation!==model.generation)return;
    model.refreshing=false;
    if(!model.stopped)model.pollTimer=window.setTimeout(refresh,2000);
@@ -164,13 +182,18 @@
   model.copyFallback=false;
   const expected=model.targets.filter(function available(role){return Boolean(measurementPart(role));});
   Promise.all(expected.map(function overview(role) {
-   return request(role,{action:'report',id:measurementPart(role).id,view:'overview'}).then(function received(response){return {role:role,report:response.report,error:response.error};});
+   return request(role,{action:'report',id:measurementPart(role).id,view:'overview'}).then(function received(response){return {role:role,report:response.report,error:response.error};}).catch(function unavailable(error){return {role:role,error:error.message};});
   })).then(function loaded(parts) {
    if(model.stopped||generation!==model.generation||key!==measurementKey())return;
    parts.forEach(function keep(part) {
     model.overviewParts[part.role]=part.report||{error:part.error||'Результат недоступен',role:part.role};
    });
-   if(model.detailsOpen)loadReport();
+   const selectedOverview=model.overviewParts[model.role];
+   if(!selectedOverview||selectedOverview.error) {
+    const availableRole=model.targets.find(function hasOverview(role){const processReport=model.overviewParts[role];return processReport&&processReport.pid&&!processReport.error;});
+    if(availableRole){model.role=availableRole;model.page=0;model.report=null;resetDetails();}
+   }
+   loadReport();
    prepareExport();
    render();
   }).catch(function failedOverview(error){if(generation===model.generation&&key===measurementKey()){model.overviewKey='';reportError(error);}});
@@ -220,7 +243,7 @@
   Promise.all(model.targets.map(function exportProcess(role) {
    const record=measurementPart(role);
    if(!record)return Promise.resolve('## '+processLabel(role)+'\nДанные отсутствуют: '+((model.states[role]||{}).error||'результат не получен или ещё готовится')+'\n');
-   return request(role,{action:'export',id:record.id}).then(function exported(response){return response.text||'## '+processLabel(role)+'\nОшибка: '+(response.error||'нет текста')+'\n';});
+   return request(role,{action:'export',id:record.id}).then(function exported(response){return response.text||'## '+processLabel(role)+'\nОшибка: '+(response.error||'нет текста')+'\n';}).catch(function unavailable(error){return '## '+processLabel(role)+'\nДанные отсутствуют: '+error.message+'\n';});
   })).then(function exported(parts) {
    if(model.stopped||generation!==model.generation||revision!==model.exportRevision||key!==measurementKey())return;
    model.exportText=intro.join('\n')+'\n\n'+parts.join('\n\n');
@@ -576,27 +599,34 @@
  function renderOverview(summary) {
   const panel=element('[data-profiler-overview]');
   panel.replaceChildren();
-  const reports=Object.values(model.overviewParts).filter(function measured(report){return Boolean(report.pid);});
-  if(!reports.length){renderEmpty(panel);return;}
-  const hottest=summary.functions[0];
-  const slowest=summary.stages[0];
-  if(hottest)appendParagraph(panel,'Больше всего собственного времени процессора: '+hottest.name+' — '+duration(hottest.self)+' ('+(100*hottest.self/(summary.cpu||1)).toFixed(1)+'%).');
-  if(slowest)appendParagraph(panel,'Наибольшее среднее время измеренного этапа: '+stageLabel(slowest.name)+' — '+slowest.meanMS.toFixed(3)+' мс; p95 ≤ '+slowest.p95MS.toFixed(3)+' мс.');
-  const missing=model.targets.filter(function unavailable(role){return !model.overviewParts[role]||model.overviewParts[role].error;});
-  if(missing.length)appendParagraph(panel,'Замер пока неполный: '+missing.map(function name(role){return processLabel(role)+' ('+((model.states[role]||{}).error||'результат ещё не получен')+')';}).join('; '));
-  if(summary.truncated)appendParagraph(panel,'Часть измерений сокращена или пропущена под нагрузкой; это отмечено в отчёте.');
-  const output=table(['Что выполнялось','Где','Работа процессора самой функции']);
+  if(!model.targets.length){appendParagraph(panel,'Подключаем процессы сервера…');return;}
+  const output=table(['Процесс','PID','Пользователь','CPU','Живая память','Выделено','GC','HTTP-запросы']);
   const body=document.createElement('tbody');
-  summary.functions.slice(0,10).forEach(function hotspot(functionReport) {
+  model.targets.forEach(function processStatistics(role) {
+   const processReport=model.overviewParts[role];
+   const processState=model.states[role]||{};
    const row=document.createElement('tr');
-   functionCell(row,functionReport,false);
-   textCell(row,processLabel(functionReport.processRole));
-   textCell(row,duration(functionReport.self),'profiler-number');
+   textCell(row,processLabel(role));
+   if(processReport&&processReport.pid&&!processReport.error) {
+    textCell(row,String(processReport.pid));
+    textCell(row,processReport.user||'—');
+    textCell(row,duration(processReport.cpu),'profiler-number');
+    textCell(row,formatBytes(processReport.heap),'profiler-number');
+    textCell(row,formatBytes(processReport.allocated),'profiler-number');
+    textCell(row,String(processReport.gc||0),'profiler-number');
+    textCell(row,processReport.network?String(processReport.network.requests):'Нет данных','profiler-number');
+   } else {
+    const status=textCell(row,processState.error||(processReport&&processReport.error)||(processState.protocol===1?'Подключён · нет записи':'Подключаем…'));
+    status.setAttribute('colspan','7');
+   }
    body.appendChild(row);
   });
   output.appendChild(body);
   panel.appendChild(output);
+  if(model.targets.includes('public'))appendParagraph(panel,'Внешние HTTP-запросы учитываются публичным процессом. Запросы приложения за прокси показаны отдельно и не прибавляются к ним.');
+  if(summary.truncated)appendParagraph(panel,'Часть измерений сокращена или пропущена под нагрузкой; это отмечено в отчёте.');
  }
+
  function render() {
   const report=model.report;
   const summary=overviewReport();
@@ -673,7 +703,7 @@
    if(state.error)throw new Error(state.error);
    model.selectedRun=state.runID;
    if(model.targets.includes('public')) {
-    if((model.states.public||{}).protocol!==1)return {error:'Для записи отдачи файлов нужен полный перезапуск службы после обновления.'};
+    if((model.states.public||{}).incompatible)return {error:'Для записи отдачи файлов нужен полный перезапуск службы после обновления.'};
     return request('public',{action:'start',runID:state.runID});
    }
   }).then(function started(state) {
@@ -692,6 +722,7 @@
  };
  element('[data-profiler-role]').onchange=function role(event) {
   model.role=event.target.value;
+  model.roleSelected=true;
   model.report=null;
   resetDetails();
   loadReport();
@@ -703,10 +734,6 @@
   resetDetails();
   loadOverview();
  };
- element('[data-profiler-details]').addEventListener('toggle',function details(event) {
-  model.detailsOpen=event.target.open;
-  if(model.detailsOpen)loadReport();
- });
  element('[data-profiler-copy]').onclick=async function copyReport() {
   if(!model.exportText)return;
   const text=model.exportText;
@@ -761,12 +788,12 @@
   model.stopped=true;
   window.clearTimeout(model.pollTimer);
   window.clearTimeout(model.searchTimer);
-  if(model.cancelPending)model.cancelPending();
+  Object.values(model.cancelPendingRoles).forEach(function abandonPending(cancel){cancel();});
   queue.splice(0).forEach(function abandonQueued(job){job.reject(new Error('Страница приостановлена'));});
   model.generation++;
-  model.pending=false;
+  model.pendingRoles={};
   model.refreshing=false;
-  model.cancelPending=null;
+  model.cancelPendingRoles={};
   resetDetails();
   model.overviewParts={};model.overviewKey='';model.exportText='';model.exportKey='';model.exportRevision++;model.copyFallback=false;model.report=null;
   model.selectedRun='';model.selected='';model.states={};
@@ -790,6 +817,7 @@
   model.more=false;
   model.page=0;
   model.targets=[];
+  model.roleSelected=false;
   const generation=model.generation;
   request('application',{action:'capabilities'}).then(function capabilities(state) {
    if(model.stopped||generation!==model.generation)return;
