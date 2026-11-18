@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync/atomic"
 
@@ -20,11 +21,14 @@ type RuntimeOptions struct {
 	StaticPath       func(string) string
 	HTMLFile         func(string, string) bool
 	PrepareBootstrap func(Policy, string) map[HTMLVariantKey]string
+	RAMCacheBytes    int64
+	ContentType      func(string, string) string
 }
 
 type PublicRuntime struct {
 	current atomic.Pointer[PublicSnapshot]
 	options RuntimeOptions
+	cache   *ramCache
 }
 
 // Published maps and their entries are never mutated. A request's reference to
@@ -66,10 +70,15 @@ func (snapshot *PublicSnapshot) lookup(query Lookup) Decision {
 const retiredGeneration uint64 = 1 << 63
 
 type publicGeneration struct {
-	roots    map[string]*os.Root
-	html     map[string]*PreparedHTML
-	readers  atomic.Uint64
-	released chan struct{}
+	roots     map[string]*os.Root
+	html      map[string]*PreparedHTML
+	ram       map[string]*preparedRAMFile
+	assets    map[string]*preparedRAMFile
+	ramBodies map[string]*ramBody
+	ramLeases []uint64
+	cache     *ramCache
+	readers   atomic.Uint64
+	released  chan struct{}
 }
 
 // PublishedFile pins its roots until Close. Generic OpenFile callers need the
@@ -115,6 +124,7 @@ func (generation *publicGeneration) retire() {
 	// runs on the response path and never waits in the publication owner's loop.
 	go func() {
 		<-generation.released
+		generation.cache.release(generation.ramLeases)
 		for _, root := range generation.roots {
 			root.Close()
 		}
@@ -272,7 +282,13 @@ func (runtime *PublicRuntime) prepare(policies map[string]cachedPolicy, stop <-c
 		return nil, err
 	}
 	defer storage.Close()
-	for domain, cached := range policies {
+	domains := make([]string, 0, len(policies))
+	for domain := range policies {
+		domains = append(domains, domain)
+	}
+	sort.Strings(domains)
+	for _, domain := range domains {
+		cached := policies[domain]
 		select {
 		case <-stop:
 			retireGenerations(prepared)
@@ -287,7 +303,7 @@ func (runtime *PublicRuntime) prepare(policies map[string]cachedPolicy, stop <-c
 		if skipBlocked && cached.blocked {
 			continue
 		}
-		generation := &publicGeneration{roots: make(map[string]*os.Root), html: make(map[string]*PreparedHTML), released: make(chan struct{})}
+		generation := &publicGeneration{roots: make(map[string]*os.Root), html: make(map[string]*PreparedHTML), ram: make(map[string]*preparedRAMFile), assets: make(map[string]*preparedRAMFile), ramBodies: make(map[string]*ramBody), cache: runtime.cache, released: make(chan struct{})}
 		prepared[domain] = generation
 		directories := map[string]string{
 			"static":   filepath.Join("storage", "static", runtime.options.StorageName(domain)),
@@ -310,6 +326,10 @@ func (runtime *PublicRuntime) prepare(policies map[string]cachedPolicy, stop <-c
 				retireGenerations(prepared)
 				return nil, err
 			}
+		}
+		if err = runtime.prepareRAMAssets(generation, cached.policy, stop); err != nil {
+			retireGenerations(prepared)
+			return nil, err
 		}
 	}
 	return prepared, nil

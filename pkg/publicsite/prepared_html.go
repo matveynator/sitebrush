@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"sort"
 	"time"
 )
 
@@ -25,22 +26,53 @@ type htmlVariant struct {
 // Preparation belongs to a publication generation, never to a visitor. File
 // identity prevents using offsets from a replaced file with equal timestamps.
 type PreparedHTML struct {
-	info      os.FileInfo
-	modified  time.Time
-	insertion int64
-	variants  map[HTMLVariantKey]htmlVariant
+	info          os.FileInfo
+	modified      time.Time
+	lastModified  string
+	sourceVersion string
+	insertion     int64
+	variants      map[HTMLVariantKey]htmlVariant
 }
 
 func (runtime *PublicRuntime) prepareHTML(generation *publicGeneration, policy Policy, stop <-chan struct{}) error {
 	if runtime.options.PrepareBootstrap == nil || runtime.options.StaticPath == nil {
 		return errors.New("public HTML preparation is not configured")
 	}
+	paths := make(map[string]int64)
 	for pathname := range policy.Layouts {
-		if err := runtime.prepareHTMLPath(generation, policy, pathname, stop); err != nil {
-			return err
-		}
+		paths[pathname] = 0
 	}
 	for pathname := range policy.PublishedVersions {
+		paths[pathname] = 0
+	}
+	for pathname := range policy.PreparedPages {
+		paths[pathname] = 0
+	}
+	ordered := make([]string, 0, len(paths))
+	for pathname := range paths {
+		directory, relative := "static", runtime.options.StaticPath(pathname)
+		if version := policy.PublishedVersions[pathname]; version != "" {
+			directory, relative = "versions", version
+		}
+		if root := generation.roots[directory]; root != nil {
+			if info, err := root.Stat(relative); err == nil {
+				paths[pathname] = info.Size()
+			}
+		}
+		ordered = append(ordered, pathname)
+	}
+	// Admission is deterministic and favors the landing page and smaller pages.
+	sort.Slice(ordered, func(first, second int) bool {
+		left, right := ordered[first], ordered[second]
+		if left == "/" || right == "/" {
+			return left == "/"
+		}
+		if paths[left] != paths[right] {
+			return paths[left] < paths[right]
+		}
+		return left < right
+	})
+	for _, pathname := range ordered {
 		if err := runtime.prepareHTMLPath(generation, policy, pathname, stop); err != nil {
 			return err
 		}
@@ -94,7 +126,7 @@ func (runtime *PublicRuntime) prepareHTMLPath(generation *publicGeneration, poli
 		directory, relative = "versions", version
 	}
 	key := directory + "\x00" + relative
-	if generation.html[key] != nil {
+	if generation.html[key] != nil && (!runtime.ramEligible(policy, pathname) || generation.ram[pathname] != nil) {
 		return nil
 	}
 	root := generation.roots[directory]
@@ -133,6 +165,9 @@ func (runtime *PublicRuntime) prepareHTMLPath(generation *publicGeneration, poli
 			return readErr
 		}
 		if !runtime.options.HTMLFile(pathname, string(prefix[:count])) {
+			if runtime.ramEligible(policy, pathname) {
+				return runtime.prepareRAMStatic(generation, policy, pathname, file, stop)
+			}
 			return nil
 		}
 	}
@@ -140,8 +175,10 @@ func (runtime *PublicRuntime) prepareHTMLPath(generation *publicGeneration, poli
 	if err != nil {
 		return err
 	}
-	generation.html[key] = prepared
-	return nil
+	if generation.html[key] == nil {
+		generation.html[key] = prepared
+	}
+	return runtime.prepareRAM(generation, policy, pathname, file, prepared, stop)
 }
 
 func prepareHTMLFile(file *os.File, bootstraps map[HTMLVariantKey]string, stop <-chan struct{}) (*PreparedHTML, error) {
@@ -169,6 +206,8 @@ func prepareHTMLFile(file *os.File, bootstraps map[HTMLVariantKey]string, stop <
 	}
 	sourceDigest := digest.Sum(nil)
 	prepared := &PreparedHTML{info: info, modified: time.Now(), insertion: int64(bootstrapPosition(prefix)), variants: make(map[HTMLVariantKey]htmlVariant, len(bootstraps))}
+	prepared.sourceVersion = hex.EncodeToString(sourceDigest)
+	prepared.lastModified = prepared.modified.UTC().Format(http.TimeFormat)
 	for key, bootstrap := range bootstraps {
 		fingerprint := sha256.New()
 		fingerprint.Write(sourceDigest)

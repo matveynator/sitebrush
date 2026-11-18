@@ -75,8 +75,10 @@ func TestCaptureOwnerRejectsRemoteConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer session.Close()
-	if state := session.Exchange(Command{Action: "timings"}, nil); state.Error == "" {
-		t.Fatal("remote client changed internal collector")
+	for _, action := range []string{"timings", "ram-cache"} {
+		if state := session.Exchange(Command{Action: action}, nil); state.Error == "" {
+			t.Fatal("remote client changed internal diagnostics", action)
+		}
 	}
 	if state := session.Exchange(Command{Action: "status"}, nil); state.Busy || len(state.Reports) != 0 {
 		t.Fatal("idle profiler started collecting")

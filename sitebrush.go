@@ -236,6 +236,7 @@ type App struct {
 	publicStreamer        *publicsite.Streamer
 	publicCatalog         *publicsite.Catalog
 	publicStaticMode      publicsite.StaticMode
+	publicRAMCacheBytes   int64
 	requestTimings        *requesttiming.Collector
 	profiler              *goprofile.Session
 	publicPublication     chan publicPublicationTask
@@ -4374,6 +4375,16 @@ func sitebrushConnStateLogger(protocol string, debug bool) func(net.Conn, http.C
 		log.Printf("%sCONNECTION%s protocol=%s state=%s local=%s remote=%s",
 			terminalCyan(), terminalReset(), protocol, state.String(), connection.LocalAddr().String(), connection.RemoteAddr().String())
 	}
+}
+
+func combinedConnState(first, second func(net.Conn, http.ConnState)) func(net.Conn, http.ConnState) {
+	if first == nil {
+		return second
+	}
+	if second == nil {
+		return first
+	}
+	return func(connection net.Conn, state http.ConnState) { first(connection, state); second(connection, state) }
 }
 
 func (a *App) logDomainEvent(domain string, format string, args ...any) {
@@ -9962,6 +9973,7 @@ type listenPorts struct {
 
 type serverRunConfig struct {
 	PublicStaticMode     publicsite.StaticMode
+	PublicRAMCacheBytes  int64
 	ParsedPorts          listenPorts
 	InheritedHTTP        net.Listener
 	InheritedHTTPS       net.Listener
@@ -10144,7 +10156,7 @@ func helpWasRequested(args []string) bool {
 }
 
 func printVisibleFlagDefaults(output io.Writer, flagSet *flag.FlagSet) {
-	visibleFlagNames := []string{"cli", "debug", "desktop", "install", "path", "port", "uninstall", "upgrade", "version", "profiler", "public-static-mode"}
+	visibleFlagNames := []string{"cli", "debug", "desktop", "install", "path", "port", "uninstall", "upgrade", "version", "profiler", "public-static-mode", "public-ram-cache-mib"}
 	for _, flagName := range visibleFlagNames {
 		currentFlag := flagSet.Lookup(flagName)
 		if currentFlag == nil {
@@ -10208,6 +10220,7 @@ func main() {
 	updateTargetVersion := flag.String("update-target-version", "", "internal expected compiled release identity")
 	versionMode := flag.Bool("version", false, "print version and exit")
 	debugMode := flag.Bool("debug", false, "enable verbose HTTP and database diagnostic logs")
+	publicRAMCache := flag.String("public-ram-cache-mib", firstNonEmpty(os.Getenv("SITEBRUSH_PUBLIC_RAM_CACHE_MIB"), "512"), "shared immutable public HTML cache in MiB; 0 disables RAM responses")
 	publicStaticMode := flag.String("public-static-mode", firstNonEmpty(os.Getenv("SITEBRUSH_PUBLIC_STATIC_MODE"), "snapshot"), "public file delivery: legacy, http10, roots, html, or snapshot")
 	requestTimings := flag.Bool("request-timings", false, "collect asynchronous request stage timings and log counters every 30 seconds")
 	profiler := flag.Bool("profiler", false, "enable owner load-test recording at /?server-settings; 30-second reports are kept temporarily and deleted after viewing; status goes to console or --logfile")
@@ -10241,6 +10254,10 @@ func main() {
 		return
 	}
 	flag.Parse()
+	publicRAMCacheBytes, ramCacheErr := publicsite.ParseRAMCacheMiB(*publicRAMCache)
+	if ramCacheErr != nil {
+		log.Fatal(ramCacheErr)
+	}
 	parsedStaticMode, staticModeErr := publicsite.ParseStaticMode(*publicStaticMode)
 	if staticModeErr != nil {
 		log.Fatal(staticModeErr)
@@ -10490,8 +10507,8 @@ func main() {
 		profilerLogOutput = filepath.Join(effectiveStoragePath, "storage", "logs", "sitebrush.log")
 	}
 	serverConfig := serverRunConfig{
-		PublicStaticMode: parsedStaticMode,
-		ParsedPorts:      parsedPorts, StoragePath: effectiveStoragePath, DBPath: effectiveDBPath,
+		PublicStaticMode: parsedStaticMode, PublicRAMCacheBytes: publicRAMCacheBytes,
+		ParsedPorts: parsedPorts, StoragePath: effectiveStoragePath, DBPath: effectiveDBPath,
 		AllowStorageFallback: !storagePathWasProvided && !dbPathWasProvided, PortWasProvided: flagWasProvided("port"),
 		DesktopMode: desktopMode, Debug: *debugMode, RequestTimings: *requestTimings, Profiler: *profiler, ProfilerLogOutput: profilerLogOutput,
 		UpdateProbation: *updateProbation, UpdateChild: *serverChild, PublicProxy: *publicProxy,
@@ -10880,8 +10897,10 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	address := "localhost:" + strconv.Itoa(listenPort)
 
 	application.publicStaticMode = config.PublicStaticMode
+	application.publicRAMCacheBytes = config.PublicRAMCacheBytes
 	application.publicStreamer = publicsite.NewStreamer()
 	application.publicCatalog = publicsite.NewCatalog(effectiveStoragePath, ctx.Done(), application.publicRuntimeOptions())
+	profilerSession.SetPublicCache(application.publicCatalog)
 	application.startPublicPublication(ctx.Done())
 	application.publicPolicyContact = config.PublicProxy && os.Getenv("SITEBRUSH_PUBLIC_POLICY_CHANNEL") == "1"
 	if application.publicPolicyContact {
@@ -11114,7 +11133,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 		})
 	}
 	server := newSitebrushHTTPServerWithMode(httpHandler, application.publicStaticMode, application.requestTimings)
-	server.ConnState = sitebrushConnStateLogger("HTTP", config.Debug)
+	server.ConnState = combinedConnState(server.ConnState, sitebrushConnStateLogger("HTTP", config.Debug))
 	serverErrors := make(chan error, 1)
 	go func() {
 		serverErrors <- server.Serve(listener)
@@ -11223,6 +11242,7 @@ func newSitebrushHTTPServerWithMode(handler http.Handler, mode publicsite.Static
 	if len(timings) > 0 && timings[0] != nil {
 		server.Handler = timings[0].Middleware(server.Handler)
 		server.ConnContext = timings[0].ConnContext
+		server.ConnState = timings[0].ConnState
 	}
 	return server
 }
@@ -12026,7 +12046,7 @@ func (a *App) serveTLSWithAutoCert(ctx context.Context, tlsListener net.Listener
 	tlsServer := newSitebrushHTTPServerWithMode(handler, a.publicStaticMode, a.requestTimings)
 	tlsServer.TLSConfig = tlsConfig
 	tlsServer.ErrorLog = log.New(problemLogWriter{application: a}, "", 0)
-	tlsServer.ConnState = sitebrushConnStateLogger("HTTPS", a.debug)
+	tlsServer.ConnState = combinedConnState(tlsServer.ConnState, sitebrushConnStateLogger("HTTPS", a.debug))
 	tlsAddress := tlsListener.Addr().String()
 	a.logProblemEvent("HTTPS server enabled on %s with TLS", tlsAddress)
 	serverStopped := make(chan struct{})
@@ -53276,15 +53296,22 @@ func (a *App) serveFileInsideStorage(w http.ResponseWriter, r *http.Request, fil
 // written without a transport error. HEAD, ranges and conditional hits stay
 // outside the server-confirmed download count.
 func serveContentWithDownloadObservation(w http.ResponseWriter, r *http.Request, name string, modified time.Time, size int64, content io.ReadSeeker) {
+	_ = serveWithDownloadObservation(w, r, name, size, func(writer http.ResponseWriter) error {
+		http.ServeContent(writer, r, name, modified, content)
+		return nil
+	})
+}
+
+func serveWithDownloadObservation(w http.ResponseWriter, r *http.Request, name string, size int64, serve func(http.ResponseWriter) error) error {
 	if r.Method != http.MethodGet || r.Header.Get("Range") != "" || !downloadableAssetName(name) {
-		http.ServeContent(w, r, name, modified, content)
-		return
+		return serve(w)
 	}
 	captured := &statusCapturingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
-	http.ServeContent(captured, r, name, modified, content)
-	if captured.statusCode == http.StatusOK && !captured.writeFailed && size > 0 && captured.bytesWritten == size {
+	err := serve(captured)
+	if err == nil && captured.statusCode == http.StatusOK && !captured.writeFailed && size > 0 && captured.bytesWritten == size {
 		w.Header().Set("X-SiteBrush-Download-Complete", "1")
 	}
+	return err
 }
 
 func downloadableAssetName(name string) bool {
@@ -58150,12 +58177,174 @@ func (a *App) publicRuntimeOptions() publicsite.RuntimeOptions {
 	if root == "" {
 		root = a.storagePath
 	}
+	ramCacheBytes := a.publicRAMCacheBytes
+	if a.publicProxy && !a.publicBoundary {
+		ramCacheBytes = 0
+	}
 	return publicsite.RuntimeOptions{
-		Mode: a.publicStaticMode, Root: root, StorageName: domainStorageName,
+		RAMCacheBytes: ramCacheBytes,
+		Mode:          a.publicStaticMode, Root: root, StorageName: domainStorageName,
 		StaticPath:       func(pathname string) string { return staticRelativePathForPage(cleanPath(pathname)) },
 		HTMLFile:         func(pathname, prefix string) bool { return pageContentKind(pathname, prefix) == "html" },
 		PrepareBootstrap: preparePublicHTMLBootstraps,
+		ContentType:      contentTypeForManagedPage,
 	}
+}
+
+// Publication owns source fingerprints. The public process verifies them while
+// preparing immutable bytes; no duplicate persistent file objects are needed.
+func (a *App) preparePublicRAMSources(policy *publicsite.Policy) error {
+	if !a.publicStaticMode.Enabled(publicsite.StaticSnapshot) || a.publicRAMCacheBytes == 0 || policy.PrivateTestDrive || policy.PendingRegistration || policy.Stealth || len(policy.AllowedIPs) != 0 {
+		return nil
+	}
+	rootPath, err := a.storageJailRootPath()
+	if err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	retained := make(map[string]string)
+	sourceRoots := make(map[string]*os.Root)
+	defer func() {
+		for _, sourceRoot := range sourceRoots {
+			sourceRoot.Close()
+		}
+	}()
+	staticDirectory := filepath.Join("storage", "static", domainStorageName(policy.Domain))
+	filesDirectory := filepath.Join("storage", "files", domainStorageName(policy.Domain))
+	retain := func(name string) (string, error) {
+		if version, found := retained[name]; found {
+			return version, nil
+		}
+		directory := staticDirectory
+		if strings.HasPrefix(name, filesDirectory+string(filepath.Separator)) {
+			directory = filesDirectory
+		}
+		relative, relativeErr := filepath.Rel(directory, name)
+		if relativeErr != nil || !filepath.IsLocal(relative) {
+			return "", errors.New("invalid public source path")
+		}
+		sourceRoot := sourceRoots[directory]
+		if sourceRoot == nil {
+			var rootErr error
+			sourceRoot, rootErr = root.OpenRoot(directory)
+			if os.IsNotExist(rootErr) {
+				return "", nil
+			}
+			if rootErr != nil {
+				return "", rootErr
+			}
+			sourceRoots[directory] = sourceRoot
+		}
+		file, openErr := sourceRoot.Open(relative)
+		if os.IsNotExist(openErr) {
+			return "", nil
+		}
+		if openErr != nil {
+			return "", openErr
+		}
+		info, readErr := file.Stat()
+		if readErr != nil {
+			file.Close()
+			return "", readErr
+		}
+		if !info.Mode().IsRegular() || info.Size() > publicsite.MaximumRAMRepresentationBytes {
+			file.Close()
+			return "", nil
+		}
+		body, readErr := io.ReadAll(io.LimitReader(file, publicsite.MaximumRAMRepresentationBytes+1))
+		file.Close()
+		if readErr != nil {
+			return "", readErr
+		}
+		if int64(len(body)) != info.Size() {
+			return "", errors.New("public source changed during version preparation")
+		}
+		digest := sha256.Sum256(body)
+		version := hex.EncodeToString(digest[:])
+		retained[name] = version
+		return version, nil
+	}
+	policy.PreparedPages = make(map[string]string)
+	for pathname := range policy.Layouts {
+		version, retainErr := retain(filepath.Join(staticDirectory, staticRelativePathForPage(pathname)))
+		if retainErr != nil {
+			return retainErr
+		}
+		if version != "" {
+			policy.PreparedPages[pathname] = version
+		}
+	}
+	static, openErr := root.OpenRoot(staticDirectory)
+	if openErr != nil && !os.IsNotExist(openErr) {
+		return openErr
+	}
+	if static != nil {
+		walkErr := fs.WalkDir(static.FS(), ".", func(relative string, entry fs.DirEntry, visitErr error) error {
+			if visitErr != nil {
+				if entry != nil && entry.IsDir() {
+					return fs.SkipDir
+				}
+				return nil
+			}
+			if entry.IsDir() {
+				return nil
+			}
+			if !entry.Type().IsRegular() && entry.Type()&os.ModeSymlink == 0 {
+				return nil
+			}
+			version, retainErr := retain(filepath.Join(staticDirectory, relative))
+			if retainErr != nil {
+				// Optional discoveries never make unrelated published pages unavailable.
+				// Known page entries were verified above through the same site root.
+				return nil
+			}
+			if version != "" {
+				policy.PreparedPages["/"+filepath.ToSlash(relative)] = version
+			}
+			return nil
+		})
+		static.Close()
+		if walkErr != nil {
+			return walkErr
+		}
+	}
+	names := make(map[string]bool)
+	for _, name := range policy.ResourcePaths {
+		names[name] = true
+	}
+	for _, rule := range policy.Files {
+		if rule.Mode == "" || rule.Mode == "public" {
+			names[rule.Name] = true
+		}
+	}
+	policy.PreparedFiles = make(map[string]string)
+	for name := range names {
+		if safeRelativeAssetPath(name) == "" || policy.Hidden["files\x00"+name] {
+			continue
+		}
+		public := true
+		for _, rule := range policy.Files {
+			if rule.Name == name && rule.Mode != "" && rule.Mode != "public" {
+				public = false
+			}
+		}
+		if !public {
+			continue
+		}
+		version, retainErr := retain(filepath.Join("storage", "files", domainStorageName(policy.Domain), filepath.FromSlash(name)))
+		if retainErr != nil {
+			// An unavailable optional resource keeps its existing authorized file path.
+			continue
+		}
+		if version != "" {
+			policy.PreparedFiles[name] = version
+		}
+	}
+	return nil
 }
 
 func preparePublicHTMLBootstraps(policy publicsite.Policy, pathname string) map[publicsite.HTMLVariantKey]string {
@@ -58250,6 +58439,10 @@ func (a *App) servePublishedStaticFileWithMenu(w http.ResponseWriter, r *http.Re
 		http.NotFound(w, r)
 		return true
 	}
+	if a.servePreparedPublicResponse(w, r, domain, pagePath, decision, injectPublicMenu, updating) {
+		return true
+	}
+
 	var publication *publicsite.PublishedFile
 	var err error
 	if a.publicCatalog != nil && a.publicCatalog.RuntimeEnabled() {
@@ -58305,6 +58498,71 @@ func (a *App) servePublishedStaticFileWithMenu(w http.ResponseWriter, r *http.Re
 			bootstrap += overlay
 		}
 	}
+	r, redirect := a.publicHTMLResponseHeaders(w, r, domain, pagePath, decision, injectPublicMenu)
+	if prepared {
+		if streamErr := a.publicStreamer.Prepared(w, r, file, publication.HTML, variantKey, redirect); streamErr != nil {
+			w.Header().Del("ETag")
+			w.Header().Set("Cache-Control", "no-store")
+			http.Error(w, "published HTML is unavailable", http.StatusServiceUnavailable)
+		}
+		return true
+	}
+	if streamErr := a.publicStreamer.HTML(w, r, file, bootstrap, CompileVersion+"-"+language+"-"+strconv.FormatBool(injectPublicMenu), redirect); streamErr != nil {
+		return false
+	}
+
+	return true
+}
+
+// Eligibility and current-generation admission precede borrowing immutable bytes.
+func (a *App) servePreparedPublicResponse(w http.ResponseWriter, r *http.Request, domain, pagePath string, decision publicsite.Decision, injectPublicMenu, updating bool) bool {
+	if a.publicRAMCacheBytes == 0 || a.publicCatalog == nil || decision.PrivateTestDrive || decision.Password.Path != "" || r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	key := publicsite.HTMLVariantKey{Language: preferredLanguageCode(r.Header.Get("Accept-Language")), Menu: injectPublicMenu, Updating: updating}
+	response, found, err := a.publicCatalog.AcquirePrepared(decision, pagePath, key)
+	if decision.PageVersion == "" && decision.ResourceFile == "" && decision.File.Name != "" {
+		response, found, err = a.publicCatalog.AcquirePreparedFile(decision, decision.File.Name)
+	}
+	if err != nil {
+		http.Error(w, "published version is unavailable", http.StatusServiceUnavailable)
+		return true
+	}
+	if !found {
+		requesttiming.MarkRAM(r, false)
+		return false
+	}
+	defer response.Close()
+	if response.HTML() {
+		if hasSitebrushSessionCookie(r) || decision.PendingRegistration {
+			return false
+		}
+		var redirect string
+		r, redirect = a.publicHTMLResponseHeaders(w, r, domain, pagePath, decision, injectPublicMenu)
+		if redirect != "" {
+			http.Redirect(w, r, redirect, http.StatusMovedPermanently)
+			return true
+		}
+	}
+	a.logContentDelivery(w, "static-file")
+	requesttiming.MarkRAM(r, true)
+	if response.HTML() {
+		err = response.ServeHTTP(w, r)
+	} else {
+		err = serveWithDownloadObservation(w, r, pagePath, response.Size(), func(writer http.ResponseWriter) error { return response.ServeHTTP(writer, r) })
+	}
+	if err != nil {
+		a.logProblemEvent("public RAM response write failed: %v", err)
+	}
+	return true
+}
+
+func publicRuntimeEnvironment(config serverRunConfig) []string {
+	return []string{"SITEBRUSH_PUBLIC_STATIC_MODE=" + config.PublicStaticMode.String(), "SITEBRUSH_PUBLIC_RAM_CACHE_MIB=" + strconv.FormatInt(config.PublicRAMCacheBytes/(1<<20), 10)}
+}
+
+// Both representations use the same policy-dependent headers and canonical URL.
+func (a *App) publicHTMLResponseHeaders(w http.ResponseWriter, r *http.Request, domain, pagePath string, decision publicsite.Decision, injectPublicMenu bool) (*http.Request, string) {
 	// The public boundary has no site database. Its policy snapshot already owns
 	// demo membership, so static responses do not enter the control plane.
 	demoSite := false
@@ -58329,19 +58587,7 @@ func (a *App) servePublishedStaticFileWithMenu(w http.ResponseWriter, r *http.Re
 	if decision, found := r.Context().Value(publicDecisionContextKey{}).(publicsite.Decision); found && decision.Password.Path == "" && requestCanUseCanonicalTrailingSlash(r, pagePath) {
 		redirect = canonicalTrailingSlashURL(r, pagePath)
 	}
-	if prepared {
-		if streamErr := a.publicStreamer.Prepared(w, r, file, publication.HTML, variantKey, redirect); streamErr != nil {
-			w.Header().Del("ETag")
-			w.Header().Set("Cache-Control", "no-store")
-			http.Error(w, "published HTML is unavailable", http.StatusServiceUnavailable)
-		}
-		return true
-	}
-	if streamErr := a.publicStreamer.HTML(w, r, file, bootstrap, CompileVersion+"-"+language+"-"+strconv.FormatBool(injectPublicMenu), redirect); streamErr != nil {
-		return false
-	}
-
-	return true
+	return r, redirect
 }
 
 func injectPublishedAnalytics(html string) string {
@@ -58815,7 +59061,7 @@ func runSupervisedSitebrush(ctx context.Context, config serverRunConfig) error {
 		if catalogErr != nil {
 			return catalogErr
 		}
-		return appupdate.Run(appupdate.Options{Catalog: &catalog, Environment: []string{"SITEBRUSH_PUBLIC_STATIC_MODE=" + config.PublicStaticMode.String()}, StoragePath: storagePath, Executable: executable, Version: CompileVersion, Compatibility: appupdate.CurrentCompatibility(), Arguments: arguments, PublicKey: publicKey, Output: os.Stdout}, ctx.Done())
+		return appupdate.Run(appupdate.Options{Catalog: &catalog, Environment: publicRuntimeEnvironment(config), StoragePath: storagePath, Executable: executable, Version: CompileVersion, Compatibility: appupdate.CurrentCompatibility(), Arguments: arguments, PublicKey: publicKey, Output: os.Stdout}, ctx.Done())
 	}
 	front, frontClose, secret, frontErr := startPublicSiteBoundary(ctx, storagePath, config)
 	if frontErr != nil {
@@ -58834,7 +59080,7 @@ func runSupervisedSitebrush(ctx context.Context, config serverRunConfig) error {
 	if err != nil {
 		return err
 	}
-	return appupdate.Run(appupdate.Options{Catalog: &catalog, PublicState: front.Set, PublicSecurity: front.Security, PublicThrottle: front.Throttle, PublicPolicy: front.Policy, PublicProfiler: front.Profiler, PublicObservations: front.PullObservations, PublicCertificate: front.Certificate, Environment: []string{"SITEBRUSH_PUBLIC_STATIC_MODE=" + config.PublicStaticMode.String(), "SITEBRUSH_PUBLIC_POLICY_CHANNEL=1", "SITEBRUSH_PUBLIC_CONTACT=" + secret, "SITEBRUSH_PUBLIC_HTTP_PORT=" + strconv.Itoa(front.HTTPPort), "SITEBRUSH_PUBLIC_HTTPS_PORT=" + strconv.Itoa(front.HTTPSPort)}, StoragePath: storagePath, Executable: executable, Version: CompileVersion, Compatibility: appupdate.CurrentCompatibility(), Arguments: arguments, PublicKey: publicKey, Output: os.Stdout}, ctx.Done())
+	return appupdate.Run(appupdate.Options{Catalog: &catalog, PublicState: front.Set, PublicSecurity: front.Security, PublicThrottle: front.Throttle, PublicPolicy: front.Policy, PublicProfiler: front.Profiler, PublicObservations: front.PullObservations, PublicCertificate: front.Certificate, Environment: append(publicRuntimeEnvironment(config), "SITEBRUSH_PUBLIC_POLICY_CHANNEL=1", "SITEBRUSH_PUBLIC_CONTACT="+secret, "SITEBRUSH_PUBLIC_HTTP_PORT="+strconv.Itoa(front.HTTPPort), "SITEBRUSH_PUBLIC_HTTPS_PORT="+strconv.Itoa(front.HTTPSPort)), StoragePath: storagePath, Executable: executable, Version: CompileVersion, Compatibility: appupdate.CurrentCompatibility(), Arguments: arguments, PublicKey: publicKey, Output: os.Stdout}, ctx.Done())
 }
 
 func runManualUpgrade(storagePath, databasePath, port string, debug bool, policies ...appupdate.BackupPolicy) error {
@@ -61744,6 +61990,11 @@ func (a *App) writePublicPolicyWithNotifier(domain string, notify func(string, s
 			return pointErr
 		}
 	}
+	if !policy.Frozen {
+		if err = a.preparePublicRAMSources(&policy); err != nil {
+			return err
+		}
+	}
 	if err = publicsite.Write(a.storagePath, policy); err != nil {
 		return err
 	}
@@ -62105,6 +62356,10 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 		default:
 			return false
 		}
+		if a.servePreparedPublicResponse(w, r, domain, pagePath, decision, false, paused) {
+			return true
+		}
+
 		file, openErr := a.openPublicSiteFile(domain, "files", filepath.FromSlash(fileName), decision)
 		if decision.File.Version != "" {
 			if file != nil {
@@ -62141,6 +62396,9 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 		return true
 	}
 	if decision.ResourceFile != "" {
+		if a.servePreparedPublicResponse(w, r, domain, pagePath, decision, false, paused) {
+			return true
+		}
 		file, openErr := a.openPublicSiteFile(domain, "files", filepath.FromSlash(decision.ResourceFile), decision)
 		if decision.Frozen && decision.Versioned {
 			if file != nil {
@@ -62469,8 +62727,10 @@ func startPublicSiteBoundary(ctx context.Context, storagePath string, config ser
 	application.profiler = profilerSession
 	profilerSession.SetTimings(application.requestTimings)
 	application.publicStaticMode = config.PublicStaticMode
+	application.publicRAMCacheBytes = config.PublicRAMCacheBytes
 	application.publicStreamer = publicsite.NewStreamer()
 	application.publicCatalog = publicsite.NewCatalog(storagePath, ctx.Done(), application.publicRuntimeOptions())
+	profilerSession.SetPublicCache(application.publicCatalog)
 	application.autoCertCertificateCache = startAutoCertCertificateMemoryCache(ctx, filepath.Join(application.storageRootDir(), "letsencrypt"))
 	staticFiles, err := fs.Sub(embeddedWebFiles, "web/static")
 	if err != nil {
