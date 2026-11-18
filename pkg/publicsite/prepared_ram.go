@@ -2,6 +2,8 @@ package publicsite
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"mime"
@@ -22,6 +24,7 @@ type preparedRAMFile struct {
 	version     string
 	variants    map[HTMLVariantKey]*ramBody
 	reason      string
+	recovered   bool
 }
 
 // A response borrows its generation until the HTTP writer has consumed the body.
@@ -166,9 +169,25 @@ func (runtime *PublicRuntime) prepareRAMPlain(generation *publicGeneration, poli
 	if contentType == "" {
 		contentType = http.DetectContentType(prefix[:count])
 	}
+	recovered := version == ""
+	if recovered {
+		if policy.Frozen || policy.Versioned {
+			generation.ramMisses[pathname] = "missing_version"
+			return nil, nil
+		}
+		version, err = fingerprintRAMSource(file, info, stop)
+		if err != nil {
+			return nil, err
+		}
+		if resource == "" {
+			generation.recoveredPages++
+		} else {
+			generation.recoveredFiles++
+		}
+	}
 	key := HTMLVariantKey{}
 	prepared := &PreparedHTML{info: info, modified: info.ModTime(), lastModified: info.ModTime().UTC().Format(http.TimeFormat), variants: map[HTMLVariantKey]htmlVariant{key: {etag: `"` + version + `"`}}}
-	result := &preparedRAMFile{contentType: contentType, resource: resource, prepared: prepared, version: version, variants: make(map[HTMLVariantKey]*ramBody), reason: "budget"}
+	result := &preparedRAMFile{contentType: contentType, resource: resource, prepared: prepared, version: version, variants: make(map[HTMLVariantKey]*ramBody), reason: "budget", recovered: recovered}
 	directory, relative := runtime.ramSource(policy, pathname, resource)
 	generation.pendingRAM = append(generation.pendingRAM, ramCandidate{generation: generation, response: result, pathname: pathname, domain: policy.Domain, directory: directory, relative: relative, size: info.Size(), version: version, identity: policy.Domain + "\x00raw\x00" + version})
 	if strings.Contains(contentType, "text/css") {
@@ -186,7 +205,7 @@ func (runtime *PublicRuntime) prepareRAMStatic(generation *publicGeneration, pol
 }
 
 func (runtime *PublicRuntime) prepareRAMAssets(generation *publicGeneration, policy Policy, stop <-chan struct{}) error {
-	if runtime.cache == nil || policy.PrivateTestDrive || policy.PendingRegistration || policy.Stealth || len(policy.AllowedIPs) != 0 {
+	if runtime.ramPolicyReason(policy) != "" {
 		return nil
 	}
 	directory := "files"
@@ -200,7 +219,19 @@ func (runtime *PublicRuntime) prepareRAMAssets(generation *publicGeneration, pol
 		return nil
 	}
 	names := make([]string, 0, len(versions))
+	publicNames := make(map[string]bool)
 	for name := range versions {
+		publicNames[name] = true
+	}
+	if !policy.Frozen && !policy.Versioned {
+		for _, name := range policy.ResourcePaths {
+			publicNames[name] = true
+		}
+		for _, rule := range policy.Files {
+			publicNames[rule.Name] = true
+		}
+	}
+	for name := range publicNames {
 		names = append(names, name)
 	}
 	for _, name := range names {
@@ -295,16 +326,38 @@ func (response *PreparedResponse) ServeHTTP(w http.ResponseWriter, r *http.Reque
 	return err
 }
 
-func (runtime *PublicRuntime) ramEligible(policy Policy, pathname string) bool {
-	if runtime.cache == nil || policy.PrivateTestDrive || policy.PendingRegistration || policy.Stealth || len(policy.AllowedIPs) != 0 || ramPageVersion(policy, pathname) == "" || hiddenVersionPath(policy.Hidden, "page", pathname) {
-		return false
+// Administrator IP rules establish trust for the control plane. They do not
+// make an otherwise public page private or change its anonymous representation.
+func (runtime *PublicRuntime) ramPolicyReason(policy Policy) string {
+	if runtime.cache == nil {
+		return "disabled"
+	}
+	if policy.RoutingVersion != 3 || policy.PrivateTestDrive || policy.PendingRegistration || policy.Stealth {
+		return "restricted"
+	}
+	return ""
+}
+
+func (runtime *PublicRuntime) ramPageReason(policy Policy, pathname string) string {
+	if reason := runtime.ramPolicyReason(policy); reason != "" {
+		return reason
+	}
+	if hiddenVersionPath(policy.Hidden, "page", pathname) {
+		return "restricted"
 	}
 	for _, password := range policy.Passwords {
 		if dirprotect.HasProtectedPrefix(pathname, password.Path) {
-			return false
+			return "restricted"
 		}
 	}
-	return true
+	if (policy.Frozen || policy.Versioned) && ramPageVersion(policy, pathname) == "" {
+		return "missing_version"
+	}
+	return ""
+}
+
+func (runtime *PublicRuntime) ramEligible(policy Policy, pathname string) bool {
+	return runtime.ramPageReason(policy, pathname) == ""
 }
 
 func ramPageVersion(policy Policy, pathname string) string {
@@ -318,27 +371,28 @@ func ramPageVersion(policy Policy, pathname string) string {
 }
 
 func (runtime *PublicRuntime) prepareRAM(generation *publicGeneration, policy Policy, pathname string, file *os.File, prepared *PreparedHTML, stop <-chan struct{}) error {
-	if runtime.cache != nil && !policy.PrivateTestDrive && !policy.PendingRegistration && !policy.Stealth && len(policy.AllowedIPs) == 0 && !hiddenVersionPath(policy.Hidden, "page", pathname) {
-		generation.pageSources[pathname] = runtime.options.StaticPath(pathname)
-		generation.references[pathname] = readRAMReferences(file, true, stop)
+	if reason := runtime.ramPageReason(policy, pathname); reason != "" {
+		generation.ramMisses[pathname] = reason
+		return nil
 	}
-
+	generation.pageSources[pathname] = runtime.options.StaticPath(pathname)
+	generation.references[pathname] = readRAMReferences(file, true, stop)
 	if prepared.info.Size() > MaximumRAMRepresentationBytes {
 		generation.ramMisses[pathname] = "too_large"
 		return nil
 	}
-	if !runtime.ramEligible(policy, pathname) {
-		generation.ramMisses[pathname] = "restricted"
-		if ramPageVersion(policy, pathname) == "" {
-			generation.ramMisses[pathname] = "missing_version"
-		}
-		return nil
-	}
 	version := ramPageVersion(policy, pathname)
+	recovered := version == ""
+	if recovered {
+		// Legacy ordinary policies already authorize this live published file. Bind
+		// its existing preparation digest to this generation, never to an HTTP read.
+		version = prepared.sourceVersion
+		generation.recoveredPages++
+	}
 	if prepared.sourceVersion != version {
 		return errors.New("published HTML version changed during RAM preparation")
 	}
-	result := &preparedRAMFile{html: true, contentType: "text/html; charset=utf-8", prepared: prepared, version: version, variants: make(map[HTMLVariantKey]*ramBody), reason: "budget"}
+	result := &preparedRAMFile{html: true, contentType: "text/html; charset=utf-8", prepared: prepared, version: version, variants: make(map[HTMLVariantKey]*ramBody), reason: "budget", recovered: recovered}
 	generation.ram[pathname] = result
 	directory, relative := runtime.ramSource(policy, pathname, "")
 	for key, variant := range prepared.variants {
@@ -349,4 +403,22 @@ func (runtime *PublicRuntime) prepareRAM(generation *publicGeneration, policy Po
 		generation.pendingRAM = append(generation.pendingRAM, ramCandidate{generation: generation, response: result, pathname: pathname, domain: policy.Domain, directory: directory, relative: relative, key: key, size: size, version: version, identity: policy.Domain + "\x00" + variant.etag, bootstrap: variant.bootstrap, insertion: prepared.insertion})
 	}
 	return nil
+}
+
+// Only bounded ordinary files can acquire a missing fingerprint. Existing
+// fingerprints and checkpoint versions remain authoritative and are never healed.
+func fingerprintRAMSource(file *os.File, before os.FileInfo, stop <-chan struct{}) (string, error) {
+	digest := sha256.New()
+	count, err := io.Copy(digest, preparationReader{source: io.NewSectionReader(file, 0, before.Size()+1), stop: stop})
+	if err != nil {
+		return "", err
+	}
+	after, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	if count != before.Size() || after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) {
+		return "", errors.New("public source changed during fingerprint preparation")
+	}
+	return hex.EncodeToString(digest.Sum(nil)), nil
 }

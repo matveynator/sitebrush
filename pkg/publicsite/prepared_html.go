@@ -48,6 +48,11 @@ func (runtime *PublicRuntime) prepareHTML(generation *publicGeneration, policy P
 	for pathname := range policy.PreparedPages {
 		paths[pathname] = 0
 	}
+	// Legacy discovery may know only index.html. The existing public router
+	// also serves that file at /; each route still gets its own bootstrap.
+	if !policy.Frozen && !policy.Versioned {
+		paths["/"] = 0
+	}
 	ordered := make([]string, 0, len(paths))
 	for pathname := range paths {
 		directory, relative := "static", runtime.options.StaticPath(pathname)
@@ -124,6 +129,9 @@ func (runtime *PublicRuntime) prepareHTMLPath(generation *publicGeneration, poli
 	directory, relative := "static", runtime.options.StaticPath(pathname)
 	if version := policy.PublishedVersions[pathname]; version != "" {
 		directory, relative = "versions", version
+	}
+	if reason := runtime.ramPageReason(policy, pathname); reason != "" {
+		generation.ramMisses[pathname] = reason
 	}
 	key := directory + "\x00" + relative
 	if generation.html[key] != nil && (!runtime.ramEligible(policy, pathname) || generation.ram[pathname] != nil) {

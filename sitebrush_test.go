@@ -36651,3 +36651,22 @@ func TestServerSoftwarePublicResponsesRespectStealthWithoutSQL(t *testing.T) {
 		}
 	}
 }
+
+func TestPublicRAMFingerprintPublicationKeepsAdministratorIPRules(t *testing.T) {
+	root := t.TempDir()
+	application := &App{storagePath: root, storageRealRoot: root, publicStaticMode: publicsite.StaticSnapshot, publicRAMCacheBytes: 1 << 20}
+	policy := publicsite.Policy{Domain: "vz.sitebrush.com", Layouts: map[string]string{"/": ""}, AllowedIPs: []string{"192.0.2.1"}}
+	filename := filepath.Join(application.domainStaticDir(policy.Domain), "index.html")
+	if err := os.MkdirAll(filepath.Dir(filename), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filename, []byte("<html><body>public</body></html>"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.preparePublicRAMSources(&policy); err != nil {
+		t.Fatal(err)
+	}
+	if policy.PreparedPages["/"] == "" || len(policy.AllowedIPs) != 1 || policy.AllowedIPs[0] != "192.0.2.1" {
+		t.Fatal("fingerprints or administrator rules changed", policy.PreparedPages)
+	}
+}

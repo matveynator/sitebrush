@@ -71,19 +71,21 @@ func (snapshot *PublicSnapshot) lookup(query Lookup) Decision {
 const retiredGeneration uint64 = 1 << 63
 
 type publicGeneration struct {
-	pendingRAM  []ramCandidate
-	references  map[string][]string
-	pageSources map[string]string
-	ramMisses   map[string]string
-	roots       map[string]*os.Root
-	html        map[string]*PreparedHTML
-	ram         map[string]*preparedRAMFile
-	assets      map[string]*preparedRAMFile
-	ramBodies   map[string]*ramBody
-	ramLeases   []uint64
-	cache       *ramCache
-	readers     atomic.Uint64
-	released    chan struct{}
+	pendingRAM     []ramCandidate
+	references     map[string][]string
+	pageSources    map[string]string
+	ramMisses      map[string]string
+	recoveredPages int
+	recoveredFiles int
+	roots          map[string]*os.Root
+	html           map[string]*PreparedHTML
+	ram            map[string]*preparedRAMFile
+	assets         map[string]*preparedRAMFile
+	ramBodies      map[string]*ramBody
+	ramLeases      []uint64
+	cache          *ramCache
+	readers        atomic.Uint64
+	released       chan struct{}
 }
 
 // PublishedFile pins its roots until Close. Generic OpenFile callers need the

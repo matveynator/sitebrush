@@ -58194,7 +58194,7 @@ func (a *App) publicRuntimeOptions() publicsite.RuntimeOptions {
 // Publication owns source fingerprints. The public process verifies them while
 // preparing immutable bytes; no duplicate persistent file objects are needed.
 func (a *App) preparePublicRAMSources(policy *publicsite.Policy) error {
-	if !a.publicStaticMode.Enabled(publicsite.StaticSnapshot) || a.publicRAMCacheBytes == 0 || policy.PrivateTestDrive || policy.PendingRegistration || policy.Stealth || len(policy.AllowedIPs) != 0 {
+	if !a.publicStaticMode.Enabled(publicsite.StaticSnapshot) || a.publicRAMCacheBytes == 0 || policy.PrivateTestDrive || policy.PendingRegistration || policy.Stealth {
 		return nil
 	}
 	rootPath, err := a.storageJailRootPath()
