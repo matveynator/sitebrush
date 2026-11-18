@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"time"
@@ -35,37 +36,111 @@ func (runtime *PublicRuntime) prepareHTML(generation *publicGeneration, policy P
 		return errors.New("public HTML preparation is not configured")
 	}
 	for pathname := range policy.Layouts {
+		if err := runtime.prepareHTMLPath(generation, policy, pathname, stop); err != nil {
+			return err
+		}
+	}
+	for pathname := range policy.PublishedVersions {
+		if err := runtime.prepareHTMLPath(generation, policy, pathname, stop); err != nil {
+			return err
+		}
+	}
+	root := generation.roots["static"]
+	if root == nil {
+		return nil
+	}
+	// Layouts are optional analytics metadata in older policies. Published HTML
+	// must remain independent of both that index and the administrative database.
+	return fs.WalkDir(root.FS(), ".", func(relative string, entry fs.DirEntry, walkErr error) error {
 		select {
 		case <-stop:
 			return errors.New("public HTML preparation stopped")
 		default:
 		}
-		directory, relative := "static", runtime.options.StaticPath(pathname)
-		if version := policy.PublishedVersions[pathname]; version != "" {
-			directory, relative = "versions", version
+		if walkErr != nil {
+			if entry != nil && entry.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
 		}
-		key := directory + "\x00" + relative
-		if generation.html[key] != nil {
-			continue
+		if entry.IsDir() {
+			return nil
 		}
-		root := generation.roots[directory]
-		if root == nil {
-			continue
+		if !entry.Type().IsRegular() && entry.Type()&os.ModeSymlink == 0 {
+			return nil
 		}
-		file, err := root.Open(relative)
-		if os.IsNotExist(err) {
-			continue
+		// Optional legacy entries that cannot be opened remain unavailable;
+		// they cannot prevent unrelated published pages from being prepared.
+		if err := runtime.prepareHTMLPath(generation, policy, "/"+relative, stop); err != nil {
+			select {
+			case <-stop:
+				return err
+			default:
+				return nil
+			}
 		}
-		if err != nil {
-			return err
-		}
-		prepared, prepareErr := prepareHTMLFile(file, runtime.options.PrepareBootstrap(policy, pathname), stop)
-		file.Close()
-		if prepareErr != nil {
-			return prepareErr
-		}
-		generation.html[key] = prepared
+		return nil
+	})
+}
+
+func (runtime *PublicRuntime) prepareHTMLPath(generation *publicGeneration, policy Policy, pathname string, stop <-chan struct{}) error {
+	select {
+	case <-stop:
+		return errors.New("public HTML preparation stopped")
+	default:
 	}
+	directory, relative := "static", runtime.options.StaticPath(pathname)
+	if version := policy.PublishedVersions[pathname]; version != "" {
+		directory, relative = "versions", version
+	}
+	key := directory + "\x00" + relative
+	if generation.html[key] != nil {
+		return nil
+	}
+	root := generation.roots[directory]
+	if root == nil {
+		return nil
+	}
+	info, err := root.Stat(relative)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return nil
+	}
+	file, err := root.Open(relative)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	info, err = file.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return nil
+	}
+	if runtime.options.HTMLFile != nil {
+		var prefix [512]byte
+		count, readErr := file.ReadAt(prefix[:], 0)
+		if readErr != nil && readErr != io.EOF {
+			return readErr
+		}
+		if !runtime.options.HTMLFile(pathname, string(prefix[:count])) {
+			return nil
+		}
+	}
+	prepared, err := prepareHTMLFile(file, runtime.options.PrepareBootstrap(policy, pathname), stop)
+	if err != nil {
+		return err
+	}
+	generation.html[key] = prepared
 	return nil
 }
 

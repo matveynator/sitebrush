@@ -18,6 +18,7 @@ type RuntimeOptions struct {
 	Root             string
 	StorageName      func(string) string
 	StaticPath       func(string) string
+	HTMLFile         func(string, string) bool
 	PrepareBootstrap func(Policy, string) map[HTMLVariantKey]string
 }
 

@@ -58153,6 +58153,7 @@ func (a *App) publicRuntimeOptions() publicsite.RuntimeOptions {
 	return publicsite.RuntimeOptions{
 		Mode: a.publicStaticMode, Root: root, StorageName: domainStorageName,
 		StaticPath:       func(pathname string) string { return staticRelativePathForPage(cleanPath(pathname)) },
+		HTMLFile:         func(pathname, prefix string) bool { return pageContentKind(pathname, prefix) == "html" },
 		PrepareBootstrap: preparePublicHTMLBootstraps,
 	}
 }
