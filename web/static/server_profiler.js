@@ -181,22 +181,21 @@
   model.copyStatus='';
   model.copyFallback=false;
   const expected=model.targets.filter(function available(role){return Boolean(measurementPart(role));});
-  Promise.all(expected.map(function overview(role) {
-   return request(role,{action:'report',id:measurementPart(role).id,view:'overview'}).then(function received(response){return {role:role,report:response.report,error:response.error};}).catch(function unavailable(error){return {role:role,error:error.message};});
-  })).then(function loaded(parts) {
-   if(model.stopped||generation!==model.generation||key!==measurementKey())return;
-   parts.forEach(function keep(part) {
+  // Process statistics arrive independently; only the combined export needs all overviews.
+  expected.forEach(function overview(role) {
+   request(role,{action:'report',id:measurementPart(role).id,view:'overview'}).then(function received(response){return {role:role,report:response.report,error:response.error};}).catch(function unavailable(error){return {role:role,error:error.message};}).then(function loaded(part) {
+    if(model.stopped||generation!==model.generation||key!==measurementKey())return;
     model.overviewParts[part.role]=part.report||{error:part.error||'Результат недоступен',role:part.role};
-   });
-   const selectedOverview=model.overviewParts[model.role];
-   if(!selectedOverview||selectedOverview.error) {
-    const availableRole=model.targets.find(function hasOverview(role){const processReport=model.overviewParts[role];return processReport&&processReport.pid&&!processReport.error;});
-    if(availableRole){model.role=availableRole;model.page=0;model.report=null;resetDetails();}
-   }
-   loadReport();
-   prepareExport();
-   render();
-  }).catch(function failedOverview(error){if(generation===model.generation&&key===measurementKey()){model.overviewKey='';reportError(error);}});
+    const selectedOverview=model.overviewParts[model.role];
+    if(selectedOverview&&selectedOverview.error) {
+     const availableRole=model.targets.find(function hasOverview(processRole){const processReport=model.overviewParts[processRole];return processReport&&processReport.pid&&!processReport.error;});
+     if(availableRole){model.role=availableRole;model.page=0;model.report=null;resetDetails();loadReport();}
+    }
+    if(expected.every(function completed(processRole){return Boolean(model.overviewParts[processRole]);}))prepareExport();
+    render();
+   }).catch(function failedOverview(error){if(generation===model.generation&&key===measurementKey()){model.overviewKey='';reportError(error);}});
+  });
+  loadReport();
  }
  function overviewReport() {
   const summary={cpu:0,heap:0,allocated:0,gc:0,groups:[],functions:[],stages:[],network:null,truncated:false};

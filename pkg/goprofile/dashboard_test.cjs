@@ -76,6 +76,8 @@ function fixture(options = {}) {
         response.report = report;
       }
       if(options.applicationStatusPending&&command.role==='application'&&command.action==='status')return;
+      if(options.publicStatusPending&&command.role==='public'&&command.action==='status')return;
+      if(options.applicationOverviewPending&&command.role==='application'&&command.action==='report'&&command.view==='overview')return;
       if(options.publicDisconnected&&command.role==='public'){queueMicrotask(()=>{this.readyState=3;this.onclose();});return;}
       queueMicrotask(() => this.onmessage({data: JSON.stringify(response)}));
     }
@@ -181,10 +183,17 @@ function fixture(options = {}) {
   assert.ok(split.copied[0].includes('Report for public')&&split.copied[0].includes('Report for application'),'Export contains both source reports');
   assert.ok(split.copied[0].includes('CPU 0.00 мс'),'Report contains an aggregate CPU summary');
   assert.ok(split.copied[0].includes('Внешних HTTP-запросов: 20.'),'External request counts are not added to internal requests');
-  const parallel = fixture({applicationStatusPending:true});
-  await parallel.settle();
-  assert.ok(parallel.sockets.flatMap(socket=>socket.commands).some(command=>command.role==='public'&&command.action==='report'&&command.view==='functions'),'A pending application status cannot block public statistics');
-  parallel.nodes.get('[data-profiler-close]').onclick();
+  for (const pending of ['applicationStatusPending','applicationOverviewPending','publicStatusPending']) {
+    const parallel = fixture({[pending]:true});
+    const availableRole = pending==='publicStatusPending'?'application':'public';
+    const availablePID = availableRole==='public'?'202':'101';
+    await parallel.settle();
+    assert.ok(parallel.sockets.flatMap(socket=>socket.commands).some(command=>command.role===availableRole&&command.action==='report'&&command.view==='functions'),pending+' cannot block another process report');
+    assert.ok(parallel.findButton('Собственное CPU'),pending+' cannot hide a ready function table');
+    const readyStatistics=parallel.descendants(parallel.nodes.get('[data-profiler-overview]')).map(node=>node.textContent).join(' ');
+    assert.ok(readyStatistics.includes(availablePID),pending+' cannot hide another process overview');
+    parallel.nodes.get('[data-profiler-close]').onclick();
+  }
   const disconnected = fixture({publicDisconnected:true});
   await disconnected.settle();
   assert.ok(disconnected.findButton('Собственное CPU'),'Application statistics remain visible when the public contact disconnects');
