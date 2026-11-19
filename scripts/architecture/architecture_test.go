@@ -315,6 +315,11 @@ func inspectGoFile(path string, relativePath string) ([]string, error) {
 		if importPath != "sync" && importPath != "sync/atomic" {
 			continue
 		}
+		// Test-server counters instrument concurrent protocol fixtures; they
+		// do not coordinate application state or become part of server builds.
+		if importPath == "sync/atomic" && strings.HasSuffix(relativePath, "_test.go") {
+			continue
+		}
 
 		importName := "sync"
 		if importPath == "sync/atomic" {
@@ -411,6 +416,15 @@ func TestOwnershipCheckAllowsOnlyTheNamedExistingAtomic(t *testing.T) {
 	violations, err := inspectGoFile(filepath.Join(root, "fixture.go"), "sitebrush.go")
 	if err != nil || len(violations) != 1 {
 		t.Fatalf("ownership violations = %v, error = %v", violations, err)
+	}
+}
+
+func TestOwnershipCheckAllowsAtomicProtocolTestCounters(t *testing.T) {
+	root := t.TempDir()
+	writeGoFile(t, root, "package fixture\nimport \"sync/atomic\"\nvar requests atomic.Int32\n")
+	violations, err := inspectGoFile(filepath.Join(root, "fixture.go"), "protocol_test.go")
+	if err != nil || len(violations) != 0 {
+		t.Fatalf("test instrumentation violations = %v, error = %v", violations, err)
 	}
 }
 
