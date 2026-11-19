@@ -1594,7 +1594,11 @@ func TestPublicStaticSecurityObservesAfterResponseAndDropsWhenFull(t *testing.T)
 
 func TestTestDriveLookupFormerlyUsedByPublicGateOpensControlDatabase(t *testing.T) {
 	root := t.TempDir()
-	application := &App{storagePath: root, storageRealRoot: root}
+	realRoot, rootErr := prepareStorageJailRoot(root)
+	if rootErr != nil {
+		t.Fatal(rootErr)
+	}
+	application := &App{storagePath: root, storageRealRoot: realRoot}
 	_, _, err := application.privateTestDrive(context.Background(), "fast.example")
 	if err == nil {
 		t.Fatal("an unowned Test Drive lookup unexpectedly succeeded")

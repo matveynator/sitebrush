@@ -41262,14 +41262,36 @@ func (a *App) serviceMailLocalKeyPair(ctx context.Context) (string, ed25519.Publ
 	// Read, validation and creation belong to one owner job. Concurrent startup
 	// subscribers must never generate and publish different installation keys.
 	err := a.withServerControlDatabaseWrite(ctx, "service-mail-key-pair", func(database *sql.DB) error {
-		installationID = hostingandsupport.SettingText(ctx, database, "service_mail_installation_id")
-		storedPublicKey, publicErr := base64.StdEncoding.DecodeString(hostingandsupport.SettingText(ctx, database, "service_mail_public_key"))
-		storedPrivateKey, privateErr := base64.StdEncoding.DecodeString(hostingandsupport.SettingText(ctx, database, "service_mail_private_key"))
+		transaction, err := database.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer transaction.Rollback()
+		now := time.Now().UTC().Format(time.RFC3339)
+		// Normal requests have a channel-owned writer. Compatibility startup
+		// handles can coexist, so acquire the persistent write turn before
+		// reading any part of the identity, not just before saving new keys.
+		if _, err := transaction.ExecContext(ctx, `INSERT INTO server_settings(name,value,updated_at) VALUES(?,?,?) ON CONFLICT(name) DO NOTHING`, "service_mail_installation_id", "", now); err != nil {
+			return err
+		}
+		if _, err := transaction.ExecContext(ctx, `UPDATE server_settings SET value=value WHERE name=?`, "service_mail_installation_id"); err != nil {
+			return err
+		}
+		var settings [3]string
+		for index, name := range []string{"service_mail_installation_id", "service_mail_public_key", "service_mail_private_key"} {
+			readErr := transaction.QueryRowContext(ctx, `SELECT value FROM server_settings WHERE name=?`, name).Scan(&settings[index])
+			if readErr != nil && !errors.Is(readErr, sql.ErrNoRows) {
+				return readErr
+			}
+		}
+		installationID = settings[0]
+		storedPublicKey, publicErr := base64.StdEncoding.DecodeString(settings[1])
+		storedPrivateKey, privateErr := base64.StdEncoding.DecodeString(settings[2])
 		if installationID != "" && publicErr == nil && privateErr == nil && len(storedPublicKey) == ed25519.PublicKeySize && len(storedPrivateKey) == ed25519.PrivateKeySize {
 			publicKey = ed25519.PublicKey(storedPublicKey)
 			privateKey = ed25519.PrivateKey(storedPrivateKey)
 			if publicKey.Equal(privateKey.Public()) && bytes.Equal(privateKey, ed25519.NewKeyFromSeed(privateKey[:ed25519.SeedSize])) {
-				return nil
+				return transaction.Commit()
 			}
 		}
 		generatedPublicKey, generatedPrivateKey, err := ed25519.GenerateKey(rand.Reader)
@@ -41277,12 +41299,6 @@ func (a *App) serviceMailLocalKeyPair(ctx context.Context) (string, ed25519.Publ
 			return err
 		}
 		generatedInstallationID := randomAccessToken()
-		transaction, err := database.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		defer transaction.Rollback()
-		now := time.Now().UTC().Format(time.RFC3339)
 		for settingName, settingText := range map[string]string{
 			"service_mail_installation_id": generatedInstallationID,
 			"service_mail_public_key":      base64.StdEncoding.EncodeToString(generatedPublicKey),

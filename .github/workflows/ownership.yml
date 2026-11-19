@@ -43,6 +43,10 @@ jobs:
           name: ownership-inventory
           path: ownership.tsv
           if-no-files-found: error
+      - name: Verify identity initialization and platform storage roots
+        run: >-
+          go test -count=1 -timeout=120s .
+          -run '^Test(ConcurrentServiceMailIdentityCreationKeepsOnePersistedKey|TestDriveLookupFormerlyUsedByPublicGateOpensControlDatabase)$'
       - name: Test all packages and application
         run: go test -count=1 -timeout=30m ./...
 
