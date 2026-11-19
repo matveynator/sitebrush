@@ -1,6 +1,7 @@
 package publicsite
 
 import (
+	"net/http"
 	"testing"
 	"time"
 )
