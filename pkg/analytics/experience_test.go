@@ -343,7 +343,8 @@ func TestSecuritySignalsRedactionAndBounds(t *testing.T) {
 }
 
 func TestExperienceDetailEvictionKeepsTotals(t *testing.T) {
-	now := time.Now().UTC()
+	// Keep the eviction assertion independent of UTC calendar-day rollover.
+	now := time.Date(2026, time.November, 18, 12, 0, 0, 0, time.UTC)
 	site := New(now)
 	for index := 0; index < 510; index++ {
 		event := experienceEvent(fmt.Sprintf("%016x", index+1), "a")
