@@ -76,7 +76,6 @@ jobs:
       - name: Verify browser analytics storage shutdown repeatedly
         run: >-
           go test -race -count=5 -timeout=180s .
-          -run '^TestBrowserAnalyticsReturnsStateBeforeDatabaseWrite
-
+          -run '^TestBrowserAnalyticsReturnsStateBeforeDatabaseWrite$'
       - name: Test all packages and application with race instrumentation
         run: go test -race -count=1 -timeout=45m ./...
