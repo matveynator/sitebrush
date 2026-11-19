@@ -37,6 +37,7 @@ func run() error {
 	burst := flag.Bool("burst", false, "release each wave of clients together")
 	allowRejections := flag.Bool("allow-non-2xx", false, "accept expected security rejections")
 	certificateFile := flag.String("ca", "", "optional trusted PEM certificate file for a local HTTPS fixture")
+	errorSamples := flag.Int("error-samples", 0, "capture up to 16 anomalous responses with a 1 KiB body prefix; 0 disables capture")
 	expected := flag.Int64("bytes", 0, "expected response body size; zero disables length comparison")
 	expectedDigest := flag.String("sha256", "", "expected response SHA256 digest")
 	deadline := flag.Duration("timeout", 15*time.Second, "timeout per request")
@@ -96,7 +97,7 @@ func run() error {
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetIndent("", "  ")
 	for runIndex := 1; runIndex <= *repeats; runIndex++ {
-		options := publicload.Options{URL: parsed.String(), Requests: *requests, Concurrency: *concurrency, ExpectedBytes: *expected, ExpectedSHA256: *expectedDigest, Burst: *burst}
+		options := publicload.Options{ErrorSamples: *errorSamples, URL: parsed.String(), Requests: *requests, Concurrency: *concurrency, ExpectedBytes: *expected, ExpectedSHA256: *expectedDigest, Burst: *burst}
 		if *warmup > 0 {
 			options.Requests = *warmup
 			if _, err := publicload.Run(client, options, stop); err != nil {

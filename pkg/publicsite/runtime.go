@@ -71,19 +71,21 @@ func (snapshot *PublicSnapshot) lookup(query Lookup) Decision {
 const retiredGeneration uint64 = 1 << 63
 
 type publicGeneration struct {
-	pendingRAM  []ramCandidate
-	references  map[string][]string
-	pageSources map[string]string
-	ramMisses   map[string]string
-	roots       map[string]*os.Root
-	html        map[string]*PreparedHTML
-	ram         map[string]*preparedRAMFile
-	assets      map[string]*preparedRAMFile
-	ramBodies   map[string]*ramBody
-	ramLeases   []uint64
-	cache       *ramCache
-	readers     atomic.Uint64
-	released    chan struct{}
+	pendingRAM     []ramCandidate
+	references     map[string][]string
+	pageSources    map[string]string
+	ramMisses      map[string]string
+	recoveredPages int
+	recoveredFiles int
+	roots          map[string]*os.Root
+	html           map[string]*PreparedHTML
+	ram            map[string]*preparedRAMFile
+	assets         map[string]*preparedRAMFile
+	ramBodies      map[string]*ramBody
+	ramLeases      []uint64
+	cache          *ramCache
+	readers        atomic.Uint64
+	released       chan struct{}
 }
 
 // PublishedFile pins its roots until Close. Generic OpenFile callers need the
@@ -275,7 +277,11 @@ func (catalog *Catalog) OpenPublished(decision Decision, relative, version strin
 		generation.release()
 		return nil, errors.New("public publication changed while opening its file")
 	}
-	return &PublishedFile{File: file, HTML: generation.html[directory+"\x00"+relative], generation: generation}, nil
+	prepared := generation.html[preparedHTMLKey(directory, relative, decision.pathname)]
+	if prepared == nil {
+		prepared = generation.html[directory+"\x00"+relative]
+	}
+	return &PublishedFile{File: file, HTML: prepared, generation: generation}, nil
 }
 
 // Preparation runs in the caller's publication session, before transferring
@@ -312,6 +318,9 @@ func (runtime *PublicRuntime) prepare(policies map[string]cachedPolicy, stop <-c
 			continue
 		}
 		generation := &publicGeneration{references: make(map[string][]string), pageSources: make(map[string]string), ramMisses: make(map[string]string), roots: make(map[string]*os.Root), html: make(map[string]*PreparedHTML), ram: make(map[string]*preparedRAMFile), assets: make(map[string]*preparedRAMFile), ramBodies: make(map[string]*ramBody), cache: runtime.cache, released: make(chan struct{})}
+		if reason := runtime.ramPageReason(cached.policy, "/"); reason != "" {
+			generation.ramMisses["/"] = reason
+		}
 		prepared[domain] = generation
 		directories := map[string]string{
 			"static":   filepath.Join("storage", "static", runtime.options.StorageName(domain)),

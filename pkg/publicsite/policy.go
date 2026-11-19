@@ -98,6 +98,7 @@ type Lookup struct {
 	SessionHash string
 }
 type Decision struct {
+	pathname            string
 	generation          *publicGeneration
 	PageHidden          bool
 	DemoSite            bool
@@ -814,7 +815,7 @@ func trustedIPAddresses(addresses []string, clientIP string) bool {
 // Both readers use one policy calculation; only acquisition differs.
 func decidePolicy(query Lookup, cached cachedPolicy, serverTrust serverTrustCache, serverBlocked bool) Decision {
 	policy := cached.policy
-	decision := Decision{Layout: policy.Layouts[query.Path], Known: true, Domain: policy.Domain, Frozen: policy.Frozen, Stealth: policy.Stealth, Found: true, DemoSite: policy.DemoSite, PrivateTestDrive: policy.PrivateTestDrive, PendingRegistration: policy.PendingRegistration, ServerOwner: policy.ServerOwner, NoIndex: policy.NoIndex, RobotsOverride: policy.RobotsOverride, ResourceFile: policy.ResourcePaths[query.Path], ResourceType: policy.ResourceTypes[query.Path], DeletionReason: policy.DeletionReason, DeletionDeadline: policy.DeletionDeadline, DeletionDebtLabel: policy.DeletionDebtLabel}
+	decision := Decision{pathname: query.Path, Layout: policy.Layouts[query.Path], Known: true, Domain: policy.Domain, Frozen: policy.Frozen, Stealth: policy.Stealth, Found: true, DemoSite: policy.DemoSite, PrivateTestDrive: policy.PrivateTestDrive, PendingRegistration: policy.PendingRegistration, ServerOwner: policy.ServerOwner, NoIndex: policy.NoIndex, RobotsOverride: policy.RobotsOverride, ResourceFile: policy.ResourcePaths[query.Path], ResourceType: policy.ResourceTypes[query.Path], DeletionReason: policy.DeletionReason, DeletionDeadline: policy.DeletionDeadline, DeletionDebtLabel: policy.DeletionDebtLabel}
 	decision.PageHidden = policy.Hidden["page\x00"+query.Path]
 	decision.PageVersion = policy.PublishedVersions[query.Path]
 	decision.Versioned = policy.Versioned

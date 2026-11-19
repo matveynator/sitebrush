@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/matveynator/sitebrush/v2/pkg/publicsite"
 )
 
 func TestExportIncludesUnfilteredEvidenceAndBoundedUnicode(t *testing.T) {
@@ -79,5 +81,15 @@ func TestGroupedWaitingStacksExcludeArgumentsAndCountDuplicates(t *testing.T) {
 	groups := groupedStacks(stacks)
 	if len(groups) != 1 || !strings.Contains(groups[0], "2 goroutine") || strings.Contains(groups[0], "0x") {
 		t.Fatal(groups)
+	}
+}
+
+func TestExportIncludesSafeRAMPolicyAndRecoveryDiagnostics(t *testing.T) {
+	report := Report{RAM: &RAMReport{RAMCacheStats: publicsite.RAMCacheStats{Sites: []publicsite.RAMSiteStats{{Domain: "vz.sitebrush.com", RootRecovered: true, RecoveredPages: 2, Policy: &publicsite.RAMPolicyStats{RoutingVersion: 3, AdministratorIPRules: 1, ServerIPRules: 2}}}}}}
+	output := exportText(report)
+	for _, fragment := range []string{"domain=vz.sitebrush.com", "root_recovered=true", "recovered_pages=2", "frozen=false", "versioned=false", "admin_ip_rules=1", "server_ip_rules=2", "root_prepared=false"} {
+		if !strings.Contains(output, fragment) {
+			t.Fatal("missing diagnostics", fragment)
+		}
 	}
 }

@@ -48,6 +48,11 @@ func (runtime *PublicRuntime) prepareHTML(generation *publicGeneration, policy P
 	for pathname := range policy.PreparedPages {
 		paths[pathname] = 0
 	}
+	// Legacy discovery may know only index.html. The existing public router
+	// also serves that file at /; each route still gets its own bootstrap.
+	if !policy.Frozen && !policy.Versioned {
+		paths["/"] = 0
+	}
 	ordered := make([]string, 0, len(paths))
 	for pathname := range paths {
 		directory, relative := "static", runtime.options.StaticPath(pathname)
@@ -125,7 +130,10 @@ func (runtime *PublicRuntime) prepareHTMLPath(generation *publicGeneration, poli
 	if version := policy.PublishedVersions[pathname]; version != "" {
 		directory, relative = "versions", version
 	}
-	key := directory + "\x00" + relative
+	if reason := runtime.ramPageReason(policy, pathname); reason != "" {
+		generation.ramMisses[pathname] = reason
+	}
+	key := preparedHTMLKey(directory, relative, pathname)
 	if generation.html[key] != nil && (!runtime.ramEligible(policy, pathname) || generation.ram[pathname] != nil) {
 		return nil
 	}
@@ -184,7 +192,24 @@ func (runtime *PublicRuntime) prepareHTMLPath(generation *publicGeneration, poli
 	if generation.html[key] == nil {
 		generation.html[key] = prepared
 	}
+	_, layoutKnown := policy.Layouts[pathname]
+	_, sourceKnown := policy.PreparedPages[pathname]
+	_, versionKnown := policy.PublishedVersions[pathname]
+	// Older routing can admit aliases absent from the page index. Preserve its
+	// source fallback, without letting an inferred root replace the indexed page.
+	if pathname != "/" || layoutKnown || sourceKnown || versionKnown {
+		sourceKey := directory + "\x00" + relative
+		if generation.html[sourceKey] == nil {
+			generation.html[sourceKey] = prepared
+		}
+	}
 	return runtime.prepareRAM(generation, policy, pathname, file, prepared, stop)
+}
+
+// Aliases can share a source while selecting different analytics bootstraps.
+// The route is part of prepared identity for both RAM and file responses.
+func preparedHTMLKey(directory, relative, pathname string) string {
+	return directory + "\x00" + relative + "\x00" + pathname
 }
 
 func prepareHTMLFile(file *os.File, bootstraps map[HTMLVariantKey]string, stop <-chan struct{}) (*PreparedHTML, error) {
