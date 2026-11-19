@@ -52152,22 +52152,30 @@ func queryAuthoritativeNameServers(ctx context.Context, nameServerIPs []string, 
 		return "", dnsmessage.Message{}, fmt.Errorf("authoritative DNS has no name servers for %s", domainName.String())
 	}
 	queryContext, cancel := context.WithCancel(ctx)
-	defer cancel()
 	responses := make(chan authoritativeDNSResponse, len(nameServerIPs))
+	remaining := len(nameServerIPs)
+	exchange := exchangeDNSMessage
+	defer func() {
+		cancel()
+		// Every worker has one reserved reply slot. Join all borrowed exchange
+		// callbacks before returning, including after the first usable answer.
+		for remaining > 0 {
+			<-responses
+			remaining--
+		}
+	}()
 	for _, nameServerIP := range nameServerIPs {
 		go func(currentNameServerIP string) {
-			message, err := exchangeDNSMessage(queryContext, currentNameServerIP, domainName, recordType)
-			select {
-			case responses <- authoritativeDNSResponse{nameServerIP: currentNameServerIP, message: message, err: err}:
-			case <-queryContext.Done():
-			}
+			message, err := exchange(queryContext, currentNameServerIP, domainName, recordType)
+			responses <- authoritativeDNSResponse{nameServerIP: currentNameServerIP, message: message, err: err}
 		}(nameServerIP)
 	}
 	var lastErr error
 	var fallbackResponse authoritativeDNSResponse
 	fallbackAvailable := false
-	for responseIndex := 0; responseIndex < len(nameServerIPs); responseIndex++ {
+	for remaining > 0 {
 		response := <-responses
+		remaining--
 		if response.err != nil {
 			lastErr = response.err
 			continue
@@ -52230,6 +52238,9 @@ func exchangeDNSMessageWithServer(ctx context.Context, nameServerIP string, doma
 	if err == nil && !message.Header.Truncated {
 		return message, nil
 	}
+	if err := ctx.Err(); err != nil {
+		return dnsmessage.Message{}, err
+	}
 	return exchangeDNSPacket(ctx, "tcp", nameServerIP, queryBytes, queryID)
 }
 
@@ -52240,7 +52251,23 @@ func exchangeDNSPacket(ctx context.Context, network string, nameServerIP string,
 	if err != nil {
 		return dnsmessage.Message{}, err
 	}
+	return exchangeDNSPacketOnConnection(queryContext, connection, network, queryBytes, queryID)
+}
+
+func exchangeDNSPacketOnConnection(ctx context.Context, connection net.Conn, network string, queryBytes []byte, queryID uint16) (dnsmessage.Message, error) {
 	defer connection.Close()
+	finished, watcherDone := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-ctx.Done():
+			// net.Conn explicitly permits Close during I/O. This library boundary
+			// interrupts reads as well as dialing, then joins its cancellation task.
+			_ = connection.Close()
+		case <-finished:
+		}
+	}()
+	defer func() { close(finished); <-watcherDone }()
 	_ = connection.SetDeadline(time.Now().Add(authoritativeDNSTimeout))
 	if network == "tcp" {
 		lengthPrefix := []byte{byte(len(queryBytes) >> 8), byte(len(queryBytes))}

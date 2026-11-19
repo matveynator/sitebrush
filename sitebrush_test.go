@@ -17281,6 +17281,104 @@ func TestAuthoritativeDNSLookupFollowsDelegationWithoutRecursiveResolver(t *test
 	}
 }
 
+func TestAuthoritativeDNSJoinsCancelledExchangesBeforeReturning(t *testing.T) {
+	domain := mustDNSNameForTest("example.org.")
+	for _, scenario := range []struct {
+		name    string
+		message dnsmessage.Message
+	}{
+		{"answer", dnsmessage.Message{Header: dnsmessage.Header{RCode: dnsmessage.RCodeSuccess}, Answers: []dnsmessage.Resource{{Header: dnsmessage.ResourceHeader{Name: domain, Type: dnsmessage.TypeTXT}, Body: &dnsmessage.TXTResource{TXT: []string{"verified"}}}}}},
+		{"missing name", dnsmessage.Message{Header: dnsmessage.Header{RCode: dnsmessage.RCodeNameError}}},
+		{"CNAME", dnsmessage.Message{Header: dnsmessage.Header{RCode: dnsmessage.RCodeSuccess}, Answers: []dnsmessage.Resource{{Header: dnsmessage.ResourceHeader{Name: domain, Type: dnsmessage.TypeCNAME}, Body: &dnsmessage.CNAMEResource{CNAME: mustDNSNameForTest("alias.example.org.")}}}}},
+		{"referral", dnsmessage.Message{Header: dnsmessage.Header{RCode: dnsmessage.RCodeSuccess}, Authorities: []dnsmessage.Resource{{Header: dnsmessage.ResourceHeader{Name: domain, Type: dnsmessage.TypeNS}, Body: &dnsmessage.NSResource{NS: mustDNSNameForTest("ns.example.org.")}}}}},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			previous := exchangeDNSMessage
+			started, cancelled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			finished := make(chan struct{})
+			ctx, cancel := context.WithCancel(context.Background())
+			exchangeDNSMessage = func(boundary context.Context, server string, _ dnsmessage.Name, _ dnsmessage.Type) (dnsmessage.Message, error) {
+				if server == "winner" {
+					select {
+					case <-started:
+						return scenario.message, nil
+					case <-boundary.Done():
+						return dnsmessage.Message{}, boundary.Err()
+					}
+				}
+				close(started)
+				<-boundary.Done()
+				close(cancelled)
+				<-release
+				return dnsmessage.Message{}, boundary.Err()
+			}
+			defer func() {
+				cancel()
+				select {
+				case <-release:
+				default:
+					close(release)
+				}
+				<-finished
+				exchangeDNSMessage = previous
+			}()
+			reply := make(chan authoritativeDNSResponse, 1)
+			go func() {
+				defer close(finished)
+				server, message, err := queryAuthoritativeNameServers(ctx, []string{"winner", "borrowed"}, domain, dnsmessage.TypeTXT)
+				reply <- authoritativeDNSResponse{nameServerIP: server, message: message, err: err}
+			}()
+			select {
+			case <-cancelled:
+			case <-time.After(time.Second):
+				t.Fatal("usable answer did not cancel remaining exchanges")
+			}
+			select {
+			case <-finished:
+				t.Fatal("DNS returned while an exchange still borrowed its callback")
+			case <-time.After(20 * time.Millisecond):
+			}
+			close(release)
+			select {
+			case result := <-reply:
+				if result.err != nil || result.nameServerIP != "winner" || !reflect.DeepEqual(result.message, scenario.message) {
+					t.Fatalf("cancelled peer replaced the chosen answer: %+v", result)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("cancelled exchanges did not return ownership")
+			}
+		})
+	}
+}
+
+func TestAuthoritativeDNSCancellationInterruptsPacketRead(t *testing.T) {
+	client, server := net.Pipe()
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	query := []byte("query")
+	finished := make(chan error, 1)
+	go func() {
+		_, err := exchangeDNSPacketOnConnection(ctx, client, "udp", query, 1)
+		finished <- err
+	}()
+	if err := server.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(server, make([]byte, len(query))); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	select {
+	case err := <-finished:
+		if err == nil {
+			t.Fatal("cancelled packet read succeeded")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("DNS cancellation waited for the network deadline")
+	}
+}
+
 func TestDomainAliasLimitIsTenDomains(t *testing.T) {
 	storagePath := t.TempDir()
 	rawDB, err := sql.Open("sqlite", filepath.Join(storagePath, "sitebrush.db"))
