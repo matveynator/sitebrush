@@ -50,10 +50,10 @@ jobs:
       - name: Test all packages and application
         run: go test -count=1 -timeout=30m ./...
 
-  race:
-    name: Race detector (Linux)
+  race_regressions:
+    name: Race regressions (Linux)
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
+    timeout-minutes: 15
     env:
       # The race runtime requires CGO on Linux. Server artifacts stay pure Go.
       CGO_ENABLED: "1"
@@ -69,6 +69,10 @@ jobs:
         run: >-
           go test -race -count=1 -timeout=180s .
           -run '^Test(ConcurrentServiceMailIdentityCreationKeepsOnePersistedKey|HostingSnapshotDiskThresholdSendsSingleOwnerEmail|EmailSubmissionRequiresInitializedDeliveryOwner|PublicTrialWildcard)'
+      - name: Verify authoritative DNS exchange ownership repeatedly
+        run: >-
+          go test -race -count=5 -timeout=180s .
+          -run '^TestAuthoritativeDNS'
       - name: Verify security checkpoint acknowledgement repeatedly
         run: >-
           go test -race -count=3 -timeout=180s .
@@ -77,5 +81,154 @@ jobs:
         run: >-
           go test -race -count=5 -timeout=180s .
           -run '^TestBrowserAnalyticsReturnsStateBeforeDatabaseWrite$'
-      - name: Test all packages and application with race instrumentation
-        run: go test -race -count=1 -timeout=45m ./...
+
+  race_application:
+    name: Application race (${{ matrix.shard }}/4)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    env:
+      CGO_ENABLED: "1"
+      SHARD: ${{ matrix.shard }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Partition every application test without exclusions
+        shell: bash
+        run: |
+          go test -race -list '^(Test|Example|Fuzz)' . > discovered-tests.txt
+          awk '/^(Test|Example|Fuzz)[^[:space:]]*$/' discovered-tests.txt > all-tests.txt
+          test -s all-tests.txt
+          awk -v shard="$SHARD" '((NR - 1) % 4) + 1 == shard' all-tests.txt > shard-tests.txt
+          test -s shard-tests.txt
+      - name: Run the complete assigned test set
+        shell: bash
+        run: |
+          selection="$(paste -sd '|' shard-tests.txt)"
+          go test -race -count=1 -timeout=45m -run "^(${selection})$" . | tee race-shard.log
+      - name: Preserve test membership and diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: race-application-${{ matrix.shard }}
+          path: |
+            all-tests.txt
+            shard-tests.txt
+            race-shard.log
+          if-no-files-found: error
+
+  race_packages:
+    name: Package race (Linux)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      CGO_ENABLED: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test every package outside the application
+        shell: bash
+        run: |
+          application="$(go list -m)"
+          go list ./... > all-packages.txt
+          awk -v application="$application" '$0 != application' all-packages.txt > race-packages.txt
+          test -s race-packages.txt
+          mapfile -t packages < race-packages.txt
+          go test -race -count=1 -timeout=45m "${packages[@]}"
+
+  race:
+    name: Race detector (Linux)
+    if: always()
+    needs: [race_regressions, race_application, race_packages]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every race check to pass
+        env:
+          CHECK_RESULTS: ${{ join(needs.*.result, ',') }}
+        run: test "$CHECK_RESULTS" = 'success,success,success'
+
+  static_load:
+    name: Static HTTP load and profiles (30s)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Exercise the profiler and load measurement components
+        run: go test -count=1 -timeout=180s ./pkg/goprofile ./pkg/publicload
+      - name: Verify static delivery and access revocation under concurrent load
+        run: go test -count=1 -timeout=180s -run '^TestPublicStaticTrustedLoadWithoutCookiesOrSQL$' .
+      - name: Measure static HTTP for 30 seconds with diagnostic profiles
+        shell: bash
+        run: |
+          mkdir -p load-artifacts
+          go version > load-artifacts/environment.txt
+          go env GOOS GOARCH CGO_ENABLED >> load-artifacts/environment.txt
+          lscpu >> load-artifacts/environment.txt
+          go test -v -run '^$' -count=1 -timeout=180s -benchmem -benchtime=30s \
+            -bench '^BenchmarkPublicConnections$/^http-keep$/^clients=300$/^many-ips$' \
+            -cpuprofile=load-artifacts/cpu.pprof -memprofile=load-artifacts/heap.pprof \
+            -blockprofile=load-artifacts/block.pprof -blockprofilerate=1000000 \
+            -mutexprofile=load-artifacts/mutex.pprof -mutexprofilefraction=100 \
+            -o load-artifacts/sitebrush-profile.test . | tee load-artifacts/load.log
+      - name: Read every generated profile
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          for profile in cpu heap block mutex; do
+            go tool pprof -top -nodecount=30 load-artifacts/sitebrush-profile.test \
+              "load-artifacts/${profile}.pprof" > "load-artifacts/${profile}-top.txt"
+          done
+      - name: Publish load summary
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          reports = []
+          for line in Path('load-artifacts/load.log').read_text().splitlines():
+              match = re.search(r'(\{"Requests":.*|\{"Anomalies":.*)', line)
+              if match:
+                  reports.append(json.loads(match.group(0)))
+          if not reports:
+              raise SystemExit('No load measurements were emitted')
+          report = reports[-1]
+          failures = sum(report[key] for key in ('TransportErrors', 'Non2xx', 'LengthMismatches', 'ContentMismatches', 'IncompleteTraces'))
+          if failures or report['Successful'] != report['Requests'] or report['Successful'] == 0:
+              raise SystemExit('Static load contains failed or unverified responses')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('### Статическая страница: 30 секунд, 300 HTTP-клиентов\n\n')
+              summary.write('| Успешных запросов | RPS | p50 TTFB, мс | p95, мс | p99, мс | Ошибок |\n')
+              summary.write('| ---: | ---: | ---: | ---: | ---: | ---: |\n')
+              latency = report['SuccessfulTTFB']
+              summary.write(f"| {report['Successful']} | {report['SuccessfulPerSecond']:.0f} | {latency['P50US']/1000:.2f} | {latency['P95US']/1000:.2f} | {latency['P99US']/1000:.2f} | {failures} |\n\n")
+              summary.write('Проверены HTTP-статус, длина и SHA256 каждого ответа. Security и очередь analytics включены. CPU/heap/block/mutex профили и полный отчёт — в artifacts.\n\n')
+              summary.write('Это CI smoke-замер с профилированием сервера и генератора нагрузки на одном runner; он не подтверждает 95% nginx или отсутствие регрессии на production hardware.\n')
+          PY
+      - name: Preserve load report and profiles
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: static-load-profiles
+          path: load-artifacts/
+          if-no-files-found: error
