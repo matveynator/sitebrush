@@ -66,4 +66,8 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Test concurrent ownership and all existing behavior
+        run: >-
+          go test -race -count=1 -timeout=180s .
+          -run '^Test(ConcurrentServiceMailIdentityCreationKeepsOnePersistedKey|HostingSnapshotDiskThresholdSendsSingleOwnerEmail|EmailSubmissionRequiresInitializedDeliveryOwner|PublicTrialWildcard)'
+      - name: Test all packages and application with race instrumentation
         run: go test -race -count=1 -timeout=45m ./...

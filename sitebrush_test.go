@@ -3655,6 +3655,16 @@ func TestHostingAndSupportCentralServersUsePinnedKeyAcrossReverseProxy(t *testin
 	}
 }
 
+func TestEmailSubmissionRequiresInitializedDeliveryOwner(t *testing.T) {
+	application := &App{}
+	if err := application.enqueueEmail(context.Background(), mailout.Message{To: "owner@example.com"}); err == nil {
+		t.Fatal("uninitialized delivery accepted a message")
+	}
+	if application.emailDelivery != nil {
+		t.Fatal("request mutated the application's delivery contact")
+	}
+}
+
 func TestHostingSnapshotDiskThresholdSendsSingleOwnerEmail(t *testing.T) {
 	storagePath := t.TempDir()
 	databasePath := filepath.Join(storagePath, "hostingandsupport.db")
@@ -3668,14 +3678,11 @@ func TestHostingSnapshotDiskThresholdSendsSingleOwnerEmail(t *testing.T) {
 	if err := hostingandsupport.Migrate(context.Background(), database); err != nil {
 		t.Fatal(err)
 	}
-	var messages []mailout.Message
+	messages := make(chan mailout.DeliveryJob, 2)
 	application := &App{
-		storagePath: storagePath,
-		dbPath:      databasePath,
-		sendEmail: func(ctx context.Context, message mailout.Message) error {
-			messages = append(messages, message)
-			return nil
-		},
+		storagePath:   storagePath,
+		dbPath:        databasePath,
+		emailDelivery: messages,
 	}
 	snapshot := hostingandsupport.HostingSnapshot{
 		InstallationID: "installation-1",
@@ -3690,8 +3697,9 @@ func TestHostingSnapshotDiskThresholdSendsSingleOwnerEmail(t *testing.T) {
 	if len(messages) != 1 {
 		t.Fatalf("messages = %d, want 1", len(messages))
 	}
-	if messages[0].MonitorDomain != snapshot.ServerDomain || messages[0].To != "owner@example.com" || !strings.Contains(messages[0].Body, "занято 96%") {
-		t.Fatalf("unexpected alert message: %#v", messages[0])
+	message := (<-messages).Message
+	if message.MonitorDomain != snapshot.ServerDomain || message.To != "owner@example.com" || !strings.Contains(message.Body, "занято 96%") {
+		t.Fatalf("unexpected alert message: %#v", message)
 	}
 }
 
@@ -19283,13 +19291,16 @@ func TestConcurrentServiceMailIdentityCreationKeepsOnePersistedKey(t *testing.T)
 	}
 	first := <-results
 	if first.err != nil {
-		t.Fatal(first.err)
+		t.Error(first.err)
 	}
 	for attempt := 1; attempt < cap(results); attempt++ {
 		result := <-results
 		if result.err != nil || result.installationID != first.installationID || !result.publicKey.Equal(first.publicKey) {
-			t.Fatal("concurrent startup generated different installation identities", result.err)
+			t.Error("concurrent startup generated different installation identities", result.err)
 		}
+	}
+	if t.Failed() {
+		t.FailNow()
 	}
 	installationID, publicKey, privateKey, err := application.serviceMailLocalKeyPair(context.Background())
 	if err != nil || installationID != first.installationID || !publicKey.Equal(first.publicKey) || !publicKey.Equal(privateKey.Public()) {
@@ -35888,6 +35899,48 @@ func TestPublicTrialWildcardAcceptsServerAliasAndRejectsForeignRecord(t *testing
 	lookupIPRecords = func(string) ([]net.IP, error) { return []net.IP{net.ParseIP("46.4.4.46"), net.ParseIP("1.1.1.1")}, nil }
 	if result := checkPublicTrialWildcardAddresses("sitebrush.com", addresses); result.Enabled || result.ReasonKey != "public_trial_disabled_wildcard_mismatch" {
 		t.Fatalf("foreign record accepted: %+v", result)
+	}
+}
+
+func TestPublicTrialWildcardWaitsForAllBorrowedResolversOnRejection(t *testing.T) {
+	previous := lookupIPRecords
+	defer func() { lookupIPRecords = previous }()
+	probeOrder := make(chan int, publicTrialWildcardProbeCount)
+	for index := range publicTrialWildcardProbeCount {
+		probeOrder <- index
+	}
+	started := make(chan struct{}, publicTrialWildcardProbeCount)
+	release := make(chan struct{})
+	lookupIPRecords = func(string) ([]net.IP, error) {
+		index := <-probeOrder
+		started <- struct{}{}
+		if index == 0 {
+			return nil, errors.New("missing wildcard")
+		}
+		<-release
+		return []net.IP{net.ParseIP("8.8.8.8")}, nil
+	}
+	finished := make(chan publicTrialAvailability, 1)
+	go func() {
+		finished <- checkPublicTrialWildcardAddresses("example.org", []net.IP{net.ParseIP("8.8.8.8")})
+	}()
+	for range publicTrialWildcardProbeCount {
+		<-started
+	}
+	select {
+	case <-finished:
+		close(release)
+		t.Fatal("wildcard rejection returned while probes still borrowed the resolver")
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case result := <-finished:
+		if result.Enabled || result.ReasonKey != "public_trial_disabled_wildcard_missing" {
+			t.Fatalf("late successful probes replaced wildcard rejection: %+v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("wildcard probes did not return ownership")
 	}
 }
 

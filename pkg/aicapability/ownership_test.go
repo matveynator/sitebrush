@@ -66,6 +66,35 @@ func TestOwnershipConcurrentReplyMutationCannotEscalateAccess(t *testing.T) {
 	}
 }
 
+func TestOwnershipListRepliesCannotChangeAuthorizationOrEarlierReplies(t *testing.T) {
+	manager := NewManager()
+	defer manager.Close()
+	token, _, err := manager.IssueFor("one.example", "owner@example.com", []string{ScopeRead})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Exchange(token, "one.example"); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		capabilities, listErr := manager.ListCapabilities("owner@example.com", "one.example")
+		if listErr != nil || len(capabilities) != 1 || !reflect.DeepEqual(capabilities[0].Scopes, []string{ScopeRead}) {
+			t.Fatalf("caller changed capability list: %+v, %v", capabilities, listErr)
+		}
+		sessions, listErr := manager.List("owner@example.com", "one.example")
+		if listErr != nil || len(sessions) != 1 || !reflect.DeepEqual(sessions[0].Scopes, []string{ScopeRead}) {
+			t.Fatalf("caller changed session list: %+v, %v", sessions, listErr)
+		}
+		capabilities[0].Scopes[0], sessions[0].Scopes[0] = ScopePublish, ScopeWrite
+		if _, err := manager.ListCapabilities("owner@example.com", "one.example"); err != nil {
+			t.Fatal(err)
+		}
+		if capabilities[0].Scopes[0] != ScopePublish || sessions[0].Scopes[0] != ScopeWrite {
+			t.Fatal("later owner reply reused an earlier caller's snapshot")
+		}
+	}
+}
+
 func TestOwnershipOAuthRepliesCannotChangeStoredAuthorization(t *testing.T) {
 	manager := NewManager()
 	defer manager.Close()

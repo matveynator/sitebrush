@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 )
@@ -63,6 +64,44 @@ func TestOwnershipRealtimeConverterReplacementSerializesCalls(t *testing.T) {
 		if !<-results {
 			t.Fatal("converter returned inconsistent data during replacement")
 		}
+	}
+}
+
+func TestOwnershipUnclaimedCallbackCancellationKeepsOwnerResponsive(t *testing.T) {
+	database, _ := newSQLiteConcurrencyTestDatabase(t)
+	boundary, cancel := context.WithCancel(context.Background())
+	started := make(chan struct{}, 1)
+	job := serializedJob{
+		ctx:     boundary,
+		claimed: make(chan struct{}),
+		result:  make(chan serializedResult, 1),
+		fn: func(context.Context, *sql.DB) (any, error) {
+			started <- struct{}{}
+			return nil, nil
+		},
+	}
+	// No subscriber accepts the claim. Cancellation must release the worker
+	// without executing the callback or waiting for a result receiver.
+	if err := database.pipeline.enqueue(boundary, job); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	cancel()
+	if err := database.withSerializedConnection(boundary, func(context.Context, *sql.DB) error {
+		started <- struct{}{}
+		return nil
+	}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled subscriber: %v", err)
+	}
+	probe, stopProbe := context.WithTimeout(context.Background(), time.Second)
+	defer stopProbe()
+	if err := database.withSerializedConnection(probe, func(context.Context, *sql.DB) error { return nil }); err != nil {
+		t.Fatalf("abandoned claim blocked owner: %v", err)
+	}
+	select {
+	case <-started:
+		t.Fatal("unclaimed callback executed")
+	default:
 	}
 }
 

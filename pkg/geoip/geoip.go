@@ -118,7 +118,16 @@ func (resolver *Resolver) Close() {
 
 func (resolver *Resolver) run() {
 	defer close(resolver.done)
-	defer close(resolver.importStop)
+	importResults := make(chan importResult, 1)
+	importInProgress := false
+	defer func() {
+		close(resolver.importStop)
+		// Close returns ownership of callbacks and download configuration only
+		// after the importer has stopped using them. The reply slot is reserved.
+		if importInProgress {
+			<-importResults
+		}
+	}()
 	if resolver.cacheDir == "" {
 		resolver.cacheDir = filepath.Join(os.TempDir(), "sitebrush-geoip")
 	}
@@ -135,8 +144,6 @@ func (resolver *Resolver) run() {
 		return
 	}
 
-	importResults := make(chan importResult, 1)
-	importInProgress := false
 	importedRelease := metadataValue(database, "imported_release")
 	currentRelease := releaseMonth(time.Now().UTC())
 	hasRanges := rangeCount(database) > 0
@@ -251,23 +258,27 @@ func importLatest(databasePath, cacheDir string, now time.Time, stop <-chan stru
 		case <-ctx.Done():
 		}
 	}()
+	result := importResult{}
 	defer func() {
 		cancel()
 		<-watcherDone
+		// The owner reserves one buffered reply slot per active import and
+		// joins it during shutdown; this completion must never be dropped.
+		results <- result
 	}()
 	release := releaseMonth(now)
 	archivePath, release, err := ensureArchive(ctx, cacheDir, now)
 	if err == nil {
 		err = importArchive(ctx, databasePath, archivePath, release)
 	}
-	select {
-	case results <- importResult{release: release, err: err}:
-	default:
-	}
+	result = importResult{release: release, err: err}
 }
 
 func ensureArchive(ctx context.Context, cacheDir string, now time.Time) (string, string, error) {
 	for _, release := range candidateReleaseMonths(now) {
+		if err := ctx.Err(); err != nil {
+			return "", "", err
+		}
 		archivePath := filepath.Join(cacheDir, fmt.Sprintf(geoIPArchiveTemplate, release))
 		if fileHasContent(archivePath) {
 			return archivePath, release, nil

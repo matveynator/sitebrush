@@ -28,6 +28,16 @@ func (c *schemaBranchConn) QueryContext(_ context.Context, query string, _ []dri
 	if c.mode == "query-error" {
 		return nil, errors.New("catalog read failure")
 	}
+	if strings.Contains(strings.ToLower(query), "pragma table_info") {
+		rows := &schemaBranchRows{columns: []string{"cid", "name", "type", "notnull", "dflt_value", "pk"}}
+		if c.mode == "scan-error" {
+			rows.values = [][]driver.Value{{int64(0), nil, "TEXT", int64(0), nil, int64(0)}}
+		} else {
+			rows.values = [][]driver.Value{{int64(0), "altitude", "TEXT", int64(0), nil, int64(0)}}
+			rows.failAfterRows = c.mode == "row-error"
+		}
+		return rows, nil
+	}
 	if !strings.Contains(strings.ToLower(query), "information_schema.columns") {
 		return &schemaBranchRows{columns: []string{"value"}}, nil
 	}
@@ -40,6 +50,12 @@ func (c *schemaBranchConn) QueryContext(_ context.Context, query string, _ []dri
 				{"extra"}, {"visitor_number"}, {"fingerprint"},
 			},
 		}, nil
+	}
+	if c.mode == "scan-error" {
+		return &schemaBranchRows{columns: []string{"column_name"}, values: [][]driver.Value{{nil}}}, nil
+	}
+	if c.mode == "row-error" {
+		return &schemaBranchRows{columns: []string{"column_name"}, values: [][]driver.Value{{"altitude"}}, failAfterRows: true}, nil
 	}
 	return &schemaBranchRows{columns: []string{"column_name"}}, nil
 }
@@ -59,15 +75,19 @@ func (c *schemaBranchConn) ExecContext(_ context.Context, query string, _ []driv
 }
 
 type schemaBranchRows struct {
-	columns []string
-	values  [][]driver.Value
-	index   int
+	columns       []string
+	values        [][]driver.Value
+	index         int
+	failAfterRows bool
 }
 
 func (r *schemaBranchRows) Columns() []string { return r.columns }
 func (r *schemaBranchRows) Close() error      { return nil }
 func (r *schemaBranchRows) Next(dest []driver.Value) error {
 	if r.index >= len(r.values) {
+		if r.failAfterRows {
+			return errors.New("catalog cursor failure")
+		}
 		return io.EOF
 	}
 	copy(dest, r.values[r.index])
@@ -113,6 +133,20 @@ func TestMetadataUpgradeExistingServerColumns(t *testing.T) {
 	}
 	if !present["altitude"] || !present["device_name"] {
 		t.Fatalf("present column catalog = %#v", present)
+	}
+}
+
+func TestColumnPresenceRejectsPartialCatalogResults(t *testing.T) {
+	for _, engine := range []string{"pgx", "duckdb", "sqlite"} {
+		for _, mode := range []string{"query-error", "scan-error", "row-error"} {
+			t.Run(engine+"/"+mode, func(t *testing.T) {
+				database := newSchemaBranchDatabase(t, mode)
+				columns, err := database.loadColumnPresence(context.Background(), engine, "markers")
+				if err == nil || columns != nil {
+					t.Fatalf("incomplete catalog escaped as a usable schema: columns=%v error=%v", columns, err)
+				}
+			})
+		}
 	}
 }
 

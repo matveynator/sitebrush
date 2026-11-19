@@ -101,7 +101,9 @@ func TestGeoIPResolverHonorsCancelledLookup(t *testing.T) {
 
 func TestGeoIPResolverCloseBroadcastsToImportWorker(t *testing.T) {
 	importStarted := make(chan struct{}, 1)
+	importExited := make(chan struct{})
 	withGeoIPHTTPClient(t, geoIPRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		defer close(importExited)
 		importStarted <- struct{}{}
 		<-request.Context().Done()
 		return nil, request.Context().Err()
@@ -122,6 +124,11 @@ func TestGeoIPResolverCloseBroadcastsToImportWorker(t *testing.T) {
 	case <-closed:
 	case <-time.After(time.Second):
 		t.Fatal("resolver shutdown signal was consumed by the import worker")
+	}
+	select {
+	case <-importExited:
+	default:
+		t.Fatal("resolver returned ownership before its importer stopped")
 	}
 }
 

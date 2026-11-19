@@ -57,6 +57,18 @@ P0 — подтверждённый критический сценарий на
 
 Fixtures регистрации теперь моделируют реальный browser flow: GET резервирует подтверждённое имя и показывает auto-confirm form; POST завершает регистрацию и ждёт TLS без выдачи сессии по HTTP. DNS в fixtures задаётся детерминированно через web-IP owner. Действующая eligibility выпуска сертификата только после завершённой регистрации сохранена. Это не изменение протокола регистрации ради прохождения тестов.
 
+## Ошибки, найденные повторным CI
+
+Полный race-прогон commit `45f8fea` выявил конкретные нарушения lifetime: `Resolver.Close` завершался раньше GeoIP importer, а неуспешная wildcard DNS-проверка оставляла запущенные probes. Поэтому следующий тест мог заменить HTTP client или resolver, пока прежняя задача ещё использовала их. GeoIP теперь закрывает import session и дожидается финального reply после завершения cancellation watcher; отменённый импорт не начинает следующую попытку загрузки. DNS получает resolver до запуска workers и собирает все результаты, сохраняя отказ даже после поздних успешных ответов.
+
+В `TestHostingSnapshotDiskThresholdSendsSingleOwnerEmail` callback и assertion совместно использовали изменяемый slice. Fixture заменён очередью сообщений с одним consumer. `enqueueEmail` больше не создаёт и не публикует worker из конкурентного request path: контакт доставки должен быть задан до начала обработки запросов, иначе возвращается явная ошибка. Production использует инициализированный durable mail owner.
+
+Конкурентное открытие SQLite могло вернуть `SQLITE_BUSY_RECOVERY` до установки busy handler. `openServerControlDatabaseHandle` устанавливает timeout перед WAL pragma. Проверка installation identity собирает результаты всех workers до завершения fixture, в том числе при ошибке.
+
+Linux-прогон также обнаружил ошибку классификации NetChan contact: failed TLS `closeNotify` write после закрытия соединения ошибочно запрещал transport fallback. Исключение ограничено точной стандартной обёрткой и типизированной write-ошибкой EPIPE/ECONNRESET/закрытого соединения. Каждый joined cause проверяется отдельно; TLS alerts, certificate errors и protocol rejection по-прежнему запрещают fallback.
+
+Порог покрытия БД 90% сохранён. Добавлены проверки отказа при частичном metadata cursor и отмены unclaimed callback; изоляция вложенных списков capabilities/sessions проверяется через публичный API. Новые результаты CI относятся к commit с этими исправлениями и не следуют из успешного предыдущего macOS-прогона.
+
 ## Контракты изменённых API
 
 - DB callbacks: до handshake caller может отменить задание без выполнения; после handshake worker owns captures до reply. Caller не должен передавать captures, доступные другим независимым goroutines. Callback не должен запускать escaping goroutine. Зависший внешний callback нельзя безопасно «забыть» и одновременно вернуть caller его данные; shutdown deadline сообщает unfinished worker.
@@ -66,6 +78,7 @@ Fixtures регистрации теперь моделируют реальны
 - Securitysync: `Request.Signal` теперь значение; `Submit` отличает отправку от query. `Reply` — send-only для worker, `Session` — receive-only. Производственный caller задаёт Session и не закрывает reply при отмене.
 - NetChan delivery: задача получает независимую копию payload и собственный session channel. Закрывается session, а не reply. Поздний результат содержит идентификатор сессии и не завершает другую задачу при последовательном переиспользовании ответа одним consumer.
 - Converter: setter передаёт исключительное владение callback/captures процессу. Нельзя менять эти captures из другой goroutine или reenter converter из callback. Следующая подтверждённая замена возвращает право дальнейшего использования предыдущих captures.
+- GeoIP shutdown: `Close` возвращается только после завершения import worker и его cancellation watcher. Download callbacks не должны игнорировать обязательную отмену HTTP/SQL boundary; зависшую внешнюю функцию нельзя безопасно объявить завершённой.
 - `crawler.KnownResourceKindsByExtension` больше не экспортируется. Вместо изменения словаря используются существующие `HasAllowedResourceExtension` / `ResourceKindFromURL` lookup API.
 
 Неизвестные outcomes после внешнего crash нельзя автоматически повторять без существующего durable operation ID/version guard. Ограничения очередей сохранены; cancel до старта не выполняет callback, после фиксации отмена не откатывает уже совершённую запись. Обновление public policy подтверждается только после применения допустимого поколения; поздний результат не получает права открыть заблокированный сайт.

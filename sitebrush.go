@@ -1108,12 +1108,13 @@ func openServerControlDatabaseHandle(databasePath string, writer bool) (*sql.DB,
 	database.SetConnMaxLifetime(0)
 	pragmas := []string{
 		"PRAGMA busy_timeout=5000",
-		"PRAGMA foreign_keys=ON",
-		"PRAGMA synchronous=FULL",
 	}
 	if writer {
-		pragmas = append([]string{"PRAGMA journal_mode=WAL"}, pragmas...)
+		// Install the connection's busy handler before WAL recovery can
+		// contend with another startup handle, including SQLITE_BUSY_RECOVERY.
+		pragmas = append(pragmas, "PRAGMA journal_mode=WAL")
 	}
+	pragmas = append(pragmas, "PRAGMA foreign_keys=ON", "PRAGMA synchronous=FULL")
 	for _, pragma := range pragmas {
 		if _, err := database.ExecContext(context.Background(), pragma); err != nil {
 			_ = database.Close()
@@ -24955,28 +24956,33 @@ func checkPublicTrialWildcardAddresses(ownerDomain string, serverIPs []net.IP) p
 		err       error
 	}
 	lookupResults := make(chan lookupResult, publicTrialWildcardProbeCount)
+	resolveDomain := lookupIPRecords
 	for probeIndex := 0; probeIndex < publicTrialWildcardProbeCount; probeIndex++ {
 		probeDomain := publicTrialWildcardProbeDomain(ownerDomain)
 		go func(domain string) {
-			ipRecords, lookupErr := lookupIPRecords(domain)
+			ipRecords, lookupErr := resolveDomain(domain)
 			lookupResults <- lookupResult{ipRecords: ipRecords, err: lookupErr}
 		}(probeDomain)
 	}
 	for probeIndex := 0; probeIndex < publicTrialWildcardProbeCount; probeIndex++ {
 		result := <-lookupResults
+		// Every probe must return its borrowed resolver before this session
+		// ends, even when an earlier result has already rejected the wildcard.
+		if availability.ReasonKey != "" {
+			continue
+		}
 		if result.err != nil || len(result.ipRecords) == 0 {
 			availability.ReasonKey = "public_trial_disabled_wildcard_missing"
-			return availability
+			continue
 		}
 		for _, ipRecord := range result.ipRecords {
 			if !domainIPRecordsMatchAll([]net.IP{ipRecord}, serverIPs) {
 				availability.ReasonKey = "public_trial_disabled_wildcard_mismatch"
-				return availability
+				break
 			}
 		}
 	}
-	availability.Enabled = true
-	availability.ReasonKey = ""
+	availability.Enabled = availability.ReasonKey == ""
 	return availability
 }
 
@@ -36603,7 +36609,7 @@ func (a *App) enqueueEmail(ctx context.Context, message mailout.Message) error {
 		return a.submitDurableMailTask(ctx.Done(), task)
 	}
 	if a.emailDelivery == nil {
-		a.emailDelivery = mailout.StartDeliveryWorker(context.Background(), a.defaultEmailSender())
+		return errors.New("email delivery worker is not running")
 	}
 	select {
 	case a.emailDelivery <- mailout.DeliveryJob{Message: message}:
