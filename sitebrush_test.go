@@ -19520,7 +19520,7 @@ func TestHostingSnapshotNetChanListenerReceivesMalformedPayload(t *testing.T) {
 	}
 }
 
-func TestHostingSnapshotNetChanDeliverySkipsTaskWithClosedResponse(t *testing.T) {
+func TestHostingSnapshotNetChanDeliverySkipsTaskWithClosedSession(t *testing.T) {
 	listener, err := listenTestSitebrushNetChan(t)
 	if err != nil {
 		t.Fatal(err)
@@ -19531,13 +19531,55 @@ func TestHostingSnapshotNetChanDeliverySkipsTaskWithClosedResponse(t *testing.T)
 	defer close(workerStop)
 	deliveries := startHostingSnapshotNetChanDeliveryWorker(workerStop, nil)
 	response := make(chan hostingSnapshotNetChanDeliveryResponse)
-	close(response)
-	deliveries <- hostingSnapshotNetChanDeliveryTask{address: listener.Address, payload: []byte("unneeded"), response: response}
+	session := make(chan struct{})
+	close(session)
+	deliveries <- hostingSnapshotNetChanDeliveryTask{address: listener.Address, payload: []byte("unneeded"), response: response, session: session}
 
 	select {
 	case <-listener.Channels:
-		t.Fatal("worker started a task whose response channel was closed")
+		t.Fatal("worker started a task whose session was closed")
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestOwnershipNetChanCancellationReturnsOnlyIndependentPayload(t *testing.T) {
+	deliveries := make(chan hostingSnapshotNetChanDeliveryTask)
+	stop := make(chan struct{})
+	finished := make(chan error, 1)
+	payload := []byte("original")
+	go func() { finished <- submitHostingSnapshotNetChanDelivery(stop, deliveries, "unused", payload) }()
+	task := <-deliveries
+	close(stop)
+	if err := <-finished; !errors.Is(err, errHostingSnapshotNetChanDeliveryCanceled) {
+		t.Fatalf("cancel error = %v", err)
+	}
+	payload[0] = 'X'
+	if string(task.payload) != "original" || !hostingSnapshotNetChanDeliveryCanceled(task.session) {
+		t.Fatal("caller reclaimed transport payload or failed to cancel its session")
+	}
+}
+
+func TestOwnershipNetChanLateReplyCannotCompleteNewSession(t *testing.T) {
+	deliveries := make(chan hostingSnapshotNetChanDeliveryTask)
+	response := make(chan hostingSnapshotNetChanDeliveryResponse, 2)
+	previous := make(chan struct{})
+	close(previous)
+	response <- hostingSnapshotNetChanDeliveryResponse{session: previous, err: errors.New("old operation")}
+	finished := make(chan error, 1)
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		finished <- submitHostingSnapshotNetChanDeliveryWithResponse(stop, deliveries, response, "unused", []byte("new"))
+	}()
+	task := <-deliveries
+	task.response <- hostingSnapshotNetChanDeliveryResponse{session: task.session}
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatalf("late reply completed a different operation: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("current reply was not delivered")
 	}
 }
 

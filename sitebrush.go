@@ -332,12 +332,13 @@ type demoSiteRuntimeRequest struct {
 type hostingSnapshotNetChanDeliveryTask struct {
 	address  string
 	payload  []byte
-	response chan hostingSnapshotNetChanDeliveryResponse
+	response chan<- hostingSnapshotNetChanDeliveryResponse
+	session  <-chan struct{}
 }
 
 type hostingSnapshotNetChanDeliveryResponse struct {
-	canceled bool
-	err      error
+	session <-chan struct{}
+	err     error
 }
 
 type sitebrushNetChanRequest struct {
@@ -39146,12 +39147,12 @@ func startHostingSnapshotNetChanDeliveryWorker(stop <-chan struct{}, identity *c
 				if !isOpen {
 					return
 				}
-				if hostingSnapshotNetChanDeliveryCanceled(task.response) {
+				if hostingSnapshotNetChanDeliveryCanceled(task.session) {
 					continue
 				}
 				err, responseNeeded := performHostingSnapshotNetChanDelivery(stop, task, identity)
 				if responseNeeded {
-					sendHostingSnapshotNetChanDeliveryResponse(task.response, err)
+					sendHostingSnapshotNetChanDeliveryResponse(stop, task, err)
 				}
 			}
 		}
@@ -39165,24 +39166,30 @@ func submitHostingSnapshotNetChanDelivery(stop <-chan struct{}, deliveries chan<
 }
 
 func submitHostingSnapshotNetChanDeliveryWithResponse(stop <-chan struct{}, deliveries chan<- hostingSnapshotNetChanDeliveryTask, response chan hostingSnapshotNetChanDeliveryResponse, address string, payload []byte) error {
-	task := hostingSnapshotNetChanDeliveryTask{address: address, payload: payload, response: response}
+	// The caller may return on cancellation before the transport releases its
+	// buffers. Transfer an independent payload and a one-shot session identity.
+	session := make(chan struct{})
+	defer close(session)
+	task := hostingSnapshotNetChanDeliveryTask{address: address, payload: append([]byte(nil), payload...), response: response, session: session}
 	select {
 	case <-stop:
 		return errHostingSnapshotNetChanDeliveryCanceled
 	case deliveries <- task:
 	}
-	select {
-	case <-stop:
+	for {
 		select {
-		case response <- hostingSnapshotNetChanDeliveryResponse{canceled: true}:
-		default:
-		}
-		return errHostingSnapshotNetChanDeliveryCanceled
-	case result, isOpen := <-response:
-		if !isOpen || result.canceled {
+		case <-stop:
 			return errHostingSnapshotNetChanDeliveryCanceled
+		case result, isOpen := <-response:
+			if !isOpen {
+				return errHostingSnapshotNetChanDeliveryCanceled
+			}
+			// A persistent subscriber can reuse its reply channel. A late
+			// result from an abandoned session cannot complete newer work.
+			if result.session == session {
+				return result.err
+			}
 		}
-		return result.err
 	}
 }
 
@@ -39203,7 +39210,7 @@ func performHostingSnapshotNetChanDelivery(stop <-chan struct{}, task hostingSna
 	if address == "" {
 		return errors.New("netchan address is empty"), true
 	}
-	if hostingSnapshotNetChanDeliveryCanceled(task.response) {
+	if hostingSnapshotNetChanDeliveryCanceled(task.session) {
 		return errHostingSnapshotNetChanDeliveryCanceled, false
 	}
 	publicKey, err := centralNetChanPublicKey(identity, stop)
@@ -39218,7 +39225,7 @@ func performHostingSnapshotNetChanDelivery(stop <-chan struct{}, task hostingSna
 	if err != nil {
 		return err, true
 	}
-	if hostingSnapshotNetChanDeliveryCanceled(task.response) {
+	if hostingSnapshotNetChanDeliveryCanceled(task.session) {
 		_ = connection.Abort()
 		return errHostingSnapshotNetChanDeliveryCanceled, false
 	}
@@ -39244,10 +39251,7 @@ func performHostingSnapshotNetChanDelivery(stop <-chan struct{}, task hostingSna
 		case <-stop:
 			_ = connection.Abort()
 			return errHostingSnapshotNetChanDeliveryCanceled, false
-		case response, isOpen := <-task.response:
-			if isOpen && !response.canceled {
-				continue
-			}
+		case <-task.session:
 			_ = connection.Abort()
 			return errHostingSnapshotNetChanDeliveryCanceled, false
 		case err := <-deliveryFinished:
@@ -39301,29 +39305,20 @@ func performHostingSnapshotNetChanDelivery(stop <-chan struct{}, task hostingSna
 	}
 }
 
-func hostingSnapshotNetChanDeliveryCanceled(response <-chan hostingSnapshotNetChanDeliveryResponse) bool {
+func hostingSnapshotNetChanDeliveryCanceled(session <-chan struct{}) bool {
 	select {
-	case state, isOpen := <-response:
-		return !isOpen || state.canceled
+	case <-session:
+		return true
 	default:
 		return false
 	}
 }
 
-func sendHostingSnapshotNetChanDeliveryResponse(response chan hostingSnapshotNetChanDeliveryResponse, err error) (sent bool) {
-	defer func() {
-		if recover() != nil {
-			sent = false
-		}
-	}()
-	if hostingSnapshotNetChanDeliveryCanceled(response) {
-		return false
-	}
+func sendHostingSnapshotNetChanDeliveryResponse(stop <-chan struct{}, task hostingSnapshotNetChanDeliveryTask, err error) {
 	select {
-	case response <- hostingSnapshotNetChanDeliveryResponse{err: err}:
-		return true
-	default:
-		return false
+	case task.response <- hostingSnapshotNetChanDeliveryResponse{session: task.session, err: err}:
+	case <-task.session:
+	case <-stop:
 	}
 }
 
