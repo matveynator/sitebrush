@@ -16106,7 +16106,7 @@ func TestGuestStaticRouteServesPublishedFileWithoutDatabase(t *testing.T) {
 		t.Fatalf("status = %d, want 200, body=%q", response.Code, response.Body.String())
 	}
 	body := response.Body.String()
-	for _, expectedFragment := range []string{"<html><body>fast", "/p/static/visitor.js", "guest_menu.ru.js"} {
+	for _, expectedFragment := range []string{"<html>", "<body>fast", "/p/static/visitor.js", "guest_menu.ru.js"} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("guest static body missing %q in %s", expectedFragment, body)
 		}
@@ -16170,6 +16170,7 @@ func TestSimplifiedExpenseLabelsExistInEveryLanguage(t *testing.T) {
 func TestGuestStaticAnalyticsAvoidsDatabaseAndUsesBrowserCollector(t *testing.T) {
 	storagePath := t.TempDir()
 	application := &App{db: panicSQLExecutor{t: t}, storagePath: storagePath, analyticsEvents: make(chan siteAnalyticsEvent, 1)}
+	initializeServerControlDatabaseForTest(t, application)
 	staticFilePath := filepath.Join(application.domainStaticDir("localhost"), "index.html")
 	if err := os.MkdirAll(filepath.Dir(staticFilePath), 0o755); err != nil {
 		t.Fatal(err)
@@ -16214,7 +16215,7 @@ func TestFilesPageUsesPublicAssetPrefix(t *testing.T) {
 	}
 
 	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?files", nil)
-	files, err := application.listManagedFiles(request.Context(), request, "/")
+	files, err := application.listManagedFiles(request.Context(), request, "/", true)
 	if err != nil {
 		t.Fatalf("list files: %v", err)
 	}
@@ -16227,7 +16228,7 @@ func TestFilesPageUsesPublicAssetPrefix(t *testing.T) {
 	}
 }
 
-func TestManagedFilesVisibleForCurrentURIAndDescendants(t *testing.T) {
+func TestManagedFilesVisibleForCurrentURIAndSharedDescendantResources(t *testing.T) {
 	storagePath := t.TempDir()
 	rawDB, err := sql.Open("sqlite", filepath.Join(storagePath, "sitebrush.db"))
 	if err != nil {
@@ -16252,6 +16253,13 @@ func TestManagedFilesVisibleForCurrentURIAndDescendants(t *testing.T) {
 	application.upsertFileMetadata(context.Background(), "localhost", "docs.png", "/docs", 8, "image/png", "test")
 	application.upsertFileMetadata(context.Background(), "localhost", "child.png", "/docs/child", 9, "image/png", "test")
 	application.upsertFileMetadata(context.Background(), "localhost", "other.png", "/other", 9, "image/png", "test")
+
+	if _, err := rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES('localhost','/docs','Docs','<img src="/p/child.png">',1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rawDB.Exec(`INSERT INTO resource_page_uses(domain,file_name,original_uri,page_path) VALUES('localhost','child.png','/docs/child.png','/docs')`); err != nil {
+		t.Fatal(err)
+	}
 
 	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs?files", nil)
 	files, err := application.listManagedFiles(request.Context(), request, "/docs")
@@ -16543,6 +16551,7 @@ func TestFilesPageDeletesUploadedFileFromURLEncodedForm(t *testing.T) {
 	if err := os.WriteFile(filePath, []byte("test file"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	application.upsertFileMetadata(context.Background(), "localhost", "uploaded.txt", "/", 9, "text/plain", "upload")
 	application.rebuildDomainStorageUsage(context.Background(), "localhost")
 	adminCookie := newAdminSessionCookie(t, application, "admin@example.com")
 	csrfRequest := httptest.NewRequest(http.MethodGet, "http://localhost/?files", nil)
@@ -17169,6 +17178,9 @@ func TestPerSiteDBRouterMigratesUnopenedDatabaseDuringAliasScan(t *testing.T) {
 	}
 	if _, err := rawPrimaryDB.Exec(`INSERT INTO domain_aliases(primary_domain,alias_domain,is_verified,dns_a_ok) VALUES(?,?,1,1)`, primaryDomain, aliasDomain); err != nil {
 		t.Fatalf("insert old alias: %v", err)
+	}
+	if _, err := rawPrimaryDB.Exec(`CREATE TABLE users(id INTEGER PRIMARY KEY,domain TEXT,email TEXT,password TEXT,is_admin INTEGER); INSERT INTO users(domain,email,password,is_admin) VALUES(?,'owner@example.org','test-password',1)`, primaryDomain); err != nil {
+		t.Fatal(err)
 	}
 	_ = rawPrimaryDB.Close()
 
@@ -18721,15 +18733,15 @@ func TestPublishedBoundaryKeepsAdminMissingPageRecovery(t *testing.T) {
 	}
 	unknownResponse := httptest.NewRecorder()
 	handler.ServeHTTP(unknownResponse, httptest.NewRequest(http.MethodGet, "http://new.example.com/new-page", nil))
-	if unknownResponse.Code != http.StatusNotFound || !strings.Contains(unknownResponse.Body.String(), `href="/new-page?visual"`) {
-		t.Fatalf("unknown domain 404 lost creation link: %d %s", unknownResponse.Code, unknownResponse.Body.String())
+	if unknownResponse.Code != http.StatusNotFound || strings.Contains(unknownResponse.Body.String(), `revision_restore`) || strings.Contains(unknownResponse.Body.String(), `?visual`) {
+		t.Fatalf("unknown domain disclosed administrative controls: %d %s", unknownResponse.Code, unknownResponse.Body.String())
 	}
 	localForwardedRequest := httptest.NewRequest(http.MethodGet, "http://new.example.com/", nil)
 	localForwardedRequest.RemoteAddr = "127.0.0.1:12345"
 	localForwardedResponse := httptest.NewRecorder()
 	handler.ServeHTTP(localForwardedResponse, localForwardedRequest)
-	if localForwardedResponse.Code != http.StatusNotFound || !strings.Contains(localForwardedResponse.Body.String(), `href="/?visual"`) {
-		t.Fatalf("new domain root from local front lost 404: %d %s", localForwardedResponse.Code, localForwardedResponse.Body.String())
+	if localForwardedResponse.Code != http.StatusNotFound || strings.Contains(localForwardedResponse.Body.String(), `revision_restore`) || strings.Contains(localForwardedResponse.Body.String(), `?visual`) {
+		t.Fatalf("unknown domain from local front disclosed administrative controls: %d %s", localForwardedResponse.Code, localForwardedResponse.Body.String())
 	}
 	adminRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/removed", nil)
 	adminRequest.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
@@ -20399,6 +20411,9 @@ func TestAnalyticsVerifiedAliasSharesPrimaryReports(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := raw.Exec(`CREATE TABLE domain_aliases(primary_domain TEXT,alias_domain TEXT UNIQUE,is_verified INTEGER,dns_a_ok INTEGER); INSERT INTO domain_aliases VALUES('primary.example','alias.example',1,1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`CREATE TABLE users(id INTEGER PRIMARY KEY,domain TEXT,email TEXT,password TEXT,is_admin INTEGER); INSERT INTO users(domain,email,password,is_admin) VALUES(?,'owner@example.org','test-password',1)`, "primary.example"); err != nil {
 		t.Fatal(err)
 	}
 	_ = raw.Close()
@@ -23491,9 +23506,16 @@ func TestSecurityBoundaryMultipartAdminFormAcceptsSessionCSRFWithOpaqueOrigin(t 
 		t.Run(testCase.name, func(t *testing.T) {
 			var body bytes.Buffer
 			writer := multipart.NewWriter(&body)
-			_ = writer.WriteField("action", "delete_selected")
+			_ = writer.WriteField("action", "upload")
 			if testCase.token != "" {
 				_ = writer.WriteField("account_csrf", testCase.token)
+			}
+			filePart, err := writer.CreateFormFile("upload_files", "csrf.txt")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := io.WriteString(filePart, "csrf fixture"); err != nil {
+				t.Fatal(err)
 			}
 			if err := writer.Close(); err != nil {
 				t.Fatal(err)
@@ -29834,21 +29856,7 @@ func TestWholeSiteImportReusesRevisionAfterFormattingAndDeletion(t *testing.T) {
 
 // A confirmed mailbox reserves identity before TLS, without creating a usable account.
 func TestConfirmedDomainReservationSurvivesTLSWaitAndRestart(t *testing.T) {
-	application := newRouterTestApplication(t)
-	db := setupBillingOwnerForTest(t, application, "sitebrush.ru", "admin@sitebrush.ru", true)
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	dispatcher, err := startServerControlDatabaseDispatcher(application.serverControlDBPath(), false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	application.controlDatabase = dispatcher
-	t.Cleanup(func() { dispatcher.Close() })
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	application.registrationConfirmations = startEmailConfirmationMemoryWorker(ctx)
-	application.automaticSSL = make(chan automaticSSLRequest, 16)
+	application, ctx := newDurableClaimTestApplication(t)
 	domain := "ero.sitebrush.ru"
 	confirmation := EmailConfirmation{Token: "confirmed-owner-token", FormToken: "owner-form", Domain: domain, Action: "register", Email: "owner@example.org", Code: "123456", ExpiresAt: time.Now().Add(time.Minute).UTC().Format(time.RFC3339)}
 	if err := application.saveRegistrationConfirmation(ctx, confirmation); err != nil {
@@ -29858,15 +29866,11 @@ func TestConfirmedDomainReservationSurvivesTLSWaitAndRestart(t *testing.T) {
 	request = request.WithContext(contextWithDomain(request.Context(), domain))
 	response := httptest.NewRecorder()
 	application.confirmEmailToken(response, request)
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `id="https-progress"`) || strings.Contains(response.Body.String(), `type="password"`) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `data-account-auto-confirm`) || strings.Contains(response.Body.String(), `type="password"`) {
 		t.Fatalf("unsafe or missing wait UI: %d %s", response.Code, response.Body.String())
 	}
 	if !application.registrationDomainClaimed(ctx, domain) || application.hasAdmin(contextWithDomain(ctx, domain), domain) {
 		t.Fatal("reservation either absent or created login credentials")
-	}
-	observed := <-application.automaticSSL
-	if observed.action != "registration_confirmed" {
-		t.Fatalf("certificate not explicitly queued: %+v", observed)
 	}
 	next, err := application.availablePublicTrialDomain(ctx, "https://ero.com", "sitebrush.ru")
 	if err != nil || next == domain {
@@ -29882,6 +29886,23 @@ func TestConfirmedDomainReservationSurvivesTLSWaitAndRestart(t *testing.T) {
 	if reserved.Code != http.StatusConflict || !strings.Contains(reserved.Body.String(), `resend_confirmation`) || !strings.Contains(reserved.Body.String(), `name="email"`) {
 		t.Fatalf("reserved site lacks confirmation resend: %d %s", reserved.Code, reserved.Body.String())
 	}
+	// Follow the browser's auto-confirm POST; GET alone cannot create credentials.
+	accept := httptest.NewRequest(http.MethodPost, "http://"+domain+"/?email_confirm="+confirmation.Token, nil).WithContext(contextWithDomain(ctx, domain))
+	accepted := httptest.NewRecorder()
+	application.confirmEmailToken(accepted, accept)
+	if accepted.Code != http.StatusOK || !strings.Contains(accepted.Body.String(), `id="https-progress"`) {
+		t.Fatalf("confirmation did not wait for TLS: %d %s", accepted.Code, accepted.Body.String())
+	}
+	for _, cookie := range accepted.Result().Cookies() {
+		if cookie.Name == "sitebrush_session" {
+			t.Fatal("HTTP confirmation authenticated before HTTPS")
+		}
+	}
+	observed := <-application.automaticSSL
+	if observed.action != "registration_confirmed" {
+		t.Fatalf("certificate not explicitly queued: %+v", observed)
+	}
+
 	// A restarted confirmation worker reloads the durable token, extended for slow TLS issuance.
 	application.registrationConfirmations = startEmailConfirmationMemoryWorker(ctx)
 	restored, found := application.registrationConfirmationByToken(ctx, confirmation.Token)
@@ -30035,6 +30056,10 @@ func newDurableClaimTestApplication(t *testing.T) (*App, context.Context) {
 	t.Cleanup(func() { dispatcher.Close() })
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
+	previousLookup := lookupIPRecords
+	lookupIPRecords = func(string) ([]net.IP, error) { return []net.IP{net.ParseIP("8.8.8.8")}, nil }
+	t.Cleanup(func() { cancel(); lookupIPRecords = previousLookup })
+	application.webPublicIPs = serverip.Start(serverip.Settings{Manual: []string{"8.8.8.8"}, Preferred: "8.8.8.8"}, nil, ctx.Done())
 	application.registrationConfirmations = startEmailConfirmationMemoryWorker(ctx)
 	application.automaticSSL = make(chan automaticSSLRequest, 32)
 	return application, ctx
@@ -35446,6 +35471,9 @@ func TestQueuedSitePublicFrontForwardsRecoveryPaymentAndACME(t *testing.T) {
 			}))
 			defer backend.Close()
 			if err := front.Set(strings.TrimPrefix(backend.URL, "http://"), false); err != nil {
+				t.Fatal(err)
+			}
+			if err := front.PolicyEnabled(); err != nil {
 				t.Fatal(err)
 			}
 			for _, probe := range []struct {
