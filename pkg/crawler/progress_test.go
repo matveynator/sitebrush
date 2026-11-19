@@ -5,6 +5,30 @@ import (
 	"time"
 )
 
+func TestOwnershipProgressSubscribersAndPublisherHaveIndependentSnapshots(t *testing.T) {
+	tracker := NewProgressTracker()
+	first := tracker.Subscribe("ownership")
+	second := tracker.Subscribe("ownership")
+	defer tracker.Unsubscribe("ownership", first)
+	defer tracker.Unsubscribe("ownership", second)
+	event := ProgressEvent{Token: "ownership", FailedURLs: []string{"original"}, FailedReasons: map[string]string{"original": "timeout"}}
+	tracker.Publish(event)
+	event.FailedURLs[0], event.FailedReasons["original"] = "publisher", "publisher"
+	firstReply := <-first
+	firstReply.FailedURLs[0], firstReply.FailedReasons["original"] = "subscriber", "subscriber"
+	secondReply := <-second
+	if secondReply.FailedURLs[0] != "original" || secondReply.FailedReasons["original"] != "timeout" {
+		t.Fatalf("subscriber received aliased progress: %+v", secondReply)
+	}
+	reconnected := tracker.Subscribe("ownership")
+	defer tracker.Unsubscribe("ownership", reconnected)
+	retained := <-reconnected
+	if retained.FailedURLs[0] != "original" || retained.FailedReasons["original"] != "timeout" {
+		t.Fatalf("subscriber changed retained progress: %+v", retained)
+	}
+	tracker.Unsubscribe("ownership", first)
+}
+
 func TestProgressTrackerKeepsNewestEventForSlowAndReconnectingSubscribers(t *testing.T) {
 	tracker := NewProgressTracker()
 	slowSubscriber := tracker.Subscribe("preview")

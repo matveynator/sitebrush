@@ -1,0 +1,62 @@
+name: Ownership
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CGO_ENABLED: "0"
+  SITEBRUSH_SERVICE_MAIL_MODE: local
+
+jobs:
+  tests:
+    name: Full tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Inventory every Go platform and ownership candidate
+        if: runner.os == 'Linux'
+        run: go run ./scripts/ownership > ownership.tsv
+      - name: Preserve ownership inventory
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ownership-inventory
+          path: ownership.tsv
+          if-no-files-found: error
+      - name: Test all packages and application
+        run: go test -count=1 -timeout=30m ./...
+
+  race:
+    name: Race detector (Linux)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    env:
+      # The race runtime requires CGO on Linux. Server artifacts stay pure Go.
+      CGO_ENABLED: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test concurrent ownership and all existing behavior
+        run: go test -race -count=1 -timeout=45m ./...

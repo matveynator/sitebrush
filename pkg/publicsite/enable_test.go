@@ -5,6 +5,34 @@ import (
 	"time"
 )
 
+func TestOwnershipStalePolicyEnableCannotRestorePreviousPublisher(t *testing.T) {
+	stop := make(chan struct{})
+	defer close(stop)
+	front := NewFront("test-secret", func(http.ResponseWriter, *http.Request, bool) bool { return false }, stop)
+	if err := front.Set("127.0.0.1:1111", false); err != nil {
+		t.Fatal(err)
+	}
+	previous, err := front.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, address := range []string{"127.0.0.1:2222", "127.0.0.1:1111"} {
+		if err := front.Set(address, false); err != nil {
+			t.Fatal(err)
+		}
+		if err := front.enablePolicy(previous); err == nil {
+			t.Fatal("stale readiness confirmation was accepted")
+		}
+		current, currentErr := front.Current()
+		if currentErr != nil || current.Address != address || current.PolicyReady {
+			t.Fatalf("stale confirmation changed publisher state: %+v, %v", current, currentErr)
+		}
+	}
+	if err := front.PolicyEnabled(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPolicyEnableRejectsSameAddressRestart(t *testing.T) {
 	stop := make(chan struct{})
 	defer close(stop)

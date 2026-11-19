@@ -1007,6 +1007,7 @@ const (
 )
 
 type siteDBOperation struct {
+	claimed  chan struct{}
 	stop     <-chan struct{}
 	ctx      context.Context
 	query    string
@@ -1017,10 +1018,11 @@ type siteDBOperation struct {
 }
 
 type siteDBOperationResponse struct {
-	result sql.Result
-	rows   *sql.Rows
-	row    *sql.Row
-	err    error
+	analytics browserstats.StorageResult
+	result    sql.Result
+	rows      *sql.Rows
+	row       *sql.Row
+	err       error
 }
 
 type serverControlDatabaseAccessKind int
@@ -1032,7 +1034,8 @@ const (
 )
 
 type serverControlDatabaseAccessRequest struct {
-	ctx      context.Context
+	claimed  chan struct{}
+	session  <-chan struct{}
 	reply    chan error
 	purpose  string
 	queuedAt time.Time
@@ -1132,13 +1135,18 @@ func (dispatcher *serverControlDatabaseDispatcher) runWorker(database *sql.DB, r
 			select {
 			case <-dispatcher.stop:
 				return
-			case <-request.ctx.Done():
-				select {
-				case request.reply <- request.ctx.Err():
-				default:
-				}
+			case <-request.session:
 				continue
 			default:
+			}
+			// The caller loans its closure captures only after this handshake.
+			// It cannot return until the reply transfers ownership back.
+			select {
+			case request.claimed <- struct{}{}:
+			case <-request.session:
+				continue
+			case <-dispatcher.stop:
+				return
 			}
 			queueDuration := time.Duration(0)
 			if !request.queuedAt.IsZero() {
@@ -1153,11 +1161,7 @@ func (dispatcher *serverControlDatabaseDispatcher) runWorker(database *sql.DB, r
 			if (debug && sessionDuration >= slowDatabaseOperationLogAfter) || sessionDuration >= 5*time.Second {
 				log.Printf("%sCONTROL DB%s worker=%s purpose=%s operation=%s", terminalCyan(), terminalReset(), workerName, request.purpose, sessionDuration.String())
 			}
-			select {
-			case request.reply <- err:
-			case <-request.ctx.Done():
-			case <-dispatcher.stop:
-			}
+			request.reply <- err
 		}
 	}
 }
@@ -1178,7 +1182,8 @@ func (dispatcher *serverControlDatabaseDispatcher) execute(ctx context.Context, 
 		return errors.New("server control database operation is required")
 	}
 	request := serverControlDatabaseAccessRequest{
-		ctx:      ctx,
+		claimed:  make(chan struct{}),
+		session:  ctx.Done(),
 		reply:    make(chan error, 1),
 		purpose:  firstNonEmpty(strings.TrimSpace(purpose), "unspecified"),
 		queuedAt: time.Now(),
@@ -1196,8 +1201,10 @@ func (dispatcher *serverControlDatabaseDispatcher) execute(ctx context.Context, 
 		return errors.New("server control database dispatcher stopped")
 	}
 	select {
-	case err := <-request.reply:
-		return err
+	case <-request.claimed:
+		// Cancellation cannot reclaim captures while the worker still owns
+		// them. SQL cancellation remains the callback's boundary concern.
+		return <-request.reply
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-dispatcher.stop:
@@ -1512,6 +1519,17 @@ func (db *siteFileDatabase) completeOperationWithDatabase(operation siteDBOperat
 		return
 	default:
 	}
+	// Reply completion is an ownership return, including transaction callbacks
+	// and filesystem compensation. A canceled caller cannot outlive its captures.
+	select {
+	case operation.claimed <- struct{}{}:
+	case <-operation.stop:
+		return
+	case <-operation.ctx.Done():
+		return
+	case <-db.stopped:
+		return
+	}
 
 	startedAt := time.Now()
 	response := operation.run(operation.ctx, database)
@@ -1652,28 +1670,6 @@ func (db *siteFileDatabase) QueryRowContext(ctx context.Context, query string, a
 	return response.row, response.err
 }
 
-func (db *siteFileDatabase) Session(stop <-chan struct{}, run func(*sql.DB) error) error {
-	reply := make(chan siteDBOperationResponse, 1)
-	operation := siteDBOperation{ctx: context.Background(), stop: stop, response: reply, kind: siteDBWorkloadGeneral, run: func(_ context.Context, raw *sql.DB) siteDBOperationResponse {
-		return siteDBOperationResponse{err: run(raw)}
-	}}
-	select {
-	case <-stop:
-		return errors.New("site database subscriber disconnected")
-	case <-db.stopped:
-		return errors.New("site database worker stopped")
-	case db.generalQueue <- operation:
-	}
-	select {
-	case <-stop:
-		return errors.New("site database subscriber disconnected")
-	case <-db.stopped:
-		return errors.New("site database worker stopped")
-	case response := <-reply:
-		return response.err
-	}
-}
-
 func (db *siteFileDatabase) Migrate(ctx context.Context, domain string, migrate siteDBMigrator) error {
 	if migrate == nil {
 		return nil
@@ -1702,11 +1698,14 @@ func (db *siteFileDatabase) runOperation(ctx context.Context, operation siteDBOp
 		ctx = context.Background()
 	}
 	operation.ctx = ctx
+	operation.claimed = make(chan struct{})
 	operation.response = make(chan siteDBOperationResponse, 1)
 
 	queue := db.queueFor(operation.kind)
 	if !db.debug {
 		select {
+		case <-operation.stop:
+			return siteDBOperationResponse{err: errors.New("site database subscriber disconnected")}
 		case <-ctx.Done():
 			return siteDBOperationResponse{err: ctx.Err()}
 		case <-db.stopped:
@@ -1714,8 +1713,12 @@ func (db *siteFileDatabase) runOperation(ctx context.Context, operation siteDBOp
 		case queue <- operation:
 		}
 		select {
+		case <-operation.claimed:
+			return <-operation.response
 		case response := <-operation.response:
 			return response
+		case <-operation.stop:
+			return siteDBOperationResponse{err: errors.New("site database subscriber disconnected")}
 		case <-ctx.Done():
 			return siteDBOperationResponse{err: ctx.Err()}
 		case <-db.stopped:
@@ -1728,6 +1731,8 @@ func (db *siteFileDatabase) runOperation(ctx context.Context, operation siteDBOp
 	defer queueTimer.Stop()
 	for queued := false; !queued; {
 		select {
+		case <-operation.stop:
+			return siteDBOperationResponse{err: errors.New("site database subscriber disconnected")}
 		case <-ctx.Done():
 			return siteDBOperationResponse{err: ctx.Err()}
 		case <-db.stopped:
@@ -1745,12 +1750,16 @@ func (db *siteFileDatabase) runOperation(ctx context.Context, operation siteDBOp
 	defer waitTimer.Stop()
 	for {
 		select {
+		case <-operation.claimed:
+			return <-operation.response
 		case response := <-operation.response:
 			waitDuration := time.Since(runStartedAt)
 			if waitDuration >= slowDatabaseOperationLogAfter || response.err != nil {
 				db.logDatabaseOperationResponse(operation, time.Since(queueStartedAt), response.err)
 			}
 			return response
+		case <-operation.stop:
+			return siteDBOperationResponse{err: errors.New("site database subscriber disconnected")}
 		case <-ctx.Done():
 			db.logDatabaseOperationWaiting("context-canceled", operation, time.Since(queueStartedAt))
 			return siteDBOperationResponse{err: ctx.Err()}
@@ -1854,27 +1863,27 @@ func (repository siteAnalyticsRepository) Exchange(request browserstats.StorageR
 	if database.analytics == nil {
 		return browserstats.StorageResult{Err: errors.New("site analytics participant unavailable")}
 	}
-	var result browserstats.StorageResult
-	err = database.analytics.Session(request.Stop, func(raw *sql.DB) error {
+	operation := siteDBOperation{stop: request.Stop, kind: siteDBWorkloadGeneral, run: func(_ context.Context, raw *sql.DB) siteDBOperationResponse {
 		domain := request.Domain
 		select {
 		case <-request.Stop:
-			return errors.New("analytics subscriber disconnected")
+			return siteDBOperationResponse{err: errors.New("analytics subscriber disconnected")}
 		default:
 		}
 		if err := application.migrateLegacyAnalytics(raw, domain, filepath.Dir(database.analytics.path)); err != nil {
-			return err
+			return siteDBOperationResponse{err: err}
 		}
 		if database.analytics.analyticsArchiveHours == nil {
 			database.analytics.analyticsArchiveHours = map[string]string{}
 		}
-		result = browserstats.ExecuteOwned(filepath.Dir(database.analytics.path), request, raw, database.analytics.analyticsArchiveHours)
-		return result.Err
-	})
-	if err != nil {
-		result.Err = err
+		result := browserstats.ExecuteOwned(filepath.Dir(database.analytics.path), request, raw, database.analytics.analyticsArchiveHours)
+		return siteDBOperationResponse{analytics: result, err: result.Err}
+	}}
+	response := database.analytics.runOperation(context.Background(), operation)
+	if response.err != nil {
+		return browserstats.StorageResult{Err: response.err}
 	}
-	return result
+	return response.analytics
 }
 
 func (a *App) migrateLegacyAnalytics(database *sql.DB, domain, directory string) error {
@@ -38881,7 +38890,7 @@ func (a *App) handleSecuritySignalRequest(ctx context.Context, request serviceMa
 	signal := *request.SecuritySignal
 	signal.InstallationID = request.InstallationID
 	reply := make(chan securitysync.Result, 1)
-	job := securitysync.Request{Signal: &signal, Reply: reply}
+	job := securitysync.Request{Signal: signal, Submit: true, Reply: reply, Session: ctx.Done()}
 	select {
 	case <-ctx.Done():
 		return "security signal canceled", http.StatusRequestTimeout
@@ -38912,7 +38921,7 @@ func (a *App) handleSecurityReputationRequest(ctx context.Context, request servi
 		return "security reputation unavailable", http.StatusServiceUnavailable, nil
 	}
 	reply := make(chan securitysync.Result, 1)
-	job := securitysync.Request{Query: true, Reply: reply}
+	job := securitysync.Request{Query: true, Reply: reply, Session: ctx.Done()}
 	select {
 	case <-ctx.Done():
 		return "security reputation canceled", http.StatusRequestTimeout, nil
@@ -51815,10 +51824,10 @@ func (store *publicTrialPreviewStore) loop() {
 	}
 }
 
-func (tracker *grabProgressTracker) subscribe(token string) chan grabProgressEvent {
+func (tracker *grabProgressTracker) subscribe(token string) <-chan grabProgressEvent {
 	return tracker.tracker.Subscribe(token)
 }
-func (tracker *grabProgressTracker) unsubscribe(token string, stream chan grabProgressEvent) {
+func (tracker *grabProgressTracker) unsubscribe(token string, stream <-chan grabProgressEvent) {
 	tracker.tracker.Unsubscribe(token, stream)
 }
 func (tracker *grabProgressTracker) publish(event grabProgressEvent) {

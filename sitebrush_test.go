@@ -1089,6 +1089,120 @@ func TestOpenServerControlDatabaseRejectsPathOutsideStorage(t *testing.T) {
 	}
 }
 
+func TestOwnershipControlDatabaseReturnsCapturesOnlyAfterCallback(t *testing.T) {
+	dispatcher, err := startServerControlDatabaseDispatcher(filepath.Join(t.TempDir(), "control.db"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dispatcher.Close()
+	started, release := make(chan struct{}), make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	boundary, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan string, 1)
+	go func() {
+		captured := "before"
+		_ = dispatcher.execute(boundary, serverControlDatabaseWrite, "ownership", func(*sql.DB) error {
+			close(started)
+			<-release
+			captured = "after"
+			return nil
+		})
+		result <- captured
+	}()
+	<-started
+	cancel()
+	select {
+	case <-result:
+		t.Fatal("cancellation returned captures while the worker still owned them")
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case snapshot := <-result:
+		if snapshot != "after" {
+			t.Fatalf("ownership returned before the final write: %q", snapshot)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("callback did not return ownership")
+	}
+}
+
+func TestOwnershipSiteDatabaseReturnsCapturesAfterCancellation(t *testing.T) {
+	for _, debug := range []bool{false, true} {
+		for _, cancellation := range []string{"context", "session"} {
+			t.Run(fmt.Sprintf("debug=%t/%s", debug, cancellation), func(t *testing.T) {
+				database := &siteFileDatabase{writeQueue: make(chan siteDBOperation, 1), stopped: make(chan struct{}), debug: debug}
+				started, release := make(chan struct{}), make(chan struct{})
+				defer func() {
+					select {
+					case <-release:
+					default:
+						close(release)
+					}
+				}()
+				boundary, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				session := make(chan struct{})
+				result := make(chan string, 1)
+				go func() {
+					captured := "before"
+					operation := siteDBOperation{kind: siteDBWorkloadWrite, stop: session, run: func(context.Context, *sql.DB) siteDBOperationResponse {
+						close(started)
+						<-release
+						captured = "after"
+						return siteDBOperationResponse{analytics: browserstats.StorageResult{Text: captured}}
+					}}
+					response := database.runOperation(boundary, operation)
+					result <- response.analytics.Text + "/" + captured
+				}()
+				go func() { database.completeOperationWithDatabase(<-database.writeQueue, nil) }()
+				<-started
+				if cancellation == "context" {
+					cancel()
+				} else {
+					close(session)
+				}
+				select {
+				case <-result:
+					t.Fatal("cancellation returned captures before callback completion")
+				case <-time.After(30 * time.Millisecond):
+				}
+				close(release)
+				select {
+				case snapshot := <-result:
+					if snapshot != "after/after" {
+						t.Fatalf("incomplete result transfer: %q", snapshot)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("site worker did not return ownership")
+				}
+			})
+		}
+	}
+}
+
+func BenchmarkOwnershipControlDatabaseMessage(b *testing.B) {
+	dispatcher, err := startServerControlDatabaseDispatcher(filepath.Join(b.TempDir(), "control.db"), false)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { _ = dispatcher.Close() })
+	callback := func(*sql.DB) error { return nil }
+	b.ReportAllocs()
+	for b.Loop() {
+		if err := dispatcher.execute(context.Background(), serverControlDatabaseRead, "ownership-benchmark", callback); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func TestServerControlDatabaseDispatcherLimitsAccessAndCancelsReply(t *testing.T) {
 	dispatcher, err := startServerControlDatabaseDispatcher(filepath.Join(t.TempDir(), "control.db"), false)
 	if err != nil {
@@ -25087,17 +25201,22 @@ func TestControlDatabaseShutdownBoundsAnUnfinishedOperation(t *testing.T) {
 		t.Fatal("shutdown hung on an unfinished operation")
 	}
 	select {
-	case err := <-replied:
-		if err == nil {
-			t.Fatal("subscriber did not receive termination")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("subscriber still waiting")
+	case <-replied:
+		t.Fatal("shutdown returned closure ownership while the callback was active")
+	default:
 	}
 	if err := dispatcher.execute(context.Background(), serverControlDatabaseRead, "after-close", func(*sql.DB) error { t.Fatal("stopped dispatcher ran new work"); return nil }); err == nil {
 		t.Fatal("closed dispatcher accepted work")
 	}
 	close(release)
+	select {
+	case err := <-replied:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("finished callback did not return ownership")
+	}
 	for range serverControlDatabaseReaderCount + 1 {
 		select {
 		case worker := <-dispatcher.workersDone:

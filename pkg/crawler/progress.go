@@ -1,6 +1,9 @@
 package crawler
 
-import "time"
+import (
+	"maps"
+	"time"
+)
 
 // ProgressEvent is emitted by page and site import crawlers.
 type ProgressEvent struct {
@@ -27,10 +30,11 @@ type ProgressEvent struct {
 }
 
 type progressTrackerRequest struct {
-	action string
-	token  string
-	stream chan ProgressEvent
-	event  ProgressEvent
+	action     string
+	token      string
+	stream     chan ProgressEvent
+	subscriber <-chan ProgressEvent
+	event      ProgressEvent
 }
 
 // ProgressTracker routes progress events by token using a channel actor.
@@ -49,22 +53,30 @@ func NewProgressTracker() *ProgressTracker {
 	return tracker
 }
 
-func (tracker *ProgressTracker) Subscribe(token string) chan ProgressEvent {
+func (tracker *ProgressTracker) Subscribe(token string) <-chan ProgressEvent {
 	stream := make(chan ProgressEvent, 1)
 	tracker.requests <- progressTrackerRequest{action: "subscribe", token: token, stream: stream}
 	return stream
 }
 
-func (tracker *ProgressTracker) Unsubscribe(token string, stream chan ProgressEvent) {
-	tracker.requests <- progressTrackerRequest{action: "unsubscribe", token: token, stream: stream}
+func (tracker *ProgressTracker) Unsubscribe(token string, stream <-chan ProgressEvent) {
+	tracker.requests <- progressTrackerRequest{action: "unsubscribe", token: token, subscriber: stream}
 }
 
 func (tracker *ProgressTracker) Publish(event ProgressEvent) {
-	tracker.requests <- progressTrackerRequest{action: "publish", token: event.Token, event: event}
+	tracker.requests <- progressTrackerRequest{action: "publish", token: event.Token, event: copyProgressEvent(event)}
+}
+
+// Publishers, retained state and every subscriber own independent nested data.
+// A slow subscriber can retain or edit its result without changing later replies.
+func copyProgressEvent(event ProgressEvent) ProgressEvent {
+	event.FailedURLs = append([]string(nil), event.FailedURLs...)
+	event.FailedReasons = maps.Clone(event.FailedReasons)
+	return event
 }
 
 func (tracker *ProgressTracker) loop() {
-	subscribersByToken := make(map[string]map[chan ProgressEvent]struct{})
+	subscribersByToken := make(map[string]map[<-chan ProgressEvent]chan ProgressEvent)
 	latestEventByToken := make(map[string]retainedProgressEvent)
 	for request := range tracker.requests {
 		now := time.Now()
@@ -76,33 +88,37 @@ func (tracker *ProgressTracker) loop() {
 		switch request.action {
 		case "subscribe":
 			if _, exists := subscribersByToken[request.token]; !exists {
-				subscribersByToken[request.token] = make(map[chan ProgressEvent]struct{})
+				subscribersByToken[request.token] = make(map[<-chan ProgressEvent]chan ProgressEvent)
 			}
-			subscribersByToken[request.token][request.stream] = struct{}{}
+			subscribersByToken[request.token][request.stream] = request.stream
 			if retainedEvent, exists := latestEventByToken[request.token]; exists {
-				request.stream <- retainedEvent.event
+				request.stream <- copyProgressEvent(retainedEvent.event)
 			}
 		case "unsubscribe":
 			group := subscribersByToken[request.token]
-			delete(group, request.stream)
+			stream, subscribed := group[request.subscriber]
+			if !subscribed {
+				continue
+			}
+			delete(group, request.subscriber)
 			if len(group) == 0 {
 				delete(subscribersByToken, request.token)
 			}
-			close(request.stream)
+			close(stream)
 		case "publish":
 			latestEventByToken[request.token] = retainedProgressEvent{event: request.event, updatedAt: now}
-			for stream := range subscribersByToken[request.token] {
+			for _, stream := range subscribersByToken[request.token] {
 				// Every progress event is a complete snapshot. Replacing a stale
 				// snapshot keeps publishers non-blocking while ensuring that a
 				// reconnecting or slow subscriber observes the newest state.
 				select {
-				case stream <- request.event:
+				case stream <- copyProgressEvent(request.event):
 				default:
 					select {
 					case <-stream:
 					default:
 					}
-					stream <- request.event
+					stream <- copyProgressEvent(request.event)
 				}
 			}
 		}

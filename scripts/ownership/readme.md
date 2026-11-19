@@ -1,0 +1,92 @@
+# Аудит владения состоянием SiteBrush
+
+Исходная точка: `9c6d5be` (до рефакторинга). Область инвентаризации — все Go-файлы репозитория, включая другие платформы, тесты и вспомогательные программы; зависимости не переписываются. На исходной точке — 501 Go-файл. Обзор всех исходников выявляет кандидатов; подробные проверки границ и исправления перечислены ниже. Это не заявление о доказанной безопасности каждого объекта во всей программе.
+
+## Воспроизводимая инвентаризация
+
+```sh
+CGO_ENABLED=0 go run ./scripts/ownership > ownership.tsv
+```
+
+GitHub workflow `Ownership` сохраняет этот отчёт как artifact `ownership-inventory` для конкретного commit. Команда разбирает AST всех Go-файлов независимо от текущего GOOS и build tags. Для каждого файла фиксирует охват, для production-кода — глобальные объявления, поля со ссылочными типами, goroutines, отправки, закрытия каналов и записи в захваченные переменные. В каждой строке есть путь, начальная/конечная строка и функция.
+
+Результат — список кандидатов для проверки, а не автоматическая классификация уязвимостей. Именованные типы, interfaces, методы, вложенные замыкания и aliases требуют ручного разбора. Копирование struct или наличие канала не считается доказательством независимости. Тесты/fixtures учитываются в охвате, но не объявляются production-нарушениями. Отчёт генерируется из текущего дерева, поэтому его строки соответствуют commit CI; приведённые ниже ссылки относятся к исходной точке.
+
+## Реестр находок и владельцев
+
+P0 — подтверждённый критический сценарий нарушения безопасности/целостности; P1 — небезопасная конкурентная граница или жизненный цикл; P2 — архитектурный долг или требующая дополнительного доказательства область; P3 — проверенное допустимое immutable sharing/низкоуровневый механизм в указанной границе. Наличие atomic само по себе не определяет приоритет. Подтверждённого внешнего exploit уровня P0 этим аудитом не установлено.
+
+| ID, приоритет | Исходная граница | Кто владеет и кто обращается | Конкретный риск и решение |
+|---|---|---|---|
+| DB-1, P1, исправлено | `sitebrush.go:1122–1206`, `runWorker` / `execute` | Один control writer и пять readers; вызывающий запрос передаёт callback | После enqueue вызывающий возвращался по отмене, worker продолжал менять захваченные outputs. Теперь старт подтверждается отдельным каналом, после старта caller ждёт возврата владения через reply. |
+| DB-2, P1, исправлено | `sitebrush.go:1499–1523`, `completeOperationWithDatabase`; `1700–1764`, `runOperation` | Content/control/analytics DB workers, вызывающие HTTP и фоновые операции | Та же проблема для транзакций, миграций и filesystem compensation. Handshake действует и в debug-пути, отменённые до старта задания не выполняются. |
+| AN-1, P1, исправлено | `sitebrush.go:1848–1878`, `siteAnalyticsRepository.Exchange` | Analytics worker владеет `analyticsArchiveHours`, результат раньше был общей локальной переменной | `Session` могла вернуть управление по Stop одновременно с записью `result`. `Session` удалена; worker формирует `StorageResult` внутри себя и передаёт его в `siteDBOperationResponse`. |
+| AUTH-1, P1, исправлено | `pkg/aicapability/capability.go:129–491`, `Manager.run` / `request` | Manager владеет capabilities, sessions, pairings и OAuth; HTTP/MCP получают результаты | Возвращённые `Capability.Scopes` и `Session.Scopes` сохраняли backing arrays внутренних записей. Изменение ответа могло менять последующие решения владельца. Единая граница ответа копирует вложенные scopes, pairing scopes, redirects и списки; входные slices копируются до передачи. Это внутренний API-риск, не доказанный удалённый exploit. |
+| IMP-1, P1, исправлено | `pkg/crawler/progress.go:62–110`, `Publish` / `loop` | Tracker владеет retained progress; publisher и несколько subscribers имели aliases | `FailedReasons` и `FailedURLs` разделялись между publisher, retained snapshot и подписчиками. Теперь каждый получает независимые вложенные данные; выход подписчика — receive-only channel, повторная отписка безопасна. |
+| DB-3, P1, исправлено | `pkg/database/database.go:327–353`, `withSerializedConnectionFor` | Совместимый serialized DB pipeline | Callback продолжал использовать захваченные данные после возврата по ctx.Done. Тот же протокол начала и возврата владения; прямой синхронный путь сохраняется. |
+| CFG-1, P1, исправлено | `pkg/database/database.go:359–366`, `realtimeConverter` / `SetRealtimeConverter` | Раньше setter и запросы читали/писали глобальную функцию | Параллельный setter и чтение function value не имели синхронизации. Отдельный процесс теперь владеет callback; чтение передаёт скаляры, замена подтверждается после предыдущего вызова. Стоимость message passing относится к совместимому realtime DB API, не к статике; требует отдельного измерения. |
+| SEC-1, P1, исправлено | `pkg/securitysync/securitysync.go:108–112,151–186`, `Request` / `run` | Reputation owner владеет evidence maps; транспорт передаёт сигналы | Request содержал mutable pointer; недоставленный reply мог удерживать owner до глобального stop. Сигнал передаётся значением с явным Submit, запрос содержит Session; отмена проверяется до обработки и при ответе. Все production callers передают Session. |
+| POL-1, P2, исправлено | `pkg/publicsite/publicsite.go:168–179`, `PolicyEnabled` | Front owns State | Read-modify-write readiness мог восстановить старый publisher после Set. Production enabler уже сравнивал revision, но публичный метод оставался опасным. Оба пути используют одну команду compare-and-enable; `stateTask` передаёт State значениями. |
+| IMP-2, P2, исправлено | `pkg/crawler/parser.go:523–536`, `KnownResourceKindsByExtension` | Общая справочная таблица | Экспорт mutable map позволял стороннему caller изменить классификацию ресурсов. Таблица стала приватной, существующие scalar lookup-функции сохранены. |
+| HTTP-1, P2, исключение | `sitebrush.go:140`, `publicHTTPInFlight` | Ingress admission, все HTTP goroutines | Atomic счётчик ограничивает in-flight HTTP/1.0, не хранит credentials/policies. Канальный общий admission мог сериализовать fast path. Сохранён до измеренной замены, добавление других atomics запрещает архитектурная проверка. |
+| STATIC-1, P2, исключение | `pkg/publicsite/runtime.go:108–207`, `PublicRuntime.publish` / `acquire`, `publicGeneration.acquire` / `retire` | Publication owner создаёт поколения; HTTP только читает содержимое и участвует в lifetime | `current` публикует полностью подготовленный snapshot; `readers` защищает закрытие roots и RAM leases. Это разделяемое изменяемое управление временем жизни, не устранённое рефакторингом. Требуется отдельное доказательство вложенной immutable структуры и benchmark альтернативы. |
+| POL-2, P2, сохранено | `pkg/publicsite/policy.go:304–512,590–611,816–917`, `NewCatalog` / `Reload` / `decidePolicy` | Catalog владеет policy indexes и revisions | Снимки содержат maps/slices, shallow copy сам по себе недостаточен. Текущий путь декодирует новое дерево, публикует готовое поколение, копирует выдаваемые AllowedIPs/ChrootEntries; stale prepare отклоняется revision. Новые поля обязаны сохранять эти границы. |
+| SEC-2, P2, сохранено | `pkg/securitysync/securitysync.go:151–186`, `run` | Reputation owner | Загрузка/сохранение evidence синхронны внутри отдельного reputation worker. Это потенциальная задержка, а не найденный mutable alias. Асинхронное persistence требует отдельного протокола порядка и durable acknowledgement; здесь не меняется. |
+| HTTP-2, P3 в указанной границе | `pkg/httpsecurity/attackguard.go:235–289`, `runAttackGuardShard`; `throttleguard.go:151–192`, `runThrottleShard` | Каждая shard owns свои bans/counters; persistence получает snapshots | Карты локальны владельцам; вложенный ReasonLog копируется при ответе. Обязательные решения не заменены телеметрией после выдачи. Потери optional observations учитываются отдельно. Это не доказательство всех комбинаций обновления правил. |
+| TD-1, P2, сохранено | `sitebrush.go:63309–63414`, `privateTestDriveGate`; control DB transactions | Trial/billing rows — DB writer, запрос получает значения | Нельзя переносить проверку ownership за пределы согласованной активации/оплаты. Исправленный DB borrow закрывает отмену с captured outputs. Более широкий аудит бизнес-TOCTOU между разными DB partitions остаётся отдельной проверкой, текущие transactional guards сохранены. |
+| AUTH-2, P2, сохранено | `sitebrush.go:21187–21205`, `accountTransaction`; `pkg/accountauth`, `accountpasskey`, `accounttotp` | Аккаунтные изменения внутри caller-owned SQL transactions | Replay и consume должны фиксироваться в одной транзакции. Не вводятся независимые Get/Set; существующие replay/concurrency tests входят в CI. Исправление DB callback lifetime не доказывает автоматически все многотранзакционные бизнес-сценарии. |
+| AN-2, P2, сохранено | `sitebrush.go:5362–5835`, `runBrowserAnalytics` / `runSecurityAnalytics`; `pkg/analytics/store.go:165–220`, `Store.run` | По одному владельцу изменяемого дерева/хранилища на соответствующую сессию | Worker-owned maps не должны попадать в отчёты живыми aliases. В этой поставке исправлен подтверждённый callback boundary; новые формы отчётов требуют проверки вложенных ссылок. Очереди observations остаются ограниченными, статика их не ждёт. |
+| NET-1, P2, сохранено | `sitebrush.go:38429–38468,39158–39178`, `serveHostingSnapshotNetChanConnection` / delivery worker; `pkg/updateannounce/contact.go`, Hub | Registry хранит права контакта через channels; каждый transport session owns контакт | Проверять payload ownership, закрытие reply и повторную доставку. Изменения transport/dependency не выполнялись. `recover` при отправке в закрытый legacy response channel не является доказательством lifecycle-безопасности; нужны session channels при дальнейшем изменении этого API. |
+| NET-2, P3 в адаптере | `pkg/netchantransport/transport.go`, dial/listen lifecycle; `pkg/mailout/mailout.go`, SMTP cancellation | Связь передаётся сессии; стандартная библиотека owns низкоуровневую синхронизацию | Concurrent Close для отмены net.Conn допускается контрактом внешнего API. Это разрешённая boundary-синхронизация; не заменять её собственной общей памятью. |
+| LOG-1, P3 в указанной границе | `pkg/applog/applog.go:104–119`, `Journal.Write`; `134–248`, `Journal.run` | Journal owns active file; archive worker owns отдельный root | Write копирует входной byte slice; закрытие archive capabilities следует за завершением worker. Ротация/компрессия остаются отдельными операциями с канальной передачей имён. |
+| TLS-1, P2, сохранено | `sitebrush.go`, autoCert certificate cache; `pkg/channelacme/acme.go`, `runIssuer` | Cache owner меняет entries; TLS читает подготовленные certificates | Указатели на сертификаты допустимы только после полной подготовки, включая Leaf/private key state. Допустимость immutable sharing не распространяется на последующую запись в tls.Certificate. Зависимости и TLS transport не переписывались. |
+| CFG-2, P3 в указанной границе | `pkg/serverip/serverip.go:195–285`, `run` / `copySettings` / `inventorySnapshot`; `pkg/aiingress/networks.go`, `Replace` | Отдельные owners settings/ranges | Settings и ответы копируются; range replacement декодируется до передачи, предыдущие поколения отклоняются. Config callbacks после передачи должны relinquish свои mutable captures. |
+| BG-1, P2, сохранено | `pkg/sitefreeze/gate.go:58–208`, `Gate.run` / `Enter`; `pkg/imageprepare/imageprepare.go`, `Start`; `pkg/aiimport/import.go` | Gate owns admission; image/import worker owns job/buffer | Lease не должен использоваться несколькими владельцами; input reader/buffer после send принадлежит worker. Результаты import/progress проверены и исправлены отдельно. Индивидуальные shutdown/abandonment тесты сохраняются. |
+| BG-2, P3 в указанной границе | `pkg/appupdate/progress.go`, `runMeasured`; `pkg/requesttiming/timing.go:99–149`, `Collector.run` | Measured task joins before resource release; collector owns counters | Скалярные сообщения и явный join сохраняют lifetime. Отчёт collector не раскрывает живую карту счётчиков. |
+| DIAG-1, P2, сохранено | `pkg/goprofile/report.go:202–390`, `Session.run`; `pkg/geoip/geoip.go:119–172`, `Resolver.run` | Owners хранят профили/lookup connection; workers возвращают результаты | Дескрипторы, профили и cancel contacts требуют проверки на каждой новой форме результата. Здесь не добавлено параллельной мутации или нового auto-profiling. |
+| GLOBAL-1, P3 при сохранении freeze | Dictionaries, regexp, embedded assets/trust; initialization-only platform handles | Инициализация до старта readers | Immutable таблицы не требуют actor на каждое чтение. Go не делает map или exported error variable константой: запрет дальнейшей записи остаётся архитектурным требованием. |
+
+Оставшиеся P2 — явно ограниченные области, а не сертификат отсутствия гонок. В частности, исключения STATIC-1/HTTP-1, lifecycle старых NetChan response channels и многосоставные операции между partitions требуют дальнейших измерений/проверок. Приватные поля и направленные каналы затрудняют неправильный доступ, но не заменяют Rust borrow checker.
+
+## Контракты изменённых API
+
+- DB callbacks: до handshake caller может отменить задание без выполнения; после handshake worker owns captures до reply. Caller не должен передавать captures, доступные другим независимым goroutines. Callback не должен запускать escaping goroutine. Зависший внешний callback нельзя безопасно «забыть» и одновременно вернуть caller его данные; shutdown deadline сообщает unfinished worker.
+- Analytics: `StorageRequest` содержит строки, скаляры и контакты каналов; результат создаёт worker. Общего mutable `result` между Session и caller больше нет.
+- AI manager: входы копируются синхронно; owner копирует вложенные результаты до отправки. `Session.Done` остаётся receive-only контактом для отзыва. Изменение возвращённых scopes не меняет разрешения.
+- Progress: `Subscribe` теперь возвращает `<-chan ProgressEvent`, `Unsubscribe` принимает receive-only канал. Закрывает его только tracker. Publisher и каждый subscriber получают свои maps/slices.
+- Securitysync: `Request.Signal` теперь значение; `Submit` отличает отправку от query. `Reply` — send-only для worker, `Session` — receive-only. Производственный caller задаёт Session и не закрывает reply при отмене.
+- Converter: setter передаёт исключительное владение callback/captures процессу. Нельзя менять эти captures из другой goroutine или reenter converter из callback. Следующая подтверждённая замена возвращает право дальнейшего использования предыдущих captures.
+- `crawler.KnownResourceKindsByExtension` больше не экспортируется. Вместо изменения словаря используются существующие `HasAllowedResourceExtension` / `ResourceKindFromURL` lookup API.
+
+Неизвестные outcomes после внешнего crash нельзя автоматически повторять без существующего durable operation ID/version guard. Ограничения очередей сохранены; cancel до старта не выполняет callback, после фиксации отмена не откатывает уже совершённую запись. Обновление public policy подтверждается только после применения допустимого поколения; поздний результат не получает права открыть заблокированный сайт.
+
+## Проверки и границы подтверждения
+
+`Ownership` запускает полный `go test ./...` на Linux/macOS и отдельный `go test -race ./...` на Linux. CGO включён только для race runtime, обычные тесты и server artifacts остаются pure Go. Existing Security workflow проверяет архитектуру, security tools и server crosscompile, включая OpenBSD. Tests добавлены для captured outputs, отмены после старта, shutdown timeout, вложенных прав AI/OAuth, независимых progress replies, отменённой reputation-задачи и stale readiness.
+
+Локальные массовые tests/load runs не выполняются по указанию пользователя. В текущей локальной среде попытка запустить только AST inventory также не прошла: выбранные Go toolchains не смогли разрешить стандартные пакеты. Это ограничение локального запуска; актуальный результат inventory/tests берётся из GitHub CI, а не предполагается успешным.
+
+Новые архитектурные проверки запрещают дополнительные atomics, в том числе через алиасы import, кроме трёх именованных существующих исключений. Это ограниченная статическая проверка, не анализ всех mutable aliases. Race detector проверяет только исполненные пути; логические TOCTOU требуют отдельных сценариев.
+
+## Измерения, которые выполняет пользователь
+
+До сравнения сохранить baseline `9c6d5be` и commit PR, использовать одинаковые Go version, hardware, GOMAXPROCS, corpus, TLS, security, analytics и режим `-public-static-mode=snapshot`. Не измерять два сервера одновременно на одном CPU. Публичную политику подготовить до начала замеров. Проверять также отказ динамического процесса, приватный Test Drive и отзыв доступа до начала ответа. Уже начатая передача может завершиться; отправленные байты невозможно отозвать.
+
+Микробенчмарки отдельно показывают стоимость control-plane messages, snapshots и статического пути. На каждой версии запускать одинаковую команду:
+
+```sh
+CGO_ENABLED=0 go test -run '^$' -bench 'Benchmark(Public|AnalyticsStatic)' -benchmem -count=5 .
+CGO_ENABLED=0 go test -run '^$' -bench 'BenchmarkOwnership' -benchmem -count=5 . ./pkg/database
+```
+
+Для load tests на своём стенде:
+
+```sh
+CGO_ENABLED=0 go run ./scripts/publicload \
+  -url https://YOUR-PUBLISHED-DOMAIN/ \
+  -requests 10000 -concurrency 600 -warmup 1000 -repeat 5
+```
+
+Повторить с `-new-connections`, затем с `-http2`, отдельно HTTP без TLS. Задать реальный ожидаемый `-bytes` и `-sha256`, если corpus позволяет фиксировать тело. Сопоставлять SuccessfulPerSecond, p50/p95/p99 SuccessfulTTFB, статусы, transport errors, B/op и allocs/op. 429/503 и неверные тела не улучшают полезный RPS. CPU/heap/block profiles снимать отдельной одинаковой серией, чтобы профилирование не исказило основное сравнение; mutex profile относится к runtime/зависимостям, не служит оправданием прикладных locks.
+
+Для ориентира 95% nginx нужен одинаковый corpus/ответы и сопоставимые условия HTTP/TLS, кэширования, logging и нагрузки. Защита и analytics SiteBrush включены. До этих измерений отсутствие деградации и цель 95% nginx **не подтверждены**. На OpenBSD пользователь отдельно проверяет запуск, shutdown при активных запросах, обновление policies и certificates, приватный Test Drive и освобождение ресурсов поколений. Crosscompile не подтверждает runtime-поведение OpenBSD.
