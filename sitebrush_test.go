@@ -20237,7 +20237,14 @@ func TestBrowserAnalyticsReturnsStateBeforeDatabaseWrite(t *testing.T) {
 	results := make(chan browserAnalyticsStorageResult, 2)
 	stop := make(chan struct{})
 	finished := make(chan struct{})
-	defer close(stop)
+	// Close the session on any early test failure as well as on normal exit.
+	t.Cleanup(func() {
+		select {
+		case <-stop:
+		default:
+			close(stop)
+		}
+	})
 	go func() { defer close(finished); app.browserAnalyticsStorage(jobs, results, stop) }()
 	state := browserstats.New(time.Now().UTC())
 	first := browserstats.Event{Visitor: "1111111111111111", View: "2222222222222222", Sequence: 1, Path: "/", Persistent: true}
@@ -20284,10 +20291,13 @@ func TestBrowserAnalyticsReturnsStateBeforeDatabaseWrite(t *testing.T) {
 		t.Fatal("snapshot and live state were not isolated")
 	}
 	close(jobs)
+	// A completed SQL operation accrues idle work budget. Closing jobs alone
+	// cannot interrupt that delay; production shutdown signals the session.
+	close(stop)
 	select {
 	case <-finished:
 	case <-time.After(time.Second):
-		t.Fatal("storage worker leaked")
+		t.Fatal("storage worker did not stop after session cancellation")
 	}
 }
 
