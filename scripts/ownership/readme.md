@@ -69,6 +69,8 @@ Linux-прогон также обнаружил ошибку классифик
 
 Порог покрытия БД 90% сохранён. Добавлены проверки отказа при частичном metadata cursor и отмены unclaimed callback; изоляция вложенных списков capabilities/sessions проверяется через публичный API. Новые результаты CI относятся к commit с этими исправлениями и не следуют из успешного предыдущего macOS-прогона.
 
+После `0b085ea` полный Linux/macOS test suite и весь Security workflow прошли. Полный race-прогон не сообщил data race, но обнаружил недетерминированное ожидание в `TestAnalyticsSecurityObservesControllerAndPersistsSummary`: тест опрашивал SQL с трёхсекундным пределом, хотя observer намеренно оплачивает каждую единицу работы 99 единицами паузы, включая холодное открытие SQLite. Fixture теперь готовит пустое хранилище до запуска collector, получает typed acknowledgement после настоящего `SaveSecurity` reply и проверяет сохранённый checkpoint одним чтением. SQL errors не скрываются; privacy, incident bytes и все счётчики по-прежнему проверяются. Ограничение фоновой нагрузки и production HTTP path не изменены.
+
 ## Контракты изменённых API
 
 - DB callbacks: до handshake caller может отменить задание без выполнения; после handshake worker owns captures до reply. Caller не должен передавать captures, доступные другим независимым goroutines. Callback не должен запускать escaping goroutine. Зависший внешний callback нельзя безопасно «забыть» и одновременно вернуть caller его данные; shutdown deadline сообщает unfinished worker.

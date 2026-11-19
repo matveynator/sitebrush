@@ -65,9 +65,13 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Test concurrent ownership and all existing behavior
+      - name: Verify observed ownership regressions with race instrumentation
         run: >-
           go test -race -count=1 -timeout=180s .
           -run '^Test(ConcurrentServiceMailIdentityCreationKeepsOnePersistedKey|HostingSnapshotDiskThresholdSendsSingleOwnerEmail|EmailSubmissionRequiresInitializedDeliveryOwner|PublicTrialWildcard)'
+      - name: Verify security checkpoint acknowledgement repeatedly
+        run: >-
+          go test -race -count=3 -timeout=180s .
+          -run '^TestAnalyticsSecurity(ObservesControllerAndPersistsSummary|QueueCannotBlockResponse)$'
       - name: Test all packages and application with race instrumentation
         run: go test -race -count=1 -timeout=45m ./...

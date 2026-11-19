@@ -20582,13 +20582,45 @@ func TestAnalyticsGoalsUseSeparateSiteAnalyticsDatabase(t *testing.T) {
 	}
 }
 
+type analyticsSecurityCheckpoint struct {
+	snapshot string
+	err      error
+}
+
+type analyticsSecurityObservedRepository struct {
+	browserstats.Repository
+	committed chan<- analyticsSecurityCheckpoint
+	session   <-chan struct{}
+}
+
+func (repository analyticsSecurityObservedRepository) Exchange(request browserstats.StorageRequest) browserstats.StorageResult {
+	result := repository.Repository.Exchange(request)
+	if request.Operation == browserstats.SaveSecurity {
+		// The acknowledgement follows the real storage reply. Only immutable
+		// checkpoint text crosses back to the test's consumer.
+		select {
+		case repository.committed <- analyticsSecurityCheckpoint{snapshot: request.State, err: result.Err}:
+		case <-repository.session:
+		}
+	}
+	return result
+}
+
 func TestAnalyticsSecurityObservesControllerAndPersistsSummary(t *testing.T) {
 	app, _ := newTestApplication(t)
+	// Cold SQLite setup is unrelated to the observer's deliberately throttled
+	// work budget. Prepare it before starting the collector's session.
+	initial := app.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.ReadSecurity, Domain: "localhost"})
+	if !errors.Is(initial.Err, sql.ErrNoRows) {
+		t.Fatalf("expected empty security checkpoint: %+v", initial)
+	}
 	app.securityAnalytics = make(chan siteAnalyticsEvent, 8)
 	app.securityLosses = make(chan string, 8)
 	app.analyticsFlushInterval = 10 * time.Millisecond
 	stop := make(chan struct{})
 	done := make(chan struct{})
+	committed := make(chan analyticsSecurityCheckpoint, 4)
+	app.analyticsStorage = analyticsSecurityObservedRepository{Repository: app.analyticsStorage, committed: committed, session: stop}
 	go func() { defer close(done); app.runSecurityAnalytics(stop) }()
 	defer func() { close(stop); <-done }()
 	handler := app.analyticsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(401); _, _ = w.Write([]byte("denied")) }))
@@ -20598,17 +20630,21 @@ func TestAnalyticsSecurityObservesControllerAndPersistsSummary(t *testing.T) {
 	request := httptest.NewRequest("POST", "http://localhost/.env?login&password=never-store", nil)
 	request.RemoteAddr = "192.0.2.8:12345"
 	handler.ServeHTTP(httptest.NewRecorder(), request)
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.NewTimer(30 * time.Second)
+	defer deadline.Stop()
 	for {
-		stored := app.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.ReadSecurity, Domain: "localhost"})
-		if stored.Err == nil {
+		select {
+		case checkpoint := <-committed:
+			if checkpoint.err != nil {
+				t.Fatalf("persist security checkpoint: %v", checkpoint.err)
+			}
 			var state browserstats.SecurityState
-			if err := json.Unmarshal([]byte(stored.Text), &state); err != nil {
+			if err := json.Unmarshal([]byte(checkpoint.snapshot), &state); err != nil {
 				t.Fatal(err)
 			}
 			if len(state.Incidents) == 1 {
-				if strings.Contains(stored.Text, "never-store") || state.Incidents[0].IP != "192.0.2.8" || state.Incidents[0].Examples[0].Bytes != 6 {
-					t.Fatalf("unsafe or incomplete incident: %s", stored.Text)
+				if strings.Contains(checkpoint.snapshot, "never-store") || state.Incidents[0].IP != "192.0.2.8" || len(state.Incidents[0].Examples) == 0 || state.Incidents[0].Examples[0].Bytes != 6 {
+					t.Fatalf("unsafe or incomplete incident: %s", checkpoint.snapshot)
 				}
 				dailyActivity := 0
 				for _, count := range state.ActivityDays {
@@ -20630,13 +20666,15 @@ func TestAnalyticsSecurityObservesControllerAndPersistsSummary(t *testing.T) {
 				if incidentTypeCount != 1 {
 					t.Fatalf("daily problem type count = %d, want one incident", incidentTypeCount)
 				}
-				break
+				stored := app.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.ReadSecurity, Domain: "localhost"})
+				if stored.Err != nil || stored.Text != checkpoint.snapshot {
+					t.Fatalf("acknowledged checkpoint was not persisted: %+v", stored)
+				}
+				return
 			}
+		case <-deadline.C:
+			t.Fatal("security collector did not acknowledge a persisted incident")
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("security summary was not persisted")
-		}
-		time.Sleep(10 * time.Millisecond)
 	}
 }
 
