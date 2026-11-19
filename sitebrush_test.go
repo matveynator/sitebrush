@@ -1089,6 +1089,120 @@ func TestOpenServerControlDatabaseRejectsPathOutsideStorage(t *testing.T) {
 	}
 }
 
+func TestOwnershipControlDatabaseReturnsCapturesOnlyAfterCallback(t *testing.T) {
+	dispatcher, err := startServerControlDatabaseDispatcher(filepath.Join(t.TempDir(), "control.db"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dispatcher.Close()
+	started, release := make(chan struct{}), make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	boundary, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan string, 1)
+	go func() {
+		captured := "before"
+		_ = dispatcher.execute(boundary, serverControlDatabaseWrite, "ownership", func(*sql.DB) error {
+			close(started)
+			<-release
+			captured = "after"
+			return nil
+		})
+		result <- captured
+	}()
+	<-started
+	cancel()
+	select {
+	case <-result:
+		t.Fatal("cancellation returned captures while the worker still owned them")
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case snapshot := <-result:
+		if snapshot != "after" {
+			t.Fatalf("ownership returned before the final write: %q", snapshot)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("callback did not return ownership")
+	}
+}
+
+func TestOwnershipSiteDatabaseReturnsCapturesAfterCancellation(t *testing.T) {
+	for _, debug := range []bool{false, true} {
+		for _, cancellation := range []string{"context", "session"} {
+			t.Run(fmt.Sprintf("debug=%t/%s", debug, cancellation), func(t *testing.T) {
+				database := &siteFileDatabase{writeQueue: make(chan siteDBOperation, 1), stopped: make(chan struct{}), debug: debug}
+				started, release := make(chan struct{}), make(chan struct{})
+				defer func() {
+					select {
+					case <-release:
+					default:
+						close(release)
+					}
+				}()
+				boundary, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				session := make(chan struct{})
+				result := make(chan string, 1)
+				go func() {
+					captured := "before"
+					operation := siteDBOperation{kind: siteDBWorkloadWrite, stop: session, run: func(context.Context, *sql.DB) siteDBOperationResponse {
+						close(started)
+						<-release
+						captured = "after"
+						return siteDBOperationResponse{analytics: browserstats.StorageResult{Text: captured}}
+					}}
+					response := database.runOperation(boundary, operation)
+					result <- response.analytics.Text + "/" + captured
+				}()
+				go func() { database.completeOperationWithDatabase(<-database.writeQueue, nil) }()
+				<-started
+				if cancellation == "context" {
+					cancel()
+				} else {
+					close(session)
+				}
+				select {
+				case <-result:
+					t.Fatal("cancellation returned captures before callback completion")
+				case <-time.After(30 * time.Millisecond):
+				}
+				close(release)
+				select {
+				case snapshot := <-result:
+					if snapshot != "after/after" {
+						t.Fatalf("incomplete result transfer: %q", snapshot)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("site worker did not return ownership")
+				}
+			})
+		}
+	}
+}
+
+func BenchmarkOwnershipControlDatabaseMessage(b *testing.B) {
+	dispatcher, err := startServerControlDatabaseDispatcher(filepath.Join(b.TempDir(), "control.db"), false)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { _ = dispatcher.Close() })
+	callback := func(*sql.DB) error { return nil }
+	b.ReportAllocs()
+	for b.Loop() {
+		if err := dispatcher.execute(context.Background(), serverControlDatabaseRead, "ownership-benchmark", callback); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func TestServerControlDatabaseDispatcherLimitsAccessAndCancelsReply(t *testing.T) {
 	dispatcher, err := startServerControlDatabaseDispatcher(filepath.Join(t.TempDir(), "control.db"), false)
 	if err != nil {
@@ -1480,7 +1594,11 @@ func TestPublicStaticSecurityObservesAfterResponseAndDropsWhenFull(t *testing.T)
 
 func TestTestDriveLookupFormerlyUsedByPublicGateOpensControlDatabase(t *testing.T) {
 	root := t.TempDir()
-	application := &App{storagePath: root, storageRealRoot: root}
+	realRoot, rootErr := prepareStorageJailRoot(root)
+	if rootErr != nil {
+		t.Fatal(rootErr)
+	}
+	application := &App{storagePath: root, storageRealRoot: realRoot}
 	_, _, err := application.privateTestDrive(context.Background(), "fast.example")
 	if err == nil {
 		t.Fatal("an unowned Test Drive lookup unexpectedly succeeded")
@@ -3537,6 +3655,16 @@ func TestHostingAndSupportCentralServersUsePinnedKeyAcrossReverseProxy(t *testin
 	}
 }
 
+func TestEmailSubmissionRequiresInitializedDeliveryOwner(t *testing.T) {
+	application := &App{}
+	if err := application.enqueueEmail(context.Background(), mailout.Message{To: "owner@example.com"}); err == nil {
+		t.Fatal("uninitialized delivery accepted a message")
+	}
+	if application.emailDelivery != nil {
+		t.Fatal("request mutated the application's delivery contact")
+	}
+}
+
 func TestHostingSnapshotDiskThresholdSendsSingleOwnerEmail(t *testing.T) {
 	storagePath := t.TempDir()
 	databasePath := filepath.Join(storagePath, "hostingandsupport.db")
@@ -3550,14 +3678,11 @@ func TestHostingSnapshotDiskThresholdSendsSingleOwnerEmail(t *testing.T) {
 	if err := hostingandsupport.Migrate(context.Background(), database); err != nil {
 		t.Fatal(err)
 	}
-	var messages []mailout.Message
+	messages := make(chan mailout.DeliveryJob, 2)
 	application := &App{
-		storagePath: storagePath,
-		dbPath:      databasePath,
-		sendEmail: func(ctx context.Context, message mailout.Message) error {
-			messages = append(messages, message)
-			return nil
-		},
+		storagePath:   storagePath,
+		dbPath:        databasePath,
+		emailDelivery: messages,
 	}
 	snapshot := hostingandsupport.HostingSnapshot{
 		InstallationID: "installation-1",
@@ -3572,8 +3697,9 @@ func TestHostingSnapshotDiskThresholdSendsSingleOwnerEmail(t *testing.T) {
 	if len(messages) != 1 {
 		t.Fatalf("messages = %d, want 1", len(messages))
 	}
-	if messages[0].MonitorDomain != snapshot.ServerDomain || messages[0].To != "owner@example.com" || !strings.Contains(messages[0].Body, "занято 96%") {
-		t.Fatalf("unexpected alert message: %#v", messages[0])
+	message := (<-messages).Message
+	if message.MonitorDomain != snapshot.ServerDomain || message.To != "owner@example.com" || !strings.Contains(message.Body, "занято 96%") {
+		t.Fatalf("unexpected alert message: %#v", message)
 	}
 }
 
@@ -15992,7 +16118,7 @@ func TestGuestStaticRouteServesPublishedFileWithoutDatabase(t *testing.T) {
 		t.Fatalf("status = %d, want 200, body=%q", response.Code, response.Body.String())
 	}
 	body := response.Body.String()
-	for _, expectedFragment := range []string{"<html><body>fast", "/p/static/visitor.js", "guest_menu.ru.js"} {
+	for _, expectedFragment := range []string{"<html>", "<body>fast", "/p/static/visitor.js", "guest_menu.ru.js"} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("guest static body missing %q in %s", expectedFragment, body)
 		}
@@ -16056,6 +16182,7 @@ func TestSimplifiedExpenseLabelsExistInEveryLanguage(t *testing.T) {
 func TestGuestStaticAnalyticsAvoidsDatabaseAndUsesBrowserCollector(t *testing.T) {
 	storagePath := t.TempDir()
 	application := &App{db: panicSQLExecutor{t: t}, storagePath: storagePath, analyticsEvents: make(chan siteAnalyticsEvent, 1)}
+	initializeServerControlDatabaseForTest(t, application)
 	staticFilePath := filepath.Join(application.domainStaticDir("localhost"), "index.html")
 	if err := os.MkdirAll(filepath.Dir(staticFilePath), 0o755); err != nil {
 		t.Fatal(err)
@@ -16100,7 +16227,7 @@ func TestFilesPageUsesPublicAssetPrefix(t *testing.T) {
 	}
 
 	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?files", nil)
-	files, err := application.listManagedFiles(request.Context(), request, "/")
+	files, err := application.listManagedFiles(request.Context(), request, "/", true)
 	if err != nil {
 		t.Fatalf("list files: %v", err)
 	}
@@ -16113,7 +16240,7 @@ func TestFilesPageUsesPublicAssetPrefix(t *testing.T) {
 	}
 }
 
-func TestManagedFilesVisibleForCurrentURIAndDescendants(t *testing.T) {
+func TestManagedFilesVisibleForCurrentURIAndSharedDescendantResources(t *testing.T) {
 	storagePath := t.TempDir()
 	rawDB, err := sql.Open("sqlite", filepath.Join(storagePath, "sitebrush.db"))
 	if err != nil {
@@ -16138,6 +16265,13 @@ func TestManagedFilesVisibleForCurrentURIAndDescendants(t *testing.T) {
 	application.upsertFileMetadata(context.Background(), "localhost", "docs.png", "/docs", 8, "image/png", "test")
 	application.upsertFileMetadata(context.Background(), "localhost", "child.png", "/docs/child", 9, "image/png", "test")
 	application.upsertFileMetadata(context.Background(), "localhost", "other.png", "/other", 9, "image/png", "test")
+
+	if _, err := rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES('localhost','/docs','Docs','<img src="/p/child.png">',1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rawDB.Exec(`INSERT INTO resource_page_uses(domain,file_name,original_uri,page_path) VALUES('localhost','child.png','/docs/child.png','/docs')`); err != nil {
+		t.Fatal(err)
+	}
 
 	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs?files", nil)
 	files, err := application.listManagedFiles(request.Context(), request, "/docs")
@@ -16429,6 +16563,7 @@ func TestFilesPageDeletesUploadedFileFromURLEncodedForm(t *testing.T) {
 	if err := os.WriteFile(filePath, []byte("test file"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	application.upsertFileMetadata(context.Background(), "localhost", "uploaded.txt", "/", 9, "text/plain", "upload")
 	application.rebuildDomainStorageUsage(context.Background(), "localhost")
 	adminCookie := newAdminSessionCookie(t, application, "admin@example.com")
 	csrfRequest := httptest.NewRequest(http.MethodGet, "http://localhost/?files", nil)
@@ -17056,6 +17191,9 @@ func TestPerSiteDBRouterMigratesUnopenedDatabaseDuringAliasScan(t *testing.T) {
 	if _, err := rawPrimaryDB.Exec(`INSERT INTO domain_aliases(primary_domain,alias_domain,is_verified,dns_a_ok) VALUES(?,?,1,1)`, primaryDomain, aliasDomain); err != nil {
 		t.Fatalf("insert old alias: %v", err)
 	}
+	if _, err := rawPrimaryDB.Exec(`CREATE TABLE users(id INTEGER PRIMARY KEY,domain TEXT,email TEXT,password TEXT,is_admin INTEGER); INSERT INTO users(domain,email,password,is_admin) VALUES(?,'owner@example.org','test-password',1)`, primaryDomain); err != nil {
+		t.Fatal(err)
+	}
 	_ = rawPrimaryDB.Close()
 
 	router := newPerSiteDBRouter(siteDatabaseDir, "localhost", func(migrationCtx context.Context, rawDB *sql.DB, domain string) error {
@@ -17140,6 +17278,104 @@ func TestAuthoritativeDNSLookupFollowsDelegationWithoutRecursiveResolver(t *test
 	}
 	if !sawRootServer || !sawAuthoritativeServer {
 		t.Fatalf("authoritative lookup did not query root and delegated server")
+	}
+}
+
+func TestAuthoritativeDNSJoinsCancelledExchangesBeforeReturning(t *testing.T) {
+	domain := mustDNSNameForTest("example.org.")
+	for _, scenario := range []struct {
+		name    string
+		message dnsmessage.Message
+	}{
+		{"answer", dnsmessage.Message{Header: dnsmessage.Header{RCode: dnsmessage.RCodeSuccess}, Answers: []dnsmessage.Resource{{Header: dnsmessage.ResourceHeader{Name: domain, Type: dnsmessage.TypeTXT}, Body: &dnsmessage.TXTResource{TXT: []string{"verified"}}}}}},
+		{"missing name", dnsmessage.Message{Header: dnsmessage.Header{RCode: dnsmessage.RCodeNameError}}},
+		{"CNAME", dnsmessage.Message{Header: dnsmessage.Header{RCode: dnsmessage.RCodeSuccess}, Answers: []dnsmessage.Resource{{Header: dnsmessage.ResourceHeader{Name: domain, Type: dnsmessage.TypeCNAME}, Body: &dnsmessage.CNAMEResource{CNAME: mustDNSNameForTest("alias.example.org.")}}}}},
+		{"referral", dnsmessage.Message{Header: dnsmessage.Header{RCode: dnsmessage.RCodeSuccess}, Authorities: []dnsmessage.Resource{{Header: dnsmessage.ResourceHeader{Name: domain, Type: dnsmessage.TypeNS}, Body: &dnsmessage.NSResource{NS: mustDNSNameForTest("ns.example.org.")}}}}},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			previous := exchangeDNSMessage
+			started, cancelled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			finished := make(chan struct{})
+			ctx, cancel := context.WithCancel(context.Background())
+			exchangeDNSMessage = func(boundary context.Context, server string, _ dnsmessage.Name, _ dnsmessage.Type) (dnsmessage.Message, error) {
+				if server == "winner" {
+					select {
+					case <-started:
+						return scenario.message, nil
+					case <-boundary.Done():
+						return dnsmessage.Message{}, boundary.Err()
+					}
+				}
+				close(started)
+				<-boundary.Done()
+				close(cancelled)
+				<-release
+				return dnsmessage.Message{}, boundary.Err()
+			}
+			defer func() {
+				cancel()
+				select {
+				case <-release:
+				default:
+					close(release)
+				}
+				<-finished
+				exchangeDNSMessage = previous
+			}()
+			reply := make(chan authoritativeDNSResponse, 1)
+			go func() {
+				defer close(finished)
+				server, message, err := queryAuthoritativeNameServers(ctx, []string{"winner", "borrowed"}, domain, dnsmessage.TypeTXT)
+				reply <- authoritativeDNSResponse{nameServerIP: server, message: message, err: err}
+			}()
+			select {
+			case <-cancelled:
+			case <-time.After(time.Second):
+				t.Fatal("usable answer did not cancel remaining exchanges")
+			}
+			select {
+			case <-finished:
+				t.Fatal("DNS returned while an exchange still borrowed its callback")
+			case <-time.After(20 * time.Millisecond):
+			}
+			close(release)
+			select {
+			case result := <-reply:
+				if result.err != nil || result.nameServerIP != "winner" || !reflect.DeepEqual(result.message, scenario.message) {
+					t.Fatalf("cancelled peer replaced the chosen answer: %+v", result)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("cancelled exchanges did not return ownership")
+			}
+		})
+	}
+}
+
+func TestAuthoritativeDNSCancellationInterruptsPacketRead(t *testing.T) {
+	client, server := net.Pipe()
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	query := []byte("query")
+	finished := make(chan error, 1)
+	go func() {
+		_, err := exchangeDNSPacketOnConnection(ctx, client, "udp", query, 1)
+		finished <- err
+	}()
+	if err := server.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(server, make([]byte, len(query))); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	select {
+	case err := <-finished:
+		if err == nil {
+			t.Fatal("cancelled packet read succeeded")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("DNS cancellation waited for the network deadline")
 	}
 }
 
@@ -18607,15 +18843,15 @@ func TestPublishedBoundaryKeepsAdminMissingPageRecovery(t *testing.T) {
 	}
 	unknownResponse := httptest.NewRecorder()
 	handler.ServeHTTP(unknownResponse, httptest.NewRequest(http.MethodGet, "http://new.example.com/new-page", nil))
-	if unknownResponse.Code != http.StatusNotFound || !strings.Contains(unknownResponse.Body.String(), `href="/new-page?visual"`) {
-		t.Fatalf("unknown domain 404 lost creation link: %d %s", unknownResponse.Code, unknownResponse.Body.String())
+	if unknownResponse.Code != http.StatusNotFound || strings.Contains(unknownResponse.Body.String(), `revision_restore`) || strings.Contains(unknownResponse.Body.String(), `?visual`) {
+		t.Fatalf("unknown domain disclosed administrative controls: %d %s", unknownResponse.Code, unknownResponse.Body.String())
 	}
 	localForwardedRequest := httptest.NewRequest(http.MethodGet, "http://new.example.com/", nil)
 	localForwardedRequest.RemoteAddr = "127.0.0.1:12345"
 	localForwardedResponse := httptest.NewRecorder()
 	handler.ServeHTTP(localForwardedResponse, localForwardedRequest)
-	if localForwardedResponse.Code != http.StatusNotFound || !strings.Contains(localForwardedResponse.Body.String(), `href="/?visual"`) {
-		t.Fatalf("new domain root from local front lost 404: %d %s", localForwardedResponse.Code, localForwardedResponse.Body.String())
+	if localForwardedResponse.Code != http.StatusNotFound || strings.Contains(localForwardedResponse.Body.String(), `revision_restore`) || strings.Contains(localForwardedResponse.Body.String(), `?visual`) {
+		t.Fatalf("unknown domain from local front disclosed administrative controls: %d %s", localForwardedResponse.Code, localForwardedResponse.Body.String())
 	}
 	adminRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/removed", nil)
 	adminRequest.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
@@ -19153,13 +19389,16 @@ func TestConcurrentServiceMailIdentityCreationKeepsOnePersistedKey(t *testing.T)
 	}
 	first := <-results
 	if first.err != nil {
-		t.Fatal(first.err)
+		t.Error(first.err)
 	}
 	for attempt := 1; attempt < cap(results); attempt++ {
 		result := <-results
 		if result.err != nil || result.installationID != first.installationID || !result.publicKey.Equal(first.publicKey) {
-			t.Fatal("concurrent startup generated different installation identities", result.err)
+			t.Error("concurrent startup generated different installation identities", result.err)
 		}
+	}
+	if t.Failed() {
+		t.FailNow()
 	}
 	installationID, publicKey, privateKey, err := application.serviceMailLocalKeyPair(context.Background())
 	if err != nil || installationID != first.installationID || !publicKey.Equal(first.publicKey) || !publicKey.Equal(privateKey.Public()) {
@@ -19406,7 +19645,7 @@ func TestHostingSnapshotNetChanListenerReceivesMalformedPayload(t *testing.T) {
 	}
 }
 
-func TestHostingSnapshotNetChanDeliverySkipsTaskWithClosedResponse(t *testing.T) {
+func TestHostingSnapshotNetChanDeliverySkipsTaskWithClosedSession(t *testing.T) {
 	listener, err := listenTestSitebrushNetChan(t)
 	if err != nil {
 		t.Fatal(err)
@@ -19417,13 +19656,55 @@ func TestHostingSnapshotNetChanDeliverySkipsTaskWithClosedResponse(t *testing.T)
 	defer close(workerStop)
 	deliveries := startHostingSnapshotNetChanDeliveryWorker(workerStop, nil)
 	response := make(chan hostingSnapshotNetChanDeliveryResponse)
-	close(response)
-	deliveries <- hostingSnapshotNetChanDeliveryTask{address: listener.Address, payload: []byte("unneeded"), response: response}
+	session := make(chan struct{})
+	close(session)
+	deliveries <- hostingSnapshotNetChanDeliveryTask{address: listener.Address, payload: []byte("unneeded"), response: response, session: session}
 
 	select {
 	case <-listener.Channels:
-		t.Fatal("worker started a task whose response channel was closed")
+		t.Fatal("worker started a task whose session was closed")
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestOwnershipNetChanCancellationReturnsOnlyIndependentPayload(t *testing.T) {
+	deliveries := make(chan hostingSnapshotNetChanDeliveryTask)
+	stop := make(chan struct{})
+	finished := make(chan error, 1)
+	payload := []byte("original")
+	go func() { finished <- submitHostingSnapshotNetChanDelivery(stop, deliveries, "unused", payload) }()
+	task := <-deliveries
+	close(stop)
+	if err := <-finished; !errors.Is(err, errHostingSnapshotNetChanDeliveryCanceled) {
+		t.Fatalf("cancel error = %v", err)
+	}
+	payload[0] = 'X'
+	if string(task.payload) != "original" || !hostingSnapshotNetChanDeliveryCanceled(task.session) {
+		t.Fatal("caller reclaimed transport payload or failed to cancel its session")
+	}
+}
+
+func TestOwnershipNetChanLateReplyCannotCompleteNewSession(t *testing.T) {
+	deliveries := make(chan hostingSnapshotNetChanDeliveryTask)
+	response := make(chan hostingSnapshotNetChanDeliveryResponse, 2)
+	previous := make(chan struct{})
+	close(previous)
+	response <- hostingSnapshotNetChanDeliveryResponse{session: previous, err: errors.New("old operation")}
+	finished := make(chan error, 1)
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		finished <- submitHostingSnapshotNetChanDeliveryWithResponse(stop, deliveries, response, "unused", []byte("new"))
+	}()
+	task := <-deliveries
+	task.response <- hostingSnapshotNetChanDeliveryResponse{session: task.session}
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatalf("late reply completed a different operation: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("current reply was not delivered")
 	}
 }
 
@@ -20054,7 +20335,14 @@ func TestBrowserAnalyticsReturnsStateBeforeDatabaseWrite(t *testing.T) {
 	results := make(chan browserAnalyticsStorageResult, 2)
 	stop := make(chan struct{})
 	finished := make(chan struct{})
-	defer close(stop)
+	// Close the session on any early test failure as well as on normal exit.
+	t.Cleanup(func() {
+		select {
+		case <-stop:
+		default:
+			close(stop)
+		}
+	})
 	go func() { defer close(finished); app.browserAnalyticsStorage(jobs, results, stop) }()
 	state := browserstats.New(time.Now().UTC())
 	first := browserstats.Event{Visitor: "1111111111111111", View: "2222222222222222", Sequence: 1, Path: "/", Persistent: true}
@@ -20101,10 +20389,13 @@ func TestBrowserAnalyticsReturnsStateBeforeDatabaseWrite(t *testing.T) {
 		t.Fatal("snapshot and live state were not isolated")
 	}
 	close(jobs)
+	// A completed SQL operation accrues idle work budget. Closing jobs alone
+	// cannot interrupt that delay; production shutdown signals the session.
+	close(stop)
 	select {
 	case <-finished:
 	case <-time.After(time.Second):
-		t.Fatal("storage worker leaked")
+		t.Fatal("storage worker did not stop after session cancellation")
 	}
 }
 
@@ -20243,6 +20534,9 @@ func TestAnalyticsVerifiedAliasSharesPrimaryReports(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := raw.Exec(`CREATE TABLE domain_aliases(primary_domain TEXT,alias_domain TEXT UNIQUE,is_verified INTEGER,dns_a_ok INTEGER); INSERT INTO domain_aliases VALUES('primary.example','alias.example',1,1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`CREATE TABLE users(id INTEGER PRIMARY KEY,domain TEXT,email TEXT,password TEXT,is_admin INTEGER); INSERT INTO users(domain,email,password,is_admin) VALUES(?,'owner@example.org','test-password',1)`, "primary.example"); err != nil {
 		t.Fatal(err)
 	}
 	_ = raw.Close()
@@ -20396,13 +20690,45 @@ func TestAnalyticsGoalsUseSeparateSiteAnalyticsDatabase(t *testing.T) {
 	}
 }
 
+type analyticsSecurityCheckpoint struct {
+	snapshot string
+	err      error
+}
+
+type analyticsSecurityObservedRepository struct {
+	browserstats.Repository
+	committed chan<- analyticsSecurityCheckpoint
+	session   <-chan struct{}
+}
+
+func (repository analyticsSecurityObservedRepository) Exchange(request browserstats.StorageRequest) browserstats.StorageResult {
+	result := repository.Repository.Exchange(request)
+	if request.Operation == browserstats.SaveSecurity {
+		// The acknowledgement follows the real storage reply. Only immutable
+		// checkpoint text crosses back to the test's consumer.
+		select {
+		case repository.committed <- analyticsSecurityCheckpoint{snapshot: request.State, err: result.Err}:
+		case <-repository.session:
+		}
+	}
+	return result
+}
+
 func TestAnalyticsSecurityObservesControllerAndPersistsSummary(t *testing.T) {
 	app, _ := newTestApplication(t)
+	// Cold SQLite setup is unrelated to the observer's deliberately throttled
+	// work budget. Prepare it before starting the collector's session.
+	initial := app.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.ReadSecurity, Domain: "localhost"})
+	if !errors.Is(initial.Err, sql.ErrNoRows) {
+		t.Fatalf("expected empty security checkpoint: %+v", initial)
+	}
 	app.securityAnalytics = make(chan siteAnalyticsEvent, 8)
 	app.securityLosses = make(chan string, 8)
 	app.analyticsFlushInterval = 10 * time.Millisecond
 	stop := make(chan struct{})
 	done := make(chan struct{})
+	committed := make(chan analyticsSecurityCheckpoint, 4)
+	app.analyticsStorage = analyticsSecurityObservedRepository{Repository: app.analyticsStorage, committed: committed, session: stop}
 	go func() { defer close(done); app.runSecurityAnalytics(stop) }()
 	defer func() { close(stop); <-done }()
 	handler := app.analyticsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(401); _, _ = w.Write([]byte("denied")) }))
@@ -20412,17 +20738,21 @@ func TestAnalyticsSecurityObservesControllerAndPersistsSummary(t *testing.T) {
 	request := httptest.NewRequest("POST", "http://localhost/.env?login&password=never-store", nil)
 	request.RemoteAddr = "192.0.2.8:12345"
 	handler.ServeHTTP(httptest.NewRecorder(), request)
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.NewTimer(30 * time.Second)
+	defer deadline.Stop()
 	for {
-		stored := app.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.ReadSecurity, Domain: "localhost"})
-		if stored.Err == nil {
+		select {
+		case checkpoint := <-committed:
+			if checkpoint.err != nil {
+				t.Fatalf("persist security checkpoint: %v", checkpoint.err)
+			}
 			var state browserstats.SecurityState
-			if err := json.Unmarshal([]byte(stored.Text), &state); err != nil {
+			if err := json.Unmarshal([]byte(checkpoint.snapshot), &state); err != nil {
 				t.Fatal(err)
 			}
 			if len(state.Incidents) == 1 {
-				if strings.Contains(stored.Text, "never-store") || state.Incidents[0].IP != "192.0.2.8" || state.Incidents[0].Examples[0].Bytes != 6 {
-					t.Fatalf("unsafe or incomplete incident: %s", stored.Text)
+				if strings.Contains(checkpoint.snapshot, "never-store") || state.Incidents[0].IP != "192.0.2.8" || len(state.Incidents[0].Examples) == 0 || state.Incidents[0].Examples[0].Bytes != 6 {
+					t.Fatalf("unsafe or incomplete incident: %s", checkpoint.snapshot)
 				}
 				dailyActivity := 0
 				for _, count := range state.ActivityDays {
@@ -20444,13 +20774,15 @@ func TestAnalyticsSecurityObservesControllerAndPersistsSummary(t *testing.T) {
 				if incidentTypeCount != 1 {
 					t.Fatalf("daily problem type count = %d, want one incident", incidentTypeCount)
 				}
-				break
+				stored := app.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.ReadSecurity, Domain: "localhost"})
+				if stored.Err != nil || stored.Text != checkpoint.snapshot {
+					t.Fatalf("acknowledged checkpoint was not persisted: %+v", stored)
+				}
+				return
 			}
+		case <-deadline.C:
+			t.Fatal("security collector did not acknowledge a persisted incident")
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("security summary was not persisted")
-		}
-		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -23335,9 +23667,16 @@ func TestSecurityBoundaryMultipartAdminFormAcceptsSessionCSRFWithOpaqueOrigin(t 
 		t.Run(testCase.name, func(t *testing.T) {
 			var body bytes.Buffer
 			writer := multipart.NewWriter(&body)
-			_ = writer.WriteField("action", "delete_selected")
+			_ = writer.WriteField("action", "upload")
 			if testCase.token != "" {
 				_ = writer.WriteField("account_csrf", testCase.token)
+			}
+			filePart, err := writer.CreateFormFile("upload_files", "csrf.txt")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := io.WriteString(filePart, "csrf fixture"); err != nil {
+				t.Fatal(err)
 			}
 			if err := writer.Close(); err != nil {
 				t.Fatal(err)
@@ -25087,17 +25426,22 @@ func TestControlDatabaseShutdownBoundsAnUnfinishedOperation(t *testing.T) {
 		t.Fatal("shutdown hung on an unfinished operation")
 	}
 	select {
-	case err := <-replied:
-		if err == nil {
-			t.Fatal("subscriber did not receive termination")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("subscriber still waiting")
+	case <-replied:
+		t.Fatal("shutdown returned closure ownership while the callback was active")
+	default:
 	}
 	if err := dispatcher.execute(context.Background(), serverControlDatabaseRead, "after-close", func(*sql.DB) error { t.Fatal("stopped dispatcher ran new work"); return nil }); err == nil {
 		t.Fatal("closed dispatcher accepted work")
 	}
 	close(release)
+	select {
+	case err := <-replied:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("finished callback did not return ownership")
+	}
 	for range serverControlDatabaseReaderCount + 1 {
 		select {
 		case worker := <-dispatcher.workersDone:
@@ -29673,21 +30017,7 @@ func TestWholeSiteImportReusesRevisionAfterFormattingAndDeletion(t *testing.T) {
 
 // A confirmed mailbox reserves identity before TLS, without creating a usable account.
 func TestConfirmedDomainReservationSurvivesTLSWaitAndRestart(t *testing.T) {
-	application := newRouterTestApplication(t)
-	db := setupBillingOwnerForTest(t, application, "sitebrush.ru", "admin@sitebrush.ru", true)
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	dispatcher, err := startServerControlDatabaseDispatcher(application.serverControlDBPath(), false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	application.controlDatabase = dispatcher
-	t.Cleanup(func() { dispatcher.Close() })
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	application.registrationConfirmations = startEmailConfirmationMemoryWorker(ctx)
-	application.automaticSSL = make(chan automaticSSLRequest, 16)
+	application, ctx := newDurableClaimTestApplication(t)
 	domain := "ero.sitebrush.ru"
 	confirmation := EmailConfirmation{Token: "confirmed-owner-token", FormToken: "owner-form", Domain: domain, Action: "register", Email: "owner@example.org", Code: "123456", ExpiresAt: time.Now().Add(time.Minute).UTC().Format(time.RFC3339)}
 	if err := application.saveRegistrationConfirmation(ctx, confirmation); err != nil {
@@ -29697,15 +30027,11 @@ func TestConfirmedDomainReservationSurvivesTLSWaitAndRestart(t *testing.T) {
 	request = request.WithContext(contextWithDomain(request.Context(), domain))
 	response := httptest.NewRecorder()
 	application.confirmEmailToken(response, request)
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `id="https-progress"`) || strings.Contains(response.Body.String(), `type="password"`) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `data-account-auto-confirm`) || strings.Contains(response.Body.String(), `type="password"`) {
 		t.Fatalf("unsafe or missing wait UI: %d %s", response.Code, response.Body.String())
 	}
 	if !application.registrationDomainClaimed(ctx, domain) || application.hasAdmin(contextWithDomain(ctx, domain), domain) {
 		t.Fatal("reservation either absent or created login credentials")
-	}
-	observed := <-application.automaticSSL
-	if observed.action != "registration_confirmed" {
-		t.Fatalf("certificate not explicitly queued: %+v", observed)
 	}
 	next, err := application.availablePublicTrialDomain(ctx, "https://ero.com", "sitebrush.ru")
 	if err != nil || next == domain {
@@ -29721,6 +30047,23 @@ func TestConfirmedDomainReservationSurvivesTLSWaitAndRestart(t *testing.T) {
 	if reserved.Code != http.StatusConflict || !strings.Contains(reserved.Body.String(), `resend_confirmation`) || !strings.Contains(reserved.Body.String(), `name="email"`) {
 		t.Fatalf("reserved site lacks confirmation resend: %d %s", reserved.Code, reserved.Body.String())
 	}
+	// Follow the browser's auto-confirm POST; GET alone cannot create credentials.
+	accept := httptest.NewRequest(http.MethodPost, "http://"+domain+"/?email_confirm="+confirmation.Token, nil).WithContext(contextWithDomain(ctx, domain))
+	accepted := httptest.NewRecorder()
+	application.confirmEmailToken(accepted, accept)
+	if accepted.Code != http.StatusOK || !strings.Contains(accepted.Body.String(), `id="https-progress"`) {
+		t.Fatalf("confirmation did not wait for TLS: %d %s", accepted.Code, accepted.Body.String())
+	}
+	for _, cookie := range accepted.Result().Cookies() {
+		if cookie.Name == "sitebrush_session" {
+			t.Fatal("HTTP confirmation authenticated before HTTPS")
+		}
+	}
+	observed := <-application.automaticSSL
+	if observed.action != "registration_confirmed" {
+		t.Fatalf("certificate not explicitly queued: %+v", observed)
+	}
+
 	// A restarted confirmation worker reloads the durable token, extended for slow TLS issuance.
 	application.registrationConfirmations = startEmailConfirmationMemoryWorker(ctx)
 	restored, found := application.registrationConfirmationByToken(ctx, confirmation.Token)
@@ -29874,6 +30217,10 @@ func newDurableClaimTestApplication(t *testing.T) (*App, context.Context) {
 	t.Cleanup(func() { dispatcher.Close() })
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
+	previousLookup := lookupIPRecords
+	lookupIPRecords = func(string) ([]net.IP, error) { return []net.IP{net.ParseIP("8.8.8.8")}, nil }
+	t.Cleanup(func() { cancel(); lookupIPRecords = previousLookup })
+	application.webPublicIPs = serverip.Start(serverip.Settings{Manual: []string{"8.8.8.8"}, Preferred: "8.8.8.8"}, nil, ctx.Done())
 	application.registrationConfirmations = startEmailConfirmationMemoryWorker(ctx)
 	application.automaticSSL = make(chan automaticSSLRequest, 32)
 	return application, ctx
@@ -35287,6 +35634,9 @@ func TestQueuedSitePublicFrontForwardsRecoveryPaymentAndACME(t *testing.T) {
 			if err := front.Set(strings.TrimPrefix(backend.URL, "http://"), false); err != nil {
 				t.Fatal(err)
 			}
+			if err := front.PolicyEnabled(); err != nil {
+				t.Fatal(err)
+			}
 			for _, probe := range []struct {
 				method string
 				path   string
@@ -35695,6 +36045,48 @@ func TestPublicTrialWildcardAcceptsServerAliasAndRejectsForeignRecord(t *testing
 	lookupIPRecords = func(string) ([]net.IP, error) { return []net.IP{net.ParseIP("46.4.4.46"), net.ParseIP("1.1.1.1")}, nil }
 	if result := checkPublicTrialWildcardAddresses("sitebrush.com", addresses); result.Enabled || result.ReasonKey != "public_trial_disabled_wildcard_mismatch" {
 		t.Fatalf("foreign record accepted: %+v", result)
+	}
+}
+
+func TestPublicTrialWildcardWaitsForAllBorrowedResolversOnRejection(t *testing.T) {
+	previous := lookupIPRecords
+	defer func() { lookupIPRecords = previous }()
+	probeOrder := make(chan int, publicTrialWildcardProbeCount)
+	for index := range publicTrialWildcardProbeCount {
+		probeOrder <- index
+	}
+	started := make(chan struct{}, publicTrialWildcardProbeCount)
+	release := make(chan struct{})
+	lookupIPRecords = func(string) ([]net.IP, error) {
+		index := <-probeOrder
+		started <- struct{}{}
+		if index == 0 {
+			return nil, errors.New("missing wildcard")
+		}
+		<-release
+		return []net.IP{net.ParseIP("8.8.8.8")}, nil
+	}
+	finished := make(chan publicTrialAvailability, 1)
+	go func() {
+		finished <- checkPublicTrialWildcardAddresses("example.org", []net.IP{net.ParseIP("8.8.8.8")})
+	}()
+	for range publicTrialWildcardProbeCount {
+		<-started
+	}
+	select {
+	case <-finished:
+		close(release)
+		t.Fatal("wildcard rejection returned while probes still borrowed the resolver")
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case result := <-finished:
+		if result.Enabled || result.ReasonKey != "public_trial_disabled_wildcard_missing" {
+			t.Fatalf("late successful probes replaced wildcard rejection: %+v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("wildcard probes did not return ownership")
 	}
 }
 

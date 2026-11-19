@@ -70,7 +70,7 @@ func TestStartAndRunLifecycle(t *testing.T) {
 	}()
 	reply := make(chan Result, 1)
 	now := time.Now().UTC()
-	requestsChannel <- Request{Signal: &Signal{IP: "203.0.113.77", Category: "injection", InstallationID: "one", ObservedAt: now}, Query: true, Reply: reply}
+	requestsChannel <- Request{Signal: Signal{IP: "203.0.113.77", Category: "injection", InstallationID: "one", ObservedAt: now}, Submit: true, Query: true, Reply: reply}
 	result := <-reply
 	if !result.Accepted || len(result.Entries) != 0 {
 		t.Fatalf("signal result=%+v", result)
@@ -299,7 +299,6 @@ func signedTestAttestation(t *testing.T, privateKey ed25519.PrivateKey, attestat
 	return base64.RawURLEncoding.EncodeToString(encoded)
 }
 
-
 // BEGIN persisted reputation bounds security tests.
 
 func TestLoadBoundsPersistedReputationState(t *testing.T) {
@@ -351,7 +350,7 @@ func TestLoadRejectsPersistedUnsafeEvidence(t *testing.T) {
 	now := time.Now().UTC()
 	state := diskState{Records: []evidenceRecord{
 		{
-			IP: "127.0.0.1",
+			IP:      "127.0.0.1",
 			Sources: []evidenceSource{{InstallationID: "loopback", Category: "injection", ObservedAt: now}},
 		},
 		{

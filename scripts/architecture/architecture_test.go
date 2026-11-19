@@ -306,40 +306,126 @@ func inspectGoFile(path string, relativePath string) ([]string, error) {
 
 	violations := make([]string, 0)
 	syncImportNames := make(map[string]bool)
+	atomicImportNames := make(map[string]bool)
 	for _, importedPackage := range parsedFile.Imports {
 		importPath, err := strconv.Unquote(importedPackage.Path.Value)
 		if err != nil {
 			return nil, fmt.Errorf("parse import in %s: %w", relativePath, err)
 		}
-		if importPath != "sync" {
+		if importPath != "sync" && importPath != "sync/atomic" {
+			continue
+		}
+		// Test-server counters instrument concurrent protocol fixtures; they
+		// do not coordinate application state or become part of server builds.
+		if importPath == "sync/atomic" && strings.HasSuffix(relativePath, "_test.go") {
 			continue
 		}
 
 		importName := "sync"
+		if importPath == "sync/atomic" {
+			importName = "atomic"
+		}
 		if importedPackage.Name != nil {
 			importName = importedPackage.Name.Name
 		}
 		if importName == "." {
-			violations = append(violations, fmt.Sprintf("%s dot-imports sync, which bypasses the lock primitive check", relativePath))
+			violations = append(violations, fmt.Sprintf("%s dot-imports %s, which bypasses the ownership check", relativePath, importPath))
 			continue
 		}
 		if importName != "_" {
-			syncImportNames[importName] = true
+			if importPath == "sync/atomic" {
+				atomicImportNames[importName] = true
+			} else {
+				syncImportNames[importName] = true
+			}
 		}
 	}
 
+	// These three existing lifecycle/admission counters remain explicit audit
+	// exceptions. A new atomic elsewhere requires a reviewed ownership decision.
+	allowedAtomics := map[string]string{}
+	if relativePath == "sitebrush.go" {
+		allowedAtomics["publicHTTPInFlight"] = "Int64"
+	}
+	if relativePath == "pkg/publicsite/runtime.go" {
+		allowedAtomics["current"] = "Pointer"
+		allowedAtomics["readers"] = "Uint64"
+	}
+	allowedPositions := make(map[token.Pos]bool)
+	ast.Inspect(parsedFile, func(node ast.Node) bool {
+		var names []*ast.Ident
+		var declarationType ast.Expr
+		switch declaration := node.(type) {
+		case *ast.ValueSpec:
+			names, declarationType = declaration.Names, declaration.Type
+		case *ast.Field:
+			names, declarationType = declaration.Names, declaration.Type
+		}
+		if len(names) != 1 || declarationType == nil {
+			return true
+		}
+		ast.Inspect(declarationType, func(nested ast.Node) bool {
+			selector, ok := nested.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			identifier, ok := selector.X.(*ast.Ident)
+			if ok && atomicImportNames[identifier.Name] && allowedAtomics[names[0].Name] == selector.Sel.Name {
+				allowedPositions[selector.Pos()] = true
+				delete(allowedAtomics, names[0].Name)
+			}
+			return true
+		})
+		return true
+	})
+
 	ast.Inspect(parsedFile, func(node ast.Node) bool {
 		selector, selectorFound := node.(*ast.SelectorExpr)
-		if !selectorFound || !isForbiddenSyncPrimitive(selector.Sel.Name) {
+		if !selectorFound {
 			return true
 		}
 		packageIdentifier, identifierFound := selector.X.(*ast.Ident)
-		if identifierFound && syncImportNames[packageIdentifier.Name] {
+		if identifierFound && syncImportNames[packageIdentifier.Name] && isForbiddenSyncPrimitive(selector.Sel.Name) {
 			violations = append(violations, fmt.Sprintf("%s uses forbidden lock primitive %s.%s", relativePath, packageIdentifier.Name, selector.Sel.Name))
+		}
+		if identifierFound && atomicImportNames[packageIdentifier.Name] && !allowedPositions[selector.Pos()] {
+			violations = append(violations, fmt.Sprintf("%s uses unreviewed atomic %s.%s", relativePath, packageIdentifier.Name, selector.Sel.Name))
 		}
 		return true
 	})
 	return violations, nil
+}
+
+func TestOwnershipCheckRejectsNewAtomicsIncludingAliasedImports(t *testing.T) {
+	for _, source := range []string{
+		"package fixture\nimport memory \"sync/atomic\"\nvar state memory.Int64\n",
+		"package fixture\nimport . \"sync/atomic\"\nvar state Int64\n",
+	} {
+		root := t.TempDir()
+		writeGoFile(t, root, source)
+		violations, err := findLockPrimitiveViolations(root)
+		if err != nil || len(violations) != 1 {
+			t.Fatalf("ownership violations = %v, error = %v", violations, err)
+		}
+	}
+}
+
+func TestOwnershipCheckAllowsOnlyTheNamedExistingAtomic(t *testing.T) {
+	root := t.TempDir()
+	writeGoFile(t, root, "package fixture\nimport \"sync/atomic\"\nvar publicHTTPInFlight atomic.Int64\nvar other atomic.Int64\n")
+	violations, err := inspectGoFile(filepath.Join(root, "fixture.go"), "sitebrush.go")
+	if err != nil || len(violations) != 1 {
+		t.Fatalf("ownership violations = %v, error = %v", violations, err)
+	}
+}
+
+func TestOwnershipCheckAllowsAtomicProtocolTestCounters(t *testing.T) {
+	root := t.TempDir()
+	writeGoFile(t, root, "package fixture\nimport \"sync/atomic\"\nvar requests atomic.Int32\n")
+	violations, err := inspectGoFile(filepath.Join(root, "fixture.go"), "protocol_test.go")
+	if err != nil || len(violations) != 0 {
+		t.Fatalf("test instrumentation violations = %v, error = %v", violations, err)
+	}
 }
 
 func isForbiddenSyncPrimitive(name string) bool {

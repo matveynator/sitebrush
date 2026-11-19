@@ -332,12 +332,13 @@ type demoSiteRuntimeRequest struct {
 type hostingSnapshotNetChanDeliveryTask struct {
 	address  string
 	payload  []byte
-	response chan hostingSnapshotNetChanDeliveryResponse
+	response chan<- hostingSnapshotNetChanDeliveryResponse
+	session  <-chan struct{}
 }
 
 type hostingSnapshotNetChanDeliveryResponse struct {
-	canceled bool
-	err      error
+	session <-chan struct{}
+	err     error
 }
 
 type sitebrushNetChanRequest struct {
@@ -1007,6 +1008,7 @@ const (
 )
 
 type siteDBOperation struct {
+	claimed  chan struct{}
 	stop     <-chan struct{}
 	ctx      context.Context
 	query    string
@@ -1017,10 +1019,11 @@ type siteDBOperation struct {
 }
 
 type siteDBOperationResponse struct {
-	result sql.Result
-	rows   *sql.Rows
-	row    *sql.Row
-	err    error
+	analytics browserstats.StorageResult
+	result    sql.Result
+	rows      *sql.Rows
+	row       *sql.Row
+	err       error
 }
 
 type serverControlDatabaseAccessKind int
@@ -1032,7 +1035,8 @@ const (
 )
 
 type serverControlDatabaseAccessRequest struct {
-	ctx      context.Context
+	claimed  chan struct{}
+	session  <-chan struct{}
 	reply    chan error
 	purpose  string
 	queuedAt time.Time
@@ -1104,12 +1108,13 @@ func openServerControlDatabaseHandle(databasePath string, writer bool) (*sql.DB,
 	database.SetConnMaxLifetime(0)
 	pragmas := []string{
 		"PRAGMA busy_timeout=5000",
-		"PRAGMA foreign_keys=ON",
-		"PRAGMA synchronous=FULL",
 	}
 	if writer {
-		pragmas = append([]string{"PRAGMA journal_mode=WAL"}, pragmas...)
+		// Install the connection's busy handler before WAL recovery can
+		// contend with another startup handle, including SQLITE_BUSY_RECOVERY.
+		pragmas = append(pragmas, "PRAGMA journal_mode=WAL")
 	}
+	pragmas = append(pragmas, "PRAGMA foreign_keys=ON", "PRAGMA synchronous=FULL")
 	for _, pragma := range pragmas {
 		if _, err := database.ExecContext(context.Background(), pragma); err != nil {
 			_ = database.Close()
@@ -1132,13 +1137,18 @@ func (dispatcher *serverControlDatabaseDispatcher) runWorker(database *sql.DB, r
 			select {
 			case <-dispatcher.stop:
 				return
-			case <-request.ctx.Done():
-				select {
-				case request.reply <- request.ctx.Err():
-				default:
-				}
+			case <-request.session:
 				continue
 			default:
+			}
+			// The caller loans its closure captures only after this handshake.
+			// It cannot return until the reply transfers ownership back.
+			select {
+			case request.claimed <- struct{}{}:
+			case <-request.session:
+				continue
+			case <-dispatcher.stop:
+				return
 			}
 			queueDuration := time.Duration(0)
 			if !request.queuedAt.IsZero() {
@@ -1153,11 +1163,7 @@ func (dispatcher *serverControlDatabaseDispatcher) runWorker(database *sql.DB, r
 			if (debug && sessionDuration >= slowDatabaseOperationLogAfter) || sessionDuration >= 5*time.Second {
 				log.Printf("%sCONTROL DB%s worker=%s purpose=%s operation=%s", terminalCyan(), terminalReset(), workerName, request.purpose, sessionDuration.String())
 			}
-			select {
-			case request.reply <- err:
-			case <-request.ctx.Done():
-			case <-dispatcher.stop:
-			}
+			request.reply <- err
 		}
 	}
 }
@@ -1178,7 +1184,8 @@ func (dispatcher *serverControlDatabaseDispatcher) execute(ctx context.Context, 
 		return errors.New("server control database operation is required")
 	}
 	request := serverControlDatabaseAccessRequest{
-		ctx:      ctx,
+		claimed:  make(chan struct{}),
+		session:  ctx.Done(),
 		reply:    make(chan error, 1),
 		purpose:  firstNonEmpty(strings.TrimSpace(purpose), "unspecified"),
 		queuedAt: time.Now(),
@@ -1196,8 +1203,10 @@ func (dispatcher *serverControlDatabaseDispatcher) execute(ctx context.Context, 
 		return errors.New("server control database dispatcher stopped")
 	}
 	select {
-	case err := <-request.reply:
-		return err
+	case <-request.claimed:
+		// Cancellation cannot reclaim captures while the worker still owns
+		// them. SQL cancellation remains the callback's boundary concern.
+		return <-request.reply
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-dispatcher.stop:
@@ -1512,6 +1521,17 @@ func (db *siteFileDatabase) completeOperationWithDatabase(operation siteDBOperat
 		return
 	default:
 	}
+	// Reply completion is an ownership return, including transaction callbacks
+	// and filesystem compensation. A canceled caller cannot outlive its captures.
+	select {
+	case operation.claimed <- struct{}{}:
+	case <-operation.stop:
+		return
+	case <-operation.ctx.Done():
+		return
+	case <-db.stopped:
+		return
+	}
 
 	startedAt := time.Now()
 	response := operation.run(operation.ctx, database)
@@ -1652,28 +1672,6 @@ func (db *siteFileDatabase) QueryRowContext(ctx context.Context, query string, a
 	return response.row, response.err
 }
 
-func (db *siteFileDatabase) Session(stop <-chan struct{}, run func(*sql.DB) error) error {
-	reply := make(chan siteDBOperationResponse, 1)
-	operation := siteDBOperation{ctx: context.Background(), stop: stop, response: reply, kind: siteDBWorkloadGeneral, run: func(_ context.Context, raw *sql.DB) siteDBOperationResponse {
-		return siteDBOperationResponse{err: run(raw)}
-	}}
-	select {
-	case <-stop:
-		return errors.New("site database subscriber disconnected")
-	case <-db.stopped:
-		return errors.New("site database worker stopped")
-	case db.generalQueue <- operation:
-	}
-	select {
-	case <-stop:
-		return errors.New("site database subscriber disconnected")
-	case <-db.stopped:
-		return errors.New("site database worker stopped")
-	case response := <-reply:
-		return response.err
-	}
-}
-
 func (db *siteFileDatabase) Migrate(ctx context.Context, domain string, migrate siteDBMigrator) error {
 	if migrate == nil {
 		return nil
@@ -1702,11 +1700,14 @@ func (db *siteFileDatabase) runOperation(ctx context.Context, operation siteDBOp
 		ctx = context.Background()
 	}
 	operation.ctx = ctx
+	operation.claimed = make(chan struct{})
 	operation.response = make(chan siteDBOperationResponse, 1)
 
 	queue := db.queueFor(operation.kind)
 	if !db.debug {
 		select {
+		case <-operation.stop:
+			return siteDBOperationResponse{err: errors.New("site database subscriber disconnected")}
 		case <-ctx.Done():
 			return siteDBOperationResponse{err: ctx.Err()}
 		case <-db.stopped:
@@ -1714,8 +1715,12 @@ func (db *siteFileDatabase) runOperation(ctx context.Context, operation siteDBOp
 		case queue <- operation:
 		}
 		select {
+		case <-operation.claimed:
+			return <-operation.response
 		case response := <-operation.response:
 			return response
+		case <-operation.stop:
+			return siteDBOperationResponse{err: errors.New("site database subscriber disconnected")}
 		case <-ctx.Done():
 			return siteDBOperationResponse{err: ctx.Err()}
 		case <-db.stopped:
@@ -1728,6 +1733,8 @@ func (db *siteFileDatabase) runOperation(ctx context.Context, operation siteDBOp
 	defer queueTimer.Stop()
 	for queued := false; !queued; {
 		select {
+		case <-operation.stop:
+			return siteDBOperationResponse{err: errors.New("site database subscriber disconnected")}
 		case <-ctx.Done():
 			return siteDBOperationResponse{err: ctx.Err()}
 		case <-db.stopped:
@@ -1745,12 +1752,16 @@ func (db *siteFileDatabase) runOperation(ctx context.Context, operation siteDBOp
 	defer waitTimer.Stop()
 	for {
 		select {
+		case <-operation.claimed:
+			return <-operation.response
 		case response := <-operation.response:
 			waitDuration := time.Since(runStartedAt)
 			if waitDuration >= slowDatabaseOperationLogAfter || response.err != nil {
 				db.logDatabaseOperationResponse(operation, time.Since(queueStartedAt), response.err)
 			}
 			return response
+		case <-operation.stop:
+			return siteDBOperationResponse{err: errors.New("site database subscriber disconnected")}
 		case <-ctx.Done():
 			db.logDatabaseOperationWaiting("context-canceled", operation, time.Since(queueStartedAt))
 			return siteDBOperationResponse{err: ctx.Err()}
@@ -1854,27 +1865,27 @@ func (repository siteAnalyticsRepository) Exchange(request browserstats.StorageR
 	if database.analytics == nil {
 		return browserstats.StorageResult{Err: errors.New("site analytics participant unavailable")}
 	}
-	var result browserstats.StorageResult
-	err = database.analytics.Session(request.Stop, func(raw *sql.DB) error {
+	operation := siteDBOperation{stop: request.Stop, kind: siteDBWorkloadGeneral, run: func(_ context.Context, raw *sql.DB) siteDBOperationResponse {
 		domain := request.Domain
 		select {
 		case <-request.Stop:
-			return errors.New("analytics subscriber disconnected")
+			return siteDBOperationResponse{err: errors.New("analytics subscriber disconnected")}
 		default:
 		}
 		if err := application.migrateLegacyAnalytics(raw, domain, filepath.Dir(database.analytics.path)); err != nil {
-			return err
+			return siteDBOperationResponse{err: err}
 		}
 		if database.analytics.analyticsArchiveHours == nil {
 			database.analytics.analyticsArchiveHours = map[string]string{}
 		}
-		result = browserstats.ExecuteOwned(filepath.Dir(database.analytics.path), request, raw, database.analytics.analyticsArchiveHours)
-		return result.Err
-	})
-	if err != nil {
-		result.Err = err
+		result := browserstats.ExecuteOwned(filepath.Dir(database.analytics.path), request, raw, database.analytics.analyticsArchiveHours)
+		return siteDBOperationResponse{analytics: result, err: result.Err}
+	}}
+	response := database.analytics.runOperation(context.Background(), operation)
+	if response.err != nil {
+		return browserstats.StorageResult{Err: response.err}
 	}
-	return result
+	return response.analytics
 }
 
 func (a *App) migrateLegacyAnalytics(database *sql.DB, domain, directory string) error {
@@ -24945,28 +24956,33 @@ func checkPublicTrialWildcardAddresses(ownerDomain string, serverIPs []net.IP) p
 		err       error
 	}
 	lookupResults := make(chan lookupResult, publicTrialWildcardProbeCount)
+	resolveDomain := lookupIPRecords
 	for probeIndex := 0; probeIndex < publicTrialWildcardProbeCount; probeIndex++ {
 		probeDomain := publicTrialWildcardProbeDomain(ownerDomain)
 		go func(domain string) {
-			ipRecords, lookupErr := lookupIPRecords(domain)
+			ipRecords, lookupErr := resolveDomain(domain)
 			lookupResults <- lookupResult{ipRecords: ipRecords, err: lookupErr}
 		}(probeDomain)
 	}
 	for probeIndex := 0; probeIndex < publicTrialWildcardProbeCount; probeIndex++ {
 		result := <-lookupResults
+		// Every probe must return its borrowed resolver before this session
+		// ends, even when an earlier result has already rejected the wildcard.
+		if availability.ReasonKey != "" {
+			continue
+		}
 		if result.err != nil || len(result.ipRecords) == 0 {
 			availability.ReasonKey = "public_trial_disabled_wildcard_missing"
-			return availability
+			continue
 		}
 		for _, ipRecord := range result.ipRecords {
 			if !domainIPRecordsMatchAll([]net.IP{ipRecord}, serverIPs) {
 				availability.ReasonKey = "public_trial_disabled_wildcard_mismatch"
-				return availability
+				break
 			}
 		}
 	}
-	availability.Enabled = true
-	availability.ReasonKey = ""
+	availability.Enabled = availability.ReasonKey == ""
 	return availability
 }
 
@@ -36593,7 +36609,7 @@ func (a *App) enqueueEmail(ctx context.Context, message mailout.Message) error {
 		return a.submitDurableMailTask(ctx.Done(), task)
 	}
 	if a.emailDelivery == nil {
-		a.emailDelivery = mailout.StartDeliveryWorker(context.Background(), a.defaultEmailSender())
+		return errors.New("email delivery worker is not running")
 	}
 	select {
 	case a.emailDelivery <- mailout.DeliveryJob{Message: message}:
@@ -38881,7 +38897,7 @@ func (a *App) handleSecuritySignalRequest(ctx context.Context, request serviceMa
 	signal := *request.SecuritySignal
 	signal.InstallationID = request.InstallationID
 	reply := make(chan securitysync.Result, 1)
-	job := securitysync.Request{Signal: &signal, Reply: reply}
+	job := securitysync.Request{Signal: signal, Submit: true, Reply: reply, Session: ctx.Done()}
 	select {
 	case <-ctx.Done():
 		return "security signal canceled", http.StatusRequestTimeout
@@ -38912,7 +38928,7 @@ func (a *App) handleSecurityReputationRequest(ctx context.Context, request servi
 		return "security reputation unavailable", http.StatusServiceUnavailable, nil
 	}
 	reply := make(chan securitysync.Result, 1)
-	job := securitysync.Request{Query: true, Reply: reply}
+	job := securitysync.Request{Query: true, Reply: reply, Session: ctx.Done()}
 	select {
 	case <-ctx.Done():
 		return "security reputation canceled", http.StatusRequestTimeout, nil
@@ -39137,12 +39153,12 @@ func startHostingSnapshotNetChanDeliveryWorker(stop <-chan struct{}, identity *c
 				if !isOpen {
 					return
 				}
-				if hostingSnapshotNetChanDeliveryCanceled(task.response) {
+				if hostingSnapshotNetChanDeliveryCanceled(task.session) {
 					continue
 				}
 				err, responseNeeded := performHostingSnapshotNetChanDelivery(stop, task, identity)
 				if responseNeeded {
-					sendHostingSnapshotNetChanDeliveryResponse(task.response, err)
+					sendHostingSnapshotNetChanDeliveryResponse(stop, task, err)
 				}
 			}
 		}
@@ -39156,24 +39172,30 @@ func submitHostingSnapshotNetChanDelivery(stop <-chan struct{}, deliveries chan<
 }
 
 func submitHostingSnapshotNetChanDeliveryWithResponse(stop <-chan struct{}, deliveries chan<- hostingSnapshotNetChanDeliveryTask, response chan hostingSnapshotNetChanDeliveryResponse, address string, payload []byte) error {
-	task := hostingSnapshotNetChanDeliveryTask{address: address, payload: payload, response: response}
+	// The caller may return on cancellation before the transport releases its
+	// buffers. Transfer an independent payload and a one-shot session identity.
+	session := make(chan struct{})
+	defer close(session)
+	task := hostingSnapshotNetChanDeliveryTask{address: address, payload: append([]byte(nil), payload...), response: response, session: session}
 	select {
 	case <-stop:
 		return errHostingSnapshotNetChanDeliveryCanceled
 	case deliveries <- task:
 	}
-	select {
-	case <-stop:
+	for {
 		select {
-		case response <- hostingSnapshotNetChanDeliveryResponse{canceled: true}:
-		default:
-		}
-		return errHostingSnapshotNetChanDeliveryCanceled
-	case result, isOpen := <-response:
-		if !isOpen || result.canceled {
+		case <-stop:
 			return errHostingSnapshotNetChanDeliveryCanceled
+		case result, isOpen := <-response:
+			if !isOpen {
+				return errHostingSnapshotNetChanDeliveryCanceled
+			}
+			// A persistent subscriber can reuse its reply channel. A late
+			// result from an abandoned session cannot complete newer work.
+			if result.session == session {
+				return result.err
+			}
 		}
-		return result.err
 	}
 }
 
@@ -39194,7 +39216,7 @@ func performHostingSnapshotNetChanDelivery(stop <-chan struct{}, task hostingSna
 	if address == "" {
 		return errors.New("netchan address is empty"), true
 	}
-	if hostingSnapshotNetChanDeliveryCanceled(task.response) {
+	if hostingSnapshotNetChanDeliveryCanceled(task.session) {
 		return errHostingSnapshotNetChanDeliveryCanceled, false
 	}
 	publicKey, err := centralNetChanPublicKey(identity, stop)
@@ -39209,7 +39231,7 @@ func performHostingSnapshotNetChanDelivery(stop <-chan struct{}, task hostingSna
 	if err != nil {
 		return err, true
 	}
-	if hostingSnapshotNetChanDeliveryCanceled(task.response) {
+	if hostingSnapshotNetChanDeliveryCanceled(task.session) {
 		_ = connection.Abort()
 		return errHostingSnapshotNetChanDeliveryCanceled, false
 	}
@@ -39235,10 +39257,7 @@ func performHostingSnapshotNetChanDelivery(stop <-chan struct{}, task hostingSna
 		case <-stop:
 			_ = connection.Abort()
 			return errHostingSnapshotNetChanDeliveryCanceled, false
-		case response, isOpen := <-task.response:
-			if isOpen && !response.canceled {
-				continue
-			}
+		case <-task.session:
 			_ = connection.Abort()
 			return errHostingSnapshotNetChanDeliveryCanceled, false
 		case err := <-deliveryFinished:
@@ -39292,29 +39311,20 @@ func performHostingSnapshotNetChanDelivery(stop <-chan struct{}, task hostingSna
 	}
 }
 
-func hostingSnapshotNetChanDeliveryCanceled(response <-chan hostingSnapshotNetChanDeliveryResponse) bool {
+func hostingSnapshotNetChanDeliveryCanceled(session <-chan struct{}) bool {
 	select {
-	case state, isOpen := <-response:
-		return !isOpen || state.canceled
+	case <-session:
+		return true
 	default:
 		return false
 	}
 }
 
-func sendHostingSnapshotNetChanDeliveryResponse(response chan hostingSnapshotNetChanDeliveryResponse, err error) (sent bool) {
-	defer func() {
-		if recover() != nil {
-			sent = false
-		}
-	}()
-	if hostingSnapshotNetChanDeliveryCanceled(response) {
-		return false
-	}
+func sendHostingSnapshotNetChanDeliveryResponse(stop <-chan struct{}, task hostingSnapshotNetChanDeliveryTask, err error) {
 	select {
-	case response <- hostingSnapshotNetChanDeliveryResponse{err: err}:
-		return true
-	default:
-		return false
+	case task.response <- hostingSnapshotNetChanDeliveryResponse{session: task.session, err: err}:
+	case <-task.session:
+	case <-stop:
 	}
 }
 
@@ -41258,14 +41268,36 @@ func (a *App) serviceMailLocalKeyPair(ctx context.Context) (string, ed25519.Publ
 	// Read, validation and creation belong to one owner job. Concurrent startup
 	// subscribers must never generate and publish different installation keys.
 	err := a.withServerControlDatabaseWrite(ctx, "service-mail-key-pair", func(database *sql.DB) error {
-		installationID = hostingandsupport.SettingText(ctx, database, "service_mail_installation_id")
-		storedPublicKey, publicErr := base64.StdEncoding.DecodeString(hostingandsupport.SettingText(ctx, database, "service_mail_public_key"))
-		storedPrivateKey, privateErr := base64.StdEncoding.DecodeString(hostingandsupport.SettingText(ctx, database, "service_mail_private_key"))
+		transaction, err := database.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer transaction.Rollback()
+		now := time.Now().UTC().Format(time.RFC3339)
+		// Normal requests have a channel-owned writer. Compatibility startup
+		// handles can coexist, so acquire the persistent write turn before
+		// reading any part of the identity, not just before saving new keys.
+		if _, err := transaction.ExecContext(ctx, `INSERT INTO server_settings(name,value,updated_at) VALUES(?,?,?) ON CONFLICT(name) DO NOTHING`, "service_mail_installation_id", "", now); err != nil {
+			return err
+		}
+		if _, err := transaction.ExecContext(ctx, `UPDATE server_settings SET value=value WHERE name=?`, "service_mail_installation_id"); err != nil {
+			return err
+		}
+		var settings [3]string
+		for index, name := range []string{"service_mail_installation_id", "service_mail_public_key", "service_mail_private_key"} {
+			readErr := transaction.QueryRowContext(ctx, `SELECT value FROM server_settings WHERE name=?`, name).Scan(&settings[index])
+			if readErr != nil && !errors.Is(readErr, sql.ErrNoRows) {
+				return readErr
+			}
+		}
+		installationID = settings[0]
+		storedPublicKey, publicErr := base64.StdEncoding.DecodeString(settings[1])
+		storedPrivateKey, privateErr := base64.StdEncoding.DecodeString(settings[2])
 		if installationID != "" && publicErr == nil && privateErr == nil && len(storedPublicKey) == ed25519.PublicKeySize && len(storedPrivateKey) == ed25519.PrivateKeySize {
 			publicKey = ed25519.PublicKey(storedPublicKey)
 			privateKey = ed25519.PrivateKey(storedPrivateKey)
 			if publicKey.Equal(privateKey.Public()) && bytes.Equal(privateKey, ed25519.NewKeyFromSeed(privateKey[:ed25519.SeedSize])) {
-				return nil
+				return transaction.Commit()
 			}
 		}
 		generatedPublicKey, generatedPrivateKey, err := ed25519.GenerateKey(rand.Reader)
@@ -41273,12 +41305,6 @@ func (a *App) serviceMailLocalKeyPair(ctx context.Context) (string, ed25519.Publ
 			return err
 		}
 		generatedInstallationID := randomAccessToken()
-		transaction, err := database.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		defer transaction.Rollback()
-		now := time.Now().UTC().Format(time.RFC3339)
 		for settingName, settingText := range map[string]string{
 			"service_mail_installation_id": generatedInstallationID,
 			"service_mail_public_key":      base64.StdEncoding.EncodeToString(generatedPublicKey),
@@ -51815,10 +51841,10 @@ func (store *publicTrialPreviewStore) loop() {
 	}
 }
 
-func (tracker *grabProgressTracker) subscribe(token string) chan grabProgressEvent {
+func (tracker *grabProgressTracker) subscribe(token string) <-chan grabProgressEvent {
 	return tracker.tracker.Subscribe(token)
 }
-func (tracker *grabProgressTracker) unsubscribe(token string, stream chan grabProgressEvent) {
+func (tracker *grabProgressTracker) unsubscribe(token string, stream <-chan grabProgressEvent) {
 	tracker.tracker.Unsubscribe(token, stream)
 }
 func (tracker *grabProgressTracker) publish(event grabProgressEvent) {
@@ -52126,22 +52152,30 @@ func queryAuthoritativeNameServers(ctx context.Context, nameServerIPs []string, 
 		return "", dnsmessage.Message{}, fmt.Errorf("authoritative DNS has no name servers for %s", domainName.String())
 	}
 	queryContext, cancel := context.WithCancel(ctx)
-	defer cancel()
 	responses := make(chan authoritativeDNSResponse, len(nameServerIPs))
+	remaining := len(nameServerIPs)
+	exchange := exchangeDNSMessage
+	defer func() {
+		cancel()
+		// Every worker has one reserved reply slot. Join all borrowed exchange
+		// callbacks before returning, including after the first usable answer.
+		for remaining > 0 {
+			<-responses
+			remaining--
+		}
+	}()
 	for _, nameServerIP := range nameServerIPs {
 		go func(currentNameServerIP string) {
-			message, err := exchangeDNSMessage(queryContext, currentNameServerIP, domainName, recordType)
-			select {
-			case responses <- authoritativeDNSResponse{nameServerIP: currentNameServerIP, message: message, err: err}:
-			case <-queryContext.Done():
-			}
+			message, err := exchange(queryContext, currentNameServerIP, domainName, recordType)
+			responses <- authoritativeDNSResponse{nameServerIP: currentNameServerIP, message: message, err: err}
 		}(nameServerIP)
 	}
 	var lastErr error
 	var fallbackResponse authoritativeDNSResponse
 	fallbackAvailable := false
-	for responseIndex := 0; responseIndex < len(nameServerIPs); responseIndex++ {
+	for remaining > 0 {
 		response := <-responses
+		remaining--
 		if response.err != nil {
 			lastErr = response.err
 			continue
@@ -52204,6 +52238,9 @@ func exchangeDNSMessageWithServer(ctx context.Context, nameServerIP string, doma
 	if err == nil && !message.Header.Truncated {
 		return message, nil
 	}
+	if err := ctx.Err(); err != nil {
+		return dnsmessage.Message{}, err
+	}
 	return exchangeDNSPacket(ctx, "tcp", nameServerIP, queryBytes, queryID)
 }
 
@@ -52214,7 +52251,23 @@ func exchangeDNSPacket(ctx context.Context, network string, nameServerIP string,
 	if err != nil {
 		return dnsmessage.Message{}, err
 	}
+	return exchangeDNSPacketOnConnection(queryContext, connection, network, queryBytes, queryID)
+}
+
+func exchangeDNSPacketOnConnection(ctx context.Context, connection net.Conn, network string, queryBytes []byte, queryID uint16) (dnsmessage.Message, error) {
 	defer connection.Close()
+	finished, watcherDone := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-ctx.Done():
+			// net.Conn explicitly permits Close during I/O. This library boundary
+			// interrupts reads as well as dialing, then joins its cancellation task.
+			_ = connection.Close()
+		case <-finished:
+		}
+	}()
+	defer func() { close(finished); <-watcherDone }()
 	_ = connection.SetDeadline(time.Now().Add(authoritativeDNSTimeout))
 	if network == "tcp" {
 		lengthPrefix := []byte{byte(len(queryBytes) >> 8), byte(len(queryBytes))}

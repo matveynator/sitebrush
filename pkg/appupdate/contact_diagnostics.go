@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"syscall"
 
 	"github.com/matveynator/netchan/v2"
 	"github.com/matveynator/netchan/v2/pkg/transport"
@@ -44,7 +45,7 @@ func recoverableContactFailure(problem error) bool {
 	var hostname x509.HostnameError
 	var certificate x509.CertificateInvalidError
 	var record tls.RecordHeaderError
-	if errors.As(problem, &verification) || errors.As(problem, &authority) || errors.As(problem, &hostname) || errors.As(problem, &certificate) || errors.As(problem, &record) || strings.Contains(problem.Error(), "tls:") {
+	if errors.As(problem, &verification) || errors.As(problem, &authority) || errors.As(problem, &hostname) || errors.As(problem, &certificate) || errors.As(problem, &record) || contactTLSFailure(problem) {
 		return false
 	}
 	for _, rejection := range []error{netchan.ErrSessionRejected, netchan.ErrSchemaMismatch, netchan.ErrMalformedFrame, netchan.ErrPayloadLimit, netchan.ErrUnsupportedType} {
@@ -56,6 +57,33 @@ func recoverableContactFailure(problem error) bool {
 	// A lost resumable session terminates an already authenticated contact;
 	// it does not reject the caller's identity or the requested operation.
 	return errors.As(problem, &network) || errors.Is(problem, net.ErrClosed) || errors.Is(problem, netchan.ErrChannelClosed) || errors.Is(problem, netchan.ErrSessionExpired) || errors.Is(problem, io.EOF) || errors.Is(problem, io.ErrUnexpectedEOF) || errors.Is(problem, os.ErrDeadlineExceeded)
+}
+
+// A failed closeNotify write is transport shutdown, not a TLS rejection. Inspect
+// every joined cause so that shutdown never hides a concurrent identity failure.
+func contactTLSFailure(problem error) bool {
+	if joined, ok := problem.(interface{ Unwrap() []error }); ok {
+		for _, cause := range joined.Unwrap() {
+			if cause != nil && contactTLSFailure(cause) {
+				return true
+			}
+		}
+		return false
+	}
+	message := problem.Error()
+	cause := errors.Unwrap(problem)
+	if cause != nil {
+		message = strings.TrimSuffix(message, cause.Error())
+	}
+	if strings.Contains(message, "tls:") {
+		var writeFailure *net.OpError
+		if message != "tls: failed to send closeNotify alert (but connection was closed anyway): " ||
+			!errors.As(cause, &writeFailure) || writeFailure.Op != "write" ||
+			!(errors.Is(cause, syscall.EPIPE) || errors.Is(cause, syscall.ECONNRESET) || errors.Is(cause, net.ErrClosed)) {
+			return true
+		}
+	}
+	return cause != nil && contactTLSFailure(cause)
 }
 
 type contactDiagnostics struct {

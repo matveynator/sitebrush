@@ -521,19 +521,19 @@ func ResourceExtension(rawRef string) string {
 }
 
 func HasAllowedResourceExtension(resourceURL string) bool {
-	_, found := KnownResourceKindsByExtension[ResourceExtension(resourceURL)]
+	_, found := knownResourceKindsByExtension[ResourceExtension(resourceURL)]
 	return found
 }
 
 func ResourceKindFromURL(resourceURL string) string {
 	extension := ResourceExtension(resourceURL)
-	if resourceKind, found := KnownResourceKindsByExtension[extension]; found {
+	if resourceKind, found := knownResourceKindsByExtension[extension]; found {
 		return resourceKind
 	}
 	return ""
 }
 
-var KnownResourceKindsByExtension = map[string]string{
+var knownResourceKindsByExtension = map[string]string{
 	".css":         "style",
 	".js":          "script",
 	".mjs":         "script",

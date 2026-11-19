@@ -32,10 +32,11 @@ type Database struct {
 // communicating." Each job carries its own response channel so callers can await results
 // without blocking the worker loop.
 type serializedJob struct {
-	ctx    context.Context
-	fn     func(context.Context, *sql.DB) (any, error)
-	result chan serializedResult
-	kind   WorkloadKind
+	claimed chan struct{}
+	ctx     context.Context
+	fn      func(context.Context, *sql.DB) (any, error)
+	result  chan serializedResult
+	kind    WorkloadKind
 }
 
 // serializedResult holds the outcome of a serializedJob. Keeping it separate helps the
@@ -142,10 +143,6 @@ func startSerializedPipeline(db *sql.DB) *serializedPipeline {
 	}
 
 	go func() {
-		defer func() {
-			// keep the pattern explicit: ownership stays with the creator, not the worker
-		}()
-
 		for {
 			job := getNextJob()
 
@@ -156,6 +153,11 @@ func startSerializedPipeline(db *sql.DB) *serializedPipeline {
 			default:
 			}
 
+			select {
+			case job.claimed <- struct{}{}:
+			case <-job.ctx.Done():
+				continue
+			}
 			value, err := job.fn(job.ctx, db)
 			job.result <- serializedResult{value, err}
 		}
@@ -334,10 +336,11 @@ func (db *Database) withSerializedConnectionFor(ctx context.Context, kind Worklo
 	}
 
 	job := serializedJob{
-		ctx:    ctx,
-		fn:     func(c context.Context, conn *sql.DB) (any, error) { return nil, fn(c, conn) },
-		result: make(chan serializedResult, 1),
-		kind:   kind,
+		claimed: make(chan struct{}),
+		ctx:     ctx,
+		fn:      func(c context.Context, conn *sql.DB) (any, error) { return nil, fn(c, conn) },
+		result:  make(chan serializedResult, 1),
+		kind:    kind,
 	}
 
 	if err := db.pipeline.enqueue(ctx, job); err != nil {
@@ -345,24 +348,15 @@ func (db *Database) withSerializedConnectionFor(ctx context.Context, kind Worklo
 	}
 
 	select {
+	case <-job.claimed:
+		// The callback owns its captures until the result returns them. SQL
+		// observes context cancellation without exposing unfinished writes.
+		return (<-job.result).err
 	case res := <-job.result:
 		return res.err
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-}
-
-// realtimeConverter is configured by the safecastrealtime package to translate
-// raw Safecast units into µSv/h.  Keeping the dependency injected avoids an
-// import cycle and mirrors the Go Proverb "The bigger the interface, the
-// weaker the abstraction" by exposing only the function we need.
-var realtimeConverter func(float64, string) (float64, bool)
-
-// SetRealtimeConverter stores the helper used to convert Safecast realtime
-// units.  We call it from main when the realtime feature is enabled so other
-// database code can stay agnostic of specific detector logic.
-func SetRealtimeConverter(fn func(float64, string) (float64, bool)) {
-	realtimeConverter = fn
 }
 
 // normalizeDBType trims and lowercases driver names so downstream switch blocks
@@ -3006,13 +3000,7 @@ ORDER BY device_id,fetched_at DESC;`
 				continue // keep the newest reading only once per device
 			}
 
-			var (
-				doseRate float64
-				ok       bool
-			)
-			if realtimeConverter != nil {
-				doseRate, ok = realtimeConverter(val, unit)
-			}
+			doseRate, ok := convertRealtimeReading(val, unit)
 			if !ok {
 				continue
 			}
@@ -3198,13 +3186,7 @@ VALUES (%s)`, strings.Join(ph, ","))
 			}
 
 			for _, m := range ms {
-				var (
-					doseRate float64
-					ok       bool
-				)
-				if realtimeConverter != nil {
-					doseRate, ok = realtimeConverter(m.Value, m.Unit)
-				}
+				doseRate, ok := convertRealtimeReading(m.Value, m.Unit)
 				if !ok {
 					continue
 				}

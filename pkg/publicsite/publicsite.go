@@ -89,9 +89,11 @@ type State struct {
 	Draining    bool
 }
 type stateTask struct {
-	enable *State
-	next   *State
-	reply  chan State
+	enable      State
+	next        State
+	replace     bool
+	checkEnable bool
+	reply       chan State
 }
 type Front struct {
 	Guest           func(http.ResponseWriter, *http.Request) bool
@@ -130,16 +132,16 @@ func NewFront(secret string, public func(http.ResponseWriter, *http.Request, boo
 			case <-stop:
 				return
 			case task := <-front.tasks:
-				if task.next != nil {
+				if task.replace {
 					previousAddress := state.Address
 					revision := state.revision + 1
-					state = *task.next
+					state = task.next
 					state.revision = revision
 					if state.Paused && state.Address == "" {
 						state.Address = previousAddress
 					}
 				}
-				if task.enable != nil && task.enable.revision == state.revision && task.enable.Address == state.Address && !state.Paused {
+				if task.checkEnable && task.enable.revision == state.revision && task.enable.Address == state.Address && !state.Paused {
 					state.PolicyReady = true
 				}
 				task.reply <- state
@@ -152,8 +154,12 @@ func NewFront(secret string, public func(http.ResponseWriter, *http.Request, boo
 }
 func (front *Front) exchange(next *State) (State, error) {
 	reply := make(chan State, 1)
+	task := stateTask{reply: reply}
+	if next != nil {
+		task.next, task.replace = *next, true
+	}
 	select {
-	case front.tasks <- stateTask{next: next, reply: reply}:
+	case front.tasks <- task:
 	case <-front.stop:
 		return State{}, errors.New("public server stopped")
 	}
@@ -170,12 +176,7 @@ func (front *Front) PolicyEnabled() error {
 	if err != nil {
 		return err
 	}
-	state.PolicyReady = true
-	_, err = front.exchange(&state)
-	if err == nil {
-		log.Printf("PUBLIC policy state=ready address=%q paused=%t", state.Address, state.Paused)
-	}
-	return err
+	return front.enablePolicy(state)
 }
 func (front *Front) Set(address string, paused bool) error {
 	if !paused && front.ResetPolicy != nil {

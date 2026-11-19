@@ -5,6 +5,56 @@ import (
 	"time"
 )
 
+func TestOwnershipAbandonedReplyReleasesSecurityOwner(t *testing.T) {
+	stop := make(chan struct{})
+	defer close(stop)
+	requests := make(chan Request)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		run("", stop, requests, map[string]map[string]evidenceSource{})
+	}()
+	session := make(chan struct{})
+	requests <- Request{Query: true, Reply: make(chan Result), Session: session}
+	close(session)
+	reply := make(chan Result, 1)
+	select {
+	case requests <- Request{Query: true, Reply: reply}:
+	case <-time.After(time.Second):
+		t.Fatal("abandoned reply blocked later security requests")
+	}
+	select {
+	case result := <-reply:
+		if result.Err != nil {
+			t.Fatal(result.Err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("security owner did not reply after cancellation")
+	}
+}
+
+func TestOwnershipCanceledSecuritySignalIsNotApplied(t *testing.T) {
+	stop := make(chan struct{})
+	defer close(stop)
+	requests := make(chan Request, requiredSources+1)
+	session := make(chan struct{})
+	close(session)
+	for _, source := range []string{"one", "two", "three"} {
+		requests <- Request{Submit: true, Signal: Signal{IP: "203.0.113.77", Category: "injection", InstallationID: source, ObservedAt: time.Now().UTC()}, Session: session}
+	}
+	reply := make(chan Result, 1)
+	requests <- Request{Query: true, Reply: reply}
+	go run("", stop, requests, map[string]map[string]evidenceSource{})
+	select {
+	case result := <-reply:
+		if len(result.Entries) != 0 || result.Err != nil {
+			t.Fatalf("canceled signals changed reputation: %+v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("security owner did not drain canceled work")
+	}
+}
+
 func TestSecurityBoundaryBlockedReplyCannotHangSubsystemShutdown(t *testing.T) {
 	stop := make(chan struct{})
 	requests := make(chan Request)

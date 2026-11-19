@@ -76,16 +76,20 @@ func (front *Front) preparePolicy(address string, prepare func() error) error {
 	if err = prepare(); err != nil {
 		return err
 	}
+	return front.enablePolicy(state)
+}
+
+func (front *Front) enablePolicy(state State) error {
 	// Compare and enable in the state owner, including same-address restarts.
 	reply := make(chan State, 1)
 	select {
-	case front.tasks <- stateTask{enable: &state, reply: reply}:
+	case front.tasks <- stateTask{enable: state, checkEnable: true, reply: reply}:
 	case <-front.stop:
 		return errors.New("public server stopped")
 	}
 	select {
 	case current := <-reply:
-		if current.revision != state.revision || current.Address != address || current.Paused || !current.PolicyReady {
+		if current.revision != state.revision || current.Address != state.Address || current.Paused || !current.PolicyReady {
 			return errors.New("public policy publisher changed during preparation")
 		}
 		log.Printf("PUBLIC policy state=ready address=%q paused=%t", current.Address, current.Paused)

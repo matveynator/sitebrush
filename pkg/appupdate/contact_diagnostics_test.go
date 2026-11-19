@@ -4,9 +4,11 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
+	"syscall"
 	"testing"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 )
 
 func TestContactFallbackRejectsIdentityProtocolAndTargetFailures(t *testing.T) {
+	closedTLS := fmt.Errorf("tls: failed to send closeNotify alert (but connection was closed anyway): %w", &net.OpError{Op: "write", Net: "tcp", Err: &os.SyscallError{Syscall: "write", Err: syscall.EPIPE}})
 	for _, scenario := range []struct {
 		name      string
 		err       error
@@ -31,6 +34,12 @@ func TestContactFallbackRejectsIdentityProtocolAndTargetFailures(t *testing.T) {
 		{"rejected", netchan.ErrSessionRejected, false},
 		{"expired authenticated session", netchan.ErrSessionExpired, true},
 		{"expired session with EOF", errors.Join(netchan.ErrSessionExpired, io.EOF), true},
+		{"expired session with failed TLS shutdown", fmt.Errorf("supervisor disconnected: %w", errors.Join(netchan.ErrSessionExpired, io.EOF, closedTLS, net.ErrClosed)), true},
+		{"TLS shutdown with identity rejection", errors.Join(closedTLS, x509.UnknownAuthorityError{Cert: &x509.Certificate{}}), false},
+		{"TLS shutdown with protocol rejection", errors.Join(closedTLS, netchan.ErrSchemaMismatch), false},
+		{"TLS shutdown with TLS alert", errors.Join(closedTLS, errors.New("tls: access denied")), false},
+		{"unverified TLS shutdown text", errors.Join(io.EOF, errors.New("tls: failed to send closeNotify alert (but connection was closed anyway): broken pipe")), false},
+		{"TLS shutdown wrapping rejection", fmt.Errorf("tls: failed to send closeNotify alert (but connection was closed anyway): %w", errors.Join(&net.OpError{Op: "write", Err: syscall.EPIPE}, errors.New("tls: access denied"))), false},
 		{"expired session with TLS rejection", errors.Join(netchan.ErrSessionExpired, errors.New("tls: access denied")), false},
 		{"rejection with EOF", errors.Join(netchan.ErrSessionRejected, io.EOF), false},
 		{"TLS with closed channel", errors.Join(netchan.ErrChannelClosed, errors.New("tls: access denied")), false},

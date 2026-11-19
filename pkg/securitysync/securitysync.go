@@ -14,13 +14,12 @@ import (
 )
 
 const (
-	evidenceWindow       = 24 * time.Hour
-	globalBlockTTL       = 7 * 24 * time.Hour
-	requiredSources      = 3
-	maximumTrackedIPs    = 4096
-	maximumSourcesPerIP  = 16
+	evidenceWindow      = 24 * time.Hour
+	globalBlockTTL      = 7 * 24 * time.Hour
+	requiredSources     = 3
+	maximumTrackedIPs   = 4096
+	maximumSourcesPerIP = 16
 )
-
 
 type PeerAttestation struct {
 	InstallationID string `json:"installation_id"`
@@ -109,9 +108,11 @@ type Entry struct {
 }
 
 type Request struct {
-	Signal *Signal
-	Query  bool
-	Reply  chan Result
+	Signal  Signal
+	Submit  bool
+	Query   bool
+	Reply   chan<- Result
+	Session <-chan struct{}
 }
 
 type Result struct {
@@ -164,9 +165,16 @@ func run(path string, stop <-chan struct{}, requests <-chan Request, records map
 				return
 			}
 			now := time.Now().UTC()
+			select {
+			case <-request.Session:
+				continue
+			case <-stop:
+				return
+			default:
+			}
 			result := Result{}
-			if request.Signal != nil {
-				result.Accepted, result.Err = submit(records, *request.Signal, now)
+			if request.Submit {
+				result.Accepted, result.Err = submit(records, request.Signal, now)
 				if result.Accepted && result.Err == nil {
 					_ = save(path, records, now)
 				}
@@ -177,6 +185,7 @@ func run(path string, stop <-chan struct{}, requests <-chan Request, records map
 			if request.Reply != nil {
 				select {
 				case request.Reply <- result:
+				case <-request.Session:
 				case <-stop:
 					return
 				}
