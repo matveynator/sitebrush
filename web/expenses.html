@@ -105,6 +105,7 @@
             {{if and $server.Local $.CanConfigurePublicIPs}}<button type="button" data-server-config-target="network">{{index $.T "server_ui_network"}}</button>{{end}}
             {{if $server.Local}}<button type="button" data-server-config-target="updates">{{index $.T "update_title"}}</button>{{end}}
             {{if or (gt $server.ClientCount 0) $expenseServer.Clients}}<button type="button" data-server-config-target="clients">{{index $.T "billing_clients"}}</button>{{end}}
+            <button type="button" data-server-config-target="billing">{{index $.T "server_billing_nav"}}</button>
             {{if $server.Local}}
             <button type="button" data-server-config-target="registration">{{index $.T "billing_registration_title"}}</button>
             <button type="button" data-server-config-target="demo">{{index $.T "billing_demo_title"}}</button>
@@ -232,11 +233,14 @@
 
             {{if or (gt $server.ClientCount 0) $expenseServer.Clients}}<section class="server-config-view" data-server-config-view="clients">
           <div class="billing-section-header">
-            <div><h2>{{index $.T "billing_clients"}}</h2><p class="text-muted">{{index $.T "expenses_clients_simple_hint"}}</p></div>
+            <div><h2>{{index $.T "billing_clients"}}</h2><p class="text-muted">{{index $.T "server_clients_hint"}}</p></div>
           </div>
-          <div class="expense-simple-clients">
+          <label class="server-billing-search-label">{{index $.T "server_clients_search"}}
+            <input class="form-control" type="search" data-server-clients-search placeholder="{{index $.T "server_clients_search_placeholder"}}" autocomplete="off">
+          </label>
+          <div class="expense-simple-clients" data-server-clients-list>
             {{range $clientIndex, $client := $expenseServer.Clients}}
-            <details class="expense-simple-client">
+            <details class="expense-simple-client" data-server-client-row data-customer-email="{{$client.Email}}">
               <summary>
                 <span class="expense-simple-client-head"><strong>{{$client.Email}}</strong><small class="text-muted">{{$client.SiteCount}} {{index $.T "billing_client_sites"}}</small></span>
                 <span><strong>{{$client.TotalStorageLabel}}</strong><br><small>{{index $.T "billing_client_storage"}}</small></span>
@@ -305,15 +309,82 @@
                   <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">{{index $.T "billing_save"}}</button>
                 </form>
                 {{end}}
-                <div class="expense-simple-invoices">
-                  <h3 class="h6 mb-0">{{index $.T "expenses_invoice_history"}}</h3>
-                  {{range $client.Invoices}}<div class="expense-simple-invoice"><span><strong>{{.Number}}</strong><br><small class="text-muted">{{.PeriodLabel}} · {{.StatusLabel}}</small></span><strong>{{.AmountLabel}}</strong></div>{{else}}<div class="text-muted">{{index $.T "expenses_invoice_history_empty"}}</div>{{end}}
+                <div class="server-client-invoices-link">
+                  <button type="button" class="btn btn-outline-primary btn-sm" data-server-config-target="billing" data-billing-client-open="{{$client.Email}}">{{index $.T "server_clients_view_invoices"}}</button>
+                  <small class="text-muted">{{index $.T "server_clients_view_invoices_hint"}}</small>
                 </div>
               </div>
             </details>
             {{else}}<div class="empty">{{index $.T "expenses_clients_empty"}}</div>{{end}}
           </div>
             </section>{{end}}
+            <section class="server-config-view" data-server-config-view="billing">
+              <header class="server-config-view-heading">
+                <h2>{{index $.T "server_billing_nav"}}</h2>
+                <p>{{index $.T "server_billing_hint"}}</p>
+              </header>
+              <div class="server-billing-dashboard" aria-label="{{index $.T "server_billing_dashboard"}}">
+                <div class="server-billing-stat"><span>{{index $.T "server_billing_forecast"}}</span><strong>{{$server.AllocatedMonthLabel}}</strong><small>{{index $.T "server_billing_forecast_note"}}</small></div>
+                <div class="server-billing-stat"><span>{{index $.T "server_billing_paid"}}</span><strong>{{$server.BillingPaidLabel}}</strong><small>{{index $.T "server_billing_paid_note"}}</small></div>
+                <div class="server-billing-stat"><span>{{index $.T "server_billing_open"}}</span><strong>{{$server.BillingOpenLabel}}</strong><small>{{index $.T "server_billing_open_note"}}</small></div>
+                <div class="server-billing-stat"><span>{{index $.T "server_billing_overdue"}}</span><strong>{{$server.BillingOverdueLabel}}</strong><small>{{index $.T "server_billing_overdue_note"}}</small></div>
+              </div>
+              {{if $server.BillingOtherCurrencies}}<p class="server-billing-currency-note">{{index $.T "server_billing_currency_note"}}</p>{{end}}
+              <div class="server-billing-block">
+                <div class="server-billing-block-header">
+                  <div><h3>{{index $.T "server_billing_history"}}</h3><p>{{index $.T "server_billing_history_hint"}}</p></div>
+                  {{if $server.Local}}<button type="button" class="btn btn-primary btn-sm" data-billing-create-toggle aria-controls="serverNewInvoice{{$serverIndex}}" aria-expanded="false">{{index $.T "server_billing_create"}}</button>{{end}}
+                </div>
+                {{if $server.Local}}
+                <section id="serverNewInvoice{{$serverIndex}}" class="server-billing-invoice-composer" data-billing-create-panel hidden>
+                  <h4>{{index $.T "server_billing_create"}}</h4>
+                  <p class="text-muted">{{index $.T "server_billing_manual_note"}}</p>
+                  <form method="post" action="?server-settings" class="server-billing-create-form">
+                    <input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+                    <input type="hidden" name="billing_action" value="create_invoice">
+                    <label>{{index $.T "server_billing_client"}}<input name="customer_email" type="email" class="form-control" list="serverInvoiceClients{{$serverIndex}}" required></label>
+                    <datalist id="serverInvoiceClients{{$serverIndex}}">{{range $client := $expenseServer.Clients}}<option value="{{$client.Email}}"></option>{{end}}</datalist>
+                    <label>{{index $.T "server_billing_site"}}<input name="domain" type="text" class="form-control" list="serverInvoiceSites{{$serverIndex}}" required></label>
+                    <datalist id="serverInvoiceSites{{$serverIndex}}">{{range $client := $expenseServer.Clients}}{{range $site := $client.Sites}}<option value="{{$site.Domain}}"></option>{{end}}{{end}}</datalist>
+                    <label>{{index $.T "server_billing_service"}}<input name="plan_name" type="text" class="form-control" required></label>
+                    <label>{{index $.T "server_billing_total"}}<input name="amount" type="number" min="0.01" step="0.01" class="form-control" required></label>
+                    <label>{{index $.T "billing_currency"}}<input name="currency" type="text" minlength="3" maxlength="3" pattern="[A-Za-z]{3}" class="form-control" value="{{$server.BillingCurrency}}" required></label>
+                    <label>{{index $.T "server_billing_provider"}}
+                      <select name="provider" class="form-select" required>
+                        <option value="">{{index $.T "server_billing_choose_provider"}}</option>
+                        {{range $.PaymentProviders}}{{if .Enabled}}<option value="{{.Provider}}">{{.DisplayName}}</option>{{end}}{{end}}
+                      </select>
+                    </label>
+                    <label>{{index $.T "server_billing_due"}}<input name="due_at" type="date" class="form-control"></label>
+                    <label class="server-billing-notes">{{index $.T "server_billing_notes"}}<textarea name="notes" rows="2" class="form-control"></textarea></label>
+                    <div class="server-billing-submit"><button type="button" class="btn btn-outline-secondary" data-billing-create-cancel>{{index $.T "edit_cancel"}}</button><button type="submit" class="btn btn-primary">{{index $.T "server_billing_issue"}}</button></div>
+                  </form>
+                </section>
+                {{end}}
+                <div class="server-billing-filters">
+                  <label>{{index $.T "server_billing_search"}}<input class="form-control" type="search" data-billing-invoice-search autocomplete="off"></label>
+                  <label>{{index $.T "server_billing_filter"}}
+                    <select class="form-select" data-billing-invoice-status>
+                      <option value="all">{{index $.T "server_billing_all"}}</option>
+                      <option value="issued">{{index $.T "server_billing_open"}}</option>
+                      <option value="paid">{{index $.T "server_billing_paid_status"}}</option>
+                      <option value="payment_error">{{index $.T "server_billing_error_status"}}</option>
+                      <option value="cancelled">{{index $.T "server_billing_cancelled_status"}}</option>
+                    </select>
+                  </label>
+                </div>
+                <div class="server-billing-invoice-list" data-billing-invoice-list>
+                  {{range $invoice := $server.Invoices}}
+                  <article class="server-billing-invoice-row" data-billing-invoice-row data-billing-customer="{{$invoice.CustomerEmail}}" data-billing-status="{{$invoice.Status}}">
+                    <div><strong>{{$invoice.Number}}</strong><span class="server-billing-muted">{{$invoice.CustomerEmail}} · {{$invoice.Domain}}</span><small>{{$invoice.PeriodLabel}} · {{$invoice.RecurringLabel}}</small></div>
+                    <div class="server-billing-invoice-amount"><strong>{{$invoice.AmountLabel}}</strong><span>{{$invoice.StatusLabel}}</span></div>
+                    {{if $invoice.CanPay}}<a class="btn btn-outline-primary btn-sm" href="{{$invoice.PaymentURL}}" target="_blank" rel="noopener noreferrer">{{index $.T "billing_invoice_pay"}}</a>{{end}}
+                  </article>
+                  {{else}}<p class="text-muted" data-billing-invoice-empty>{{index $.T "server_billing_empty"}}</p>{{end}}
+                </div>
+                <p class="server-billing-count" aria-live="polite" data-billing-invoice-count></p>
+              </div>
+            </section>
             {{if $server.Local}}
             <section class="server-config-view" data-server-config-view="monetization">
               <header class="server-config-view-heading"><h2>{{index $.T "server_ui_monetization"}}</h2><p>{{index $.T "server_ui_monetization_hint"}}</p></header>
