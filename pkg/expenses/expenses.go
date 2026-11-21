@@ -25,6 +25,7 @@ const (
 type ServerPolicy struct {
 	InstallationID            string
 	Mode                      Mode
+	MonetizationMode          string // enabled or disabled; empty preserves legacy enabled policies
 	DiskRatePer100GBMinor     int64
 	ActualMonthlyExpenseMinor int64
 	Currency                  string
@@ -39,6 +40,7 @@ func DefaultServerPolicy(installationID string, diskTotalBytes int64) ServerPoli
 	return ServerPolicy{
 		InstallationID:         strings.TrimSpace(installationID),
 		Mode:                   ModeAutomatic,
+		MonetizationMode:       "disabled",
 		DiskRatePer100GBMinor:  DefaultDiskRatePer100GBMinor,
 		Currency:               "EUR",
 		FreeSiteThresholdBytes: DefaultFreeSiteThresholdBytes,
@@ -53,6 +55,9 @@ func (policy ServerPolicy) Validate() error {
 	}
 	if policy.Mode != ModeAutomatic && policy.Mode != ModeActual {
 		return fmt.Errorf("expense mode must be automatic or actual")
+	}
+	if policy.MonetizationMode != "" && policy.MonetizationMode != "enabled" && policy.MonetizationMode != "disabled" {
+		return fmt.Errorf("monetization mode must be enabled or disabled")
 	}
 	if policy.DiskRatePer100GBMinor <= 0 {
 		return fmt.Errorf("disk rate per 100 GB must be greater than zero")
@@ -70,6 +75,12 @@ func (policy ServerPolicy) Validate() error {
 		return fmt.Errorf("billing disk percentage must be between 1 and 100")
 	}
 	return nil
+}
+
+// MonetizationEnabled treats legacy policy snapshots as enabled while
+// unconfigured new installations explicitly start in disabled mode.
+func (policy ServerPolicy) MonetizationEnabled() bool {
+	return policy.MonetizationMode != "disabled"
 }
 
 func CalculateMonthlyExpense(policy ServerPolicy) int64 {
