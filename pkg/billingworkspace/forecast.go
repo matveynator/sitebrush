@@ -108,7 +108,7 @@ func ProjectMonth(policy expenses.ServerPolicy, month time.Time, sites []Site, e
 		if amount <= 0 {
 			continue
 		}
-		customer := byCustomer[site.CustomerID]
+		customer := byCustomer[strings.TrimSpace(site.CustomerID)]
 		if err := addMoney(&customer.HostingMinor, amount); err != nil {
 			return Forecast{}, err
 		}
