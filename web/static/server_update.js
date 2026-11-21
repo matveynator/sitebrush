@@ -3,7 +3,7 @@
   const updateRoot = document.querySelector('[data-server-update]');
   if (!updateRoot) return;
   const announcementRoot = updateRoot.querySelector('[data-announcements]');
-  const updateModel = { serverVersion: updateRoot.dataset.serverVersion || '', lastContact: 0, pendingAction: '', queuedCommand: null, logText: '', renderedLog: '', connected: false, state: null, error: '', pending: false, socket: null, stopped: false, preview: null, campaigns: [], reason: 'security', backupPolicy: {databases: true, analytics: false, files: false, settings: false} };
+  const updateModel = { autoCheckAttempted: false, serverVersion: updateRoot.dataset.serverVersion || '', lastContact: 0, pendingAction: '', queuedCommand: null, logText: '', renderedLog: '', connected: false, state: null, error: '', pending: false, socket: null, stopped: false, preview: null, campaigns: [], reason: 'security', backupPolicy: {databases: true, analytics: false, files: false, settings: false} };
 
   function reportUpdateError(error) {
     const requestID = window.crypto && window.crypto.randomUUID ? window.crypto.randomUUID() : String(Date.now());
@@ -313,6 +313,11 @@
       }
       updateModel.error = updateResponse.Error || '';
       renderUpdate();
+      if (requestedAction === 'status' && !updateModel.autoCheckAttempted && !updateModel.error &&
+          updateModel.state && updateModel.state.current && !updateModel.state.busy && !updateModel.state.checking) {
+        updateModel.autoCheckAttempted = true;
+        submitUpdateCommand('check');
+      }
       if (updateModel.queuedCommand) {
         const queuedCommand = updateModel.queuedCommand;
         updateModel.queuedCommand = null;

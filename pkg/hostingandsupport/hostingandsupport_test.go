@@ -65,12 +65,13 @@ func TestServerExpensePolicyRoundTrip(t *testing.T) {
 		ActualMonthlyExpenseMinor: 7500,
 		Currency:                  "eur",
 		FreeSiteThresholdBytes:    100 * expenses.DecimalMegabyte,
+		BillingCapacityPercent:    45,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	loaded, found := store.ServerExpensePolicy(context.Background(), "local", 500*expenses.DecimalGigabyte)
-	if !found || loaded.Mode != expenses.ModeActual || loaded.ActualMonthlyExpenseMinor != 7500 || loaded.DiskRatePer100GBMinor != 1500 || loaded.FreeSiteThresholdBytes != 100*expenses.DecimalMegabyte || loaded.Currency != "EUR" || loaded.EffectiveAt != saved.EffectiveAt {
+	if !found || loaded.Mode != expenses.ModeActual || loaded.ActualMonthlyExpenseMinor != 7500 || loaded.DiskRatePer100GBMinor != 1500 || loaded.FreeSiteThresholdBytes != 100*expenses.DecimalMegabyte || loaded.BillingCapacityPercent != 45 || loaded.Currency != "EUR" || loaded.EffectiveAt != saved.EffectiveAt {
 		t.Fatalf("loaded policy = %#v", loaded)
 	}
 }
