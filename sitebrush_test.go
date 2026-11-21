@@ -4559,7 +4559,7 @@ func TestChrootLocationSettingsCreatesDirectoryAndServesIndex(t *testing.T) {
 	}
 }
 
-func TestDomainSettingsRendersCustomDomainSetupFirst(t *testing.T) {
+func TestDomainSettingsRendersOverviewAndDomainSetup(t *testing.T) {
 	application, _ := newTestApplication(t)
 	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?settings", nil)
 	request.Header.Set("Accept-Language", "en")
@@ -4599,7 +4599,6 @@ func TestDomainSettingsRendersCustomDomainSetupFirst(t *testing.T) {
 	}
 	body := response.Body.String()
 	for _, expectedFragment := range []string{
-		"First step",
 		"Connect your own second-level domain",
 		"Add domain",
 		"How to turn it on",
@@ -4626,6 +4625,48 @@ func TestDomainSettingsRendersCustomDomainSetupFirst(t *testing.T) {
 	}
 	if customDomainIndex > sslIndex || customDomainIndex > backupIndex || customDomainIndex > staticFoldersIndex {
 		t.Fatalf("custom domain setup is not the first settings section in %s", body)
+	}
+}
+
+
+func TestDomainSettingsNavigationPreservesExistingActions(t *testing.T) {
+	templateBytes, err := fs.ReadFile(embeddedWebFiles, "web/domain_settings.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	markup := string(templateBytes)
+	var lastSectionIndex int
+	for _, section := range []string{"overview", "domains", "search", "backup", "folders"} {
+		if !strings.Contains(markup, "data-settings-target=\""+section+"\"") {
+			t.Errorf("missing navigation link for %s", section)
+		}
+		sectionIndex := strings.Index(markup, "data-settings-panel=\""+section+"\"")
+		if sectionIndex <= lastSectionIndex {
+			t.Errorf("missing or unordered settings panel for %s", section)
+		}
+		lastSectionIndex = sectionIndex
+	}
+	for _, action := range []string{
+		"update_indexing", "add_alias", "check_all", "select_primary",
+		"check_alias", "select_alias", "delete_alias", "update_auto_ssl",
+		"rotate_backup_token", "save_chroot_location", "delete_chroot_location",
+	} {
+		if !strings.Contains(markup, "name=\"action\" value=\""+action+"\"") {
+			t.Errorf("settings form action %s is missing", action)
+		}
+	}
+	for _, asset := range []string{"web/static/domain_settings.js", "web/static/domain_settings.css"} {
+		if _, err := fs.ReadFile(embeddedWebFiles, asset); err != nil {
+			t.Errorf("missing settings asset %s: %v", asset, err)
+		}
+	}
+	for _, disclosure := range []string{
+		"settings-setup-details", "settings-alias-details",
+		"settings-backup-details", "settings-folder-details",
+	} {
+		if !strings.Contains(markup, "<details class=\"settings-disclosure "+disclosure+"\"") {
+			t.Errorf("missing progressive disclosure for %s", disclosure)
+		}
 	}
 }
 
