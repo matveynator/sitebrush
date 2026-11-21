@@ -157,3 +157,330 @@
   max-width: 68ch; margin: 0 0 24px;
   color: var(--theme-foreground); font-size: 15px; line-height: 1.6;
 }
+
+
+/* Client records and invoice ledger are separate workspaces. */
+.server-settings-page .server-billing-search-label {
+  display: grid; gap: 7px; margin: 0 0 18px; max-width: 380px;
+  color: var(--theme-muted-foreground); font-size: 13px;
+}
+.server-settings-page .expense-simple-clients { gap: 9px; }
+.server-settings-page .expense-simple-client {
+  border: 1px solid var(--theme-border); border-radius: var(--theme-radius);
+  background: var(--theme-card); overflow: hidden;
+}
+.server-settings-page .expense-simple-client[hidden] { display: none !important; }
+.server-settings-page .expense-simple-client summary {
+  padding: 17px; list-style: none; position: relative;
+  transition: background-color .15s ease;
+}
+.server-settings-page .expense-simple-client summary::-webkit-details-marker { display: none; }
+.server-settings-page .expense-simple-client summary:hover { background: var(--theme-muted); }
+.server-settings-page .expense-simple-client summary:focus-visible {
+  outline: 2px solid var(--theme-ring); outline-offset: -3px;
+}
+.server-settings-page .expense-simple-client-body { padding: 8px 17px 18px; }
+.server-settings-page .server-client-invoices-link {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 12px;
+  padding-top: 4px;
+}
+.server-settings-page .server-billing-dashboard {
+  display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 10px;
+  margin: 0 0 26px;
+}
+.server-settings-page .server-billing-stat {
+  display: flex; flex-direction: column; gap: 7px; min-width: 0;
+  padding: 18px 15px; border: 1px solid var(--theme-border);
+  border-radius: var(--theme-radius); background: var(--theme-card);
+}
+.server-settings-page .server-billing-stat > span {
+  font-size: 13px; line-height: 1.4; color: var(--theme-muted-foreground);
+}
+.server-settings-page .server-billing-stat > strong {
+  font-size: clamp(18px,2vw,25px); letter-spacing: -.035em;
+  font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
+}
+.server-settings-page .server-billing-stat > small {
+  margin-top: auto; color: var(--theme-muted-foreground); font-size: 12px; line-height: 1.4;
+}
+.server-settings-page .server-billing-currency-note {
+  font-size: 13px; color: var(--theme-muted-foreground);
+}
+.server-settings-page .server-billing-block {
+  display: grid; gap: 17px; padding-top: 24px; border-top: 1px solid var(--theme-border);
+}
+.server-settings-page .server-billing-block-header {
+  display: flex; justify-content: space-between; align-items: flex-start;
+  gap: 16px; flex-wrap: wrap;
+}
+.server-settings-page .server-billing-block-header h3 {
+  margin: 0 0 5px; font-size: 19px; letter-spacing: -.025em;
+}
+.server-settings-page .server-billing-block-header p {
+  margin: 0; font-size: 13px; color: var(--theme-muted-foreground);
+}
+.server-settings-page .server-billing-invoice-composer {
+  padding: 20px; border: 1px solid var(--theme-border);
+  border-radius: var(--theme-radius); background: var(--theme-muted);
+}
+.server-settings-page .server-billing-invoice-composer[hidden] { display: none; }
+.server-settings-page .server-billing-invoice-composer h4 { margin: 0 0 5px; font-size: 18px; }
+.server-settings-page .server-billing-create-form {
+  display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 15px;
+}
+.server-settings-page .server-billing-create-form label,
+.server-settings-page .server-billing-filters label {
+  display: grid; gap: 7px; font-size: 13px; font-weight: 600; min-width: 0;
+}
+.server-settings-page .server-billing-notes,
+.server-settings-page .server-billing-submit { grid-column: 1 / -1; }
+.server-settings-page .server-billing-submit {
+  display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 10px;
+}
+.server-settings-page .server-billing-filters {
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(160px, 200px);
+  align-items: end; gap: 12px;
+}
+.server-settings-page .server-billing-invoice-list {
+  border: 1px solid var(--theme-border); border-radius: var(--theme-radius);
+  overflow: hidden;
+}
+.server-settings-page .server-billing-invoice-row {
+  display: grid; grid-template-columns: minmax(0,1fr) auto auto;
+  align-items: center; gap: 15px; padding: 15px;
+  border-bottom: 1px solid var(--theme-border);
+}
+.server-settings-page .server-billing-invoice-row:last-child { border-bottom: 0; }
+.server-settings-page .server-billing-invoice-row[hidden] { display: none; }
+.server-settings-page .server-billing-invoice-row > div:first-child { display: grid; gap: 4px; min-width: 0; }
+.server-settings-page .server-billing-invoice-row strong,
+.server-settings-page .server-billing-invoice-row small { overflow-wrap: anywhere; }
+.server-settings-page .server-billing-invoice-row small,
+.server-settings-page .server-billing-muted,
+.server-settings-page .server-billing-invoice-amount span {
+  color: var(--theme-muted-foreground); font-size: 12px; line-height: 1.45;
+}
+.server-settings-page .server-billing-invoice-amount {
+  display: grid; gap: 5px; justify-items: end; text-align: right;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.server-settings-page .server-billing-count {
+  color: var(--theme-muted-foreground); font-size: 12px; margin: 0;
+}
+@media (max-width: 1120px) {
+  .server-settings-page .server-billing-dashboard { grid-template-columns: repeat(2,minmax(0,1fr)); }
+}
+@media (max-width: 600px) {
+  .server-settings-page .server-billing-dashboard,
+  .server-settings-page .server-billing-create-form,
+  .server-settings-page .server-billing-filters { grid-template-columns: minmax(0,1fr); }
+  .server-settings-page .server-billing-invoice-row { grid-template-columns: minmax(0,1fr) auto; }
+  .server-settings-page .server-billing-invoice-row > a { grid-column: 1 / -1; justify-self: start; }
+  .server-settings-page .server-billing-invoice-amount { justify-items: end; }
+  .server-settings-page .server-billing-submit button { flex: 1; }
+}
+
+
+/* One calm hierarchy: local server workspace, temporary sites and (central
+   owner only) the unified installation catalog. */
+.server-settings-page .server-root-tabs {
+  width: max-content; margin-bottom: 22px; border-radius: 12px;
+}
+.server-settings-page .server-root-workspace {
+  display: grid; gap: 24px; min-width: 0; padding: clamp(20px,3vw,34px);
+  border: 1px solid var(--theme-border); border-radius: var(--theme-radius);
+  background: var(--theme-card);
+}
+.server-settings-page .server-root-workspace[hidden] { display: none !important; }
+.server-settings-page .server-workspace-header {
+  display: flex; justify-content: space-between; align-items: start;
+  gap: 18px; flex-wrap: wrap; padding-bottom: 21px;
+  border-bottom: 1px solid var(--theme-border);
+}
+.server-settings-page .server-workspace-header h2 {
+  margin: 0 0 8px; font-size: clamp(23px,2.8vw,30px); letter-spacing: -.035em;
+}
+.server-settings-page .server-workspace-header p {
+  margin: 0; max-width: 62ch; font-size: 14px;
+  line-height: 1.6; color: var(--theme-muted-foreground);
+}
+.server-settings-page .server-workspace-count,
+.server-settings-page .server-workspace-footnote {
+  color: var(--theme-muted-foreground); font-size: 12px;
+  line-height: 1.5; margin: 0;
+}
+.server-settings-page .server-workspace-count { font-variant-numeric: tabular-nums; }
+.server-settings-page .server-workspace-empty {
+  margin: 0; padding: 28px 18px; color: var(--theme-muted-foreground);
+  font-size: 14px; text-align: center;
+}
+.server-settings-page .server-workspace-empty[hidden] { display: none; }
+.server-settings-page .server-temporary-block { display: grid; gap: 14px; }
+.server-settings-page .server-temporary-block h3 {
+  margin: 0; font-size: 16px; letter-spacing: -.015em;
+}
+.server-settings-page .server-temporary-list {
+  display: grid; border: 1px solid var(--theme-border);
+  border-radius: var(--theme-radius); overflow: hidden;
+}
+.server-settings-page .server-temporary-row {
+  display: grid; grid-template-columns: minmax(0,1fr) auto;
+  gap: 12px 25px; padding: 18px;
+  border-bottom: 1px solid var(--theme-border);
+}
+.server-settings-page .server-temporary-row:last-child { border-bottom: 0; }
+.server-settings-page .server-temporary-identity,
+.server-settings-page .server-temporary-status { display: grid; gap: 5px; align-content: start; min-width: 0; }
+.server-settings-page .server-temporary-identity > a,
+.server-settings-page .server-temporary-identity > strong {
+  font-size: 15px; font-weight: 650; overflow-wrap: anywhere;
+}
+.server-settings-page .server-temporary-identity small,
+.server-settings-page .server-temporary-status small {
+  font-size: 12px; color: var(--theme-muted-foreground);
+  overflow-wrap: anywhere;
+}
+.server-settings-page .server-temporary-status { justify-items: end; text-align: end; }
+.server-settings-page .server-temporary-status strong { font-size: 13px; }
+.server-settings-page .server-temporary-detail { grid-column: 1 / -1; }
+.server-settings-page .server-temporary-detail summary,
+.server-settings-page .server-temporary-archive summary {
+  width: fit-content; cursor: pointer; font-size: 13px;
+  color: var(--theme-muted-foreground);
+}
+.server-settings-page .server-temporary-detail > div {
+  margin-top: 9px; color: var(--theme-muted-foreground);
+  font-size: 12px; line-height: 1.6; overflow-wrap: anywhere;
+}
+.server-settings-page .server-temporary-archive {
+  border-top: 1px solid var(--theme-border); padding-top: 18px;
+}
+.server-settings-page .server-temporary-archive .server-temporary-list { margin-top: 15px; }
+.server-settings-page .server-installation-toolbar {
+  display: grid; grid-template-columns: minmax(190px,1fr) minmax(140px,190px) minmax(140px,190px);
+  gap: 12px; align-items: end;
+}
+.server-settings-page .server-installation-toolbar label {
+  display: grid; gap: 8px; min-width: 0; font-weight: 600;
+  font-size: 12px; color: var(--theme-muted-foreground);
+}
+.server-settings-page .server-installation-toolbar input,
+.server-settings-page .server-installation-toolbar select { min-height: 43px; }
+.server-settings-page .server-installation-head,
+.server-settings-page .server-installation-row {
+  display: grid; grid-template-columns: minmax(170px,1fr) 60px minmax(110px,135px) minmax(110px,135px) minmax(130px,155px);
+  gap: 12px; align-items: center;
+}
+.server-settings-page .server-installation-head {
+  padding: 12px 15px 5px; color: var(--theme-muted-foreground);
+  font-size: 11px; font-weight: 650;
+}
+.server-settings-page .server-installation-head > span:not(:first-child) { text-align: end; }
+.server-settings-page .server-installation-list {
+  display: grid; border: 1px solid var(--theme-border);
+  border-radius: var(--theme-radius); overflow: hidden;
+}
+.server-settings-page .server-installation-row {
+  min-width: 0; padding: 15px; border-bottom: 1px solid var(--theme-border);
+  transition: background-color .16s ease;
+}
+.server-settings-page .server-installation-row:hover { background: var(--theme-muted); }
+.server-settings-page .server-installation-row[hidden] { display: none !important; }
+.server-settings-page .server-installation-row:last-child { border-bottom: 0; }
+.server-settings-page .server-installation-identity {
+  display: grid; gap: 6px; min-width: 0;
+}
+.server-settings-page .server-installation-identity strong {
+  font-size: 14px; font-weight: 700; overflow-wrap: anywhere;
+}
+.server-settings-page .server-installation-identity small {
+  color: var(--theme-muted-foreground); font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.server-settings-page .server-installation-number {
+  text-align: end; font-variant-numeric: tabular-nums;
+  font-size: 13px; font-weight: 600; overflow-wrap: anywhere;
+}
+.server-settings-page .server-installation-number small { display: none; }
+.server-settings-page .server-installation-state {
+  display: grid; gap: 7px; justify-items: end;
+}
+.server-settings-page .server-installation-enabled,
+.server-settings-page .server-installation-disabled {
+  font-size: 12px; font-weight: 600;
+}
+.server-settings-page .server-installation-enabled { color: var(--theme-foreground); }
+.server-settings-page .server-installation-disabled { color: var(--theme-muted-foreground); }
+.server-settings-page .server-installation-open {
+  padding: 3px 0; cursor: pointer; border: 0; background: none;
+  color: var(--theme-primary); font-size: 12px; font-weight: 650;
+}
+.server-settings-page .server-installation-open:hover { text-decoration: underline; }
+.server-settings-page .server-installation-open:focus-visible,
+.server-settings-page .server-temporary-detail summary:focus-visible,
+.server-settings-page .server-temporary-archive summary:focus-visible {
+  outline: 2px solid var(--theme-ring); outline-offset: 3px;
+}
+.server-settings-page .server-monetization-state {
+  margin: 0; padding: 18px; border: 1px solid var(--theme-border);
+  border-radius: var(--theme-radius);
+}
+.server-settings-page .server-monetization-state legend {
+  float: none; width: auto; padding: 0; margin: 0 0 12px;
+  font-weight: 650; font-size: 14px;
+}
+.server-settings-page .server-monetization-choices {
+  display: grid; grid-template-columns: repeat(2,minmax(0,1fr));
+  width: min(100%,400px); gap: 5px; padding: 5px;
+  background: var(--theme-muted); border-radius: 10px;
+}
+.server-settings-page .server-monetization-choices label { margin: 0; cursor: pointer; }
+.server-settings-page .server-monetization-choices input {
+  position: absolute; width: 1px; height: 1px; opacity: 0;
+}
+.server-settings-page .server-monetization-choices span {
+  display: block; text-align: center; padding: 10px 12px;
+  border-radius: 7px; font-size: 13px; font-weight: 600;
+}
+.server-settings-page .server-monetization-choices input:checked + span {
+  background: var(--theme-card); color: var(--theme-foreground);
+  box-shadow: 0 1px 3px rgba(0,0,0,.06);
+}
+.server-settings-page .server-monetization-choices input:focus-visible + span {
+  outline: 2px solid var(--theme-ring); outline-offset: 1px;
+}
+.server-settings-page .server-monetization-state .form-text {
+  max-width: 60ch; font-size: 12px; line-height: 1.6; margin: 11px 0 0;
+}
+.server-settings-page .server-tariff-fields { display: grid; gap: 20px; }
+.server-settings-page .server-tariff-form[data-monetization-enabled="false"] .server-tariff-fields {
+  display: none;
+}
+@media (max-width: 1100px) {
+  .server-settings-page .server-installation-head,
+  .server-settings-page .server-installation-row {
+    grid-template-columns: minmax(150px,1fr) 50px minmax(100px,120px) minmax(100px,120px) minmax(105px,130px);
+  }
+}
+@media (max-width: 900px) {
+  .server-settings-page .server-installation-head { display: none; }
+  .server-settings-page .server-installation-row {
+    grid-template-columns: minmax(0,1fr) repeat(2,minmax(100px,auto));
+    gap: 10px 16px;
+  }
+  .server-settings-page .server-installation-number { text-align: start; }
+  .server-settings-page .server-installation-number small {
+    display: block; margin-bottom: 4px; font-size: 11px; font-weight: 400;
+    color: var(--theme-muted-foreground);
+  }
+  .server-settings-page .server-installation-state { justify-items: end; }
+}
+@media (max-width: 650px) {
+  .server-settings-page .server-root-workspace { padding: 18px 14px; }
+  .server-settings-page .server-installation-toolbar { grid-template-columns: minmax(0,1fr); }
+  .server-settings-page .server-installation-row { grid-template-columns: minmax(0,1fr) auto; }
+  .server-settings-page .server-installation-row > .server-installation-identity { grid-column: 1 / -1; }
+  .server-settings-page .server-installation-row > .server-installation-number { text-align: start; }
+  .server-settings-page .server-temporary-row { grid-template-columns: minmax(0,1fr); }
+  .server-settings-page .server-temporary-status { text-align: start; justify-items: start; }
+}

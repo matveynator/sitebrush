@@ -79,12 +79,11 @@
   </style>
 
   <div class="expense-simple-page">
-    {{if or .ActivePublicTrialSites .ArchivedPublicTrialSites .ShowCentralRegistry}}
-    <nav class="server-root-tabs" aria-label="{{index .T "billing_installations"}}" data-server-root-tabs>
-      <button type="button" class="is-active" data-server-root-target="servers" aria-current="page">{{index .T "billing_servers"}}</button>
-      <button type="button" data-server-root-target="installations">{{index .T "billing_installations"}}</button>
+    <nav class="server-root-tabs" aria-label="{{index .T "server_ui_navigation"}}" data-server-root-tabs>
+      <button type="button" class="is-active" data-server-root-target="servers" aria-current="page">{{index .T "server_ui_server_settings"}}</button>
+      <button type="button" data-server-root-target="temporary-sites">{{index .T "billing_temporary_sites"}}</button>
+      {{if .ShowCentralRegistry}}<button type="button" data-server-root-target="installations">{{index .T "billing_installations"}}</button>{{end}}
     </nav>
-    {{end}}
 
     <section data-hosting-installation-panel="servers">
       {{if gt (len .ExpenseServers) 1}}
@@ -105,6 +104,7 @@
             {{if and $server.Local $.CanConfigurePublicIPs}}<button type="button" data-server-config-target="network">{{index $.T "server_ui_network"}}</button>{{end}}
             {{if $server.Local}}<button type="button" data-server-config-target="updates">{{index $.T "update_title"}}</button>{{end}}
             {{if or (gt $server.ClientCount 0) $expenseServer.Clients}}<button type="button" data-server-config-target="clients">{{index $.T "billing_clients"}}</button>{{end}}
+            <button type="button" data-server-config-target="billing">{{index $.T "server_billing_nav"}}</button>
             {{if $server.Local}}
             <button type="button" data-server-config-target="registration">{{index $.T "billing_registration_title"}}</button>
             <button type="button" data-server-config-target="demo">{{index $.T "billing_demo_title"}}</button>
@@ -232,11 +232,14 @@
 
             {{if or (gt $server.ClientCount 0) $expenseServer.Clients}}<section class="server-config-view" data-server-config-view="clients">
           <div class="billing-section-header">
-            <div><h2>{{index $.T "billing_clients"}}</h2><p class="text-muted">{{index $.T "expenses_clients_simple_hint"}}</p></div>
+            <div><h2>{{index $.T "billing_clients"}}</h2><p class="text-muted">{{index $.T "server_clients_hint"}}</p></div>
           </div>
-          <div class="expense-simple-clients">
+          <label class="server-billing-search-label">{{index $.T "server_clients_search"}}
+            <input class="form-control" type="search" data-server-clients-search placeholder="{{index $.T "server_clients_search_placeholder"}}" autocomplete="off">
+          </label>
+          <div class="expense-simple-clients" data-server-clients-list>
             {{range $clientIndex, $client := $expenseServer.Clients}}
-            <details class="expense-simple-client">
+            <details class="expense-simple-client" data-server-client-row data-customer-email="{{$client.Email}}">
               <summary>
                 <span class="expense-simple-client-head"><strong>{{$client.Email}}</strong><small class="text-muted">{{$client.SiteCount}} {{index $.T "billing_client_sites"}}</small></span>
                 <span><strong>{{$client.TotalStorageLabel}}</strong><br><small>{{index $.T "billing_client_storage"}}</small></span>
@@ -305,15 +308,82 @@
                   <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">{{index $.T "billing_save"}}</button>
                 </form>
                 {{end}}
-                <div class="expense-simple-invoices">
-                  <h3 class="h6 mb-0">{{index $.T "expenses_invoice_history"}}</h3>
-                  {{range $client.Invoices}}<div class="expense-simple-invoice"><span><strong>{{.Number}}</strong><br><small class="text-muted">{{.PeriodLabel}} · {{.StatusLabel}}</small></span><strong>{{.AmountLabel}}</strong></div>{{else}}<div class="text-muted">{{index $.T "expenses_invoice_history_empty"}}</div>{{end}}
+                <div class="server-client-invoices-link">
+                  <button type="button" class="btn btn-outline-primary btn-sm" data-server-config-target="billing" data-billing-client-open="{{$client.Email}}">{{index $.T "server_clients_view_invoices"}}</button>
+                  <small class="text-muted">{{index $.T "server_clients_view_invoices_hint"}}</small>
                 </div>
               </div>
             </details>
             {{else}}<div class="empty">{{index $.T "expenses_clients_empty"}}</div>{{end}}
           </div>
             </section>{{end}}
+            <section class="server-config-view" data-server-config-view="billing">
+              <header class="server-config-view-heading">
+                <h2>{{index $.T "server_billing_nav"}}</h2>
+                <p>{{index $.T "server_billing_hint"}}</p>
+              </header>
+              <div class="server-billing-dashboard" aria-label="{{index $.T "server_billing_dashboard"}}">
+                <div class="server-billing-stat"><span>{{index $.T "server_billing_forecast"}}</span><strong>{{$server.AllocatedMonthLabel}}</strong><small>{{index $.T "server_billing_forecast_note"}}</small></div>
+                <div class="server-billing-stat"><span>{{index $.T "server_billing_paid"}}</span><strong>{{$server.BillingPaidLabel}}</strong><small>{{index $.T "server_billing_paid_note"}}</small></div>
+                <div class="server-billing-stat"><span>{{index $.T "server_billing_open"}}</span><strong>{{$server.BillingOpenLabel}}</strong><small>{{index $.T "server_billing_open_note"}}</small></div>
+                <div class="server-billing-stat"><span>{{index $.T "server_billing_overdue"}}</span><strong>{{$server.BillingOverdueLabel}}</strong><small>{{index $.T "server_billing_overdue_note"}}</small></div>
+              </div>
+              {{if $server.BillingOtherCurrencies}}<p class="server-billing-currency-note">{{index $.T "server_billing_currency_note"}}</p>{{end}}
+              <div class="server-billing-block">
+                <div class="server-billing-block-header">
+                  <div><h3>{{index $.T "server_billing_history"}}</h3><p>{{index $.T "server_billing_history_hint"}}</p></div>
+                  {{if $server.Local}}<button type="button" class="btn btn-primary btn-sm" data-billing-create-toggle aria-controls="serverNewInvoice{{$serverIndex}}" aria-expanded="false">{{index $.T "server_billing_create"}}</button>{{end}}
+                </div>
+                {{if $server.Local}}
+                <section id="serverNewInvoice{{$serverIndex}}" class="server-billing-invoice-composer" data-billing-create-panel hidden>
+                  <h4>{{index $.T "server_billing_create"}}</h4>
+                  <p class="text-muted">{{index $.T "server_billing_manual_note"}}</p>
+                  <form method="post" action="?server-settings" class="server-billing-create-form">
+                    <input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+                    <input type="hidden" name="billing_action" value="create_invoice">
+                    <label>{{index $.T "server_billing_client"}}<input name="customer_email" type="email" class="form-control" list="serverInvoiceClients{{$serverIndex}}" required></label>
+                    <datalist id="serverInvoiceClients{{$serverIndex}}">{{range $client := $expenseServer.Clients}}<option value="{{$client.Email}}"></option>{{end}}</datalist>
+                    <label>{{index $.T "server_billing_site"}}<input name="domain" type="text" class="form-control" list="serverInvoiceSites{{$serverIndex}}" required></label>
+                    <datalist id="serverInvoiceSites{{$serverIndex}}">{{range $client := $expenseServer.Clients}}{{range $site := $client.Sites}}<option value="{{$site.Domain}}"></option>{{end}}{{end}}</datalist>
+                    <label>{{index $.T "server_billing_service"}}<input name="plan_name" type="text" class="form-control" required></label>
+                    <label>{{index $.T "server_billing_total"}}<input name="amount" type="number" min="0.01" step="0.01" class="form-control" required></label>
+                    <label>{{index $.T "billing_currency"}}<input name="currency" type="text" minlength="3" maxlength="3" pattern="[A-Za-z]{3}" class="form-control" value="{{$server.BillingCurrency}}" required></label>
+                    <label>{{index $.T "server_billing_provider"}}
+                      <select name="provider" class="form-select" required>
+                        <option value="">{{index $.T "server_billing_choose_provider"}}</option>
+                        {{range $.PaymentProviders}}{{if .Enabled}}<option value="{{.Provider}}">{{.DisplayName}}</option>{{end}}{{end}}
+                      </select>
+                    </label>
+                    <label>{{index $.T "server_billing_due"}}<input name="due_at" type="date" class="form-control"></label>
+                    <label class="server-billing-notes">{{index $.T "server_billing_notes"}}<textarea name="notes" rows="2" class="form-control"></textarea></label>
+                    <div class="server-billing-submit"><button type="button" class="btn btn-outline-secondary" data-billing-create-cancel>{{index $.T "edit_cancel"}}</button><button type="submit" class="btn btn-primary">{{index $.T "server_billing_issue"}}</button></div>
+                  </form>
+                </section>
+                {{end}}
+                <div class="server-billing-filters">
+                  <label>{{index $.T "server_billing_search"}}<input class="form-control" type="search" data-billing-invoice-search autocomplete="off"></label>
+                  <label>{{index $.T "server_billing_filter"}}
+                    <select class="form-select" data-billing-invoice-status>
+                      <option value="all">{{index $.T "server_billing_all"}}</option>
+                      <option value="issued">{{index $.T "server_billing_open"}}</option>
+                      <option value="paid">{{index $.T "server_billing_paid_status"}}</option>
+                      <option value="payment_error">{{index $.T "server_billing_error_status"}}</option>
+                      <option value="cancelled">{{index $.T "server_billing_cancelled_status"}}</option>
+                    </select>
+                  </label>
+                </div>
+                <div class="server-billing-invoice-list" data-billing-invoice-list>
+                  {{range $invoice := $server.Invoices}}
+                  <article class="server-billing-invoice-row" data-billing-invoice-row data-billing-customer="{{$invoice.CustomerEmail}}" data-billing-status="{{$invoice.Status}}">
+                    <div><strong>{{$invoice.Number}}</strong><span class="server-billing-muted">{{$invoice.CustomerEmail}} · {{$invoice.Domain}}</span><small>{{$invoice.PeriodLabel}} · {{$invoice.RecurringLabel}}</small></div>
+                    <div class="server-billing-invoice-amount"><strong>{{$invoice.AmountLabel}}</strong><span>{{$invoice.StatusLabel}}</span></div>
+                    {{if $invoice.CanPay}}<a class="btn btn-outline-primary btn-sm" href="{{$invoice.PaymentURL}}" target="_blank" rel="noopener noreferrer">{{index $.T "billing_invoice_pay"}}</a>{{end}}
+                  </article>
+                  {{else}}<p class="text-muted" data-billing-invoice-empty>{{index $.T "server_billing_empty"}}</p>{{end}}
+                </div>
+                <p class="server-billing-count" aria-live="polite" data-billing-invoice-count></p>
+              </div>
+            </section>
             {{if $server.Local}}
             <section class="server-config-view" data-server-config-view="monetization">
               <header class="server-config-view-heading"><h2>{{index $.T "server_ui_monetization"}}</h2><p>{{index $.T "server_ui_monetization_hint"}}</p></header>
@@ -321,9 +391,18 @@
               <form method="post" action="?server-settings" class="server-tariff-form" data-server-tariff data-disk-bytes="{{$server.DiskCapacityBytesInput}}">
                 <input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
                 <input type="hidden" name="billing_action" value="save_server_expense_policy">
+                <fieldset class="server-monetization-state">
+                  <legend>{{index $.T "server_monetization_state"}}</legend>
+                  <div class="server-monetization-choices">
+                    <label><input type="radio" name="monetization_mode" value="enabled" {{if $server.MonetizationEnabled}}checked{{end}}><span>{{index $.T "server_monetization_on"}}</span></label>
+                    <label><input type="radio" name="monetization_mode" value="disabled" {{if not $server.MonetizationEnabled}}checked{{end}}><span>{{index $.T "server_monetization_off"}}</span></label>
+                  </div>
+                  <p class="form-text" data-monetization-mode-explanation>{{index $.T "server_monetization_help"}}</p>
+                </fieldset>
+                <div class="server-tariff-fields">
                 <div class="server-tariff-grid">
                   <label>{{index $.T "expenses_monthly_server_price"}}
-                    <input name="monthly_server_expense" type="number" min="0.01" step="0.01" class="form-control" value="{{$server.MonthlyCostInput}}" required>
+                    <input name="monthly_server_expense" type="number" min="0" step="0.01" class="form-control" value="{{$server.MonthlyCostInput}}" required>
                   </label>
                   <label>{{index $.T "billing_currency"}}
                     <input name="currency" type="text" minlength="3" maxlength="3" pattern="[A-Za-z]{3}" class="form-control" value="{{$server.BillingCurrency}}" required>
@@ -339,6 +418,7 @@
                   <div><span>{{index $.T "expenses_billing_capacity"}}</span><strong data-tariff-capacity>{{$server.BillingCapacityLabel}}</strong></div>
                   <div><span>{{index $.T "expenses_automatic_price_per_gb"}}</span><strong data-tariff-price>{{$server.BillingCostPerGBLabel}}/{{index $.T "expenses_gb_short"}}</strong></div>
                 </div>
+                </div>
                 <p class="form-text">{{index $.T "server_ui_tariff_future"}}</p>
                 <label class="server-tariff-confirm" data-tariff-confirm-row hidden><input type="checkbox" data-tariff-confirm> {{index $.T "server_ui_tariff_confirm"}}</label>
                 <div class="server-tariff-actions"><button type="submit" class="btn btn-primary" data-tariff-save>{{index $.T "billing_save"}}</button></div>
@@ -352,31 +432,108 @@
       {{else}}<div class="empty">{{index .T "expenses_servers_empty"}}</div>{{end}}
     </section>
 
-    <div data-server-installations-container hidden>
-      <nav class="server-installation-kinds" data-hosting-installation-tabs aria-label="{{index .T "billing_installations"}}">
-        {{if or .ActivePublicTrialSites .ArchivedPublicTrialSites}}<button type="button" class="hosting-installation-tab" data-hosting-installation-tab="temporary-sites">{{index .T "billing_temporary_sites"}}</button>{{end}}
-        {{if .ShowCentralRegistry}}<button type="button" class="hosting-installation-tab" data-hosting-installation-tab="desktop">{{index .T "billing_desktop_installations"}}</button><button type="button" class="hosting-installation-tab" data-hosting-installation-tab="archive">{{index .T "billing_archive"}}</button>{{end}}
-      </nav>
-    <section data-hosting-installation-panel="temporary-sites" hidden>
-      <h2>{{index .T "billing_temporary_sites"}}</h2>
-      <p class="text-muted">{{index .T "billing_temporary_sites_description"}}</p>
-      <h3 class="h6">{{index .T "billing_temporary_sites_active"}}</h3>
-      <div class="billing-plan-list mb-4">{{range .ActivePublicTrialSites}}<div class="billing-plan-row"><span><strong><a href="https://{{.Domain}}/" target="_blank" rel="noopener noreferrer">{{.Domain}}</a></strong><br><small>{{index $.T "billing_temporary_sites_source"}}: {{if .SourceURL}}<a href="{{.SourceURL}}" target="_blank" rel="noopener noreferrer">{{.SourceURL}}</a>{{else}}{{index $.T "billing_temporary_sites_source_unknown"}}{{end}} · {{index $.T "billing_temporary_sites_created"}}: {{.CreatedAt}}{{if .ClientIP}} · {{index $.T "billing_temporary_sites_ip"}}: {{.ClientIP}}{{if .City}} · {{.City}}{{end}}{{if .Country}} · {{.Country}}{{end}}{{end}}{{if .VerifiedEmail}} · {{index $.T "billing_temporary_sites_verified_email"}}: {{.VerifiedEmail}}{{end}}{{if .PossibleEmail}} · {{index $.T "billing_temporary_sites_possible_email"}}: {{.PossibleEmail}}{{end}} · {{index $.T "billing_temporary_sites_delete_after"}}: {{.DeleteAfter}}<br>{{index $.T "test_drive_admin_id"}}: {{.ID}} · {{index $.T "test_drive_admin_status"}}: {{with index $.T (printf "test_drive_status_%s" .Status)}}{{.}}{{else}}{{.Status}}{{end}} · {{index $.T "test_drive_admin_last_activity"}}: {{.LastActiveAt}} · {{index $.T "test_drive_admin_last_ip"}}: {{.LastIP}} · {{index $.T "test_drive_admin_mail_count"}}: {{.MailCount}} · {{index $.T "test_drive_admin_captcha"}}: {{if .HumanVerified}}{{index $.T "test_drive_admin_yes"}}{{else}}{{index $.T "test_drive_admin_no"}}{{end}}{{if .PendingEmail}} · {{index $.T "test_drive_admin_pending_email"}}: {{.PendingEmail}}{{end}}<br>{{index $.T "test_drive_admin_user_agent"}}: {{.UserAgent}}{{if .IPHistory}}<br>{{index $.T "test_drive_admin_ip_history"}}: {{.IPHistory}}{{end}}{{if .LastError}}<br><span class="text-danger">{{.LastError}}</span>{{end}}</small></span></div>{{else}}<div class="empty">{{index .T "billing_temporary_sites_active_empty"}}</div>{{end}}</div>
-      <h3 class="h6">{{index .T "billing_temporary_sites_archive"}}</h3>
-      <div class="billing-plan-list">{{range .ArchivedPublicTrialSites}}<div class="billing-plan-row"><span><strong>{{.Domain}}</strong><br><small>{{index $.T "billing_temporary_sites_source"}}: {{if .SourceURL}}<a href="{{.SourceURL}}" target="_blank" rel="noopener noreferrer">{{.SourceURL}}</a>{{else}}{{index $.T "billing_temporary_sites_source_unknown"}}{{end}} · {{index $.T "billing_temporary_sites_created"}}: {{.CreatedAt}}{{if .ClientIP}} · {{index $.T "billing_temporary_sites_ip"}}: {{.ClientIP}}{{if .City}} · {{.City}}{{end}}{{if .Country}} · {{.Country}}{{end}}{{end}}{{if .VerifiedEmail}} · {{index $.T "billing_temporary_sites_verified_email"}}: {{.VerifiedEmail}}{{end}}{{if .PossibleEmail}} · {{index $.T "billing_temporary_sites_possible_email"}}: {{.PossibleEmail}}{{end}} · {{index $.T "billing_temporary_sites_deleted"}}: {{.DeletedAt}}</small></span></div>{{else}}<div class="empty">{{index .T "billing_temporary_sites_archive_empty"}}</div>{{end}}</div>
+    <section class="server-root-workspace" data-hosting-installation-panel="temporary-sites" hidden>
+      <header class="server-workspace-header">
+        <div>
+          <h2>{{index .T "billing_temporary_sites"}}</h2>
+          <p>{{index .T "billing_temporary_sites_description"}}</p>
+        </div>
+        <span class="server-workspace-count">{{if .ActivePublicTrialSites}}{{len .ActivePublicTrialSites}}{{else}}0{{end}} {{index .T "server_installations_active"}}</span>
+      </header>
+      <div class="server-temporary-block">
+        <h3>{{index .T "billing_temporary_sites_active"}}</h3>
+        <div class="server-temporary-list">
+          {{range .ActivePublicTrialSites}}
+          <article class="server-temporary-row">
+            <div class="server-temporary-identity">
+              <a href="https://{{.Domain}}/" target="_blank" rel="noopener noreferrer">{{.Domain}}</a>
+              <small>{{index $.T "billing_temporary_sites_created"}}: {{.CreatedAt}}</small>
+              {{if .SourceURL}}<small>{{index $.T "billing_temporary_sites_source"}}: <a href="{{.SourceURL}}" target="_blank" rel="noopener noreferrer">{{.SourceURL}}</a></small>{{end}}
+            </div>
+            <div class="server-temporary-status">
+              <strong>{{with index $.T (printf "test_drive_status_%s" .Status)}}{{.}}{{else}}{{.Status}}{{end}}</strong>
+              <small>{{index $.T "billing_temporary_sites_delete_after"}}: {{.DeleteAfter}}</small>
+            </div>
+            <details class="server-temporary-detail">
+              <summary>{{index $.T "server_installations_details"}}</summary>
+              <div>{{if .VerifiedEmail}}{{index $.T "billing_temporary_sites_verified_email"}}: {{.VerifiedEmail}}{{end}}{{if .ClientIP}} · {{index $.T "billing_temporary_sites_ip"}}: {{.ClientIP}}{{end}}{{if .LastActiveAt}} · {{index $.T "test_drive_admin_last_activity"}}: {{.LastActiveAt}}{{end}}{{if .LastError}} · {{.LastError}}{{end}}</div>
+            </details>
+          </article>
+          {{else}}<p class="server-workspace-empty">{{index .T "billing_temporary_sites_active_empty"}}</p>{{end}}
+        </div>
+      </div>
+      {{if .ArchivedPublicTrialSites}}
+      <details class="server-temporary-archive">
+        <summary>{{index .T "billing_temporary_sites_archive"}} · {{len .ArchivedPublicTrialSites}}</summary>
+        <div class="server-temporary-list">
+          {{range .ArchivedPublicTrialSites}}
+          <article class="server-temporary-row">
+            <div class="server-temporary-identity"><strong>{{.Domain}}</strong><small>{{index $.T "billing_temporary_sites_created"}}: {{.CreatedAt}}</small></div>
+            <div class="server-temporary-status"><small>{{index $.T "billing_temporary_sites_deleted"}}: {{.DeletedAt}}</small></div>
+          </article>
+          {{end}}
+        </div>
+      </details>
+      {{end}}
     </section>
-
     {{if .ShowCentralRegistry}}
-    <section data-hosting-installation-panel="desktop" hidden>
-      <h2>{{index .T "billing_desktop_installations"}}</h2>
-      <div class="billing-plan-list">{{range .DesktopHostingGroups}}{{range .Hostings}}<div class="billing-plan-row"><span><strong>{{if .ServerDomain}}{{.ServerDomain}}{{else}}{{.InstallationID}}{{end}}</strong><br><small>{{.ServerIP}} · {{len .Sites}} {{index $.T "billing_client_sites"}}{{range .Sites}} · {{.Domain}}{{end}}</small></span></div>{{end}}{{else}}<div class="empty">{{index .T "billing_no_desktop_installations"}}</div>{{end}}</div>
-    </section>
-    <section data-hosting-installation-panel="archive" hidden>
-      <h2>{{index .T "billing_archive"}}</h2>
-      <div class="billing-plan-list">{{range .ArchivedHostings}}<div class="billing-plan-row"><span><strong>{{if .ServerDomain}}{{.ServerDomain}}{{else}}{{.InstallationID}}{{end}}</strong><br><small>{{.LastSeenAt}}</small></span></div>{{else}}<div class="empty">{{index .T "billing_archive_empty"}}</div>{{end}}</div>
+    <section class="server-root-workspace" data-server-installations-container hidden>
+      <header class="server-workspace-header">
+        <div><h2>{{index .T "billing_installations"}}</h2><p>{{index .T "server_installations_description"}}</p></div>
+        <span class="server-workspace-count">{{if .InstallationCatalog}}{{len .InstallationCatalog}}{{else}}0{{end}} {{index .T "server_installations_total"}}</span>
+      </header>
+      <div class="server-installation-toolbar">
+        <label>{{index .T "server_installations_search"}}
+          <input type="search" class="form-control" data-installations-search autocomplete="off" placeholder="{{index .T "server_installations_search_placeholder"}}">
+        </label>
+        <label>{{index .T "server_installations_sort"}}
+          <select class="form-select" data-installations-sort>
+            <option value="sites">{{index .T "server_installations_sort_sites"}}</option>
+            <option value="forecast">{{index .T "server_installations_sort_forecast"}}</option>
+            <option value="paid">{{index .T "server_installations_sort_paid"}}</option>
+            <option value="name">{{index .T "server_installations_sort_name"}}</option>
+          </select>
+        </label>
+        <label>{{index .T "server_installations_filter"}}
+          <select class="form-select" data-installations-filter>
+            <option value="active">{{index .T "server_installations_filter_active"}}</option>
+            <option value="monetized">{{index .T "server_installations_filter_enabled"}}</option>
+            <option value="not-monetized">{{index .T "server_installations_filter_disabled"}}</option>
+            <option value="archived">{{index .T "billing_archive"}}</option>
+            <option value="all">{{index .T "server_billing_all"}}</option>
+          </select>
+        </label>
+      </div>
+      <div class="server-installation-head" aria-hidden="true">
+        <span>{{index .T "server_installations_name"}}</span>
+        <span>{{index .T "billing_client_sites"}}</span>
+        <span>{{index .T "server_installations_sort_forecast"}}</span>
+        <span>{{index .T "server_installations_sort_paid"}}</span>
+        <span>{{index .T "server_monetization_state"}}</span>
+      </div>
+      <div data-installations-list class="server-installation-list">
+      {{range .InstallationCatalog}}
+        <article class="server-installation-row" data-installation-row data-installation-id="{{.ID}}" data-installation-search="{{.Name}} {{.ID}} {{.OwnerEmail}} {{.OSLabel}}" data-installation-name="{{.Name}}" data-installation-sites="{{.SiteCount}}" data-installation-forecast="{{.MonthlyForecastMinor}}" data-installation-paid="{{.PaidThisMonthMinor}}" data-installation-monetized="{{if .MonetizationEnabled}}true{{else}}false{{end}}" data-installation-currency="{{.Currency}}" data-installation-archived="{{if .Archived}}true{{else}}false{{end}}">
+          <div class="server-installation-identity">
+            <strong>{{.Name}}</strong>
+            <small>{{.OwnerEmail}}{{if .OSLabel}} · {{.OSLabel}}{{end}}</small>
+            {{if .Archived}}<small>{{index $.T "billing_archive"}} · {{.LastSeenAt}}</small>{{end}}
+          </div>
+          <span class="server-installation-number"><small>{{index $.T "billing_client_sites"}}</small>{{.SiteCount}}</span>
+          <span class="server-installation-number"><small>{{index $.T "server_installations_sort_forecast"}}</small>{{.MonthlyForecastLabel}}</span>
+          <span class="server-installation-number"><small>{{index $.T "server_installations_sort_paid"}}</small>{{.PaidThisMonthLabel}}</span>
+          <div class="server-installation-state">
+            {{if .MonetizationEnabled}}<span class="server-installation-enabled">{{index $.T "server_monetization_on"}}</span>{{else}}<span class="server-installation-disabled">{{index $.T "server_monetization_off"}}</span>{{end}}
+            {{if .Qualified}}<button type="button" class="server-installation-open" data-open-server-id="{{.ID}}">{{index $.T "server_installations_open"}}</button>{{end}}
+          </div>
+        </article>
+      {{else}}<p class="server-workspace-empty">{{index .T "server_installations_empty"}}</p>{{end}}
+      </div>
+      <p class="server-workspace-count" aria-live="polite" data-installations-count></p>
+      <p class="server-workspace-empty" data-installations-no-results hidden>{{index .T "server_installations_no_results"}}</p>
+      <p class="server-workspace-footnote">{{index .T "server_installations_forecast_note"}}</p>
     </section>
     {{end}}
-    </div>
 
     {{template "public-trial-preview-modal" .}}
   </div>
@@ -3119,20 +3276,7 @@
   });
 })();
 </script>
-<script>
-(function initializeExpenseServerSelection() {
-  const serverSelectElement = document.querySelector('[data-expense-server-select]');
-  if (!serverSelectElement) {
-    return;
-  }
-  const serverPanelElements = Array.from(document.querySelectorAll('[data-expense-server-panel]'));
-  serverSelectElement.addEventListener('change', function selectExpenseServer() {
-    for (const serverPanelElement of serverPanelElements) {
-      serverPanelElement.hidden = serverPanelElement.dataset.expenseServerPanel !== serverSelectElement.value;
-    }
-  });
-})();
-</script>
+{{if not .SimplifiedExpenses}}
 <script>
 (function initializeHostingInstallationTabs() {
   const tabContainerElement = document.querySelector('[data-hosting-installation-tabs]');
@@ -3231,6 +3375,7 @@
   }
 })();
 </script>
+{{end}}
 <script>
 (function initializeSiteSettingsTabs() {
   const tabContainerElement = document.querySelector('[data-site-settings-tabs]');

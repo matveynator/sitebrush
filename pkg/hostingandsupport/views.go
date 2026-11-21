@@ -83,6 +83,9 @@ type ServerView struct {
 	DefaultInvoiceAmount   string
 	DefaultInvoiceCurrency string
 	CostConfigured         bool
+	MonetizationEnabled    bool
+	MonthlyForecastMinor   int64
+	PaidThisMonthMinor     int64
 	MonthlyCostLabel       string
 	MinimumPriceGBLabel    string
 	CostPerGBLabel         string
@@ -103,6 +106,10 @@ type ServerView struct {
 	SharedCostPerGBLabel   string
 	BillingCapacityLabel   string
 	BillingCostPerGBLabel  string
+	BillingPaidLabel       string
+	BillingOpenLabel       string
+	BillingOverdueLabel    string
+	BillingOtherCurrencies int
 	BillableUsedLabel      string
 	AllocatedMonthLabel    string
 	CapacityUsedPercent    int
@@ -156,6 +163,11 @@ type ServerClientView struct {
 
 type ServerInvoiceView struct {
 	Number         string
+	Status         string
+	Currency       string
+	AmountMinor    int64
+	PaidAt         string
+	DueAt          string
 	CustomerEmail  string
 	Domain         string
 	PlanName       string
@@ -481,6 +493,12 @@ func BuildRemoteServerView(clientHosting ClientHosting, invoices []Invoice, late
 			billingPrice.PriceLabel = MoneyLabel(0, expensePolicy.Currency)
 			billingPrice.StatusText = "бесплатно до " + FormatFileSize(expensePolicy.FreeSiteThresholdBytes)
 		}
+		if !expensePolicy.MonetizationEnabled() {
+			billingPrice.Amount = "0.00"
+			billingPrice.PriceLabel = "—"
+			billingPrice.StatusText = "монетизация отключена"
+			billingPrice.Billable = false
+		}
 		certificateRemaining := remoteCertificateRemainingLabel(site)
 		server.Sites = append(server.Sites, ServerSiteView{
 			Domain:               site.Domain,
@@ -516,7 +534,7 @@ func BuildRemoteServerView(clientHosting ClientHosting, invoices []Invoice, late
 	server.TotalUsedLabel = serverTotalUsedLabel(server.Sites)
 	server.Clients = serverClientViewsFromSites(server.Sites)
 	server.ClientCount = len(server.Clients)
-	server.Invoices = ServerInvoiceViews(invoices, serverDomains(server.Sites), serverClientEmails(server.Clients))
+	server.Invoices = ServerInvoiceViewsForInstallation(invoices, server.ID, serverDomains(server.Sites))
 	server.InvoiceCount = len(server.Invoices)
 	server.BillableCount = BillableSiteCount(server.Sites)
 	server.UnpaidInvoiceCount = UnpaidInvoiceCount(server.Invoices)
@@ -564,6 +582,7 @@ func ApplyServerCostView(server *ServerView, policy expenses.ServerPolicy, invoi
 	policy = expenses.NormalizePolicy(policy)
 	monthlyExpenseMinor := expenses.CalculateMonthlyExpense(policy)
 	server.BillingCurrency = firstNonEmpty(normalizeBillingCurrency(policy.Currency), "EUR")
+	server.MonetizationEnabled = policy.MonetizationEnabled()
 	server.ExpenseMode = string(policy.Mode)
 	server.MonthlyCostInput = formatMoneyMinor(monthlyExpenseMinor)
 	server.ActualExpenseInput = formatMoneyMinor(policy.ActualMonthlyExpenseMinor)
@@ -583,7 +602,11 @@ func ApplyServerCostView(server *ServerView, policy expenses.ServerPolicy, invoi
 	allocation := expenses.AllocateMonthlyExpense(policy, expenseSites)
 	server.BillingCapacityLabel = FormatFileSize(allocation.BillingCapacityBytes)
 	server.BillableUsedLabel = FormatFileSize(allocation.BillableUsedBytes)
-	server.AllocatedMonthLabel = MoneyLabel(allocation.AllocatedMinor, server.BillingCurrency)
+	server.MonthlyForecastMinor = allocation.AllocatedMinor
+	if !server.MonetizationEnabled {
+		server.MonthlyForecastMinor = 0
+	}
+	server.AllocatedMonthLabel = MoneyLabel(server.MonthlyForecastMinor, server.BillingCurrency)
 	server.CapacityExceeded = allocation.CapacityExceeded
 	server.DiskCapacityKnown = policy.DiskTotalBytes > 0
 	if allocation.BillingCapacityBytes > 0 {
@@ -631,6 +654,35 @@ func ApplyServerCostView(server *ServerView, policy expenses.ServerPolicy, invoi
 	server.CoveredMonthLabel = MoneyLabel(coveredMinor, server.BillingCurrency)
 	server.UncoveredMonthLabel = MoneyLabel(uncoveredMinor, server.BillingCurrency)
 	server.ReserveLabel = MoneyLabel(reserveMinor, server.BillingCurrency)
+	applyServerBillingDashboard(server)
+}
+
+// Invoice snapshots stay unchanged when a server tariff changes. Dashboard
+// totals count only this server's invoice view and never sum currencies.
+func applyServerBillingDashboard(server *ServerView) {
+	paid, open, overdue := int64(0), int64(0), int64(0)
+	otherCurrency := 0
+	today := time.Now().UTC().Format("2006-01-02")
+	month := time.Now().UTC().Format("2006-01")
+	for _, invoice := range server.Invoices {
+		if invoice.AmountMinor <= 0 { continue }
+		if !strings.EqualFold(invoice.Currency, server.BillingCurrency) {
+			otherCurrency++
+			continue
+		}
+		switch invoice.Status {
+		case "paid":
+			if strings.HasPrefix(invoice.PaidAt, month) { paid += invoice.AmountMinor }
+		case "issued", "payment_error":
+			open += invoice.AmountMinor
+			if len(invoice.DueAt) >= len(today) && invoice.DueAt[:len(today)] < today { overdue += invoice.AmountMinor }
+		}
+	}
+	server.PaidThisMonthMinor = paid
+	server.BillingPaidLabel = MoneyLabel(paid, server.BillingCurrency)
+	server.BillingOpenLabel = MoneyLabel(open, server.BillingCurrency)
+	server.BillingOverdueLabel = MoneyLabel(overdue, server.BillingCurrency)
+	server.BillingOtherCurrencies = otherCurrency
 }
 
 func ServerSystemMetricViews(clientHosting ClientHosting) []ServerMetricView {
@@ -1129,6 +1181,11 @@ func ServerInvoiceViews(invoices []Invoice, domains map[string]struct{}, emails 
 		statusLabel := InvoiceStatusLabel(invoice.Status)
 		views = append(views, ServerInvoiceView{
 			Number:         invoice.Number,
+			Status:         invoice.Status,
+			Currency:       invoice.Currency,
+			AmountMinor:    invoice.AmountMinor,
+			PaidAt:         invoice.PaidAt,
+			DueAt:          invoice.DueAt,
 			CustomerEmail:  invoice.CustomerEmail,
 			Domain:         invoice.Domain,
 			PlanName:       firstNonEmpty(invoice.PlanName, "обслуживание сайта"),
@@ -1142,6 +1199,31 @@ func ServerInvoiceViews(invoices []Invoice, domains map[string]struct{}, emails 
 		})
 	}
 	return views
+}
+
+// ServerInvoiceViewsForInstallation never assigns one server's invoices to
+// another just because their customers share the same email. Historical
+// invoices without installation IDs are admitted by an exact site domain only.
+func ServerInvoiceViewsForInstallation(invoices []Invoice, installationID string, domains map[string]struct{}) []ServerInvoiceView {
+	installationID = strings.TrimSpace(installationID)
+	filtered := make([]Invoice, 0, len(invoices))
+	if installationID == "" {
+		return nil
+	}
+	for _, invoice := range invoices {
+		invoiceInstallation := strings.TrimSpace(invoice.InstallationID)
+		if invoiceInstallation != "" {
+			if invoiceInstallation != installationID {
+				continue
+			}
+		} else {
+			if _, found := domains[normalizeDomainName(invoice.Domain)]; !found {
+				continue
+			}
+		}
+		filtered = append(filtered, invoice)
+	}
+	return ServerInvoiceViews(filtered, nil, nil)
 }
 
 func InvoiceStatusLabel(status string) string {
