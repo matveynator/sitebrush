@@ -83,6 +83,9 @@ type ServerView struct {
 	DefaultInvoiceAmount   string
 	DefaultInvoiceCurrency string
 	CostConfigured         bool
+	MonetizationEnabled    bool
+	MonthlyForecastMinor   int64
+	PaidThisMonthMinor     int64
 	MonthlyCostLabel       string
 	MinimumPriceGBLabel    string
 	CostPerGBLabel         string
@@ -490,6 +493,12 @@ func BuildRemoteServerView(clientHosting ClientHosting, invoices []Invoice, late
 			billingPrice.PriceLabel = MoneyLabel(0, expensePolicy.Currency)
 			billingPrice.StatusText = "бесплатно до " + FormatFileSize(expensePolicy.FreeSiteThresholdBytes)
 		}
+		if !expensePolicy.MonetizationEnabled() {
+			billingPrice.Amount = "0.00"
+			billingPrice.PriceLabel = "—"
+			billingPrice.StatusText = "монетизация отключена"
+			billingPrice.Billable = false
+		}
 		certificateRemaining := remoteCertificateRemainingLabel(site)
 		server.Sites = append(server.Sites, ServerSiteView{
 			Domain:               site.Domain,
@@ -573,6 +582,7 @@ func ApplyServerCostView(server *ServerView, policy expenses.ServerPolicy, invoi
 	policy = expenses.NormalizePolicy(policy)
 	monthlyExpenseMinor := expenses.CalculateMonthlyExpense(policy)
 	server.BillingCurrency = firstNonEmpty(normalizeBillingCurrency(policy.Currency), "EUR")
+	server.MonetizationEnabled = policy.MonetizationEnabled()
 	server.ExpenseMode = string(policy.Mode)
 	server.MonthlyCostInput = formatMoneyMinor(monthlyExpenseMinor)
 	server.ActualExpenseInput = formatMoneyMinor(policy.ActualMonthlyExpenseMinor)
@@ -592,7 +602,11 @@ func ApplyServerCostView(server *ServerView, policy expenses.ServerPolicy, invoi
 	allocation := expenses.AllocateMonthlyExpense(policy, expenseSites)
 	server.BillingCapacityLabel = FormatFileSize(allocation.BillingCapacityBytes)
 	server.BillableUsedLabel = FormatFileSize(allocation.BillableUsedBytes)
-	server.AllocatedMonthLabel = MoneyLabel(allocation.AllocatedMinor, server.BillingCurrency)
+	server.MonthlyForecastMinor = allocation.AllocatedMinor
+	if !server.MonetizationEnabled {
+		server.MonthlyForecastMinor = 0
+	}
+	server.AllocatedMonthLabel = MoneyLabel(server.MonthlyForecastMinor, server.BillingCurrency)
 	server.CapacityExceeded = allocation.CapacityExceeded
 	server.DiskCapacityKnown = policy.DiskTotalBytes > 0
 	if allocation.BillingCapacityBytes > 0 {
@@ -664,6 +678,7 @@ func applyServerBillingDashboard(server *ServerView) {
 			if len(invoice.DueAt) >= len(today) && invoice.DueAt[:len(today)] < today { overdue += invoice.AmountMinor }
 		}
 	}
+	server.PaidThisMonthMinor = paid
 	server.BillingPaidLabel = MoneyLabel(paid, server.BillingCurrency)
 	server.BillingOpenLabel = MoneyLabel(open, server.BillingCurrency)
 	server.BillingOverdueLabel = MoneyLabel(overdue, server.BillingCurrency)
