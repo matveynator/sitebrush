@@ -29167,7 +29167,9 @@ func (a *App) runAutomaticBillingOnce(ctx context.Context, store hostingandsuppo
 		}
 		pricePerGBMinor := expenses.BillingCostPerGBMinor(policy)
 		billingCurrency := policy.Currency
-		if strings.HasPrefix(installationID, "local:") {
+		// The latest expense policy owns future rates. Historical server-cost
+		// settings are a fallback only when the canonical rate is unavailable.
+		if pricePerGBMinor <= 0 && strings.HasPrefix(installationID, "local:") {
 			if configured, found := store.ServerCostPolicy(ctx, "local"); found && configured.MinimumPriceGBMinor > 0 {
 				pricePerGBMinor = configured.MinimumPriceGBMinor
 				billingCurrency = configured.Currency

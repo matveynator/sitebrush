@@ -2954,7 +2954,7 @@ func TestServerSettingsNavigationPreservesExistingControls(t *testing.T) {
 			t.Fatalf("missing settings asset %s: %v", asset, err)
 		}
 	}
-	for _, section := range []string{"overview", "updates", "registration", "demo", "clients"} {
+	for _, section := range []string{"overview", "monetization", "network", "updates", "registration", "demo", "clients"} {
 		if !strings.Contains(page, `data-server-config-target="`+section+`"`) {
 			t.Errorf("missing server section navigation for %q", section)
 		}
@@ -2989,12 +2989,21 @@ func TestServerSettingsNavigationPreservesExistingControls(t *testing.T) {
 		`{{if $server.Local}}`,
 		`{{if and $server.Local $.CanConfigurePublicIPs}}`,
 		`{{if .CanConfigurePublicIPs}}`,
-		`id="server-network"`,
+		`data-server-root-tabs`,
+		`data-server-installations-container`,
 		`data-server-config-layout`,
+		`data-server-tariff`,
+		`name="billing_capacity_percent"`,
 	} {
 		if !strings.Contains(page, fragment) {
 			t.Errorf("server settings lost scope or network boundary %s", fragment)
 		}
+	}
+	if strings.Contains(page, `id="expenseSettings{{$serverIndex}}"`) {
+		t.Error("duplicate legacy monetization modal remains")
+	}
+	if strings.Count(page, `data-public-ip-panel data-csrf=`) != 1 {
+		t.Error("public IP panel must exist in exactly one local server view")
 	}
 	if _, err := parseEmbeddedPageTemplate("expenses.html", pageBytes); err != nil {
 		t.Fatalf("server settings template cannot be parsed: %v", err)
