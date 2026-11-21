@@ -401,6 +401,7 @@
   text-align: end; font-variant-numeric: tabular-nums;
   font-size: 13px; font-weight: 600; overflow-wrap: anywhere;
 }
+.server-settings-page .server-installation-number small { display: none; }
 .server-settings-page .server-installation-state {
   display: grid; gap: 7px; justify-items: end;
 }
@@ -468,6 +469,10 @@
     gap: 10px 16px;
   }
   .server-settings-page .server-installation-number { text-align: start; }
+  .server-settings-page .server-installation-number small {
+    display: block; margin-bottom: 4px; font-size: 11px; font-weight: 400;
+    color: var(--theme-muted-foreground);
+  }
   .server-settings-page .server-installation-state { justify-items: end; }
 }
 @media (max-width: 650px) {
@@ -476,7 +481,6 @@
   .server-settings-page .server-installation-row { grid-template-columns: minmax(0,1fr) auto; }
   .server-settings-page .server-installation-row > .server-installation-identity { grid-column: 1 / -1; }
   .server-settings-page .server-installation-row > .server-installation-number { text-align: start; }
-  .server-settings-page .server-installation-row > .server-installation-number:nth-child(4) { display: none; }
   .server-settings-page .server-temporary-row { grid-template-columns: minmax(0,1fr); }
   .server-settings-page .server-temporary-status { text-align: start; justify-items: start; }
 }
