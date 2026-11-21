@@ -37511,9 +37511,12 @@ process.stdout.write(JSON.stringify(responses));`)
 			}
 			tokenizer := htmlparser.NewTokenizer(strings.NewReader(entry))
 			separated := false
-			action := ""
 			for tokenizer.Next() != htmlparser.ErrorToken {
 				token := tokenizer.Token()
+				if token.Data == "li" {
+					separated = false
+				}
+				action := ""
 				for _, attribute := range token.Attr {
 					if token.Data == "li" && attribute.Key == "class" {
 						separated = strings.Contains(attribute.Val, "SiteBrushSeparatedMenuItem")
@@ -37522,12 +37525,15 @@ process.stdout.write(JSON.stringify(responses));`)
 						action = attribute.Val
 					}
 				}
+				if action == "" {
+					continue
+				}
+				wantSeparator := action == "freeze" || action == "publish" || action == "copy_site" || action == "tree" || action == "?analytics" || action == "?server-settings" || action == "?profile"
+				if separated != wantSeparator {
+					t.Fatalf("%s %s: separator=%t want=%t", fixture.Language, action, separated, wantSeparator)
+				}
+				actual = append(actual, action)
 			}
-			wantSeparator := action == "freeze" || action == "publish" || action == "copy_site" || action == "tree" || action == "?analytics" || action == "?server-settings" || action == "?profile"
-			if separated != wantSeparator {
-				t.Fatalf("%s %s: separator=%t want=%t", fixture.Language, action, separated, wantSeparator)
-			}
-			actual = append(actual, action)
 		}
 		if !reflect.DeepEqual(actual, expected) {
 			t.Fatalf("language=%s frozen=%t protected=%t manager=%t revision=%t logout=%t: order=%v want=%v", fixture.Language, fixture.Frozen, fixture.Protected, fixture.Manager, fixture.Revision, fixture.Logout, actual, expected)
