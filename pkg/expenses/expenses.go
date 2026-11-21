@@ -62,8 +62,8 @@ func (policy ServerPolicy) Validate() error {
 	if policy.DiskRatePer100GBMinor <= 0 {
 		return fmt.Errorf("disk rate per 100 GB must be greater than zero")
 	}
-	if policy.Mode == ModeActual && policy.ActualMonthlyExpenseMinor <= 0 {
-		return fmt.Errorf("actual monthly expense must be greater than zero")
+	if policy.Mode == ModeActual && policy.ActualMonthlyExpenseMinor <= 0 && policy.MonetizationEnabled() {
+		return fmt.Errorf("enabled monetization requires a positive monthly expense")
 	}
 	if normalizeCurrency(policy.Currency) == "" {
 		return fmt.Errorf("expense currency must be a three-letter code")
