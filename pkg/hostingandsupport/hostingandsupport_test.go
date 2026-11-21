@@ -1280,6 +1280,9 @@ func TestApplyServerCostViewUsesThirtyPercentBillingCapacity(t *testing.T) {
 		},
 	}
 	policy := expenses.DefaultServerPolicy("local", 500*expenses.DecimalGigabyte)
+	// New installations start with monetization off; this fixture tests the
+	// configured billing-capacity formula for an opted-in installation.
+	policy.MonetizationMode = "enabled"
 	ApplyServerCostView(&server, policy, nil)
 	if server.BillingCapacityLabel != "139.7 GB" || server.BillableUsedLabel != "83.8 GB" {
 		t.Fatalf("capacity labels = %q / %q", server.BillableUsedLabel, server.BillingCapacityLabel)
