@@ -38,6 +38,11 @@
     rows.sort((left, right) => {
       if (sort === "name") return text(left.dataset.installationName).localeCompare(text(right.dataset.installationName));
       const field = {sites:"installationSites",forecast:"installationForecast",paid:"installationPaid"}[sort] || "installationSites";
+      // Money is ordered within each currency, never compared as if EUR=USD.
+      if (sort === "forecast" || sort === "paid") {
+        const currencyOrder = text(left.dataset.installationCurrency).localeCompare(text(right.dataset.installationCurrency));
+        if (currencyOrder) return currencyOrder;
+      }
       return number(right, field) - number(left, field) || text(left.dataset.installationName).localeCompare(text(right.dataset.installationName));
     });
     let visible = 0;
