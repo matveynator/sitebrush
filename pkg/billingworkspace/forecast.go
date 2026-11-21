@@ -73,6 +73,11 @@ func ProjectMonth(policy expenses.ServerPolicy, month time.Time, sites []Site, e
 		PeriodStart: month.Format("2006-01"),
 		Currency: policy.Currency,
 	}
+	// Disabled monetization suppresses all future charges, including optional
+	// services; already issued invoice snapshots remain unchanged.
+	if !policy.MonetizationEnabled() {
+		return result, nil
+	}
 	usages := make([]expenses.SiteUsage, 0, len(sites))
 	byCustomer := make(map[string]*CustomerForecast)
 	customerForSite := make(map[string]string)
