@@ -103,20 +103,32 @@ func TestServerPolicyValidationAndNormalization(t *testing.T) {
 	}
 }
 
-// A newly saved policy changes future allocations without changing historical figures.
+// Future monthly prices use the saved percentage, while past totals remain fixed.
 func TestConfigurableBillingCapacityPercent(t *testing.T) {
-  policy := DefaultServerPolicy("local", 1000*DecimalGigabyte)
-  policy.Mode = ModeActual
-  policy.ActualMonthlyExpenseMinor = 9000
-  policy.BillingCapacityPercent = 30
-  if got := BillingCostPerGBMinor(policy); got != 30 { t.Fatalf("30%% price = %d, want 30", got) }
-  policy.BillingCapacityPercent = 60
-  if got := BillingCostPerGBMinor(policy); got != 15 { t.Fatalf("60%% price = %d, want 15", got) }
-  if got := CalculateMonthlyExpense(policy); got != 9000 { t.Fatalf("monthly expense changed: %d", got) }
-  policy.BillingCapacityPercent = 101
-  if err := policy.Validate(); err == nil { t.Fatal("percent above 100 accepted") }
-  policy.BillingCapacityPercent = -1
-  if err := policy.Validate(); err == nil { t.Fatal("negative percent accepted") }
-  policy.BillingCapacityPercent = 0
-  if got := NormalizePolicy(policy).BillingCapacityPercent; got != 30 { t.Fatalf("legacy percent = %d", got) }
+	policy := DefaultServerPolicy("local", 1000*DecimalGigabyte)
+	policy.Mode = ModeActual
+	policy.ActualMonthlyExpenseMinor = 9000
+	policy.BillingCapacityPercent = 30
+	if got := BillingCostPerGBMinor(policy); got != 30 {
+		t.Fatalf("30%% price = %d, want 30", got)
+	}
+	policy.BillingCapacityPercent = 60
+	if got := BillingCostPerGBMinor(policy); got != 15 {
+		t.Fatalf("60%% price = %d, want 15", got)
+	}
+	if got := CalculateMonthlyExpense(policy); got != 9000 {
+		t.Fatalf("monthly expense changed: %d", got)
+	}
+	policy.BillingCapacityPercent = 101
+	if err := policy.Validate(); err == nil {
+		t.Fatal("percent above 100 accepted")
+	}
+	policy.BillingCapacityPercent = -1
+	if err := policy.Validate(); err == nil {
+		t.Fatal("negative percent accepted")
+	}
+	policy.BillingCapacityPercent = 0
+	if got := NormalizePolicy(policy).BillingCapacityPercent; got != 30 {
+		t.Fatalf("legacy percent = %d", got)
+	}
 }

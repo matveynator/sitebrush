@@ -29567,7 +29567,9 @@ func (a *App) saveServerExpensePolicyFromForm(r *http.Request) string {
 	billingPercent := expenses.BillingCapacityPercent
 	if rawPercent := strings.TrimSpace(r.FormValue("billing_capacity_percent")); rawPercent != "" {
 		parsed, parseErr := strconv.ParseInt(rawPercent, 10, 64)
-		if parseErr != nil { return translationOrDefault(translations, "expenses_server_policy_invalid", "Check the server expense settings.") }
+		if parseErr != nil {
+			return translationOrDefault(translations, "expenses_server_policy_invalid", "Check the server expense settings.")
+		}
 		billingPercent = parsed
 	}
 	_, diskTotalBytes, diskAvailable := diskusage.DiskSpace(a.storageRootDir())
