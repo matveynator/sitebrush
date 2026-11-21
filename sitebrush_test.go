@@ -3940,6 +3940,40 @@ func TestAutomaticBillingCreatesInvoicesForClientAndServerOwner(t *testing.T) {
 	if invoicesAfterOptOut := store.Invoices(context.Background(), 10); len(invoicesAfterOptOut) != 2 {
 		t.Fatalf("opt-out altered issued invoices or created new ones: %#v", invoicesAfterOptOut)
 	}
+
+	// An already prepared, enabled snapshot must not override a newer
+	// opt-out committed at the database owner's transaction boundary.
+	persisted := snapshot.LocalCostPolicy
+	persisted.MonetizationMode = "disabled"
+	if _, err := store.SaveServerExpensePolicy(context.Background(), persisted); err != nil {
+		t.Fatal(err)
+	}
+	application.runAutomaticBillingOnce(context.Background(), store, snapshot, time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC))
+	if stale := store.Invoices(context.Background(), 10); len(stale) != 2 {
+		t.Fatalf("stale enabled snapshot issued invoices after opt-out: %+v", stale)
+	}
+
+	// A newly enabled persisted tariff wins over an old prepared price for
+	// future periods, while previous invoices remain immutable.
+	persisted.MonetizationMode = "enabled"
+	persisted.ActualMonthlyExpenseMinor *= 2
+	if _, err := store.SaveServerExpensePolicy(context.Background(), persisted); err != nil {
+		t.Fatal(err)
+	}
+	application.runAutomaticBillingOnce(context.Background(), store, snapshot, time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC))
+	repriced := store.Invoices(context.Background(), 10)
+	if len(repriced) != 4 {
+		t.Fatalf("re-enabling the persisted tariff did not create new-period invoices: %+v", repriced)
+	}
+	repricedClient := int64(0)
+	for _, invoice := range repriced {
+		if invoice.CustomerEmail == "client@example.com" && strings.HasPrefix(invoice.PeriodStart, "2026-10") {
+			repricedClient = invoice.AmountMinor
+		}
+	}
+	if repricedClient <= clientInvoice.AmountMinor {
+		t.Fatalf("future invoice used stale tariff: old=%d new=%d", clientInvoice.AmountMinor, repricedClient)
+	}
 }
 
 func TestSaveServerExpensePolicyUsesOnlyMonthlyServerPrice(t *testing.T) {
