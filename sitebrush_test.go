@@ -3041,6 +3041,52 @@ func TestServerSettingsNavigationPreservesExistingControls(t *testing.T) {
 	}
 }
 
+func TestCentralInstallationCatalogReplacesDuplicateServerSelector(t *testing.T) {
+	source, err := fs.ReadFile(embeddedWebFiles, "web/expenses.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := parseEmbeddedPageTemplate("expenses.html", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	servers := []hostingandsupport.ServerView{
+		{ID: "local:sitebrush.com", Name: "SiteBrush.com", Local: true},
+		{ID: "remote:one", Name: "Remote installation"},
+	}
+	expenseServers := []simplifiedExpenseServerView{
+		{Server: servers[0], MailSelected: true},
+		{Server: servers[1]},
+	}
+	render := func(central bool) string {
+		t.Helper()
+		data := map[string]any{
+			"Domain": "sitebrush.com", "Title": "Settings",
+			"T": translationsForLanguageCode("en"),
+			"SimplifiedExpenses": true, "ShowCentralRegistry": central,
+			"Servers": servers, "ExpenseServers": expenseServers,
+			"DemoSettings": demo.Settings{}, "DemoStatus": demoSiteStatusView{},
+		}
+		var html bytes.Buffer
+		if err := page.Execute(&html, data); err != nil {
+			t.Fatal(err)
+		}
+		return html.String()
+	}
+	centralHTML := render(true)
+	if strings.Contains(centralHTML, "data-expense-server-select") ||
+		!strings.Contains(centralHTML, `data-server-root-target="installations"`) ||
+		!strings.Contains(centralHTML, `data-server-local="true"`) ||
+		!strings.Contains(centralHTML, `data-server-id="remote:one"`) {
+		t.Fatal("central navigation must show a unified catalogue without a duplicate server selector")
+	}
+	ownerHTML := render(false)
+	if !strings.Contains(ownerHTML, "data-expense-server-select") ||
+		strings.Contains(ownerHTML, `data-server-root-target="installations"`) {
+		t.Fatal("ordinary server owner must retain server selection without the central registry")
+	}
+}
+
 func TestHostingAndSupportTemplateRendersServerView(t *testing.T) {
 	templateBytes, err := fs.ReadFile(embeddedWebFiles, "web/expenses.html")
 	if err != nil {
