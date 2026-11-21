@@ -1,5 +1,11 @@
 {
   "en": {
+    "server_ui_monetization": "Monetization",
+    "server_ui_monetization_hint": "Server cost and future storage charges",
+    "server_ui_billing_percent": "Billing disk share",
+    "server_ui_tariff_future": "New rates apply to future invoices. Issued invoices and past payments are unchanged.",
+    "server_ui_tariff_confirm": "I understand that future charges will use the new rate.",
+    "server_ui_network_hint": "IP addresses of this server. An outgoing/NAT address does not guarantee inbound reachability.",
     "server_ui_network": "Network and public IPs",
     "server_ui_navigation": "Server navigation",
     "server_ui_overview": "Overview and costs",
@@ -1835,6 +1841,12 @@
     "site_copy_use_found": "Use downloaded content"
   },
   "fr": {
+    "server_ui_monetization": "Monétisation",
+    "server_ui_monetization_hint": "Coût du serveur et frais de stockage futurs",
+    "server_ui_billing_percent": "Part du disque facturable",
+    "server_ui_tariff_future": "Les nouveaux tarifs s'appliquent aux prochaines factures. Les factures émises restent inchangées.",
+    "server_ui_tariff_confirm": "Je comprends que les frais futurs utiliseront le nouveau tarif.",
+    "server_ui_network_hint": "Adresses IP de ce serveur. Une adresse sortante ou NAT ne garantit pas l'accès entrant.",
     "server_ui_network": "Réseau et adresses IP publiques",
     "server_ui_navigation": "Navigation du serveur",
     "server_ui_overview": "Vue d’ensemble et coûts",
@@ -3435,6 +3447,12 @@
     "site_copy_use_found": "Utiliser le contenu téléchargé"
   },
   "ru": {
+    "server_ui_monetization": "Монетизация",
+    "server_ui_monetization_hint": "Стоимость сервера и будущие начисления за хранение",
+    "server_ui_billing_percent": "Доля диска для расчёта",
+    "server_ui_tariff_future": "Новые тарифы применяются к будущим счетам. Выставленные счета и прошедшие платежи не изменяются.",
+    "server_ui_tariff_confirm": "Я понимаю, что будущие начисления будут рассчитываться по новому тарифу.",
+    "server_ui_network_hint": "IP-адреса этого сервера. Исходящий IP или NAT не подтверждают доступность извне.",
     "server_ui_network": "Сеть и публичные IP",
     "server_ui_navigation": "Разделы настроек сервера",
     "server_ui_overview": "Обзор и расходы",
@@ -5270,6 +5288,12 @@
     "site_copy_use_found": "Использовать скачанное"
   },
   "ja": {
+    "server_ui_monetization": "Monetization",
+    "server_ui_monetization_hint": "Server cost and future storage charges",
+    "server_ui_billing_percent": "Billing disk share",
+    "server_ui_tariff_future": "New rates apply to future invoices. Issued invoices and past payments are unchanged.",
+    "server_ui_tariff_confirm": "I understand that future charges will use the new rate.",
+    "server_ui_network_hint": "IP addresses of this server. An outgoing/NAT address does not guarantee inbound reachability.",
     "server_ui_network": "ネットワークと公開IP",
     "server_ui_navigation": "サーバーナビゲーション",
     "server_ui_overview": "概要と費用",
@@ -6866,6 +6890,12 @@
     "site_copy_use_found": "ダウンロード済みの内容を使用"
   },
   "it": {
+    "server_ui_monetization": "Monetizzazione",
+    "server_ui_monetization_hint": "Costo del server e addebiti futuri",
+    "server_ui_billing_percent": "Quota del disco per la tariffa",
+    "server_ui_tariff_future": "Le nuove tariffe valgono per le fatture future. Le fatture emesse restano invariate.",
+    "server_ui_tariff_confirm": "Confermo che gli addebiti futuri useranno la nuova tariffa.",
+    "server_ui_network_hint": "Indirizzi IP di questo server. Un IP in uscita o NAT non garantisce l'accesso in entrata.",
     "server_ui_network": "Rete e IP pubblici",
     "server_ui_navigation": "Navigazione del server",
     "server_ui_overview": "Panoramica e costi",
@@ -8462,6 +8492,12 @@
     "site_copy_use_found": "Usa i contenuti scaricati"
   },
   "sv": {
+    "server_ui_monetization": "Monetization",
+    "server_ui_monetization_hint": "Server cost and future storage charges",
+    "server_ui_billing_percent": "Billing disk share",
+    "server_ui_tariff_future": "New rates apply to future invoices. Issued invoices and past payments are unchanged.",
+    "server_ui_tariff_confirm": "I understand that future charges will use the new rate.",
+    "server_ui_network_hint": "IP addresses of this server. An outgoing/NAT address does not guarantee inbound reachability.",
     "server_ui_network": "Nätverk och publika IP-adresser",
     "server_ui_navigation": "Servernavigering",
     "server_ui_overview": "Översikt och kostnader",
@@ -10058,6 +10094,12 @@
     "site_copy_use_found": "Använd hämtat innehåll"
   },
   "fi": {
+    "server_ui_monetization": "Monetization",
+    "server_ui_monetization_hint": "Server cost and future storage charges",
+    "server_ui_billing_percent": "Billing disk share",
+    "server_ui_tariff_future": "New rates apply to future invoices. Issued invoices and past payments are unchanged.",
+    "server_ui_tariff_confirm": "I understand that future charges will use the new rate.",
+    "server_ui_network_hint": "IP addresses of this server. An outgoing/NAT address does not guarantee inbound reachability.",
     "server_ui_network": "Verkko ja julkiset IP-osoitteet",
     "server_ui_navigation": "Palvelimen navigointi",
     "server_ui_overview": "Yleiskatsaus ja kustannukset",
@@ -11654,6 +11696,12 @@
     "site_copy_use_found": "Käytä ladattua sisältöä"
   },
   "mn": {
+    "server_ui_monetization": "Monetization",
+    "server_ui_monetization_hint": "Server cost and future storage charges",
+    "server_ui_billing_percent": "Billing disk share",
+    "server_ui_tariff_future": "New rates apply to future invoices. Issued invoices and past payments are unchanged.",
+    "server_ui_tariff_confirm": "I understand that future charges will use the new rate.",
+    "server_ui_network_hint": "IP addresses of this server. An outgoing/NAT address does not guarantee inbound reachability.",
     "server_ui_network": "Сүлжээ ба нийтийн IP хаяг",
     "server_ui_navigation": "Серверийн навигаци",
     "server_ui_overview": "Тойм ба зардал",
@@ -13250,6 +13298,12 @@
     "site_copy_use_found": "Татсан агуулгыг ашиглах"
   },
   "zh": {
+    "server_ui_monetization": "Monetization",
+    "server_ui_monetization_hint": "Server cost and future storage charges",
+    "server_ui_billing_percent": "Billing disk share",
+    "server_ui_tariff_future": "New rates apply to future invoices. Issued invoices and past payments are unchanged.",
+    "server_ui_tariff_confirm": "I understand that future charges will use the new rate.",
+    "server_ui_network_hint": "IP addresses of this server. An outgoing/NAT address does not guarantee inbound reachability.",
     "server_ui_network": "网络与公网 IP",
     "server_ui_navigation": "服务器导航",
     "server_ui_overview": "概览与费用",
@@ -14846,6 +14900,12 @@
     "site_copy_use_found": "使用已下载的内容"
   },
   "he": {
+    "server_ui_monetization": "Monetization",
+    "server_ui_monetization_hint": "Server cost and future storage charges",
+    "server_ui_billing_percent": "Billing disk share",
+    "server_ui_tariff_future": "New rates apply to future invoices. Issued invoices and past payments are unchanged.",
+    "server_ui_tariff_confirm": "I understand that future charges will use the new rate.",
+    "server_ui_network_hint": "IP addresses of this server. An outgoing/NAT address does not guarantee inbound reachability.",
     "server_ui_network": "רשת וכתובות IP ציבוריות",
     "server_ui_navigation": "ניווט בשרת",
     "server_ui_overview": "סקירה ועלויות",
@@ -16442,6 +16502,12 @@
     "site_copy_use_found": "שימוש בתוכן שהורד"
   },
   "fa": {
+    "server_ui_monetization": "Monetization",
+    "server_ui_monetization_hint": "Server cost and future storage charges",
+    "server_ui_billing_percent": "Billing disk share",
+    "server_ui_tariff_future": "New rates apply to future invoices. Issued invoices and past payments are unchanged.",
+    "server_ui_tariff_confirm": "I understand that future charges will use the new rate.",
+    "server_ui_network_hint": "IP addresses of this server. An outgoing/NAT address does not guarantee inbound reachability.",
     "server_ui_network": "شبکه و IPهای عمومی",
     "server_ui_navigation": "پیمایش سرور",
     "server_ui_overview": "نمای کلی و هزینه‌ها",
@@ -18038,6 +18104,12 @@
     "site_copy_use_found": "استفاده از محتوای دریافت‌شده"
   },
   "de": {
+    "server_ui_monetization": "Monetarisierung",
+    "server_ui_monetization_hint": "Serverkosten und künftige Speichergebühren",
+    "server_ui_billing_percent": "Anteil des Speichers für die Berechnung",
+    "server_ui_tariff_future": "Neue Tarife gelten für künftige Rechnungen. Bestehende Rechnungen bleiben unverändert.",
+    "server_ui_tariff_confirm": "Mir ist bewusst, dass künftige Gebühren nach dem neuen Tarif berechnet werden.",
+    "server_ui_network_hint": "IP-Adressen dieses Servers. Eine ausgehende oder NAT-Adresse bedeutet keine eingehende Erreichbarkeit.",
     "server_ui_network": "Netzwerk und öffentliche IPs",
     "server_ui_navigation": "Servernavigation",
     "server_ui_overview": "Übersicht und Kosten",
@@ -19634,6 +19706,12 @@
     "site_copy_use_found": "Heruntergeladene Inhalte verwenden"
   },
   "tr": {
+    "server_ui_monetization": "Monetization",
+    "server_ui_monetization_hint": "Server cost and future storage charges",
+    "server_ui_billing_percent": "Billing disk share",
+    "server_ui_tariff_future": "New rates apply to future invoices. Issued invoices and past payments are unchanged.",
+    "server_ui_tariff_confirm": "I understand that future charges will use the new rate.",
+    "server_ui_network_hint": "IP addresses of this server. An outgoing/NAT address does not guarantee inbound reachability.",
     "server_ui_network": "Ağ ve genel IP adresleri",
     "server_ui_navigation": "Sunucu gezintisi",
     "server_ui_overview": "Genel bakış ve maliyetler",
@@ -21230,6 +21308,12 @@
     "site_copy_use_found": "İndirilen içeriği kullan"
   },
   "kk": {
+    "server_ui_monetization": "Monetization",
+    "server_ui_monetization_hint": "Server cost and future storage charges",
+    "server_ui_billing_percent": "Billing disk share",
+    "server_ui_tariff_future": "New rates apply to future invoices. Issued invoices and past payments are unchanged.",
+    "server_ui_tariff_confirm": "I understand that future charges will use the new rate.",
+    "server_ui_network_hint": "IP addresses of this server. An outgoing/NAT address does not guarantee inbound reachability.",
     "server_ui_network": "Желі және жария IP мекенжайлар",
     "server_ui_navigation": "Сервер навигациясы",
     "server_ui_overview": "Шолу және шығындар",
@@ -22826,6 +22910,12 @@
     "site_copy_use_found": "Жүктелген мазмұнды пайдалану"
   },
   "es": {
+    "server_ui_monetization": "Monetización",
+    "server_ui_monetization_hint": "Coste del servidor y cargos de almacenamiento futuros",
+    "server_ui_billing_percent": "Porcentaje de disco para facturación",
+    "server_ui_tariff_future": "Las nuevas tarifas se aplican a facturas futuras. Las facturas emitidas no cambian.",
+    "server_ui_tariff_confirm": "Entiendo que los cargos futuros usarán la nueva tarifa.",
+    "server_ui_network_hint": "Direcciones IP de este servidor. Una IP saliente o NAT no garantiza acceso entrante.",
     "server_ui_network": "Red e IP públicas",
     "server_ui_navigation": "Navegación del servidor",
     "server_ui_overview": "Resumen y costes",
@@ -24422,6 +24512,12 @@
     "site_copy_use_found": "Usar el contenido descargado"
   },
   "pt": {
+    "server_ui_monetization": "Monetization",
+    "server_ui_monetization_hint": "Server cost and future storage charges",
+    "server_ui_billing_percent": "Billing disk share",
+    "server_ui_tariff_future": "New rates apply to future invoices. Issued invoices and past payments are unchanged.",
+    "server_ui_tariff_confirm": "I understand that future charges will use the new rate.",
+    "server_ui_network_hint": "IP addresses of this server. An outgoing/NAT address does not guarantee inbound reachability.",
     "server_ui_network": "Rede e IPs públicos",
     "server_ui_navigation": "Navegação do servidor",
     "server_ui_overview": "Visão geral e custos",
