@@ -168,12 +168,15 @@
               <button type="submit">{{index $.T "domain_settings_use_domain"}}</button>
             </form>
             {{end}}
-            <form method="post" action="?settings"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
-              <input type="hidden" name="return" value="{{$.ReturnPath}}">
-              <input type="hidden" name="action" value="delete_alias">
-              <input type="hidden" name="alias_domain" value="{{.Domain}}">
-              <button class="danger" type="submit" aria-label="{{index $.T "domain_settings_delete_alias_aria"}} {{.Domain}}">×</button>
-            </form>
+            <details class="settings-alias-delete">
+              <summary aria-label="{{index $.T "domain_settings_delete_alias_aria"}} {{.Domain}}">{{index $.T "domain_settings_delete_alias_aria"}}</summary>
+              <form method="post" action="?settings"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+                <input type="hidden" name="return" value="{{$.ReturnPath}}">
+                <input type="hidden" name="action" value="delete_alias">
+                <input type="hidden" name="alias_domain" value="{{.Domain}}">
+                <button class="danger" type="submit">{{index $.T "domain_settings_delete_alias_aria"}} {{.Domain}}</button>
+              </form>
+            </details>
           </div>
         </div>
 
