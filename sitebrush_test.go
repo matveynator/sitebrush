@@ -3005,6 +3005,37 @@ func TestServerSettingsNavigationPreservesExistingControls(t *testing.T) {
 	if strings.Count(page, `data-public-ip-panel data-csrf=`) != 1 {
 		t.Error("public IP panel must exist in exactly one local server view")
 	}
+	// Monetization follows ordinary server administration; the overview remains read-only.
+	navigationStart := strings.Index(page, `<nav class="server-config-nav"`)
+	if navigationStart < 0 {
+		t.Fatal("server settings navigation is missing")
+	}
+	navigationEnd := strings.Index(page[navigationStart:], "</nav>")
+	if navigationEnd < 0 {
+		t.Fatal("server settings navigation is not closed")
+	}
+	navigation := page[navigationStart : navigationStart+navigationEnd]
+	monetizationPosition := strings.Index(navigation, `data-server-config-target="monetization"`)
+	if monetizationPosition < 0 {
+		t.Fatal("monetization is missing from server navigation")
+	}
+	for _, section := range []string{"network", "updates", "clients", "registration", "demo"} {
+		position := strings.Index(navigation, `data-server-config-target="`+section+`"`)
+		if position >= monetizationPosition || position < 0 {
+			t.Errorf("section %q should appear before monetization", section)
+		}
+	}
+	if strings.Index(page, `data-server-config-view="monetization"`) <= strings.Index(page, `data-server-config-view="clients"`) {
+		t.Error("monetization view must be the final server section")
+	}
+	if !strings.Contains(page, `server_ui_monetization_purpose`) {
+		t.Error("monetization purpose is missing from the template")
+	}
+	for _, language := range []string{"en", "fr", "ru", "ja", "it", "sv", "fi", "mn", "zh", "he", "fa", "de", "tr", "kk", "es", "pt"} {
+		if strings.TrimSpace(translationsForLanguageCode(language)["server_ui_monetization_purpose"]) == "" {
+			t.Errorf("monetization purpose has no %s translation", language)
+		}
+	}
 	if _, err := parseEmbeddedPageTemplate("expenses.html", pageBytes); err != nil {
 		t.Fatalf("server settings template cannot be parsed: %v", err)
 	}
@@ -16077,7 +16108,8 @@ func TestSimplifiedExpensesShowsTestDriveUnderRegistrationAfterExplicitPermissio
 	}
 	body := rendered.String()
 	for _, expectedFragment := range []string{
-		`data-hosting-installation-tab="servers"`,
+		`data-server-root-target="servers"`,
+		`data-server-root-target="installations"`,
 		`data-hosting-installation-tab="temporary-sites"`,
 		`trial.sitebrush.example`,
 		`https://copied.example/`,
