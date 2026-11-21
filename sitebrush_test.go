@@ -3220,6 +3220,8 @@ func TestExpensesTemplateShowsOnlyLocalServerAndEnabledDemoOutsideSitebrushCom(t
 		`data-hosting-installation-tab="archive"`,
 		`data-hosting-installation-panel="archive"`,
 		"Ключ sitebrush.com",
+		`data-server-root-target="installations"`,
+		`data-server-installations-container`,
 	} {
 		if strings.Contains(disabledDemoHTML, forbiddenFragment) {
 			t.Fatalf("regular server rendered forbidden central or demo fragment %q", forbiddenFragment)
@@ -3281,9 +3283,10 @@ func TestExpensesTemplateShowsOnlyLocalServerAndEnabledDemoOutsideSitebrushCom(t
 	centralSnapshot.ArchivedHostings = []hostingandsupport.ClientHosting{{InstallationID: "archive-1", LastSeenAt: "2026-07-20"}}
 	centralHTML := renderSnapshot(centralSnapshot)
 	for _, expectedFragment := range []string{
-		`data-hosting-installation-tab="desktop"`,
-		`data-hosting-installation-tab="archive"`,
-		"desktop.example.com",
+		`data-server-root-target="installations"`,
+		`data-installation-id="desktop-1"`,
+		`data-installation-id="archive-1"`,
+		"desktop-1",
 		"archive-1",
 	} {
 		if !strings.Contains(centralHTML, expectedFragment) {
@@ -16109,8 +16112,8 @@ func TestSimplifiedExpensesShowsTestDriveUnderRegistrationAfterExplicitPermissio
 	body := rendered.String()
 	for _, expectedFragment := range []string{
 		`data-server-root-target="servers"`,
-		`data-server-root-target="installations"`,
-		`data-hosting-installation-tab="temporary-sites"`,
+		`data-server-root-target="temporary-sites"`,
+		`data-hosting-installation-panel="temporary-sites"`,
 		`trial.sitebrush.example`,
 		`https://copied.example/`,
 		`deleted.sitebrush.example`,
@@ -16121,6 +16124,9 @@ func TestSimplifiedExpensesShowsTestDriveUnderRegistrationAfterExplicitPermissio
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("simplified settings missing %q", expectedFragment)
 		}
+	}
+	if strings.Contains(body, `data-server-root-target="installations"`) || strings.Contains(body, `data-server-installations-container`) {
+		t.Fatal("regular server owner accessed the central installation catalog")
 	}
 	if strings.Contains(body, `data-public-trial-disabled-section`) || strings.Contains(body, `id="publicTrialEmbedHTML"`) || strings.Contains(body, `id="publicTrialPreviewModal"`) {
 		t.Fatalf("test drive without explicit permission rendered DNS instructions, form or preview: %s", body)
