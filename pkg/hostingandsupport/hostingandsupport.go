@@ -373,6 +373,7 @@ type HostingSnapshot struct {
 	MonthlyExpenseMinor       int64                    `json:"monthly_expense_minor,omitempty"`
 	FreeSiteThresholdBytes    int64                    `json:"free_site_threshold_bytes,omitempty"`
 	BillingCapacityPercent    int64                    `json:"billing_capacity_percent,omitempty"`
+	MonetizationMode          string                   `json:"monetization_mode,omitempty"`
 	Plans                     []HostingSnapshotPlan    `json:"plans"`
 	Roles                     []HostingSnapshotRole    `json:"roles"`
 	Sites                     []HostingSnapshotSite    `json:"sites"`
@@ -1310,7 +1311,12 @@ func preMailJournalColumns() []hostingAndSupportColumn {
 }
 
 func billingCapacityColumns() []hostingAndSupportColumn {
-	return []hostingAndSupportColumn{{tableName: "server_expense_policies", columnName: "billing_capacity_percent", definition: "INTEGER NOT NULL DEFAULT 30"}}
+	return []hostingAndSupportColumn{
+		{tableName: "server_expense_policies", columnName: "billing_capacity_percent", definition: "INTEGER NOT NULL DEFAULT 30"},
+		// Existing policies already represented billable servers. New installations
+		// explicitly write disabled until their owners enable monetization.
+		{tableName: "server_expense_policies", columnName: "monetization_mode", definition: "TEXT NOT NULL DEFAULT 'enabled'"},
+	}
 }
 
 func trialOnboardingColumns() []hostingAndSupportColumn {
@@ -1687,16 +1693,16 @@ func (store Store) SaveServerExpensePolicy(ctx context.Context, policy expenses.
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	policy.EffectiveAt = now
 	policy.UpdatedAt = now
-	_, err := store.DB.ExecContext(ctx, `INSERT INTO server_expense_policies(installation_id,expense_mode,disk_rate_per_100_gb_minor,actual_monthly_expense_minor,currency,free_site_threshold_bytes,billing_capacity_percent,effective_at,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
-		policy.InstallationID, string(policy.Mode), policy.DiskRatePer100GBMinor, policy.ActualMonthlyExpenseMinor, policy.Currency, policy.FreeSiteThresholdBytes, policy.BillingCapacityPercent, policy.EffectiveAt, policy.UpdatedAt)
+	_, err := store.DB.ExecContext(ctx, `INSERT INTO server_expense_policies(installation_id,expense_mode,disk_rate_per_100_gb_minor,actual_monthly_expense_minor,currency,free_site_threshold_bytes,billing_capacity_percent,monetization_mode,effective_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		policy.InstallationID, string(policy.Mode), policy.DiskRatePer100GBMinor, policy.ActualMonthlyExpenseMinor, policy.Currency, policy.FreeSiteThresholdBytes, policy.BillingCapacityPercent, policy.MonetizationMode, policy.EffectiveAt, policy.UpdatedAt)
 	return policy, err
 }
 
 func (store Store) ServerExpensePolicy(ctx context.Context, installationID string, diskTotalBytes int64) (expenses.ServerPolicy, bool) {
 	policy := expenses.DefaultServerPolicy(installationID, diskTotalBytes)
 	var mode string
-	err := store.DB.QueryRowContext(ctx, `SELECT installation_id,COALESCE(expense_mode,''),COALESCE(disk_rate_per_100_gb_minor,1500),COALESCE(actual_monthly_expense_minor,0),COALESCE(currency,'EUR'),COALESCE(free_site_threshold_bytes,100000000),COALESCE(billing_capacity_percent,30),COALESCE(effective_at,''),COALESCE(created_at,'') FROM server_expense_policies WHERE installation_id=? ORDER BY effective_at DESC,id DESC LIMIT 1`,
-		strings.TrimSpace(installationID)).Scan(&policy.InstallationID, &mode, &policy.DiskRatePer100GBMinor, &policy.ActualMonthlyExpenseMinor, &policy.Currency, &policy.FreeSiteThresholdBytes, &policy.BillingCapacityPercent, &policy.EffectiveAt, &policy.UpdatedAt)
+	err := store.DB.QueryRowContext(ctx, `SELECT installation_id,COALESCE(expense_mode,''),COALESCE(disk_rate_per_100_gb_minor,1500),COALESCE(actual_monthly_expense_minor,0),COALESCE(currency,'EUR'),COALESCE(free_site_threshold_bytes,100000000),COALESCE(billing_capacity_percent,30),COALESCE(monetization_mode,'enabled'),COALESCE(effective_at,''),COALESCE(created_at,'') FROM server_expense_policies WHERE installation_id=? ORDER BY effective_at DESC,id DESC LIMIT 1`,
+		strings.TrimSpace(installationID)).Scan(&policy.InstallationID, &mode, &policy.DiskRatePer100GBMinor, &policy.ActualMonthlyExpenseMinor, &policy.Currency, &policy.FreeSiteThresholdBytes, &policy.BillingCapacityPercent, &policy.MonetizationMode, &policy.EffectiveAt, &policy.UpdatedAt)
 	policy.Mode = expenses.Mode(mode)
 	policy.DiskTotalBytes = diskTotalBytes
 	policy = expenses.NormalizePolicy(policy)
@@ -2801,6 +2807,7 @@ func (store Store) SaveHostingSnapshot(ctx context.Context, snapshot HostingSnap
 			Currency:                  snapshot.BillingCurrency,
 			FreeSiteThresholdBytes:    snapshot.FreeSiteThresholdBytes,
 			BillingCapacityPercent:    snapshot.BillingCapacityPercent,
+			MonetizationMode:          snapshot.MonetizationMode,
 			DiskTotalBytes:            snapshot.DiskTotalBytes,
 		})
 		if snapshot.ExpenseMode == "" && snapshot.MonthlyCostMinor > 0 {
@@ -2808,8 +2815,8 @@ func (store Store) SaveHostingSnapshot(ctx context.Context, snapshot HostingSnap
 			expensePolicy.ActualMonthlyExpenseMinor = snapshot.MonthlyCostMinor
 		}
 		if expensePolicy.Validate() == nil {
-			_, err = transaction.ExecContext(ctx, `INSERT OR IGNORE INTO server_expense_policies(installation_id,expense_mode,disk_rate_per_100_gb_minor,actual_monthly_expense_minor,currency,free_site_threshold_bytes,billing_capacity_percent,effective_at,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
-				installationID, string(expensePolicy.Mode), expensePolicy.DiskRatePer100GBMinor, expensePolicy.ActualMonthlyExpenseMinor, expensePolicy.Currency, expensePolicy.FreeSiteThresholdBytes, expensePolicy.BillingCapacityPercent, strings.TrimSpace(snapshot.BillingCostUpdatedAt), now)
+			_, err = transaction.ExecContext(ctx, `INSERT OR IGNORE INTO server_expense_policies(installation_id,expense_mode,disk_rate_per_100_gb_minor,actual_monthly_expense_minor,currency,free_site_threshold_bytes,billing_capacity_percent,monetization_mode,effective_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+				installationID, string(expensePolicy.Mode), expensePolicy.DiskRatePer100GBMinor, expensePolicy.ActualMonthlyExpenseMinor, expensePolicy.Currency, expensePolicy.FreeSiteThresholdBytes, expensePolicy.BillingCapacityPercent, expensePolicy.MonetizationMode, strings.TrimSpace(snapshot.BillingCostUpdatedAt), now)
 		}
 	}
 	if err == nil {
@@ -3161,6 +3168,7 @@ func (store Store) ClientHostings(ctx context.Context) []ClientHosting {
 		}
 		hosting.ExpensePolicy = expenses.DefaultServerPolicy(hosting.InstallationID, hosting.DiskTotalBytes)
 		if hosting.MonthlyCostMinor > 0 {
+			hosting.ExpensePolicy.MonetizationMode = "enabled"
 			hosting.ExpensePolicy.Mode = expenses.ModeActual
 			hosting.ExpensePolicy.ActualMonthlyExpenseMinor = hosting.MonthlyCostMinor
 			hosting.ExpensePolicy.Currency = firstNonEmpty(hosting.BillingCurrency, "EUR")
