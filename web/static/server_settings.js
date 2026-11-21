@@ -4,7 +4,7 @@
   const serverPanels = Array.from(document.querySelectorAll("[data-expense-server-panel]"));
   if (!serverPanels.length) return;
   const selector = document.querySelector("[data-expense-server-select]");
-  const validSections = new Set(["overview", "monetization", "network", "updates", "clients", "registration", "demo"]);
+  const validSections = new Set(["overview", "monetization", "network", "updates", "clients", "billing", "registration", "demo"]);
 
   function fromHash() {
     const fragment = window.location.hash.slice(1);
@@ -60,6 +60,39 @@
     layout.dataset.serverConfigSelected = section;
     if (section === "updates") openUpdater(layout);
   }
+  function filterBillingInvoices(layout) {
+    const search = layout.querySelector("[data-billing-invoice-search]");
+    const status = layout.querySelector("[data-billing-invoice-status]");
+    if (!search || !status) return;
+    const query = search.value.trim().toLocaleLowerCase();
+    const requestedStatus = status.value;
+    const rows = Array.from(layout.querySelectorAll("[data-billing-invoice-row]"));
+    let visible = 0;
+    for (const row of rows) {
+      const matchesQuery = !query || row.textContent.toLocaleLowerCase().includes(query);
+      const matchesStatus = requestedStatus === "all" || row.dataset.billingStatus === requestedStatus;
+      row.hidden = !(matchesQuery && matchesStatus);
+      if (!row.hidden) visible++;
+    }
+    const count = layout.querySelector("[data-billing-invoice-count]");
+    if (count) count.textContent = visible + " / " + rows.length;
+  }
+  function filterBillingClients(layout) {
+    const search = layout.querySelector("[data-server-clients-search]");
+    if (!search) return;
+    const query = search.value.trim().toLocaleLowerCase();
+    for (const row of layout.querySelectorAll("[data-server-client-row]")) {
+      row.hidden = !!query && !row.textContent.toLocaleLowerCase().includes(query);
+    }
+  }
+  function showInvoiceComposer(layout, visible) {
+    const composer = layout.querySelector("[data-billing-create-panel]");
+    const button = layout.querySelector("[data-billing-create-toggle]");
+    if (!composer || !button) return;
+    composer.hidden = !visible;
+    button.setAttribute("aria-expanded", String(visible));
+    if (visible) composer.querySelector('[name="customer_email"]').focus();
+  }
   function displayHash() {
     const state = fromHash();
     let target = state.id ? serverPanels.find(panel => panel.dataset.serverId === state.id) : null;
@@ -81,8 +114,31 @@
       const button = event.target.closest("[data-server-config-target]");
       if (!button || !layout.contains(button)) return;
       choose(panel, button.dataset.serverConfigTarget);
+      if (button.dataset.billingClientOpen) {
+        const search = layout.querySelector("[data-billing-invoice-search]");
+        const status = layout.querySelector("[data-billing-invoice-status]");
+        if (search) search.value = button.dataset.billingClientOpen;
+        if (status) status.value = "all";
+        filterBillingInvoices(layout);
+      }
       writeHash(panel, layout.dataset.serverConfigSelected);
     });
+    layout.addEventListener("click", event => {
+      if (event.target.closest("[data-billing-create-toggle]")) {
+        const composer = layout.querySelector("[data-billing-create-panel]");
+        showInvoiceComposer(layout, !!composer && composer.hidden);
+      } else if (event.target.closest("[data-billing-create-cancel]")) {
+        showInvoiceComposer(layout, false);
+      }
+    });
+    layout.addEventListener("input", event => {
+      if (event.target.matches("[data-billing-invoice-search]")) filterBillingInvoices(layout);
+      if (event.target.matches("[data-server-clients-search]")) filterBillingClients(layout);
+    });
+    layout.addEventListener("change", event => {
+      if (event.target.matches("[data-billing-invoice-status]")) filterBillingInvoices(layout);
+    });
+    filterBillingInvoices(layout);
     layout.addEventListener("submit", event => {
       const form = event.target;
       if (!(form instanceof HTMLFormElement) || form.method.toLowerCase() !== "post" || !form.closest("[data-server-config-view]")) return;
