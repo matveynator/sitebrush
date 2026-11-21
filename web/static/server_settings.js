@@ -77,9 +77,9 @@
     const nav = layout.querySelector(".server-config-nav");
     if (!nav) continue;
     nav.hidden = false;
-    nav.addEventListener("click", event => {
+    layout.addEventListener("click", event => {
       const button = event.target.closest("[data-server-config-target]");
-      if (!button || !nav.contains(button)) return;
+      if (!button || !layout.contains(button)) return;
       choose(panel, button.dataset.serverConfigTarget);
       writeHash(panel, layout.dataset.serverConfigSelected);
     });
