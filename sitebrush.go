@@ -30099,6 +30099,12 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 		return nil
 	})
 	applySimplifiedSiteDeletionControls(expenseServers, sites)
+	// The cross-installation financial catalog is materialized exclusively for
+	// the authenticated SiteBrush.com registry owner.
+	var installationCatalog []hostingandsupport.InstallationCatalogView
+	if snapshot.ShowCentralRegistry {
+		installationCatalog = hostingandsupport.InstallationCatalogViews(snapshot.Servers, snapshot.DesktopHostingGroups, snapshot.ArchivedHostings)
+	}
 	return map[string]any{
 		"T":                        translations,
 		"Title":                    expensesTitle,
@@ -30165,6 +30171,7 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 		"SimplifiedExpenses":         true,
 		"CanConfigurePublicIPs":      a.updateAuthorized(r),
 		"ExpenseServers":             expenseServers,
+		"InstallationCatalog":       installationCatalog,
 		"MailJournalLabelsJSON":      mailJournalLabelsJSON(translations),
 	}
 }
