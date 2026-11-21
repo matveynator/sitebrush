@@ -3821,7 +3821,7 @@ func TestAutomaticBillingCreatesInvoicesForClientAndServerOwner(t *testing.T) {
 		invoicesByEmail[invoice.CustomerEmail] = invoice
 	}
 	clientInvoice := invoicesByEmail["client@example.com"]
-	if clientInvoice.InstallationID != "local:sitebrush.com" || clientInvoice.AmountMinor <= 0 || clientInvoice.ServerCostMinor <= 0 || len(clientInvoice.Lines) != 2 || !clientInvoice.Lines[1].Bonus {
+	if clientInvoice.InstallationID != "local:sitebrush.com" || clientInvoice.AmountMinor <= 0 || clientInvoice.ServerCostMinor <= 0 || len(clientInvoice.Lines) != 2 || clientInvoice.Lines[0].BillableMegabytes != 1500 || !clientInvoice.Lines[1].Bonus {
 		t.Fatalf("client invoice = %#v", clientInvoice)
 	}
 	ownerInvoice := invoicesByEmail["owner@example.com"]

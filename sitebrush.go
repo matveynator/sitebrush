@@ -29184,11 +29184,11 @@ func (a *App) runAutomaticBillingOnce(ctx context.Context, store hostingandsuppo
 			group = &billingInvoiceGroup{customer: customer, installationID: installationID, serverName: serverName, currency: billingCurrency}
 			groups[groupKey] = group
 		}
-		paidBytes := max(int64(0), site.usedBytes-hostingandsupport.BillingFreeBytes)
+		paidBytes := max(int64(0), site.usedBytes-policy.FreeSiteThresholdBytes)
 		amountMinor := (paidBytes/1000000000)*pricePerGBMinor + ((paidBytes%1000000000)*pricePerGBMinor+999999999)/1000000000
 		line := hostingandsupport.InvoiceLine{
 			Domain:            normalizeDomainName(site.domain),
-			Description:       "Размещение сверх бесплатного лимита 1 GiB: " + normalizeDomainName(site.domain),
+			Description:       "Размещение сверх бесплатного лимита " + hostingandsupport.FormatFileSize(policy.FreeSiteThresholdBytes) + ": " + normalizeDomainName(site.domain),
 			UsedBytes:         site.usedBytes,
 			BillableMegabytes: (paidBytes + expenses.DecimalMegabyte - 1) / expenses.DecimalMegabyte,
 			ListAmountMinor:   amountMinor,
@@ -29197,7 +29197,7 @@ func (a *App) runAutomaticBillingOnce(ctx context.Context, store hostingandsuppo
 		}
 		if paidBytes == 0 {
 			line.Bonus = true
-			line.Description = "Бесплатное размещение " + normalizeDomainName(site.domain) + " до 1 GiB"
+			line.Description = "Бесплатное размещение " + normalizeDomainName(site.domain) + " до " + hostingandsupport.FormatFileSize(policy.FreeSiteThresholdBytes)
 			line.TotalAmountMinor = 0
 		} else if amountMinor > 0 {
 			group.hasPaidSite = true
