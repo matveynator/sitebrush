@@ -29208,7 +29208,9 @@ func (a *App) runAutomaticBillingOnce(ctx context.Context, store hostingandsuppo
 	}
 	processServer := func(installationID string, serverName string, policy expenses.ServerPolicy, sites []billingServerSite) {
 		policy = expenses.NormalizePolicy(policy)
-		if strings.TrimSpace(policy.Currency) == "" {
+		// No future invoices may be created while this installation is not
+		// opted in. Already issued invoices remain unchanged.
+		if !policy.MonetizationEnabled() || strings.TrimSpace(policy.Currency) == "" {
 			return
 		}
 		if expenses.CalculateMonthlyExpense(policy) <= 0 {
@@ -29578,6 +29580,7 @@ func (a *App) saveServerExpensePolicyFromForm(r *http.Request) string {
 	_, diskTotalBytes, diskAvailable := diskusage.DiskSpace(a.storageRootDir())
 	policy := expenses.ServerPolicy{
 		InstallationID:            "local",
+		MonetizationMode:          strings.TrimSpace(r.FormValue("monetization_mode")),
 		Mode:                      expenses.ModeActual,
 		DiskRatePer100GBMinor:     expenses.DefaultDiskRatePer100GBMinor,
 		ActualMonthlyExpenseMinor: actualExpenseMinor,
@@ -29809,7 +29812,7 @@ func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, control
 	if !localDiskAvailable {
 		localExpensePolicy.DiskTotalBytes = 0
 	}
-	if expenses.CalculateMonthlyExpense(localExpensePolicy) > 0 && localExpensePolicy.Currency != "" {
+	if localExpensePolicy.MonetizationEnabled() && expenses.CalculateMonthlyExpense(localExpensePolicy) > 0 && localExpensePolicy.Currency != "" {
 		expenseSites := make([]expenses.SiteUsage, 0, len(siteRows))
 		for _, site := range siteRows {
 			expenseSites = append(expenseSites, expenses.SiteUsage{
@@ -39483,6 +39486,7 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 		MonthlyExpenseMinor:       expenses.CalculateMonthlyExpense(serverExpensePolicy),
 		FreeSiteThresholdBytes:    serverExpensePolicy.FreeSiteThresholdBytes,
 		BillingCapacityPercent:    serverExpensePolicy.BillingCapacityPercent,
+		MonetizationMode:          serverExpensePolicy.MonetizationMode,
 		CreatedAt:                 snapshotCreatedAt,
 	}
 	if a.desktopMode {
