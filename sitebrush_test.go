@@ -4850,6 +4850,27 @@ func TestDomainSettingsNavigationPreservesExistingActions(t *testing.T) {
 	}
 }
 
+func TestDomainAliasDeletionRequiresDeliberateDisclosure(t *testing.T) {
+	content, err := fs.ReadFile(embeddedWebFiles, "web/domain_settings.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(content)
+	disclosure := strings.Index(page, `<details class="settings-alias-delete">`)
+	if disclosure < 0 {
+		t.Fatal("deleting a domain alias must require an explicit disclosure")
+	}
+	summary := strings.Index(page[disclosure:], "<summary")
+	action := strings.Index(page[disclosure:], `name="action" value="delete_alias"`)
+	ending := strings.Index(page[disclosure:], "</details>")
+	if summary < 0 || action <= summary || ending <= action {
+		t.Fatal("alias removal action must be inside its confirmation disclosure")
+	}
+	if !strings.Contains(page[disclosure:disclosure+ending], `{{.Domain}}`) {
+		t.Fatal("alias removal confirmation must identify the affected domain")
+	}
+}
+
 func TestDNSHostNameForAliasUsesProviderHostFieldValues(t *testing.T) {
 	for aliasDomain, expectedHostName := range map[string]string{
 		"example.com":     "@",
