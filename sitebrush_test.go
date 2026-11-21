@@ -3839,6 +3839,14 @@ func TestAutomaticBillingCreatesInvoicesForClientAndServerOwner(t *testing.T) {
 			{Domain: "owner.example.com", UsedBytes: 1_700_000_000, BillingAmount: "1.40", BillingCurrency: "EUR", BillingBillable: true, AdminEmails: "owner@example.com"},
 		},
 	}
+	// Disabling monetization must stop future invoices even if the server has
+	// valid costs and subscribed customers. This must not alter old invoices.
+	snapshotDisabled := snapshot
+	snapshotDisabled.LocalCostPolicy.MonetizationMode = "disabled"
+	application.runAutomaticBillingOnce(context.Background(), store, snapshotDisabled, time.Date(2026, 7, 23, 10, 0, 0, 0, time.UTC))
+	if disabledInvoices := store.Invoices(context.Background(), 10); len(disabledInvoices) != 0 {
+		t.Fatalf("disabled monetization issued invoices: %#v", disabledInvoices)
+	}
 	snapshotWithoutCost := snapshot
 	snapshotWithoutCost.LocalCostPolicy = expenses.ServerPolicy{}
 	application.runAutomaticBillingOnce(context.Background(), store, snapshotWithoutCost, time.Date(2026, 7, 23, 11, 0, 0, 0, time.UTC))
@@ -3881,6 +3889,10 @@ func TestAutomaticBillingCreatesInvoicesForClientAndServerOwner(t *testing.T) {
 	application.runAutomaticBillingOnce(context.Background(), store, snapshot, time.Date(2026, 7, 23, 13, 0, 0, 0, time.UTC))
 	if duplicateInvoices := store.Invoices(context.Background(), 10); len(duplicateInvoices) != 2 {
 		t.Fatalf("duplicate invoices = %d, want 2", len(duplicateInvoices))
+	}
+	application.runAutomaticBillingOnce(context.Background(), store, snapshotDisabled, time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC))
+	if invoicesAfterOptOut := store.Invoices(context.Background(), 10); len(invoicesAfterOptOut) != 2 {
+		t.Fatalf("opt-out altered issued invoices or created new ones: %#v", invoicesAfterOptOut)
 	}
 }
 
