@@ -11,43 +11,69 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{{index .T "domain_settings_title"}}</title>
   <link href="/p/static/technical_pages.css" rel="stylesheet">
+  <link href="/p/static/domain_settings.css" rel="stylesheet">
+  <script src="/p/static/domain_settings.js" defer></script>
 </head>
-<body class="technical-page">
+<body class="technical-page site-settings">
 <main class="container">
   <div class="page-header">
     <h1 class="section-heading"><img src="/p/static/settings.png" class="section-icon" alt=""><a href="/">{{.Domain}}</a> <small class="text-muted">| {{index .T "domain_settings_title"}}</small></h1>
     <a class="btn btn-outline-secondary" href="{{.ReturnPath}}">{{index .T "back_to_uri"}}</a>
   </div>
 
-  <section class="dns-box indexing-settings-panel">
-    <h2>{{index .T "domain_settings_indexing_title"}}</h2>
-    {{if .IndexingAllowed}}
-      <p class="indexing-status status-ok">{{index .T "domain_settings_indexing_enabled"}}</p>
-    {{else}}
-      <p class="indexing-status status-bad" role="alert">{{index .T "domain_settings_indexing_disabled"}}</p>
-    {{end}}
-    <form method="post" action="?settings">
-      <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
-      <input type="hidden" name="return" value="{{.ReturnPath}}">
-      <input type="hidden" name="action" value="update_indexing">
-      <label class="checkbox-row">
-        <input type="checkbox" name="indexing_allowed" value="1" {{if .IndexingAllowed}}checked{{end}}>
-        <span>{{index .T "domain_settings_indexing_allow"}}</span>
-      </label>
-      {{if .IndexingAllowed}}
-        <p class="hint">{{index .T "domain_settings_indexing_enabled_hint"}}</p>
-      {{else}}
-        <p class="hint">{{index .T "domain_settings_indexing_disabled_hint"}}</p>
-      {{end}}
-      <p class="hint"><a href="/robots.txt?text">{{index .T "domain_settings_indexing_edit_robots"}}</a></p>
-      <button type="submit">{{index .T "domain_settings_indexing_save"}}</button>
-    </form>
-  </section>
+
+  <div class="settings-layout">
+    <nav class="settings-nav" aria-label="{{index .T "domain_settings_title"}}">
+      <a href="#overview" data-settings-target="overview">{{index .T "domain_settings_nav_overview"}}</a>
+      <a href="#domains" data-settings-target="domains">{{index .T "domain_settings_nav_domains"}}</a>
+      <a href="#search" data-settings-target="search">{{index .T "domain_settings_indexing_title"}}</a>
+      <a href="#backup" data-settings-target="backup">{{index .T "domain_settings_backup_title"}}</a>
+      <a href="#folders" data-settings-target="folders">{{index .T "domain_settings_chroot_title"}}</a>
+    </nav>
+    <div class="settings-content">
+      <section class="settings-panel" data-settings-panel="overview" id="overview" aria-labelledby="settings-overview-title">
+        <header class="settings-section-header">
+          <h2 id="settings-overview-title">{{index .T "domain_settings_nav_overview"}}</h2>
+          <p class="hint">{{index .T "domain_settings_overview_intro"}}</p>
+        </header>
+        <div class="settings-summary-grid">
+          <article class="settings-summary-card">
+            <h3>{{index .T "domain_settings_selected_domain"}}</h3>
+            <p class="settings-summary-value">{{.SelectedDomain}}</p>
+            <a href="#domains">{{index .T "domain_settings_nav_domains"}}</a>
+          </article>
+          <article class="settings-summary-card">
+            <h3>{{index .T "domain_settings_indexing_title"}}</h3>
+            {{if .IndexingAllowed}}<p class="status-ok">{{index .T "domain_settings_indexing_enabled"}}</p>{{else}}<p class="status-bad">{{index .T "domain_settings_indexing_disabled"}}</p>{{end}}
+            <a href="#search">{{index .T "domain_settings_indexing_title"}}</a>
+          </article>
+          <article class="settings-summary-card">
+            <h3>{{index .T "domain_settings_ssl_title"}}</h3>
+            <p class="{{.AutomaticSSLStatus.OverallClass}}">{{index .T .AutomaticSSLStatus.OverallTextKey}}</p>
+            <a href="#domains">{{index .T "domain_settings_nav_domains"}}</a>
+          </article>
+        </div>
+        {{range .Aliases}}
+          {{if or (not .TXTVerified) (not .ARecordVerified)}}
+          <div class="settings-domain-attention" role="status">
+            <strong>{{.Domain}}</strong>
+            {{if not .TXTVerified}}<span>{{index $.T "domain_settings_txt_missing"}}</span>{{end}}
+            {{if not .ARecordVerified}}<span>{{index $.T "domain_settings_a_missing"}}</span>{{end}}
+            <a href="#domains">{{index $.T "domain_settings_review_domain"}}</a>
+          </div>
+          {{end}}
+        {{end}}
+      </section>
+
+      <section class="settings-panel" data-settings-panel="domains" id="domains" aria-labelledby="settings-domains-title">
+        <header class="settings-section-header">
+          <h2 id="settings-domains-title">{{index .T "domain_settings_nav_domains"}}</h2>
+        </header>
 
   <section class="dns-box custom-domain-panel">
     <div class="custom-domain-head">
       <div>
-        <p class="eyebrow">{{index .T "domain_settings_custom_domain_eyebrow"}}</p>
+        {{if not .Aliases}}<p class="eyebrow">{{index .T "domain_settings_custom_domain_eyebrow"}}</p>{{end}}
         <h2>{{index .T "domain_settings_custom_domain_title"}}</h2>
         <p class="hint">{{index .T "domain_settings_custom_domain_intro"}} <code>{{.Domain}}</code></p>
       </div>
@@ -69,9 +95,10 @@
     <p class="hint">{{index .T "domain_settings_alias_limit"}}</p>
     {{end}}
 
+    <details class="settings-disclosure settings-setup-details">
+      <summary>{{index .T "domain_settings_custom_domain_steps_title"}}</summary>
     <div class="domain-setup-grid">
       <section class="domain-setup-card">
-        <p><strong>{{index .T "domain_settings_custom_domain_steps_title"}}</strong></p>
         <ol class="domain-setup-steps">
           <li>{{index .T "domain_settings_custom_domain_step_add"}}</li>
           <li>{{index .T "domain_settings_custom_domain_step_txt"}}</li>
@@ -100,6 +127,7 @@
         {{end}}
       </section>
     </div>
+    </details>
 
     {{if .Aliases}}
     <div class="domain-bulk-actions">
@@ -159,6 +187,8 @@
         {{if .AutomaticSSL.CertificateExpiresAt}}<p class="hint">{{index $.T "domain_settings_ssl_expires"}} {{.AutomaticSSL.CertificateExpiresAt}} ({{.AutomaticSSL.CertificateRemaining}})</p>{{end}}
         {{if .IsActive}}<button type="button" data-certificate-renew="{{.Domain}}">{{index $.T "domain_settings_ssl_renew_now"}}</button><span class="hint" data-certificate-renew-status="{{.Domain}}" aria-live="polite"></span>{{end}}
 
+        <details class="settings-disclosure settings-alias-details">
+          <summary>{{index $.T "domain_settings_details_label"}}</summary>
         <div class="dns-record-list">
           <div class="dns-record-row">
             <span class="dns-record-type">TXT</span>
@@ -176,6 +206,7 @@
           {{end}}
         </div>
         {{if .LastCheckedAt}}<p class="hint">{{index $.T "domain_settings_last_checked"}} {{.LastCheckedAt}}</p>{{end}}
+        </details>
       </section>
       {{end}}
     </div>
@@ -224,10 +255,45 @@
     </form>
   </section>
 
+
+      </section>
+      <section class="settings-panel" data-settings-panel="search" id="search" aria-labelledby="settings-search-title">
+        <header class="settings-section-header">
+          <h2 id="settings-search-title">{{index .T "domain_settings_indexing_title"}}</h2>
+        </header>
+  <section class="dns-box indexing-settings-panel">
+    {{if .IndexingAllowed}}
+      <p class="indexing-status status-ok">{{index .T "domain_settings_indexing_enabled"}}</p>
+    {{else}}
+      <p class="indexing-status status-bad" role="alert">{{index .T "domain_settings_indexing_disabled"}}</p>
+    {{end}}
+    <form method="post" action="?settings">
+      <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
+      <input type="hidden" name="return" value="{{.ReturnPath}}">
+      <input type="hidden" name="action" value="update_indexing">
+      <label class="checkbox-row">
+        <input type="checkbox" name="indexing_allowed" value="1" {{if .IndexingAllowed}}checked{{end}}>
+        <span>{{index .T "domain_settings_indexing_allow"}}</span>
+      </label>
+      {{if .IndexingAllowed}}
+        <p class="hint">{{index .T "domain_settings_indexing_enabled_hint"}}</p>
+      {{else}}
+        <p class="hint">{{index .T "domain_settings_indexing_disabled_hint"}}</p>
+      {{end}}
+      <p class="hint"><a href="/robots.txt?text">{{index .T "domain_settings_indexing_edit_robots"}}</a></p>
+      <button type="submit">{{index .T "domain_settings_indexing_save"}}</button>
+    </form>
+  </section>
+      </section>
+      <section class="settings-panel" data-settings-panel="backup" id="backup" aria-labelledby="settings-backup-title">
+        <header class="settings-section-header">
+          <h2 id="settings-backup-title">{{index .T "domain_settings_backup_title"}}</h2>
+        </header>
   <section class="dns-box">
-    <p><strong>{{index .T "domain_settings_backup_title"}}</strong></p>
     <p class="hint">{{index .T "domain_settings_backup_hint"}}</p>
     <p><a class="backup-download-link" href="{{.BackupDownloadPath}}" data-native-backup-download><img src="/p/static/backup.png" alt="">{{index .T "domain_settings_backup_download"}}</a></p>
+    <details class="settings-disclosure settings-backup-details">
+      <summary>{{index .T "domain_settings_backup_automation"}}</summary>
     <div class="add-form" style="margin-bottom: 12px;">
       <input type="text" id="backup_download_url" readonly value="{{.BackupDownloadURL}}">
       <button type="button" id="copy_backup_link_button">{{index .T "domain_settings_copy_link"}}</button>
@@ -238,10 +304,16 @@
       <input type="hidden" name="action" value="rotate_backup_token">
       <button type="submit">{{index .T "domain_settings_regen_backup_token"}}</button>
     </form>
+    </details>
   </section>
 
+
+      </section>
+      <section class="settings-panel" data-settings-panel="folders" id="folders" aria-labelledby="settings-folders-title">
+        <header class="settings-section-header">
+          <h2 id="settings-folders-title">{{index .T "domain_settings_chroot_title"}}</h2>
+        </header>
   <section class="dns-box">
-    <p><strong>{{index .T "domain_settings_chroot_title"}}</strong></p>
     <form class="add-form static-folder-form" method="post" action="?settings"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
       <input type="hidden" name="return" value="{{.ReturnPath}}">
       <input type="hidden" name="action" value="save_chroot_location">
@@ -257,7 +329,10 @@
         <div class="alias-header">
           <div>
             <div class="alias-domain"><a href="{{.URLPath}}">{{.URLPath}}</a></div>
-            <div class="hint">{{index $.T "domain_settings_chroot_copy_hint"}} <code>{{.DirectoryPath}}</code></div>
+            <details class="settings-disclosure settings-folder-details">
+              <summary>{{index $.T "domain_settings_details_label"}}</summary>
+              <div class="hint">{{index $.T "domain_settings_chroot_copy_hint"}} <code>{{.DirectoryPath}}</code></div>
+            </details>
           </div>
           <div class="alias-actions">
             <form method="post" action="?settings"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
@@ -275,6 +350,10 @@
     <p class="empty">{{index .T "domain_settings_chroot_empty"}}</p>
     {{end}}
   </section>
+
+      </section>
+    </div>
+  </div>
 
   <script>
   (function setupCertificateRenewalControls() {

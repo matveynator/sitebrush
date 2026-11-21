@@ -1,0 +1,53 @@
+/* Website-scoped layout. Existing settings forms remain the source of truth. */
+.site-settings .container { width: min(1160px, calc(100% - 32px)); }
+.site-settings .page-header { background: var(--panel); box-shadow: none; }
+.site-settings .settings-layout { display: grid; grid-template-columns: 224px minmax(0, 1fr); gap: 28px; align-items: start; }
+.site-settings .settings-nav { position: sticky; top: 20px; display: grid; gap: 4px; min-width: 0; padding: 8px; border: 1px solid var(--border-cyan); border-radius: var(--theme-radius); background: var(--panel); }
+.site-settings .settings-nav a { display: flex; align-items: center; min-height: 44px; padding: 9px 13px; box-sizing: border-box; border-radius: calc(var(--theme-radius) - 2px); color: var(--text); font-size: 14px; font-weight: 500; line-height: 1.3; text-decoration: none; }
+.site-settings .settings-nav a:hover { background: var(--panel-soft); }
+.site-settings .settings-nav a[aria-current="page"] { background: var(--theme-accent); color: var(--theme-accent-foreground); font-weight: 700; }
+.site-settings .settings-nav a:focus-visible, .site-settings .settings-disclosure summary:focus-visible, .site-settings .settings-summary-card a:focus-visible { outline: 2px solid var(--theme-ring); outline-offset: 2px; }
+.site-settings .settings-content, .site-settings .settings-panel { min-width: 0; }
+.site-settings .settings-panel > * { max-width: 100%; box-sizing: border-box; }
+.site-settings .settings-section-header { margin: 0 0 18px; }
+.site-settings .settings-section-header h2 { margin: 0 0 6px; color: var(--text); font-size: clamp(21px, 2.8vw, 27px); line-height: 1.2; }
+.site-settings .settings-section-header .hint { margin: 0; }
+.site-settings .settings-panel .dns-box { margin: 0 0 18px; padding: clamp(16px, 2.2vw, 24px); box-shadow: none; border-color: var(--border-cyan); background: var(--panel); }
+.site-settings .settings-summary-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.site-settings .settings-summary-card { min-width: 0; padding: 18px; border: 1px solid var(--border-cyan); border-radius: var(--theme-radius); background: var(--panel); }
+.site-settings .settings-summary-card h3 { margin: 0 0 10px; color: var(--muted); font-size: 14px; font-weight: 600; }
+.site-settings .settings-summary-card p { min-width: 0; margin: 0 0 12px; overflow-wrap: anywhere; font-size: 14px; line-height: 1.45; }
+.site-settings .settings-summary-card .settings-summary-value { color: var(--text); font-weight: 700; font-size: 20px; }
+.site-settings .settings-summary-card a, .site-settings .settings-domain-attention a { font-size: 13px; font-weight: 600; }
+.site-settings .settings-domain-attention { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-top: 14px; padding: 14px 18px; border: 1px solid var(--border-cyan); border-radius: var(--theme-radius); background: var(--panel); font-size: 14px; }
+.site-settings .settings-domain-attention strong { overflow-wrap: anywhere; }
+.site-settings .settings-domain-attention a { margin-inline-start: auto; }
+.site-settings .settings-disclosure { margin: 16px 0; padding: 0; border: 1px solid var(--border-cyan); border-radius: var(--theme-radius); background: var(--panel-soft); }
+.site-settings .settings-disclosure summary { min-height: 44px; box-sizing: border-box; padding: 12px 15px; cursor: pointer; color: var(--text); font-size: 14px; font-weight: 600; }
+.site-settings .settings-disclosure[open] > summary { border-bottom: 1px solid var(--border-cyan); }
+.site-settings .settings-disclosure > :not(summary) { margin: 12px 15px; }
+.site-settings .settings-disclosure .domain-setup-grid { width: auto; }
+.site-settings .settings-disclosure .dns-record-list { overflow-x: auto; }
+.site-settings .dns-record-field code, .site-settings .settings-folder-details code { overflow-wrap: anywhere; word-break: break-word; }
+.site-settings .settings-folder-details { margin: 8px 0 0; }
+.site-settings .settings-folder-details .hint { padding-block-end: 8px; }
+.site-settings .settings-backup-details .add-form { flex-wrap: wrap; }
+.site-settings .settings-backup-details input { min-width: 0; }
+.site-settings .alias-row { min-width: 0; }
+.site-settings .alias-header { gap: 12px; }
+.site-settings .alias-actions { flex-wrap: wrap; }
+.site-settings .alias-actions button.danger { min-width: 44px; min-height: 44px; }
+.site-settings .settings-panel .status-list { flex-wrap: wrap; }
+@media (max-width: 800px) {
+ .site-settings .settings-layout { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+ .site-settings .settings-nav { position: static; display: flex; flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-inline: contain; padding: 6px; }
+ .site-settings .settings-nav a { flex: 0 0 auto; white-space: nowrap; }
+ .site-settings .settings-summary-grid { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 520px) {
+ .site-settings .container { width: min(100% - 24px, 1160px); }
+ .site-settings .page-header { gap: 12px; flex-wrap: wrap; }
+ .site-settings .settings-panel .dns-box { padding: 14px; }
+ .site-settings .settings-summary-card { padding: 14px; }
+ .site-settings .settings-domain-attention a { margin-inline-start: 0; }
+}

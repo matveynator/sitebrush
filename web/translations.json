@@ -1,5 +1,11 @@
 {
   "en": {
+    "domain_settings_nav_overview": "Overview",
+    "domain_settings_nav_domains": "Domains and HTTPS",
+    "domain_settings_overview_intro": "Check website status and manage its settings.",
+    "domain_settings_details_label": "Technical details",
+    "domain_settings_backup_automation": "Automated backups: link and token",
+    "domain_settings_review_domain": "Review domain",
     "public_ip_ready": "Settings loaded or saved. Retry Test Drive after a change.",
     "public_ip_title": "Public web server IP addresses",
     "public_ip_help": "All active public interface addresses are accepted for DNS, Test Drive and TLS. The preferred address is used for DNS suggestions.",
@@ -1825,6 +1831,12 @@
     "site_copy_use_found": "Use downloaded content"
   },
   "fr": {
+    "domain_settings_nav_overview": "Vue d’ensemble",
+    "domain_settings_nav_domains": "Domaines et HTTPS",
+    "domain_settings_overview_intro": "Vérifiez l’état du site et gérez ses paramètres.",
+    "domain_settings_details_label": "Détails techniques",
+    "domain_settings_backup_automation": "Sauvegardes automatiques : lien et jeton",
+    "domain_settings_review_domain": "Configurer le domaine",
     "public_ip_ready": "Settings loaded or saved. Retry Test Drive after a change.",
     "public_ip_title": "Public web server IP addresses",
     "public_ip_help": "All active public interface addresses are accepted for DNS, Test Drive and TLS. The preferred address is used for DNS suggestions.",
@@ -3415,6 +3427,12 @@
     "site_copy_use_found": "Utiliser le contenu téléchargé"
   },
   "ru": {
+    "domain_settings_nav_overview": "Обзор",
+    "domain_settings_nav_domains": "Домены и HTTPS",
+    "domain_settings_overview_intro": "Проверяйте состояние сайта и управляйте его настройками.",
+    "domain_settings_details_label": "Технические подробности",
+    "domain_settings_backup_automation": "Автоматические бэкапы: ссылка и токен",
+    "domain_settings_review_domain": "Настроить домен",
     "public_ip_ready": "Настройки загружены или сохранены. После изменения повторите Test Drive.",
     "public_ip_title": "Публичные IP веб-сервера",
     "public_ip_help": "Все публичные адреса активных интерфейсов допускаются для DNS, Test Drive и TLS. Основной адрес используется в DNS-подсказках.",
@@ -5240,6 +5258,12 @@
     "site_copy_use_found": "Использовать скачанное"
   },
   "ja": {
+    "domain_settings_nav_overview": "概要",
+    "domain_settings_nav_domains": "ドメインとHTTPS",
+    "domain_settings_overview_intro": "サイトの状態を確認し、設定を管理します。",
+    "domain_settings_details_label": "技術的な詳細",
+    "domain_settings_backup_automation": "自動バックアップ：リンクとトークン",
+    "domain_settings_review_domain": "ドメインを設定",
     "public_ip_ready": "Settings loaded or saved. Retry Test Drive after a change.",
     "public_ip_title": "Public web server IP addresses",
     "public_ip_help": "All active public interface addresses are accepted for DNS, Test Drive and TLS. The preferred address is used for DNS suggestions.",
@@ -6826,6 +6850,12 @@
     "site_copy_use_found": "ダウンロード済みの内容を使用"
   },
   "it": {
+    "domain_settings_nav_overview": "Panoramica",
+    "domain_settings_nav_domains": "Domini e HTTPS",
+    "domain_settings_overview_intro": "Controlla lo stato del sito e gestisci le impostazioni.",
+    "domain_settings_details_label": "Dettagli tecnici",
+    "domain_settings_backup_automation": "Backup automatici: link e token",
+    "domain_settings_review_domain": "Configura dominio",
     "public_ip_ready": "Settings loaded or saved. Retry Test Drive after a change.",
     "public_ip_title": "Public web server IP addresses",
     "public_ip_help": "All active public interface addresses are accepted for DNS, Test Drive and TLS. The preferred address is used for DNS suggestions.",
@@ -8412,6 +8442,12 @@
     "site_copy_use_found": "Usa i contenuti scaricati"
   },
   "sv": {
+    "domain_settings_nav_overview": "Översikt",
+    "domain_settings_nav_domains": "Domäner och HTTPS",
+    "domain_settings_overview_intro": "Kontrollera webbplatsens status och hantera inställningarna.",
+    "domain_settings_details_label": "Tekniska detaljer",
+    "domain_settings_backup_automation": "Automatiska säkerhetskopior: länk och token",
+    "domain_settings_review_domain": "Konfigurera domän",
     "public_ip_ready": "Settings loaded or saved. Retry Test Drive after a change.",
     "public_ip_title": "Public web server IP addresses",
     "public_ip_help": "All active public interface addresses are accepted for DNS, Test Drive and TLS. The preferred address is used for DNS suggestions.",
@@ -9998,6 +10034,12 @@
     "site_copy_use_found": "Använd hämtat innehåll"
   },
   "fi": {
+    "domain_settings_nav_overview": "Yleiskatsaus",
+    "domain_settings_nav_domains": "Verkkotunnukset ja HTTPS",
+    "domain_settings_overview_intro": "Tarkista sivuston tila ja hallitse asetuksia.",
+    "domain_settings_details_label": "Tekniset tiedot",
+    "domain_settings_backup_automation": "Automaattiset varmuuskopiot: linkki ja tunnus",
+    "domain_settings_review_domain": "Määritä verkkotunnus",
     "public_ip_ready": "Settings loaded or saved. Retry Test Drive after a change.",
     "public_ip_title": "Public web server IP addresses",
     "public_ip_help": "All active public interface addresses are accepted for DNS, Test Drive and TLS. The preferred address is used for DNS suggestions.",
@@ -11584,6 +11626,12 @@
     "site_copy_use_found": "Käytä ladattua sisältöä"
   },
   "mn": {
+    "domain_settings_nav_overview": "Тойм",
+    "domain_settings_nav_domains": "Домэйн ба HTTPS",
+    "domain_settings_overview_intro": "Сайтын төлөвийг шалгаж, тохиргоог удирдана уу.",
+    "domain_settings_details_label": "Техникийн дэлгэрэнгүй",
+    "domain_settings_backup_automation": "Автомат нөөцлөлт: холбоос ба токен",
+    "domain_settings_review_domain": "Домэйныг тохируулах",
     "public_ip_ready": "Settings loaded or saved. Retry Test Drive after a change.",
     "public_ip_title": "Public web server IP addresses",
     "public_ip_help": "All active public interface addresses are accepted for DNS, Test Drive and TLS. The preferred address is used for DNS suggestions.",
@@ -13170,6 +13218,12 @@
     "site_copy_use_found": "Татсан агуулгыг ашиглах"
   },
   "zh": {
+    "domain_settings_nav_overview": "概览",
+    "domain_settings_nav_domains": "域名与 HTTPS",
+    "domain_settings_overview_intro": "查看网站状态并管理设置。",
+    "domain_settings_details_label": "技术详情",
+    "domain_settings_backup_automation": "自动备份：链接和令牌",
+    "domain_settings_review_domain": "配置域名",
     "public_ip_ready": "Settings loaded or saved. Retry Test Drive after a change.",
     "public_ip_title": "Public web server IP addresses",
     "public_ip_help": "All active public interface addresses are accepted for DNS, Test Drive and TLS. The preferred address is used for DNS suggestions.",
@@ -14756,6 +14810,12 @@
     "site_copy_use_found": "使用已下载的内容"
   },
   "he": {
+    "domain_settings_nav_overview": "סקירה כללית",
+    "domain_settings_nav_domains": "דומיינים ו-HTTPS",
+    "domain_settings_overview_intro": "בדיקת מצב האתר וניהול ההגדרות שלו.",
+    "domain_settings_details_label": "פרטים טכניים",
+    "domain_settings_backup_automation": "גיבויים אוטומטיים: קישור ואסימון",
+    "domain_settings_review_domain": "הגדרת דומיין",
     "public_ip_ready": "Settings loaded or saved. Retry Test Drive after a change.",
     "public_ip_title": "Public web server IP addresses",
     "public_ip_help": "All active public interface addresses are accepted for DNS, Test Drive and TLS. The preferred address is used for DNS suggestions.",
@@ -16342,6 +16402,12 @@
     "site_copy_use_found": "שימוש בתוכן שהורד"
   },
   "fa": {
+    "domain_settings_nav_overview": "نمای کلی",
+    "domain_settings_nav_domains": "دامنه‌ها و HTTPS",
+    "domain_settings_overview_intro": "وضعیت سایت را بررسی و تنظیمات آن را مدیریت کنید.",
+    "domain_settings_details_label": "جزئیات فنی",
+    "domain_settings_backup_automation": "پشتیبان‌گیری خودکار: پیوند و توکن",
+    "domain_settings_review_domain": "تنظیم دامنه",
     "public_ip_ready": "Settings loaded or saved. Retry Test Drive after a change.",
     "public_ip_title": "Public web server IP addresses",
     "public_ip_help": "All active public interface addresses are accepted for DNS, Test Drive and TLS. The preferred address is used for DNS suggestions.",
@@ -17928,6 +17994,12 @@
     "site_copy_use_found": "استفاده از محتوای دریافت‌شده"
   },
   "de": {
+    "domain_settings_nav_overview": "Übersicht",
+    "domain_settings_nav_domains": "Domains und HTTPS",
+    "domain_settings_overview_intro": "Prüfen Sie den Website-Status und verwalten Sie die Einstellungen.",
+    "domain_settings_details_label": "Technische Details",
+    "domain_settings_backup_automation": "Automatische Backups: Link und Token",
+    "domain_settings_review_domain": "Domain einrichten",
     "public_ip_ready": "Settings loaded or saved. Retry Test Drive after a change.",
     "public_ip_title": "Public web server IP addresses",
     "public_ip_help": "All active public interface addresses are accepted for DNS, Test Drive and TLS. The preferred address is used for DNS suggestions.",
@@ -19514,6 +19586,12 @@
     "site_copy_use_found": "Heruntergeladene Inhalte verwenden"
   },
   "tr": {
+    "domain_settings_nav_overview": "Genel bakış",
+    "domain_settings_nav_domains": "Alan adları ve HTTPS",
+    "domain_settings_overview_intro": "Site durumunu kontrol edin ve ayarları yönetin.",
+    "domain_settings_details_label": "Teknik ayrıntılar",
+    "domain_settings_backup_automation": "Otomatik yedekler: bağlantı ve belirteç",
+    "domain_settings_review_domain": "Alan adını ayarla",
     "public_ip_ready": "Settings loaded or saved. Retry Test Drive after a change.",
     "public_ip_title": "Public web server IP addresses",
     "public_ip_help": "All active public interface addresses are accepted for DNS, Test Drive and TLS. The preferred address is used for DNS suggestions.",
@@ -21100,6 +21178,12 @@
     "site_copy_use_found": "İndirilen içeriği kullan"
   },
   "kk": {
+    "domain_settings_nav_overview": "Шолу",
+    "domain_settings_nav_domains": "Домендер және HTTPS",
+    "domain_settings_overview_intro": "Сайт күйін тексеріп, параметрлерін басқарыңыз.",
+    "domain_settings_details_label": "Техникалық мәліметтер",
+    "domain_settings_backup_automation": "Автоматты сақтық көшірмелер: сілтеме және токен",
+    "domain_settings_review_domain": "Доменді баптау",
     "public_ip_ready": "Settings loaded or saved. Retry Test Drive after a change.",
     "public_ip_title": "Public web server IP addresses",
     "public_ip_help": "All active public interface addresses are accepted for DNS, Test Drive and TLS. The preferred address is used for DNS suggestions.",
@@ -22686,6 +22770,12 @@
     "site_copy_use_found": "Жүктелген мазмұнды пайдалану"
   },
   "es": {
+    "domain_settings_nav_overview": "Resumen",
+    "domain_settings_nav_domains": "Dominios y HTTPS",
+    "domain_settings_overview_intro": "Consulta el estado del sitio y gestiona sus ajustes.",
+    "domain_settings_details_label": "Detalles técnicos",
+    "domain_settings_backup_automation": "Copias automáticas: enlace y token",
+    "domain_settings_review_domain": "Configurar dominio",
     "public_ip_ready": "Settings loaded or saved. Retry Test Drive after a change.",
     "public_ip_title": "Public web server IP addresses",
     "public_ip_help": "All active public interface addresses are accepted for DNS, Test Drive and TLS. The preferred address is used for DNS suggestions.",
@@ -24272,6 +24362,12 @@
     "site_copy_use_found": "Usar el contenido descargado"
   },
   "pt": {
+    "domain_settings_nav_overview": "Visão geral",
+    "domain_settings_nav_domains": "Domínios e HTTPS",
+    "domain_settings_overview_intro": "Verifique o estado do site e gerencie as configurações.",
+    "domain_settings_details_label": "Detalhes técnicos",
+    "domain_settings_backup_automation": "Backups automáticos: link e token",
+    "domain_settings_review_domain": "Configurar domínio",
     "public_ip_ready": "Settings loaded or saved. Retry Test Drive after a change.",
     "public_ip_title": "Public web server IP addresses",
     "public_ip_help": "All active public interface addresses are accepted for DNS, Test Drive and TLS. The preferred address is used for DNS suggestions.",
