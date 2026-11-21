@@ -273,6 +273,11 @@
     function render() {
       const enabled = mode() === "enabled";
       form.dataset.monetizationEnabled = String(enabled);
+      // Hidden controls must not block opt-out with native constraint validation.
+      // The server restores the persisted tariff when the mode alone is saved.
+      for (const field of form.querySelectorAll(".server-tariff-fields input, .server-tariff-fields select, .server-tariff-fields textarea")) {
+        field.disabled = !enabled;
+      }
       cost.min = enabled ? "0.01" : "0";
       const diskGB = Number(form.dataset.diskBytes) / 1000000000;
       const portion = Number(percent.value);
