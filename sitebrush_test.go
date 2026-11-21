@@ -2969,7 +2969,7 @@ func TestServerSettingsNavigationPreservesExistingControls(t *testing.T) {
 		`data-hosting-installation-tabs`,
 		`data-expense-server-select`,
 		`data-public-ip-panel`,
-		`data-profiler-open`,
+		`{{template "server-profiler" .}}`,
 		`data-server-update-frame`,
 		`data-billing-ajax-save`,
 		`value="update_site_quota"`,
