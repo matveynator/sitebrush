@@ -3276,20 +3276,7 @@
   });
 })();
 </script>
-<script>
-(function initializeExpenseServerSelection() {
-  const serverSelectElement = document.querySelector('[data-expense-server-select]');
-  if (!serverSelectElement) {
-    return;
-  }
-  const serverPanelElements = Array.from(document.querySelectorAll('[data-expense-server-panel]'));
-  serverSelectElement.addEventListener('change', function selectExpenseServer() {
-    for (const serverPanelElement of serverPanelElements) {
-      serverPanelElement.hidden = serverPanelElement.dataset.expenseServerPanel !== serverSelectElement.value;
-    }
-  });
-})();
-</script>
+{{if not .SimplifiedExpenses}}
 <script>
 (function initializeHostingInstallationTabs() {
   const tabContainerElement = document.querySelector('[data-hosting-installation-tabs]');
@@ -3388,6 +3375,7 @@
   }
 })();
 </script>
+{{end}}
 <script>
 (function initializeSiteSettingsTabs() {
   const tabContainerElement = document.querySelector('[data-site-settings-tabs]');
