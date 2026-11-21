@@ -525,7 +525,7 @@ func BuildRemoteServerView(clientHosting ClientHosting, invoices []Invoice, late
 	server.TotalUsedLabel = serverTotalUsedLabel(server.Sites)
 	server.Clients = serverClientViewsFromSites(server.Sites)
 	server.ClientCount = len(server.Clients)
-	server.Invoices = ServerInvoiceViews(invoices, serverDomains(server.Sites), serverClientEmails(server.Clients))
+	server.Invoices = ServerInvoiceViewsForInstallation(invoices, server.ID, serverDomains(server.Sites))
 	server.InvoiceCount = len(server.Invoices)
 	server.BillableCount = BillableSiteCount(server.Sites)
 	server.UnpaidInvoiceCount = UnpaidInvoiceCount(server.Invoices)
@@ -1184,6 +1184,31 @@ func ServerInvoiceViews(invoices []Invoice, domains map[string]struct{}, emails 
 		})
 	}
 	return views
+}
+
+// ServerInvoiceViewsForInstallation never assigns one server's invoices to
+// another just because their customers share the same email. Historical
+// invoices without installation IDs are admitted by an exact site domain only.
+func ServerInvoiceViewsForInstallation(invoices []Invoice, installationID string, domains map[string]struct{}) []ServerInvoiceView {
+	installationID = strings.TrimSpace(installationID)
+	filtered := make([]Invoice, 0, len(invoices))
+	if installationID == "" {
+		return nil
+	}
+	for _, invoice := range invoices {
+		invoiceInstallation := strings.TrimSpace(invoice.InstallationID)
+		if invoiceInstallation != "" {
+			if invoiceInstallation != installationID {
+				continue
+			}
+		} else {
+			if _, found := domains[normalizeDomainName(invoice.Domain)]; !found {
+				continue
+			}
+		}
+		filtered = append(filtered, invoice)
+	}
+	return ServerInvoiceViews(filtered, nil, nil)
 }
 
 func InvoiceStatusLabel(status string) string {
