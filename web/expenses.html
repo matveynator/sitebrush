@@ -513,15 +513,15 @@
       </div>
       <div data-installations-list class="server-installation-list">
       {{range .InstallationCatalog}}
-        <article class="server-installation-row" data-installation-row data-installation-id="{{.ID}}" data-installation-search="{{.Name}} {{.ID}} {{.OwnerEmail}} {{.OSLabel}}" data-installation-name="{{.Name}}" data-installation-sites="{{.SiteCount}}" data-installation-forecast="{{.MonthlyForecastMinor}}" data-installation-paid="{{.PaidThisMonthMinor}}" data-installation-monetized="{{if .MonetizationEnabled}}true{{else}}false{{end}}" data-installation-archived="{{if .Archived}}true{{else}}false{{end}}">
+        <article class="server-installation-row" data-installation-row data-installation-id="{{.ID}}" data-installation-search="{{.Name}} {{.ID}} {{.OwnerEmail}} {{.OSLabel}}" data-installation-name="{{.Name}}" data-installation-sites="{{.SiteCount}}" data-installation-forecast="{{.MonthlyForecastMinor}}" data-installation-paid="{{.PaidThisMonthMinor}}" data-installation-monetized="{{if .MonetizationEnabled}}true{{else}}false{{end}}" data-installation-currency="{{.Currency}}" data-installation-archived="{{if .Archived}}true{{else}}false{{end}}">
           <div class="server-installation-identity">
             <strong>{{.Name}}</strong>
             <small>{{.OwnerEmail}}{{if .OSLabel}} · {{.OSLabel}}{{end}}</small>
             {{if .Archived}}<small>{{index $.T "billing_archive"}} · {{.LastSeenAt}}</small>{{end}}
           </div>
-          <span class="server-installation-number">{{.SiteCount}}</span>
-          <span class="server-installation-number">{{.MonthlyForecastLabel}}<small>{{.Currency}}</small></span>
-          <span class="server-installation-number">{{.PaidThisMonthLabel}}</span>
+          <span class="server-installation-number"><small>{{index $.T "billing_client_sites"}}</small>{{.SiteCount}}</span>
+          <span class="server-installation-number"><small>{{index $.T "server_installations_sort_forecast"}}</small>{{.MonthlyForecastLabel}}</span>
+          <span class="server-installation-number"><small>{{index $.T "server_installations_sort_paid"}}</small>{{.PaidThisMonthLabel}}</span>
           <div class="server-installation-state">
             {{if .MonetizationEnabled}}<span class="server-installation-enabled">{{index $.T "server_monetization_on"}}</span>{{else}}<span class="server-installation-disabled">{{index $.T "server_monetization_off"}}</span>{{end}}
             {{if .Qualified}}<button type="button" class="server-installation-open" data-open-server-id="{{.ID}}">{{index $.T "server_installations_open"}}</button>{{end}}
