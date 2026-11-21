@@ -29208,6 +29208,22 @@ func (a *App) runAutomaticBillingOnce(ctx context.Context, store hostingandsuppo
 	}
 	processServer := func(installationID string, serverName string, policy expenses.ServerPolicy, sites []billingServerSite) {
 		policy = expenses.NormalizePolicy(policy)
+		// The prepared view is a read-only snapshot and can be older than an
+		// opt-out committed before this invoice worker obtained its DB turn.
+		// Check the current tariff within the same DB-owner callback that
+		// creates the invoice. An unexpected read failure must fail closed.
+		policyID := installationID
+		if strings.HasPrefix(installationID, "local:") {
+			policyID = "local"
+		}
+		currentPolicy, found, readErr := store.CurrentServerExpensePolicy(ctx, policyID, policy.DiskTotalBytes)
+		if readErr != nil {
+			log.Printf("automatic billing policy read failed installation=%s: %v", installationID, readErr)
+			return
+		}
+		if found {
+			policy = currentPolicy
+		}
 		// No future invoices may be created while this installation is not
 		// opted in. Already issued invoices remain unchanged.
 		if !policy.MonetizationEnabled() || strings.TrimSpace(policy.Currency) == "" {
