@@ -1,0 +1,86 @@
+/* The administration surface has its own layout; never alter public pages. */
+.server-settings-page .billing-page { width: min(1260px, calc(100% - 32px)); }
+.server-settings-page .server-settings-header { background: var(--theme-card); box-shadow: none; }
+.server-settings-page .server-network-disclosure {
+  margin: 0 0 22px; border: 1px solid var(--theme-border);
+  border-radius: var(--theme-radius); background: var(--theme-card);
+}
+.server-settings-page .server-network-summary {
+  display: grid; gap: 3px; padding: 16px 20px; cursor: pointer;
+  font-weight: 700; color: var(--theme-foreground);
+}
+.server-settings-page .server-network-summary small {
+  color: var(--theme-muted-foreground); font-size: 13px; font-weight: 400; line-height: 1.45;
+}
+.server-settings-page .server-network-disclosure[open] > .server-network-summary {
+  border-bottom: 1px solid var(--theme-border);
+}
+.server-settings-page .server-network-disclosure > [data-public-ip-panel] {
+  margin: 0 !important; border: none !important; background: transparent; box-shadow: none;
+}
+.server-settings-page .server-config-layout {
+  display: grid; grid-template-columns: 224px minmax(0, 1fr);
+  align-items: start; gap: 24px; min-width: 0;
+}
+.server-settings-page .server-config-nav {
+  position: sticky; top: 18px; display: grid; gap: 3px;
+  min-width: 0; padding: 7px; border: 1px solid var(--theme-border);
+  border-radius: var(--theme-radius); background: var(--theme-card);
+}
+.server-settings-page .server-config-nav[hidden] { display: none; }
+.server-settings-page .server-config-nav button,
+.server-settings-page .server-config-nav a {
+  display: flex; align-items: center; justify-content: flex-start;
+  box-sizing: border-box; width: 100%; min-height: 44px; padding: 10px 12px;
+  border: 0 !important; border-radius: calc(var(--theme-radius) - 2px);
+  background: transparent !important; box-shadow: none !important;
+  color: var(--theme-foreground) !important; text-align: start;
+  font: 500 14px/1.3 var(--theme-font-sans); text-decoration: none;
+  cursor: pointer;
+}
+.server-settings-page .server-config-nav button:hover,
+.server-settings-page .server-config-nav a:hover { background: var(--theme-muted) !important; }
+.server-settings-page .server-config-nav button[aria-current="page"] {
+  background: var(--theme-accent) !important;
+  color: var(--theme-accent-foreground) !important; font-weight: 700;
+}
+.server-settings-page .server-config-nav :is(a, button):focus-visible,
+.server-settings-page .server-network-summary:focus-visible {
+  outline: 2px solid var(--theme-ring); outline-offset: 2px;
+}
+.server-settings-page .server-config-content, .server-settings-page .server-config-view { min-width: 0; }
+.server-settings-page .server-config-view-heading { margin-bottom: 16px; }
+.server-settings-page .server-config-view-heading h2 { margin: 0 0 5px; font-size: clamp(21px, 2.6vw, 26px); }
+.server-settings-page .server-config-view-heading p { margin: 0; font-size: 14px; color: var(--theme-muted-foreground); }
+.server-settings-page .server-config-view > .expense-simple-summary { box-shadow: none; }
+.server-settings-page .server-config-view > .expense-simple-summary > * { min-width: 0; }
+.server-settings-page .server-config-view:not([data-server-config-view="overview"]) {
+  padding: 20px; border: 1px solid var(--theme-border);
+  border-radius: var(--theme-radius); background: var(--theme-card);
+}
+.server-settings-page .server-config-view > h2:first-child { margin-top: 0; }
+.server-settings-page .server-config-view [data-server-update-frame] { max-width: 100%; }
+.server-settings-page .server-config-view .expense-simple-clients { min-width: 0; }
+.server-settings-page .expense-simple-server-description,
+.server-settings-page .expense-mail-monitor { border-color: var(--theme-border); }
+.server-settings-page .expense-simple-server-metric,
+.server-settings-page .expense-simple-metric { background: var(--theme-card); }
+.server-settings-page .expense-simple-client { border-color: var(--theme-border); }
+.server-settings-page .server-config-view [role="alert"] { overflow-wrap: anywhere; }
+@media (max-width: 850px) {
+  .server-settings-page .server-config-layout { grid-template-columns: minmax(0, 1fr); gap: 14px; }
+  .server-settings-page .server-config-nav {
+    position: static; display: flex; flex-wrap: nowrap; overflow-x: auto;
+    overscroll-behavior-inline: contain; padding: 5px;
+  }
+  .server-settings-page .server-config-nav button,
+  .server-settings-page .server-config-nav a {
+    width: auto; flex: 0 0 auto; white-space: nowrap; padding-inline: 13px;
+  }
+}
+@media (max-width: 520px) {
+  .server-settings-page .billing-page { width: calc(100% - 24px); }
+  .server-settings-page .server-network-summary { padding: 13px; }
+  .server-settings-page .server-config-view:not([data-server-config-view="overview"]) { padding: 14px; }
+  .server-settings-page .expense-simple-summary { padding: 14px; }
+}
