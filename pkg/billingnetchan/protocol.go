@@ -71,12 +71,8 @@ func (event Event) Validate(installationID string) error {
 	default:
 		return errors.New("unsupported payment event status")
 	}
-	occurred, err := time.Parse(time.RFC3339, event.OccurredAt)
-	if err != nil || occurred.Location() != time.UTC && occurred.Format("-07:00") != "+00:00" {
-		// Accept UTC instant formats only, not arbitrary local timestamps.
-		if err != nil || !strings.HasSuffix(event.OccurredAt, "Z") {
-			return errors.New("invalid payment event timestamp")
-		}
+	if _, err := time.Parse(time.RFC3339, event.OccurredAt); err != nil || !strings.HasSuffix(event.OccurredAt, "Z") {
+		return errors.New("invalid payment event UTC timestamp")
 	}
 	return nil
 }
@@ -126,6 +122,10 @@ func Serve(connection *netchan.Channel[Message], centralAuthenticated bool, inst
 		case request, ok := <-connection.Receive:
 			if !ok {
 				return
+			}
+			if request.Reply == nil || request.Session == nil {
+				// Malformed requests must not monopolize the payment owner.
+				continue
 			}
 			select {
 			case <-request.Session:
