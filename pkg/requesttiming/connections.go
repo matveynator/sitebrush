@@ -21,7 +21,7 @@ func (collector *Collector) ConnState(connection net.Conn, state http.ConnState)
 	collector.Observe(Event{connection: connection, transition: true, state: state, at: time.Now()})
 }
 
-func recordConnectionTiming(report *Report, connections map[net.Conn]connectionTiming, event Event, cutoff time.Time) {
+func recordConnectionTiming(report, interval *Report, connections map[net.Conn]connectionTiming, event Event, cutoff time.Time) {
 	if event.at.Before(cutoff) {
 		return
 	}
@@ -29,6 +29,7 @@ func recordConnectionTiming(report *Report, connections map[net.Conn]connectionT
 	case http.StateActive:
 		if _, exists := connections[event.connection]; !exists && len(connections) >= 65536 {
 			report.Incomplete = true
+			interval.Incomplete = true
 			return
 		}
 		connections[event.connection] = connectionTiming{active: event.at}
@@ -42,6 +43,7 @@ func recordConnectionTiming(report *Report, connections map[net.Conn]connectionT
 		completed.Durations[HTTP1ResponseComplete] = event.at.Sub(current.active)
 		completed.Present = 1 << HTTP1ResponseComplete
 		report.record(completed)
+		interval.record(completed)
 	case http.StateClosed, http.StateHijacked:
 		delete(connections, event.connection)
 	}

@@ -9,6 +9,8 @@ import (
 	"math/bits"
 	"net"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -33,11 +35,20 @@ const (
 	HandlerComplete
 	BodyWrite
 	HTTP1ResponseComplete
+	PublicStaticRAM
+	PublicStaticFile
+	UnknownHost
+	LocalIPEntry
+	ProxyApplication
+	ControlDBQueue
+	ControlDBExecution
+	SiteDBQueue
+	SiteDBExecution
 	stageCount
 )
 
 func (stage Stage) String() string {
-	return [...]string{"accepted_to_request", "front_state", "domain", "policy", "attack_guard", "throttle_guard", "public_handler", "first_write", "certificate", "attack_queue", "attack_work", "throttle_queue", "throttle_work", "proxy_metadata", "proxy_backend", "handler_complete", "body_write", "http1_response_complete"}[stage]
+	return [...]string{"accepted_to_request", "front_state", "domain", "policy", "attack_guard", "throttle_guard", "public_handler", "first_write", "certificate", "attack_queue", "attack_work", "throttle_queue", "throttle_work", "proxy_metadata", "proxy_backend", "handler_complete", "body_write", "http1_response_complete", "public_static_ram", "public_static_file", "unknown_host", "local_ip_entry", "proxy_application", "control_db_queue", "control_db_execution", "site_db_queue", "site_db_execution"}[stage]
 }
 
 type HTTPMetrics struct {
@@ -48,6 +59,7 @@ type HTTPMetrics struct {
 	WriteErrors uint64 `json:"writeErrors"`
 }
 type Event struct {
+	Status     int
 	RAMReason  string
 	RAM        RAMMetrics
 	connection net.Conn
@@ -68,14 +80,17 @@ type RAMMetrics struct {
 }
 
 type Counter struct {
-	Stage   string
-	Count   uint64
-	TotalNS uint64
-	MaxNS   uint64
-	Buckets [64]uint64
+	Stage    string
+	Count    uint64
+	TotalNS  uint64
+	MaxNS    uint64
+	Statuses [600]uint64
+	Buckets  [64]uint64
 }
 
 type Report struct {
+	Started        time.Time
+	Finished       time.Time
 	RAM            RAMMetrics
 	HTTP           HTTPMetrics
 	Stages         [stageCount]Counter
@@ -83,26 +98,39 @@ type Report struct {
 	Incomplete     bool
 }
 
+type reportRequest struct {
+	reply    chan *Report
+	interval bool
+}
+
 type Collector struct {
 	events  chan Event
 	losses  chan struct{}
-	reports chan chan Report
+	reports chan reportRequest
 	stop    <-chan struct{}
 }
 
 func New(stop <-chan struct{}) *Collector {
-	collector := &Collector{events: make(chan Event, 4096), losses: make(chan struct{}, 1), reports: make(chan chan Report), stop: stop}
+	collector := &Collector{events: make(chan Event, 4096), losses: make(chan struct{}, 1), reports: make(chan reportRequest), stop: stop}
 	go collector.run()
 	return collector
 }
 
 func (collector *Collector) run() {
-	var report Report
+	report := newReport(time.Now())
+	interval := newReport(report.Started)
 	connections := make(map[net.Conn]connectionTiming)
 	var cutoff time.Time
 	// A lost transition must not pair one request with a later request's Idle.
 	// Discard queued correlations on loss; HTTP totals still report partial data.
-	lost := func() { report.DroppedMinimum++; report.Incomplete = true; clear(connections); cutoff = time.Now() }
+	lost := func() {
+		report.DroppedMinimum++
+		report.Incomplete = true
+		interval.DroppedMinimum++
+		interval.Incomplete = true
+		clear(connections)
+		cutoff = time.Now()
+	}
 	consume := func(event Event) {
 		select {
 		case <-collector.losses:
@@ -110,10 +138,11 @@ func (collector *Collector) run() {
 		default:
 		}
 		if event.transition {
-			recordConnectionTiming(&report, connections, event, cutoff)
+			recordConnectionTiming(&report, &interval, connections, event, cutoff)
 			return
 		}
 		report.record(event)
+		interval.record(event)
 		if event.connection != nil && event.started.After(cutoff) {
 			if current, found := connections[event.connection]; found && !event.started.Before(current.active) {
 				current.started = event.started
@@ -123,16 +152,13 @@ func (collector *Collector) run() {
 			}
 		}
 	}
-	for stage := range report.Stages {
-		report.Stages[stage].Stage = Stage(stage).String()
-	}
 	for {
 		select {
 		case <-collector.stop:
 			return
 		case <-collector.losses:
 			lost()
-		case reply := <-collector.reports:
+		case request := <-collector.reports:
 			for pending := len(collector.events); pending > 0; pending-- {
 				consume(<-collector.events)
 			}
@@ -141,7 +167,16 @@ func (collector *Collector) run() {
 				lost()
 			default:
 			}
-			reply <- report
+			report.Finished = time.Now()
+			if request.interval {
+				interval.Finished = report.Finished
+				completed := interval
+				request.reply <- &completed
+				interval = newReport(report.Finished)
+			} else {
+				completed := report
+				request.reply <- &completed
+			}
 		case event := <-collector.events:
 			consume(event)
 		}
@@ -171,6 +206,9 @@ func (report *Report) record(event Event) {
 		counter := &report.Stages[stage]
 		nanoseconds := uint64(max(duration, 0))
 		counter.Count++
+		if event.Status > 0 && event.Status < len(counter.Statuses) {
+			counter.Statuses[event.Status]++
+		}
 		counter.TotalNS += nanoseconds
 		counter.MaxNS = max(counter.MaxNS, nanoseconds)
 		counter.Buckets[min(bits.Len64(nanoseconds), 63)]++
@@ -222,10 +260,48 @@ func (collector *Collector) Record(stage Stage, duration time.Duration) {
 	collector.Observe(event)
 }
 
+func newReport(started time.Time) Report {
+	report := Report{Started: started}
+	for stage := range report.Stages {
+		report.Stages[stage].Stage = Stage(stage).String()
+	}
+	return report
+}
+
+// StatusSummary returns independent text; owners never expose mutable maps.
+func (counter Counter) StatusSummary() string {
+	var statuses []string
+	for status, count := range counter.Statuses {
+		if count != 0 {
+			statuses = append(statuses, strconv.Itoa(status)+":"+strconv.FormatUint(count, 10))
+		}
+	}
+	return strings.Join(statuses, ",")
+}
+
+func (collector *Collector) RecordResult(stage Stage, duration time.Duration, status int) {
+	if collector == nil {
+		return
+	}
+	event := Event{Status: status, Present: 1 << stage}
+	event.Durations[stage] = duration
+	collector.Observe(event)
+}
+
 func (collector *Collector) Snapshot(stop <-chan struct{}) (Report, error) {
-	reply := make(chan Report, 1)
+	return collector.snapshot(stop, false)
+}
+
+// IntervalSnapshot has one consumer: the 30-second logger. Cumulative snapshots
+// used by profiler captures remain independent of interval resets.
+func (collector *Collector) IntervalSnapshot(stop <-chan struct{}) (Report, error) {
+	return collector.snapshot(stop, true)
+}
+
+func (collector *Collector) snapshot(stop <-chan struct{}, interval bool) (Report, error) {
+	reply := make(chan *Report, 1)
 	select {
-	case collector.reports <- reply:
+	case collector.reports <- reportRequest{reply: reply, interval: interval}:
 	case <-stop:
 		return Report{}, errors.New("timing subscriber stopped")
 	case <-collector.stop:
@@ -233,7 +309,7 @@ func (collector *Collector) Snapshot(stop <-chan struct{}) (Report, error) {
 	}
 	select {
 	case report := <-reply:
-		return report, nil
+		return *report, nil
 	case <-stop:
 		return Report{}, errors.New("timing subscriber stopped")
 	case <-collector.stop:
@@ -246,8 +322,36 @@ func (collector *Collector) Snapshot(stop <-chan struct{}) (Report, error) {
 type trace struct {
 	started, first time.Time
 	event          Event
+	route          Stage
 }
 type traceKey struct{}
+type collectorKey struct{}
+
+// SQL workers share only an immutable collector contact, never an HTTP trace.
+func WithCollector(parent context.Context, collector *Collector) context.Context {
+	if parent == nil {
+		parent = context.Background()
+	}
+	if collector == nil {
+		return parent
+	}
+	return context.WithValue(parent, collectorKey{}, collector)
+}
+
+func FromContext(parent context.Context) *Collector {
+	if parent == nil {
+		return nil
+	}
+	collector, _ := parent.Value(collectorKey{}).(*Collector)
+	return collector
+}
+
+func Route(request *http.Request, stage Stage) {
+	if measurement, found := request.Context().Value(traceKey{}).(*trace); found {
+		measurement.route = stage
+	}
+}
+
 type acceptedKey struct{}
 type connectionKey struct{}
 
@@ -305,7 +409,7 @@ func (collector *Collector) Middleware(next http.Handler) http.Handler {
 			default:
 			}
 		}
-		request = request.WithContext(context.WithValue(request.Context(), traceKey{}, measurement))
+		request = request.WithContext(context.WithValue(WithCollector(request.Context(), collector), traceKey{}, measurement))
 		if request.Header.Get("Upgrade") == "" {
 			measurement.event.HTTP.Requests = 1
 			if request.Body != nil {
@@ -322,6 +426,13 @@ func (collector *Collector) Middleware(next http.Handler) http.Handler {
 			measurement.event.protocol = request.ProtoMajor
 			measurement.event.Durations[HandlerComplete] = measurement.event.at.Sub(measurement.started)
 			measurement.event.Present |= 1 << HandlerComplete
+		}
+		if measurement.event.Status == 0 {
+			measurement.event.Status = http.StatusOK
+		}
+		if measurement.route != 0 {
+			measurement.event.Present |= 1 << measurement.route
+			measurement.event.Durations[measurement.route] = time.Since(measurement.started)
 		}
 		collector.Observe(measurement.event)
 	})
@@ -344,6 +455,9 @@ func (writer *responseWriter) Unwrap() http.ResponseWriter { return writer.Respo
 func (writer *responseWriter) WriteHeader(status int) {
 	if status >= 200 || status == http.StatusSwitchingProtocols {
 		writer.firstWrite()
+		if writer.measurement.event.Status == 0 {
+			writer.measurement.event.Status = status
+		}
 	}
 	if status >= 400 {
 		writer.measurement.event.HTTP.Errors = 1
@@ -351,6 +465,9 @@ func (writer *responseWriter) WriteHeader(status int) {
 	writer.ResponseWriter.WriteHeader(status)
 }
 func (writer *responseWriter) Write(body []byte) (int, error) {
+	if writer.measurement.event.Status == 0 {
+		writer.measurement.event.Status = http.StatusOK
+	}
 	writer.firstWrite()
 	started := time.Now()
 	count, err := writer.ResponseWriter.Write(body)

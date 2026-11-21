@@ -942,6 +942,7 @@ type siteDBMigrationEvent struct {
 
 var errSiteMigrationsStarting = errors.New("startup database migrations are still running")
 var errSiteDatabaseMissing = errors.New("site database does not exist")
+var errDatabaseQueueFull = errors.New("database queue is full")
 
 type siteDatabaseDegradedError struct {
 	domain string
@@ -1040,6 +1041,7 @@ type serverControlDatabaseAccessRequest struct {
 	reply    chan error
 	purpose  string
 	queuedAt time.Time
+	timings  *requesttiming.Collector
 	run      func(*sql.DB) error
 }
 
@@ -1160,6 +1162,7 @@ func (dispatcher *serverControlDatabaseDispatcher) runWorker(database *sql.DB, r
 			startedAt := time.Now()
 			err := request.run(database)
 			sessionDuration := time.Since(startedAt)
+			request.timings.RecordResult(requesttiming.ControlDBExecution, sessionDuration, databaseOperationStatus(err))
 			if (debug && sessionDuration >= slowDatabaseOperationLogAfter) || sessionDuration >= 5*time.Second {
 				log.Printf("%sCONTROL DB%s worker=%s purpose=%s operation=%s", terminalCyan(), terminalReset(), workerName, request.purpose, sessionDuration.String())
 			}
@@ -1189,14 +1192,23 @@ func (dispatcher *serverControlDatabaseDispatcher) execute(ctx context.Context, 
 		reply:    make(chan error, 1),
 		purpose:  firstNonEmpty(strings.TrimSpace(purpose), "unspecified"),
 		queuedAt: time.Now(),
+		timings:  requesttiming.FromContext(ctx),
 		run:      run,
 	}
+	queueClaimed := false
+	defer func() {
+		if !queueClaimed {
+			request.timings.RecordResult(requesttiming.ControlDBQueue, time.Since(request.queuedAt), databaseQueueStatus(ctx))
+		}
+	}()
 	requests := dispatcher.readRequests
 	if kind == serverControlDatabaseWrite {
 		requests = dispatcher.writeRequests
 	}
 	select {
 	case requests <- request:
+	default:
+		return errDatabaseQueueFull
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-dispatcher.stop:
@@ -1204,6 +1216,8 @@ func (dispatcher *serverControlDatabaseDispatcher) execute(ctx context.Context, 
 	}
 	select {
 	case <-request.claimed:
+		queueClaimed = true
+		request.timings.RecordResult(requesttiming.ControlDBQueue, time.Since(request.queuedAt), http.StatusOK)
 		// Cancellation cannot reclaim captures while the worker still owns
 		// them. SQL cancellation remains the callback's boundary concern.
 		return <-request.reply
@@ -1536,6 +1550,7 @@ func (db *siteFileDatabase) completeOperationWithDatabase(operation siteDBOperat
 	startedAt := time.Now()
 	response := operation.run(operation.ctx, database)
 	duration := time.Since(startedAt)
+	requesttiming.FromContext(operation.ctx).RecordResult(requesttiming.SiteDBExecution, duration, databaseOperationStatus(response.err))
 	if db.debug && (duration >= slowDatabaseOperationLogAfter || response.err != nil) {
 		db.logDatabaseOperationFinished(operation, duration, response.err)
 	}
@@ -1695,6 +1710,25 @@ func (db *siteFileDatabase) Close() error {
 	}
 }
 
+// SQL result codes are diagnostic outcomes: 200 completed, 499 canceled,
+// 503 rejected/unavailable and 500 execution failed. They are not HTTP replies.
+func databaseOperationStatus(err error) int {
+	if err == nil {
+		return http.StatusOK
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return 499
+	}
+	return http.StatusInternalServerError
+}
+
+func databaseQueueStatus(ctx context.Context) int {
+	if ctx.Err() != nil {
+		return 499
+	}
+	return http.StatusServiceUnavailable
+}
+
 func (db *siteFileDatabase) runOperation(ctx context.Context, operation siteDBOperation) siteDBOperationResponse {
 	if ctx == nil {
 		ctx = context.Background()
@@ -1702,75 +1736,40 @@ func (db *siteFileDatabase) runOperation(ctx context.Context, operation siteDBOp
 	operation.ctx = ctx
 	operation.claimed = make(chan struct{})
 	operation.response = make(chan siteDBOperationResponse, 1)
-
+	timings := requesttiming.FromContext(ctx)
+	queuedAt := time.Now()
+	queueClaimed := false
+	defer func() {
+		if !queueClaimed {
+			timings.RecordResult(requesttiming.SiteDBQueue, time.Since(queuedAt), databaseQueueStatus(ctx))
+		}
+	}()
 	queue := db.queueFor(operation.kind)
-	if !db.debug {
-		select {
-		case <-operation.stop:
-			return siteDBOperationResponse{err: errors.New("site database subscriber disconnected")}
-		case <-ctx.Done():
-			return siteDBOperationResponse{err: ctx.Err()}
-		case <-db.stopped:
-			return siteDBOperationResponse{err: errors.New("site database worker stopped")}
-		case queue <- operation:
-		}
-		select {
-		case <-operation.claimed:
-			return <-operation.response
-		case response := <-operation.response:
-			return response
-		case <-operation.stop:
-			return siteDBOperationResponse{err: errors.New("site database subscriber disconnected")}
-		case <-ctx.Done():
-			return siteDBOperationResponse{err: ctx.Err()}
-		case <-db.stopped:
-			return siteDBOperationResponse{err: errors.New("site database worker stopped")}
-		}
+	select {
+	case <-operation.stop:
+		return siteDBOperationResponse{err: errors.New("site database subscriber disconnected")}
+	case <-ctx.Done():
+		return siteDBOperationResponse{err: ctx.Err()}
+	case <-db.stopped:
+		return siteDBOperationResponse{err: errors.New("site database worker stopped")}
+	case queue <- operation:
+	default:
+		return siteDBOperationResponse{err: errDatabaseQueueFull}
 	}
-
-	queueStartedAt := time.Now()
-	queueTimer := time.NewTimer(slowDatabaseOperationLogAfter)
-	defer queueTimer.Stop()
-	for queued := false; !queued; {
-		select {
-		case <-operation.stop:
-			return siteDBOperationResponse{err: errors.New("site database subscriber disconnected")}
-		case <-ctx.Done():
-			return siteDBOperationResponse{err: ctx.Err()}
-		case <-db.stopped:
-			return siteDBOperationResponse{err: errors.New("site database worker stopped")}
-		case queue <- operation:
-			queued = true
-		case <-queueTimer.C:
-			db.logDatabaseOperationWaiting("queue", operation, time.Since(queueStartedAt))
-			queueTimer.Reset(slowDatabaseOperationRepeatAfter)
-		}
-	}
-
-	runStartedAt := time.Now()
-	waitTimer := time.NewTimer(slowDatabaseOperationLogAfter)
-	defer waitTimer.Stop()
-	for {
-		select {
-		case <-operation.claimed:
-			return <-operation.response
-		case response := <-operation.response:
-			waitDuration := time.Since(runStartedAt)
-			if waitDuration >= slowDatabaseOperationLogAfter || response.err != nil {
-				db.logDatabaseOperationResponse(operation, time.Since(queueStartedAt), response.err)
-			}
-			return response
-		case <-operation.stop:
-			return siteDBOperationResponse{err: errors.New("site database subscriber disconnected")}
-		case <-ctx.Done():
-			db.logDatabaseOperationWaiting("context-canceled", operation, time.Since(queueStartedAt))
-			return siteDBOperationResponse{err: ctx.Err()}
-		case <-db.stopped:
-			return siteDBOperationResponse{err: errors.New("site database worker stopped")}
-		case <-waitTimer.C:
-			db.logDatabaseOperationWaiting("response", operation, time.Since(runStartedAt))
-			waitTimer.Reset(slowDatabaseOperationRepeatAfter)
-		}
+	select {
+	case <-operation.claimed:
+		queueClaimed = true
+		timings.RecordResult(requesttiming.SiteDBQueue, time.Since(queuedAt), http.StatusOK)
+		// Execution owns the callback's captures until completion, even on cancel.
+		return <-operation.response
+	case response := <-operation.response:
+		return response
+	case <-operation.stop:
+		return siteDBOperationResponse{err: errors.New("site database subscriber disconnected")}
+	case <-ctx.Done():
+		return siteDBOperationResponse{err: ctx.Err()}
+	case <-db.stopped:
+		return siteDBOperationResponse{err: errors.New("site database worker stopped")}
 	}
 }
 
@@ -11271,7 +11270,7 @@ func startRequestTimingCounters(enabled bool, stop <-chan struct{}, role string)
 			case <-stop:
 				return
 			case <-ticker.C:
-				report, err := collector.Snapshot(stop)
+				report, err := collector.IntervalSnapshot(stop)
 				if err != nil {
 					return
 				}
@@ -11279,7 +11278,7 @@ func startRequestTimingCounters(enabled bool, stop <-chan struct{}, role string)
 					if counter.Count == 0 {
 						continue
 					}
-					log.Printf("REQUEST TIMING role=%s stage=%s count=%d mean=%s p50_upper=%s p95_upper=%s p99_upper=%s max=%s incomplete=%t dropped_minimum=%d", role, counter.Stage, counter.Count, time.Duration(counter.TotalNS/counter.Count), counter.PercentileUpperBound(50), counter.PercentileUpperBound(95), counter.PercentileUpperBound(99), time.Duration(counter.MaxNS), report.Incomplete, report.DroppedMinimum)
+					log.Printf("REQUEST TIMING role=%s interval_start=%s interval_end=%s stage=%s count=%d statuses=%s mean=%s p50_upper=%s p95_upper=%s p99_upper=%s max=%s incomplete=%t dropped_minimum=%d", role, report.Started.Format(time.RFC3339Nano), report.Finished.Format(time.RFC3339Nano), counter.Stage, counter.Count, counter.StatusSummary(), time.Duration(counter.TotalNS/counter.Count), counter.PercentileUpperBound(50), counter.PercentileUpperBound(95), counter.PercentileUpperBound(99), time.Duration(counter.MaxNS), report.Incomplete, report.DroppedMinimum)
 				}
 			}
 		}
@@ -13379,16 +13378,29 @@ func (a *App) aiIngressDecisionForRequest(r *http.Request) (machine, owner bool)
 }
 
 func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
+	admission := publicsite.NewBackendAdmission()
 	embedded := a.securityResponseHeadersMiddleware(http.HandlerFunc(a.serveEmbeddedStaticAsset))
 	core := a.siteDynamicHTTPCore(router)
-	fallback := a.aiIngressMiddleware(core)
+	fallback := admission.Wrap(a.aiIngressMiddleware(core))
 	content := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if a.publicCatalog != nil && a.servePublicPublished(w, r, false) {
 			return
 		}
 		core.ServeHTTP(w, r)
 	})
-	dynamic := a.securityResponseHeadersMiddleware(a.aiIngressMiddleware(a.analyticsMiddleware(a.accessLogMiddleware(a.authAbuseMiddleware(content)))))
+	dynamicContent := a.securityResponseHeadersMiddleware(a.aiIngressMiddleware(a.analyticsMiddleware(a.accessLogMiddleware(a.authAbuseMiddleware(content)))))
+	dynamic := admission.Wrap(dynamicContent)
+	accountHTTP := admission.Wrap(http.HandlerFunc(a.awaitAccountHTTPS))
+	privateDynamic := admission.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if a.controlDatabase == nil {
+			serveSecurityUnavailable(w)
+			return
+		}
+		if a.privateTestDriveGate(w, r) {
+			return
+		}
+		dynamicContent.ServeHTTP(w, r)
+	}))
 	public := a.securityResponseHeadersMiddleware(a.analyticsMiddleware(a.accessLogMiddleware(a.authAbuseMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !a.servePublicPublished(w, r, false) {
 			fallback.ServeHTTP(w, r)
@@ -13400,20 +13412,44 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 		}
 	})))
 	unknownPublic := a.securityResponseHeadersMiddleware(a.accessLogMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requesttiming.Route(r, requesttiming.UnknownHost)
 		http.NotFound(w, r)
 	})))
+	onboarding := admission.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !a.newSiteOnboardingRequest(r, domainFromRequest(r)) {
+			unknownPublic.ServeHTTP(w, r)
+			return
+		}
+		dynamicContent.ServeHTTP(w, r)
+	}))
+	pendingOperation := admission.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !a.servePendingSiteBoundary(w, r) {
+			dynamicContent.ServeHTTP(w, r)
+		}
+	}))
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Del("Server")
+		if a.serveLocalIPEntry(w, r) {
+			return
+		}
 		if a.publicCatalog != nil && (embeddedStaticRequest(r) || !publicOrdinaryRequest(r)) {
 			decision := a.publicRequestDecision(r)
 			r = withPublicRequestDecision(r, decision)
 			publicsite.ApplyServerHeader(w.Header(), decision)
 		}
+		if a.publicCatalog != nil && (hasQueryFlag(r, "site_recovery") || hasQueryFlag(r, "site_debt_pay") || hasQueryFlag(r, "site_debt_contact")) {
+			decision := a.pendingSiteDecision(r)
+			if decision.Found && decision.DeletionReason != "" {
+				pendingOperation.ServeHTTP(w, r)
+				return
+			}
+		}
 		if a.servePendingSiteBoundary(w, r) {
 			return
 		}
-		// Registration services remain reachable when the main page is published.
+		// Installation services validate the configured owner inside bounded
+		// dynamic admission, even before that owner's first public publication.
 		if r.URL.Path == "/" && (hasQueryFlag(r, "ignite") || hasQueryFlag(r, "sitebrush_agent")) {
 			dynamic.ServeHTTP(w, r)
 			return
@@ -13426,17 +13462,9 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 			embedded.ServeHTTP(w, r)
 			return
 		}
-		if requestHostIP(r) != nil && r.URL.Path == "/" {
+		if requestHostIP(r) != nil && r.URL.Path == "/" && !publicOrdinaryRequest(r) {
 			if !localAccountRequest(r) && r.TLS == nil {
-				a.awaitAccountHTTPS(w, r)
-				return
-			}
-			if r.URL.RawQuery == "" {
-				if a.hasAdmin(r.Context(), a.siteDomain(r.Context(), r)) {
-					httpsecurity.RedirectLocal(w, r, "/?login", http.StatusSeeOther)
-				} else {
-					httpsecurity.RedirectLocal(w, r, "/?register", http.StatusSeeOther)
-				}
+				accountHTTP.ServeHTTP(w, r)
 				return
 			}
 			dynamic.ServeHTTP(w, r)
@@ -13486,8 +13514,12 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 			host := domainFromRequest(r)
 			if host != "" {
 				hostDecision := a.publicRequestDecision(r)
-				if !hostDecision.Found && !hostDecision.Known && !a.newSiteOnboardingRequest(r, host) {
-					unknownPublic.ServeHTTP(w, r)
+				if !hostDecision.Found && !hostDecision.Known {
+					if newSiteOnboardingCandidate(r) {
+						onboarding.ServeHTTP(w, r)
+					} else {
+						unknownPublic.ServeHTTP(w, r)
+					}
 					return
 				}
 			}
@@ -13498,10 +13530,7 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 		// Host existence is resolved in memory; unknown hosts never reach DB.
 		if a.publicCatalog != nil &&
 			publicOrdinaryRequest(r) &&
-			!testDriveSessionRequest &&
-			!(r.URL.Path == "/" &&
-				canonicalLocalDomain(domainFromRequest(r)) == "localhost" &&
-				httpsecurity.IsLocalRequest(r)) {
+			!testDriveSessionRequest {
 			decision := a.publicRequestDecision(r)
 			r = withPublicRequestDecision(r, decision)
 			publicsite.ApplyServerHeader(w.Header(), decision)
@@ -13539,14 +13568,7 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 				return
 			}
 			if decision.PrivateTestDrive {
-				if a.controlDatabase == nil {
-					serveSecurityUnavailable(w)
-					return
-				}
-				if a.privateTestDriveGate(w, r) {
-					return
-				}
-				dynamic.ServeHTTP(w, r)
+				privateDynamic.ServeHTTP(w, r)
 				return
 			}
 
@@ -13566,45 +13588,8 @@ func (a *App) siteHTTPHandler(router http.Handler) http.Handler {
 			return
 		}
 
-		if a.publicCatalog != nil && publicOrdinaryRequest(r) {
-			decision := a.publicRequestDecision(r)
-			publicsite.ApplyServerHeader(w.Header(), decision)
-			if decision.PrivateTestDrive {
-				if a.controlDatabase == nil {
-					serveSecurityUnavailable(w)
-					return
-				}
-				if a.privateTestDriveGate(w, r) {
-					return
-				}
-				dynamic.ServeHTTP(w, r)
-				return
-			}
-			if decision.Found {
-				public.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), publicDecisionContextKey{}, decision)))
-				return
-			}
-			if !decision.Known && r.URL.Path == "/" && canonicalLocalDomain(domainFromRequest(r)) == "localhost" && httpsecurity.IsLocalRequest(r) {
-				if a.siteDatabaseRouter != nil {
-					databasePath := siteDatabaseFile(siteDatabaseRootPath(a.serverControlDBPath()), "localhost")
-					if _, err := os.Stat(databasePath); os.IsNotExist(err) {
-						httpsecurity.RedirectLocal(w, r, "/?register", http.StatusSeeOther)
-						return
-					} else if err != nil {
-						http.Error(w, "account storage temporarily unavailable", http.StatusServiceUnavailable)
-						return
-					}
-				}
-				dynamic.ServeHTTP(w, r)
-				return
-			}
-			if decision.Known {
-				http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
-			} else if publicMissingPageRequest(r, cleanPath(r.URL.Path)) {
-				a.renderMissingPage(w, withPublicRequestDecision(r, decision), cleanPath(r.URL.Path), false)
-			} else {
-				http.NotFound(w, r)
-			}
+		if testDriveSessionRequest && publicOrdinaryRequest(r) {
+			privateDynamic.ServeHTTP(w, r)
 			return
 		}
 		dynamic.ServeHTTP(w, r)
@@ -13665,8 +13650,14 @@ func (a *App) aiIngressMiddleware(next http.Handler) http.Handler {
 		// The SQL router needs the requested site before admission reads its
 		// control database. HTTP requests do not arrive with a domain context.
 		domain := domainFromRequest(r)
-		if requestHostIP(r) != nil {
-			domain = a.siteDomain(r.Context(), r)
+		if requestHostIP(r) != nil || domain == "localhost" && localAccountRequest(r) {
+			resolved, err := a.resolveAccountDomain(r.Context(), r)
+			if err != nil {
+				http.Error(w, "account routing temporarily unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			domain = resolved
+			r = r.WithContext(context.WithValue(r.Context(), resolvedAccountDomainKey{}, domain))
 		}
 		r = r.WithContext(contextWithDomain(r.Context(), domain))
 		machine, owner := a.aiIngressAdmission(r)
@@ -14047,6 +14038,9 @@ func (a *App) refreshAIProviderRange(source aiingress.Source, stop <-chan struct
 }
 
 func (a *App) route(w http.ResponseWriter, r *http.Request) {
+	if a.serveLocalIPEntry(w, r) {
+		return
+	}
 	if a.serverHostBoundary(w, r) {
 		return
 	}
@@ -19128,10 +19122,28 @@ func (a *App) isRegistrationOnboardingRequest(r *http.Request, domain string) bo
 // The public catalog has no entry until registration creates the site. Only
 // the owner's eligible subdomains may pass its unknown-host gate for onboarding.
 func (a *App) newSiteOnboardingRequest(r *http.Request, domain string) bool {
-	if r.URL.Path != "/" || !hasQueryFlag(r, "register") && !hasQueryFlag(r, "email_confirm") && !registrationCaptchaRequest(r) {
+	if !newSiteOnboardingCandidate(r) {
 		return false
 	}
 	return a.newSiteSubdomainAllowed(r.Context(), domain) && a.isRegistrationOnboardingRequest(r, domain)
+}
+
+func newSiteOnboardingCandidate(r *http.Request) bool {
+	return r.URL.Path == "/" && (hasQueryFlag(r, "register") || hasQueryFlag(r, "email_confirm") || registrationCaptchaRequest(r))
+}
+
+// The public snapshot only selects the onboarding adapter. The application
+// rechecks the live owner, reservation and confirmation under bounded admission.
+func (a *App) publicOnboardingCandidate(r *http.Request) bool {
+	if !newSiteOnboardingCandidate(r) || a.publicCatalog == nil {
+		return false
+	}
+	label, parent, found := strings.Cut(normalizeDomainName(domainFromRequest(r)), ".")
+	if !found || reservedServerLabel(label) || safePublicTrialLabel(label) != label {
+		return false
+	}
+	decision := a.publicCatalog.LookupRequest(publicsite.Lookup{Host: parent}, r.Context().Done())
+	return decision.Found && decision.ServerOwner
 }
 
 func registrationCaptchaRequest(r *http.Request) bool {
@@ -19658,6 +19670,28 @@ func localAccountRequest(r *http.Request) bool {
 	return address != nil && address.IsLoopback()
 }
 
+// The entry chooses no account identity and grants no local privilege. Live
+// owner resolution and authorization belong to the explicit account operation.
+func (a *App) serveLocalIPEntry(w http.ResponseWriter, r *http.Request) bool {
+	if !publicOrdinaryRequest(r) || r.URL.Path != "/" || r.URL.RawQuery != "" {
+		return false
+	}
+	if requestHostIP(r) == nil {
+		if domainFromRequest(r) != "localhost" || !localAccountRequest(r) {
+			return false
+		}
+		decision := a.publicRequestDecision(r)
+		if decision.Found || decision.Known {
+			return false
+		}
+	}
+	requesttiming.Route(r, requesttiming.LocalIPEntry)
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	httpsecurity.RedirectLocal(w, r, "/?login", http.StatusSeeOther)
+	return true
+}
+
 func accountClientIP(r *http.Request) string {
 	if localAccountRequest(r) {
 		return "127.0.0.1"
@@ -19671,18 +19705,23 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	domain := a.siteDomain(r.Context(), r)
+	adminPresent, adminErr := a.adminExists(r.Context(), domain)
+	if adminErr != nil {
+		http.Error(w, "account database temporarily unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	if r.FormValue("site_workflow") == "new_site" {
 		if !a.newSiteSubdomainAllowed(r.Context(), domain) || !a.publicTrialDomainAvailable(r.Context(), domain) {
 			http.Error(w, "the selected subdomain is unavailable", http.StatusConflict)
 			return
 		}
 	}
-	if a.registrationDomainClaimed(r.Context(), domain) && !a.hasAdmin(r.Context(), domain) {
+	if a.registrationDomainClaimed(r.Context(), domain) && !adminPresent {
 		a.renderReservedDomain(w, r, translationOrDefault(translationsForRequest(r), "auth_domain_reserved", "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site."), http.StatusConflict)
 		return
 	}
 	translations := translationsForRequest(r)
-	if a.hasAdmin(r.Context(), domain) {
+	if adminPresent {
 		httpsecurity.RedirectLocal(w, r, "/", http.StatusFound)
 		return
 	}
@@ -20228,11 +20267,16 @@ func (a *App) registerPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	domain := a.siteDomain(r.Context(), r)
-	if a.registrationDomainClaimed(r.Context(), domain) && !a.hasAdmin(r.Context(), domain) {
+	adminPresent, adminErr := a.adminExists(r.Context(), domain)
+	if adminErr != nil {
+		http.Error(w, "account database temporarily unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if a.registrationDomainClaimed(r.Context(), domain) && !adminPresent {
 		a.renderReservedDomain(w, r, translationOrDefault(translationsForRequest(r), "auth_domain_reserved", "This domain is reserved. Continue using the confirmation link sent to its owner; choose another name for a new site."), http.StatusConflict)
 		return
 	}
-	if a.hasAdmin(r.Context(), domain) {
+	if adminPresent {
 		returnPath := registrationReturnPath(r)
 		if a.isAdminRequest(r) {
 			httpsecurity.RedirectLocal(w, r, returnPath, http.StatusFound)
@@ -20810,7 +20854,12 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 		httpsecurity.RedirectLocal(w, r, loginReturnPathOrDefault(r), http.StatusFound)
 		return
 	}
-	if !a.hasAdmin(r.Context(), domain) {
+	adminPresent, adminErr := a.adminExists(r.Context(), domain)
+	if adminErr != nil {
+		http.Error(w, "account database temporarily unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if !adminPresent {
 		httpsecurity.RedirectLocal(w, r, "/?register&return_path="+url.QueryEscape(registrationReturnPath(r)), http.StatusFound)
 		return
 	}
@@ -45686,7 +45735,7 @@ func (a *App) withServerControlDatabase(ctx context.Context, kind serverControlD
 		return err
 	}
 	if a.controlDatabase != nil {
-		return a.controlDatabase.execute(ctx, kind, purpose, run)
+		return a.controlDatabase.execute(requesttiming.WithCollector(ctx, a.requestTimings), kind, purpose, run)
 	}
 	database, err := openServerControlDatabaseHandle(realDatabasePath, kind == serverControlDatabaseWrite)
 	if err != nil {
@@ -46793,9 +46842,38 @@ func (a *App) registerPageRedirect(ctx context.Context, domain, oldPath, newPath
 }
 
 func (a *App) hasAdmin(ctx context.Context, domain string) bool {
+	exists, err := a.adminExists(ctx, domain)
+	if err != nil {
+		// Legacy callers use absence to offer account creation. Unavailability
+		// must never grant that permission; account endpoints report the error.
+		log.Printf("administrator presence unavailable domain=%q error=%v", domain, err)
+		return true
+	}
+	return exists
+}
+
+func (a *App) adminExists(ctx context.Context, domain string) (bool, error) {
+	adapterContext, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	rows, err := a.db.QueryContext(adapterContext, `SELECT COUNT(1) FROM users WHERE domain=? AND is_admin=1`, domain)
+	if errors.Is(err, errSiteDatabaseMissing) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
 	var adminCount int
-	_ = a.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM users WHERE domain=? AND is_admin=1`, domain).Scan(&adminCount)
-	return adminCount > 0
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return false, err
+		}
+		return false, sql.ErrNoRows
+	}
+	if err := rows.Scan(&adminCount); err != nil {
+		return false, err
+	}
+	return adminCount > 0, rows.Err()
 }
 
 func (a *App) hasAnyAdmin(ctx context.Context) bool {
@@ -47629,7 +47707,7 @@ func siteCopyMenuConfigByteList(pagePath string, translations map[string]string)
 
 func siteCopyMenuTexts(translations map[string]string) map[string]string {
 	return map[string]string{
-		"title":                     translationOrDefault(translations, "menu_copy_site", "Copy site"),
+		"title":                     translationOrDefault(translations, "menu_copy_site", "Copy external website"),
 		"sourceURLPlaceholder":      translationOrDefault(translations, "missing_source_url_placeholder", "https://example.com/page"),
 		"sourceIPLabel":             translationOrDefault(translations, "missing_source_ip_label", "Source IP if DNS is not ready:"),
 		"sourceIPPlaceholder":       translationOrDefault(translations, "missing_source_ip_placeholder", "203.0.113.10"),
@@ -47717,8 +47795,8 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
 	confirmNoLabel := template.JSEscapeString(translationOrDefault(translations, "confirm_no", "No"))
 	editLabel := template.JSEscapeString(translationOrDefault(translations, "menu_edit", "Edit"))
 	textEditLabel := template.JSEscapeString(translationOrDefault(translations, "menu_text_edit", "Edit as text"))
-	voiceEditLabel := template.JSEscapeString(translationOrDefault(translations, "menu_voice_edit", "Edit with voice"))
-	copySiteLabel := template.JSEscapeString(translationOrDefault(translations, "menu_copy_site", "Copy site"))
+	connectAILabel := template.JSEscapeString(translationOrDefault(translations, "menu_connect_ai", "Connect AI assistant"))
+	copySiteLabel := template.JSEscapeString(translationOrDefault(translations, "menu_copy_site", "Copy external website"))
 	standardMenuHint := template.JSEscapeString(template.HTMLEscapeString(translationOrDefault(translations, "menu_standard_context_hint", "Browser standard menu: Ctrl + right mouse click.")))
 	deleteLabel := template.JSEscapeString(translationOrDefault(translations, "menu_delete", "Delete"))
 	protectPasswordLabel := template.JSEscapeString(translationOrDefault(translations, "menu_protect_password", "Protect with password"))
@@ -47763,14 +47841,14 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
 		if revisionID > 0 {
 			deleteActionEntry = "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='delete' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/cross.png' class='SiteBrushMenuIcon' alt=''>" + deleteLabel + "</button></li>"
 		}
-		freezeActionEntry := "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='freeze' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/freeze.png' class='SiteBrushMenuIcon' alt=''>" + freezeLabel + "</button></li>"
+		freezeActionEntry := "<li class='SiteBrushContextMenu SiteBrushSeparatedMenuItem'><button type='button' data-sitebrush-action='freeze' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/freeze.png' class='SiteBrushMenuIcon' alt=''>" + freezeLabel + "</button></li>"
 		if isFrozen {
-			freezeActionEntry = "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='publish' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/publish.png' class='SiteBrushMenuIcon' alt=''>" + publishLabel + "</button></li>"
+			freezeActionEntry = "<li class='SiteBrushContextMenu SiteBrushSeparatedMenuItem'><button type='button' data-sitebrush-action='publish' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/publish.png' class='SiteBrushMenuIcon' alt=''>" + publishLabel + "</button></li>"
 			freezeActionEntry += "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='unfreeze' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/unlock.png' class='SiteBrushMenuIcon' alt=''>" + unfreezeLabel + "</button></li>"
 		}
-		passwordActionEntry := "<li class='SiteBrushContextMenu SiteBrushSeparatedMenuItem'><button type='button' data-sitebrush-action='protect_password' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/lock.png' class='SiteBrushMenuIcon' alt=''>" + protectPasswordLabel + "</button></li>"
+		passwordActionEntry := "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='protect_password' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/lock.png' class='SiteBrushMenuIcon' alt=''>" + protectPasswordLabel + "</button></li>"
 		if pagePasswordProtected {
-			passwordActionEntry = "<li class='SiteBrushContextMenu SiteBrushSeparatedMenuItem'><button type='button' data-sitebrush-action='remove_password_protection' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/unlock.png' class='SiteBrushMenuIcon' alt=''>" + removePasswordProtectionLabel + "</button></li>"
+			passwordActionEntry = "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='remove_password_protection' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/unlock.png' class='SiteBrushMenuIcon' alt=''>" + removePasswordProtectionLabel + "</button></li>"
 		}
 		hostingAndSupportEntry := ""
 		if isServerManager {
@@ -48265,12 +48343,12 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
       "<li class='SiteBrushContextMenu SiteBrushDomainMenuItem'><a href='/' class='SiteBrushContextMenuLink'>" + currentDomainName + "</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?visual' class='SiteBrushContextMenuLink'><img src='/p/static/pencil.png' class='SiteBrushMenuIcon' alt=''>" + "` + editLabel + `" + "</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?text' class='SiteBrushContextMenuLink'><img src='/p/static/pencil-text.png' class='SiteBrushMenuIcon' alt=''>" + "` + textEditLabel + `" + "</a></li>",
-      "<li class='SiteBrushContextMenu'><a href='?ai' class='SiteBrushContextMenuLink'><img src='/p/static/pencil.png' class='SiteBrushMenuIcon' alt=''>" + "` + voiceEditLabel + `" + "</a></li>",
-      "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='copy_site' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/copy.png' class='SiteBrushMenuIcon' alt=''>" + "` + copySiteLabel + `" + "</button></li>",
+      "<li class='SiteBrushContextMenu'><a href='/?mcp' class='SiteBrushContextMenuLink'><img src='/p/static/ai-assistant.svg' class='SiteBrushMenuIcon' alt=''>" + "` + connectAILabel + `" + "</a></li>",
       "` + deleteActionEntry + `",
       "<li class='SiteBrushContextMenu'><a href='?revisions' class='SiteBrushContextMenuLink'><img src='/p/static/revisions.png' class='SiteBrushMenuIcon' alt=''>" + "` + revisionsLabel + `" + "</a></li>",
-      "` + passwordActionEntry + `",
       "` + freezeActionEntry + `",
+      "` + passwordActionEntry + `",
+      "<li class='SiteBrushContextMenu SiteBrushSeparatedMenuItem'><button type='button' data-sitebrush-action='copy_site' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/copy.png' class='SiteBrushMenuIcon' alt=''>" + "` + copySiteLabel + `" + "</button></li>",
       "<li class='SiteBrushContextMenu SiteBrushSeparatedMenuItem'><button type='button' data-sitebrush-action='tree' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/tree.png' class='SiteBrushMenuIcon' alt=''>" + "` + treeLabel + `" + "</button></li>",
       "<li class='SiteBrushContextMenu'><a href='?files' class='SiteBrushContextMenuLink'><img src='/p/static/upload.png' class='SiteBrushMenuIcon' alt=''>" + "` + filesLabel + `" + "</a></li>",
       "<li class='SiteBrushContextMenu SiteBrushSeparatedMenuItem'><a href='?analytics' class='SiteBrushContextMenuLink'><img src='/p/static/analytics.svg' class='SiteBrushMenuIcon' alt=''>" + "` + analyticsLabel + `" + "</a></li>",
@@ -51985,6 +52063,9 @@ func canonicalLocalDomain(rawDomain string) string {
 }
 
 func (a *App) siteDomain(ctx context.Context, r *http.Request) string {
+	if resolved, ok := ctx.Value(resolvedAccountDomainKey{}).(string); ok {
+		return resolved
+	}
 	requestDomain := domainFromRequest(r)
 	if requestHostIP(r) != nil || requestDomain == "localhost" && localAccountRequest(r) {
 		if a.controlDatabase == nil {
@@ -52014,6 +52095,34 @@ func (a *App) siteDomain(ctx context.Context, r *http.Request) string {
 		return requestDomain
 	}
 	return primaryDomain
+}
+
+type resolvedAccountDomainKey struct{}
+
+// Resolve once at dynamic ingress. The SQL deadline bounds unavailable control
+// storage; callback completion still returns ownership before this call ends.
+func (a *App) resolveAccountDomain(ctx context.Context, r *http.Request) (string, error) {
+	domain := domainFromRequest(r)
+	if a.controlDatabase == nil {
+		return domain, nil
+	}
+	adapterContext, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	var ownerDomain string
+	err := a.withServerControlDatabaseRead(adapterContext, "ip-owner-domain", func(database *sql.DB) error {
+		lookupErr := database.QueryRowContext(adapterContext, `SELECT domain FROM server_managers WHERE role='owner' ORDER BY created_at ASC LIMIT 1`).Scan(&ownerDomain)
+		if errors.Is(lookupErr, sql.ErrNoRows) {
+			return nil
+		}
+		return lookupErr
+	})
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(ownerDomain) != "" {
+		return canonicalLocalDomain(ownerDomain), nil
+	}
+	return domain, nil
 }
 
 var lookupTXTRecords = lookupAuthoritativeTXTRecords
@@ -58620,6 +58729,7 @@ func (a *App) servePreparedPublicResponse(w http.ResponseWriter, r *http.Request
 	}
 	a.logContentDelivery(w, "static-file")
 	requesttiming.MarkRAM(r, true)
+	requesttiming.Route(r, requesttiming.PublicStaticRAM)
 	if response.HTML() {
 		err = response.ServeHTTP(w, r)
 	} else {
@@ -62362,6 +62472,7 @@ func (a *App) servePublicPublished(w http.ResponseWriter, r *http.Request, pause
 	if !decision.Found {
 		return false
 	}
+	requesttiming.Route(r, requesttiming.PublicStaticFile)
 	if decision.NoIndex {
 		w.Header().Set("X-Robots-Tag", "noindex")
 		if pagePath == "/robots.txt" && fileName == "" {
@@ -62573,10 +62684,24 @@ func newPublicHTTPFront(application *App, secret string, stop <-chan struct{}) *
 			// Only the ACME owner's registered token handler may answer this path.
 			return false
 		}
+		if application.publicBoundary && !publicOrdinaryRequest(r) && !embeddedStaticRequest(r) && requestHostIP(r) == nil && !localAccountRequest(r) {
+			decision := application.publicRequestDecision(r)
+			if !decision.Found && !decision.Known && !application.publicOnboardingCandidate(r) {
+				if application.serverHostBoundary(w, r) {
+					return true
+				}
+				requesttiming.Route(r, requesttiming.UnknownHost)
+				http.NotFound(w, r)
+				return true
+			}
+		}
 		// Recovery, billing, and invoice requests need the application database
 		// and publication owner; the launcher only owns public admission.
 		if application.publicBoundary && (hasQueryFlag(r, "site_recovery") || hasQueryFlag(r, "site_debt_pay") || hasQueryFlag(r, "site_debt_contact")) {
 			return false
+		}
+		if application.serveLocalIPEntry(w, r) {
+			return true
 		}
 		if application.servePendingSiteBoundary(w, r) {
 			return true
@@ -62584,7 +62709,7 @@ func newPublicHTTPFront(application *App, secret string, stop <-chan struct{}) *
 		if application.serverHostBoundary(w, r) {
 			return true
 		}
-		if requestHostIP(r) != nil {
+		if requestHostIP(r) != nil && !publicOrdinaryRequest(r) {
 			return false
 		}
 		if testDriveEntryAction(r) {
@@ -62650,6 +62775,7 @@ func newPublicHTTPFront(application *App, secret string, stop <-chan struct{}) *
 				w.Header().Set("Retry-After", "2")
 				http.Error(w, "site policy is unavailable", http.StatusServiceUnavailable)
 			} else {
+				requesttiming.Route(r, requesttiming.UnknownHost)
 				http.NotFound(w, r)
 			}
 			return true
