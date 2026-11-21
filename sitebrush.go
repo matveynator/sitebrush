@@ -29563,7 +29563,10 @@ func (a *App) saveServerExpensePolicyFromForm(r *http.Request) string {
 	translations := translationsForRequest(r)
 	monthlyExpense := firstNonEmpty(r.FormValue("monthly_server_expense"), r.FormValue("actual_monthly_expense"))
 	actualExpenseMinor := hostingandsupport.MoneyMinor(strings.ReplaceAll(strings.TrimSpace(monthlyExpense), ",", "."))
-	freeThresholdMB, _ := strconv.ParseInt(strings.TrimSpace(r.FormValue("free_site_threshold_mb")), 10, 64)
+	freeThresholdMB, thresholdErr := strconv.ParseInt(strings.TrimSpace(r.FormValue("free_site_threshold_mb")), 10, 64)
+	if thresholdErr != nil || freeThresholdMB < 0 || freeThresholdMB > math.MaxInt64/expenses.DecimalMegabyte {
+		return translationOrDefault(translations, "expenses_server_policy_invalid", "Check the server expense settings.")
+	}
 	billingPercent := expenses.BillingCapacityPercent
 	if rawPercent := strings.TrimSpace(r.FormValue("billing_capacity_percent")); rawPercent != "" {
 		parsed, parseErr := strconv.ParseInt(rawPercent, 10, 64)
