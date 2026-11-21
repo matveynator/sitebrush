@@ -6,6 +6,60 @@
   const selector = document.querySelector("[data-expense-server-select]");
   const validSections = new Set(["overview", "monetization", "network", "updates", "clients", "billing", "registration", "demo"]);
 
+  const rootTabs = document.querySelector("[data-server-root-tabs]");
+  const serversWorkspace = document.querySelector('[data-hosting-installation-panel="servers"]');
+  const temporaryWorkspace = document.querySelector('[data-hosting-installation-panel="temporary-sites"]');
+  const installationsWorkspace = document.querySelector("[data-server-installations-container]");
+
+  function showRoot(section) {
+    if (!rootTabs) return;
+    const available = Array.from(rootTabs.querySelectorAll("[data-server-root-target]")).map(button => button.dataset.serverRootTarget);
+    const selected = available.includes(section) ? section : "servers";
+    if (serversWorkspace) serversWorkspace.hidden = selected !== "servers";
+    if (temporaryWorkspace) temporaryWorkspace.hidden = selected !== "temporary-sites";
+    if (installationsWorkspace) installationsWorkspace.hidden = selected !== "installations";
+    rootTabs.querySelectorAll("[data-server-root-target]").forEach(button => {
+      const active = button.dataset.serverRootTarget === selected;
+      button.classList.toggle("is-active", active);
+      button.setAttribute("aria-current", active ? "page" : "false");
+    });
+  }
+
+  function filterInstallations() {
+    if (!installationsWorkspace) return;
+    const query = (installationsWorkspace.querySelector("[data-installations-search]")?.value || "").trim().toLocaleLowerCase();
+    const sort = installationsWorkspace.querySelector("[data-installations-sort]")?.value || "sites";
+    const filter = installationsWorkspace.querySelector("[data-installations-filter]")?.value || "active";
+    const list = installationsWorkspace.querySelector("[data-installations-list]");
+    if (!list) return;
+    const rows = Array.from(list.querySelectorAll("[data-installation-row]"));
+    const text = value => (value || "").toLocaleLowerCase();
+    const number = (row, key) => Number(row.dataset[key]) || 0;
+    rows.sort((left, right) => {
+      if (sort === "name") return text(left.dataset.installationName).localeCompare(text(right.dataset.installationName));
+      const field = {sites:"installationSites",forecast:"installationForecast",paid:"installationPaid"}[sort] || "installationSites";
+      return number(right, field) - number(left, field) || text(left.dataset.installationName).localeCompare(text(right.dataset.installationName));
+    });
+    let visible = 0;
+    for (const row of rows) {
+      const archived = row.dataset.installationArchived === "true";
+      const enabled = row.dataset.installationMonetized === "true";
+      const statusMatch = filter === "all" ||
+        (filter === "active" && !archived) ||
+        (filter === "archived" && archived) ||
+        (filter === "monetized" && !archived && enabled) ||
+        (filter === "not-monetized" && !archived && !enabled);
+      const queryMatch = !query || text(row.dataset.installationSearch).includes(query);
+      row.hidden = !(statusMatch && queryMatch);
+      if (!row.hidden) visible++;
+      list.appendChild(row);
+    }
+    const count = installationsWorkspace.querySelector("[data-installations-count]");
+    if (count) count.textContent = visible + " / " + rows.length;
+    const empty = installationsWorkspace.querySelector("[data-installations-no-results]");
+    if (empty) empty.hidden = visible !== 0 || rows.length === 0;
+  }
+
   function fromHash() {
     const fragment = window.location.hash.slice(1);
     if (fragment.startsWith("server-id=")) {
@@ -94,6 +148,12 @@
     if (visible) composer.querySelector('[name="customer_email"]').focus();
   }
   function displayHash() {
+    const root = window.location.hash.slice(1);
+    if (root === "installations" || root === "temporary-sites") {
+      showRoot(root);
+      return;
+    }
+    showRoot("servers");
     const state = fromHash();
     let target = state.id ? serverPanels.find(panel => panel.dataset.serverId === state.id) : null;
     if (!target && selector) target = serverPanels.find(panel => panel.dataset.expenseServerPanel === selector.value);
@@ -102,6 +162,40 @@
     for (const panel of serverPanels) panel.hidden = panel !== target;
     if (selector) selector.value = target.dataset.expenseServerPanel;
     choose(target, state.section);
+  }
+
+  if (rootTabs) {
+    rootTabs.addEventListener("click", event => {
+      const button = event.target.closest("[data-server-root-target]");
+      if (!button || !rootTabs.contains(button)) return;
+      const section = button.dataset.serverRootTarget;
+      if (section === "servers") {
+        const selected = selector ? serverPanels.find(panel => panel.dataset.expenseServerPanel === selector.value) : serverPanels.find(panel => !panel.hidden);
+        writeHash(selected || serverPanels[0], "overview");
+      } else {
+        history.replaceState(null, "", "#" + section);
+      }
+      displayHash();
+    });
+  }
+  if (installationsWorkspace) {
+    installationsWorkspace.addEventListener("input", event => {
+      if (event.target.matches("[data-installations-search]")) filterInstallations();
+    });
+    installationsWorkspace.addEventListener("change", event => {
+      if (event.target.matches("[data-installations-sort], [data-installations-filter]")) filterInstallations();
+    });
+    installationsWorkspace.addEventListener("click", event => {
+      const open = event.target.closest("[data-open-server-id]");
+      if (!open) return;
+      const panel = serverPanels.find(candidate => candidate.dataset.serverId === open.dataset.openServerId);
+      if (!panel) return;
+      if (selector) selector.value = panel.dataset.expenseServerPanel;
+      writeHash(panel, "overview");
+      displayHash();
+      rootTabs?.scrollIntoView({behavior:"smooth",block:"start"});
+    });
+    filterInstallations();
   }
 
   for (const panel of serverPanels) {
@@ -150,6 +244,7 @@
     const panel = serverPanels.find(candidate => candidate.dataset.expenseServerPanel === selector.value);
     if (!panel) return;
     serverPanels.forEach(candidate => candidate.hidden = candidate !== panel);
+    showRoot("servers");
     choose(panel, "overview");
     writeHash(panel, "overview");
   });
@@ -167,20 +262,25 @@
     const confirmRow = form.querySelector("[data-tariff-confirm-row]");
     const confirmation = form.querySelector("[data-tariff-confirm]");
     const button = form.querySelector("[data-tariff-save]");
-    const initial = [cost.value,currency.value,percent.value,threshold.value];
+    const modes = Array.from(form.querySelectorAll('[name="monetization_mode"]'));
+    const mode = () => modes.find(input => input.checked)?.value || "disabled";
+    const initial = [cost.value,currency.value,percent.value,threshold.value,mode()];
     function render() {
+      const enabled = mode() === "enabled";
+      form.dataset.monetizationEnabled = String(enabled);
+      cost.min = enabled ? "0.01" : "0";
       const diskGB = Number(form.dataset.diskBytes) / 1000000000;
       const portion = Number(percent.value);
       const monthly = Number(cost.value);
       const capacityGB = diskGB * portion / 100;
       const valid = Number.isFinite(capacityGB) && capacityGB > 0 && portion>=1 && portion<=100 && Number.isFinite(monthly) && monthly>0;
-      capacity.textContent = valid ? new Intl.NumberFormat(document.documentElement.lang || "en", {maximumFractionDigits:1}).format(capacityGB) + " GB" : "—";
+      capacity.textContent = enabled && valid ? new Intl.NumberFormat(document.documentElement.lang || "en", {maximumFractionDigits:1}).format(capacityGB) + " GB" : "—";
       const currencyCode = /^[A-Za-z]{3}$/.test(currency.value) ? currency.value.toUpperCase() : "EUR";
-      price.textContent = valid ? new Intl.NumberFormat(document.documentElement.lang || "en", {style:"currency",currency:currencyCode}).format(monthly / capacityGB) + "/GB" : "—";
-      const changed = [cost.value,currency.value,percent.value,threshold.value].some((value,i) => value !== initial[i]);
+      price.textContent = enabled && valid ? new Intl.NumberFormat(document.documentElement.lang || "en", {style:"currency",currency:currencyCode}).format(monthly / capacityGB) + "/GB" : "—";
+      const changed = [cost.value,currency.value,percent.value,threshold.value,mode()].some((value,i) => value !== initial[i]);
       confirmRow.hidden = !changed;
       if (!changed) confirmation.checked = false;
-      button.disabled = changed && !confirmation.checked;
+      button.disabled = (changed && !confirmation.checked) || (enabled && !valid);
     }
     form.addEventListener("input",render);
     form.addEventListener("change",render);
