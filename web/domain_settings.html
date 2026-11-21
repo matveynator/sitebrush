@@ -99,7 +99,6 @@
       <summary>{{index .T "domain_settings_custom_domain_steps_title"}}</summary>
     <div class="domain-setup-grid">
       <section class="domain-setup-card">
-        <p><strong>{{index .T "domain_settings_custom_domain_steps_title"}}</strong></p>
         <ol class="domain-setup-steps">
           <li>{{index .T "domain_settings_custom_domain_step_add"}}</li>
           <li>{{index .T "domain_settings_custom_domain_step_txt"}}</li>
@@ -263,7 +262,6 @@
           <h2 id="settings-search-title">{{index .T "domain_settings_indexing_title"}}</h2>
         </header>
   <section class="dns-box indexing-settings-panel">
-    <h2>{{index .T "domain_settings_indexing_title"}}</h2>
     {{if .IndexingAllowed}}
       <p class="indexing-status status-ok">{{index .T "domain_settings_indexing_enabled"}}</p>
     {{else}}
@@ -292,7 +290,6 @@
           <h2 id="settings-backup-title">{{index .T "domain_settings_backup_title"}}</h2>
         </header>
   <section class="dns-box">
-    <p><strong>{{index .T "domain_settings_backup_title"}}</strong></p>
     <p class="hint">{{index .T "domain_settings_backup_hint"}}</p>
     <p><a class="backup-download-link" href="{{.BackupDownloadPath}}" data-native-backup-download><img src="/p/static/backup.png" alt="">{{index .T "domain_settings_backup_download"}}</a></p>
     <details class="settings-disclosure settings-backup-details">
@@ -317,7 +314,6 @@
           <h2 id="settings-folders-title">{{index .T "domain_settings_chroot_title"}}</h2>
         </header>
   <section class="dns-box">
-    <p><strong>{{index .T "domain_settings_chroot_title"}}</strong></p>
     <form class="add-form static-folder-form" method="post" action="?settings"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
       <input type="hidden" name="return" value="{{.ReturnPath}}">
       <input type="hidden" name="action" value="save_chroot_location">
