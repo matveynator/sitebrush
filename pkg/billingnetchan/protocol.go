@@ -100,11 +100,12 @@ func Apply(authenticated bool, installationID string, event Event, commit Commit
 		receipt.Error = "payment journal unavailable"
 		return receipt
 	}
-	receipt.Duplicate, err := commit(event)
+	duplicate, err := commit(event)
 	if err != nil {
 		receipt.Error = "payment journal commit failed"
 		return receipt
 	}
+	receipt.Duplicate = duplicate
 	receipt.Committed = true
 	return receipt
 }
