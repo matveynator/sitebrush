@@ -79,14 +79,12 @@
   </style>
 
   <div class="expense-simple-page">
-    <nav class="hosting-installation-tabs" role="tablist" aria-label="{{index .T "billing_installations"}}" data-hosting-installation-tabs>
-      {{if or (gt (len .Servers) 1) .ActivePublicTrialSites .ArchivedPublicTrialSites .ShowCentralRegistry}}<button type="button" class="hosting-installation-tab active" role="tab" aria-selected="true" data-hosting-installation-tab="servers">{{index .T "billing_servers"}}</button>{{end}}
-      {{if or .ActivePublicTrialSites .ArchivedPublicTrialSites}}<button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="temporary-sites">{{index .T "billing_temporary_sites"}}</button>{{end}}
-      {{if .ShowCentralRegistry}}
-      <button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="desktop">{{index .T "billing_desktop_installations"}}</button>
-      <button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="archive">{{index .T "billing_archive"}}</button>
-      {{end}}
+    {{if or .ActivePublicTrialSites .ArchivedPublicTrialSites .ShowCentralRegistry}}
+    <nav class="server-root-tabs" aria-label="{{index .T "billing_installations"}}" data-server-root-tabs>
+      <button type="button" class="is-active" data-server-root-target="servers" aria-current="page">{{index .T "billing_servers"}}</button>
+      <button type="button" data-server-root-target="installations">{{index .T "billing_installations"}}</button>
     </nav>
+    {{end}}
 
     <section data-hosting-installation-panel="servers">
       {{if gt (len .ExpenseServers) 1}}
@@ -352,6 +350,11 @@
       {{else}}<div class="empty">{{index .T "expenses_servers_empty"}}</div>{{end}}
     </section>
 
+    <div data-server-installations-container hidden>
+      <nav class="server-installation-kinds" data-hosting-installation-tabs aria-label="{{index .T "billing_installations"}}">
+        {{if or .ActivePublicTrialSites .ArchivedPublicTrialSites}}<button type="button" class="hosting-installation-tab" data-hosting-installation-tab="temporary-sites">{{index .T "billing_temporary_sites"}}</button>{{end}}
+        {{if .ShowCentralRegistry}}<button type="button" class="hosting-installation-tab" data-hosting-installation-tab="desktop">{{index .T "billing_desktop_installations"}}</button><button type="button" class="hosting-installation-tab" data-hosting-installation-tab="archive">{{index .T "billing_archive"}}</button>{{end}}
+      </nav>
     <section data-hosting-installation-panel="temporary-sites" hidden>
       <h2>{{index .T "billing_temporary_sites"}}</h2>
       <p class="text-muted">{{index .T "billing_temporary_sites_description"}}</p>
@@ -371,7 +374,7 @@
       <div class="billing-plan-list">{{range .ArchivedHostings}}<div class="billing-plan-row"><span><strong>{{if .ServerDomain}}{{.ServerDomain}}{{else}}{{.InstallationID}}{{end}}</strong><br><small>{{.LastSeenAt}}</small></span></div>{{else}}<div class="empty">{{index .T "billing_archive_empty"}}</div>{{end}}</div>
     </section>
     {{end}}
-
+    </div>
 
     {{template "public-trial-preview-modal" .}}
   </div>
@@ -3137,6 +3140,64 @@
   const tabButtonElements = Array.from(tabContainerElement.querySelectorAll('[data-hosting-installation-tab]'));
   const panelElements = Array.from(document.querySelectorAll('[data-hosting-installation-panel]'));
   tabContainerElement.hidden = tabButtonElements.length === 0;
+  const rootTabs = document.querySelector('[data-server-root-tabs]');
+  if (rootTabs) {
+    const installationGroup = document.querySelector('[data-server-installations-container]');
+    const serverPanel = document.querySelector('[data-hosting-installation-panel="servers"]');
+    let chosenKind = tabButtonElements[0] && tabButtonElements[0].dataset.hostingInstallationTab;
+    function chooseKind(kind) {
+      if (tabButtonElements.some(button => button.dataset.hostingInstallationTab === kind)) chosenKind = kind;
+      tabButtonElements.forEach(button => {
+        const active = button.dataset.hostingInstallationTab === chosenKind;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-current', active ? 'page' : 'false');
+      });
+      panelElements.forEach(panel => { if (panel !== serverPanel) panel.hidden = panel.dataset.hostingInstallationPanel !== chosenKind; });
+    }
+    function chooseRoot(section) {
+      const installations = section === 'installations';
+      installationGroup.hidden = !installations;
+      serverPanel.hidden = installations;
+      rootTabs.querySelectorAll('[data-server-root-target]').forEach(button => {
+        const active = button.dataset.serverRootTarget === section;
+        button.classList.toggle('is-active', active);
+        button.setAttribute('aria-current', active ? 'page' : 'false');
+      });
+      if (installations) chooseKind(chosenKind);
+    }
+    rootTabs.querySelectorAll('[data-server-root-target]').forEach(button => button.addEventListener('click', () => {
+      if (button.dataset.serverRootTarget === 'installations') {
+        chooseRoot('installations');
+        window.location.hash = 'installations-' + (chosenKind || '');
+        return;
+      }
+      chooseRoot('servers');
+      const server = document.querySelector('[data-expense-server-panel]:not([hidden])');
+      const params = new URLSearchParams({'server-id': server && server.dataset.serverId || '', 'section':'overview'});
+      window.location.hash = params.toString();
+    }));
+    tabButtonElements.forEach(button => button.addEventListener('click', () => {
+      chooseKind(button.dataset.hostingInstallationTab);
+      window.location.hash = 'installations-' + chosenKind;
+    }));
+    function fromHash() {
+      const hash = window.location.hash.slice(1);
+      if (hash.startsWith('installations-')) {
+        chooseKind(hash.slice('installations-'.length));
+        chooseRoot('installations');
+      } else if (hash.startsWith('server-') || hash === '') chooseRoot('servers');
+    }
+    window.addEventListener('hashchange', fromHash);
+    fromHash();
+    const archiveSearch = document.querySelector('[data-hosting-archive-search]');
+    if (archiveSearch) archiveSearch.addEventListener('input', () => {
+      const search = archiveSearch.value.trim().toLowerCase();
+      document.querySelectorAll('[data-hosting-archive-entry]').forEach(entry => {
+        entry.hidden = search !== '' && !entry.dataset.hostingArchiveEntry.toLowerCase().includes(search);
+      });
+    });
+    return;
+  }
 
   function selectInstallationTab(tabName) {
     for (const tabButtonElement of tabButtonElements) {
