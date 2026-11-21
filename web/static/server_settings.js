@@ -113,7 +113,7 @@
     const button = form.querySelector("[data-tariff-save]");
     const initial = [cost.value,currency.value,percent.value,threshold.value];
     function render() {
-      const diskGB = Number(form.dataset.diskGb);
+      const diskGB = Number(form.dataset.diskBytes) / 1000000000;
       const portion = Number(percent.value);
       const monthly = Number(cost.value);
       const capacityGB = diskGB * portion / 100;

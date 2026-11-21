@@ -41,6 +41,11 @@
           preferredSelectElement.add(new Option(address.ip, address.ip));
         }
       }
+      if (addressListElement.children.length === 0) {
+        const empty = document.createElement('li');
+        empty.textContent = labels.missing;
+        addressListElement.append(empty);
+      }
       for (const manualIP of model.manual.split(/[\s,;]+/).filter(Boolean)) {
         if (!choices.has(manualIP)) { choices.add(manualIP); preferredSelectElement.add(new Option(manualIP, manualIP)); }
       }

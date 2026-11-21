@@ -186,7 +186,7 @@
         {{if $server.Local}}
             <section class="server-config-view" data-server-config-view="monetization">
               <header class="server-config-view-heading"><h2>{{index $.T "server_ui_monetization"}}</h2><p>{{index $.T "server_ui_monetization_hint"}}</p></header>
-              <form method="post" action="?server-settings" class="server-tariff-form" data-server-tariff data-disk-gb="{{$server.DiskCapacityGBInput}}">
+              <form method="post" action="?server-settings" class="server-tariff-form" data-server-tariff data-disk-bytes="{{$server.DiskCapacityBytesInput}}">
                 <input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
                 <input type="hidden" name="billing_action" value="save_server_expense_policy">
                 <div class="server-tariff-grid">
@@ -216,8 +216,6 @@
             <section class="server-config-view" data-server-config-view="network">
               <header class="server-config-view-heading"><h2>{{index $.T "server_ui_network"}}</h2><p>{{index $.T "server_ui_network_hint"}}</p></header>
   <section class="card p-3 mb-3" data-public-ip-panel data-csrf="{{$.AccountCSRF}}">
-    <h2 class="h5">{{index $.T "public_ip_title"}}</h2>
-    <p>{{index $.T "public_ip_help"}}</p>
     <ul data-public-ip-addresses></ul>
     <label class="d-block">{{index $.T "public_ip_manual_label"}}<textarea class="form-control" rows="3" data-public-ip-manual></textarea></label>
     <p class="small text-muted">{{index $.T "public_ip_manual_hint"}}</p>
@@ -225,7 +223,7 @@
     <p>{{index $.T "public_ip_primary_label"}}: <strong data-public-ip-primary></strong></p>
     <div class="d-flex gap-2"><button type="button" class="btn btn-primary" data-public-ip-save>{{index $.T "billing_save"}}</button><button type="button" class="btn btn-outline-secondary" data-public-ip-refresh>{{index $.T "public_ip_refresh"}}</button></div>
     <p role="status" aria-live="polite" data-public-ip-status></p>
-    <script type="application/json" data-public-ip-labels>{"ready":{{index $.T "public_ip_ready"}},"auto":{{index $.T "public_ip_auto"}},"manual":{{index $.T "public_ip_manual_hint"}},"outgoing":{{index $.T "public_ip_outgoing"}},"local":{{index $.T "public_ip_local"}},"inactive":{{index $.T "public_ip_inactive"}},"missing":{{index $.T "public_ip_missing"}},"working":{{index $.T "public_ip_working"}},"disconnected":{{index $.T "public_ip_disconnected"}}}</script>
+    <script type="application/json" data-public-ip-labels>{"ready":{{index $.T "public_ip_ready"}},"auto":{{index $.T "public_ip_auto"}},"manual":{{index $.T "public_ip_manual_label"}},"outgoing":{{index $.T "public_ip_outgoing"}},"local":{{index $.T "public_ip_local"}},"inactive":{{index $.T "public_ip_inactive"}},"missing":{{index $.T "public_ip_missing"}},"working":{{index $.T "public_ip_working"}},"disconnected":{{index $.T "public_ip_disconnected"}}}</script>
   </section>
             </section>
             {{end}}
