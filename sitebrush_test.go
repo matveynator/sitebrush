@@ -2943,6 +2943,64 @@ func TestHostingSnapshotServerStatusLabels(t *testing.T) {
 	}
 }
 
+func TestServerSettingsNavigationPreservesExistingControls(t *testing.T) {
+	pageBytes, err := fs.ReadFile(embeddedWebFiles, "web/expenses.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(pageBytes)
+	for _, asset := range []string{"web/static/server_settings.css", "web/static/server_settings.js"} {
+		if _, err := fs.ReadFile(embeddedWebFiles, asset); err != nil {
+			t.Fatalf("missing settings asset %s: %v", asset, err)
+		}
+	}
+	for _, section := range []string{"overview", "updates", "registration", "demo", "clients"} {
+		if !strings.Contains(page, `data-server-config-target="`+section+`"`) {
+			t.Errorf("missing server section navigation for %q", section)
+		}
+		if !strings.Contains(page, `data-server-config-view="`+section+`"`) {
+			t.Errorf("missing server section view for %q", section)
+		}
+	}
+	for _, fragment := range []string{
+		`data-hosting-installation-panel="temporary-sites"`,
+		`data-hosting-installation-panel="desktop"`,
+		`data-hosting-installation-panel="archive"`,
+		`data-hosting-installation-tabs`,
+		`data-expense-server-select`,
+		`data-public-ip-panel`,
+		`data-profiler-open`,
+		`data-server-update-frame`,
+		`data-billing-ajax-save`,
+		`value="update_site_quota"`,
+		`value="save_server_expense_policy"`,
+		`value="registration_settings"`,
+		`value="demo_settings"`,
+		`value="queue_site"`,
+		`value="restore_site"`,
+		`name="confirm_domain"`,
+		`data-public-trial-copy-html`,
+	} {
+		if !strings.Contains(page, fragment) {
+			t.Errorf("server settings lost existing control %s", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		`{{if $server.Local}}`,
+		`{{if and $server.Local $.CanConfigurePublicIPs}}`,
+		`{{if .CanConfigurePublicIPs}}`,
+		`id="server-network"`,
+		`data-server-config-layout`,
+	} {
+		if !strings.Contains(page, fragment) {
+			t.Errorf("server settings lost scope or network boundary %s", fragment)
+		}
+	}
+	if _, err := parseEmbeddedPageTemplate("expenses.html", pageBytes); err != nil {
+		t.Fatalf("server settings template cannot be parsed: %v", err)
+	}
+}
+
 func TestHostingAndSupportTemplateRendersServerView(t *testing.T) {
 	templateBytes, err := fs.ReadFile(embeddedWebFiles, "web/expenses.html")
 	if err != nil {
