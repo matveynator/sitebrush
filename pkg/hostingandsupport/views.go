@@ -433,6 +433,9 @@ func BuildLocalServerView(input LocalServerViewInput) ServerView {
 }
 
 func BuildRemoteServerView(clientHosting ClientHosting, invoices []Invoice, latestSitebrushVersion string) ServerView {
+	// Invoice status is installation-owned. A domain may have belonged to a
+	// different installation in the past, so domain alone is not authority.
+	installationInvoices := invoicesForInstallation(invoices, clientHosting.InstallationID)
 	sitebrushVersionLabel, sitebrushVersionClass := remoteSitebrushVersionDisplay(clientHosting.SitebrushVersion, latestSitebrushVersion)
 	server := ServerView{
 		ID:                    strings.TrimSpace(clientHosting.InstallationID),
@@ -512,7 +515,7 @@ func BuildRemoteServerView(clientHosting ClientHosting, invoices []Invoice, late
 			AnalyticsLabel:       site.AnalyticsLabel,
 			LimitLabel:           site.LimitLabel,
 			OverLimit:            site.OverLimit,
-			InvoiceLabel:         InvoiceLabelForDomain(invoices, site.Domain),
+			InvoiceLabel:         InvoiceLabelForDomain(installationInvoices, site.Domain),
 			BillingPriceLabel:    billingPrice.PriceLabel,
 			BillingStatusText:    billingPrice.StatusText,
 			BillingAmount:        billingPrice.Amount,
@@ -534,7 +537,7 @@ func BuildRemoteServerView(clientHosting ClientHosting, invoices []Invoice, late
 	server.TotalUsedLabel = serverTotalUsedLabel(server.Sites)
 	server.Clients = serverClientViewsFromSites(server.Sites)
 	server.ClientCount = len(server.Clients)
-	server.Invoices = ServerInvoiceViewsForInstallation(invoices, server.ID, serverDomains(server.Sites))
+	server.Invoices = ServerInvoiceViews(installationInvoices, nil, nil)
 	server.InvoiceCount = len(server.Invoices)
 	server.BillableCount = BillableSiteCount(server.Sites)
 	server.UnpaidInvoiceCount = UnpaidInvoiceCount(server.Invoices)
@@ -1201,29 +1204,28 @@ func ServerInvoiceViews(invoices []Invoice, domains map[string]struct{}, emails 
 	return views
 }
 
-// ServerInvoiceViewsForInstallation never assigns one server's invoices to
-// another just because their customers share the same email. Historical
-// invoices without installation IDs are admitted by an exact site domain only.
-func ServerInvoiceViewsForInstallation(invoices []Invoice, installationID string, domains map[string]struct{}) []ServerInvoiceView {
+// invoicesForInstallation rejects legacy invoices that lack an installation
+// identifier. A domain may be re-used by a different owner; an unassigned
+// historical invoice must stay in an owner-only audit list until migrated.
+func invoicesForInstallation(invoices []Invoice, installationID string) []Invoice {
 	installationID = strings.TrimSpace(installationID)
-	filtered := make([]Invoice, 0, len(invoices))
 	if installationID == "" {
 		return nil
 	}
+	filtered := make([]Invoice, 0, len(invoices))
 	for _, invoice := range invoices {
-		invoiceInstallation := strings.TrimSpace(invoice.InstallationID)
-		if invoiceInstallation != "" {
-			if invoiceInstallation != installationID {
-				continue
-			}
-		} else {
-			if _, found := domains[normalizeDomainName(invoice.Domain)]; !found {
-				continue
-			}
+		if strings.TrimSpace(invoice.InstallationID) == installationID {
+			filtered = append(filtered, invoice)
 		}
-		filtered = append(filtered, invoice)
 	}
-	return ServerInvoiceViews(filtered, nil, nil)
+	return filtered
+}
+
+// ServerInvoiceViewsForInstallation scopes invoice history by immutable
+// installation identity. The domain argument remains for existing callers,
+// but it never authorizes a historical invoice from another installation.
+func ServerInvoiceViewsForInstallation(invoices []Invoice, installationID string, _ map[string]struct{}) []ServerInvoiceView {
+	return ServerInvoiceViews(invoicesForInstallation(invoices, installationID), nil, nil)
 }
 
 func InvoiceStatusLabel(status string) string {
