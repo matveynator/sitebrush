@@ -3929,6 +3929,61 @@ func TestSaveServerExpensePolicyUsesOnlyMonthlyServerPrice(t *testing.T) {
 	}
 }
 
+func TestDisablingMonetizationPreservesTariffEvenWithHiddenInvalidFields(t *testing.T) {
+	application, _ := newTestApplication(t)
+	database := setupBillingOwnerForTest(t, application, "localhost", "owner@example.com", false)
+	defer database.Close()
+	store := hostingandsupport.Store{DB: database}
+
+	save := func(values url.Values) string {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodPost, "http://localhost/?server-settings", strings.NewReader(values.Encode()))
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		return application.saveServerExpensePolicyFromForm(request)
+	}
+	expectedSaved := translationsForLanguageCode("ru")["expenses_server_policy_saved"]
+	configured := url.Values{
+		"monetization_mode": {"enabled"},
+		"monthly_server_expense": {"83.21"},
+		"currency": {"EUR"},
+		"free_site_threshold_mb": {"250"},
+		"billing_capacity_percent": {"45"},
+	}
+	if got := save(configured); got != expectedSaved {
+		t.Fatalf("enable monetization: %q", got)
+	}
+	before, found := store.ServerExpensePolicy(context.Background(), "local", 500*expenses.DecimalGigabyte)
+	if !found || !before.MonetizationEnabled() || before.ActualMonthlyExpenseMinor != 8321 {
+		t.Fatalf("enabled policy: %+v found=%v", before, found)
+	}
+	// The browser disables invisible inputs. A malicious or stale caller may
+	// also submit invalid unused values; neither may reset the stored tariff.
+	if got := save(url.Values{
+		"monetization_mode": {"disabled"},
+		"monthly_server_expense": {"not-a-price"},
+		"currency": {"INVALID"},
+		"free_site_threshold_mb": {"broken"},
+		"billing_capacity_percent": {"500"},
+	}); got != expectedSaved {
+		t.Fatalf("opt-out with irrelevant hidden inputs: %q", got)
+	}
+	after, found := store.ServerExpensePolicy(context.Background(), "local", 500*expenses.DecimalGigabyte)
+	if !found || after.MonetizationEnabled() || after.Mode != before.Mode ||
+		after.ActualMonthlyExpenseMinor != before.ActualMonthlyExpenseMinor ||
+		after.BillingCapacityPercent != before.BillingCapacityPercent ||
+		after.FreeSiteThresholdBytes != before.FreeSiteThresholdBytes ||
+		after.Currency != before.Currency || after.EffectiveAt == before.EffectiveAt {
+		t.Fatalf("opt-out lost tariff or history: before=%+v after=%+v found=%v", before, after, found)
+	}
+	if got := save(url.Values{"monetization_mode": {"maybe"}}); got == expectedSaved {
+		t.Fatal("invalid monetization mode was accepted")
+	}
+	unchanged, found := store.ServerExpensePolicy(context.Background(), "local", 500*expenses.DecimalGigabyte)
+	if !found || unchanged.EffectiveAt != after.EffectiveAt {
+		t.Fatalf("invalid mode replaced the persisted policy: %+v", unchanged)
+	}
+}
+
 func TestAutomaticBillingDistributesServerCostByStorage(t *testing.T) {
 	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "billing.db"))
 	if err != nil {
