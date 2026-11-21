@@ -97,6 +97,8 @@ type ServerView struct {
 	DiskRatePer100GBInput  string
 	ActualExpenseInput     string
 	FreeThresholdInput     string
+	BillingPercentInput    string
+	DiskCapacityGBInput    string
 	CapacityCostPerGBLabel string
 	SharedCostPerGBLabel   string
 	BillingCapacityLabel   string
@@ -568,6 +570,8 @@ func ApplyServerCostView(server *ServerView, policy expenses.ServerPolicy, invoi
 	server.DiskRatePer100GBInput = formatMoneyMinor(policy.DiskRatePer100GBMinor)
 	server.DiskRatePer100GBLabel = MoneyLabel(policy.DiskRatePer100GBMinor, server.BillingCurrency)
 	server.FreeThresholdInput = strconv.FormatInt(policy.FreeSiteThresholdBytes/expenses.DecimalMegabyte, 10)
+	server.BillingPercentInput = strconv.FormatInt(policy.BillingCapacityPercent, 10)
+	server.DiskCapacityGBInput = strconv.FormatInt(policy.DiskTotalBytes/expenses.DecimalGigabyte, 10)
 	server.MonthlyCostLabel = MoneyLabel(monthlyExpenseMinor, server.BillingCurrency)
 	server.CostConfigured = monthlyExpenseMinor > 0 && normalizeBillingCurrency(policy.Currency) != ""
 	expenseSites := make([]expenses.SiteUsage, 0, len(server.Sites))

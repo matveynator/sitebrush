@@ -29,6 +29,7 @@ type ServerPolicy struct {
 	ActualMonthlyExpenseMinor int64
 	Currency                  string
 	FreeSiteThresholdBytes    int64
+	BillingCapacityPercent    int64
 	DiskTotalBytes            int64
 	EffectiveAt               string
 	UpdatedAt                 string
@@ -41,6 +42,7 @@ func DefaultServerPolicy(installationID string, diskTotalBytes int64) ServerPoli
 		DiskRatePer100GBMinor:  DefaultDiskRatePer100GBMinor,
 		Currency:               "EUR",
 		FreeSiteThresholdBytes: DefaultFreeSiteThresholdBytes,
+		BillingCapacityPercent: BillingCapacityPercent,
 		DiskTotalBytes:         diskTotalBytes,
 	}
 }
@@ -64,6 +66,9 @@ func (policy ServerPolicy) Validate() error {
 	if policy.FreeSiteThresholdBytes < 0 {
 		return fmt.Errorf("free site threshold cannot be negative")
 	}
+	if policy.BillingCapacityPercent < 1 || policy.BillingCapacityPercent > 100 {
+		return fmt.Errorf("billing disk percentage must be between 1 and 100")
+	}
 	return nil
 }
 
@@ -82,7 +87,7 @@ func CalculateMonthlyExpense(policy ServerPolicy) int64 {
 }
 
 func BillingCapacityBytes(policy ServerPolicy) int64 {
-	return percentageOfBytes(policy.DiskTotalBytes, BillingCapacityPercent)
+	return percentageOfBytes(policy.DiskTotalBytes, policy.BillingCapacityPercent)
 }
 
 func BillingCostPerGBMinor(policy ServerPolicy) int64 {
@@ -210,6 +215,9 @@ func NormalizePolicy(policy ServerPolicy) ServerPolicy {
 	}
 	if policy.FreeSiteThresholdBytes < 0 || (unspecifiedPolicy && policy.FreeSiteThresholdBytes == 0) {
 		policy.FreeSiteThresholdBytes = DefaultFreeSiteThresholdBytes
+	}
+	if policy.BillingCapacityPercent == 0 {
+		policy.BillingCapacityPercent = BillingCapacityPercent
 	}
 	policy.Currency = normalizeCurrency(policy.Currency)
 	if policy.Currency == "" {

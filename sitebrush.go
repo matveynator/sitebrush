@@ -29562,6 +29562,12 @@ func (a *App) saveServerExpensePolicyFromForm(r *http.Request) string {
 	monthlyExpense := firstNonEmpty(r.FormValue("monthly_server_expense"), r.FormValue("actual_monthly_expense"))
 	actualExpenseMinor := hostingandsupport.MoneyMinor(strings.ReplaceAll(strings.TrimSpace(monthlyExpense), ",", "."))
 	freeThresholdMB, _ := strconv.ParseInt(strings.TrimSpace(r.FormValue("free_site_threshold_mb")), 10, 64)
+	billingPercent := expenses.BillingCapacityPercent
+	if rawPercent := strings.TrimSpace(r.FormValue("billing_capacity_percent")); rawPercent != "" {
+		parsed, parseErr := strconv.ParseInt(rawPercent, 10, 64)
+		if parseErr != nil { return translationOrDefault(translations, "expenses_server_policy_invalid", "Check the server expense settings.") }
+		billingPercent = parsed
+	}
 	_, diskTotalBytes, diskAvailable := diskusage.DiskSpace(a.storageRootDir())
 	policy := expenses.ServerPolicy{
 		InstallationID:            "local",
@@ -29570,6 +29576,7 @@ func (a *App) saveServerExpensePolicyFromForm(r *http.Request) string {
 		ActualMonthlyExpenseMinor: actualExpenseMinor,
 		Currency:                  r.FormValue("currency"),
 		FreeSiteThresholdBytes:    freeThresholdMB * expenses.DecimalMegabyte,
+		BillingCapacityPercent:    billingPercent,
 		DiskTotalBytes:            int64(diskTotalBytes),
 	}
 	if !diskAvailable {
@@ -39468,6 +39475,7 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 		ActualMonthlyExpenseMinor: serverExpensePolicy.ActualMonthlyExpenseMinor,
 		MonthlyExpenseMinor:       expenses.CalculateMonthlyExpense(serverExpensePolicy),
 		FreeSiteThresholdBytes:    serverExpensePolicy.FreeSiteThresholdBytes,
+		BillingCapacityPercent:    serverExpensePolicy.BillingCapacityPercent,
 		CreatedAt:                 snapshotCreatedAt,
 	}
 	if a.desktopMode {
