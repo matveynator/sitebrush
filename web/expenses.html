@@ -14,6 +14,7 @@
   <link href="/p/static/technical_pages.css" rel="stylesheet">
   <link href="/p/static/server_settings.css" rel="stylesheet">
   <script defer src="/p/static/server_settings.js"></script>
+  {{if .CanConfigurePublicIPs}}<script defer src="/p/static/server_public_ips.js"></script>{{end}}
 <script defer src="/p/static/mail_journal.js"></script>
 </head>
 <body class="technical-page bg-body expenses-page server-settings-page">
@@ -28,24 +29,6 @@
 
   {{if .Status}}<div class="alert alert-info billing-status" role="alert">{{.Status}}</div>{{end}}
 
-  {{if .CanConfigurePublicIPs}}
-  <details class="server-network-disclosure" id="server-network">
-    <summary class="server-network-summary"><span>{{index .T "server_ui_network"}}</span><small>{{index .T "public_ip_help"}}</small></summary>
-  <section class="card p-3 mb-3" data-public-ip-panel data-csrf="{{.AccountCSRF}}">
-    <h2 class="h5">{{index .T "public_ip_title"}}</h2>
-    <p>{{index .T "public_ip_help"}}</p>
-    <ul data-public-ip-addresses></ul>
-    <label class="d-block">{{index .T "public_ip_manual_label"}}<textarea class="form-control" rows="3" data-public-ip-manual></textarea></label>
-    <p class="small text-muted">{{index .T "public_ip_manual_hint"}}</p>
-    <label class="d-block">{{index .T "public_ip_primary_label"}}<select class="form-select" data-public-ip-preferred></select></label>
-    <p>{{index .T "public_ip_primary_label"}}: <strong data-public-ip-primary></strong></p>
-    <div class="d-flex gap-2"><button type="button" class="btn btn-primary" data-public-ip-save>{{index .T "billing_save"}}</button><button type="button" class="btn btn-outline-secondary" data-public-ip-refresh>{{index .T "public_ip_refresh"}}</button></div>
-    <p role="status" aria-live="polite" data-public-ip-status></p>
-    <script type="application/json" data-public-ip-labels>{"ready":{{index .T "public_ip_ready"}},"auto":{{index .T "public_ip_auto"}},"manual":{{index .T "public_ip_manual_hint"}},"outgoing":{{index .T "public_ip_outgoing"}},"local":{{index .T "public_ip_local"}},"inactive":{{index .T "public_ip_inactive"}},"missing":{{index .T "public_ip_missing"}},"working":{{index .T "public_ip_working"}},"disconnected":{{index .T "public_ip_disconnected"}}}</script>
-  </section>
-  </details>
-  <script defer src="/p/static/server_public_ips.js"></script>
-  {{end}}
   {{if .SimplifiedExpenses}}
   <style>
     .expense-simple-page { display: grid; gap: 16px; }
@@ -117,17 +100,18 @@
       {{end}}
       {{range $serverIndex, $expenseServer := .ExpenseServers}}
       {{$server := $expenseServer.Server}}
-      <div data-expense-server-panel="{{$serverIndex}}" {{if not $expenseServer.MailSelected}}hidden{{end}}>
+      <div data-expense-server-panel="{{$serverIndex}}" data-server-id="{{$server.ID}}" {{if not $expenseServer.MailSelected}}hidden{{end}}>
         <div class="server-config-layout" data-server-config-layout>
           <nav class="server-config-nav" aria-label="{{index $.T "server_ui_navigation"}}" hidden>
             <button type="button" data-server-config-target="overview" aria-current="page">{{index $.T "server_ui_overview"}}</button>
-            {{if and $server.Local $.CanConfigurePublicIPs}}<a href="#server-network" data-server-config-network>{{index $.T "server_ui_network"}}</a>{{end}}
+            {{if $server.Local}}<button type="button" data-server-config-target="monetization">{{index $.T "server_ui_monetization"}}</button>{{end}}
+            {{if and $server.Local $.CanConfigurePublicIPs}}<button type="button" data-server-config-target="network">{{index $.T "server_ui_network"}}</button>{{end}}
+            {{if $server.Local}}<button type="button" data-server-config-target="updates">{{index $.T "update_title"}}</button>{{end}}
+            {{if gt $server.ClientCount 0}}<button type="button" data-server-config-target="clients">{{index $.T "billing_clients"}}</button>{{end}}
             {{if $server.Local}}
-            <button type="button" data-server-config-target="updates">{{index $.T "update_title"}}</button>
             <button type="button" data-server-config-target="registration">{{index $.T "billing_registration_title"}}</button>
             <button type="button" data-server-config-target="demo">{{index $.T "billing_demo_title"}}</button>
             {{end}}
-            <button type="button" data-server-config-target="clients">{{index $.T "billing_clients"}}</button>
           </nav>
           <div class="server-config-content">
             <section class="server-config-view" data-server-config-view="overview">
@@ -138,7 +122,7 @@
               <h2>{{$server.Name}}</h2>
               <div class="text-muted">{{index $.T "expenses_purpose_simple"}}</div>
             </div>
-            {{if $server.Local}}<button type="button" class="btn btn-outline-primary" data-bs-toggle="modal" data-bs-target="#expenseSettings{{$serverIndex}}">{{index $.T "expenses_configure"}}</button>{{end}}
+
           </div>
           <div class="expense-simple-server-description">
             <div class="expense-simple-server-description-main">
@@ -202,42 +186,58 @@
             </section>
 
         {{if $server.Local}}
+            <section class="server-config-view" data-server-config-view="monetization">
+              <header class="server-config-view-heading"><h2>{{index $.T "server_ui_monetization"}}</h2><p>{{index $.T "server_ui_monetization_hint"}}</p></header>
+              <form method="post" action="?server-settings" class="server-tariff-form" data-server-tariff data-disk-gb="{{$server.DiskCapacityGBInput}}">
+                <input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+                <input type="hidden" name="billing_action" value="save_server_expense_policy">
+                <div class="server-tariff-grid">
+                  <label>{{index $.T "expenses_monthly_server_price"}}
+                    <input name="monthly_server_expense" type="number" min="0.01" step="0.01" class="form-control" value="{{$server.MonthlyCostInput}}" required>
+                  </label>
+                  <label>{{index $.T "billing_currency"}}
+                    <input name="currency" type="text" minlength="3" maxlength="3" pattern="[A-Za-z]{3}" class="form-control" value="{{$server.BillingCurrency}}" required>
+                  </label>
+                  <label>{{index $.T "server_ui_billing_percent"}}
+                    <span class="input-group"><input name="billing_capacity_percent" type="number" min="1" max="100" step="1" class="form-control" value="{{$server.BillingPercentInput}}" required><span class="input-group-text">%</span></span>
+                  </label>
+                  <label>{{index $.T "expenses_free_threshold_mb"}}
+                    <input name="free_site_threshold_mb" type="number" min="0" step="1" class="form-control" value="{{$server.FreeThresholdInput}}" required>
+                  </label>
+                </div>
+                <div class="server-tariff-preview" role="status" aria-live="polite">
+                  <div><span>{{index $.T "expenses_billing_capacity"}}</span><strong data-tariff-capacity>{{$server.BillingCapacityLabel}}</strong></div>
+                  <div><span>{{index $.T "expenses_automatic_price_per_gb"}}</span><strong data-tariff-price>{{$server.BillingCostPerGBLabel}}/{{index $.T "expenses_gb_short"}}</strong></div>
+                </div>
+                <p class="form-text">{{index $.T "server_ui_tariff_future"}}</p>
+                <label class="server-tariff-confirm" data-tariff-confirm-row hidden><input type="checkbox" data-tariff-confirm> {{index $.T "server_ui_tariff_confirm"}}</label>
+                <div class="server-tariff-actions"><button type="submit" class="btn btn-primary" data-tariff-save>{{index $.T "billing_save"}}</button></div>
+              </form>
+            </section>
+            {{if $.CanConfigurePublicIPs}}
+            <section class="server-config-view" data-server-config-view="network">
+              <header class="server-config-view-heading"><h2>{{index $.T "server_ui_network"}}</h2><p>{{index $.T "server_ui_network_hint"}}</p></header>
+  <section class="card p-3 mb-3" data-public-ip-panel data-csrf="{{$.AccountCSRF}}">
+    <h2 class="h5">{{index $.T "public_ip_title"}}</h2>
+    <p>{{index $.T "public_ip_help"}}</p>
+    <ul data-public-ip-addresses></ul>
+    <label class="d-block">{{index $.T "public_ip_manual_label"}}<textarea class="form-control" rows="3" data-public-ip-manual></textarea></label>
+    <p class="small text-muted">{{index $.T "public_ip_manual_hint"}}</p>
+    <label class="d-block">{{index $.T "public_ip_primary_label"}}<select class="form-select" data-public-ip-preferred></select></label>
+    <p>{{index $.T "public_ip_primary_label"}}: <strong data-public-ip-primary></strong></p>
+    <div class="d-flex gap-2"><button type="button" class="btn btn-primary" data-public-ip-save>{{index $.T "billing_save"}}</button><button type="button" class="btn btn-outline-secondary" data-public-ip-refresh>{{index $.T "public_ip_refresh"}}</button></div>
+    <p role="status" aria-live="polite" data-public-ip-status></p>
+    <script type="application/json" data-public-ip-labels>{"ready":{{index $.T "public_ip_ready"}},"auto":{{index $.T "public_ip_auto"}},"manual":{{index $.T "public_ip_manual_hint"}},"outgoing":{{index $.T "public_ip_outgoing"}},"local":{{index $.T "public_ip_local"}},"inactive":{{index $.T "public_ip_inactive"}},"missing":{{index $.T "public_ip_missing"}},"working":{{index $.T "public_ip_working"}},"disconnected":{{index $.T "public_ip_disconnected"}}}</script>
+  </section>
+            </section>
+            {{end}}
             <section class="server-config-view" data-server-config-view="updates">
           <div id="server-update" class="mb-4">
             <h2>{{index $.T "update_title"}}</h2>
             <p role="status" data-server-update-frame-loading>{{index $.T "update_connecting"}}</p>
-            <iframe title="{{index $.T "update_title"}}" data-src="/?server_update&embedded" style="width:100%;min-height:1000px;border:0" data-server-update-frame hidden></iframe>
-            <p role="alert" class="alert alert-danger" data-server-update-frame-error hidden>{{index $.T "update_unavailable"}}</p>
-            <script>
-              (function checkEmbeddedUpdate() {
-                const frameElement = document.querySelector('[data-server-update-frame]');
-                const errorElement = document.querySelector('[data-server-update-frame-error]');
-                const loadingElement = document.querySelector('[data-server-update-frame-loading]');
-                if (!frameElement || !errorElement || !loadingElement) return;
-                const frameModel = {ready: false, diagnostic: false, loaded: false};
-                function renderFrameStatus() {
-                  loadingElement.hidden = frameModel.loaded;
-                  frameElement.hidden = !frameModel.ready && !frameModel.diagnostic;
-                  errorElement.hidden = !frameModel.loaded || frameModel.ready || frameModel.diagnostic;
-                }
-                frameElement.addEventListener('load', function showEmbeddedUpdateStatus() {
-                  try {
-                    if (!frameElement.contentDocument || !frameElement.contentDocument.URL.includes('server_update')) return;
-                    frameModel.ready = Boolean(frameElement.contentDocument && frameElement.contentDocument.querySelector('[data-server-update]'));
-                    frameModel.diagnostic = Boolean(frameElement.contentDocument && frameElement.contentDocument.querySelector('[data-server-update-diagnostic]'));
-                  } catch (frameError) { frameModel.ready = false; frameModel.diagnostic = false; }
-                  frameModel.loaded = true;
-                  renderFrameStatus();
-                });
-                frameElement.addEventListener('error', function showEmbeddedUpdateError() { frameModel.ready = false; frameModel.loaded = true; renderFrameStatus(); });
-                window.setTimeout(function showEmbeddedUpdateTimeout() {
-                  if (frameModel.loaded) return;
-                  frameModel.loaded = true;
-                  renderFrameStatus();
-                }, 20000);
-                frameElement.src = frameElement.dataset.src;
-              })();
-            </script>
+            <iframe title="{{index $.T "update_title"}}" data-src="/?server_update&embedded" class="server-update-embed" data-server-update-frame hidden></iframe>
+            <p role="alert" class="alert alert-danger" data-server-update-frame-error hidden>{{index $.T "update_unavailable"}} · <a href="/?server_update">{{index $.T "update_title"}}</a></p>
+
           </div>
             </section>
             <section class="server-config-view" data-server-config-view="registration">
@@ -261,7 +261,7 @@
             </section>
         {{end}}
 
-            <section class="server-config-view" data-server-config-view="clients">
+            {{if gt $server.ClientCount 0}}<section class="server-config-view" data-server-config-view="clients">
           <div class="billing-section-header">
             <div><h2>{{index $.T "billing_clients"}}</h2><p class="text-muted">{{index $.T "expenses_clients_simple_hint"}}</p></div>
           </div>
@@ -344,27 +344,10 @@
             </details>
             {{else}}<div class="empty">{{index $.T "expenses_clients_empty"}}</div>{{end}}
           </div>
-            </section>
+            </section>{{end}}
           </div>
         </div>
 
-        {{if $server.Local}}
-        <div class="modal fade" id="expenseSettings{{$serverIndex}}" tabindex="-1" aria-hidden="true">
-          <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
-            <form method="post" action="?server-settings"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
-              <div class="modal-header"><h2 class="modal-title h5">{{index $.T "expenses_settings_title"}}</h2><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button></div>
-              <div class="modal-body billing-plan-form">
-                <input type="hidden" name="billing_action" value="save_server_expense_policy">
-                <label>{{index $.T "billing_currency"}} <input name="currency" type="text" minlength="3" maxlength="3" class="form-control" value="{{$server.BillingCurrency}}" required></label>
-                <label>{{index $.T "expenses_monthly_server_price"}} <input name="monthly_server_expense" type="number" min="0.01" step="0.01" class="form-control" value="{{$server.MonthlyCostInput}}" required></label>
-                <div class="form-text">{{index $.T "expenses_automatic_price_per_gb"}}: {{$server.BillingCostPerGBLabel}}/{{index $.T "expenses_gb_short"}}</div>
-                <label>{{index $.T "expenses_free_threshold_mb"}} <input name="free_site_threshold_mb" type="number" min="0" step="1" class="form-control" value="{{$server.FreeThresholdInput}}" required></label>
-              </div>
-              <div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">{{index $.T "edit_cancel"}}</button><button type="submit" class="btn btn-primary">{{index $.T "billing_save"}}</button></div>
-            </form>
-          </div></div>
-        </div>
-        {{end}}
       </div>
       {{else}}<div class="empty">{{index .T "expenses_servers_empty"}}</div>{{end}}
     </section>
