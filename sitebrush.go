@@ -29563,42 +29563,52 @@ func (a *App) handleExpensesAction(r *http.Request) string {
 
 func (a *App) saveServerExpensePolicyFromForm(r *http.Request) string {
 	translations := translationsForRequest(r)
-	monthlyExpense := firstNonEmpty(r.FormValue("monthly_server_expense"), r.FormValue("actual_monthly_expense"))
-	actualExpenseMinor := hostingandsupport.MoneyMinor(strings.ReplaceAll(strings.TrimSpace(monthlyExpense), ",", "."))
-	freeThresholdMB, thresholdErr := strconv.ParseInt(strings.TrimSpace(r.FormValue("free_site_threshold_mb")), 10, 64)
-	if thresholdErr != nil || freeThresholdMB < 0 || freeThresholdMB > math.MaxInt64/expenses.DecimalMegabyte {
-		return translationOrDefault(translations, "expenses_server_policy_invalid", "Check the server expense settings.")
+	monetizationMode := strings.TrimSpace(r.FormValue("monetization_mode"))
+	_, diskTotalBytes, diskAvailable := diskusage.DiskSpace(a.storageRootDir())
+	if !diskAvailable {
+		diskTotalBytes = 0
 	}
-	billingPercent := expenses.BillingCapacityPercent
-	if rawPercent := strings.TrimSpace(r.FormValue("billing_capacity_percent")); rawPercent != "" {
-		parsed, parseErr := strconv.ParseInt(rawPercent, 10, 64)
-		if parseErr != nil {
+	policy := expenses.DefaultServerPolicy("local", int64(diskTotalBytes))
+	if monetizationMode != "disabled" {
+		monthlyExpense := firstNonEmpty(r.FormValue("monthly_server_expense"), r.FormValue("actual_monthly_expense"))
+		actualExpenseMinor := hostingandsupport.MoneyMinor(strings.ReplaceAll(strings.TrimSpace(monthlyExpense), ",", "."))
+		freeThresholdMB, thresholdErr := strconv.ParseInt(strings.TrimSpace(r.FormValue("free_site_threshold_mb")), 10, 64)
+		if thresholdErr != nil || freeThresholdMB < 0 || freeThresholdMB > math.MaxInt64/expenses.DecimalMegabyte {
 			return translationOrDefault(translations, "expenses_server_policy_invalid", "Check the server expense settings.")
 		}
-		billingPercent = parsed
+		billingPercent := expenses.BillingCapacityPercent
+		if rawPercent := strings.TrimSpace(r.FormValue("billing_capacity_percent")); rawPercent != "" {
+			parsed, parseErr := strconv.ParseInt(rawPercent, 10, 64)
+			if parseErr != nil {
+				return translationOrDefault(translations, "expenses_server_policy_invalid", "Check the server expense settings.")
+			}
+			billingPercent = parsed
+		}
+		policy.Mode = expenses.ModeActual
+		policy.ActualMonthlyExpenseMinor = actualExpenseMinor
+		policy.Currency = r.FormValue("currency")
+		policy.FreeSiteThresholdBytes = freeThresholdMB * expenses.DecimalMegabyte
+		policy.BillingCapacityPercent = billingPercent
 	}
-	_, diskTotalBytes, diskAvailable := diskusage.DiskSpace(a.storageRootDir())
-	policy := expenses.ServerPolicy{
-		InstallationID:            "local",
-		MonetizationMode:          strings.TrimSpace(r.FormValue("monetization_mode")),
-		Mode:                      expenses.ModeActual,
-		DiskRatePer100GBMinor:     expenses.DefaultDiskRatePer100GBMinor,
-		ActualMonthlyExpenseMinor: actualExpenseMinor,
-		Currency:                  r.FormValue("currency"),
-		FreeSiteThresholdBytes:    freeThresholdMB * expenses.DecimalMegabyte,
-		BillingCapacityPercent:    billingPercent,
-		DiskTotalBytes:            int64(diskTotalBytes),
-	}
-	if !diskAvailable {
-		policy.DiskTotalBytes = 0
-	}
+	// Keep legacy callers (without monetization_mode) compatible. A malformed
+	// explicit mode is rejected rather than silently enabling billing.
+	policy.MonetizationMode = monetizationMode
 	if err := policy.Validate(); err != nil {
 		return translationOrDefault(translations, "expenses_server_policy_invalid", "Check the server expense settings.")
 	}
 	var savedPolicy expenses.ServerPolicy
 	err := a.withServerControlDatabaseWrite(r.Context(), "save-expense-policy", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		if monetizationMode == "disabled" {
+			// Turning billing off must not depend on hidden required tariff
+			// controls, nor overwrite the pricing to restore on opt-in.
+			if previous, found := store.ServerExpensePolicy(r.Context(), "local", int64(diskTotalBytes)); found {
+				policy = previous
+			}
+			policy.MonetizationMode = "disabled"
+		}
 		var saveErr error
-		savedPolicy, saveErr = (hostingandsupport.Store{DB: database}).SaveServerExpensePolicy(r.Context(), policy)
+		savedPolicy, saveErr = store.SaveServerExpensePolicy(r.Context(), policy)
 		return saveErr
 	})
 	if err != nil {
