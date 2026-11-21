@@ -12,9 +12,12 @@
   <title>{{.Title}}</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="/p/static/technical_pages.css" rel="stylesheet">
+  <link href="/p/static/server_settings.css" rel="stylesheet">
+  <script defer src="/p/static/server_settings.js"></script>
+  {{if .CanConfigurePublicIPs}}<script defer src="/p/static/server_public_ips.js"></script>{{end}}
 <script defer src="/p/static/mail_journal.js"></script>
 </head>
-<body class="technical-page bg-body expenses-page">
+<body class="technical-page bg-body expenses-page server-settings-page">
 <main class="container billing-page">
 <script type="application/json" id="mail-journal-labels">{{.MailJournalLabelsJSON}}</script>
 <div data-mail-settings data-mode="statistics" data-csrf="{{.AccountCSRF}}" data-language="{{.LanguageCode}}"></div>
@@ -26,21 +29,6 @@
 
   {{if .Status}}<div class="alert alert-info billing-status" role="alert">{{.Status}}</div>{{end}}
 
-  {{if .CanConfigurePublicIPs}}
-  <section class="card p-3 mb-3" data-public-ip-panel data-csrf="{{.AccountCSRF}}">
-    <h2 class="h5">{{index .T "public_ip_title"}}</h2>
-    <p>{{index .T "public_ip_help"}}</p>
-    <ul data-public-ip-addresses></ul>
-    <label class="d-block">{{index .T "public_ip_manual_label"}}<textarea class="form-control" rows="3" data-public-ip-manual></textarea></label>
-    <p class="small text-muted">{{index .T "public_ip_manual_hint"}}</p>
-    <label class="d-block">{{index .T "public_ip_primary_label"}}<select class="form-select" data-public-ip-preferred></select></label>
-    <p>{{index .T "public_ip_primary_label"}}: <strong data-public-ip-primary></strong></p>
-    <div class="d-flex gap-2"><button type="button" class="btn btn-primary" data-public-ip-save>{{index .T "billing_save"}}</button><button type="button" class="btn btn-outline-secondary" data-public-ip-refresh>{{index .T "public_ip_refresh"}}</button></div>
-    <p role="status" aria-live="polite" data-public-ip-status></p>
-    <script type="application/json" data-public-ip-labels>{"ready":{{index .T "public_ip_ready"}},"auto":{{index .T "public_ip_auto"}},"manual":{{index .T "public_ip_manual_hint"}},"outgoing":{{index .T "public_ip_outgoing"}},"local":{{index .T "public_ip_local"}},"inactive":{{index .T "public_ip_inactive"}},"missing":{{index .T "public_ip_missing"}},"working":{{index .T "public_ip_working"}},"disconnected":{{index .T "public_ip_disconnected"}}}</script>
-  </section>
-  <script defer src="/p/static/server_public_ips.js"></script>
-  {{end}}
   {{if .SimplifiedExpenses}}
   <style>
     .expense-simple-page { display: grid; gap: 16px; }
@@ -91,14 +79,12 @@
   </style>
 
   <div class="expense-simple-page">
-    <nav class="hosting-installation-tabs" role="tablist" aria-label="{{index .T "billing_installations"}}" data-hosting-installation-tabs>
-      {{if or (gt (len .Servers) 1) .ActivePublicTrialSites .ArchivedPublicTrialSites .ShowCentralRegistry}}<button type="button" class="hosting-installation-tab active" role="tab" aria-selected="true" data-hosting-installation-tab="servers">{{index .T "billing_servers"}}</button>{{end}}
-      {{if or .ActivePublicTrialSites .ArchivedPublicTrialSites}}<button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="temporary-sites">{{index .T "billing_temporary_sites"}}</button>{{end}}
-      {{if .ShowCentralRegistry}}
-      <button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="desktop">{{index .T "billing_desktop_installations"}}</button>
-      <button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="archive">{{index .T "billing_archive"}}</button>
-      {{end}}
+    {{if or .ActivePublicTrialSites .ArchivedPublicTrialSites .ShowCentralRegistry}}
+    <nav class="server-root-tabs" aria-label="{{index .T "billing_installations"}}" data-server-root-tabs>
+      <button type="button" class="is-active" data-server-root-target="servers" aria-current="page">{{index .T "billing_servers"}}</button>
+      <button type="button" data-server-root-target="installations">{{index .T "billing_installations"}}</button>
     </nav>
+    {{end}}
 
     <section data-hosting-installation-panel="servers">
       {{if gt (len .ExpenseServers) 1}}
@@ -112,14 +98,29 @@
       {{end}}
       {{range $serverIndex, $expenseServer := .ExpenseServers}}
       {{$server := $expenseServer.Server}}
-      <div data-expense-server-panel="{{$serverIndex}}" {{if not $expenseServer.MailSelected}}hidden{{end}}>
+      <div data-expense-server-panel="{{$serverIndex}}" data-server-id="{{$server.ID}}" {{if not $expenseServer.MailSelected}}hidden{{end}}>
+        <div class="server-config-layout" data-server-config-layout>
+          <nav class="server-config-nav" aria-label="{{index $.T "server_ui_navigation"}}" hidden>
+            <button type="button" data-server-config-target="overview" aria-current="page">{{index $.T "server_ui_overview"}}</button>
+            {{if and $server.Local $.CanConfigurePublicIPs}}<button type="button" data-server-config-target="network">{{index $.T "server_ui_network"}}</button>{{end}}
+            {{if $server.Local}}<button type="button" data-server-config-target="updates">{{index $.T "update_title"}}</button>{{end}}
+            {{if or (gt $server.ClientCount 0) $expenseServer.Clients}}<button type="button" data-server-config-target="clients">{{index $.T "billing_clients"}}</button>{{end}}
+            {{if $server.Local}}
+            <button type="button" data-server-config-target="registration">{{index $.T "billing_registration_title"}}</button>
+            <button type="button" data-server-config-target="demo">{{index $.T "billing_demo_title"}}</button>
+            {{end}}
+            {{if $server.Local}}<button type="button" data-server-config-target="monetization">{{index $.T "server_ui_monetization"}}</button>{{end}}
+          </nav>
+          <div class="server-config-content">
+            <section class="server-config-view" data-server-config-view="overview">
+              <header class="server-config-view-heading"><h2>{{index $.T "server_ui_overview"}}</h2><p>{{index $.T "server_ui_overview_hint"}}</p></header>
         <section class="expense-simple-summary">
           <div class="expense-simple-summary-head">
             <div>
               <h2>{{$server.Name}}</h2>
               <div class="text-muted">{{index $.T "expenses_purpose_simple"}}</div>
             </div>
-            {{if $server.Local}}<button type="button" class="btn btn-outline-primary" data-bs-toggle="modal" data-bs-target="#expenseSettings{{$serverIndex}}">{{index $.T "expenses_configure"}}</button>{{end}}
+
           </div>
           <div class="expense-simple-server-description">
             <div class="expense-simple-server-description-main">
@@ -180,45 +181,35 @@
           {{if $server.CapacityExceeded}}<div class="alert alert-danger mb-0">{{index $.T "expenses_capacity_exceeded"}}</div>{{end}}
           {{end}}
         </section>
+        {{if $server.Local}}<div class="server-overview-monetization"><button type="button" class="btn btn-outline-primary btn-sm" data-server-config-target="monetization">{{index $.T "server_ui_monetization"}}</button></div>{{end}}
+            </section>
 
         {{if $server.Local}}
-        <section class="mt-4">
+            {{if $.CanConfigurePublicIPs}}
+            <section class="server-config-view" data-server-config-view="network">
+              <header class="server-config-view-heading"><h2>{{index $.T "server_ui_network"}}</h2><p>{{index $.T "server_ui_network_hint"}}</p></header>
+  <section class="card p-3 mb-3" data-public-ip-panel data-csrf="{{$.AccountCSRF}}">
+    <ul data-public-ip-addresses></ul>
+    <label class="d-block">{{index $.T "public_ip_manual_label"}}<textarea class="form-control" rows="3" data-public-ip-manual></textarea></label>
+    <p class="small text-muted">{{index $.T "public_ip_manual_hint"}}</p>
+    <label class="d-block">{{index $.T "public_ip_primary_label"}}<select class="form-select" data-public-ip-preferred></select></label>
+    <p>{{index $.T "public_ip_primary_label"}}: <strong data-public-ip-primary></strong></p>
+    <div class="d-flex gap-2"><button type="button" class="btn btn-primary" data-public-ip-save>{{index $.T "billing_save"}}</button><button type="button" class="btn btn-outline-secondary" data-public-ip-refresh>{{index $.T "public_ip_refresh"}}</button></div>
+    <p role="status" aria-live="polite" data-public-ip-status></p>
+    <script type="application/json" data-public-ip-labels>{"ready":{{index $.T "public_ip_ready"}},"auto":{{index $.T "public_ip_auto"}},"manual":{{index $.T "public_ip_manual_label"}},"outgoing":{{index $.T "public_ip_outgoing"}},"local":{{index $.T "public_ip_local"}},"inactive":{{index $.T "public_ip_inactive"}},"missing":{{index $.T "public_ip_missing"}},"working":{{index $.T "public_ip_working"}},"disconnected":{{index $.T "public_ip_disconnected"}}}</script>
+  </section>
+            </section>
+            {{end}}
+            <section class="server-config-view" data-server-config-view="updates">
           <div id="server-update" class="mb-4">
             <h2>{{index $.T "update_title"}}</h2>
             <p role="status" data-server-update-frame-loading>{{index $.T "update_connecting"}}</p>
-            <iframe title="{{index $.T "update_title"}}" data-src="/?server_update&embedded" style="width:100%;min-height:1000px;border:0" data-server-update-frame hidden></iframe>
-            <p role="alert" class="alert alert-danger" data-server-update-frame-error hidden>{{index $.T "update_unavailable"}}</p>
-            <script>
-              (function checkEmbeddedUpdate() {
-                const frameElement = document.querySelector('[data-server-update-frame]');
-                const errorElement = document.querySelector('[data-server-update-frame-error]');
-                const loadingElement = document.querySelector('[data-server-update-frame-loading]');
-                if (!frameElement || !errorElement || !loadingElement) return;
-                const frameModel = {ready: false, diagnostic: false, loaded: false};
-                function renderFrameStatus() {
-                  loadingElement.hidden = frameModel.loaded;
-                  frameElement.hidden = !frameModel.ready && !frameModel.diagnostic;
-                  errorElement.hidden = !frameModel.loaded || frameModel.ready || frameModel.diagnostic;
-                }
-                frameElement.addEventListener('load', function showEmbeddedUpdateStatus() {
-                  try {
-                    if (!frameElement.contentDocument || !frameElement.contentDocument.URL.includes('server_update')) return;
-                    frameModel.ready = Boolean(frameElement.contentDocument && frameElement.contentDocument.querySelector('[data-server-update]'));
-                    frameModel.diagnostic = Boolean(frameElement.contentDocument && frameElement.contentDocument.querySelector('[data-server-update-diagnostic]'));
-                  } catch (frameError) { frameModel.ready = false; frameModel.diagnostic = false; }
-                  frameModel.loaded = true;
-                  renderFrameStatus();
-                });
-                frameElement.addEventListener('error', function showEmbeddedUpdateError() { frameModel.ready = false; frameModel.loaded = true; renderFrameStatus(); });
-                window.setTimeout(function showEmbeddedUpdateTimeout() {
-                  if (frameModel.loaded) return;
-                  frameModel.loaded = true;
-                  renderFrameStatus();
-                }, 20000);
-                frameElement.src = frameElement.dataset.src;
-              })();
-            </script>
+            <iframe title="{{index $.T "update_title"}}" data-src="/?server_update&embedded" class="server-update-embed" data-server-update-frame hidden></iframe>
+            <p role="alert" class="alert alert-danger" data-server-update-frame-error hidden>{{index $.T "update_unavailable"}} · <a href="/?server_update">{{index $.T "update_title"}}</a></p>
+
           </div>
+            </section>
+            <section class="server-config-view" data-server-config-view="registration">
           <div>
             <h2>{{index $.T "billing_registration_title"}}</h2>
             <p class="text-muted">{{index $.T "billing_registration_hint"}}</p>
@@ -229,15 +220,17 @@
             </div>
             {{end}}
           </div>
-          <div class="mt-4">
+            </section>
+            <section class="server-config-view" data-server-config-view="demo">
+          <div>
             <h2>{{index $.T "billing_demo_title"}}</h2>
             <p class="text-muted">{{index $.T "billing_demo_exclusion_hint"}}</p>
             {{template "demo-settings-form" $}}
           </div>
-        </section>
+            </section>
         {{end}}
 
-        <section class="mt-4">
+            {{if or (gt $server.ClientCount 0) $expenseServer.Clients}}<section class="server-config-view" data-server-config-view="clients">
           <div class="billing-section-header">
             <div><h2>{{index $.T "billing_clients"}}</h2><p class="text-muted">{{index $.T "expenses_clients_simple_hint"}}</p></div>
           </div>
@@ -320,29 +313,50 @@
             </details>
             {{else}}<div class="empty">{{index $.T "expenses_clients_empty"}}</div>{{end}}
           </div>
-        </section>
-
-        {{if $server.Local}}
-        <div class="modal fade" id="expenseSettings{{$serverIndex}}" tabindex="-1" aria-hidden="true">
-          <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
-            <form method="post" action="?server-settings"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
-              <div class="modal-header"><h2 class="modal-title h5">{{index $.T "expenses_settings_title"}}</h2><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button></div>
-              <div class="modal-body billing-plan-form">
+            </section>{{end}}
+            {{if $server.Local}}
+            <section class="server-config-view" data-server-config-view="monetization">
+              <header class="server-config-view-heading"><h2>{{index $.T "server_ui_monetization"}}</h2><p>{{index $.T "server_ui_monetization_hint"}}</p></header>
+              <p class="server-monetization-purpose">{{index $.T "server_ui_monetization_purpose"}}</p>
+              <form method="post" action="?server-settings" class="server-tariff-form" data-server-tariff data-disk-bytes="{{$server.DiskCapacityBytesInput}}">
+                <input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
                 <input type="hidden" name="billing_action" value="save_server_expense_policy">
-                <label>{{index $.T "billing_currency"}} <input name="currency" type="text" minlength="3" maxlength="3" class="form-control" value="{{$server.BillingCurrency}}" required></label>
-                <label>{{index $.T "expenses_monthly_server_price"}} <input name="monthly_server_expense" type="number" min="0.01" step="0.01" class="form-control" value="{{$server.MonthlyCostInput}}" required></label>
-                <div class="form-text">{{index $.T "expenses_automatic_price_per_gb"}}: {{$server.BillingCostPerGBLabel}}/{{index $.T "expenses_gb_short"}}</div>
-                <label>{{index $.T "expenses_free_threshold_mb"}} <input name="free_site_threshold_mb" type="number" min="0" step="1" class="form-control" value="{{$server.FreeThresholdInput}}" required></label>
-              </div>
-              <div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">{{index $.T "edit_cancel"}}</button><button type="submit" class="btn btn-primary">{{index $.T "billing_save"}}</button></div>
-            </form>
-          </div></div>
+                <div class="server-tariff-grid">
+                  <label>{{index $.T "expenses_monthly_server_price"}}
+                    <input name="monthly_server_expense" type="number" min="0.01" step="0.01" class="form-control" value="{{$server.MonthlyCostInput}}" required>
+                  </label>
+                  <label>{{index $.T "billing_currency"}}
+                    <input name="currency" type="text" minlength="3" maxlength="3" pattern="[A-Za-z]{3}" class="form-control" value="{{$server.BillingCurrency}}" required>
+                  </label>
+                  <label>{{index $.T "server_ui_billing_percent"}}
+                    <span class="input-group"><input name="billing_capacity_percent" type="number" min="1" max="100" step="1" class="form-control" value="{{$server.BillingPercentInput}}" required><span class="input-group-text">%</span></span>
+                  </label>
+                  <label>{{index $.T "expenses_free_threshold_mb"}}
+                    <input name="free_site_threshold_mb" type="number" min="0" step="1" class="form-control" value="{{$server.FreeThresholdInput}}" required>
+                  </label>
+                </div>
+                <div class="server-tariff-preview" role="status" aria-live="polite">
+                  <div><span>{{index $.T "expenses_billing_capacity"}}</span><strong data-tariff-capacity>{{$server.BillingCapacityLabel}}</strong></div>
+                  <div><span>{{index $.T "expenses_automatic_price_per_gb"}}</span><strong data-tariff-price>{{$server.BillingCostPerGBLabel}}/{{index $.T "expenses_gb_short"}}</strong></div>
+                </div>
+                <p class="form-text">{{index $.T "server_ui_tariff_future"}}</p>
+                <label class="server-tariff-confirm" data-tariff-confirm-row hidden><input type="checkbox" data-tariff-confirm> {{index $.T "server_ui_tariff_confirm"}}</label>
+                <div class="server-tariff-actions"><button type="submit" class="btn btn-primary" data-tariff-save>{{index $.T "billing_save"}}</button></div>
+              </form>
+            </section>
+            {{end}}
+          </div>
         </div>
-        {{end}}
+
       </div>
       {{else}}<div class="empty">{{index .T "expenses_servers_empty"}}</div>{{end}}
     </section>
 
+    <div data-server-installations-container hidden>
+      <nav class="server-installation-kinds" data-hosting-installation-tabs aria-label="{{index .T "billing_installations"}}">
+        {{if or .ActivePublicTrialSites .ArchivedPublicTrialSites}}<button type="button" class="hosting-installation-tab" data-hosting-installation-tab="temporary-sites">{{index .T "billing_temporary_sites"}}</button>{{end}}
+        {{if .ShowCentralRegistry}}<button type="button" class="hosting-installation-tab" data-hosting-installation-tab="desktop">{{index .T "billing_desktop_installations"}}</button><button type="button" class="hosting-installation-tab" data-hosting-installation-tab="archive">{{index .T "billing_archive"}}</button>{{end}}
+      </nav>
     <section data-hosting-installation-panel="temporary-sites" hidden>
       <h2>{{index .T "billing_temporary_sites"}}</h2>
       <p class="text-muted">{{index .T "billing_temporary_sites_description"}}</p>
@@ -362,7 +376,7 @@
       <div class="billing-plan-list">{{range .ArchivedHostings}}<div class="billing-plan-row"><span><strong>{{if .ServerDomain}}{{.ServerDomain}}{{else}}{{.InstallationID}}{{end}}</strong><br><small>{{.LastSeenAt}}</small></span></div>{{else}}<div class="empty">{{index .T "billing_archive_empty"}}</div>{{end}}</div>
     </section>
     {{end}}
-
+    </div>
 
     {{template "public-trial-preview-modal" .}}
   </div>
@@ -3128,6 +3142,64 @@
   const tabButtonElements = Array.from(tabContainerElement.querySelectorAll('[data-hosting-installation-tab]'));
   const panelElements = Array.from(document.querySelectorAll('[data-hosting-installation-panel]'));
   tabContainerElement.hidden = tabButtonElements.length === 0;
+  const rootTabs = document.querySelector('[data-server-root-tabs]');
+  if (rootTabs) {
+    const installationGroup = document.querySelector('[data-server-installations-container]');
+    const serverPanel = document.querySelector('[data-hosting-installation-panel="servers"]');
+    let chosenKind = tabButtonElements[0] && tabButtonElements[0].dataset.hostingInstallationTab;
+    function chooseKind(kind) {
+      if (tabButtonElements.some(button => button.dataset.hostingInstallationTab === kind)) chosenKind = kind;
+      tabButtonElements.forEach(button => {
+        const active = button.dataset.hostingInstallationTab === chosenKind;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-current', active ? 'page' : 'false');
+      });
+      panelElements.forEach(panel => { if (panel !== serverPanel) panel.hidden = panel.dataset.hostingInstallationPanel !== chosenKind; });
+    }
+    function chooseRoot(section) {
+      const installations = section === 'installations';
+      installationGroup.hidden = !installations;
+      serverPanel.hidden = installations;
+      rootTabs.querySelectorAll('[data-server-root-target]').forEach(button => {
+        const active = button.dataset.serverRootTarget === section;
+        button.classList.toggle('is-active', active);
+        button.setAttribute('aria-current', active ? 'page' : 'false');
+      });
+      if (installations) chooseKind(chosenKind);
+    }
+    rootTabs.querySelectorAll('[data-server-root-target]').forEach(button => button.addEventListener('click', () => {
+      if (button.dataset.serverRootTarget === 'installations') {
+        chooseRoot('installations');
+        window.location.hash = 'installations-' + (chosenKind || '');
+        return;
+      }
+      chooseRoot('servers');
+      const server = document.querySelector('[data-expense-server-panel]:not([hidden])');
+      const params = new URLSearchParams({'server-id': server && server.dataset.serverId || '', 'section':'overview'});
+      window.location.hash = params.toString();
+    }));
+    tabButtonElements.forEach(button => button.addEventListener('click', () => {
+      chooseKind(button.dataset.hostingInstallationTab);
+      window.location.hash = 'installations-' + chosenKind;
+    }));
+    function fromHash() {
+      const hash = window.location.hash.slice(1);
+      if (hash.startsWith('installations-')) {
+        chooseKind(hash.slice('installations-'.length));
+        chooseRoot('installations');
+      } else if (hash.startsWith('server-') || hash === '') chooseRoot('servers');
+    }
+    window.addEventListener('hashchange', fromHash);
+    fromHash();
+    const archiveSearch = document.querySelector('[data-hosting-archive-search]');
+    if (archiveSearch) archiveSearch.addEventListener('input', () => {
+      const search = archiveSearch.value.trim().toLowerCase();
+      document.querySelectorAll('[data-hosting-archive-entry]').forEach(entry => {
+        entry.hidden = search !== '' && !entry.dataset.hostingArchiveEntry.toLowerCase().includes(search);
+      });
+    });
+    return;
+  }
 
   function selectInstallationTab(tabName) {
     for (const tabButtonElement of tabButtonElements) {

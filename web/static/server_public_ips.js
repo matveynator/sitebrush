@@ -30,12 +30,21 @@
       for (const address of model.snapshot.addresses || []) {
         const rowElement = document.createElement('li');
         const sourceLabel = address.source === 'manual' ? labels.manual : address.source === 'outgoing' ? labels.outgoing : address.interface;
-        rowElement.textContent = address.ip + ' — ' + sourceLabel + (address.public ? '' : ' · ' + labels.local) + (address.active ? '' : ' · ' + labels.inactive);
+        const ipElement = document.createElement('strong');
+        ipElement.textContent = address.ip;
+        const detailsElement = document.createElement('small');
+        detailsElement.textContent = sourceLabel + (address.public ? '' : ' · ' + labels.local) + (address.active ? '' : ' · ' + labels.inactive);
+        rowElement.append(ipElement, detailsElement);
         addressListElement.append(rowElement);
         if (address.active && address.public && !choices.has(address.ip)) {
           choices.add(address.ip);
           preferredSelectElement.add(new Option(address.ip, address.ip));
         }
+      }
+      if (addressListElement.children.length === 0) {
+        const empty = document.createElement('li');
+        empty.textContent = labels.missing;
+        addressListElement.append(empty);
       }
       for (const manualIP of model.manual.split(/[\s,;]+/).filter(Boolean)) {
         if (!choices.has(manualIP)) { choices.add(manualIP); preferredSelectElement.add(new Option(manualIP, manualIP)); }

@@ -29167,7 +29167,9 @@ func (a *App) runAutomaticBillingOnce(ctx context.Context, store hostingandsuppo
 		}
 		pricePerGBMinor := expenses.BillingCostPerGBMinor(policy)
 		billingCurrency := policy.Currency
-		if strings.HasPrefix(installationID, "local:") {
+		// The latest expense policy owns future rates. Historical server-cost
+		// settings are a fallback only when the canonical rate is unavailable.
+		if pricePerGBMinor <= 0 && strings.HasPrefix(installationID, "local:") {
 			if configured, found := store.ServerCostPolicy(ctx, "local"); found && configured.MinimumPriceGBMinor > 0 {
 				pricePerGBMinor = configured.MinimumPriceGBMinor
 				billingCurrency = configured.Currency
@@ -29182,11 +29184,11 @@ func (a *App) runAutomaticBillingOnce(ctx context.Context, store hostingandsuppo
 			group = &billingInvoiceGroup{customer: customer, installationID: installationID, serverName: serverName, currency: billingCurrency}
 			groups[groupKey] = group
 		}
-		paidBytes := max(int64(0), site.usedBytes-hostingandsupport.BillingFreeBytes)
+		paidBytes := max(int64(0), site.usedBytes-policy.FreeSiteThresholdBytes)
 		amountMinor := (paidBytes/1000000000)*pricePerGBMinor + ((paidBytes%1000000000)*pricePerGBMinor+999999999)/1000000000
 		line := hostingandsupport.InvoiceLine{
 			Domain:            normalizeDomainName(site.domain),
-			Description:       "Размещение сверх бесплатного лимита 1 GiB: " + normalizeDomainName(site.domain),
+			Description:       "Размещение сверх бесплатного лимита " + hostingandsupport.FormatFileSize(policy.FreeSiteThresholdBytes) + ": " + normalizeDomainName(site.domain),
 			UsedBytes:         site.usedBytes,
 			BillableMegabytes: (paidBytes + expenses.DecimalMegabyte - 1) / expenses.DecimalMegabyte,
 			ListAmountMinor:   amountMinor,
@@ -29195,7 +29197,7 @@ func (a *App) runAutomaticBillingOnce(ctx context.Context, store hostingandsuppo
 		}
 		if paidBytes == 0 {
 			line.Bonus = true
-			line.Description = "Бесплатное размещение " + normalizeDomainName(site.domain) + " до 1 GiB"
+			line.Description = "Бесплатное размещение " + normalizeDomainName(site.domain) + " до " + hostingandsupport.FormatFileSize(policy.FreeSiteThresholdBytes)
 			line.TotalAmountMinor = 0
 		} else if amountMinor > 0 {
 			group.hasPaidSite = true
@@ -29561,7 +29563,18 @@ func (a *App) saveServerExpensePolicyFromForm(r *http.Request) string {
 	translations := translationsForRequest(r)
 	monthlyExpense := firstNonEmpty(r.FormValue("monthly_server_expense"), r.FormValue("actual_monthly_expense"))
 	actualExpenseMinor := hostingandsupport.MoneyMinor(strings.ReplaceAll(strings.TrimSpace(monthlyExpense), ",", "."))
-	freeThresholdMB, _ := strconv.ParseInt(strings.TrimSpace(r.FormValue("free_site_threshold_mb")), 10, 64)
+	freeThresholdMB, thresholdErr := strconv.ParseInt(strings.TrimSpace(r.FormValue("free_site_threshold_mb")), 10, 64)
+	if thresholdErr != nil || freeThresholdMB < 0 || freeThresholdMB > math.MaxInt64/expenses.DecimalMegabyte {
+		return translationOrDefault(translations, "expenses_server_policy_invalid", "Check the server expense settings.")
+	}
+	billingPercent := expenses.BillingCapacityPercent
+	if rawPercent := strings.TrimSpace(r.FormValue("billing_capacity_percent")); rawPercent != "" {
+		parsed, parseErr := strconv.ParseInt(rawPercent, 10, 64)
+		if parseErr != nil {
+			return translationOrDefault(translations, "expenses_server_policy_invalid", "Check the server expense settings.")
+		}
+		billingPercent = parsed
+	}
 	_, diskTotalBytes, diskAvailable := diskusage.DiskSpace(a.storageRootDir())
 	policy := expenses.ServerPolicy{
 		InstallationID:            "local",
@@ -29570,6 +29583,7 @@ func (a *App) saveServerExpensePolicyFromForm(r *http.Request) string {
 		ActualMonthlyExpenseMinor: actualExpenseMinor,
 		Currency:                  r.FormValue("currency"),
 		FreeSiteThresholdBytes:    freeThresholdMB * expenses.DecimalMegabyte,
+		BillingCapacityPercent:    billingPercent,
 		DiskTotalBytes:            int64(diskTotalBytes),
 	}
 	if !diskAvailable {
@@ -39468,6 +39482,7 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 		ActualMonthlyExpenseMinor: serverExpensePolicy.ActualMonthlyExpenseMinor,
 		MonthlyExpenseMinor:       expenses.CalculateMonthlyExpense(serverExpensePolicy),
 		FreeSiteThresholdBytes:    serverExpensePolicy.FreeSiteThresholdBytes,
+		BillingCapacityPercent:    serverExpensePolicy.BillingCapacityPercent,
 		CreatedAt:                 snapshotCreatedAt,
 	}
 	if a.desktopMode {

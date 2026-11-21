@@ -2943,6 +2943,104 @@ func TestHostingSnapshotServerStatusLabels(t *testing.T) {
 	}
 }
 
+func TestServerSettingsNavigationPreservesExistingControls(t *testing.T) {
+	pageBytes, err := fs.ReadFile(embeddedWebFiles, "web/expenses.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(pageBytes)
+	for _, asset := range []string{"web/static/server_settings.css", "web/static/server_settings.js"} {
+		if _, err := fs.ReadFile(embeddedWebFiles, asset); err != nil {
+			t.Fatalf("missing settings asset %s: %v", asset, err)
+		}
+	}
+	for _, section := range []string{"overview", "monetization", "network", "updates", "registration", "demo", "clients"} {
+		if !strings.Contains(page, `data-server-config-target="`+section+`"`) {
+			t.Errorf("missing server section navigation for %q", section)
+		}
+		if !strings.Contains(page, `data-server-config-view="`+section+`"`) {
+			t.Errorf("missing server section view for %q", section)
+		}
+	}
+	for _, fragment := range []string{
+		`data-hosting-installation-panel="temporary-sites"`,
+		`data-hosting-installation-panel="desktop"`,
+		`data-hosting-installation-panel="archive"`,
+		`data-hosting-installation-tabs`,
+		`data-expense-server-select`,
+		`data-public-ip-panel`,
+		`{{template "server-profiler" .}}`,
+		`data-server-update-frame`,
+		`data-billing-ajax-save`,
+		`value="update_site_quota"`,
+		`value="save_server_expense_policy"`,
+		`value="registration_settings"`,
+		`value="demo_settings"`,
+		`value="queue_site"`,
+		`value="restore_site"`,
+		`name="confirm_domain"`,
+		`data-public-trial-copy-html`,
+	} {
+		if !strings.Contains(page, fragment) {
+			t.Errorf("server settings lost existing control %s", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		`{{if $server.Local}}`,
+		`{{if and $server.Local $.CanConfigurePublicIPs}}`,
+		`{{if .CanConfigurePublicIPs}}`,
+		`data-server-root-tabs`,
+		`data-server-installations-container`,
+		`data-server-config-layout`,
+		`data-server-tariff`,
+		`name="billing_capacity_percent"`,
+	} {
+		if !strings.Contains(page, fragment) {
+			t.Errorf("server settings lost scope or network boundary %s", fragment)
+		}
+	}
+	if strings.Contains(page, `id="expenseSettings{{$serverIndex}}"`) {
+		t.Error("duplicate legacy monetization modal remains")
+	}
+	if strings.Count(page, `data-public-ip-panel data-csrf=`) != 1 {
+		t.Error("public IP panel must exist in exactly one local server view")
+	}
+	// Monetization follows ordinary server administration; the overview remains read-only.
+	navigationStart := strings.Index(page, `<nav class="server-config-nav"`)
+	if navigationStart < 0 {
+		t.Fatal("server settings navigation is missing")
+	}
+	navigationEnd := strings.Index(page[navigationStart:], "</nav>")
+	if navigationEnd < 0 {
+		t.Fatal("server settings navigation is not closed")
+	}
+	navigation := page[navigationStart : navigationStart+navigationEnd]
+	monetizationPosition := strings.Index(navigation, `data-server-config-target="monetization"`)
+	if monetizationPosition < 0 {
+		t.Fatal("monetization is missing from server navigation")
+	}
+	for _, section := range []string{"network", "updates", "clients", "registration", "demo"} {
+		position := strings.Index(navigation, `data-server-config-target="`+section+`"`)
+		if position >= monetizationPosition || position < 0 {
+			t.Errorf("section %q should appear before monetization", section)
+		}
+	}
+	if strings.Index(page, `data-server-config-view="monetization"`) <= strings.Index(page, `data-server-config-view="clients"`) {
+		t.Error("monetization view must be the final server section")
+	}
+	if !strings.Contains(page, `server_ui_monetization_purpose`) {
+		t.Error("monetization purpose is missing from the template")
+	}
+	for _, language := range []string{"en", "fr", "ru", "ja", "it", "sv", "fi", "mn", "zh", "he", "fa", "de", "tr", "kk", "es", "pt"} {
+		if strings.TrimSpace(translationsForLanguageCode(language)["server_ui_monetization_purpose"]) == "" {
+			t.Errorf("monetization purpose has no %s translation", language)
+		}
+	}
+	if _, err := parseEmbeddedPageTemplate("expenses.html", pageBytes); err != nil {
+		t.Fatalf("server settings template cannot be parsed: %v", err)
+	}
+}
+
 func TestHostingAndSupportTemplateRendersServerView(t *testing.T) {
 	templateBytes, err := fs.ReadFile(embeddedWebFiles, "web/expenses.html")
 	if err != nil {
@@ -3754,7 +3852,7 @@ func TestAutomaticBillingCreatesInvoicesForClientAndServerOwner(t *testing.T) {
 		invoicesByEmail[invoice.CustomerEmail] = invoice
 	}
 	clientInvoice := invoicesByEmail["client@example.com"]
-	if clientInvoice.InstallationID != "local:sitebrush.com" || clientInvoice.AmountMinor <= 0 || clientInvoice.ServerCostMinor <= 0 || len(clientInvoice.Lines) != 2 || !clientInvoice.Lines[1].Bonus {
+	if clientInvoice.InstallationID != "local:sitebrush.com" || clientInvoice.AmountMinor <= 0 || clientInvoice.ServerCostMinor <= 0 || len(clientInvoice.Lines) != 2 || clientInvoice.Lines[0].BillableMegabytes != 1500 || !clientInvoice.Lines[1].Bonus {
 		t.Fatalf("client invoice = %#v", clientInvoice)
 	}
 	ownerInvoice := invoicesByEmail["owner@example.com"]
@@ -3792,6 +3890,7 @@ func TestSaveServerExpensePolicyUsesOnlyMonthlyServerPrice(t *testing.T) {
 	form.Set("monthly_server_expense", "75.00")
 	form.Set("currency", "EUR")
 	form.Set("free_site_threshold_mb", "100")
+	form.Set("billing_capacity_percent", "45")
 	request := httptest.NewRequest(http.MethodPost, "http://localhost/?server-settings", strings.NewReader(form.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	status := application.saveServerExpensePolicyFromForm(request)
@@ -3799,8 +3898,19 @@ func TestSaveServerExpensePolicyUsesOnlyMonthlyServerPrice(t *testing.T) {
 		t.Fatalf("save status = %q", status)
 	}
 	policy, found := (hostingandsupport.Store{DB: controlDatabase}).ServerExpensePolicy(context.Background(), "local", 500*expenses.DecimalGigabyte)
-	if !found || policy.Mode != expenses.ModeActual || policy.ActualMonthlyExpenseMinor != 7500 || expenses.CalculateMonthlyExpense(policy) != 7500 {
+	if !found || policy.Mode != expenses.ModeActual || policy.ActualMonthlyExpenseMinor != 7500 || expenses.CalculateMonthlyExpense(policy) != 7500 || policy.BillingCapacityPercent != 45 || expenses.BillingCostPerGBMinor(policy) != 33 {
 		t.Fatalf("saved expense policy = %+v, found=%t", policy, found)
+	}
+	// Invalid percentages must be rejected without replacing the persisted tariff.
+	form.Set("billing_capacity_percent", "101")
+	invalidRequest := httptest.NewRequest(http.MethodPost, "http://localhost/?server-settings", strings.NewReader(form.Encode()))
+	invalidRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if invalidStatus := application.saveServerExpensePolicyFromForm(invalidRequest); invalidStatus == status {
+		t.Fatalf("invalid billing share was accepted: %q", invalidStatus)
+	}
+	after, found := (hostingandsupport.Store{DB: controlDatabase}).ServerExpensePolicy(context.Background(), "local", 500*expenses.DecimalGigabyte)
+	if !found || after.BillingCapacityPercent != 45 {
+		t.Fatalf("invalid save replaced existing tariff: %+v found=%t", after, found)
 	}
 }
 
@@ -15998,7 +16108,8 @@ func TestSimplifiedExpensesShowsTestDriveUnderRegistrationAfterExplicitPermissio
 	}
 	body := rendered.String()
 	for _, expectedFragment := range []string{
-		`data-hosting-installation-tab="servers"`,
+		`data-server-root-target="servers"`,
+		`data-server-root-target="installations"`,
 		`data-hosting-installation-tab="temporary-sites"`,
 		`trial.sitebrush.example`,
 		`https://copied.example/`,
