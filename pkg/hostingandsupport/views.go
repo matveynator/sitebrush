@@ -1225,6 +1225,9 @@ func invoicesForInstallation(invoices []Invoice, installationID string) []Invoic
 // installation identity. The domain argument remains for existing callers,
 // but it never authorizes a historical invoice from another installation.
 func ServerInvoiceViewsForInstallation(invoices []Invoice, installationID string, _ map[string]struct{}) []ServerInvoiceView {
+	if strings.TrimSpace(installationID) == "" {
+		return nil
+	}
 	return ServerInvoiceViews(invoicesForInstallation(invoices, installationID), nil, nil)
 }
 
