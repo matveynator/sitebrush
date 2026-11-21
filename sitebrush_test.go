@@ -4617,9 +4617,9 @@ func TestDomainSettingsRendersOverviewAndDomainSetup(t *testing.T) {
 		}
 	}
 	customDomainIndex := strings.Index(body, "Connect your own second-level domain")
-	sslIndex := strings.Index(body, "SSL certificate")
-	backupIndex := strings.Index(body, "Site backup")
-	staticFoldersIndex := strings.Index(body, "Static folders")
+	sslIndex := strings.Index(body, "<p><strong>SSL certificate</strong></p>")
+	backupIndex := strings.Index(body, "data-settings-panel=\"backup\"")
+	staticFoldersIndex := strings.Index(body, "data-settings-panel=\"folders\"")
 	if customDomainIndex < 0 || sslIndex < 0 || backupIndex < 0 || staticFoldersIndex < 0 {
 		t.Fatalf("domain settings page missing ordered sections in %s", body)
 	}
