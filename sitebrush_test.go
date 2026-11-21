@@ -3859,6 +3859,7 @@ func TestSaveServerExpensePolicyUsesOnlyMonthlyServerPrice(t *testing.T) {
 	form.Set("monthly_server_expense", "75.00")
 	form.Set("currency", "EUR")
 	form.Set("free_site_threshold_mb", "100")
+	form.Set("billing_capacity_percent", "45")
 	request := httptest.NewRequest(http.MethodPost, "http://localhost/?server-settings", strings.NewReader(form.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	status := application.saveServerExpensePolicyFromForm(request)
@@ -3866,8 +3867,19 @@ func TestSaveServerExpensePolicyUsesOnlyMonthlyServerPrice(t *testing.T) {
 		t.Fatalf("save status = %q", status)
 	}
 	policy, found := (hostingandsupport.Store{DB: controlDatabase}).ServerExpensePolicy(context.Background(), "local", 500*expenses.DecimalGigabyte)
-	if !found || policy.Mode != expenses.ModeActual || policy.ActualMonthlyExpenseMinor != 7500 || expenses.CalculateMonthlyExpense(policy) != 7500 {
+	if !found || policy.Mode != expenses.ModeActual || policy.ActualMonthlyExpenseMinor != 7500 || expenses.CalculateMonthlyExpense(policy) != 7500 || policy.BillingCapacityPercent != 45 || expenses.BillingCostPerGBMinor(policy) != 33 {
 		t.Fatalf("saved expense policy = %+v, found=%t", policy, found)
+	}
+	// Invalid percentages must be rejected without replacing the persisted tariff.
+	form.Set("billing_capacity_percent", "101")
+	invalidRequest := httptest.NewRequest(http.MethodPost, "http://localhost/?server-settings", strings.NewReader(form.Encode()))
+	invalidRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if invalidStatus := application.saveServerExpensePolicyFromForm(invalidRequest); invalidStatus == status {
+		t.Fatalf("invalid billing share was accepted: %q", invalidStatus)
+	}
+	after, found := (hostingandsupport.Store{DB: controlDatabase}).ServerExpensePolicy(context.Background(), "local", 500*expenses.DecimalGigabyte)
+	if !found || after.BillingCapacityPercent != 45 {
+		t.Fatalf("invalid save replaced existing tariff: %+v found=%t", after, found)
 	}
 }
 
