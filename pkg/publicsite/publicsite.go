@@ -116,11 +116,13 @@ type Front struct {
 	public          func(http.ResponseWriter, *http.Request, bool) bool
 	handler         http.Handler
 	proxy           *httputil.ReverseProxy
+	backend         http.Handler
 }
 
 func NewFront(secret string, public func(http.ResponseWriter, *http.Request, bool) bool, stop <-chan struct{}, admission ...func(http.Handler) http.Handler) *Front {
 	front := &Front{pulls: make(chan observationPull, 1), events: make(chan publicObservation, 1024), losses: make(chan string, 64), observations: make(chan string, 64), tasks: make(chan stateTask, 128), stop: stop, secret: secret, public: public}
 	front.proxy = newProxy(front)
+	front.backend = LimitBackend(front.proxy)
 	front.handler = http.HandlerFunc(front.serveHTTP)
 	if len(admission) > 0 {
 		front.handler = admission[0](front.handler)
@@ -234,7 +236,8 @@ func (front *Front) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	target := &url.URL{Scheme: "http", Host: state.Address}
 	r = r.WithContext(context.WithValue(r.Context(), proxyTargetKey{}, target))
 	started = requesttiming.Start(r)
-	front.proxy.ServeHTTP(w, r)
+	requesttiming.Route(r, requesttiming.ProxyApplication)
+	front.backend.ServeHTTP(w, r)
 	requesttiming.Finish(r, requesttiming.ProxyBackend, started)
 }
 

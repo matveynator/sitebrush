@@ -4023,16 +4023,16 @@ func TestContextMenuUsesDirectEditorProfileAndDeleteActions(t *testing.T) {
 		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
 	}
 	body := response.Body.String()
-	for _, expectedFragment := range []string{"href='?visual'", "href='?text'", "href='?ai'", "data-sitebrush-action='delete'", "?delete=" + strconv.FormatInt(revisionID, 10), "data-sitebrush-action='protect_password'", "/p/static/lock.png", "Protect with password", "href='?profile'", "href='?analytics'", "/p/static/analytics.svg"} {
+	for _, expectedFragment := range []string{"href='?visual'", "href='?text'", "href='/?mcp'", "data-sitebrush-action='delete'", "?delete=" + strconv.FormatInt(revisionID, 10), "data-sitebrush-action='protect_password'", "/p/static/lock.png", "Protect with password", "href='?profile'", "href='?analytics'", "/p/static/analytics.svg"} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("context menu missing %q in %s", expectedFragment, body)
 		}
 	}
 	visualIndex := strings.Index(body, "href='?visual'")
 	textIndex := strings.Index(body, "href='?text'")
-	aiIndex := strings.Index(body, "href='?ai'")
-	if visualIndex < 0 || textIndex <= visualIndex || aiIndex <= textIndex {
-		t.Fatalf("editor menu order is not visual, text, AI: visual=%d text=%d ai=%d", visualIndex, textIndex, aiIndex)
+	assistantIndex := strings.Index(body, "href='/?mcp'")
+	if visualIndex < 0 || textIndex <= visualIndex || assistantIndex <= textIndex {
+		t.Fatalf("editor menu order is not visual, text, MCP: visual=%d text=%d ai=%d", visualIndex, textIndex, assistantIndex)
 	}
 	for _, expectedFragment := range []string{"href='https://sitebrush.com'", "class='SiteBrushContextMenuVersion' download>v.", "href='" + latestServerBinaryDownloadURL(runtime.GOOS, runtime.GOARCH) + "'", "SiteBrushMenuStorageUsage", "10.0 GB"} {
 		if !strings.Contains(body, expectedFragment) {
@@ -5994,8 +5994,18 @@ func TestLocalhostWithoutSiteDatabaseOpensRegistration(t *testing.T) {
 		response := httptest.NewRecorder()
 		prepareAccountMailCaptchaForTest(t, application, request)
 		application.route(response, request)
-		if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/?register" {
+		if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/?login" {
 			t.Fatalf("missing local database stale_session=%t status=%d location=%q body=%q", staleSession, response.Code, response.Header().Get("Location"), response.Body.String())
+		}
+		loginRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?login", nil)
+		loginRequest.RemoteAddr = request.RemoteAddr
+		if staleSession {
+			loginRequest.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "stale"})
+		}
+		loginResponse := httptest.NewRecorder()
+		application.route(loginResponse, loginRequest)
+		if loginResponse.Code != http.StatusSeeOther || loginResponse.Header().Get("Location") != "/?register" {
+			t.Fatalf("fresh local login did not open registration: %d %q", loginResponse.Code, loginResponse.Header().Get("Location"))
 		}
 	}
 	if _, err := os.Stat(filepath.Join(siteDatabaseRootPath(dbPath), domainStorageName("localhost")+".db")); !errors.Is(err, os.ErrNotExist) {
@@ -13177,7 +13187,7 @@ func TestAIEditorTemplateExposesFreeTierProviders(t *testing.T) {
 	}
 }
 
-func TestEditorExposesOnlyVisualTextAndAIRoutes(t *testing.T) {
+func TestEditorKeepsAIPageAndMenuConnectsAssistant(t *testing.T) {
 	aiTemplateBytes, err := embeddedWebFiles.ReadFile("web/edit_ai.html")
 	if err != nil {
 		t.Fatal(err)
@@ -13195,7 +13205,7 @@ func TestEditorExposesOnlyVisualTextAndAIRoutes(t *testing.T) {
 	}
 
 	menuScript := buildContextMenuScript(true, false, false, false, true, "/", "example.com", 0, 0, "", "", translationsForLanguageCode("en"))
-	for _, expectedPath := range []string{"href='?visual'", "href='?text'", "href='?ai'"} {
+	for _, expectedPath := range []string{"href='?visual'", "href='?text'", "href='/?mcp'"} {
 		if !strings.Contains(menuScript, expectedPath) {
 			t.Fatalf("context menu does not expose %q", expectedPath)
 		}
@@ -28634,14 +28644,24 @@ func TestUpdateDevelopmentSourceStartupIgnoresCachedExecutable(t *testing.T) {
 		t.Skip("requires a native development server build")
 	}
 	if root := os.Getenv("SITEBRUSH_TEST_DEV_SOURCE_ROOT"); root != "" {
-		ports, err := parseListenPorts(os.Getenv("SITEBRUSH_TEST_DEV_SOURCE_PORT"))
+		// Keep the socket bound from allocation through server startup. Closing
+		// a parent's ephemeral reservation permits unrelated clients to steal it.
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
+			t.Fatal(err)
+		}
+		defer listener.Close()
+		ports, err := parseListenPorts(strconv.Itoa(listener.Addr().(*net.TCPAddr).Port))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(os.Getenv("SITEBRUSH_TEST_DEV_SOURCE_ADDRESS_FILE"), []byte(listener.Addr().String()), 0600); err != nil {
 			t.Fatal(err)
 		}
 		boundary, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		go func() { _, _ = io.Copy(io.Discard, os.Stdin); cancel() }()
-		if err := runSupervisedSitebrush(boundary, serverRunConfig{StoragePath: root, DBPath: filepath.Join(root, defaultDBPath), ParsedPorts: ports, PortWasProvided: true}); err != nil {
+		if err := runSupervisedSitebrush(boundary, serverRunConfig{StoragePath: root, DBPath: filepath.Join(root, defaultDBPath), ParsedPorts: ports, PortWasProvided: true, InheritedHTTP: listener}); err != nil {
 			t.Fatal(err)
 		}
 		return
@@ -28656,20 +28676,15 @@ func TestUpdateDevelopmentSourceStartupIgnoresCachedExecutable(t *testing.T) {
 	if err := os.WriteFile(journalPath, journal, 0600); err != nil {
 		t.Fatal(err)
 	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
-	listener.Close()
 	outputPath := filepath.Join(t.TempDir(), "startup.log")
 	output, err := os.Create(outputPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer output.Close()
+	addressPath := filepath.Join(t.TempDir(), "listener.address")
 	command := exec.Command(os.Args[0], "-test.run=^TestUpdateDevelopmentSourceStartupIgnoresCachedExecutable$")
-	command.Env = append(os.Environ(), "SITEBRUSH_TEST_DEV_SOURCE_ROOT="+root, "SITEBRUSH_TEST_DEV_SOURCE_PORT="+port, "SITEBRUSH_SERVICE_MAIL_MODE=local")
+	command.Env = append(os.Environ(), "SITEBRUSH_TEST_DEV_SOURCE_ROOT="+root, "SITEBRUSH_TEST_DEV_SOURCE_ADDRESS_FILE="+addressPath, "SITEBRUSH_SERVICE_MAIL_MODE=local")
 	command.Stdout = output
 	command.Stderr = output
 	input, err := command.StdinPipe()
@@ -28707,11 +28722,20 @@ func TestUpdateDevelopmentSourceStartupIgnoresCachedExecutable(t *testing.T) {
 			t.Fatalf("development startup exited: %v\n%s", err, contents)
 		default:
 		}
-		response, err := client.Get("http://localhost:" + port + "/")
-		if err == nil {
-			response.Body.Close()
-			if response.StatusCode == http.StatusOK {
-				break
+		encodedAddress, addressErr := os.ReadFile(addressPath)
+		if addressErr != nil && !errors.Is(addressErr, os.ErrNotExist) {
+			t.Fatal(addressErr)
+		}
+		address := string(encodedAddress)
+		host, _, parseErr := net.SplitHostPort(address)
+		if parseErr == nil && host == "127.0.0.1" {
+			// Embedded assets prove HTTP readiness without account SQL or redirects.
+			response, requestErr := client.Get("http://" + address + "/p/static/visitor.js")
+			if requestErr == nil {
+				response.Body.Close()
+				if response.StatusCode == http.StatusOK {
+					break
+				}
 			}
 		}
 		if time.Now().After(deadline) {
@@ -35027,18 +35051,24 @@ func TestLocalhostPublicRootAndAuthenticatedMenuDuringCatalogPreload(t *testing.
 				}
 				response := httptest.NewRecorder()
 				handler.ServeHTTP(response, request)
-				if response.Code != http.StatusOK || response.Header().Get("Location") != "" || !strings.Contains(response.Body.String(), "public localhost home") {
-					t.Fatalf("bare localhost was redirected or lost public contents: %d %q", response.Code, response.Header().Get("Location"))
-				}
-				administratorMenu := strings.Contains(response.Body.String(), "initializeSitebrushContextMenuForAdmin")
-				if administratorMenu != (role == "owner") {
-					t.Fatalf("wrong menu for %s: administrator=%t", role, administratorMenu)
-				}
-				if role == "owner" && (response.Header().Get("Cache-Control") != "private, no-store" || strings.Contains(response.Body.String(), `data-menu="guest_menu.`)) {
-					t.Fatal("administrator HTML was cacheable or retained the guest bootstrap")
-				}
-				if ready && role != "owner" && (!strings.Contains(response.Body.String(), "/p/static/visitor.js") || !strings.Contains(response.Body.String(), `data-menu="guest_menu.`)) {
-					t.Fatal("published HTML lost its authenticated menu transport")
+				if !ready {
+					if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/?login" {
+						t.Fatalf("unpublished localhost entered dynamic root: %d", response.Code)
+					}
+				} else {
+					if response.Code != http.StatusOK || response.Header().Get("Location") != "" || !strings.Contains(response.Body.String(), "public localhost home") {
+						t.Fatalf("bare localhost was redirected or lost public contents: %d %q", response.Code, response.Header().Get("Location"))
+					}
+					administratorMenu := strings.Contains(response.Body.String(), "initializeSitebrushContextMenuForAdmin")
+					if administratorMenu != (role == "owner") {
+						t.Fatalf("wrong menu for %s: administrator=%t", role, administratorMenu)
+					}
+					if role == "owner" && (response.Header().Get("Cache-Control") != "private, no-store" || strings.Contains(response.Body.String(), `data-menu="guest_menu.`)) {
+						t.Fatal("administrator HTML was cacheable or retained the guest bootstrap")
+					}
+					if ready && role != "owner" && (!strings.Contains(response.Body.String(), "/p/static/visitor.js") || !strings.Contains(response.Body.String(), `data-menu="guest_menu.`)) {
+						t.Fatal("published HTML lost its authenticated menu transport")
+					}
 				}
 				configuration, err := websocket.NewConfig("ws"+strings.TrimPrefix(menuServer.URL, "http")+"/?sitebrush_menu_ws", "http://localhost:777")
 				if err != nil {
@@ -37060,5 +37090,484 @@ func TestPublicRAMFingerprintPublicationKeepsAdministratorIPRules(t *testing.T) 
 	}
 	if policy.PreparedPages["/"] == "" || len(policy.AllowedIPs) != 1 || policy.AllowedIPs[0] != "192.0.2.1" {
 		t.Fatal("fingerprints or administrator rules changed", policy.PreparedPages)
+	}
+}
+
+// The proxy backend is deliberately held while both listeners share one Front.
+// This reproduces the original transport/Host combination without load sleeps.
+func TestLoopbackEntryAndHTTPSStaticSurviveBlockedBackend(t *testing.T) {
+	stop := make(chan struct{})
+	defer close(stop)
+	root := t.TempDir()
+	application := &App{storagePath: root, storageRealRoot: root, publicBoundary: true, publicStaticMode: publicsite.StaticSnapshot, publicRAMCacheBytes: 1 << 20, publicStreamer: publicsite.NewStreamer(), db: panicSQLExecutor{t: t}}
+	filename := filepath.Join(application.domainStaticDir("sitebrush.com"), "index.html")
+	if err := os.MkdirAll(filepath.Dir(filename), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filename, []byte("<html><head></head><body>isolated publication</body></html>"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	policy := publicsite.Policy{Domain: "sitebrush.com", ServerOwner: true, Layouts: map[string]string{"/": ""}}
+	if err := application.preparePublicRAMSources(&policy); err != nil {
+		t.Fatal(err)
+	}
+	if err := publicsite.Write(root, policy); err != nil {
+		t.Fatal(err)
+	}
+	application.publicCatalog = publicsite.NewCatalog(root, stop, application.publicRuntimeOptions())
+	if err := application.publicCatalog.SetMemory(true); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{}, publicsite.BackendLimit)
+	release := make(chan struct{})
+	backend := httptest.NewServer(publicsite.RestoreRequest(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		started <- struct{}{}
+		select {
+		case <-release:
+		case <-request.Context().Done():
+		}
+	}), "entry-test"))
+	defer backend.Close()
+	defer close(release)
+	front := newPublicHTTPFront(application, "entry-test", stop)
+	if err := front.Set(strings.TrimPrefix(backend.URL, "http://"), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := front.PolicyEnabled(); err != nil {
+		t.Fatal(err)
+	}
+	timings := requesttiming.New(stop)
+	listener := httptest.NewServer(timings.Middleware(front))
+	defer listener.Close()
+	secureListener := httptest.NewTLSServer(timings.Middleware(front))
+	defer secureListener.Close()
+	client := listener.Client()
+	client.Timeout = 5 * time.Second
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	secureClient := secureListener.Client()
+	secureClient.Timeout = 5 * time.Second
+	boundary, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dynamicResults := make(chan error, publicsite.BackendLimit)
+	for index := 0; index < publicsite.BackendLimit; index++ {
+		go func() {
+			request, _ := http.NewRequestWithContext(boundary, "GET", listener.URL+"/?login", nil)
+			request.Host = "127.0.0.1"
+			response, err := client.Do(request)
+			if response != nil {
+				response.Body.Close()
+			}
+			dynamicResults <- err
+		}()
+		select {
+		case <-started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("backend barrier was not reached")
+		}
+	}
+	request, _ := http.NewRequest("GET", listener.URL+"/?login", nil)
+	request.Host = "127.0.0.1"
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != 503 || response.Header.Get("Retry-After") != "1" {
+		t.Fatal("backend did not shed overflow", response.StatusCode)
+	}
+	results := make(chan error, 96)
+	for index := 0; index < 96; index++ {
+		go func(index int) {
+			target, hostname, expected := listener.URL, "127.0.0.1", http.StatusSeeOther
+			selectedClient := client
+			if index%3 == 0 {
+				target, hostname, expected, selectedClient = secureListener.URL, "sitebrush.com", http.StatusOK, secureClient
+			}
+			if index%3 == 1 {
+				hostname, expected = "unknown.invalid", http.StatusNotFound
+			}
+			request, _ := http.NewRequest("GET", target+"/", nil)
+			request.Host = hostname
+			response, err := selectedClient.Do(request)
+			if err == nil {
+				body, readErr := io.ReadAll(response.Body)
+				response.Body.Close()
+				err = readErr
+				if response.StatusCode != expected {
+					err = fmt.Errorf("host=%s returned %d, want %d", hostname, response.StatusCode, expected)
+				}
+				if expected == 200 && !strings.Contains(string(body), "isolated publication") {
+					err = errors.New("published HTTPS body changed")
+				}
+				if expected == 303 && response.Header.Get("Location") != "/?login" {
+					err = errors.New("loopback did not choose deterministic entry")
+				}
+			}
+			results <- err
+		}(index)
+	}
+	for index := 0; index < 96; index++ {
+		select {
+		case err := <-results:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("public listeners depend on blocked backend")
+		}
+	}
+	cancel()
+	for index := 0; index < publicsite.BackendLimit; index++ {
+		select {
+		case <-dynamicResults:
+		case <-time.After(5 * time.Second):
+			t.Fatal("backend request ignored disconnection")
+		}
+	}
+	report, err := timings.Snapshot(stop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Stages[requesttiming.LocalIPEntry].Count != 32 || report.Stages[requesttiming.UnknownHost].Count != 32 || report.Stages[requesttiming.PublicStaticRAM].Count != 32 {
+		t.Fatal("paths were not measured independently")
+	}
+}
+
+func TestLocalIPEntryNeverConsultsControlOrSiteDatabase(t *testing.T) {
+	stop := make(chan struct{})
+	defer close(stop)
+	// No consumer exists for these DB contacts. Any SQL attempt would wait.
+	dispatcher := &serverControlDatabaseDispatcher{readRequests: make(chan serverControlDatabaseAccessRequest), stop: make(chan struct{}), stopped: make(chan struct{})}
+	application := &App{storagePath: t.TempDir(), controlDatabase: dispatcher, db: panicSQLExecutor{t: t}}
+	application.publicCatalog = publicsite.NewCatalog(application.storagePath, stop)
+	if err := application.publicCatalog.SetMemory(true); err != nil {
+		t.Fatal(err)
+	}
+	handler := application.siteHTTPHandler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("entry reached router") }))
+	for _, host := range []string{"127.0.0.1", "127.0.0.2", "[::1]", "localhost", "46.4.4.46"} {
+		for _, method := range []string{"GET", "HEAD"} {
+			request := httptest.NewRequest(method, "http://"+host+"/", nil)
+			request.RemoteAddr = "127.0.0.1:12345"
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != 303 || response.Header().Get("Location") != "/?login" {
+				t.Fatalf("%s %s: %d", method, host, response.Code)
+			}
+		}
+	}
+	// A forged local Host over an external peer never grants local setup rights.
+	for _, header := range []string{"", "Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Real-IP"} {
+		request := httptest.NewRequest("GET", "http://127.0.0.1/", nil)
+		request.RemoteAddr = "203.0.113.5:1234"
+		if header != "" {
+			request.Header.Set(header, "127.0.0.1")
+		}
+		if localAccountRequest(request) {
+			t.Fatal("forged local privilege", header)
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != 303 {
+			t.Fatal("external IP entry lost its setup route")
+		}
+	}
+}
+
+func TestAccountDatabaseErrorsDoNotOfferRegistration(t *testing.T) {
+	application, database := newTestApplication(t)
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{"login", "register", "setup"} {
+		request := httptest.NewRequest("GET", "https://localhost/?"+action, nil)
+		response := httptest.NewRecorder()
+		switch action {
+		case "login":
+			application.login(response, request)
+		case "register":
+			application.registerPage(response, request)
+		case "setup":
+			request.Method = "POST"
+			application.setupAdmin(response, request)
+		}
+		if response.Code != 503 || response.Header().Get("Location") != "" {
+			t.Fatalf("%s treated SQL failure as absence: %d %q", action, response.Code, response.Header().Get("Location"))
+		}
+	}
+	if !application.hasAdmin(context.Background(), "localhost") {
+		t.Fatal("legacy absence check granted registration on SQL failure")
+	}
+}
+
+func TestDatabaseQueueOverflowAndCancellationBeforeClaim(t *testing.T) {
+	for _, debug := range []bool{false, true} {
+		t.Run(fmt.Sprint(debug), func(t *testing.T) {
+			stop := make(chan struct{})
+			defer close(stop)
+			timings := requesttiming.New(stop)
+			database := &siteFileDatabase{readQueue: make(chan siteDBOperation, 1), stopped: make(chan struct{}), debug: debug}
+			database.readQueue <- siteDBOperation{}
+			operation := siteDBOperation{kind: siteDBWorkloadRead, run: func(context.Context, *sql.DB) siteDBOperationResponse {
+				t.Error("unclaimed operation executed")
+				return siteDBOperationResponse{}
+			}}
+			if result := database.runOperation(requesttiming.WithCollector(context.Background(), timings), operation); !errors.Is(result.err, errDatabaseQueueFull) {
+				t.Fatal("full site queue did not shed", result.err)
+			}
+			<-database.readQueue
+			boundary, cancel := context.WithCancel(requesttiming.WithCollector(context.Background(), timings))
+			result := make(chan siteDBOperationResponse, 1)
+			go func() { result <- database.runOperation(boundary, operation) }()
+			queued := <-database.readQueue
+			cancel()
+			select {
+			case result := <-result:
+				if !errors.Is(result.err, context.Canceled) {
+					t.Fatal(result.err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("queued task ignored cancellation")
+			}
+			database.completeOperationWithDatabase(queued, nil)
+			report, err := timings.Snapshot(stop)
+			if err != nil {
+				t.Fatal(err)
+			}
+			counter := report.Stages[requesttiming.SiteDBQueue]
+			if counter.Count != 2 || counter.Statuses[503] != 1 || counter.Statuses[499] != 1 || report.Stages[requesttiming.SiteDBExecution].Count != 0 {
+				t.Fatal("queue and execution were conflated")
+			}
+		})
+	}
+	dispatcher := &serverControlDatabaseDispatcher{readRequests: make(chan serverControlDatabaseAccessRequest, 1), stop: make(chan struct{}), stopped: make(chan struct{})}
+	dispatcher.readRequests <- serverControlDatabaseAccessRequest{}
+	if err := dispatcher.execute(context.Background(), serverControlDatabaseRead, "overflow", func(*sql.DB) error { t.Error("overflow executed"); return nil }); !errors.Is(err, errDatabaseQueueFull) {
+		t.Fatal("full control queue did not shed", err)
+	}
+}
+
+func TestCanceledControlQueueSkipsWorkAndRecordsExecutionSeparately(t *testing.T) {
+	dispatcher, err := startServerControlDatabaseDispatcher(filepath.Join(t.TempDir(), "control.db"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dispatcher.Close()
+	stop := make(chan struct{})
+	defer close(stop)
+	timings := requesttiming.New(stop)
+	started := make(chan struct{}, serverControlDatabaseReaderCount)
+	release := make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	results := make(chan error, serverControlDatabaseReaderCount)
+	for index := 0; index < serverControlDatabaseReaderCount; index++ {
+		go func() {
+			results <- dispatcher.execute(requesttiming.WithCollector(context.Background(), timings), serverControlDatabaseRead, "barrier", func(*sql.DB) error { started <- struct{}{}; <-release; return nil })
+		}()
+	}
+	for index := 0; index < serverControlDatabaseReaderCount; index++ {
+		<-started
+	}
+	boundary, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	canceled := make(chan error, 1)
+	ran := make(chan struct{}, 1)
+	go func() {
+		canceled <- dispatcher.execute(boundary, serverControlDatabaseRead, "cancel-before-claim", func(*sql.DB) error { ran <- struct{}{}; return nil })
+	}()
+	queued := <-dispatcher.readRequests
+	cancel()
+	select {
+	case err := <-canceled:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("control queue ignored cancellation")
+	}
+	dispatcher.readRequests <- queued
+	close(release)
+	for index := 0; index < serverControlDatabaseReaderCount; index++ {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := dispatcher.execute(context.Background(), serverControlDatabaseRead, "after-barrier", func(*sql.DB) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ran:
+		t.Fatal("abandoned callback executed")
+	default:
+	}
+	report, err := timings.Snapshot(stop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Stages[requesttiming.ControlDBQueue].Count != serverControlDatabaseReaderCount || report.Stages[requesttiming.ControlDBExecution].Count != serverControlDatabaseReaderCount {
+		t.Fatal("missing independent control DB observations")
+	}
+}
+
+func TestLocalAccountControlErrorFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	databasePath := filepath.Join(root, "control.db")
+	dispatcher, err := startServerControlDatabaseDispatcher(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dispatcher.Close()
+	if err := dispatcher.execute(context.Background(), serverControlDatabaseWrite, "break-owner-table", func(database *sql.DB) error { _, err := database.Exec(`DROP TABLE server_managers`); return err }); err != nil {
+		t.Fatal(err)
+	}
+	application := &App{storagePath: root, storageRealRoot: root, dbPath: databasePath, controlDatabase: dispatcher, db: panicSQLExecutor{t: t}}
+	request := httptest.NewRequest("GET", "http://127.0.0.1/?login", nil)
+	request.RemoteAddr = "127.0.0.1:12345"
+	response := httptest.NewRecorder()
+	application.siteHTTPHandler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("failed owner lookup reached account operation") })).ServeHTTP(response, request)
+	if response.Code != 503 || response.Header().Get("Location") != "" {
+		t.Fatal("failed owner lookup enabled registration", response.Code)
+	}
+}
+
+func TestAdminContextMenuOrderSeparatorsAndLanguages(t *testing.T) {
+	type menuFixture struct {
+		Language                                     string
+		Frozen, Protected, Manager, Revision, Logout bool
+		Builder, Normalize                           string
+	}
+	var fixtures []menuFixture
+	for language := range translationCatalog {
+		for _, frozen := range []bool{false, true} {
+			for _, protected := range []bool{false, true} {
+				for _, permissions := range []struct{ manager, revision, logout bool }{{true, true, true}, {false, true, true}, {true, false, false}, {false, false, false}} {
+					revisionID := 0
+					if permissions.revision {
+						revisionID = 7
+					}
+					script := buildContextMenuScript(true, permissions.manager, frozen, protected, permissions.logout, "/docs/current", "example.org", revisionID, 3, "", "menu-csrf", translationsForLanguageCode(language))
+					builderStart := strings.Index(script, "function buildSitebrushAdminMenuEntries(")
+					builderEnd := strings.Index(script[builderStart:], "function sitebrushContextMenuWasOpenedByMouse(") + builderStart
+					normalizeStart := strings.Index(script, "function normalizeSitebrushMenuLinks(")
+					normalizeEnd := strings.Index(script[normalizeStart:], "function sitebrushMenuViewportNumber(") + normalizeStart
+					if !strings.Contains(script, `if (actionName === "copy_site") {`+"\n"+`      openCopySiteDialog();`) || !strings.Contains(script, `submitPasswordActionForm("?page_password=protect", passwordText)`) || !strings.Contains(script, `const currentPagePath = "/docs/current"`) {
+						t.Fatal("contextual handlers changed")
+					}
+					fixtures = append(fixtures, menuFixture{Language: language, Frozen: frozen, Protected: protected, Manager: permissions.manager, Revision: permissions.revision, Logout: permissions.logout, Builder: script[builderStart:builderEnd], Normalize: script[normalizeStart:normalizeEnd]})
+				}
+			}
+		}
+	}
+	payload, err := json.Marshal(fixtures)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("node", "-e", `
+const fs = require("node:fs");
+const fixtures = JSON.parse(fs.readFileSync(0, "utf8"));
+const responses = fixtures.map(fixture => {
+ const builder = new Function("currentDomainName", fixture.Builder + "\nreturn buildSitebrushAdminMenuEntries;")("example.org");
+ const normalize = new Function(fixture.Normalize + "\nreturn normalizeSitebrushMenuLinks;")();
+ const contextualLinks = ["?visual", "?text", "?revisions", "/?mcp"].map(href => ({href, getAttribute() {return this.href;}, setAttribute(name, nextHref) {this.href = nextHref;}}));
+ normalize({querySelectorAll() {return contextualLinks;}}, "/docs/current");
+ return {entries: builder(false), mouse: builder(true).join(""), links: contextualLinks.map(link => link.href)};
+});
+process.stdout.write(JSON.stringify(responses));`)
+	command.Stdin = bytes.NewReader(payload)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("menu JavaScript: %v: %s", err, output)
+	}
+	var responses []struct {
+		Entries []string
+		Mouse   string
+		Links   []string
+	}
+	if err := json.Unmarshal(output, &responses); err != nil {
+		t.Fatal(err)
+	}
+	if len(responses) != len(fixtures) {
+		t.Fatal("missing menu results")
+	}
+	for index, fixture := range fixtures {
+		expected := []string{"?visual", "?text", "/?mcp"}
+		if fixture.Revision {
+			expected = append(expected, "delete")
+		}
+		expected = append(expected, "?revisions")
+		if fixture.Frozen {
+			expected = append(expected, "publish", "unfreeze")
+		} else {
+			expected = append(expected, "freeze")
+		}
+		if fixture.Protected {
+			expected = append(expected, "remove_password_protection")
+		} else {
+			expected = append(expected, "protect_password")
+		}
+		expected = append(expected, "copy_site", "tree", "?files", "?analytics", "?settings")
+		if fixture.Manager {
+			expected = append(expected, "?server-settings")
+		}
+		expected = append(expected, "?profile")
+		if fixture.Logout {
+			expected = append(expected, "?logout")
+		}
+		var actual []string
+		for _, entry := range responses[index].Entries {
+			if entry == "" || !strings.HasPrefix(entry, "<li ") || strings.Contains(entry, "SiteBrushDomainMenuItem") || strings.Contains(entry, "ContextMenuCopyright") {
+				continue
+			}
+			tokenizer := htmlparser.NewTokenizer(strings.NewReader(entry))
+			separated := false
+			for tokenizer.Next() != htmlparser.ErrorToken {
+				token := tokenizer.Token()
+				if token.Data == "li" {
+					separated = false
+				}
+				action := ""
+				for _, attribute := range token.Attr {
+					if token.Data == "li" && attribute.Key == "class" {
+						separated = strings.Contains(attribute.Val, "SiteBrushSeparatedMenuItem")
+					}
+					if attribute.Key == "href" || attribute.Key == "data-sitebrush-action" {
+						action = attribute.Val
+					}
+				}
+				if action == "" {
+					continue
+				}
+				wantSeparator := action == "freeze" || action == "publish" || action == "copy_site" || action == "tree" || action == "?analytics" || action == "?server-settings" || action == "?profile"
+				if separated != wantSeparator {
+					t.Fatalf("%s %s: separator=%t want=%t", fixture.Language, action, separated, wantSeparator)
+				}
+				actual = append(actual, action)
+			}
+		}
+		if !reflect.DeepEqual(actual, expected) {
+			t.Fatalf("language=%s frozen=%t protected=%t manager=%t revision=%t logout=%t: order=%v want=%v", fixture.Language, fixture.Frozen, fixture.Protected, fixture.Manager, fixture.Revision, fixture.Logout, actual, expected)
+		}
+		if !reflect.DeepEqual(responses[index].Links, []string{"/docs/current?visual", "/docs/current?text", "/docs/current?revisions", "/?mcp"}) {
+			t.Fatal("page context or root MCP link changed", responses[index].Links)
+		}
+		translations := translationsForLanguageCode(fixture.Language)
+		for _, key := range []string{"menu_connect_ai", "menu_copy_site"} {
+			label := translationCatalog[fixture.Language][key]
+			if label == "" || !strings.Contains(strings.Join(responses[index].Entries, ""), label) {
+				t.Fatalf("%s missing localized %s", fixture.Language, key)
+			}
+		}
+		if strings.Contains(strings.Join(responses[index].Entries, ""), "SiteBrushStandardMenuHint") || !strings.Contains(responses[index].Mouse, translations["menu_standard_context_hint"]) {
+			t.Fatal("browser menu hint behavior changed")
+		}
+	}
+	guest := buildContextMenuScript(false, false, false, false, false, "/docs/current", "example.org", 0, 0, "", "", translationsForLanguageCode("en"))
+	if strings.Contains(guest, "buildSitebrushAdminMenuEntries") || strings.Contains(guest, "data-sitebrush-action='copy_site'") {
+		t.Fatal("guest received administrator actions")
 	}
 }
