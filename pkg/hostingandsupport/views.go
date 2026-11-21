@@ -103,6 +103,10 @@ type ServerView struct {
 	SharedCostPerGBLabel   string
 	BillingCapacityLabel   string
 	BillingCostPerGBLabel  string
+	BillingPaidLabel       string
+	BillingOpenLabel       string
+	BillingOverdueLabel    string
+	BillingOtherCurrencies int
 	BillableUsedLabel      string
 	AllocatedMonthLabel    string
 	CapacityUsedPercent    int
@@ -156,6 +160,11 @@ type ServerClientView struct {
 
 type ServerInvoiceView struct {
 	Number         string
+	Status         string
+	Currency       string
+	AmountMinor    int64
+	PaidAt         string
+	DueAt          string
 	CustomerEmail  string
 	Domain         string
 	PlanName       string
@@ -631,6 +640,34 @@ func ApplyServerCostView(server *ServerView, policy expenses.ServerPolicy, invoi
 	server.CoveredMonthLabel = MoneyLabel(coveredMinor, server.BillingCurrency)
 	server.UncoveredMonthLabel = MoneyLabel(uncoveredMinor, server.BillingCurrency)
 	server.ReserveLabel = MoneyLabel(reserveMinor, server.BillingCurrency)
+	applyServerBillingDashboard(server)
+}
+
+// Invoice snapshots stay unchanged when a server tariff changes. Dashboard
+// totals count only this server's invoice view and never sum currencies.
+func applyServerBillingDashboard(server *ServerView) {
+	paid, open, overdue := int64(0), int64(0), int64(0)
+	otherCurrency := 0
+	today := time.Now().UTC().Format("2006-01-02")
+	month := time.Now().UTC().Format("2006-01")
+	for _, invoice := range server.Invoices {
+		if invoice.AmountMinor <= 0 { continue }
+		if !strings.EqualFold(invoice.Currency, server.BillingCurrency) {
+			otherCurrency++
+			continue
+		}
+		switch invoice.Status {
+		case "paid":
+			if strings.HasPrefix(invoice.PaidAt, month) { paid += invoice.AmountMinor }
+		case "issued", "payment_error":
+			open += invoice.AmountMinor
+			if len(invoice.DueAt) >= len(today) && invoice.DueAt[:len(today)] < today { overdue += invoice.AmountMinor }
+		}
+	}
+	server.BillingPaidLabel = MoneyLabel(paid, server.BillingCurrency)
+	server.BillingOpenLabel = MoneyLabel(open, server.BillingCurrency)
+	server.BillingOverdueLabel = MoneyLabel(overdue, server.BillingCurrency)
+	server.BillingOtherCurrencies = otherCurrency
 }
 
 func ServerSystemMetricViews(clientHosting ClientHosting) []ServerMetricView {
@@ -1129,6 +1166,11 @@ func ServerInvoiceViews(invoices []Invoice, domains map[string]struct{}, emails 
 		statusLabel := InvoiceStatusLabel(invoice.Status)
 		views = append(views, ServerInvoiceView{
 			Number:         invoice.Number,
+			Status:         invoice.Status,
+			Currency:       invoice.Currency,
+			AmountMinor:    invoice.AmountMinor,
+			PaidAt:         invoice.PaidAt,
+			DueAt:          invoice.DueAt,
 			CustomerEmail:  invoice.CustomerEmail,
 			Domain:         invoice.Domain,
 			PlanName:       firstNonEmpty(invoice.PlanName, "обслуживание сайта"),
