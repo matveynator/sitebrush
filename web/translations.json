@@ -1,5 +1,9 @@
 {
   "en": {
+    "server_ui_network": "Network and public IPs",
+    "server_ui_navigation": "Server navigation",
+    "server_ui_overview": "Overview and costs",
+    "server_ui_overview_hint": "Server health, performance, mail and hosting costs",
     "domain_settings_nav_overview": "Overview",
     "domain_settings_nav_domains": "Domains and HTTPS",
     "domain_settings_overview_intro": "Check website status and manage its settings.",
@@ -1831,6 +1835,10 @@
     "site_copy_use_found": "Use downloaded content"
   },
   "fr": {
+    "server_ui_network": "Réseau et adresses IP publiques",
+    "server_ui_navigation": "Navigation du serveur",
+    "server_ui_overview": "Vue d’ensemble et coûts",
+    "server_ui_overview_hint": "État du serveur, performances, courrier et frais d’hébergement",
     "domain_settings_nav_overview": "Vue d’ensemble",
     "domain_settings_nav_domains": "Domaines et HTTPS",
     "domain_settings_overview_intro": "Vérifiez l’état du site et gérez ses paramètres.",
@@ -3427,6 +3435,10 @@
     "site_copy_use_found": "Utiliser le contenu téléchargé"
   },
   "ru": {
+    "server_ui_network": "Сеть и публичные IP",
+    "server_ui_navigation": "Разделы настроек сервера",
+    "server_ui_overview": "Обзор и расходы",
+    "server_ui_overview_hint": "Состояние сервера, производительность, почта и стоимость хостинга",
     "domain_settings_nav_overview": "Обзор",
     "domain_settings_nav_domains": "Домены и HTTPS",
     "domain_settings_overview_intro": "Проверяйте состояние сайта и управляйте его настройками.",
@@ -5258,6 +5270,10 @@
     "site_copy_use_found": "Использовать скачанное"
   },
   "ja": {
+    "server_ui_network": "ネットワークと公開IP",
+    "server_ui_navigation": "サーバーナビゲーション",
+    "server_ui_overview": "概要と費用",
+    "server_ui_overview_hint": "サーバーの状態、パフォーマンス、メールとホスティング費用",
     "domain_settings_nav_overview": "概要",
     "domain_settings_nav_domains": "ドメインとHTTPS",
     "domain_settings_overview_intro": "サイトの状態を確認し、設定を管理します。",
@@ -6850,6 +6866,10 @@
     "site_copy_use_found": "ダウンロード済みの内容を使用"
   },
   "it": {
+    "server_ui_network": "Rete e IP pubblici",
+    "server_ui_navigation": "Navigazione del server",
+    "server_ui_overview": "Panoramica e costi",
+    "server_ui_overview_hint": "Stato del server, prestazioni, posta e costi di hosting",
     "domain_settings_nav_overview": "Panoramica",
     "domain_settings_nav_domains": "Domini e HTTPS",
     "domain_settings_overview_intro": "Controlla lo stato del sito e gestisci le impostazioni.",
@@ -8442,6 +8462,10 @@
     "site_copy_use_found": "Usa i contenuti scaricati"
   },
   "sv": {
+    "server_ui_network": "Nätverk och publika IP-adresser",
+    "server_ui_navigation": "Servernavigering",
+    "server_ui_overview": "Översikt och kostnader",
+    "server_ui_overview_hint": "Serverstatus, prestanda, e-post och driftkostnader",
     "domain_settings_nav_overview": "Översikt",
     "domain_settings_nav_domains": "Domäner och HTTPS",
     "domain_settings_overview_intro": "Kontrollera webbplatsens status och hantera inställningarna.",
@@ -10034,6 +10058,10 @@
     "site_copy_use_found": "Använd hämtat innehåll"
   },
   "fi": {
+    "server_ui_network": "Verkko ja julkiset IP-osoitteet",
+    "server_ui_navigation": "Palvelimen navigointi",
+    "server_ui_overview": "Yleiskatsaus ja kustannukset",
+    "server_ui_overview_hint": "Palvelimen tila, suorituskyky, sähköposti ja ylläpitokustannukset",
     "domain_settings_nav_overview": "Yleiskatsaus",
     "domain_settings_nav_domains": "Verkkotunnukset ja HTTPS",
     "domain_settings_overview_intro": "Tarkista sivuston tila ja hallitse asetuksia.",
@@ -11626,6 +11654,10 @@
     "site_copy_use_found": "Käytä ladattua sisältöä"
   },
   "mn": {
+    "server_ui_network": "Сүлжээ ба нийтийн IP хаяг",
+    "server_ui_navigation": "Серверийн навигаци",
+    "server_ui_overview": "Тойм ба зардал",
+    "server_ui_overview_hint": "Серверийн төлөв, гүйцэтгэл, шуудан ба хостингийн зардал",
     "domain_settings_nav_overview": "Тойм",
     "domain_settings_nav_domains": "Домэйн ба HTTPS",
     "domain_settings_overview_intro": "Сайтын төлөвийг шалгаж, тохиргоог удирдана уу.",
@@ -13218,6 +13250,10 @@
     "site_copy_use_found": "Татсан агуулгыг ашиглах"
   },
   "zh": {
+    "server_ui_network": "网络与公网 IP",
+    "server_ui_navigation": "服务器导航",
+    "server_ui_overview": "概览与费用",
+    "server_ui_overview_hint": "服务器状态、性能、邮件和托管费用",
     "domain_settings_nav_overview": "概览",
     "domain_settings_nav_domains": "域名与 HTTPS",
     "domain_settings_overview_intro": "查看网站状态并管理设置。",
@@ -14810,6 +14846,10 @@
     "site_copy_use_found": "使用已下载的内容"
   },
   "he": {
+    "server_ui_network": "רשת וכתובות IP ציבוריות",
+    "server_ui_navigation": "ניווט בשרת",
+    "server_ui_overview": "סקירה ועלויות",
+    "server_ui_overview_hint": "מצב השרת, ביצועים, דואר ועלויות אירוח",
     "domain_settings_nav_overview": "סקירה כללית",
     "domain_settings_nav_domains": "דומיינים ו-HTTPS",
     "domain_settings_overview_intro": "בדיקת מצב האתר וניהול ההגדרות שלו.",
@@ -16402,6 +16442,10 @@
     "site_copy_use_found": "שימוש בתוכן שהורד"
   },
   "fa": {
+    "server_ui_network": "شبکه و IPهای عمومی",
+    "server_ui_navigation": "پیمایش سرور",
+    "server_ui_overview": "نمای کلی و هزینه‌ها",
+    "server_ui_overview_hint": "وضعیت سرور، عملکرد، ایمیل و هزینه‌های میزبانی",
     "domain_settings_nav_overview": "نمای کلی",
     "domain_settings_nav_domains": "دامنه‌ها و HTTPS",
     "domain_settings_overview_intro": "وضعیت سایت را بررسی و تنظیمات آن را مدیریت کنید.",
@@ -17994,6 +18038,10 @@
     "site_copy_use_found": "استفاده از محتوای دریافت‌شده"
   },
   "de": {
+    "server_ui_network": "Netzwerk und öffentliche IPs",
+    "server_ui_navigation": "Servernavigation",
+    "server_ui_overview": "Übersicht und Kosten",
+    "server_ui_overview_hint": "Serverstatus, Leistung, E-Mail und Hostingkosten",
     "domain_settings_nav_overview": "Übersicht",
     "domain_settings_nav_domains": "Domains und HTTPS",
     "domain_settings_overview_intro": "Prüfen Sie den Website-Status und verwalten Sie die Einstellungen.",
@@ -19586,6 +19634,10 @@
     "site_copy_use_found": "Heruntergeladene Inhalte verwenden"
   },
   "tr": {
+    "server_ui_network": "Ağ ve genel IP adresleri",
+    "server_ui_navigation": "Sunucu gezintisi",
+    "server_ui_overview": "Genel bakış ve maliyetler",
+    "server_ui_overview_hint": "Sunucu durumu, performans, e-posta ve barındırma maliyetleri",
     "domain_settings_nav_overview": "Genel bakış",
     "domain_settings_nav_domains": "Alan adları ve HTTPS",
     "domain_settings_overview_intro": "Site durumunu kontrol edin ve ayarları yönetin.",
@@ -21178,6 +21230,10 @@
     "site_copy_use_found": "İndirilen içeriği kullan"
   },
   "kk": {
+    "server_ui_network": "Желі және жария IP мекенжайлар",
+    "server_ui_navigation": "Сервер навигациясы",
+    "server_ui_overview": "Шолу және шығындар",
+    "server_ui_overview_hint": "Сервер күйі, өнімділігі, пошта және хостинг шығындары",
     "domain_settings_nav_overview": "Шолу",
     "domain_settings_nav_domains": "Домендер және HTTPS",
     "domain_settings_overview_intro": "Сайт күйін тексеріп, параметрлерін басқарыңыз.",
@@ -22770,6 +22826,10 @@
     "site_copy_use_found": "Жүктелген мазмұнды пайдалану"
   },
   "es": {
+    "server_ui_network": "Red e IP públicas",
+    "server_ui_navigation": "Navegación del servidor",
+    "server_ui_overview": "Resumen y costes",
+    "server_ui_overview_hint": "Estado del servidor, rendimiento, correo y costes de alojamiento",
     "domain_settings_nav_overview": "Resumen",
     "domain_settings_nav_domains": "Dominios y HTTPS",
     "domain_settings_overview_intro": "Consulta el estado del sitio y gestiona sus ajustes.",
@@ -24362,6 +24422,10 @@
     "site_copy_use_found": "Usar el contenido descargado"
   },
   "pt": {
+    "server_ui_network": "Rede e IPs públicos",
+    "server_ui_navigation": "Navegação do servidor",
+    "server_ui_overview": "Visão geral e custos",
+    "server_ui_overview_hint": "Estado do servidor, desempenho, e-mail e custos de hospedagem",
     "domain_settings_nav_overview": "Visão geral",
     "domain_settings_nav_domains": "Domínios e HTTPS",
     "domain_settings_overview_intro": "Verifique o estado do site e gerencie as configurações.",
