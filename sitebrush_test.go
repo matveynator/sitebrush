@@ -28644,14 +28644,24 @@ func TestUpdateDevelopmentSourceStartupIgnoresCachedExecutable(t *testing.T) {
 		t.Skip("requires a native development server build")
 	}
 	if root := os.Getenv("SITEBRUSH_TEST_DEV_SOURCE_ROOT"); root != "" {
-		ports, err := parseListenPorts(os.Getenv("SITEBRUSH_TEST_DEV_SOURCE_PORT"))
+		// Keep the socket bound from allocation through server startup. Closing
+		// a parent's ephemeral reservation permits unrelated clients to steal it.
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
+			t.Fatal(err)
+		}
+		defer listener.Close()
+		ports, err := parseListenPorts(strconv.Itoa(listener.Addr().(*net.TCPAddr).Port))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(os.Getenv("SITEBRUSH_TEST_DEV_SOURCE_ADDRESS_FILE"), []byte(listener.Addr().String()), 0600); err != nil {
 			t.Fatal(err)
 		}
 		boundary, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		go func() { _, _ = io.Copy(io.Discard, os.Stdin); cancel() }()
-		if err := runSupervisedSitebrush(boundary, serverRunConfig{StoragePath: root, DBPath: filepath.Join(root, defaultDBPath), ParsedPorts: ports, PortWasProvided: true}); err != nil {
+		if err := runSupervisedSitebrush(boundary, serverRunConfig{StoragePath: root, DBPath: filepath.Join(root, defaultDBPath), ParsedPorts: ports, PortWasProvided: true, InheritedHTTP: listener}); err != nil {
 			t.Fatal(err)
 		}
 		return
@@ -28666,20 +28676,15 @@ func TestUpdateDevelopmentSourceStartupIgnoresCachedExecutable(t *testing.T) {
 	if err := os.WriteFile(journalPath, journal, 0600); err != nil {
 		t.Fatal(err)
 	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
-	listener.Close()
 	outputPath := filepath.Join(t.TempDir(), "startup.log")
 	output, err := os.Create(outputPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer output.Close()
+	addressPath := filepath.Join(t.TempDir(), "listener.address")
 	command := exec.Command(os.Args[0], "-test.run=^TestUpdateDevelopmentSourceStartupIgnoresCachedExecutable$")
-	command.Env = append(os.Environ(), "SITEBRUSH_TEST_DEV_SOURCE_ROOT="+root, "SITEBRUSH_TEST_DEV_SOURCE_PORT="+port, "SITEBRUSH_SERVICE_MAIL_MODE=local")
+	command.Env = append(os.Environ(), "SITEBRUSH_TEST_DEV_SOURCE_ROOT="+root, "SITEBRUSH_TEST_DEV_SOURCE_ADDRESS_FILE="+addressPath, "SITEBRUSH_SERVICE_MAIL_MODE=local")
 	command.Stdout = output
 	command.Stderr = output
 	input, err := command.StdinPipe()
@@ -28717,11 +28722,20 @@ func TestUpdateDevelopmentSourceStartupIgnoresCachedExecutable(t *testing.T) {
 			t.Fatalf("development startup exited: %v\n%s", err, contents)
 		default:
 		}
-		response, err := client.Get("http://localhost:" + port + "/")
-		if err == nil {
-			response.Body.Close()
-			if response.StatusCode == http.StatusOK {
-				break
+		encodedAddress, addressErr := os.ReadFile(addressPath)
+		if addressErr != nil && !errors.Is(addressErr, os.ErrNotExist) {
+			t.Fatal(addressErr)
+		}
+		address := string(encodedAddress)
+		host, _, parseErr := net.SplitHostPort(address)
+		if parseErr == nil && host == "127.0.0.1" {
+			// Embedded assets prove HTTP readiness without account SQL or redirects.
+			response, requestErr := client.Get("http://" + address + "/p/static/visitor.js")
+			if requestErr == nil {
+				response.Body.Close()
+				if response.StatusCode == http.StatusOK {
+					break
+				}
 			}
 		}
 		if time.Now().After(deadline) {
