@@ -149,3 +149,11 @@
   .server-settings-page .server-tariff-preview { grid-template-columns: minmax(0,1fr); }
   .server-settings-page .server-tariff-actions button { width: 100%; }
 }
+
+.server-settings-page .server-overview-monetization {
+  display: flex; justify-content: flex-end; padding: 0 4px 4px;
+}
+.server-settings-page .server-monetization-purpose {
+  max-width: 68ch; margin: 0 0 24px;
+  color: var(--theme-foreground); font-size: 15px; line-height: 1.6;
+}
