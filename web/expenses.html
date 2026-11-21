@@ -438,7 +438,7 @@
           <h2>{{index .T "billing_temporary_sites"}}</h2>
           <p>{{index .T "billing_temporary_sites_description"}}</p>
         </div>
-        <span class="server-workspace-count">{{len .ActivePublicTrialSites}} {{index .T "server_installations_active"}}</span>
+        <span class="server-workspace-count">{{if .ActivePublicTrialSites}}{{len .ActivePublicTrialSites}}{{else}}0{{end}} {{index .T "server_installations_active"}}</span>
       </header>
       <div class="server-temporary-block">
         <h3>{{index .T "billing_temporary_sites_active"}}</h3>
@@ -480,7 +480,7 @@
     <section class="server-root-workspace" data-server-installations-container hidden>
       <header class="server-workspace-header">
         <div><h2>{{index .T "billing_installations"}}</h2><p>{{index .T "server_installations_description"}}</p></div>
-        <span class="server-workspace-count">{{len .InstallationCatalog}} {{index .T "server_installations_total"}}</span>
+        <span class="server-workspace-count">{{if .InstallationCatalog}}{{len .InstallationCatalog}}{{else}}0{{end}} {{index .T "server_installations_total"}}</span>
       </header>
       <div class="server-installation-toolbar">
         <label>{{index .T "server_installations_search"}}
