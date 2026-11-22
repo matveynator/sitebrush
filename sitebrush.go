@@ -30223,6 +30223,7 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 		"CentralClients":           centralClients,
 		"CentralClientsDeferred":   centralClientsDeferred,
 		"ServerClientsDeferred":    serverClientsDeferred,
+		"SelectedServerLocal":      len(expenseServers) > 0 && expenseServers[0].Server.Local,
 		"T":                        translations,
 		"Title":                    expensesTitle,
 		"Sites":                    sites,
