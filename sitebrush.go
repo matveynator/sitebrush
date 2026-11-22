@@ -29287,6 +29287,12 @@ func (a *App) runAutomaticBillingOnce(ctx context.Context, store hostingandsuppo
 	}
 	processServer(localInstallationID, snapshot.MainDomain, snapshot.LocalCostPolicy, localSites)
 	for _, hosting := range snapshot.ClientHostings {
+		// The central registry can report this server under its canonical ID.
+		// Billing it again as remote would create duplicate invoice cycles.
+		if hosting.InstallationID == localInstallationID ||
+			(snapshot.LocalInstallationID != "" && hosting.InstallationID == snapshot.LocalInstallationID) {
+			continue
+		}
 		serverName := firstNonEmpty(hosting.ServerDomain, hosting.InstallationID)
 		remoteSites := make([]billingServerSite, 0, len(hosting.Sites))
 		for _, site := range hosting.Sites {
