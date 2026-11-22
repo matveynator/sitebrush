@@ -718,6 +718,38 @@ func TestBuildServerViewsMergesDuplicateLocalAndRemoteServer(t *testing.T) {
 	}
 }
 
+
+func TestBuildServerViewsPreservesLocalAliasInvoicesOnRegistryMerge(t *testing.T) {
+	// Automatic invoices use the historical local:<domain> alias and manual
+	// invoices use the permanent installation ID. Both belong to this server.
+	now := time.Now().UTC()
+	invoices := []Invoice{
+		{ID: 1, Number: "automatic", InstallationID: "local:sitebrush.com", CustomerEmail: "owner@example.com", Domain: "sitebrush.com", Currency: "EUR", AmountMinor: 550, Amount: "5.50", Status: "paid", PaidAt: now.Format(time.RFC3339)},
+		{ID: 2, Number: "manual", InstallationID: "canonical-local", CustomerEmail: "owner@example.com", Domain: "sitebrush.com", Currency: "EUR", AmountMinor: 300, Amount: "3.00", Status: "issued"},
+	}
+	local := BuildLocalServerView(LocalServerViewInput{
+		InstallationID: "canonical-local",
+		MainDomain:     "sitebrush.com",
+		Sites:          []Site{{Domain: "sitebrush.com", AdminEmails: "owner@example.com"}},
+		Invoices:       invoices,
+	})
+	if len(local.Invoices) != 2 {
+		t.Fatalf("local invoices were lost before registry merge: %#v", local.Invoices)
+	}
+	remote := ClientHosting{InstallationID: "canonical-local", ServerDomain: "sitebrush.com", BillingCurrency: "EUR", Sites: []ClientHostingSite{{Domain: "sitebrush.com", OwnerEmail: "owner@example.com"}}}
+	servers := BuildServerViews(local, []ClientHosting{remote}, invoices, "v1")
+	if len(servers) != 1 {
+		t.Fatalf("same installation was not merged: %#v", servers)
+	}
+	merged := servers[0]
+	if !merged.Local || len(merged.Invoices) != 2 || merged.InvoiceCount != 2 || merged.UnpaidInvoiceCount != 1 {
+		t.Fatalf("merge lost the automatic or manual invoice: %#v", merged)
+	}
+	if merged.PaidThisMonthMinor != 550 || merged.BillingOpenLabel != MoneyLabel(300, "EUR") {
+		t.Fatalf("merged financial totals are incomplete: paid=%d open=%s", merged.PaidThisMonthMinor, merged.BillingOpenLabel)
+	}
+}
+
 func TestServerClientViewsSortSitesByUsedBytes(t *testing.T) {
 	clients := serverClientViewsFromSites([]ServerSiteView{
 		{Domain: "small.example.com", OwnerEmail: "owner@example.com", UsedBytes: 10},
