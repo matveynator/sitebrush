@@ -3180,7 +3180,7 @@ func TestHostingAndSupportTemplateRendersServerView(t *testing.T) {
 		"PublicTrialEmbedHTML":        "",
 		"CurrentDomain":               "sitebrush.com",
 	}
-	view["ExpenseServers"] = simplifiedExpenseServerViews(view["Servers"].([]hostingandsupport.ServerView), nil, nil)
+	view["ExpenseServers"] = simplifiedExpenseServerViews(view["Servers"].([]hostingandsupport.ServerView), nil)
 	var rendered bytes.Buffer
 	if err := parsedTemplate.Execute(&rendered, view); err != nil {
 		t.Fatal(err)
@@ -3424,7 +3424,7 @@ func TestSimplifiedExpenseServerViewsIncludeOwnerAndClientDetails(t *testing.T) 
 		{PrimaryEmail: "client@example.com", Emails: []string{"client@example.com"}, InvoiceDay: 5},
 		{PrimaryEmail: "owner@example.com", Emails: []string{"owner@example.com"}, InvoiceDay: 7},
 	}
-	views := simplifiedExpenseServerViews([]hostingandsupport.ServerView{server}, clientDetails, nil)
+	views := simplifiedExpenseServerViews([]hostingandsupport.ServerView{server}, clientDetails)
 	if len(views) != 1 || len(views[0].Clients) != 2 {
 		t.Fatalf("simplified servers = %#v", views)
 	}
@@ -3451,7 +3451,7 @@ func TestExpenseClientDirectoryPreservesInstallationCurrencyAndDeletedSiteDebts(
 				{CustomerEmail: "former@example.com", Status: "issued", Currency: "USD", AmountMinor: 100, Overdue: true},
 			}},
 	}
-	views := simplifiedExpenseServerViews(servers, nil, nil)
+	views := simplifiedExpenseServerViews(servers, nil)
 	clients := centralExpenseClients(views)
 	if len(clients) != 2 {
 		t.Fatalf("invoice-only client disappeared: %+v", clients)
@@ -16324,6 +16324,14 @@ func TestSimplifiedExpensesShowsTestDriveUnderRegistrationAfterExplicitPermissio
 		t.Fatalf("test drive without explicit permission rendered DNS instructions, form or preview: %s", body)
 	}
 
+	view["AutoRegistrationEnabled"] = true
+	var cleanupRendered bytes.Buffer
+	if err := parsedTemplate.Execute(&cleanupRendered, view); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(cleanupRendered.String(), "trial.sitebrush.example") || !strings.Contains(cleanupRendered.String(), "deleted.sitebrush.example") {
+		t.Fatal("registration enabled with Test Drive disabled hid cleanup records")
+	}
 	view["AutoRegistrationEnabled"] = true
 	view["PublicTrialEnabled"] = true
 	var unavailableRendered bytes.Buffer

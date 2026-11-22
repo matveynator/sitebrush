@@ -54,7 +54,7 @@ func TestHostingServerViewsMergeSortAndPreserveLocalSecurityState(t *testing.T) 
 	if len(servers) != 2 {
 		t.Fatalf("server count=%d want 2: %#v", len(servers), servers)
 	}
-	if !servers[0].Local || servers[0].ID != "local:example.com" {
+	if !servers[0].Local || servers[0].ID != "local" {
 		t.Fatalf("duplicate local/remote server not merged: %#v", servers[0])
 	}
 	if !servers[0].Sites[0].CanEditQuota || servers[0].Sites[0].QuotaInput != "10gb" || !servers[0].Sites[0].CertificateValid {

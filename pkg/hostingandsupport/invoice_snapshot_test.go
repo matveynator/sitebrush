@@ -85,6 +85,20 @@ func TestLocalInvoiceOwnershipRejectsReusableDomainsAndForeignLocalAliases(t *te
 	}
 }
 
+func TestMergedLocalRegistryViewKeepsCompleteLocalInvoiceAliases(t *testing.T) {
+	local := ServerView{ID: "identity", Local: true, Name: "host.example", BillingCurrency: "EUR",
+		Invoices: []ServerInvoiceView{
+			{Number: "CURRENT", Status: "issued", Currency: "EUR", AmountMinor: 100},
+			{Number: "HISTORICAL", Status: "issued", Currency: "EUR", AmountMinor: 200},
+		}, InvoiceCount: 2,
+	}
+	remote := ServerView{ID: "identity", Name: "host.example", BillingCurrency: "USD", Invoices: local.Invoices[:1]}
+	merged := mergeLocalAndRemoteServerViews(local, remote)
+	if merged.ID != local.ID || len(merged.Invoices) != 2 || merged.InvoiceCount != 2 || merged.BillingOpenLabel != MoneyLabel(300, "EUR") {
+		t.Fatalf("registry view narrowed authoritative local history: %+v", merged)
+	}
+}
+
 func TestInvoiceOverdueUsesValidUnpaidDates(t *testing.T) {
 	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
 	for _, test := range []struct {

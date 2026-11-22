@@ -306,9 +306,7 @@ func mergeLocalAndRemoteServerViews(localServer ServerView, remoteServer ServerV
 	merged := remoteServer
 	merged.Sites = append([]ServerSiteView(nil), remoteServer.Sites...)
 	merged.Local = true
-	if merged.ID == "" {
-		merged.ID = localServer.ID
-	}
+	merged.ID = localServer.ID
 	merged.Subtitle = firstNonEmpty(remoteServer.Subtitle, localServer.Subtitle)
 	if len(merged.Sites) == 0 {
 		merged.Sites = localServer.Sites
@@ -338,14 +336,17 @@ func mergeLocalAndRemoteServerViews(localServer ServerView, remoteServer ServerV
 		}
 		merged.Clients = serverClientViewsFromSites(merged.Sites)
 	}
-	if len(merged.Invoices) == 0 {
-		merged.Invoices = localServer.Invoices
-		merged.InvoiceCount = localServer.InvoiceCount
-		merged.BillableCount = localServer.BillableCount
-		merged.UnpaidInvoiceCount = localServer.UnpaidInvoiceCount
-		merged.InvoiceActionLabel = localServer.InvoiceActionLabel
-		merged.InvoiceActionClass = localServer.InvoiceActionClass
-	}
+	// Registry reports can lag behind this installation's database. Local
+	// history already includes its verified historical aliases and must remain
+	// authoritative even when the registry has a nonempty, narrower history.
+	merged.Invoices = localServer.Invoices
+	merged.InvoiceCount = localServer.InvoiceCount
+	merged.BillableCount = localServer.BillableCount
+	merged.UnpaidInvoiceCount = localServer.UnpaidInvoiceCount
+	merged.InvoiceActionLabel = localServer.InvoiceActionLabel
+	merged.InvoiceActionClass = localServer.InvoiceActionClass
+	merged.BillingCurrency = localServer.BillingCurrency
+	applyServerBillingDashboard(&merged)
 	return merged
 }
 

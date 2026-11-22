@@ -30024,7 +30024,7 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 		}
 		panelServers = localServers
 	}
-	expenseServers := simplifiedExpenseServerViews(panelServers, snapshot.Clients, snapshot.Invoices)
+	expenseServers := simplifiedExpenseServerViews(panelServers, snapshot.Clients)
 	selectedMailServer := strings.TrimSpace(r.URL.Query().Get("mail_server"))
 	selectedMailServerFound := false
 	for _, server := range expenseServers {
@@ -30405,7 +30405,7 @@ func applySimplifiedSiteDeletionControls(servers []simplifiedExpenseServerView, 
 	}
 }
 
-func simplifiedExpenseServerViews(servers []hostingandsupport.ServerView, clients []hostingAndSupportClientView, invoices []hostingandsupport.Invoice) []simplifiedExpenseServerView {
+func simplifiedExpenseServerViews(servers []hostingandsupport.ServerView, clients []hostingAndSupportClientView) []simplifiedExpenseServerView {
 	clientDetailsByEmail := make(map[string]hostingAndSupportClientView)
 	for _, client := range clients {
 		for _, email := range append(append([]string(nil), client.Emails...), client.PrimaryEmail) {
@@ -30459,6 +30459,9 @@ func simplifiedExpenseServerViews(servers []hostingandsupport.ServerView, client
 			debtByCurrency := make(map[string]int64)
 			hasOverdue := false
 			for _, invoice := range invoicesByEmail[email] {
+				if invoice.AmountMinor <= 0 {
+					continue
+				}
 				if invoice.Status == "paid" && strings.HasPrefix(invoice.PaidAt, time.Now().UTC().Format("2006-01")) {
 					paidByCurrency[invoice.Currency] += invoice.AmountMinor
 				}
@@ -30595,19 +30598,6 @@ func centralExpenseClients(servers []simplifiedExpenseServerView) []simplifiedEx
 	}
 	sortExpenseClients(clients)
 	return clients
-}
-
-func paidServerExpenseForClient(invoices []hostingandsupport.Invoice, server hostingandsupport.ServerView, email string, now time.Time) int64 {
-	monthPrefix := now.UTC().Format("2006-01")
-	paidMinor := int64(0)
-	for _, invoice := range invoices {
-		installationMatches := hostingandsupport.InvoiceBelongsToServer(invoice, server)
-		if !installationMatches || invoice.Status != "paid" || !strings.EqualFold(strings.TrimSpace(invoice.CustomerEmail), email) || !strings.HasPrefix(invoice.PaidAt, monthPrefix) || !strings.EqualFold(invoice.Currency, server.BillingCurrency) {
-			continue
-		}
-		paidMinor += invoice.AmountMinor
-	}
-	return paidMinor
 }
 
 type hostingAndSupportClientView struct {
