@@ -607,3 +607,99 @@
   }
   .server-settings-page .server-root-tabs .server-nav-group { grid-column: auto; }
 }
+
+/* Context stays visible: local node and central control center have different scope. */
+.server-settings-page .server-settings-header {
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap;
+  gap: 16px 24px; min-width: 0;
+}
+.server-settings-page .server-settings-heading { min-width: 0; display: grid; gap: 6px; }
+.server-settings-page .server-settings-heading .section-heading { margin: 0; }
+.server-settings-page .server-settings-context {
+  margin: 0; font-size: 13px; color: var(--theme-muted-foreground);
+  overflow-wrap: anywhere;
+}
+.server-settings-page .server-settings-actions {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
+}
+.server-settings-page .server-theme-control {
+  display: flex; align-items: center; gap: 8px; font-size: 12px;
+  color: var(--theme-muted-foreground); margin: 0;
+}
+.server-settings-page .server-theme-control select { width: auto; min-width: 114px; }
+.server-settings-page .server-nav-global-heading {
+  padding-block-start: 15px !important;
+  border-top: 1px solid var(--theme-border);
+}
+.server-settings-page[data-server-settings-scope="central"] .server-settings-context,
+body.server-settings-page[data-server-settings-scope="central"] .server-settings-context {
+  color: var(--theme-primary); font-weight: 650;
+}
+.server-settings-page .server-overview-blocks {
+  display: grid; gap: 16px; min-width: 0;
+}
+.server-settings-page .server-overview-blocks > .expense-simple-summary {
+  min-width: 0; padding: 20px; box-shadow: none;
+}
+.server-settings-page .server-overview-blocks h3 {
+  font-size: 15px; letter-spacing: -.01em; font-weight: 700;
+  margin: 0 0 3px; color: var(--theme-foreground);
+}
+.server-settings-page .server-overview-system .expense-simple-server-description {
+  border-top: 0; padding-top: 0;
+}
+.server-settings-page .server-overview-mail .expense-mail-monitor {
+  border: 0; border-radius: 0; padding: 0; gap: 10px;
+}
+.server-settings-page .server-overview-mail .expense-mail-monitor-counts {
+  display: flex; flex-wrap: wrap; gap: 8px 12px;
+}
+.server-settings-page .server-overview-mail .expense-mail-monitor-counts > span {
+  display: inline-flex; flex-wrap: wrap; align-items: center; gap: 5px;
+  padding: 9px 12px; border-radius: 8px; background: var(--theme-muted);
+  font-size: 12px; font-variant-numeric: tabular-nums;
+}
+.server-settings-page .server-mail-error {
+  color: var(--theme-destructive); font-weight: 700;
+  box-shadow: inset 3px 0 0 var(--theme-destructive);
+}
+.server-settings-page .server-mail-warning {
+  color: var(--bs-warning-text-emphasis, #a16207); font-weight: 650;
+  box-shadow: inset 3px 0 0 var(--bs-warning-text-emphasis, #a16207);
+}
+.server-settings-page .server-mail-details summary {
+  cursor: pointer; color: var(--theme-muted-foreground);
+  font-size: 13px; width: fit-content;
+}
+.server-settings-page .server-mail-details .expense-mail-monitor-counts { margin-top: 12px; }
+.server-settings-page .server-primary-ip {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin-block: 12px; font-variant-numeric: tabular-nums;
+}
+.server-settings-page .server-primary-ip strong { overflow-wrap: anywhere; }
+.server-settings-page .server-demo-visit:empty,
+.server-settings-page [data-mail-feedback]:empty { display: none; }
+.server-settings-page .server-installation-toolbar {
+  grid-template-columns: minmax(160px,1fr) minmax(125px,175px) minmax(125px,175px) auto;
+}
+.server-settings-page .server-installation-apply { min-height: 43px; align-self: end; }
+.server-settings-page .server-installation-pages {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: 14px; margin-block: 14px;
+}
+.server-settings-page .server-installation-pages .server-workspace-count {
+  font-variant-numeric: tabular-nums; text-align: center;
+}
+@media (max-width: 960px) {
+  .server-settings-page .server-installation-toolbar {
+    grid-template-columns: repeat(2,minmax(0,1fr));
+  }
+}
+@media (max-width: 600px) {
+  .server-settings-page .server-settings-actions { width: 100%; }
+  .server-settings-page .server-installation-toolbar {
+    grid-template-columns: minmax(0,1fr);
+  }
+  .server-settings-page .server-overview-blocks > .expense-simple-summary { padding: 16px; }
+  .server-settings-page .server-installation-pages { flex-wrap: wrap; }
+}
