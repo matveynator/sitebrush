@@ -63,3 +63,14 @@ func TestInstallationCatalogDoesNotChargeUnconfiguredDesktop(t *testing.T) {
 		t.Fatalf("new installation not disabled by default: %+v",catalog)
 	}
 }
+
+func TestInstallationCatalogDoesNotRankAmountsAcrossCurrencies(t *testing.T) {
+	servers := []ServerView{
+		{ID: "usd", SiteCount: 2, BillingCurrency: "USD", MonthlyForecastMinor: 90000},
+		{ID: "eur", SiteCount: 2, BillingCurrency: "EUR", MonthlyForecastMinor: 100},
+	}
+	catalog := InstallationCatalogViews(servers, nil, nil)
+	if len(catalog) != 2 || catalog[0].ID != "eur" || catalog[1].ID != "usd" {
+		t.Fatalf("mixed currencies were ranked as interchangeable money: %+v", catalog)
+	}
+}
