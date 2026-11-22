@@ -31,8 +31,16 @@
   function readNavigation() {
     const fragment = window.location.hash.slice(1);
     const parameters = new URLSearchParams(fragment);
+    const pageQuery = new URLSearchParams(window.location.search);
     if (["installations", "temporary-sites", "clients", "billing"].includes(fragment)) parameters.set("workspace", fragment);
     if (fragment.startsWith("server-") && !parameters.has("server-id")) parameters.set("section", fragment === "server-update" ? "updates" : fragment.slice(7));
+    // A direct URL must select the same workspace as a click. Query parameters
+    // also survive reloads used to hydrate the deferred client/server workspace.
+    if (!parameters.has("workspace") && ["installations", "temporary-sites", "clients", "billing"].includes(pageQuery.get("workspace"))) {
+      parameters.set("workspace", pageQuery.get("workspace"));
+    }
+    if (!parameters.has("server-id") && pageQuery.has("installation")) parameters.set("server-id", pageQuery.get("installation"));
+    if (!parameters.has("section") && pageQuery.has("section")) parameters.set("section", pageQuery.get("section"));
     return {
       workspace: parameters.get("workspace") || "servers",
       serverID: parameters.get("server-id") || "",
