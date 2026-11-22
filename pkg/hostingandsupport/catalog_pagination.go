@@ -8,9 +8,9 @@ import (
 // InstallationPage is a detached, read-only page of one authorized central
 // catalog. Filtering and sorting precede pagination; browser HTML stays bounded.
 type InstallationPage struct {
-	Rows []InstallationCatalogView
+	Rows                         []InstallationCatalogView
 	Total, Matching, Page, Pages int
-	Filter, Sort, Query string
+	Filter, Sort, Query          string
 }
 
 func PaginateInstallations(catalog []InstallationCatalogView, filter, order, query string, page, pageSize int) InstallationPage {
