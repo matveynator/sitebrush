@@ -11,7 +11,7 @@
     const model = {
         visitor: '', persistent: false, tab: '', session: '', view: '', sequence: 0, path: '', evidence: null,
         signals: [], limited: false, connection: null, lastSent: -10000, started: 0,
-        batches: [], batchesRestored: false, deliveryTimer: null, lastDelivery: -10000,
+        batches: [], batchesRestored: false, deliveryTimer: null, lastDelivery: -10000, httpInFlight: false, socketAttemptAt: 0,
         lastInteraction: 0, maximumScroll: 0, layout: '', device: '', retryCount: 0, nextConnect: 0,
         forms: new WeakMap(), sections: new WeakSet(), recentClicks: [], timers: [], uriRules: [], matchedRules: new Set(),
         replay: [], replayAllowed: false, replayPreferences: null, replayPolicySession: '', replayScroll: -1, replayScrollAt: 0, replayFields: new Map(), stopped: false
@@ -284,11 +284,52 @@
         if (model.stopped || model.deliveryTimer !== null) return;
         model.deliveryTimer = window.setTimeout(function deliverScheduledBatch() { model.deliveryTimer = null; deliverPendingBatch(); },delay);
     }
+    // A rejected WebSocket handshake must not disable conversion analytics.
+    // POST is already an authenticated-origin-checked ingestion path on Go.
+    // Retain each batch until HTTP 204 confirms admission, just like WS ack.
+    function deliverViaHTTP() {
+        if (model.httpInFlight || model.stopped || !model.batches.length || typeof fetch !== 'function') return;
+        if (model.connection && model.connection.readyState === WebSocket.OPEN) return;
+        const batch = model.batches[0];
+        if (performance.now() - model.lastDelivery < 15000) {
+            scheduleDelivery(15000 - (performance.now() - model.lastDelivery));
+            return;
+        }
+        model.httpInFlight = true;
+        model.lastDelivery = performance.now();
+        fetch('/?request=analytics', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(batch.envelope),
+            keepalive: false
+        }).then(response => {
+            if (response.status !== 204) throw new Error('analytics HTTP admission declined');
+            model.batches = model.batches.filter(function pendingAfterHTTP(candidate) {
+                return candidate.envelope.view !== batch.envelope.view || candidate.envelope.sequence !== batch.envelope.sequence;
+            });
+            persistBatches();
+        }).catch(error => {
+            // Fail open for page delivery but retain the unsaved analytics batch.
+            console.debug('SiteBrush analytics: HTTP delivery unavailable', error.name);
+        }).finally(() => {
+            model.httpInFlight = false;
+            if (model.batches.length && !model.stopped) scheduleDelivery(15000);
+        });
+    }
     function deliverPendingBatch() {
         while (model.batches.length && model.batches[0].expires <= Date.now()) { model.batches.shift(); model.limited = true; persistBatches(); }
-        if (!model.batches.length || model.stopped) return;
-        if (!model.connection || model.connection.readyState >= WebSocket.CLOSING) { connect(); return; }
-        if (model.connection.readyState !== WebSocket.OPEN) return;
+        if (!model.batches.length || model.stopped || model.httpInFlight) return;
+        if (!model.connection || model.connection.readyState >= WebSocket.CLOSING) {
+            connect();
+            if (model.retryCount > 0 || !window.WebSocket) deliverViaHTTP();
+            return;
+        }
+        if (model.connection.readyState !== WebSocket.OPEN) {
+            if (performance.now() - model.socketAttemptAt >= 10000) deliverViaHTTP();
+            else scheduleDelivery(10000 - (performance.now() - model.socketAttemptAt));
+            return;
+        }
         const batch = model.batches[0];
         const elapsed = performance.now()-model.lastDelivery;
         const retryDelay = batch.sentAt === null ? 1000-elapsed : 15000-(performance.now()-batch.sentAt);
@@ -318,8 +359,9 @@
         } else deliverPendingBatch();
     }
     function connect() {
-        if (model.connection && model.connection.readyState < WebSocket.CLOSING || model.stopped || performance.now() < model.nextConnect) return;
+        if (!window.WebSocket || model.connection && model.connection.readyState < WebSocket.CLOSING || model.stopped || performance.now() < model.nextConnect) return;
         model.nextConnect = performance.now()+15000;
+        model.socketAttemptAt = performance.now();
         model.connection = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://')+location.host+'/?request=analytics');
         model.connection.addEventListener('open',function connected() {
             model.retryCount = 0;
@@ -345,7 +387,7 @@
         });
         model.connection.addEventListener('close',function disconnected() {
             model.retryCount++; model.nextConnect = performance.now()+Math.min(60000,15000*model.retryCount);
-            if (!model.stopped && model.batches.length) scheduleDelivery(Math.min(60000,15000*model.retryCount));
+            if (!model.stopped && model.batches.length) scheduleDelivery(Math.min(15000,15000*model.retryCount));
         });
         model.connection.addEventListener('error',function failed() { console.debug('SiteBrush analytics: connection unavailable'); });
     }
@@ -360,7 +402,7 @@
         enqueue({kind:'page'}); recordScroll(); observeSections(); observeConfiguredURI(); connect(); if (model.replayPreferences) configureReplay(model.replayPreferences);
     }
     function start() {
-        if (!window.crypto || !window.WebSocket) return;
+        if (!window.crypto || (!window.WebSocket && typeof fetch !== 'function')) return;
         startView();
         window.SiteBrushAnalytics = Object.freeze({action:legacyAction,event:businessEvent,formResult:formResult});
         document.addEventListener('click',recordClick,{capture:true,passive:true});
