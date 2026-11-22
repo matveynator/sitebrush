@@ -26,7 +26,7 @@
   <header class="page-header server-settings-header mb-4">
     <div class="server-settings-heading">
       <h1 class="section-heading"><img src="/p/static/sitebrush-app-icon.png" class="section-icon" alt=""><a href="/">{{.Domain}}</a></h1>
-      <p class="server-settings-context" aria-live="polite" data-server-context data-server-context-local="{{.Domain}} · {{if eq .LanguageCode "ru"}}Настройки сервера{{else}}Server settings{{end}}" data-server-context-central="{{if eq .LanguageCode "ru"}}Центральный узел{{else}}Central node{{end}}">{{.Title}}</p>
+      <p class="server-settings-context" aria-live="polite" data-server-context data-server-context-local="{{.Domain}} · {{if eq .LanguageCode "ru"}}Настройки сервера{{else}}Server settings{{end}}" data-server-context-node-label="{{if eq .LanguageCode "ru"}}Настройки сервера{{else}}Server settings{{end}}" data-server-context-central="{{if eq .LanguageCode "ru"}}Центральный узел{{else}}Central node{{end}}">{{.Title}}</p>
     </div>
     <div class="server-settings-actions">
       <a href="/" class="btn btn-outline-secondary btn-sm" target="_blank" rel="noopener noreferrer">{{if eq .LanguageCode "ru"}}Открыть сайт{{else}}Open website{{end}} ↗</a>
