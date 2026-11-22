@@ -580,7 +580,7 @@
 }
 .server-settings-page .server-config-view[hidden] { display: none !important; }
 .server-settings-page [data-expense-server-panel][hidden] { display: none !important; }
-@media (max-width: 850px) {
+@media (max-width: 900px) {
   .server-settings-page .server-admin-shell {
     grid-template-columns: minmax(0, 1fr);
     gap: 18px;
