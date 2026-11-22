@@ -266,7 +266,11 @@
     choose(target, navigation.section);
     const activeSection = target.querySelector("[data-server-config-layout]")?.dataset.serverConfigSelected || "overview";
     showRoot(navigation.workspace, activeSection, target);
-    const activeLedger = ledgers.find(ledger => navigation.workspace === "billing" ? !ledger.panel : navigation.workspace === "servers" && ledger.panel === target);
+    // Rendering invoices is work for the billing workspace only; the server
+    // overview must not render an invisible ledger on every navigation.
+    const activeLedger = ledgers.find(ledger => navigation.workspace === "billing"
+      ? !ledger.panel
+      : navigation.workspace === "servers" && activeSection === "billing" && ledger.panel === target);
     if (activeLedger) {
       activeLedger.model = {query: navigation.query, customer: navigation.customer, status: navigation.status, installation: navigation.installation, page: navigation.page};
       renderLedger(activeLedger);
