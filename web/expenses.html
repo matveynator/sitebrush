@@ -333,10 +333,10 @@
                           <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-toggle="dropdown" aria-expanded="false" aria-label="{{if eq $.LanguageCode "ru"}}Действия с сайтом{{else}}Site actions{{end}}">⋮</button>
                           <div class="dropdown-menu dropdown-menu-end">
                             {{range $certificate := $site.CertificateDomains}}{{if and $certificate.Valid $certificate.CanRenew}}
-                            <button type="button" class="dropdown-item" data-client-valid-ssl-action data-certificate-renew="{{$certificate.Domain}}">{{index $.T "domain_settings_ssl_renew_now"}} · {{$certificate.Domain}}</button>
+                            <button type="button" class="dropdown-item" data-client-valid-ssl-action data-certificate-renew="{{$certificate.Domain}}">{{if eq $.LanguageCode "ru"}}Обновить SSL принудительно{{else}}Force SSL renewal{{end}} · {{$certificate.Domain}}</button>
                             {{end}}{{end}}
                             {{if $site.CanDelete}}
-                            <button type="button" class="dropdown-item text-danger" data-client-site-delete data-domain="{{$site.Domain}}" data-deletion-reason="{{$site.DeletionReason}}" data-deletion-deadline="{{$site.DeletionDeadline}}" data-deletion-size="{{$site.DeletionSizeLabel}}" data-bs-toggle="modal" data-bs-target="#clientDeleteModal">{{index $.T "server_site_actions"}}</button>
+                            <button type="button" class="dropdown-item text-danger" data-client-site-delete data-domain="{{$site.Domain}}" data-deletion-reason="{{$site.DeletionReason}}" data-deletion-deadline="{{$site.DeletionDeadline}}" data-deletion-size="{{$site.DeletionSizeLabel}}" data-bs-toggle="modal" data-bs-target="#clientDeleteModal">{{if $site.DeletionReason}}{{index $.T "server_delete_restore"}}{{else}}{{index $.T "server_delete_now"}}{{end}}</button>
                             {{end}}
                           </div>
                         </div>
