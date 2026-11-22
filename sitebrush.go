@@ -21332,7 +21332,11 @@ func (a *App) renderLoginPage(w http.ResponseWriter, r *http.Request, returnPath
 func (a *App) publicDemoRegistrationAllowed(ctx context.Context) bool {
 	allowed := false
 	err := a.withServerControlDatabaseRead(ctx, "public-demo-registration", func(database *sql.DB) error {
-		allowed = (hostingandsupport.Store{DB: database}).AutomaticRegistrationAllowed(ctx)
+		var enabled string
+		if err := database.QueryRowContext(ctx, `SELECT value FROM server_settings WHERE name='auto_registration_enabled'`).Scan(&enabled); err != nil {
+			return err
+		}
+		allowed = strings.TrimSpace(enabled) == "1"
 		return nil
 	})
 	return err == nil && allowed
