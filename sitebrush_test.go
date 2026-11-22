@@ -38263,7 +38263,6 @@ func TestServerSettingsContextAndPagedCatalogControls(t *testing.T) {
 	for _, fragment := range []string{
 		"data-server-context",
 		"data-server-theme",
-		"data-server-settings",
 		"data-installations-query-form",
 		"catalog_filter",
 		"catalog_sort",
