@@ -1601,7 +1601,7 @@ func (store Store) SavePublicTrialCleanupError(ctx context.Context, trialSiteID 
 	if cleanupError != nil {
 		errorText = cleanupError.Error()
 	}
-	_, _ = store.DB.ExecContext(ctx, `UPDATE public_trial_sites SET last_error=? WHERE id=? AND status='active'`, errorText, trialSiteID)
+	_, _ = store.DB.ExecContext(ctx, `UPDATE public_trial_sites SET last_error=? WHERE id=? AND status IN ('active','private','email_pending','email_verified','expiring')`, errorText, trialSiteID)
 }
 
 func (store Store) ArchivePublicTrialSite(ctx context.Context, trialSiteID int64, deletedAt time.Time) error {
