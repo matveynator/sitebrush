@@ -350,7 +350,10 @@
         const percent = Math.max(0, Math.min(100, Math.round(used / quota * 100)));
         progress.setAttribute("aria-valuenow", String(percent));
         progress.querySelector("span").style.width = percent + "%";
-        if (used > quota) progress.classList.add("is-over");
+        if (used > quota) {
+          progress.classList.add("is-over");
+          site.dataset.clientSiteProblem = "true";
+        }
       }
       const invalid = site.querySelector("[data-client-ssl-invalid]");
       if (invalid) site.dataset.clientSiteProblem = "true";
@@ -530,6 +533,20 @@
       });
     }
     filterClients(workspace);
+  }
+  // The shared dialogs live after <main>, unlike the former per-site dialogs.
+  // Keep the selected server workspace in the redirect fragment after POST.
+  for (const dialog of ["clientQuotaModal", "clientDeleteModal"]) {
+    document.getElementById(dialog)?.addEventListener("submit", event => {
+      const form = event.target;
+      if (!(form instanceof HTMLFormElement)) return;
+      const navigation = readNavigation();
+      const parameters = new URLSearchParams({
+        "server-id": navigation.serverID || localPanel().dataset.serverId,
+        section: "clients"
+      });
+      form.action = form.action.split("#", 1)[0] + "#" + parameters.toString();
+    });
   }
   // Shared Bootstrap dialogs retain the original POST names, domain and CSRF.
   document.addEventListener("click", event => {
