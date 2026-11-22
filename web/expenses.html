@@ -18,6 +18,7 @@
   <link href="/p/static/server_settings.css" rel="stylesheet">
   {{if .ShowProfiler}}<link href="/p/static/server_profiler.css" rel="stylesheet"><script defer src="/p/static/server_profiler.js"></script>{{end}}
   <script defer src="/p/static/server_settings.js"></script>
+  {{if or (eq .SelectedServerSection "clients") (and .ShowCentralRegistry (not .CentralClientsDeferred))}}<script defer src="/p/static/server_clients.js"></script>{{end}}
   {{if .CanConfigurePublicIPs}}<script defer src="/p/static/server_public_ips.js"></script>{{end}}
 <script defer src="/p/static/mail_journal.js"></script>
 </head>
