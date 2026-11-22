@@ -19,9 +19,15 @@ func (store Store) LocalInstallationID(ctx context.Context) (string, error) {
 // InvoiceSnapshot is collected by the existing database owner, before the
 // immutable panel snapshot is published. Financial totals must never depend on
 // a presentation limit. Two cursors avoid per-invoice queries on the owner's
-// single SQL connection; neither cursor remains open when the next one starts.
+// single SQL connection. A read transaction guarantees both result sets
+// come from the same SQLite WAL snapshot while the writer stays independent.
 func (store Store) InvoiceSnapshot(ctx context.Context) ([]Invoice, error) {
-	rows, err := store.DB.QueryContext(ctx, invoiceSelectColumns+` FROM billing_invoices ORDER BY id DESC`)
+	transaction, err := store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer transaction.Rollback()
+	rows, err := transaction.QueryContext(ctx, invoiceSelectColumns+` FROM billing_invoices ORDER BY id DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -42,7 +48,7 @@ func (store Store) InvoiceSnapshot(ctx context.Context) ([]Invoice, error) {
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
-	lines, err := store.DB.QueryContext(ctx, `SELECT id,invoice_id,COALESCE(domain,''),COALESCE(description,''),COALESCE(used_bytes,0),COALESCE(billable_megabytes,0),COALESCE(list_amount_minor,0),COALESCE(discount_amount_minor,0),COALESCE(total_amount_minor,0),COALESCE(bonus,0),COALESCE(cost_share_minor,0),COALESCE(minimum_amount_minor,0) FROM billing_invoice_lines ORDER BY invoice_id,id`)
+	lines, err := transaction.QueryContext(ctx, `SELECT id,invoice_id,COALESCE(domain,''),COALESCE(description,''),COALESCE(used_bytes,0),COALESCE(billable_megabytes,0),COALESCE(list_amount_minor,0),COALESCE(discount_amount_minor,0),COALESCE(total_amount_minor,0),COALESCE(bonus,0),COALESCE(cost_share_minor,0),COALESCE(minimum_amount_minor,0) FROM billing_invoice_lines ORDER BY invoice_id,id`)
 	if err != nil {
 		return nil, err
 	}
@@ -62,6 +68,9 @@ func (store Store) InvoiceSnapshot(ctx context.Context) ([]Invoice, error) {
 		return nil, err
 	}
 	if err := lines.Close(); err != nil {
+		return nil, err
+	}
+	if err := transaction.Commit(); err != nil {
 		return nil, err
 	}
 	return invoices, nil
