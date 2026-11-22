@@ -97,7 +97,7 @@
       for (const certificate of site.querySelectorAll("[data-client-certificate]")) {
         if (!certificateNeedsRenewal(certificate)) continue;
         const renewal = Array.from(site.querySelectorAll("[data-client-valid-ssl-action]"))
-          .find(button => button.dataset.certificateRenew === certificate.querySelector("small")?.textContent?.split(" · ")[0]);
+          .find(button => button.dataset.certificateRenew === certificate.dataset.clientCertificateDomain);
         const inline = certificate.querySelector("[data-client-ssl-inline]");
         if (renewal && inline) {
           renewal.classList.remove("dropdown-item");
