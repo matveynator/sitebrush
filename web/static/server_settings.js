@@ -101,30 +101,50 @@
       else button.removeAttribute("aria-current");
     }
   }
+  // Load the authenticated updater into the page instead of nesting an iframe.
+  // Its own command channel and authorization are unchanged.
   function openUpdater(layout) {
-    const frame = layout.querySelector("[data-server-update-frame]");
-    if (!frame || frame.dataset.started) return;
-    const loading = layout.querySelector("[data-server-update-frame-loading]");
-    const error = layout.querySelector("[data-server-update-frame-error]");
-    frame.dataset.started = "true";
-    let completed = false;
-    function finish(success) {
-      if (completed) return;
-      completed = true;
+    const host = layout.querySelector("[data-server-update-content]");
+    if (!host || host.dataset.loading === "true" || host.dataset.loaded === "true") return;
+    const loading = layout.querySelector("[data-server-update-loading]");
+    const error = layout.querySelector("[data-server-update-error]");
+    host.dataset.loading = "true";
+    loading.hidden = false;
+    error.hidden = true;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 20000);
+    fetch("/?server_update&embedded", {
+      credentials: "same-origin", headers: {"Accept": "text/html"}, signal: controller.signal
+    }).then(async response => {
+      if (!response.ok) throw new Error("Updater responded with HTTP " + response.status);
+      const page = new DOMParser().parseFromString(await response.text(), "text/html");
+      const updateRoot = page.querySelector("[data-server-update]");
+      if (!updateRoot || !updateRoot.dataset.csrf) throw new Error("Updater response is unavailable");
+      host.replaceChildren(document.importNode(updateRoot, true));
+      if (!document.querySelector('link[href="/p/static/server_update.css"]')) {
+        const stylesheet = document.createElement("link");
+        stylesheet.rel = "stylesheet";
+        stylesheet.href = "/p/static/server_update.css";
+        document.head.appendChild(stylesheet);
+      }
+      await new Promise((resolve, reject) => {
+        const script = document.createElement("script");
+        script.src = "/p/static/server_update.js";
+        script.onload = resolve;
+        script.onerror = () => reject(new Error("Updater script is unavailable"));
+        document.head.appendChild(script);
+      });
+      host.dataset.loaded = "true";
       loading.hidden = true;
-      frame.hidden = !success;
-      error.hidden = success;
-    }
-    frame.addEventListener("load", () => {
-      let valid = false;
-      try {
-        valid = Boolean(frame.contentDocument?.querySelector("[data-server-update], [data-server-update-diagnostic]"));
-      } catch (frameError) { console.error("Unable to open updater", frameError); }
-      finish(valid);
-    }, {once: true});
-    frame.addEventListener("error", () => finish(false), {once: true});
-    window.setTimeout(() => finish(false), 20000);
-    frame.src = frame.dataset.src;
+    }).catch(loadError => {
+      console.error("Unable to open updater", loadError);
+      host.replaceChildren();
+      error.hidden = false;
+      loading.hidden = true;
+    }).finally(() => {
+      window.clearTimeout(timeout);
+      host.dataset.loading = "false";
+    });
   }
   function choose(panel, wanted) {
     const layout = panel.querySelector("[data-server-config-layout]");
@@ -271,7 +291,30 @@
         window.location.assign(url.href);
         return;
       }
+      // A section still missing after the correct lazy request is an error,
+      // not a reason to silently substitute the overview.
+      const destination = rootWorkspaces[navigation.workspace] || rootWorkspaces.servers;
+      for (const panel of serverPanels) panel.hidden = panel !== target;
+      for (const [name, workspace] of Object.entries(rootWorkspaces)) {
+        if (workspace) workspace.hidden = workspace !== destination;
+      }
+      let notice = destination.querySelector("[data-server-navigation-error]");
+      if (!notice) {
+        notice = document.createElement("p");
+        notice.dataset.serverNavigationError = "true";
+        notice.setAttribute("role", "alert");
+        notice.className = "alert alert-danger";
+        destination.prepend(notice);
+      }
+      const russian = document.documentElement.lang.toLowerCase().startsWith("ru");
+      notice.textContent = russian
+        ? "Не удалось загрузить раздел настроек. Обновите страницу или проверьте журнал сервера."
+        : "The settings section could not be loaded. Reload the page or check the server log.";
+      notice.hidden = false;
+      showRoot(navigation.workspace, navigation.section, target);
+      return;
     }
+    for (const notice of document.querySelectorAll("[data-server-navigation-error]")) notice.hidden = true;
 
     for (const panel of serverPanels) panel.hidden = panel !== target;
     if (selector) selector.value = target.dataset.expenseServerPanel;
@@ -297,7 +340,10 @@
     if (rootButton) {
       const shortcut = rootButton.dataset.serverConfigShortcut;
       const activePanel = serverPanels.find(panel => !panel.hidden) || localPanel();
-      writeNavigation({workspace: rootButton.dataset.serverRootTarget, serverID: activePanel.dataset.serverId, section: shortcut || "overview"});
+      // Sidebar shortcuts describe the local installation; a previously viewed
+      // remote installation must never redirect local network/update controls.
+      const shortcutPanel = shortcut ? localPanel() : activePanel;
+      writeNavigation({workspace: rootButton.dataset.serverRootTarget, serverID: shortcutPanel.dataset.serverId, section: shortcut || "overview"});
       return;
     }
     const panel = event.target.closest("[data-expense-server-panel]");
