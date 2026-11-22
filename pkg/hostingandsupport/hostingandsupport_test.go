@@ -730,8 +730,15 @@ func TestBuildServerViewsPreservesLocalAliasInvoicesOnRegistryMerge(t *testing.T
 	local := BuildLocalServerView(LocalServerViewInput{
 		InstallationID: "canonical-local",
 		MainDomain:     "sitebrush.com",
-		Sites:          []Site{{Domain: "sitebrush.com", AdminEmails: "owner@example.com"}},
-		Invoices:       invoices,
+		Sites: []Site{
+			{Domain: "sitebrush.com", AdminEmails: "owner@example.com", UsedBytes: 1_000_000_000},
+			{Domain: "new.example.com", AdminEmails: "new@example.com", UsedBytes: 1_000_000_000},
+		},
+		Invoices: invoices,
+		CostPolicy: expenses.ServerPolicy{
+			InstallationID: "local", Mode: expenses.ModeActual,
+			ActualMonthlyExpenseMinor: 1250, Currency: "EUR", DiskTotalBytes: 10_000_000_000,
+		},
 	})
 	if len(local.Invoices) != 2 {
 		t.Fatalf("local invoices were lost before registry merge: %#v", local.Invoices)
@@ -747,6 +754,12 @@ func TestBuildServerViewsPreservesLocalAliasInvoicesOnRegistryMerge(t *testing.T
 	}
 	if merged.PaidThisMonthMinor != 550 || merged.BillingOpenLabel != MoneyLabel(300, "EUR") {
 		t.Fatalf("merged financial totals are incomplete: paid=%d open=%s", merged.PaidThisMonthMinor, merged.BillingOpenLabel)
+	}
+	if merged.SiteCount != 2 || len(merged.Sites) != 2 || merged.Sites[1].Domain != "new.example.com" {
+		t.Fatalf("registry snapshot removed a locally created site: %#v", merged.Sites)
+	}
+	if merged.MonthlyCostLabel != local.MonthlyCostLabel || merged.AllocatedMonthLabel != local.AllocatedMonthLabel || merged.MonetizationEnabled != local.MonetizationEnabled {
+		t.Fatalf("stale registry policy replaced the local tariff: local=%#v merged=%#v", local, merged)
 	}
 }
 
