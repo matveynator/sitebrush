@@ -4197,6 +4197,54 @@ func TestAutomaticBillingDistributesServerCostByStorage(t *testing.T) {
 	}
 }
 
+
+func TestAutomaticBillingSkipsOwnInstallationInCentralRegistry(t *testing.T) {
+	ctx := context.Background()
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "billing.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	if err := hostingandsupport.Migrate(ctx, database); err != nil {
+		t.Fatal(err)
+	}
+	store := hostingandsupport.Store{DB: database}
+	customer, err := store.EnsureBillingCustomer(ctx, "client@example.com", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveBillingCustomerSchedule(ctx, customer.ID, 23, 7, "UTC"); err != nil {
+		t.Fatal(err)
+	}
+	policy := expenses.ServerPolicy{
+		InstallationID: "local", Mode: expenses.ModeActual,
+		ActualMonthlyExpenseMinor: 100, Currency: "EUR",
+		FreeSiteThresholdBytes: 100_000_000, DiskTotalBytes: 10_000_000_000,
+	}
+	snapshot := hostingAndSupportPanelSnapshot{
+		MainDomain: "sitebrush.com", LocalInstallationID: "canonical-local",
+		LocalCostPolicy: policy,
+		Sites: []hostingandsupport.Site{{
+			Domain: "client.example.com", UsedBytes: 1_600_000_000,
+			AdminEmails: "client@example.com",
+		}},
+		ClientHostings: []hostingandsupport.ClientHosting{{
+			InstallationID: "canonical-local", ServerDomain: "sitebrush.com",
+			ExpensePolicy: policy,
+			Sites: []hostingandsupport.ClientHostingSite{{
+				Domain: "client.example.com", UsedBytes: 1_600_000_000,
+				OwnerEmail: "client@example.com",
+			}},
+		}},
+	}
+	app := &App{emailDelivery: make(chan mailout.DeliveryJob, 4)}
+	app.runAutomaticBillingOnce(ctx, store, snapshot, time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC))
+	invoices := store.Invoices(ctx, 10)
+	if len(invoices) != 1 || invoices[0].InstallationID != "local:sitebrush.com" {
+		t.Fatalf("central registration billed local sites twice: %#v", invoices)
+	}
+}
+
 func TestVerifiedPaidTrialBillsOnlyAfterFirstMonth(t *testing.T) {
 	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "billing.db"))
 	if err != nil {
