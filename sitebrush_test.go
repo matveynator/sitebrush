@@ -3661,7 +3661,7 @@ func TestSimplifiedExpensesShowsLocalSiteDeletionControls(t *testing.T) {
 		t.Fatal(err)
 	}
 	var rendered bytes.Buffer
-	view := map[string]any{"Domain": "sitebrush.com", "Title": "Server settings", "T": translationsForLanguageCode("ru"), "SimplifiedExpenses": true, "Servers": []hostingandsupport.ServerView{{Local: true}}, "ExpenseServers": servers, "AccountCSRF": "test-csrf"}
+	view := map[string]any{"Domain": "sitebrush.com", "Title": "Server settings", "T": translationsForLanguageCode("ru"), "SimplifiedExpenses": true, "Servers": []hostingandsupport.ServerView{{Local: true}}, "ExpenseServers": servers, "AccountCSRF": "test-csrf", "SelectedServerSection": "clients"}
 	if err := parsedTemplate.Execute(&rendered, view); err != nil {
 		t.Fatal(err)
 	}
@@ -16508,6 +16508,7 @@ func TestSimplifiedExpensesShowsTestDriveUnderRegistrationAfterExplicitPermissio
 		"PublicTrialAvailable":       false,
 		"PublicTrialUnavailableText": "Enable automatic registration and wildcard DNS.",
 		"PublicTrialEmbedHTML":       "<form data-sitebrush-public-trial-form></form>",
+		"SelectedServerSection":      "registration",
 		"ActivePublicTrialSites": []hostingandsupport.PublicTrialSite{{
 			Domain: "trial.sitebrush.example", SourceURL: "https://copied.example/", CreatedAt: "created", DeleteAfter: "delete-after",
 		}},
