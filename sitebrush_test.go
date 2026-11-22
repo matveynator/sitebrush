@@ -3041,6 +3041,32 @@ func TestServerSettingsNavigationPreservesExistingControls(t *testing.T) {
 	}
 }
 
+// Dependent public onboarding controls must not be rendered when the
+// server owner has disabled the prerequisite registration policy.
+func TestRegistrationSettingsScopeTrialAndDemoNavigation(t *testing.T) {
+	pageBytes, err := fs.ReadFile(embeddedWebFiles, "web/expenses.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(pageBytes)
+	for _, fragment := range []string{
+		`{{if and .AutoRegistrationEnabled .PublicTrialEnabled}}<button type="button" data-server-root-target="temporary-sites"`,
+		`{{if and .AutoRegistrationEnabled .PublicTrialEnabled}}` + "\n" + `    <section class="server-root-workspace" data-hosting-installation-panel="temporary-sites"`,
+		`{{if $.AutoRegistrationEnabled}}<button type="button" data-server-config-target="demo"`,
+		`{{if $.AutoRegistrationEnabled}}<section class="server-config-view" data-server-config-view="demo"`,
+		`{{if .CleanupPendingTrialSites}}`,
+		`{{range .CleanupPendingTrialSites}}`,
+		`{{if .DeletedAt}}`,
+	} {
+		if !strings.Contains(page, fragment) {
+			t.Errorf("registration-dependent interface is missing guard %q", fragment)
+		}
+	}
+	if _, err := parseEmbeddedPageTemplate("expenses.html", pageBytes); err != nil {
+		t.Fatalf("conditional server settings template is invalid: %v", err)
+	}
+}
+
 func TestHostingAndSupportTemplateRendersServerView(t *testing.T) {
 	templateBytes, err := fs.ReadFile(embeddedWebFiles, "web/expenses.html")
 	if err != nil {
