@@ -21328,9 +21328,19 @@ func (a *App) renderLoginPage(w http.ResponseWriter, r *http.Request, returnPath
 
 // Only the exact domain enabled by the server operator is publicly editable.
 // A demo-looking hostname alone never grants access to another installation.
+// An unavailable registration policy must never grant public demo editing.
+func (a *App) publicDemoRegistrationAllowed(ctx context.Context) bool {
+	allowed := false
+	err := a.withServerControlDatabaseRead(ctx, "public-demo-registration", func(database *sql.DB) error {
+		allowed = (hostingandsupport.Store{DB: database}).AutomaticRegistrationAllowed(ctx)
+		return nil
+	})
+	return err == nil && allowed
+}
+
 func (a *App) publicDemoState(r *http.Request, domain string) (demoSiteRuntimeState, bool) {
 	state, found := a.runtimeDemoSiteState(r.Context())
-	return state, found && a.serverAutomaticRegistrationAllowed(r.Context()) && state.Settings.Enabled && normalizeDomainName(state.Settings.Domain) == normalizeDomainName(domain) && normalizeDomainName(domainFromRequest(r)) == normalizeDomainName(domain)
+	return state, found && a.publicDemoRegistrationAllowed(r.Context()) && state.Settings.Enabled && normalizeDomainName(state.Settings.Domain) == normalizeDomainName(domain) && normalizeDomainName(domainFromRequest(r)) == normalizeDomainName(domain)
 }
 
 func (a *App) publicDemoAISession(r *http.Request, domain string) (aicapability.Session, aicapability.Capability, error) {
@@ -21353,7 +21363,7 @@ func (a *App) maybeStartDemoSite(w http.ResponseWriter, r *http.Request, request
 		return false
 	}
 	state, found := a.runtimeDemoSiteState(r.Context())
-	if !found || normalizeDomainName(state.Settings.Domain) != normalizeDomainName(requestDomain) || !a.serverAutomaticRegistrationAllowed(r.Context()) {
+	if !found || normalizeDomainName(state.Settings.Domain) != normalizeDomainName(requestDomain) || !a.publicDemoRegistrationAllowed(r.Context()) {
 		return false
 	}
 	if !httpsecurity.IsLocalRequest(r) && !httpsecurity.UsesHTTPS(r) {
@@ -31478,7 +31488,7 @@ func (a *App) saveHostingAndSupportRegistrationSettingsFromForm(r *http.Request)
 	// disabling registration must stop subsequent public demo sessions as well.
 	a.updateRuntimeDemoSiteState(r.Context(), a.loadDemoSiteRuntimeState(r.Context()))
 	if r.FormValue("auto_registration_enabled") != "1" && a.aiCapabilities != nil {
-		if settings, enabled := a.demoSiteSettings(r.Context()); enabled {
+		if settings, _ := a.demoSiteSettings(r.Context()); settings.Domain != "" {
 			if err := a.aiCapabilities.RevokeDomain(settings.Domain); err != nil {
 				log.Printf("registration disabled: demo capability revoke failed: %v", err)
 			}
