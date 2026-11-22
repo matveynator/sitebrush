@@ -289,7 +289,7 @@
                   </span>
                   <small class="text-muted">{{$client.SiteCount}} {{index $.T "billing_client_sites"}} · <span data-client-quota-summary>{{$client.TotalStorageLabel}}</span></small>
                 </span>
-                <span class="server-client-head-cost"><strong>{{$client.DebtLabel}}</strong><small>{{index $.T "server_billing_open"}}</small></span>
+                <span class="server-client-head-cost"><strong>{{$client.DebtLabel}}</strong><small>{{index $.T "server_billing_open"}}</small><small>{{index $.T "server_billing_paid"}}: {{$client.PaidThisMonthLabel}}</small></span>
               </summary>
               <div class="expense-simple-client-body">
                 <nav class="server-client-tabs" aria-label="{{if eq $.LanguageCode "ru"}}Разделы клиента{{else}}Client sections{{end}}">
@@ -311,7 +311,7 @@
                         <strong>{{if $site.URL}}<a href="{{$site.URL}}" target="_blank" rel="noopener noreferrer">{{$site.Domain}}</a>{{else}}{{$site.Domain}}{{end}}</strong>
                         {{if $site.DeletionReason}}<small class="status-bad">{{index $.T "server_delete_pending"}} {{$site.DeletionDeadline}}</small>{{end}}
                         {{range $certificate := $site.CertificateDomains}}
-                        <div class="server-client-certificate" data-client-certificate data-client-certificate-valid="{{if $certificate.Valid}}true{{else}}false{{end}}" data-client-certificate-expires="{{$certificate.ExpiresAt}}" data-client-certificate-remaining="{{$certificate.Remaining}}">
+                        <div class="server-client-certificate" data-client-certificate data-client-certificate-valid="{{if $certificate.Valid}}true{{else}}false{{end}}" data-client-certificate-domain="{{$certificate.Domain}}" data-client-certificate-expires="{{$certificate.ExpiresAt}}" data-client-certificate-remaining="{{$certificate.Remaining}}">
                           {{if $certificate.Valid}}<small class="status-ok">{{$certificate.Domain}} · {{index $.T "domain_settings_ssl_valid"}} · {{$certificate.ExpiresAt}} ({{$certificate.Remaining}})</small>{{else}}
                           <small class="status-bad" data-client-ssl-invalid>{{$certificate.Domain}} · {{index $.T "domain_settings_ssl_invalid"}}{{if $certificate.LastError}} · {{$certificate.LastError}}{{end}}</small>
                           {{if $certificate.CanRenew}}<button type="button" class="btn btn-outline-primary btn-sm" data-certificate-renew="{{$certificate.Domain}}">{{index $.T "domain_settings_ssl_renew_now"}}</button>{{end}}
@@ -658,6 +658,7 @@
   </div>
 
 </main>
+{{if eq .SelectedServerSection "clients"}}
 <!-- Shared client dialogs: exactly two, regardless of site count. -->
 <div class="modal fade" id="clientQuotaModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
@@ -697,6 +698,7 @@
     </form>
   </div></div>
 </div>
+{{end}}
 <div class="modal fade" id="demoRefreshModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg demo-refresh-modal-dialog"><div class="modal-content">
     <div class="modal-header">
