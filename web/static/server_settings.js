@@ -182,15 +182,19 @@
     const layout = panel.querySelector("[data-server-config-layout]");
     if (!layout) return;
     const views = Array.from(layout.querySelectorAll("[data-server-config-view]"));
-    const section = views.some(view => view.dataset.serverConfigView === wanted) ? wanted : "overview";
-    for (const view of views) view.hidden = view.dataset.serverConfigView !== section;
+    // Never silently replace a requested (possibly deferred) view with Overview.
+    // A missing/forbidden view is diagnosed by displayNavigation instead.
+    const section = wanted || "overview";
+    const loaded = views.some(view => view.dataset.serverConfigView === section);
+    for (const view of views) view.hidden = !loaded || view.dataset.serverConfigView !== section;
     for (const button of layout.querySelectorAll("[data-server-config-target]")) {
       const active = button.dataset.serverConfigTarget === section;
       button.setAttribute("aria-current", active ? "page" : "false");
       button.classList.toggle("is-active", active);
     }
     layout.dataset.serverConfigSelected = section;
-    if (section === "updates") openUpdater(layout);
+    if (loaded && section === "updates") openUpdater(layout);
+    return loaded;
   }
 
   function invoiceBelongsToPanel(invoice, panel) {
@@ -307,12 +311,17 @@
     const needBilling = navigation.workspace === "billing" && centralBilling?.dataset.billingDeferred === "true";
     const needInstallations = navigation.workspace === "installations" && installationsWorkspace?.dataset.installationsDeferred === "true";
     const requestedSection = navigation.section;
-    const serverShortcutAvailable = Array.from(rootTabs?.querySelectorAll("[data-server-config-shortcut]") || [])
-      .some(button => button.dataset.serverConfigShortcut === requestedSection);
+    // Lazy views must be resolvable by direct URL as well as by sidebar click.
+    // Unknown sections fail visibly without a reload loop.
+    const validServerSections = ["overview", "network", "updates", "registration", "demo", "clients", "billing", "monetization"];
+    const knownServerSection = validServerSections.includes(requestedSection);
     const serverSectionLoaded = Array.from(target.querySelectorAll("[data-server-config-view]"))
       .some(view => view.dataset.serverConfigView === requestedSection);
-    const needServerSection = navigation.workspace === "servers" && serverShortcutAvailable && !serverSectionLoaded;
-    if (needClients || needBilling || needInstallations || needServerSection || missingRequestedServer) {
+    const needServerSection = navigation.workspace === "servers" && knownServerSection &&
+      !missingRequestedServer && !serverSectionLoaded;
+    const invalidServerSection = navigation.workspace === "servers" &&
+      !knownServerSection && !missingRequestedServer;
+    if (needClients || needBilling || needInstallations || needServerSection || missingRequestedServer || invalidServerSection) {
       const url = new URL(window.location.href);
       if (needServerSection || missingRequestedServer) {
         url.searchParams.set("section", requestedSection);
@@ -323,7 +332,7 @@
         url.searchParams.delete("section");
         url.searchParams.delete("installation");
       }
-      if (url.href !== window.location.href) {
+      if (!invalidServerSection && url.href !== window.location.href) {
         window.location.assign(url.href);
         return;
       }
@@ -331,9 +340,11 @@
       // not a reason to silently substitute the overview.
       const destination = rootWorkspaces[navigation.workspace] || rootWorkspaces.servers;
       for (const panel of serverPanels) panel.hidden = panel !== target;
-      for (const [name, workspace] of Object.entries(rootWorkspaces)) {
+      for (const workspace of Object.values(rootWorkspaces)) {
         if (workspace) workspace.hidden = workspace !== destination;
       }
+      // Keep an unavailable view blank rather than exposing a stale Overview.
+      if (navigation.workspace === "servers") choose(target, requestedSection);
       let notice = destination.querySelector("[data-server-navigation-error]");
       if (!notice) {
         notice = document.createElement("p");
