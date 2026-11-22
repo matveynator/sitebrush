@@ -510,3 +510,100 @@
   .server-settings-page .server-nav-group { display: none; }
 }
 .server-settings-page .server-root-tabs { max-width: 100%; flex-wrap: wrap; }
+
+/* The administrator has one persistent navigation rail across every workspace. */
+.server-settings-page .server-admin-shell {
+  display: grid;
+  grid-template-columns: 228px minmax(0, 1fr);
+  gap: 26px;
+  align-items: start;
+  min-width: 0;
+}
+.server-settings-page .server-admin-sidebar,
+.server-settings-page .server-admin-main { min-width: 0; }
+.server-settings-page .server-root-tabs {
+  position: sticky;
+  top: 18px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: stretch;
+  width: 100%;
+  max-width: 100%;
+  max-height: calc(100vh - 36px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 8px;
+  margin: 0;
+  border-radius: var(--theme-radius);
+  background: var(--theme-card);
+  gap: 2px;
+}
+.server-settings-page .server-root-tabs .server-nav-group {
+  display: block;
+  margin: 15px 11px 5px;
+  padding: 0;
+  font-size: 11px;
+  line-height: 1.3;
+  font-weight: 650;
+  color: var(--theme-muted-foreground);
+}
+.server-settings-page .server-root-tabs .server-nav-group:first-child { margin-top: 7px; }
+.server-settings-page .server-root-tabs button {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  padding: 10px 12px;
+  border-radius: calc(var(--theme-radius) - 3px);
+  background: transparent;
+  color: var(--theme-foreground);
+  text-align: start;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font-weight: 500;
+}
+.server-settings-page .server-root-tabs button:hover { background: var(--theme-muted); }
+.server-settings-page .server-root-tabs button.is-active {
+  background: var(--theme-muted);
+  box-shadow: inset 3px 0 0 var(--theme-primary);
+  font-weight: 700;
+}
+.server-settings-page .server-root-tabs button[hidden] { display: none !important; }
+.server-settings-page .server-config-layout {
+  display: block;
+  min-width: 0;
+}
+.server-settings-page .server-config-content { width: 100%; min-width: 0; }
+.server-settings-page .server-config-layout:not([data-server-config-selected]) .server-config-view:not([data-server-config-view="overview"]) {
+  display: none;
+}
+.server-settings-page .server-config-view[hidden] { display: none !important; }
+.server-settings-page [data-expense-server-panel][hidden] { display: none !important; }
+@media (max-width: 850px) {
+  .server-settings-page .server-admin-shell {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 18px;
+  }
+  .server-settings-page .server-root-tabs {
+    position: static;
+    max-height: none;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 3px;
+  }
+  .server-settings-page .server-root-tabs .server-nav-group {
+    grid-column: 1 / -1;
+  }
+  .server-settings-page .server-root-tabs button {
+    width: 100%;
+    min-width: 0;
+    flex: initial;
+  }
+}
+@media (max-width: 520px) {
+  .server-settings-page .server-root-tabs {
+    grid-template-columns: minmax(0, 1fr);
+    max-height: 330px;
+    overflow-y: auto;
+  }
+  .server-settings-page .server-root-tabs .server-nav-group { grid-column: auto; }
+}

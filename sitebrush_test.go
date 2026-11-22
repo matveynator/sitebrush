@@ -2955,8 +2955,8 @@ func TestServerSettingsNavigationPreservesExistingControls(t *testing.T) {
 		}
 	}
 	for _, section := range []string{"overview", "monetization", "network", "updates", "registration", "demo", "clients"} {
-		if !strings.Contains(page, `data-server-config-target="`+section+`"`) {
-			t.Errorf("missing server section navigation for %q", section)
+		if !strings.Contains(page, `data-server-config-shortcut="`+section+`"`) {
+			t.Errorf("missing sidebar section navigation for %q", section)
 		}
 		if !strings.Contains(page, `data-server-config-view="`+section+`"`) {
 			t.Errorf("missing server section view for %q", section)
@@ -3001,28 +3001,38 @@ func TestServerSettingsNavigationPreservesExistingControls(t *testing.T) {
 	if strings.Count(page, `data-public-ip-panel data-csrf=`) != 1 {
 		t.Error("public IP panel must exist in exactly one local server view")
 	}
-	// Monetization follows ordinary server administration; the overview remains read-only.
-	navigationStart := strings.Index(page, `<nav class="server-config-nav"`)
+	// The whole administrator surface has one left sidebar. Server subsections
+	// and global installation workspaces must never create competing menus.
+	navigationStart := strings.Index(page, `<nav class="server-root-tabs"`)
 	if navigationStart < 0 {
-		t.Fatal("server settings navigation is missing")
+		t.Fatal("server sidebar navigation is missing")
 	}
 	navigationEnd := strings.Index(page[navigationStart:], "</nav>")
 	if navigationEnd < 0 {
-		t.Fatal("server settings navigation is not closed")
+		t.Fatal("server sidebar navigation is not closed")
 	}
 	navigation := page[navigationStart : navigationStart+navigationEnd]
-	monetizationPosition := strings.Index(navigation, `data-server-config-target="monetization"`)
-	if monetizationPosition < 0 {
-		t.Fatal("monetization is missing from server navigation")
+	if strings.Count(page, `<nav class="server-root-tabs"`) != 1 || strings.Contains(page, `<nav class="server-config-nav"`) {
+		t.Error("there must be only one administrator sidebar")
 	}
-	for _, section := range []string{"clients", "billing"} {
-		position := strings.Index(navigation, `data-server-config-target="`+section+`"`)
-		if position >= monetizationPosition || position < 0 {
-			t.Errorf("section %q should appear before monetization", section)
+	if !strings.Contains(page[:navigationStart], `<aside class="server-admin-sidebar">`) {
+		t.Error("navigation must live in the left sidebar")
+	}
+	previousPosition := -1
+	for _, section := range []string{"overview", "network", "updates", "registration", "demo", "clients", "monetization", "billing"} {
+		position := strings.Index(navigation, `data-server-config-shortcut="`+section+`"`)
+		if position <= previousPosition {
+			t.Errorf("sidebar section %q is missing or appears out of order", section)
+		}
+		previousPosition = position
+	}
+	for _, workspace := range []string{"installations", "clients", "billing"} {
+		if !strings.Contains(navigation, `data-server-root-target="`+workspace+`"`) {
+			t.Errorf("missing global workspace %q", workspace)
 		}
 	}
-	if strings.Index(navigation, `data-server-config-target="registration"`) < monetizationPosition {
-		t.Error("registration must follow the financial group")
+	if !strings.Contains(navigation, `{{if .ShowCentralRegistry}}`) {
+		t.Error("central installation workspaces must be authorized")
 	}
 	if strings.Index(page, `data-server-config-view="monetization"`) <= strings.Index(page, `data-server-config-view="clients"`) {
 		t.Error("monetization view must be the final server section")
@@ -3058,6 +3068,87 @@ func TestServerSettingsNavigationPreservesExistingControls(t *testing.T) {
 		if strings.Contains(panels[1], "data-public-ip-panel") != authorized || strings.Contains(panels[2], "data-public-ip-panel") {
 			t.Errorf("network controls escaped their local authorization boundary: authorized=%v", authorized)
 		}
+	}
+}
+
+// Server-only actions are excluded at render time, not merely hidden by JS.
+func TestServerSidebarCapabilitiesAreScopedBeforeJavascript(t *testing.T) {
+	pageBytes, err := fs.ReadFile(embeddedWebFiles, "web/expenses.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := parseEmbeddedPageTemplate("expenses.html", pageBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name         string
+		local        bool
+		autoRegister bool
+		publicIPs    bool
+		central      bool
+		visible      []string
+		hidden       []string
+	}{
+		{
+			name: "local prerequisites disabled", local: true, publicIPs: true,
+			visible: []string{"network", "updates", "registration", "monetization", "clients", "billing"},
+			hidden: []string{"demo"},
+		},
+		{
+			name: "local registration enabled", local: true, autoRegister: true,
+			visible: []string{"updates", "registration", "demo", "monetization", "clients", "billing"},
+			hidden: []string{"network"},
+		},
+		{
+			name: "central remote installation", central: true,
+			visible: []string{"clients", "billing"},
+			hidden: []string{"network", "updates", "registration", "demo", "monetization"},
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			view := map[string]any{
+				"T": translationsForLanguageCode("en"),
+				"SelectedServerLocal": testCase.local,
+				"AutoRegistrationEnabled": testCase.autoRegister,
+				"CanConfigurePublicIPs": testCase.publicIPs,
+				"ShowCentralRegistry": testCase.central,
+				"DemoSettings": demo.Settings{},
+				"DemoStatus": map[string]any{"SnapshotAvailable": false, "LastRestoredAt": ""},
+				"ExpenseServers": []simplifiedExpenseServerView{{
+					Server: hostingandsupport.ServerView{ID: "test-installation", Local: testCase.local},
+					MailSelected: true,
+				}},
+			}
+			var rendered bytes.Buffer
+			if err := page.Execute(&rendered, view); err != nil {
+				t.Fatal(err)
+			}
+			html := rendered.String()
+			start := strings.Index(html, `<nav class="server-root-tabs"`)
+			if start < 0 {
+				t.Fatal("sidebar not rendered")
+			}
+			end := strings.Index(html[start:], "</nav>")
+			if end < 0 {
+				t.Fatal("sidebar is not closed")
+			}
+			navigation := html[start : start+end]
+			for _, section := range testCase.visible {
+				if !strings.Contains(navigation, `data-server-config-shortcut="`+section+`"`) {
+					t.Errorf("missing allowed sidebar section %s", section)
+				}
+			}
+			for _, section := range testCase.hidden {
+				if strings.Contains(navigation, `data-server-config-shortcut="`+section+`"`) {
+					t.Errorf("forbidden or unavailable sidebar section %s", section)
+				}
+			}
+			if strings.Contains(navigation, `data-server-root-target="installations"`) != testCase.central {
+				t.Error("central installation directory visibility does not match authorization")
+			}
+		})
 	}
 }
 
@@ -32336,6 +32427,9 @@ func TestMailMonitorPanelMergedLocalServerAndRemoteScope(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "http://localhost/?server-settings&mail_server=merged-local", nil)
 	view := application.hostingAndSupportPanelView(request, snapshot)
 	servers := view["ExpenseServers"].([]simplifiedExpenseServerView)
+	if len(servers) != 1 || !servers[0].Server.Local {
+		t.Fatalf("server settings must load only the selected local installation: %+v", servers)
+	}
 	if servers[0].MailLastDay.Queued != 1 || len(servers[0].MailOperations) != 0 || servers[0].MailExpanded || !strings.Contains(servers[0].MailSecurityURL, "tab=security") {
 		t.Fatalf("server page must show statistics and a security link: %+v", servers[0])
 	}
@@ -32359,6 +32453,9 @@ func TestMailMonitorPanelMergedLocalServerAndRemoteScope(t *testing.T) {
 	}
 	request = httptest.NewRequest(http.MethodGet, "http://localhost/?analytics&tab=security&mail_server=merged-local", nil)
 	servers = application.hostingAndSupportPanelView(request, snapshot)["ExpenseServers"].([]simplifiedExpenseServerView)
+	if len(servers) != 2 {
+		t.Fatalf("security journal must retain every installation: %+v", servers)
+	}
 	if !servers[0].MailSelected || !servers[0].MailAvailable || servers[0].MailLastDay.Queued != 1 || len(servers[0].MailOperations) != 1 {
 		t.Fatalf("merged local journal lost: %+v", servers[0])
 	}
@@ -32369,6 +32466,11 @@ func TestMailMonitorPanelMergedLocalServerAndRemoteScope(t *testing.T) {
 	servers = application.hostingAndSupportPanelView(request, snapshot)["ExpenseServers"].([]simplifiedExpenseServerView)
 	if !servers[1].MailSelected || len(servers[1].MailOperations) != 0 {
 		t.Fatal("remote journal leaked local messages")
+	}
+	request = httptest.NewRequest(http.MethodGet, "http://localhost/?server-settings&installation=remote", nil)
+	servers = application.hostingAndSupportPanelView(request, snapshot)["ExpenseServers"].([]simplifiedExpenseServerView)
+	if len(servers) != 1 || servers[0].Server.ID != "remote" {
+		t.Fatalf("selected remote installation must load without other panels: %+v", servers)
 	}
 	request = httptest.NewRequest(http.MethodGet, "http://localhost/?server-settings&mail_server=unknown", nil)
 	servers = application.hostingAndSupportPanelView(request, snapshot)["ExpenseServers"].([]simplifiedExpenseServerView)
