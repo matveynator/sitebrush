@@ -2,6 +2,7 @@ package expenses
 
 import (
 	"fmt"
+	"math/big"
 	"sort"
 	"strings"
 )
@@ -173,15 +174,23 @@ func AllocateMonthlyExpense(policy ServerPolicy, sites []SiteUsage) MonthlyAlloc
 	if totalWeight > billingCapacityBytes {
 		allocationDenominator = totalWeight
 	}
-	targetAllocatedMinor := (monthlyExpenseMinor*totalWeight + allocationDenominator/2) / allocationDenominator
+	// Bytes times minor currency units can overflow int64 on ordinary large
+	// storage servers. Keep exact intermediate products local to this billing
+	// calculation; only bounded integer results escape to callers.
+	denominator := big.NewInt(allocationDenominator)
+	targetNumerator := new(big.Int).Mul(big.NewInt(monthlyExpenseMinor), big.NewInt(totalWeight))
+	targetNumerator.Add(targetNumerator, big.NewInt(allocationDenominator/2))
+	targetAllocatedMinor := new(big.Int).Quo(targetNumerator, denominator).Int64()
 	if targetAllocatedMinor > monthlyExpenseMinor {
 		targetAllocatedMinor = monthlyExpenseMinor
 	}
 	allocatedMinor := int64(0)
 	for weightedIndex := range weightedSites {
-		numerator := monthlyExpenseMinor * weightedSites[weightedIndex].weight
-		weightedSites[weightedIndex].share = numerator / allocationDenominator
-		weightedSites[weightedIndex].remainder = numerator % allocationDenominator
+		numerator := new(big.Int).Mul(big.NewInt(monthlyExpenseMinor), big.NewInt(weightedSites[weightedIndex].weight))
+		share, remainder := new(big.Int), new(big.Int)
+		share.QuoRem(numerator, denominator, remainder)
+		weightedSites[weightedIndex].share = share.Int64()
+		weightedSites[weightedIndex].remainder = remainder.Int64()
 		allocatedMinor += weightedSites[weightedIndex].share
 	}
 	sort.SliceStable(weightedSites, func(left int, right int) bool {
