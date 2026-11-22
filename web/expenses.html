@@ -214,6 +214,19 @@
             <h2>{{index $.T "billing_registration_title"}}</h2>
             <p class="text-muted">{{index $.T "billing_registration_hint"}}</p>
             {{template "registration-settings-form" $}}
+            {{if and (not $.AutoRegistrationEnabled) $.CleanupPendingTrialSites}}
+            <details class="server-temporary-archive mt-3">
+              <summary>{{index $.T "billing_temporary_sites_cleanup_pending"}} · {{len $.CleanupPendingTrialSites}}</summary>
+              <div class="server-temporary-list">
+                {{range $.CleanupPendingTrialSites}}
+                <article class="server-temporary-row">
+                  <div class="server-temporary-identity"><strong>{{.Domain}}</strong>{{if .LastError}}<small role="alert">{{.LastError}}</small>{{end}}</div>
+                  <div class="server-temporary-status"><small>{{index $.T "billing_temporary_sites_delete_after"}}: {{.DeleteAfter}}</small></div>
+                </article>
+                {{end}}
+              </div>
+            </details>
+            {{end}}
             {{if $.PublicTrialEnabled}}
             <div class="mt-4">
               {{template "public-trial-settings" $}}
