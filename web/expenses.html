@@ -278,79 +278,125 @@
           {{template "client-filters" $}}
           <div class="expense-simple-clients" data-server-clients-list>
             {{range $clientIndex, $client := $expenseServer.Clients}}
-            <details class="expense-simple-client" data-server-client-row data-customer-email="{{$client.Email}}" data-client-search="{{$client.SearchText}}" data-client-unpaid="{{$client.HasUnpaid}}" data-client-overdue="{{$client.HasOverdue}}" data-client-over-limit="{{$client.OverLimit}}" data-client-attention="{{$client.NeedsAttention}}">
+            <details class="expense-simple-client" data-server-client-row data-customer-email="{{$client.Email}}" data-client-search="{{$client.SearchText}}" data-client-site-count="{{$client.SiteCount}}" data-client-debt-label="{{$client.DebtLabel}}" data-client-unpaid="{{$client.HasUnpaid}}" data-client-overdue="{{$client.HasOverdue}}" data-client-over-limit="{{$client.OverLimit}}" data-client-attention="{{$client.NeedsAttention}}">
               <summary>
-                <span class="expense-simple-client-head"><strong>{{$client.Email}}</strong><small class="text-muted">{{$client.SiteCount}} {{index $.T "billing_client_sites"}}</small></span>
-                <span><strong>{{$client.TotalStorageLabel}}</strong><br><small>{{index $.T "billing_client_storage"}}</small></span>
-                <span><strong>{{$client.PaidThisMonthLabel}}</strong><br><small>{{index $.T "server_billing_paid"}}</small></span>
-                <span><strong>{{$client.DebtLabel}}</strong><br><small>{{if $client.HasOverdue}}{{index $.T "server_billing_overdue"}}{{else if $client.OverLimit}}{{index $.T "server_clients_over_limit"}}{{else if $client.NeedsAttention}}{{index $.T "server_clients_attention"}}{{else}}{{index $.T "server_billing_open"}}{{end}}</small></span>
+                <span class="expense-simple-client-head">
+                  <strong>{{$client.Email}}</strong>
+                  <span class="server-client-problems">
+                    {{if $client.HasOverdue}}<span class="server-client-problem is-error">{{index $.T "server_billing_overdue"}} · {{$client.DebtLabel}}</span>{{else if $client.OverLimit}}<span class="server-client-problem is-warning">{{index $.T "server_clients_over_limit"}}</span>{{else if $client.NeedsAttention}}<span class="server-client-problem is-warning">{{index $.T "server_clients_attention"}}</span>{{end}}
+                    <span class="server-client-problem is-warning" data-client-ssl-problems hidden></span>
+                  </span>
+                  <small class="text-muted">{{$client.SiteCount}} {{index $.T "billing_client_sites"}} · <span data-client-quota-summary>{{$client.TotalStorageLabel}}</span></small>
+                </span>
+                <span class="server-client-head-cost"><strong>{{$client.DebtLabel}}</strong><small>{{index $.T "server_billing_open"}}</small></span>
               </summary>
               <div class="expense-simple-client-body">
-                <div class="expense-simple-sites">
-                  {{range $siteIndex, $site := $client.Sites}}
-                  <div class="expense-simple-site">
-                    <span>{{if $site.URL}}<a href="{{$site.URL}}" target="_blank" rel="noopener noreferrer">{{$site.Domain}}</a>{{else}}{{$site.Domain}}{{end}}{{if $site.DeletionReason}}<small class="d-block text-warning">{{index $.T "server_delete_pending"}} {{$site.DeletionDeadline}}</small>{{end}}{{range $certificate := $site.CertificateDomains}}<br><small>{{if $certificate.Valid}}<span class="status-ok">{{$certificate.Domain}} · {{index $.T "domain_settings_ssl_valid"}} · {{$certificate.ExpiresAt}} ({{$certificate.Remaining}})</span>{{else}}<span class="status-bad">{{$certificate.Domain}} · {{index $.T "domain_settings_ssl_invalid"}}{{if $certificate.LastError}} · {{$certificate.LastError}}{{end}}</span>{{end}} {{if $certificate.CanRenew}}<button type="button" class="btn btn-outline-primary btn-sm" data-certificate-renew="{{$certificate.Domain}}">{{index $.T "domain_settings_ssl_renew_now"}}</button><span data-certificate-renew-status="{{$certificate.Domain}}" aria-live="polite"></span>{{end}}</small>{{end}}</span>
-                    <span>{{$site.UsedLabel}} · {{$site.BillingPriceLabel}}{{if $site.AnalyticsLabel}}<small class="d-block">{{index $.T "cx_storage"}}: {{$site.AnalyticsLabel}}</small>{{end}}</span>
-                    <span class="expense-simple-site-actions">
-                      {{if $site.CanEditQuota}}<button type="button" class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#simpleQuota{{$serverIndex}}_{{$clientIndex}}_{{$siteIndex}}">{{index $.T "billing_quota"}}: {{$site.LimitLabel}}</button>
-                      {{else}}{{index $.T "billing_quota"}}: {{$site.LimitLabel}}{{end}}
-                      {{if $site.CanDelete}}<button type="button" class="btn btn-outline-danger btn-sm" data-bs-toggle="modal" data-bs-target="#simpleDelete{{$serverIndex}}_{{$clientIndex}}_{{$siteIndex}}">{{index $.T "server_site_actions"}}</button>{{end}}
-                    </span>
+                <nav class="server-client-tabs" aria-label="{{if eq $.LanguageCode "ru"}}Разделы клиента{{else}}Client sections{{end}}">
+                  <button type="button" data-client-tab="sites" class="is-active" aria-pressed="true">{{if eq $.LanguageCode "ru"}}Сайты{{else}}Sites{{end}} ({{$client.SiteCount}})</button>
+                  <button type="button" data-client-tab="billing" aria-pressed="false">{{if eq $.LanguageCode "ru"}}Биллинг и расписание{{else}}Billing and schedule{{end}}</button>
+                  <button type="button" data-client-tab="account" aria-pressed="false">{{if eq $.LanguageCode "ru"}}Аккаунт клиента{{else}}Client account{{end}}</button>
+                </nav>
+                <section data-client-pane="sites">
+                  {{if gt $client.SiteCount 5}}
+                  <div class="server-client-site-controls">
+                    <label>{{if eq $.LanguageCode "ru"}}Найти сайт клиента{{else}}Find client site{{end}}<input class="form-control form-control-sm" type="search" data-client-domain-search placeholder="{{if eq $.LanguageCode "ru"}}Поиск по домену{{else}}Search domain{{end}}" autocomplete="off"></label>
+                    <label class="server-client-error-filter"><input type="checkbox" data-client-errors-only> {{if eq $.LanguageCode "ru"}}Только с ошибками{{else}}Problems only{{end}} (<span data-client-error-count>0</span>)</label>
                   </div>
-                  {{if $site.CanEditQuota}}
-                  <div class="modal fade" id="simpleQuota{{$serverIndex}}_{{$clientIndex}}_{{$siteIndex}}" tabindex="-1" aria-hidden="true">
-                    <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
-                      <form method="post" action="?server-settings"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
-                        <div class="modal-header"><h2 class="modal-title h5">{{index $.T "billing_quota_change_title"}}</h2><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button></div>
-                        <div class="modal-body">
-                          <p><strong>{{$site.Domain}}</strong></p>
-                          <input type="hidden" name="billing_action" value="update_site_quota">
-                          <input type="hidden" name="domain" value="{{$site.Domain}}">
-                          <label>{{index $.T "billing_quota"}} <input name="quota" type="text" class="form-control" value="{{$site.QuotaInput}}" required></label>
+                  {{end}}
+                  <div class="expense-simple-sites" data-client-sites>
+                    {{range $siteIndex, $site := $client.Sites}}
+                    <article class="expense-simple-site" data-client-site-row data-client-site-domain="{{$site.Domain}}" data-client-site-used="{{$site.UsedBytes}}" data-client-site-limit="{{$site.LimitLabel}}" data-client-site-problem="{{if or $site.OverLimit $site.DeletionReason}}true{{else}}false{{end}}">
+                      <div class="server-client-site-identity">
+                        <strong>{{if $site.URL}}<a href="{{$site.URL}}" target="_blank" rel="noopener noreferrer">{{$site.Domain}}</a>{{else}}{{$site.Domain}}{{end}}</strong>
+                        {{if $site.DeletionReason}}<small class="status-bad">{{index $.T "server_delete_pending"}} {{$site.DeletionDeadline}}</small>{{end}}
+                        {{range $certificate := $site.CertificateDomains}}
+                        <div class="server-client-certificate" data-client-certificate data-client-certificate-valid="{{if $certificate.Valid}}true{{else}}false{{end}}" data-client-certificate-expires="{{$certificate.ExpiresAt}}" data-client-certificate-remaining="{{$certificate.Remaining}}">
+                          {{if $certificate.Valid}}<small class="status-ok">{{$certificate.Domain}} · {{index $.T "domain_settings_ssl_valid"}} · {{$certificate.ExpiresAt}} ({{$certificate.Remaining}})</small>{{else}}
+                          <small class="status-bad" data-client-ssl-invalid>{{$certificate.Domain}} · {{index $.T "domain_settings_ssl_invalid"}}{{if $certificate.LastError}} · {{$certificate.LastError}}{{end}}</small>
+                          {{if $certificate.CanRenew}}<button type="button" class="btn btn-outline-primary btn-sm" data-certificate-renew="{{$certificate.Domain}}">{{index $.T "domain_settings_ssl_renew_now"}}</button>{{end}}
+                          {{end}}
+                          <span data-client-ssl-inline></span><span data-certificate-renew-status="{{$certificate.Domain}}" aria-live="polite"></span>
                         </div>
-                        <div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">{{index $.T "edit_cancel"}}</button><button type="submit" class="btn btn-primary">{{index $.T "billing_apply"}}</button></div>
-                      </form>
-                    </div></div>
-                  </div>
-                  {{end}}
-                  {{if $site.CanDelete}}
-                  <div class="modal fade" id="simpleDelete{{$serverIndex}}_{{$clientIndex}}_{{$siteIndex}}" tabindex="-1" aria-hidden="true">
-                    <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
-                      <form method="post" action="?server-settings"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}"><input type="hidden" name="domain" value="{{$site.Domain}}">
-                        <div class="modal-header"><h2 class="modal-title h5">{{index $.T "server_site_label"}} {{$site.Domain}}</h2><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button></div>
-                        <div class="modal-body">
-                          {{if $site.DeletionReason}}<p class="alert alert-warning">{{index $.T "server_delete_pending"}} {{$site.DeletionDeadline}}. {{index $.T "server_delete_reason"}} {{if eq $site.DeletionReason "nonpayment"}}{{index $.T "server_delete_nonpayment"}}{{else}}{{index $.T "server_delete_request"}}{{end}}.</p>{{end}}
-                          <p><strong>{{index $.T "server_delete_size"}}</strong> {{$site.DeletionSizeLabel}}. {{index $.T "server_delete_no_backup"}}</p>
-                          <label>{{index $.T "server_delete_action"}}<select name="billing_action" class="form-select" required>{{if $site.DeletionReason}}<option value="restore_site">{{index $.T "server_delete_restore"}}</option>{{else}}<option value="queue_site">{{index $.T "server_delete_queue"}}</option><option value="suspend_site_nonpayment">{{index $.T "server_delete_suspend"}}</option>{{end}}<option value="delete_site_now">{{index $.T "server_delete_now"}}</option></select></label>
-                          <label class="mt-3">{{index $.T "server_delete_confirm_domain"}}<input name="confirm_domain" type="text" class="form-control" placeholder="{{$site.Domain}}" autocomplete="off" required></label>
+                        {{end}}
+                      </div>
+                      <div class="server-client-site-usage">
+                        <span>{{$site.UsedLabel}} / {{$site.LimitLabel}}</span>
+                        <div class="server-client-site-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" data-client-site-progress><span></span></div>
+                        {{if $site.AnalyticsLabel}}<small>{{index $.T "cx_storage"}}: {{$site.AnalyticsLabel}}</small>{{end}}
+                      </div>
+                      <div class="expense-simple-site-actions">
+                        {{if $site.CanEditQuota}}
+                        <button type="button" class="btn btn-outline-primary btn-sm" data-client-quota-edit data-domain="{{$site.Domain}}" data-quota="{{$site.QuotaInput}}" data-bs-toggle="modal" data-bs-target="#clientQuotaModal">{{index $.T "billing_quota"}}</button>
+                        {{end}}
+                        {{if or $site.CanDelete $site.CertificateDomains}}
+                        <div class="dropdown">
+                          <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-toggle="dropdown" aria-expanded="false" aria-label="{{if eq $.LanguageCode "ru"}}Действия с сайтом{{else}}Site actions{{end}}">⋮</button>
+                          <div class="dropdown-menu dropdown-menu-end">
+                            {{range $certificate := $site.CertificateDomains}}{{if and $certificate.Valid $certificate.CanRenew}}
+                            <button type="button" class="dropdown-item" data-client-valid-ssl-action data-certificate-renew="{{$certificate.Domain}}">{{index $.T "domain_settings_ssl_renew_now"}} · {{$certificate.Domain}}</button>
+                            {{end}}{{end}}
+                            {{if $site.CanDelete}}
+                            <button type="button" class="dropdown-item text-danger" data-client-site-delete data-domain="{{$site.Domain}}" data-deletion-reason="{{$site.DeletionReason}}" data-deletion-deadline="{{$site.DeletionDeadline}}" data-deletion-size="{{$site.DeletionSizeLabel}}" data-bs-toggle="modal" data-bs-target="#clientDeleteModal">{{index $.T "server_site_actions"}}</button>
+                            {{end}}
+                          </div>
                         </div>
-                        <div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">{{index $.T "edit_cancel"}}</button><button type="submit" class="btn btn-outline-danger">{{index $.T "server_delete_execute"}}</button></div>
-                      </form>
-                    </div></div>
+                        {{end}}
+                      </div>
+                    </article>
+                    {{end}}
                   </div>
+                  <div class="server-client-site-footer" data-client-site-footer hidden>
+                    <span data-client-site-count aria-live="polite"></span>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-client-show-all>{{if eq $.LanguageCode "ru"}}Показать все сайты{{else}}Show all sites{{end}}</button>
+                  </div>
+                  <p class="server-workspace-empty" data-client-no-sites hidden>{{index $.T "server_installations_no_results"}}</p>
+                </section>
+                <section data-client-pane="billing" hidden>
+                  {{if $client.BillingCustomerID}}
+                  <form method="post" action="?server-settings" class="billing-plan-form">
+                    <input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+                    <input type="hidden" name="billing_action" value="billing_customer_schedule">
+                    <input type="hidden" name="customer_id" value="{{$client.BillingCustomerID}}">
+                    <label>{{index $.T "billing_invoice_day"}} <input type="number" name="invoice_day" class="form-control" min="1" max="28" value="{{$client.InvoiceDay}}" required></label>
+                    <label>{{index $.T "billing_payment_term_days"}} <input type="number" name="payment_term_days" class="form-control" min="1" max="60" value="{{$client.PaymentTermDays}}" required></label>
+                    <label>{{index $.T "billing_timezone"}} <input type="text" name="timezone" class="form-control" value="{{$client.BillingTimezone}}" list="billingTimezoneList" required></label>
+                    <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">{{index $.T "billing_save"}}</button>
+                  </form>
                   {{end}}
-                  {{if $site.AdminAccounts}}<details class="expense-simple-site-accounts"><summary>{{index $.T "server_admin_accounts"}} {{$site.Domain}}</summary>
-                    {{range $site.AdminAccounts}}<form method="post" action="?server-settings" class="border rounded p-2 mt-2"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}"><input type="hidden" name="domain" value="{{$site.Domain}}"><input type="hidden" name="confirm_domain" value="{{$site.Domain}}"><input type="hidden" name="email" value="{{.Email}}">
-                      <strong>{{.Email}}</strong>{{if .DeleteAfter}} <span class="text-warning">{{index $.T "server_delete_pending"}} {{.DeleteAfter}}</span>{{end}}
-                      {{if .Protected}}<p class="text-muted mb-0">{{index $.T "server_account_protected"}}</p>{{else}}<label class="d-block mt-2">{{index $.T "server_delete_action"}}<select name="billing_action" class="form-select form-select-sm">{{if .DeleteAfter}}<option value="restore_account">{{index $.T "server_account_restore"}}</option>{{else}}<option value="queue_account">{{index $.T "server_account_queue"}}</option>{{end}}<option value="delete_account_now">{{index $.T "server_account_delete_now"}}</option></select></label><label class="d-block mt-2">{{index $.T "server_account_confirm_email"}}<input name="confirm_email" type="email" class="form-control form-control-sm" autocomplete="off" required></label><button type="submit" class="btn btn-outline-danger btn-sm mt-2">{{index $.T "server_action_confirm"}}</button>{{end}}
-                    </form>{{end}}
-                  </details>{{end}}
-                  {{end}}
-                </div>
-                {{if $client.BillingCustomerID}}
-                <form method="post" action="?server-settings" class="billing-plan-form"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
-                  <input type="hidden" name="billing_action" value="billing_customer_schedule">
-                  <input type="hidden" name="customer_id" value="{{$client.BillingCustomerID}}">
-                  <label>{{index $.T "billing_invoice_day"}} <input type="number" name="invoice_day" class="form-control" min="1" max="28" value="{{$client.InvoiceDay}}" required></label>
-                  <label>{{index $.T "billing_payment_term_days"}} <input type="number" name="payment_term_days" class="form-control" min="1" max="60" value="{{$client.PaymentTermDays}}" required></label>
-                  <label>{{index $.T "billing_timezone"}} <input type="text" name="timezone" class="form-control" value="{{$client.BillingTimezone}}" list="billingTimezoneList" required></label>
-                  <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">{{index $.T "billing_save"}}</button>
-                </form>
-                {{end}}
-                <div class="server-client-invoices-link">
-                  <button type="button" class="btn btn-outline-primary btn-sm" data-server-config-target="billing" data-billing-client-open="{{$client.Email}}">{{index $.T "server_clients_view_invoices"}}</button>
-                  <small class="text-muted">{{index $.T "server_clients_view_invoices_hint"}}</small>
-                </div>
+                  <div class="server-client-invoices-link">
+                    <button type="button" class="btn btn-outline-primary btn-sm" data-server-config-target="billing" data-billing-client-open="{{$client.Email}}">{{index $.T "server_clients_view_invoices"}} · {{$client.DebtLabel}}</button>
+                    <small class="text-muted">{{index $.T "server_clients_view_invoices_hint"}}</small>
+                  </div>
+                </section>
+                <section data-client-pane="account" hidden>
+                  <p class="small text-muted">{{if eq $.LanguageCode "ru"}}Действия применяются к выбранной учётной записи на конкретном сайте. Удаление доступа на одном сайте не удаляет другие сайты клиента.{{else}}Actions apply to the selected account on one site. Removing access on a site does not remove the client's other websites.{{end}}</p>
+                  <form method="post" action="?server-settings" class="server-client-account-form" data-client-account-form>
+                    <input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+                    <input type="hidden" name="domain" data-client-account-domain>
+                    <input type="hidden" name="confirm_domain" data-client-account-confirm-domain>
+                    <input type="hidden" name="email" data-client-account-email>
+                    <label>{{index $.T "server_admin_accounts"}}
+                      <select class="form-select" data-client-account-select required>
+                        <option value="">{{if eq $.LanguageCode "ru"}}Выберите сайт и аккаунт{{else}}Choose a site and account{{end}}</option>
+                        {{range $site := $client.Sites}}{{range $account := $site.AdminAccounts}}
+                        <option value="{{$site.Domain}} · {{$account.Email}}" data-domain="{{$site.Domain}}" data-email="{{$account.Email}}" data-protected="{{if $account.Protected}}true{{else}}false{{end}}" data-pending="{{if $account.DeleteAfter}}true{{else}}false{{end}}">{{$account.Email}} · {{$site.Domain}}{{if $account.DeleteAfter}} ({{index $.T "server_delete_pending"}} {{$account.DeleteAfter}}){{end}}</option>
+                        {{end}}{{end}}
+                      </select>
+                    </label>
+                    <p class="small text-muted" data-client-account-protected hidden>{{index $.T "server_account_protected"}}</p>
+                    <div data-client-account-actions hidden>
+                      <label>{{index $.T "server_delete_action"}}
+                        <select name="billing_action" class="form-select" data-client-account-action>
+                          <option value="queue_account">{{index $.T "server_account_queue"}}</option>
+                          <option value="restore_account">{{index $.T "server_account_restore"}}</option>
+                          <option value="delete_account_now">{{index $.T "server_account_delete_now"}}</option>
+                        </select>
+                      </label>
+                      <label>{{index $.T "server_account_confirm_email"}}<input type="email" name="confirm_email" class="form-control" autocomplete="off" required disabled data-client-account-confirm></label>
+                      <button type="submit" class="btn btn-outline-danger btn-sm">{{index $.T "server_action_confirm"}}</button>
+                    </div>
+                  </form>
+                </section>
               </div>
             </details>
             {{else}}<div class="empty">{{index $.T "expenses_clients_empty"}}</div>{{end}}
@@ -611,6 +657,45 @@
   </div>
 
 </main>
+<!-- Shared client dialogs: exactly two, regardless of site count. -->
+<div class="modal fade" id="clientQuotaModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+    <form method="post" action="?server-settings">
+      <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
+      <input type="hidden" name="billing_action" value="update_site_quota">
+      <input type="hidden" name="domain" data-client-quota-domain>
+      <div class="modal-header"><h2 class="modal-title h5">{{index .T "billing_quota_change_title"}}</h2><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index .T "tree_close"}}"></button></div>
+      <div class="modal-body">
+        <p><strong data-client-quota-title></strong></p>
+        <label>{{index .T "billing_quota"}} <input name="quota" type="text" class="form-control" data-client-quota-value required></label>
+      </div>
+      <div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">{{index .T "edit_cancel"}}</button><button type="submit" class="btn btn-primary">{{index .T "billing_apply"}}</button></div>
+    </form>
+  </div></div>
+</div>
+<div class="modal fade" id="clientDeleteModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+    <form method="post" action="?server-settings">
+      <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
+      <input type="hidden" name="domain" data-client-delete-domain>
+      <div class="modal-header"><h2 class="modal-title h5"><span data-client-delete-title></span></h2><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index .T "tree_close"}}"></button></div>
+      <div class="modal-body">
+        <p class="alert alert-warning" data-client-delete-pending hidden><span data-client-delete-deadline></span></p>
+        <p><strong>{{index .T "server_delete_size"}}</strong> <span data-client-delete-size></span>. {{index .T "server_delete_no_backup"}}</p>
+        <label>{{index .T "server_delete_action"}}
+          <select name="billing_action" class="form-select" data-client-delete-action required>
+            <option value="queue_site">{{index .T "server_delete_queue"}}</option>
+            <option value="suspend_site_nonpayment">{{index .T "server_delete_suspend"}}</option>
+            <option value="restore_site">{{index .T "server_delete_restore"}}</option>
+            <option value="delete_site_now">{{index .T "server_delete_now"}}</option>
+          </select>
+        </label>
+        <label class="mt-3">{{index .T "server_delete_confirm_domain"}}<input name="confirm_domain" type="text" class="form-control" autocomplete="off" data-client-delete-confirm required></label>
+      </div>
+      <div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">{{index .T "edit_cancel"}}</button><button type="submit" class="btn btn-outline-danger">{{index .T "server_delete_execute"}}</button></div>
+    </form>
+  </div></div>
+</div>
 <div class="modal fade" id="demoRefreshModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg demo-refresh-modal-dialog"><div class="modal-content">
     <div class="modal-header">
@@ -1416,9 +1501,24 @@
 {{end}}
 
 {{define "client-filters"}}
-<div class="server-billing-filters">
-  <label>{{index .T "server_clients_search"}}<input class="form-control" type="search" data-server-clients-search placeholder="{{index .T "server_clients_search_placeholder"}}" autocomplete="off"></label>
-  <label>{{index .T "server_installations_filter"}}<select class="form-select" data-server-clients-filter><option value="all">{{index .T "server_clients_all"}}</option><option value="attention">{{index .T "server_clients_attention"}}</option><option value="unpaid">{{index .T "server_billing_open"}}</option><option value="overdue">{{index .T "server_billing_overdue"}}</option><option value="over-limit">{{index .T "server_clients_over_limit"}}</option></select></label>
+<div class="server-client-filter-bar">
+  <div class="server-client-filter-top">
+    <label>{{index .T "server_clients_search"}}<input class="form-control" type="search" data-server-clients-search placeholder="{{index .T "server_clients_search_placeholder"}}" autocomplete="off"></label>
+    <label>{{if eq .LanguageCode "ru"}}Сортировка{{else}}Sort by{{end}}
+      <select class="form-select" data-server-clients-sort>
+        <option value="debt">{{if eq .LanguageCode "ru"}}По долгу{{else}}Debt{{end}}</option>
+        <option value="storage">{{if eq .LanguageCode "ru"}}По занятому месту{{else}}Storage used{{end}}</option>
+        <option value="sites">{{if eq .LanguageCode "ru"}}По количеству сайтов{{else}}Site count{{end}}</option>
+        <option value="email">{{if eq .LanguageCode "ru"}}По email{{else}}Email{{end}}</option>
+      </select>
+    </label>
+  </div>
+  <div class="server-client-filter-chips" role="group" aria-label="{{index .T "server_installations_filter"}}">
+    <button type="button" class="is-active" data-server-client-filter="all" aria-pressed="true">{{index .T "server_clients_all"}} <span data-client-filter-count="all">0</span></button>
+    <button type="button" data-server-client-filter="attention" aria-pressed="false">{{index .T "server_clients_attention"}} <span data-client-filter-count="attention">0</span></button>
+    <button type="button" data-server-client-filter="overdue" aria-pressed="false">{{index .T "server_billing_overdue"}} <span data-client-filter-count="overdue">0</span></button>
+    <button type="button" data-server-client-filter="over-limit" aria-pressed="false">{{index .T "server_clients_over_limit"}} <span data-client-filter-count="over-limit">0</span></button>
+  </div>
 </div>
 {{end}}
 
