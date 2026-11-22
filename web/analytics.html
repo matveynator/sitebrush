@@ -743,7 +743,12 @@
   <main id="conversion-dashboard" data-csrf="{{.AccountCSRF}}">
     {{if .BrowserAnalytics.Error}}<p class="alert alert-danger" role="alert">{{index .T "cx_report_error"}}</p>{{end}}
     {{if .BrowserAnalytics.Available}}
-    <p class="small text-muted" data-analytics-last-report>{{if eq .LanguageCode "ru"}}Последний сохранённый отчёт{{else}}Last saved analytics report{{end}}: {{.BrowserAnalytics.Report.Generated.UTC.Format "2006-01-02 15:04:05"}} UTC</p>
+    <p class="small text-muted" data-analytics-last-report>{{if eq .LanguageCode "ru"}}Отчёт сформирован{{else}}Report generated{{end}}: {{.BrowserAnalytics.Report.Generated.UTC.Format "2006-01-02 15:04:05"}} UTC</p>
+    {{if .BrowserAnalytics.Report.LastEvent.IsZero}}
+    <p class="alert alert-secondary" data-analytics-no-events>{{if eq .LanguageCode "ru"}}Нет подтверждённых событий посещений. Время формирования отчёта не подтверждает работу сбора данных.{{else}}No accepted visit events. Report generation time does not confirm that collection is working.{{end}}</p>
+    {{else}}
+    <p class="small text-muted" data-analytics-last-event>{{if eq .LanguageCode "ru"}}Последнее принятое событие{{else}}Last accepted event{{end}}: {{.BrowserAnalytics.Report.LastEvent.UTC.Format "2006-01-02 15:04:05"}} UTC</p>
+    {{end}}
     {{if .BrowserAnalytics.Stale}}<p class="alert alert-warning" role="status" data-analytics-stale>{{if eq .LanguageCode "ru"}}Отчёт не обновлялся более 10 минут. Возможно, остановились сбор данных или запись в хранилище; проверьте подключение событий и журнал сервера.{{else}}The report has not updated for over 10 minutes. Collection or persistence may be stalled; check event delivery and the server log.{{end}}</p>{{end}}
     {{else if not .BrowserAnalytics.Error}}<p class="alert alert-secondary" data-analytics-no-report>{{if eq .LanguageCode "ru"}}Сохранённых отчётов пока нет. Это не подтверждает исправность сбора событий.{{else}}No saved analytics report yet. This does not confirm that event collection is working.{{end}}</p>{{end}}
     {{if .AnalyticsQuotaBlocked}}<p class="alert alert-warning">{{index .T "cx_storage_paused"}}</p>{{end}}

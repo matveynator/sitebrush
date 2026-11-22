@@ -142,3 +142,34 @@ func TestIdleMessagesCannotExtendSession(t *testing.T) {
 		t.Fatalf("idle messages prolonged session: %+v", report)
 	}
 }
+
+func TestReportLastEventRemainsDistinctFromGenerationAfterNovemberNinth(t *testing.T) {
+	first := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	last := time.Date(2026, 11, 19, 15, 0, 0, 0, time.UTC)
+	reportAt := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
+	for _, version := range []int{1, 2} {
+		site := New(first)
+		events := []Event{observation(1, "/first"), observation(2, "/latest")}
+		if version == 2 {
+			events = []Event{
+				conversionEvent("1111111111111111", "2222222222222222", "/first", 1, Signal{Kind: "page"}),
+				conversionEvent("1111111111111111", "3333333333333333", "/latest", 1, Signal{Kind: "page"}),
+			}
+		}
+		if !site.Record(events[0], first, 8<<20) || !site.Record(events[1], last, 8<<20) {
+			t.Fatalf("version %d: expected both events to be accepted", version)
+		}
+		encoded, err := json.Marshal(site)
+		if err != nil {
+			t.Fatal(err)
+		}
+		restored := New(first)
+		if err := json.Unmarshal(encoded, restored); err != nil {
+			t.Fatal(err)
+		}
+		report := restored.Report(reportAt, 30)
+		if !report.LastEvent.Equal(last) || !report.Generated.Equal(reportAt) {
+			t.Fatalf("version %d: event=%s generation=%s, want event=%s generation=%s", version, report.LastEvent, report.Generated, last, reportAt)
+		}
+	}
+}
