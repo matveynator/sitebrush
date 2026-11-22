@@ -816,6 +816,19 @@ body.server-settings-page[data-server-settings-scope="central"] .server-settings
   display: grid; gap: 6px; min-width: 0; font-size: 12px;
   color: var(--theme-muted-foreground); font-variant-numeric: tabular-nums;
 }
+.server-settings-page .server-client-quota-trigger {
+  width: fit-content; max-width: 100%; padding: 0; border: 0;
+  background: transparent; color: var(--theme-foreground);
+  text-align: start; font: inherit; cursor: pointer;
+  font-variant-numeric: tabular-nums; text-decoration: underline;
+  text-decoration-color: var(--theme-border); text-underline-offset: 3px;
+}
+.server-settings-page .server-client-quota-trigger:hover {
+  color: var(--theme-primary); text-decoration-color: currentColor;
+}
+.server-settings-page .server-client-quota-trigger:focus-visible {
+  outline: 2px solid var(--theme-ring); outline-offset: 3px;
+}
 .server-settings-page .server-client-site-progress {
   height: 5px; width: 100%; max-width: 200px; overflow: hidden;
   background: var(--theme-muted); border-radius: 99px;
