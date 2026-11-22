@@ -31446,23 +31446,15 @@ func siteAdminEmailsFromDatabase(ctx context.Context, database *sql.DB, domain s
 }
 
 func (a *App) saveHostingAndSupportSettingsFromForm(r *http.Request) string {
-	if err := a.withServerControlDatabaseWrite(r.Context(), "save-hosting-settings", func(database *sql.DB) error {
-		store := hostingandsupport.Store{DB: database}
-		limits := store.SiteSizeLimits(r.Context())
-		var err error
-		limits.Registration, err = parseCreationSize(r.FormValue("registration_max_site_size"), limits.Registration)
-		if err != nil {
-			return err
-		}
-		limits.TestDrive, err = parseCreationSize(r.FormValue("public_trial_max_site_size"), limits.TestDrive)
-		if err != nil {
-			return err
-		}
-		return store.SaveRegistrationSettingsWithLimits(r.Context(), r.FormValue("auto_registration_enabled") == "1", r.FormValue("public_trial_enabled") == "1", limits)
-	}); err != nil {
-		return err.Error()
+	// Legacy combined form follows the same registration owner boundary.
+	// Disabling registration must not re-enable demo in a second step.
+	status := a.saveHostingAndSupportRegistrationSettingsFromForm(r)
+	if status != translationOrDefault(translationsForRequest(r), "billing_status_settings_saved", "Billing settings saved.") {
+		return status
 	}
-	a.invalidatePublicTrialAvailability()
+	if r.FormValue("auto_registration_enabled") != "1" {
+		return status
+	}
 	return a.saveHostingAndSupportDemoSettings(r)
 }
 
