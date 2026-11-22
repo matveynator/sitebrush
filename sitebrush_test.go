@@ -3114,6 +3114,8 @@ func TestServerSidebarCapabilitiesAreScopedBeforeJavascript(t *testing.T) {
 				"AutoRegistrationEnabled": testCase.autoRegister,
 				"CanConfigurePublicIPs": testCase.publicIPs,
 				"ShowCentralRegistry": testCase.central,
+				"DemoSettings": demo.Settings{},
+				"DemoStatus": map[string]any{"SnapshotAvailable": false, "LastRestoredAt": ""},
 				"ExpenseServers": []simplifiedExpenseServerView{{
 					Server: hostingandsupport.ServerView{ID: "test-installation", Local: testCase.local},
 					MailSelected: true,
