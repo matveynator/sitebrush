@@ -5,6 +5,26 @@
   if (!serverPanels.length) return;
   const selector = document.querySelector("[data-expense-server-select]");
   const rootTabs = document.querySelector("[data-server-root-tabs]");
+  const contextLabel = document.querySelector("[data-server-context]");
+  const themeChoice = document.querySelector("[data-server-theme]");
+  if (themeChoice) {
+    const key = 'sitebrush.server-settings.theme';
+    let selected = 'system';
+    try { selected = localStorage.getItem(key) || 'system'; } catch (storageError) { /* Private browsing. */ }
+    if (!['light', 'dark', 'system'].includes(selected)) selected = 'system';
+    themeChoice.value = selected;
+    const media = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+    const applyTheme = () => document.documentElement.setAttribute('data-bs-theme',
+      selected === 'system' ? (media && media.matches ? 'dark' : 'light') : selected);
+    themeChoice.addEventListener('change', () => {
+      selected = themeChoice.value;
+      if (!['light', 'dark', 'system'].includes(selected)) selected = 'system';
+      try { localStorage.setItem(key, selected); } catch (storageError) { /* Nonpersistent preference. */ }
+      applyTheme();
+    });
+    if (media?.addEventListener) media.addEventListener('change', () => { if (selected === 'system') applyTheme(); });
+    applyTheme();
+  }
   const installationsWorkspace = document.querySelector("[data-server-installations-container]");
   const centralClients = document.querySelector("[data-central-clients-container]");
   const centralBilling = document.querySelector("[data-central-billing-container]");
@@ -90,6 +110,18 @@
     for (const [workspaceName, workspaceElement] of Object.entries(rootWorkspaces)) {
       if (workspaceElement) workspaceElement.hidden = workspaceName !== selected;
     }
+    if (contextLabel) {
+      if (["installations", "clients", "billing"].includes(selected)) {
+        const tab = Array.from(rootTabs?.querySelectorAll("[data-server-root-target]") || [])
+          .find(button => button.dataset.serverRootTarget === selected);
+        contextLabel.textContent = contextLabel.dataset.serverContextCentral + ' · ' + (tab?.textContent?.trim() || selected);
+      } else {
+        const serverName = targetPanel?.dataset.serverName || '';
+        const title = contextLabel.dataset.serverContextLocal || '';
+        contextLabel.textContent = serverName ? serverName + ' · ' + title : title;
+      }
+    }
+    document.body.dataset.serverSettingsScope = ["installations", "clients", "billing"].includes(selected) ? "central" : "node";
     for (const button of rootTabs?.querySelectorAll("[data-server-root-target]") || []) {
       const shortcut = button.dataset.serverConfigShortcut;
       // A section may be intentionally absent until selected. Authorization
@@ -391,51 +423,15 @@
   window.addEventListener("popstate", displayNavigation);
   displayNavigation();
 
-  function filterInstallations() {
-    if (!installationsWorkspace) return;
-    const query = (installationsWorkspace.querySelector("[data-installations-search]")?.value || "").trim().toLocaleLowerCase();
-    const sort = installationsWorkspace.querySelector("[data-installations-sort]")?.value || "sites";
-    const filter = installationsWorkspace.querySelector("[data-installations-filter]")?.value || "active";
-    const list = installationsWorkspace.querySelector("[data-installations-list]");
-    if (!list) return;
-    const rows = Array.from(list.querySelectorAll("[data-installation-row]"));
-    const text = contentText => (contentText || "").toLocaleLowerCase();
-    const number = (row, key) => Number(row.dataset[key]) || 0;
-    rows.sort((left, right) => {
-      if (sort === "name") return text(left.dataset.installationName).localeCompare(text(right.dataset.installationName));
-      const field = {sites:"installationSites",forecast:"installationForecast",paid:"installationPaid"}[sort] || "installationSites";
-      // Money is ordered within each currency, never compared as if EUR=USD.
-      if (sort === "forecast" || sort === "paid") {
-        const currencyOrder = text(left.dataset.installationCurrency).localeCompare(text(right.dataset.installationCurrency));
-        if (currencyOrder) return currencyOrder;
-      }
-      return number(right, field) - number(left, field) || text(left.dataset.installationName).localeCompare(text(right.dataset.installationName));
-    });
-    let visible = 0;
-    for (const row of rows) {
-      const archived = row.dataset.installationArchived === "true";
-      const enabled = row.dataset.installationMonetized === "true";
-      const statusMatch = filter === "all" ||
-        (filter === "active" && !archived) ||
-        (["connected", "disconnected", "unqualified"].includes(filter) && row.dataset.installationConnection === filter) ||
-        (filter === "archived" && archived) ||
-        (filter === "monetized" && !archived && enabled) ||
-        (filter === "not-monetized" && !archived && !enabled);
-      const queryMatch = !query || text(row.dataset.installationSearch).includes(query);
-      row.hidden = !(statusMatch && queryMatch);
-      if (!row.hidden) visible++;
-      list.appendChild(row);
-    }
-    const count = installationsWorkspace.querySelector("[data-installations-count]");
-    if (count) count.textContent = visible + " / " + rows.length;
-    const empty = installationsWorkspace.querySelector("[data-installations-no-results]");
-    if (empty) empty.hidden = visible !== 0 || rows.length === 0;
-  }
-
+  // The central catalog is filtered, sorted and paged on the server. Never
+  // filter only the 40 visible cards: doing so would hide matching archives.
   if (installationsWorkspace) {
-    installationsWorkspace.addEventListener("input", event => { if (event.target.matches("[data-installations-search]")) filterInstallations(); });
-    installationsWorkspace.addEventListener("change", event => { if (event.target.matches("[data-installations-sort], [data-installations-filter]")) filterInstallations(); });
-    filterInstallations();
+    const form = installationsWorkspace.querySelector('[data-installations-query-form]');
+    if (form) {
+      form.addEventListener('change', event => {
+        if (event.target.matches('[data-installations-filter], [data-installations-sort]')) form.requestSubmit();
+      });
+    }
   }
 
   // Live preview is explanatory. Go is the only source of billing amounts.
