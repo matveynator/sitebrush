@@ -265,7 +265,11 @@
   }
   function displayNavigation() {
     const navigation = readNavigation();
-    const target = serverPanels.find(panel => panel.dataset.serverId === navigation.serverID) || localPanel();
+    const requestedPanel = serverPanels.find(panel => panel.dataset.serverId === navigation.serverID);
+    // A direct link to an unloaded installation must hydrate that installation.
+    // Falling back to the local panel here would silently show the wrong server.
+    const missingRequestedServer = navigation.workspace === "servers" && Boolean(navigation.serverID) && !requestedPanel;
+    const target = requestedPanel || localPanel();
 
     const needClients = navigation.workspace === "clients" && centralClients?.dataset.clientsDeferred === "true";
     const needBilling = navigation.workspace === "billing" && centralBilling?.dataset.billingDeferred === "true";
@@ -276,11 +280,11 @@
     const serverSectionLoaded = Array.from(target.querySelectorAll("[data-server-config-view]"))
       .some(view => view.dataset.serverConfigView === requestedSection);
     const needServerSection = navigation.workspace === "servers" && serverShortcutAvailable && !serverSectionLoaded;
-    if (needClients || needBilling || needInstallations || needServerSection) {
+    if (needClients || needBilling || needInstallations || needServerSection || missingRequestedServer) {
       const url = new URL(window.location.href);
-      if (needServerSection) {
+      if (needServerSection || missingRequestedServer) {
         url.searchParams.set("section", requestedSection);
-        url.searchParams.set("installation", target.dataset.serverId);
+        url.searchParams.set("installation", missingRequestedServer ? navigation.serverID : target.dataset.serverId);
         url.searchParams.delete("workspace");
       } else {
         url.searchParams.set("workspace", navigation.workspace);
