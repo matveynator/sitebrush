@@ -466,7 +466,7 @@
       </div>
       {{if .CleanupPendingTrialSites}}
       <div class="server-temporary-block">
-        <h3>{{with index .T "test_drive_status_expiring"}}{{.}}{{else}}Cleanup pending{{end}} · {{len .CleanupPendingTrialSites}}</h3>
+        <h3>{{index .T "billing_temporary_sites_cleanup_pending"}} · {{len .CleanupPendingTrialSites}}</h3>
         <div class="server-temporary-list">
           {{range .CleanupPendingTrialSites}}
           <article class="server-temporary-row">
@@ -486,7 +486,7 @@
       {{end}}
       {{if .ArchivedPublicTrialSites}}
       <details class="server-temporary-archive">
-        <summary>{{index .T "billing_temporary_sites_archive"}} · {{len .ArchivedPublicTrialSites}}</summary>
+        <summary>{{index .T "billing_temporary_sites_history"}} · {{len .ArchivedPublicTrialSites}}</summary>
         <div class="server-temporary-list">
           {{range .ArchivedPublicTrialSites}}
           <article class="server-temporary-row">
