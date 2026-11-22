@@ -204,8 +204,8 @@ func TestHostingClassificationCoversServerDesktopTemporaryAndArchived(t *testing
 		{InstallationID: "old", LastSeenAt: now.Add(-2 * HostingArchiveAfter).Format(time.RFC3339)},
 	}
 	production, temporary, archived := ClassifyClientHostings(input, now)
-	if len(production) != 2 || len(temporary) != 1 || len(archived) != 1 {
-		t.Fatalf("classification production=%#v temp=%#v archived=%#v", production, temporary, archived)
+	if len(production) != 2 || len(temporary) != 2 || len(archived) != 1 {
+		t.Fatalf("classification counts: production=%d temporary=%d archived=%d", len(production), len(temporary), len(archived))
 	}
 	var desktop ClientHosting
 	for _, h := range production {
@@ -216,8 +216,24 @@ func TestHostingClassificationCoversServerDesktopTemporaryAndArchived(t *testing
 	if !desktop.Qualified || desktop.SiteCount != 1 || desktop.TotalUsedBytes != 123 || len(desktop.ClientEmails) != 2 {
 		t.Fatalf("qualified desktop recalculation=%#v", desktop)
 	}
-	if len(temporary[0].Hostings) != 1 || len(temporary[0].Hostings[0].QualificationReasons) == 0 {
-		t.Fatalf("temporary desktop=%#v", temporary)
+	groupsByIP := make(map[string]DesktopHostingGroup)
+	for _, group := range temporary {
+		groupsByIP[group.ServerIP] = group
+	}
+	for _, expected := range []struct {
+		ip, installationID, kind, reason string
+	}{
+		{"127.0.0.1", "server-private", InstallationKindServer, QualificationReasonPublicIP},
+		{"unknown", "desktop-temp", InstallationKindDesktop, QualificationReasonUpdateRequired},
+	} {
+		group := groupsByIP[expected.ip]
+		if len(group.Hostings) != 1 {
+			t.Fatalf("temporary group %s has %d installations", expected.ip, len(group.Hostings))
+		}
+		hosting := group.Hostings[0]
+		if hosting.InstallationID != expected.installationID || hosting.InstallationKind != expected.kind || hosting.Qualified || !strings.Contains(strings.Join(hosting.QualificationReasons, " "), expected.reason) {
+			t.Errorf("temporary group %s: id=%s kind=%s qualified=%v reasons=%v", expected.ip, hosting.InstallationID, hosting.InstallationKind, hosting.Qualified, hosting.QualificationReasons)
+		}
 	}
 	if got := verifiedClientHostingSites([]ClientHostingSite{
 		{ReachabilityCheckedAt: "bad", DNSMatchesServer: true, ReachableByServer: true},

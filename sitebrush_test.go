@@ -2984,7 +2984,6 @@ func TestServerSettingsNavigationPreservesExistingControls(t *testing.T) {
 	}
 	for _, fragment := range []string{
 		`{{if $server.Local}}`,
-		`{{if and $server.Local $.CanConfigurePublicIPs}}`,
 		`{{if $.CanConfigurePublicIPs}}`,
 		`data-server-root-tabs`,
 		`data-server-installations-container`,
@@ -3036,8 +3035,29 @@ func TestServerSettingsNavigationPreservesExistingControls(t *testing.T) {
 			t.Errorf("monetization purpose has no %s translation", language)
 		}
 	}
-	if _, err := parseEmbeddedPageTemplate("expenses.html", pageBytes); err != nil {
+	parsedTemplate, err := parseEmbeddedPageTemplate("expenses.html", pageBytes)
+	if err != nil {
 		t.Fatalf("server settings template cannot be parsed: %v", err)
+	}
+	for _, authorized := range []bool{false, true} {
+		view := map[string]any{
+			"T": translationsForLanguageCode("en"), "CanConfigurePublicIPs": authorized,
+			"ExpenseServers": []simplifiedExpenseServerView{
+				{Server: hostingandsupport.ServerView{ID: "local", Local: true}},
+				{Server: hostingandsupport.ServerView{ID: "remote"}},
+			},
+		}
+		var rendered bytes.Buffer
+		if err := parsedTemplate.Execute(&rendered, view); err != nil {
+			t.Fatal(err)
+		}
+		panels := strings.Split(rendered.String(), `<div data-expense-server-panel=`)
+		if len(panels) != 3 {
+			t.Fatalf("expected two installation panels, got %d", len(panels)-1)
+		}
+		if strings.Contains(panels[1], "data-public-ip-panel") != authorized || strings.Contains(panels[2], "data-public-ip-panel") {
+			t.Errorf("network controls escaped their local authorization boundary: authorized=%v", authorized)
+		}
 	}
 }
 
@@ -32264,7 +32284,7 @@ func TestMailMonitorPanelMergedLocalServerAndRemoteScope(t *testing.T) {
 	application, _ := newTestApplication(t)
 	enableMailMonitorForTest(t, application)
 	application.recordMailMonitorEvent(context.Background(), mailmonitor.Event{Kind: "invoice", Stage: "queued", Recipient: "local@example.com"})
-	snapshot := hostingAndSupportPanelSnapshot{Servers: []hostingandsupport.ServerView{{ID: "merged-local", Name: "Local", Local: true}, {ID: "remote", Name: "Remote"}}}
+	snapshot := hostingAndSupportPanelSnapshot{ShowCentralRegistry: true, Servers: []hostingandsupport.ServerView{{ID: "merged-local", Name: "Local", Local: true}, {ID: "remote", Name: "Remote"}}}
 	request := httptest.NewRequest(http.MethodGet, "http://localhost/?server-settings&mail_server=merged-local", nil)
 	view := application.hostingAndSupportPanelView(request, snapshot)
 	servers := view["ExpenseServers"].([]simplifiedExpenseServerView)
@@ -32306,6 +32326,12 @@ func TestMailMonitorPanelMergedLocalServerAndRemoteScope(t *testing.T) {
 	servers = application.hostingAndSupportPanelView(request, snapshot)["ExpenseServers"].([]simplifiedExpenseServerView)
 	if !servers[0].MailSelected || servers[0].MailExpanded {
 		t.Fatal("unknown server selected an unrestricted journal")
+	}
+	snapshot.ShowCentralRegistry = false
+	request = httptest.NewRequest(http.MethodGet, "http://localhost/?analytics&tab=security&mail_server=remote", nil)
+	servers = application.hostingAndSupportPanelView(request, snapshot)["ExpenseServers"].([]simplifiedExpenseServerView)
+	if len(servers) != 1 || !servers[0].Server.Local || !servers[0].MailSelected {
+		t.Fatal("ordinary installation exposed a remote mail journal")
 	}
 }
 

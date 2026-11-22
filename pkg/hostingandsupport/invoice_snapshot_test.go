@@ -86,16 +86,23 @@ func TestLocalInvoiceOwnershipRejectsReusableDomainsAndForeignLocalAliases(t *te
 }
 
 func TestMergedLocalRegistryViewKeepsCompleteLocalInvoiceAliases(t *testing.T) {
-	local := ServerView{ID: "identity", Local: true, Name: "host.example", BillingCurrency: "EUR",
-		Invoices: []ServerInvoiceView{
-			{Number: "CURRENT", Status: "issued", Currency: "EUR", AmountMinor: 100},
-			{Number: "HISTORICAL", Status: "issued", Currency: "EUR", AmountMinor: 200},
-		}, InvoiceCount: 2,
+	now := time.Now().UTC()
+	invoices := []Invoice{
+		{Number: "MANUAL", InstallationID: "identity", Status: "paid", Currency: "EUR", AmountMinor: 100, PaidAt: now.Format(time.RFC3339)},
+		{Number: "AUTOMATIC", InstallationID: "local:host.example", Status: "issued", Currency: "EUR", AmountMinor: 300, DueAt: now.AddDate(0, 0, -1).Format("2006-01-02")},
 	}
-	remote := ServerView{ID: "identity", Name: "host.example", BillingCurrency: "USD", Invoices: local.Invoices[:1]}
-	merged := mergeLocalAndRemoteServerViews(local, remote)
-	if merged.ID != local.ID || len(merged.Invoices) != 2 || merged.InvoiceCount != 2 || merged.BillingOpenLabel != MoneyLabel(300, "EUR") {
-		t.Fatalf("registry view narrowed authoritative local history: %+v", merged)
+	local := BuildLocalServerView(LocalServerViewInput{InstallationID: "identity", MainDomain: "host.example", Invoices: invoices})
+	hosting := ClientHosting{InstallationID: "identity", ServerDomain: "host.example"}
+	if remote := BuildRemoteServerView(hosting, invoices, "1"); len(remote.Invoices) != 1 {
+		t.Fatalf("expected the registry to select only the canonical invoice, got %d", len(remote.Invoices))
+	}
+	servers := BuildServerViews(local, []ClientHosting{hosting}, invoices, "1")
+	if len(servers) != 1 {
+		t.Fatalf("local installation was duplicated: %d servers", len(servers))
+	}
+	merged := servers[0]
+	if merged.ID != local.ID || len(merged.Invoices) != 2 || merged.InvoiceCount != 2 || merged.UnpaidInvoiceCount != 1 || merged.BillingOpenLabel != MoneyLabel(300, "EUR") || merged.BillingOverdueLabel != MoneyLabel(300, "EUR") || merged.BillingPaidLabel != MoneyLabel(100, "EUR") {
+		t.Fatalf("registry merge narrowed local history: invoices=%d unpaid=%d paid=%s open=%s overdue=%s", len(merged.Invoices), merged.UnpaidInvoiceCount, merged.BillingPaidLabel, merged.BillingOpenLabel, merged.BillingOverdueLabel)
 	}
 }
 

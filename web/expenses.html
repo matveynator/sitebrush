@@ -229,7 +229,7 @@
             {{if $.AutoRegistrationEnabled}}<section class="server-config-view" data-server-config-view="demo">
           <div>
             <h2>{{index $.T "billing_demo_title"}}</h2>
-            <p class="text-muted">{{index $.T "billing_demo_exclusion_hint"}}</p>
+            <p class="text-muted">{{index $.T "billing_demo_billing_blocked"}} {{index $.T "billing_demo_exclusion_hint"}}</p>
             {{template "demo-settings-form" $}}
           </div>
             </section>{{end}}
