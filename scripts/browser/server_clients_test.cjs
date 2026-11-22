@@ -98,18 +98,45 @@ list.items = [];
 const workspace = new Element();
 workspace.all['[data-server-client-row]'] = [alice,bob];
 workspace.all['[data-client-filter-count]'] = badges;
-workspace.all['[data-client-account-form]'] = [];
+const accountForm = new Element();
+const accountSelect = new Element();
+accountSelect.selectedOptions = [{dataset:{}}];
+const accountAction = new Element();
+accountAction.options = ['queue_account','restore_account','delete_account_now'].map(value=>({value,disabled:false,hidden:false}));
+const accountConfirm = new Element();
+const accountNotice = new Element();
+const accountActions = new Element();
+accountForm.one['[data-client-account-select]'] = accountSelect;
+accountForm.one['[data-client-account-domain]'] = new Element();
+accountForm.one['[data-client-account-confirm-domain]'] = new Element();
+accountForm.one['[data-client-account-email]'] = new Element();
+accountForm.one['[data-client-account-action]'] = accountAction;
+accountForm.one['[data-client-account-confirm]'] = accountConfirm;
+accountForm.one['[data-client-account-protected]'] = accountNotice;
+accountForm.one['[data-client-account-actions]'] = accountActions;
+workspace.all['[data-client-account-form]'] = [accountForm];
 workspace.one['[data-server-clients-search]'] = search;
 workspace.one['[data-server-client-filter].is-active'] = chip;
 workspace.one['[data-server-clients-sort]'] = sort;
 workspace.one['[data-server-clients-list], .expense-simple-clients'] = list;
 workspace.one['[data-clients-no-results]'] = new Element();
+const quotaDialog = new Element();
+for (const name of ['domain','title','value']) quotaDialog.one['[data-client-quota-'+name+']'] = new Element();
+const deleteDialog = new Element();
+for (const name of ['domain','title','size','pending','deadline','confirm']) deleteDialog.one['[data-client-delete-'+name+']'] = new Element();
+const deleteAction = new Element();
+deleteAction.options = ['queue_site','suspend_site_nonpayment','restore_site','delete_site_now']
+  .map(value => ({value,disabled:false,hidden:false}));
+deleteDialog.one['[data-client-delete-action]'] = deleteAction;
+const dialogs = {'clientQuotaModal':quotaDialog,'clientDeleteModal':deleteDialog};
 const document = {
+  events:{},
   documentElement: {lang:'ru'},
   querySelectorAll: selector => selector === '[data-expense-server-panel]' ? [workspace] : [],
-  querySelector: () => null,
-  getElementById: () => null,
-  addEventListener() {}
+  querySelector: selector => selector==='#clientQuotaModal'?quotaDialog:
+    selector==='#clientDeleteModal'?deleteDialog:null,
+  getElementById: id => dialogs[id] || null,
+  addEventListener(name,callback){this.events[name]=callback;}
 };
 const window = {location:{hash:'',search:''}};
 new Function('document','window','URLSearchParams','HTMLFormElement',script)(
@@ -147,4 +174,53 @@ workspace.events.change({target:{
   closest: () => alice
 }});
 assert.equal(visibleSites(),2,'only problems must show over-quota and invalid-SSL sites');
-console.log('Server client workspace: 32-site search, filters, quota, sorting and shared dialog structure passed');
+
+accountSelect.selectedOptions = [{dataset:{
+  domain:'aika.sitebrush.com',email:'alice@example.com',protected:'false',pending:'false'
+}}];
+workspace.events.change({target:{
+  matches: selector => selector==='[data-client-account-select]',
+  closest: () => accountForm
+}});
+assert.equal(accountForm.one['[data-client-account-domain]'].value,'aika.sitebrush.com');
+assert.equal(accountForm.one['[data-client-account-email]'].value,'alice@example.com');
+assert.equal(accountActions.hidden,false,'unprotected account should expose actions');
+assert.equal(accountAction.value,'queue_account');
+
+accountSelect.selectedOptions = [{dataset:{
+  domain:'aika.sitebrush.com',email:'alice@example.com',protected:'false',pending:'true'
+}}];
+workspace.events.change({target:{
+  matches: selector => selector==='[data-client-account-select]',
+  closest: () => accountForm
+}});
+assert.equal(accountAction.value,'restore_account','queued account should offer restoration');
+
+accountSelect.selectedOptions = [{dataset:{
+  domain:'aika.sitebrush.com',email:'alice@example.com',protected:'true',pending:'false'
+}}];
+workspace.events.change({target:{
+  matches: selector => selector==='[data-client-account-select]',
+  closest: () => accountForm
+}});
+assert.equal(accountActions.hidden,true,'protected account must not show a destructive action');
+assert.equal(accountConfirm.disabled,true);
+
+document.events.click({target:{closest:selector=>selector==='[data-client-quota-edit]' ?
+  {dataset:{domain:'aika.sitebrush.com',quota:'30 GB'}}:null}});
+assert.equal(quotaDialog.one['[data-client-quota-domain]'].value,'aika.sitebrush.com');
+assert.equal(quotaDialog.one['[data-client-quota-value]'].value,'30 GB');
+
+document.events.click({target:{closest:selector=>selector==='[data-client-site-delete]' ?
+  {dataset:{domain:'aika.sitebrush.com',deletionReason:'',deletionDeadline:'',deletionSize:'42 MB'}}:null}});
+assert.equal(deleteDialog.one['[data-client-delete-domain]'].value,'aika.sitebrush.com');
+assert.equal(deleteAction.value,'queue_site');
+assert.equal(deleteAction.options.find(option=>option.value==='restore_site').disabled,true);
+
+document.events.click({target:{closest:selector=>selector==='[data-client-site-delete]' ?
+  {dataset:{domain:'aika.sitebrush.com',deletionReason:'nonpayment',deletionDeadline:'2026-12-01',deletionSize:'42 MB'}}:null}});
+assert.equal(deleteAction.value,'restore_site','queued site must offer restoration');
+assert.equal(deleteDialog.one['[data-client-delete-pending]'].hidden,false);
+assert.equal(deleteAction.options.find(option=>option.value==='queue_site').disabled,true);
+
+console.log('Server client workspace: 32-site search, filters, account safety and shared dialogs passed');
