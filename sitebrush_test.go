@@ -2967,7 +2967,7 @@ func TestServerSettingsNavigationPreservesExistingControls(t *testing.T) {
 		`data-expense-server-select`,
 		`data-public-ip-panel`,
 		`{{template "server-profiler" .}}`,
-		`data-server-update-frame`,
+		`data-server-update-content`,
 		`data-billing-ajax-save`,
 		`value="update_site_quota"`,
 		`value="save_server_expense_policy"`,
@@ -21264,11 +21264,11 @@ func TestAnalyticsAliasResolutionPreservesRouterFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	delete(resolutions, "primary.example")
-	if domain := app.resolveAnalyticsDomain("primary.example", resolutions); domain != "" {
-		t.Fatalf("SQL failure resolved to %q", domain)
+	if domain := app.resolveAnalyticsDomain("primary.example", resolutions); domain != "primary.example" {
+		t.Fatalf("existing primary site was discarded on SQL failure: %q", domain)
 	}
-	if cached := resolutions["primary.example"]; cached.domain != "" || time.Until(cached.expires) > time.Second {
-		t.Fatalf("SQL failure cached as success: %+v", cached)
+	if cached := resolutions["primary.example"]; cached.domain != "primary.example" || time.Until(cached.expires) > time.Second {
+		t.Fatalf("SQL failure cached for too long: %+v", cached)
 	}
 }
 
@@ -38183,5 +38183,59 @@ process.stdout.write(JSON.stringify(responses));`)
 	guest := buildContextMenuScript(false, false, false, false, false, "/docs/current", "example.org", 0, 0, "", "", translationsForLanguageCode("en"))
 	if strings.Contains(guest, "buildSitebrushAdminMenuEntries") || strings.Contains(guest, "data-sitebrush-action='copy_site'") {
 		t.Fatal("guest received administrator actions")
+	}
+}
+
+func TestServerSettingsNativeUpdatesAndSidebarNavigation(t *testing.T) {
+	pageBytes, err := fs.ReadFile(embeddedWebFiles, "web/expenses.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scriptBytes, err := fs.ReadFile(embeddedWebFiles, "web/static/server_settings.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, script := string(pageBytes), string(scriptBytes)
+	if strings.Contains(page, "data-server-update-frame") || strings.Contains(page, "server-update-embed") {
+		t.Fatal("server updater must no longer be embedded in an iframe")
+	}
+	for _, required := range []string{
+		"data-server-update-content",
+		"data-server-config-shortcut=\"overview\"",
+		"data-server-config-shortcut=\"network\"",
+	} {
+		if !strings.Contains(page, required) {
+			t.Fatalf("missing native navigation element %q", required)
+		}
+	}
+	for _, required := range []string{
+		"fetch(\"/?server_update&embedded\"",
+		"const shortcutPanel = shortcut ? localPanel() : activePanel",
+		"window.location.assign(url.href)",
+		"data-server-navigation-error",
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("missing lazy navigation or update logic %q", required)
+		}
+	}
+}
+
+func TestAnalyticsPageReportsStaleAndUnavailableCheckpoints(t *testing.T) {
+	pageBytes, err := fs.ReadFile(embeddedWebFiles, "web/analytics.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(pageBytes)
+	for _, required := range []string{
+		"data-analytics-last-report",
+		"data-analytics-stale",
+		"data-security-analytics-error",
+		"data-security-analytics-last-event",
+		"data-security-analytics-no-events",
+		"data-security-analytics-stale",
+	} {
+		if !strings.Contains(page, required) {
+			t.Fatalf("missing analytics health diagnostic %q", required)
+		}
 	}
 }
