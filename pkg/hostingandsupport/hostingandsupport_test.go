@@ -1068,7 +1068,7 @@ func TestBackfillDoesNotResurrectDeletedOrRegisteredTrial(t *testing.T) {
 	created := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
 	for _, status := range []string{"deleted", "expired", "registered", "activated", "importing"} {
 		domain := status + ".example"
-		if err := store.AssignSite(ctx, domain, 0, "free"); err != nil {
+		if err := store.AssignSite(ctx, domain, 0, "trial"); err != nil {
 			t.Fatal(err)
 		}
 		if err := store.CreatePublicTrialSite(ctx, domain, "https://source.example/", created); err != nil {
@@ -1092,6 +1092,28 @@ func TestBackfillDoesNotResurrectDeletedOrRegisteredTrial(t *testing.T) {
 		if site.Status == "active" {
 			t.Fatalf("completed trial incorrectly reactivated: %+v", site)
 		}
+	}
+}
+
+func TestBackfillNeverClassifiesOrdinaryFreeSiteAsTrial(t *testing.T) {
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "billing.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	ctx := context.Background()
+	if err := Migrate(ctx, database); err != nil {
+		t.Fatal(err)
+	}
+	store := Store{DB: database}
+	if err := store.AssignSite(ctx, "ordinary.example", 0, "free"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BackfillPublicTrialSites(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if sites := store.PublicTrialSites(ctx); len(sites) != 0 {
+		t.Fatalf("ordinary free site became a new temporary site: %+v", sites)
 	}
 }
 
