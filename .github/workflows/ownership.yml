@@ -44,7 +44,7 @@ jobs:
           path: ownership.tsv
           if-no-files-found: error
       - name: Test server-settings navigation
-        run: node web/static/server_settings_navigation_test.cjs
+        run: node scripts/browser/server_settings_navigation_test.cjs
       - name: Verify identity initialization and platform storage roots
         run: >-
           go test -count=1 -timeout=120s .
