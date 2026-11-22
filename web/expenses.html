@@ -213,9 +213,9 @@
             <section class="server-config-view" data-server-config-view="updates">
           <div id="server-update" class="mb-4">
             <h2>{{index $.T "update_title"}}</h2>
-            <p role="status" data-server-update-frame-loading>{{index $.T "update_connecting"}}</p>
-            <iframe title="{{index $.T "update_title"}}" data-src="/?server_update&embedded" class="server-update-embed" data-server-update-frame hidden></iframe>
-            <p role="alert" class="alert alert-danger" data-server-update-frame-error hidden>{{index $.T "update_unavailable"}} · <a href="/?server_update">{{index $.T "update_title"}}</a></p>
+            <p role="status" data-server-update-loading hidden>{{index $.T "update_connecting"}}</p>
+            <div data-server-update-content></div>
+            <p role="alert" class="alert alert-danger" data-server-update-error hidden>{{index $.T "update_unavailable"}} · <a href="/?server_update">{{index $.T "update_title"}}</a></p>
 
           </div>
             </section>
