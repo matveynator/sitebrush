@@ -704,3 +704,176 @@ body.server-settings-page[data-server-settings-scope="central"] .server-settings
   .server-settings-page .server-overview-blocks > .expense-simple-summary { padding: 16px; }
   .server-settings-page .server-installation-pages { flex-wrap: wrap; }
 }
+
+
+/* Client workspace: short overview rows, one level of internal navigation. */
+.server-settings-page .server-client-filter-bar {
+  display: grid; gap: 13px; margin-bottom: 20px; min-width: 0;
+}
+.server-settings-page .server-client-filter-top {
+  display: grid; grid-template-columns: minmax(230px, 1fr) minmax(160px, 220px);
+  gap: 12px; align-items: end;
+}
+.server-settings-page .server-client-filter-top label,
+.server-settings-page .server-client-site-controls label {
+  display: grid; gap: 6px; min-width: 0; font-size: 12px;
+  font-weight: 600; color: var(--theme-muted-foreground);
+}
+.server-settings-page .server-client-filter-chips,
+.server-settings-page .server-client-tabs {
+  display: flex; gap: 7px; flex-wrap: wrap; align-items: center; min-width: 0;
+}
+.server-settings-page .server-client-filter-chips button,
+.server-settings-page .server-client-tabs button {
+  display: inline-flex; gap: 7px; align-items: center;
+  min-height: 36px; padding: 7px 12px;
+  border: 1px solid var(--theme-border); border-radius: 999px;
+  background: transparent; color: var(--theme-foreground);
+  font: 500 13px/1.35 var(--theme-font-sans);
+  cursor: pointer; overflow-wrap: anywhere;
+}
+.server-settings-page .server-client-filter-chips button span {
+  display: inline-block; min-width: 18px; padding: 1px 4px;
+  border-radius: 6px; text-align: center; font-variant-numeric: tabular-nums;
+  background: var(--theme-muted);
+}
+.server-settings-page .server-client-filter-chips button:hover,
+.server-settings-page .server-client-tabs button:hover {
+  background: var(--theme-muted);
+}
+.server-settings-page .server-client-filter-chips button.is-active,
+.server-settings-page .server-client-tabs button.is-active {
+  color: var(--theme-foreground); background: var(--theme-muted);
+  border-color: var(--theme-primary); font-weight: 700;
+}
+.server-settings-page .server-client-filter-chips button:focus-visible,
+.server-settings-page .server-client-tabs button:focus-visible {
+  outline: 2px solid var(--theme-ring); outline-offset: 2px;
+}
+.server-settings-page .expense-simple-client > summary {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center; gap: 12px; padding: 17px 19px;
+}
+.server-settings-page .expense-simple-client > summary .expense-simple-client-head {
+  display: grid; gap: 7px; min-width: 0;
+}
+.server-settings-page .server-client-problems {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+}
+.server-settings-page .server-client-problem {
+  display: inline-flex; align-items: center; width: fit-content;
+  max-width: 100%; padding: 4px 8px; border-radius: 6px;
+  font-size: 11px; font-weight: 700; overflow-wrap: anywhere;
+}
+.server-settings-page .server-client-problem.is-warning {
+  color: var(--bs-warning-text-emphasis, #a16207);
+  background: var(--bs-warning-bg-subtle, var(--theme-muted));
+}
+.server-settings-page .server-client-problem.is-error {
+  color: var(--bs-danger-text-emphasis, #b91c1c);
+  background: var(--bs-danger-bg-subtle, var(--theme-muted));
+}
+.server-settings-page .server-client-problem[hidden] { display: none !important; }
+.server-settings-page .server-client-head-cost { display: grid; gap: 4px; text-align: end; }
+.server-settings-page .server-client-head-cost small { color: var(--theme-muted-foreground); }
+.server-settings-page .expense-simple-client-body {
+  padding: 0 19px 19px; display: grid; gap: 16px;
+}
+.server-settings-page .server-client-tabs { padding: 13px 0; border-bottom: 1px solid var(--theme-border); }
+.server-settings-page [data-client-pane][hidden],
+.server-settings-page [data-client-site-row][hidden],
+.server-settings-page [data-client-site-footer][hidden],
+.server-settings-page [data-client-no-sites][hidden],
+.server-settings-page [data-client-account-actions][hidden] { display: none !important; }
+.server-settings-page .server-client-site-controls {
+  display: flex; gap: 12px 22px; flex-wrap: wrap; align-items: end;
+  padding-bottom: 14px;
+}
+.server-settings-page .server-client-site-controls > label:first-child {
+  flex: 1 1 210px; max-width: 370px;
+}
+.server-settings-page .server-client-site-controls .server-client-error-filter {
+  display: flex; align-items: center; flex: 0 1 auto; gap: 8px;
+  min-height: 32px; font-size: 13px; color: var(--theme-foreground);
+}
+.server-settings-page [data-client-sites] {
+  display: grid; gap: 0; border: 0; background: transparent;
+}
+.server-settings-page [data-client-site-row] {
+  display: grid; grid-template-columns: minmax(0,1.7fr) minmax(120px,1fr) auto;
+  gap: 14px; align-items: start; padding: 14px 0;
+  background: transparent; border-bottom: 1px solid var(--theme-border);
+}
+.server-settings-page .server-client-site-identity {
+  display: grid; gap: 6px; min-width: 0; overflow-wrap: anywhere;
+}
+.server-settings-page .server-client-site-identity > strong { font-size: 14px; }
+.server-settings-page .server-client-certificate {
+  display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+  font-size: 12px; line-height: 1.5; overflow-wrap: anywhere;
+}
+.server-settings-page .server-client-site-usage {
+  display: grid; gap: 6px; min-width: 0; font-size: 12px;
+  color: var(--theme-muted-foreground); font-variant-numeric: tabular-nums;
+}
+.server-settings-page .server-client-site-progress {
+  height: 5px; width: 100%; max-width: 200px; overflow: hidden;
+  background: var(--theme-muted); border-radius: 99px;
+}
+.server-settings-page .server-client-site-progress span {
+  display: block; height: 100%; width: 0; border-radius: inherit;
+  background: var(--theme-primary);
+}
+.server-settings-page .server-client-site-progress.is-over span {
+  background: var(--theme-destructive);
+}
+.server-settings-page [data-client-site-row] .expense-simple-site-actions {
+  display: flex; gap: 6px; justify-content: end; align-items: start;
+  flex-wrap: nowrap;
+}
+.server-settings-page [data-client-site-row] .dropdown-menu {
+  max-width: min(310px, 90vw); overflow-wrap: anywhere;
+}
+.server-settings-page .server-client-site-footer {
+  display: flex; gap: 14px; flex-wrap: wrap; align-items: center;
+  justify-content: space-between; margin-top: 14px; font-size: 12px;
+  color: var(--theme-muted-foreground);
+}
+.server-settings-page .server-client-account-form {
+  display: grid; gap: 14px; max-width: 580px;
+}
+.server-settings-page .server-client-account-form label {
+  display: grid; gap: 7px; min-width: 0;
+}
+.server-settings-page [data-client-account-actions] {
+  display: grid; gap: 14px; justify-items: start;
+  padding-top: 6px;
+}
+.server-settings-page [data-client-pane="billing"] .billing-plan-form {
+  max-width: 760px;
+}
+@media (max-width: 900px) {
+  .server-settings-page [data-client-site-row] {
+    grid-template-columns: minmax(0,1fr) auto;
+  }
+  .server-settings-page .server-client-site-identity { grid-column: 1 / -1; }
+  .server-settings-page [data-client-site-row] .expense-simple-site-actions {
+    grid-column: 2; grid-row: 2;
+  }
+}
+@media (max-width: 600px) {
+  .server-settings-page .server-client-filter-top {
+    grid-template-columns: minmax(0,1fr);
+  }
+  .server-settings-page .expense-simple-client > summary {
+    grid-template-columns: minmax(0,1fr); gap: 5px;
+  }
+  .server-settings-page .server-client-head-cost { text-align: start; }
+  .server-settings-page .expense-simple-client-body { padding-inline: 12px; }
+  .server-settings-page [data-client-site-row] {
+    grid-template-columns: minmax(0,1fr); gap: 8px;
+  }
+  .server-settings-page [data-client-site-row] .expense-simple-site-actions {
+    grid-column: 1; grid-row: auto; justify-content: start;
+  }
+}
