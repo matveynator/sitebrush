@@ -3163,7 +3163,7 @@ func TestRegistrationSettingsScopeTrialAndDemoNavigation(t *testing.T) {
 	for _, fragment := range []string{
 		`{{if or (and .AutoRegistrationEnabled .PublicTrialEnabled) .ActivePublicTrialSites .CleanupPendingTrialSites .ArchivedPublicTrialSites}}<button type="button" data-server-root-target="temporary-sites"`,
 		`{{if or (and .AutoRegistrationEnabled .PublicTrialEnabled) .ActivePublicTrialSites .CleanupPendingTrialSites .ArchivedPublicTrialSites}}` + "\n" + `    <section class="server-root-workspace" data-hosting-installation-panel="temporary-sites"`,
-		`{{if $.AutoRegistrationEnabled}}<button type="button" class="btn btn-outline-secondary" data-server-config-target="demo"`,
+		`{{if .AutoRegistrationEnabled}}<button type="button" data-server-root-target="servers" data-server-config-shortcut="demo"`,
 		`{{if and $.AutoRegistrationEnabled (eq $.SelectedServerSection "demo")}}<section class="server-config-view" data-server-config-view="demo"`,
 		`{{if .CleanupPendingTrialSites}}`,
 		`{{range .CleanupPendingTrialSites}}`,
@@ -3351,8 +3351,9 @@ func TestHostingAndSupportTemplateRendersServerView(t *testing.T) {
 	if err := parsedTemplate.Execute(&registrationHTML, view); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(registrationHTML.String(), `data-server-config-target="demo"`) {
-		t.Fatal("registration does not link to the demo subview")
+	if !strings.Contains(registrationHTML.String(), `data-server-config-shortcut="demo"`) ||
+		strings.Contains(registrationHTML.String(), `data-server-config-target="demo"`) {
+		t.Fatal("demo settings must have one sidebar route without a duplicate button")
 	}
 	view["SelectedServerSection"] = "demo"
 	var demoHTML bytes.Buffer
@@ -3447,7 +3448,7 @@ func TestExpensesTemplateShowsOnlyLocalServerAndEnabledDemoOutsideSitebrushCom(t
 	}
 	// A disabled prerequisite must remove the public demo controls entirely.
 	if strings.Contains(disabledDemoHTML, `name="demo_site_enabled"`) ||
-		strings.Contains(disabledDemoHTML, `data-server-config-target="demo"`) {
+		strings.Contains(disabledDemoHTML, `data-server-config-shortcut="demo"`) {
 		t.Fatal("demo controls are visible when self-registration is disabled")
 	}
 	for _, removedFragment := range []string{
@@ -16585,7 +16586,7 @@ func TestSimplifiedExpensesShowsTestDriveUnderRegistrationAfterExplicitPermissio
 		`trial.sitebrush.example`,
 		`https://copied.example/`,
 		`deleted.sitebrush.example`,
-		`data-server-config-target="demo"`,
+		`data-server-config-shortcut="demo"`,
 	} {
 		if !strings.Contains(unavailableBody, expected) {
 			t.Fatalf("enabled registration and Test Drive missing %q", expected)
@@ -38250,5 +38251,51 @@ func TestAnalyticsPageReportsStaleAndUnavailableCheckpoints(t *testing.T) {
 		if !strings.Contains(page, required) {
 			t.Fatalf("missing analytics health diagnostic %q", required)
 		}
+	}
+}
+
+func TestServerSettingsContextAndPagedCatalogControls(t *testing.T) {
+	pageBytes, err := fs.ReadFile(embeddedWebFiles, "web/expenses.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(pageBytes)
+	for _, fragment := range []string{
+		"data-server-context",
+		"data-server-theme",
+		"data-server-settings",
+		"data-installations-query-form",
+		"catalog_filter",
+		"catalog_sort",
+		"catalog_query",
+		"InstallationCatalogPrevious",
+		"InstallationCatalogNext",
+		"server-overview-system",
+		"server-overview-finance",
+		"server-overview-mail",
+		"data-public-ip-copy",
+		"data-create-site-preview",
+		"data-demo-site-visit",
+		"data-copy-label",
+	} {
+		if !strings.Contains(page, fragment) {
+			t.Errorf("missing server settings ergonomics %q", fragment)
+		}
+	}
+	if strings.Contains(page, `data-server-config-target="demo"`) ||
+		strings.Contains(page, `href="#temporary-sites"`) {
+		t.Fatal("redundant navigation bypasses persistent sidebar")
+	}
+	if strings.Index(page, "mail-journal-labels") < strings.Index(page, "</main>") {
+		t.Fatal("nonvisual mail state must stay outside main content")
+	}
+	scriptBytes, err := fs.ReadFile(embeddedWebFiles, "web/static/server_settings.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(scriptBytes)
+	if strings.Contains(script, "function filterInstallations()") ||
+		!strings.Contains(script, "form.requestSubmit()") {
+		t.Fatal("catalog must reload the requested server-side filter, not search a 40-row DOM subset")
 	}
 }
