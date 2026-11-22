@@ -4729,8 +4729,15 @@ func (a *App) resolveAnalyticsDomain(domain string, resolutions map[string]analy
 	if err == nil && strings.TrimSpace(primary) != "" {
 		resolved.domain = primary
 	} else if err != nil {
-		// Do not create an alias checkpoint on a transient lookup failure.
-		resolved.domain = ""
+		// A failing alias lookup must not discard observations for a known
+		// primary site. Never create an analytics database for an unknown host.
+		primaryFile := siteDatabaseFile(siteDatabaseRootPath(a.serverControlDBPath()), domain)
+		if info, statErr := os.Stat(primaryFile); statErr == nil && info.Mode().IsRegular() {
+			resolved.domain = domain
+		} else {
+			resolved.domain = ""
+		}
+		// Retry alias resolution promptly once the control database recovers.
 		resolved.expires = now.Add(time.Second)
 	}
 	if resolved.domain != "" && !a.analyticsSiteAvailable(resolved.domain) {
@@ -5685,6 +5692,7 @@ func (a *App) runSecurityAnalytics(stop <-chan struct{}) {
 		}
 		result := a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.SaveSecurity, Domain: domain, State: string(encoded), Stop: cancellation})
 		if result.Err != nil {
+			log.Printf("security analytics save failed domain=%q error=%s", domain, diagnosticlog.SafeLogValue(result.Err.Error()))
 			return false
 		}
 		dirty[domain] = false
@@ -5710,10 +5718,14 @@ func (a *App) runSecurityAnalytics(stop <-chan struct{}) {
 			loaded := a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.ReadSecurity, Domain: domain, Limit: 2 << 20, Stop: stop})
 			state = &browserstats.SecurityState{}
 			if loaded.Err != nil && !errors.Is(loaded.Err, sql.ErrNoRows) {
+				log.Printf("security analytics restore failed domain=%q error=%s", domain, diagnosticlog.SafeLogValue(loaded.Err.Error()))
 				return nil
 			}
-			if loaded.Err == nil && json.Unmarshal([]byte(loaded.Text), state) != nil {
-				return nil
+			if loaded.Err == nil {
+				if err := json.Unmarshal([]byte(loaded.Text), state); err != nil {
+					log.Printf("security analytics checkpoint invalid domain=%q error=%s", domain, diagnosticlog.SafeLogValue(err.Error()))
+					return nil
+				}
 			}
 			state.Incomplete = state.Incomplete || lost[domain]
 			delete(lost, domain)
@@ -6745,6 +6757,7 @@ type browserAnalyticsDashboard struct {
 	Report          browserstats.Report
 	Available       bool
 	Error           bool
+	Stale           bool
 	Days            int
 	Age             string
 	Cards           []analyticsMetricCard
@@ -6773,6 +6786,7 @@ func (a *App) browserAnalyticsView(r *http.Request, domain string) browserAnalyt
 		return dashboard
 	}
 	dashboard.Report, dashboard.Available = reports[strconv.Itoa(days)]
+	dashboard.Stale = dashboard.Available && !dashboard.Report.Generated.IsZero() && time.Since(dashboard.Report.Generated) > 10*time.Minute
 	dashboard.Cards, dashboard.ReturnSections, dashboard.ContentSections = browserAnalyticsSections(dashboard.Report, translationsForRequest(r))
 	dashboard.Age = fmt.Sprintf("%s UTC · %s", dashboard.Report.Generated.UTC().Format("2006-01-02 15:04:05"), time.Since(dashboard.Report.Generated).Round(time.Second))
 	return dashboard
@@ -8691,13 +8705,21 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		securityThrottles, _ = a.throttleGuard.Snapshot(time.Now().UTC())
 	}
 	loadedSecurity := a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.ReadSecurity, Domain: domain, Limit: 2 << 20, Stop: r.Context().Done()})
+	securityLastObserved := time.Time{}
+	securityReadError := loadedSecurity.Err != nil && !errors.Is(loadedSecurity.Err, sql.ErrNoRows)
 	if loadedSecurity.Err == nil {
 		state := browserstats.SecurityState{}
-		if json.Unmarshal([]byte(loadedSecurity.Text), &state) == nil {
+		if err := json.Unmarshal([]byte(loadedSecurity.Text), &state); err == nil {
+			securityLastObserved = state.Updated
 			securityNow := time.Now().UTC()
 			state.Prune(securityNow)
 			security = state.Report(securityNow, browserDashboard.Days)
+		} else {
+			securityReadError = true
+			log.Printf("security analytics report invalid domain=%q error=%s", domain, diagnosticlog.SafeLogValue(err.Error()))
 		}
+	} else if securityReadError {
+		log.Printf("security analytics report unavailable domain=%q error=%s", domain, diagnosticlog.SafeLogValue(loadedSecurity.Err.Error()))
 	}
 	securityIncidents := make(map[string]browserstats.Incident, len(security.Incidents))
 	attackTypesByIP := map[string]map[string]bool{}
@@ -8959,6 +8981,9 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		"Conversion": browserDashboard.Report.Conversion, "GoalsJSON": template.JS(analyticsGoalsJSON(goals)), "ConversionJSON": analyticsConversionJSON(browserDashboard.Report.Conversion),
 		"Report":           analyticsReportView(report, translationsForRequest(r)),
 		"BrowserAnalytics": browserDashboard,
+		"SecurityAnalyticsReadError": securityReadError,
+		"SecurityAnalyticsLastObserved": securityLastObserved,
+		"SecurityAnalyticsStale": !securityLastObserved.IsZero() && time.Since(securityLastObserved) > 10*time.Minute,
 		"Experience":       experience, "ExperienceFilter": filter, "Security": security, "SecurityTypeAxes": analyticsSecurityTypeAxes(), "SecurityBlocks": securityBlocks, "SecurityLocalBlocks": securityLocalBlocks, "SecurityGlobalBlocks": securityGlobalBlocks, "SecurityAllowlist": securityAllowlist, "SecurityThrottles": securityThrottles, "SecuritySettings": securitySettings, "GoalsText": strings.Join(goalLines, "\n"), "SessionMapJSON": template.JS(mapJSON), "PeriodOptions": []int{1, 7, 30, 90}, "UnknownGeo": unknownGeo, "ServerRequests": serverRequests, "ServerLocalHours": serverLocalHours, "ServerHoursJSON": template.JS(serverHoursJSON), "SecurityHoursJSON": template.JS(securityHoursJSON), "SecurityCountriesJSON": template.JS(securityCountriesJSON), "SecurityTypesJSON": template.JS(securityTypesJSON), "ActivityDaysJSON": template.JS(activityDaysJSON), "ActivityHoursJSON": template.JS(activityHoursJSON), "SecurityActivityDaysJSON": template.JS(securityActivityDaysJSON), "SecurityActivityHoursJSON": template.JS(securityActivityHoursJSON), "SecurityActivityTypesJSON": template.JS(securityActivityTypesJSON), "SecurityActivitySeverityJSON": template.JS(securityActivitySeverityJSON), "ActivitySessionsJSON": template.JS(activitySessionsJSON), "SecurityIncidentsJSON": template.JS(securityIncidentsJSON), "ServerTimezone": time.Local.String(), "ServerNowRFC3339": serverNow.Format(time.RFC3339), "ServerNowDisplay": serverNow.Format("02 Jan 2006 15:04:05"), "ServerTimezoneOffsetSeconds": serverTimezoneOffsetSeconds,
 	})
 }
