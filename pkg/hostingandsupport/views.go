@@ -303,50 +303,36 @@ func serverViewsLookDuplicate(localServer ServerView, remoteServer ServerView) b
 }
 
 func mergeLocalAndRemoteServerViews(localServer ServerView, remoteServer ServerView) ServerView {
-	merged := remoteServer
-	merged.Sites = append([]ServerSiteView(nil), remoteServer.Sites...)
-	merged.Local = true
-	merged.ID = localServer.ID
+	// The running installation owns its site list, quotas, tariff and invoices.
+	// A registry snapshot can be stale and must never replace local billing.
+	merged := localServer
+	merged.LastSeenAt = remoteServer.LastSeenAt
 	merged.Subtitle = firstNonEmpty(remoteServer.Subtitle, localServer.Subtitle)
-	if len(merged.Sites) == 0 {
-		merged.Sites = localServer.Sites
-		merged.Clients = localServer.Clients
-		merged.SiteCount = localServer.SiteCount
-		merged.ClientCount = localServer.ClientCount
-		merged.TotalUsedLabel = localServer.TotalUsedLabel
-	} else {
-		localSitesByDomain := make(map[string]ServerSiteView, len(localServer.Sites))
-		for _, localSite := range localServer.Sites {
-			localSitesByDomain[normalizeDomainName(localSite.Domain)] = localSite
-		}
-		for siteIndex := range merged.Sites {
-			localSite, found := localSitesByDomain[normalizeDomainName(merged.Sites[siteIndex].Domain)]
-			if !found {
-				continue
-			}
-			merged.Sites[siteIndex].LimitLabel = localSite.LimitLabel
-			merged.Sites[siteIndex].QuotaInput = localSite.QuotaInput
-			merged.Sites[siteIndex].CanEditQuota = true
-			merged.Sites[siteIndex].CertificateValid = localSite.CertificateValid
-			merged.Sites[siteIndex].CertificateExpiresAt = localSite.CertificateExpiresAt
-			merged.Sites[siteIndex].CertificateRemaining = localSite.CertificateRemaining
-			merged.Sites[siteIndex].CertificateLastError = localSite.CertificateLastError
-			merged.Sites[siteIndex].CertificateCanRenew = localSite.CertificateCanRenew
-			merged.Sites[siteIndex].CertificateDomains = localSite.CertificateDomains
-		}
-		merged.Clients = serverClientViewsFromSites(merged.Sites)
+	merged.OwnerEmail = firstNonEmpty(localServer.OwnerEmail, remoteServer.OwnerEmail)
+	if remoteServer.OSLabel != "" {
+		merged.OSLabel = remoteServer.OSLabel
 	}
-	// Registry reports can lag behind this installation's database. Local
-	// history already includes its verified historical aliases and must remain
-	// authoritative even when the registry has a nonempty, narrower history.
-	merged.Invoices = localServer.Invoices
-	merged.InvoiceCount = localServer.InvoiceCount
-	merged.BillableCount = localServer.BillableCount
-	merged.UnpaidInvoiceCount = localServer.UnpaidInvoiceCount
-	merged.InvoiceActionLabel = localServer.InvoiceActionLabel
-	merged.InvoiceActionClass = localServer.InvoiceActionClass
-	merged.BillingCurrency = localServer.BillingCurrency
-	applyServerBillingDashboard(&merged)
+	if remoteServer.CPULabel != "" {
+		merged.CPULabel = remoteServer.CPULabel
+	}
+	if remoteServer.NetworkStatusLabel != "" {
+		merged.NetworkStatusLabel = remoteServer.NetworkStatusLabel
+		merged.NetworkStatusClass = remoteServer.NetworkStatusClass
+	}
+	if len(remoteServer.SystemMetrics) > 0 {
+		merged.SystemMetrics = make([]ServerMetricView, len(remoteServer.SystemMetrics))
+		for index, metric := range remoteServer.SystemMetrics {
+			metric.Processes = append([]HostingSnapshotProcess(nil), metric.Processes...)
+			merged.SystemMetrics[index] = metric
+		}
+	}
+	if merged.DiskTotalLabel == "" {
+		merged.DiskTotalLabel = remoteServer.DiskTotalLabel
+		merged.DiskFreeLabel = remoteServer.DiskFreeLabel
+		merged.DiskUsedLabel = remoteServer.DiskUsedLabel
+		merged.DiskUsedPercent = remoteServer.DiskUsedPercent
+		merged.DiskStatusClass = remoteServer.DiskStatusClass
+	}
 	return merged
 }
 
