@@ -30052,12 +30052,21 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 	translations := translationsForRequest(r)
 	panelServers := append([]hostingandsupport.ServerView(nil), snapshot.Servers...)
 	if snapshot.ShowCentralRegistry {
+		// Only the central catalog/clients (and the security journal) need
+		// every remote view. Opening the local overview should not allocate
+		// thousands of archived remote server, billing or client graphs.
+		workspace := strings.TrimSpace(r.URL.Query().Get("workspace"))
+		selectedID := strings.TrimSpace(r.URL.Query().Get("installation"))
+		includeAll := workspace == "installations" || workspace == "clients" || mailJournalSecurityView(r)
 		knownServerIDs := make(map[string]bool)
 		for _, server := range panelServers {
 			knownServerIDs[server.ID] = true
 		}
 		addHosting := func(hosting hostingandsupport.ClientHosting) {
 			if hosting.InstallationID == "" || knownServerIDs[hosting.InstallationID] {
+				return
+			}
+			if !includeAll && hosting.InstallationID != selectedID {
 				return
 			}
 			knownServerIDs[hosting.InstallationID] = true
