@@ -137,7 +137,10 @@
           <div class="server-config-content">
             <section class="server-config-view" data-server-config-view="overview">
               <header class="server-config-view-heading"><h2>{{index $.T "server_ui_overview"}}</h2><p>{{index $.T "server_ui_overview_hint"}}</p></header>
-        <section class="expense-simple-summary">
+        <div class="server-overview-blocks">
+          <section class="expense-simple-summary server-overview-system">
+            <h3>{{if eq $.LanguageCode "ru"}}Состояние системы{{else}}System health{{end}}</h3>
+
           <div class="expense-simple-summary-head">
             <div>
               <h2>{{$server.Name}}</h2>
@@ -154,7 +157,6 @@
               {{if $server.CPULabel}}<span>{{$server.CPULabel}}</span>{{end}}
               {{if $server.SyncStatusLabel}}<span class="{{$server.SyncStatusClass}}">{{$server.SyncStatusLabel}}</span>{{end}}
               {{if $server.NetworkStatusLabel}}<span class="{{$server.NetworkStatusClass}}">{{$server.NetworkStatusLabel}}</span>{{end}}
-              {{if $server.DiskUsedLabel}}<span class="{{$server.DiskStatusClass}}">{{$server.DiskUsedLabel}} / {{$server.DiskTotalLabel}}</span>{{end}}
               {{if $server.SitebrushVersionLabel}}<span class="{{$server.SitebrushVersionClass}}">SiteBrush {{$server.SitebrushVersionLabel}}</span>{{end}}
             </div>
             {{if $server.SystemMetrics}}
@@ -169,26 +171,9 @@
             </div>
             {{end}}
           </div>
-          <section class="expense-mail-monitor" id="mail-monitor-{{$serverIndex}}">
-            <strong>{{index $.T "mail_monitor_title"}}</strong>
-            {{if $expenseServer.MailAvailable}}
-            <div class="expense-mail-monitor-counts">
-              <span>{{index $.T "mail_monitor_queued_count"}}: <span data-mail-count="Queued" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.Queued}} / {{$expenseServer.MailLast90Days.Queued}}</span></span>
-              <span>{{index $.T "mail_monitor_accepted_count"}}: <span data-mail-count="Accepted" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.Accepted}} / {{$expenseServer.MailLast90Days.Accepted}}</span></span>
-              <span>{{index $.T "mail_monitor_failed_count"}}: <span data-mail-count="Failed" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.Failed}} / {{$expenseServer.MailLast90Days.Failed}}</span></span>
-              <span>{{index $.T "mail_monitor_registration_requested_count"}}: <span data-mail-count="RegistrationRequested" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.RegistrationRequested}} / {{$expenseServer.MailLast90Days.RegistrationRequested}}</span></span>
-              <span>{{index $.T "mail_monitor_registration_complete_count"}}: <span data-mail-count="RegistrationComplete" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.RegistrationComplete}} / {{$expenseServer.MailLast90Days.RegistrationComplete}}</span></span>
-              <span>{{index $.T "mail_monitor_recovery_requested_count"}}: <span data-mail-count="RecoveryRequested" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.RecoveryRequested}} / {{$expenseServer.MailLast90Days.RecoveryRequested}}</span></span>
-              <span>{{index $.T "mail_monitor_recovery_complete_count"}}: <span data-mail-count="RecoveryComplete" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.RecoveryComplete}} / {{$expenseServer.MailLast90Days.RecoveryComplete}}</span></span>
-            </div>
-              <span>{{index $.T "mail_journal_relay_count"}}: <span data-mail-count="RelayAccepted" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.RelayAccepted}} / {{$expenseServer.MailLast90Days.RelayAccepted}}</span></span>
-              <span>{{index $.T "mail_journal_cancelled_count"}}: <span data-mail-count="Cancelled" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.Cancelled}} / {{$expenseServer.MailLast90Days.Cancelled}}</span></span>
-            {{else}}<div class="text-danger">{{index $.T "mail_monitor_unavailable"}}</div>{{end}}
-            {{if $expenseServer.MailReceivedAt}}<small>{{index $.T "mail_monitor_received_at"}}: <time datetime="{{$expenseServer.MailReceivedAt}}">{{$expenseServer.MailReceivedAt}}</time></small>{{end}}
-            {{if not $server.Local}}<small class="text-muted">{{index $.T "mail_monitor_remote_note"}}</small>{{end}}
-            <small class="text-muted">{{index $.T "mail_monitor_boundary"}}</small>
-            <a class="btn btn-outline-primary btn-sm" href="{{$expenseServer.MailSecurityURL}}">{{index $.T "mail_journal_security_details"}}</a>
           </section>
+          <section class="expense-simple-summary server-overview-finance">
+            <h3>{{if eq $.LanguageCode "ru"}}Финансы и квота{{else}}Finances and quota{{end}}</h3>
           {{if not $server.DiskCapacityKnown}}
           <div class="alert alert-warning mb-0">{{index $.T "expenses_disk_unknown"}}</div>
           {{else}}
@@ -205,7 +190,36 @@
           </div>
           {{if $server.CapacityExceeded}}<div class="alert alert-danger mb-0">{{index $.T "expenses_capacity_exceeded"}}</div>{{end}}
           {{end}}
-        </section>
+          </section>
+          <section class="expense-simple-summary server-overview-mail">
+            <h3>{{if eq $.LanguageCode "ru"}}Почта и регистрации{{else}}Mail and registration{{end}}</h3>
+          <section class="expense-mail-monitor" id="mail-monitor-{{$serverIndex}}">
+            <strong>{{index $.T "mail_monitor_title"}}</strong>
+            {{if $expenseServer.MailAvailable}}
+            <div class="expense-mail-monitor-counts">
+              <span>{{index $.T "mail_monitor_queued_count"}}: <span data-mail-count="Queued" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.Queued}} / {{$expenseServer.MailLast90Days.Queued}}</span></span>
+              <span>{{index $.T "mail_monitor_accepted_count"}}: <span data-mail-count="Accepted" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.Accepted}} / {{$expenseServer.MailLast90Days.Accepted}}</span></span>
+              <span class="{{if gt $expenseServer.MailLastDay.Failed 0}}server-mail-error{{else if gt $expenseServer.MailLast90Days.Failed 0}}server-mail-warning{{end}}">{{index $.T "mail_monitor_failed_count"}}: <span data-mail-count="Failed" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.Failed}} / {{$expenseServer.MailLast90Days.Failed}}</span></span>
+            </div>
+            <details class="server-mail-details">
+              <summary>{{if eq $.LanguageCode "ru"}}Дополнительные показатели · 24 часа / 90 дней{{else}}Additional metrics · 24 hours / 90 days{{end}}</summary>
+              <div class="expense-mail-monitor-counts">
+              <span>{{index $.T "mail_monitor_registration_requested_count"}}: <span data-mail-count="RegistrationRequested" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.RegistrationRequested}} / {{$expenseServer.MailLast90Days.RegistrationRequested}}</span></span>
+              <span>{{index $.T "mail_monitor_registration_complete_count"}}: <span data-mail-count="RegistrationComplete" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.RegistrationComplete}} / {{$expenseServer.MailLast90Days.RegistrationComplete}}</span></span>
+              <span>{{index $.T "mail_monitor_recovery_requested_count"}}: <span data-mail-count="RecoveryRequested" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.RecoveryRequested}} / {{$expenseServer.MailLast90Days.RecoveryRequested}}</span></span>
+              <span>{{index $.T "mail_monitor_recovery_complete_count"}}: <span data-mail-count="RecoveryComplete" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.RecoveryComplete}} / {{$expenseServer.MailLast90Days.RecoveryComplete}}</span></span>
+              <span>{{index $.T "mail_journal_relay_count"}}: <span data-mail-count="RelayAccepted" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.RelayAccepted}} / {{$expenseServer.MailLast90Days.RelayAccepted}}</span></span>
+              <span>{{index $.T "mail_journal_cancelled_count"}}: <span data-mail-count="Cancelled" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.Cancelled}} / {{$expenseServer.MailLast90Days.Cancelled}}</span></span>
+              </div>
+            </details>
+            {{else}}<div class="text-danger">{{index $.T "mail_monitor_unavailable"}}</div>{{end}}
+            {{if $expenseServer.MailReceivedAt}}<small>{{index $.T "mail_monitor_received_at"}}: <time datetime="{{$expenseServer.MailReceivedAt}}">{{$expenseServer.MailReceivedAt}}</time></small>{{end}}
+            {{if not $server.Local}}<small class="text-muted">{{index $.T "mail_monitor_remote_note"}}</small>{{end}}
+            <small class="text-muted">{{index $.T "mail_monitor_boundary"}}</small>
+            <a class="btn btn-outline-primary btn-sm" href="{{$expenseServer.MailSecurityURL}}">{{index $.T "mail_journal_security_details"}}</a>
+          </section>
+          </section>
+        </div>
             </section>
 
         {{if $server.Local}}
