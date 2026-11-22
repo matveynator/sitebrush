@@ -60,17 +60,34 @@
     displayNavigation();
   }
   function openServer(serverID, section) {
-    writeNavigation({workspace: "servers", serverID, section: section || "overview"});
+    const selectedSection = section || "overview";
+    if (!serverPanels.some(panel => panel.dataset.serverId === serverID)) {
+      // Installation details are requested only when opened from the catalogue.
+      const url = new URL(window.location.href);
+      url.searchParams.set("installation", serverID);
+      url.searchParams.delete("workspace");
+      url.searchParams.set("section", selectedSection);
+      url.hash = new URLSearchParams({"server-id": serverID, section: selectedSection}).toString();
+      window.location.assign(url.href);
+      return;
+    }
+    writeNavigation({workspace: "servers", serverID, section: selectedSection});
   }
-  function showRoot(section) {
+  function showRoot(section, selectedServerSection, targetPanel) {
     const selected = rootWorkspaces[section] ? section : "servers";
     for (const [workspaceName, workspaceElement] of Object.entries(rootWorkspaces)) {
       if (workspaceElement) workspaceElement.hidden = workspaceName !== selected;
     }
     for (const button of rootTabs?.querySelectorAll("[data-server-root-target]") || []) {
-      const active = button.dataset.serverRootTarget === selected;
+      const shortcut = button.dataset.serverConfigShortcut;
+      // A remote installation cannot expose local-only controls.
+      button.hidden = Boolean(shortcut && !Array.from(targetPanel.querySelectorAll("[data-server-config-view]"))
+        .some(view => view.dataset.serverConfigView === shortcut));
+      const active = button.dataset.serverRootTarget === selected &&
+        (selected !== "servers" || shortcut === selectedServerSection);
       button.classList.toggle("is-active", active);
-      button.setAttribute("aria-current", active ? "page" : "false");
+      if (active) button.setAttribute("aria-current", "page");
+      else button.removeAttribute("aria-current");
     }
   }
   function openUpdater(layout) {
@@ -217,11 +234,30 @@
   }
   function displayNavigation() {
     const navigation = readNavigation();
-    showRoot(navigation.workspace);
     const target = serverPanels.find(panel => panel.dataset.serverId === navigation.serverID) || localPanel();
+
+    const needClients = navigation.workspace === "clients" && centralClients?.dataset.clientsDeferred === "true";
+    const needServerClients = navigation.workspace === "servers" &&
+      ["clients", "billing"].includes(navigation.section) && target.dataset.serverClientsDeferred === "true";
+    if (needClients || needServerClients) {
+      const url = new URL(window.location.href);
+      if (needClients) url.searchParams.set("workspace", "clients");
+      if (needServerClients) {
+        url.searchParams.set("section", navigation.section);
+        url.searchParams.delete("workspace");
+        url.searchParams.set("installation", target.dataset.serverId);
+      }
+      if (url.href !== window.location.href) {
+        window.location.replace(url.href);
+        return;
+      }
+    }
+
     for (const panel of serverPanels) panel.hidden = panel !== target;
     if (selector) selector.value = target.dataset.expenseServerPanel;
     choose(target, navigation.section);
+    const activeSection = target.querySelector("[data-server-config-layout]")?.dataset.serverConfigSelected || "overview";
+    showRoot(navigation.workspace, activeSection, target);
     const activeLedger = ledgers.find(ledger => navigation.workspace === "billing" ? !ledger.panel : navigation.workspace === "servers" && ledger.panel === target);
     if (activeLedger) {
       activeLedger.model = {query: navigation.query, customer: navigation.customer, status: navigation.status, installation: navigation.installation, page: navigation.page};
@@ -235,7 +271,9 @@
     if (centralInvoiceButton) { writeNavigation({workspace: "billing", customer: centralInvoiceButton.dataset.centralClientInvoices}); return; }
     const rootButton = event.target.closest("[data-server-root-target]");
     if (rootButton) {
-      writeNavigation({workspace: rootButton.dataset.serverRootTarget, serverID: localPanel().dataset.serverId, section: "overview"});
+      const shortcut = rootButton.dataset.serverConfigShortcut;
+      const activePanel = serverPanels.find(panel => !panel.hidden) || localPanel();
+      writeNavigation({workspace: rootButton.dataset.serverRootTarget, serverID: activePanel.dataset.serverId, section: shortcut || "overview"});
       return;
     }
     const panel = event.target.closest("[data-expense-server-panel]");
@@ -256,8 +294,6 @@
   });
   for (const panel of serverPanels) {
     const layout = panel.querySelector("[data-server-config-layout]");
-    const navigation = layout?.querySelector(".server-config-nav");
-    if (navigation) navigation.hidden = false;
     panel.addEventListener("change", event => {
       if (!event.target.matches("[data-billing-site-customer]")) return;
       const option = event.target.selectedOptions[0];
