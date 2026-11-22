@@ -321,14 +321,13 @@
                         {{end}}
                       </div>
                       <div class="server-client-site-usage">
-                        <span>{{$site.UsedLabel}} / {{$site.LimitLabel}}</span>
+                        {{if $site.CanEditQuota}}
+                        <button type="button" class="server-client-quota-trigger" data-client-quota-edit data-domain="{{$site.Domain}}" data-quota="{{$site.QuotaInput}}" data-bs-toggle="modal" data-bs-target="#clientQuotaModal" aria-label="{{index $.T "billing_quota"}} · {{$site.Domain}}">{{$site.UsedLabel}} / {{$site.LimitLabel}}</button>
+                        {{else}}<span>{{$site.UsedLabel}} / {{$site.LimitLabel}}</span>{{end}}
                         <div class="server-client-site-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" data-client-site-progress><span></span></div>
                         {{if $site.AnalyticsLabel}}<small>{{index $.T "cx_storage"}}: {{$site.AnalyticsLabel}}</small>{{end}}
                       </div>
                       <div class="expense-simple-site-actions">
-                        {{if $site.CanEditQuota}}
-                        <button type="button" class="btn btn-outline-primary btn-sm" data-client-quota-edit data-domain="{{$site.Domain}}" data-quota="{{$site.QuotaInput}}" data-bs-toggle="modal" data-bs-target="#clientQuotaModal">{{index $.T "billing_quota"}}</button>
-                        {{end}}
                         {{if or $site.CanDelete $site.CertificateDomains}}
                         <div class="dropdown">
                           <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-toggle="dropdown" aria-expanded="false" aria-label="{{if eq $.LanguageCode "ru"}}Действия с сайтом{{else}}Site actions{{end}}">⋮</button>
