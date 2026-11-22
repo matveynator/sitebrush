@@ -68,6 +68,11 @@ func (store Store) SaveRegistrationSettingsWithLimits(ctx context.Context, autom
 	if err = saveBooleanSetting(ctx, transaction, "public_trial_enabled", testDrive); err != nil {
 		return err
 	}
+	if !automatic {
+		if err = saveBooleanSetting(ctx, transaction, "demo_site_enabled", false); err != nil {
+			return err
+		}
+	}
 	for _, setting := range []struct {
 		name  string
 		bytes int64
