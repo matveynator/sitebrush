@@ -28930,7 +28930,9 @@ func (a *App) expensesPage(w http.ResponseWriter, r *http.Request) {
 	}
 	view["Status"] = status
 	view["ShowProfiler"] = a.profiler != nil && a.updateAuthorized(r)
+	renderStarted := requesttiming.Start(r)
 	a.render(w, r, "expenses.html", view)
+	requesttiming.Finish(r, requesttiming.ServerSettingsRender, renderStarted)
 }
 
 func (a *App) startHostingAndSupportPanelProcess(stop <-chan struct{}) chan hostingAndSupportPanelRequest {
@@ -29715,15 +29717,21 @@ func (a *App) hostingAndSupportCanShowCentralServers(_ context.Context, ownerDom
 }
 
 func (a *App) expensesView(ctx context.Context, r *http.Request) (map[string]any, error) {
+	snapshotStarted := requesttiming.Start(r)
 	snapshot, found := a.preparedHostingAndSupportPanelSnapshot()
 	if !found {
 		var err error
 		snapshot, err = a.collectHostingAndSupportPanelSnapshot(ctx, nil)
 		if err != nil {
+			requesttiming.Finish(r, requesttiming.ServerSettingsSnapshot, snapshotStarted)
 			return nil, err
 		}
 	}
-	return a.hostingAndSupportPanelView(r, snapshot), nil
+	requesttiming.Finish(r, requesttiming.ServerSettingsSnapshot, snapshotStarted)
+	viewStarted := requesttiming.Start(r)
+	view := a.hostingAndSupportPanelView(r, snapshot)
+	requesttiming.Finish(r, requesttiming.ServerSettingsView, viewStarted)
+	return view, nil
 }
 
 func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, controlDatabase *sql.DB) (hostingAndSupportPanelSnapshot, error) {
@@ -30072,15 +30080,23 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 			selectedPanelServers = panelServers[selected : selected+1]
 		}
 	}
-	expenseServers := simplifiedExpenseServerViews(selectedPanelServers, snapshot.Clients)
-	// Large client forms are a dedicated workspace, not hidden markup on
-	// every overview request. The URL selects the server workspace explicitly.
-	section := r.URL.Query().Get("section")
+	// Do not construct client/site/invoice view graphs just to discard them.
+	// The overview needs only already prepared server summaries.
+	section := strings.TrimSpace(r.URL.Query().Get("section"))
+	switch section {
+	case "overview", "network", "updates", "registration", "demo", "clients", "billing", "monetization":
+	default:
+		section = "overview"
+	}
 	serverClientsDeferred := section != "clients" && section != "billing"
+	var expenseServers []simplifiedExpenseServerView
 	if serverClientsDeferred {
-		for index := range expenseServers {
-			expenseServers[index].Clients = nil
+		expenseServers = make([]simplifiedExpenseServerView, 0, len(selectedPanelServers))
+		for _, server := range selectedPanelServers {
+			expenseServers = append(expenseServers, simplifiedExpenseServerView{Server: server})
 		}
+	} else {
+		expenseServers = simplifiedExpenseServerViews(selectedPanelServers, snapshot.Clients)
 	}
 	selectedMailServer := strings.TrimSpace(r.URL.Query().Get("mail_server"))
 	selectedMailServerFound := false
@@ -30173,10 +30189,15 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 		}
 		log.Printf("MAIL monitor panel read failed error=%s", diagnosticlog.SafeLogValue(readErr.Error()))
 	}
-	trialAvailability := a.publicTrialAvailabilityForSettings(r.Context(), snapshot.MainDomain, snapshot.AutoRegistrationEnabled, snapshot.PublicTrialEnabled)
+	// Wildcard DNS / external-IP probing is only needed in the registration
+	// workspace. It must never hold up an overview or billing navigation.
+	trialAvailability := publicTrialAvailability{}
 	trialUnavailableText := ""
-	if !trialAvailability.Enabled {
-		trialUnavailableText = translationOrDefault(translations, trialAvailability.ReasonKey, "Test drive is unavailable until automatic registration and wildcard DNS are configured.")
+	if section == "registration" && len(expenseServers) > 0 && expenseServers[0].Server.Local {
+		trialAvailability = a.publicTrialAvailabilityForSettings(r.Context(), snapshot.MainDomain, snapshot.AutoRegistrationEnabled, snapshot.PublicTrialEnabled)
+		if !trialAvailability.Enabled {
+			trialUnavailableText = translationOrDefault(translations, trialAvailability.ReasonKey, "Test drive is unavailable until automatic registration and wildcard DNS are configured.")
+		}
 	}
 	publicTrialEmbedHTML := ""
 	testDriveEmbedHTML := ""
@@ -30191,38 +30212,47 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 		expensesTitle = translationOrDefault(translations, "expenses_central_title", "Server settings")
 	}
 	sites := append([]hostingandsupport.Site(nil), snapshot.Sites...)
-	ownerDomain := a.serverOwnerDomain(r.Context())
-	for siteIndex := range sites {
-		for _, email := range hostingandsupport.SplitEmailList(sites[siteIndex].AdminEmails) {
-			protected := sites[siteIndex].Domain == ownerDomain && slices.ContainsFunc(snapshot.OwnerEmails, func(ownerEmail string) bool { return strings.EqualFold(ownerEmail, email) })
-			sites[siteIndex].AdminAccounts = append(sites[siteIndex].AdminAccounts, hostingandsupport.SiteAccountView{Email: email, Protected: protected})
+	if section == "clients" {
+		ownerDomain := a.serverOwnerDomain(r.Context())
+		for siteIndex := range sites {
+			for _, email := range hostingandsupport.SplitEmailList(sites[siteIndex].AdminEmails) {
+				protected := sites[siteIndex].Domain == ownerDomain && slices.ContainsFunc(snapshot.OwnerEmails, func(ownerEmail string) bool { return strings.EqualFold(ownerEmail, email) })
+				sites[siteIndex].AdminAccounts = append(sites[siteIndex].AdminAccounts, hostingandsupport.SiteAccountView{Email: email, Protected: protected})
+			}
 		}
+		if err := a.withServerControlDatabaseRead(r.Context(), "hosting-panel-deletion-state", func(database *sql.DB) error {
+			return hostingandsupport.PopulateSiteDeletionViews(r.Context(), database, sites)
+		}); err != nil {
+			log.Printf("hosting-panel deletion read failed: %s", diagnosticlog.SafeLogValue(err.Error()))
+		}
+		applySimplifiedSiteDeletionControls(expenseServers, sites)
 	}
-	if err := a.withServerControlDatabaseRead(r.Context(), "hosting-panel-deletion-state", func(database *sql.DB) error {
-		return hostingandsupport.PopulateSiteDeletionViews(r.Context(), database, sites)
-	}); err != nil {
-		log.Printf("hosting-panel deletion read failed: %s", diagnosticlog.SafeLogValue(err.Error()))
-	}
-	applySimplifiedSiteDeletionControls(expenseServers, sites)
 	// The cross-installation financial catalog is materialized exclusively for
 	// the authenticated SiteBrush.com registry owner.
+	centralInstallationsDeferred := snapshot.ShowCentralRegistry && r.URL.Query().Get("workspace") != "installations"
 	var installationCatalog []hostingandsupport.InstallationCatalogView
-	if snapshot.ShowCentralRegistry {
+	if snapshot.ShowCentralRegistry && !centralInstallationsDeferred {
 		installationCatalog = hostingandsupport.InstallationCatalogViews(panelServers, nil, nil)
 	}
+	centralBillingDeferred := snapshot.ShowCentralRegistry && r.URL.Query().Get("workspace") != "billing"
 	var ledgerInvoices []hostingandsupport.ServerInvoiceView
-	if snapshot.ShowCentralRegistry {
-		ledgerInvoices = hostingandsupport.ServerInvoiceViews(snapshot.Invoices, nil, nil)
-	} else {
-		for _, server := range panelServers {
-			ledgerInvoices = append(ledgerInvoices, server.Invoices...)
+	if section == "billing" || !centralBillingDeferred && snapshot.ShowCentralRegistry {
+		if snapshot.ShowCentralRegistry {
+			ledgerInvoices = hostingandsupport.ServerInvoiceViews(snapshot.Invoices, nil, nil)
+		} else {
+			for _, server := range panelServers {
+				ledgerInvoices = append(ledgerInvoices, server.Invoices...)
+			}
 		}
 	}
 	return map[string]any{
 		"LedgerInvoices":           ledgerInvoices,
 		"CentralClients":           centralClients,
 		"CentralClientsDeferred":   centralClientsDeferred,
+		"CentralBillingDeferred":   centralBillingDeferred,
+		"CentralInstallationsDeferred": centralInstallationsDeferred,
 		"ServerClientsDeferred":    serverClientsDeferred,
+		"SelectedServerSection":    section,
 		"SelectedServerLocal":      len(expenseServers) > 0 && expenseServers[0].Server.Local,
 		"T":                        translations,
 		"Title":                    expensesTitle,
@@ -30261,7 +30291,12 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 		},
 		"Backups":                    nil,
 		"DemoSettings":               snapshot.DemoSettings,
-		"DemoStatus":                 a.demoSiteStatusView(r.Context(), snapshot.DemoSettings),
+		"DemoStatus":                 func() demoSiteStatusView {
+			if section == "demo" && len(expenseServers) > 0 && expenseServers[0].Server.Local {
+				return a.demoSiteStatusView(r.Context(), snapshot.DemoSettings)
+			}
+			return demoSiteStatusView{}
+		}(),
 		"DemoCopyScopeLabel":         translationOrDefault(translations, "billing_demo_copy_scope", "Content to download"),
 		"DemoCopyPageLabel":          translationOrDefault(translations, "billing_demo_copy_single_page", "Only the specified page"),
 		"DemoSnapshotLabel":          translationOrDefault(translations, "billing_demo_snapshot", "Current demo copy"),
@@ -49897,27 +49932,34 @@ func startRenderTemplateProcess(stop <-chan struct{}) chan renderTemplateRequest
 		}
 		parsedTemplates[templateName] = parsedTemplate
 	}
-	go func() {
-		for {
-			select {
-			case <-stop:
-				return
-			case request := <-requests:
-				if parseErr := parseErrors[request.name]; parseErr != nil {
-					request.reply <- renderTemplateResponse{err: parseErr}
-					continue
+	// Templates and parse errors are immutable after initialization. Executing
+	// templates is safe concurrently; independent, bounded channel workers
+	// prevent one large admin page from blocking unrelated login/editor pages.
+	// Each worker exclusively owns the request envelope and its output bytes.
+	workers := min(4, max(1, runtime.GOMAXPROCS(0)))
+	for worker := 0; worker < workers; worker++ {
+		go func() {
+			for {
+				select {
+				case <-stop:
+					return
+				case request := <-requests:
+					if parseErr := parseErrors[request.name]; parseErr != nil {
+						request.reply <- renderTemplateResponse{err: parseErr}
+						continue
+					}
+					parsedTemplate := parsedTemplates[request.name]
+					if parsedTemplate == nil {
+						request.reply <- renderTemplateResponse{err: fmt.Errorf("template %s is not embedded", request.name)}
+						continue
+					}
+					var rendered bytes.Buffer
+					renderErr := parsedTemplate.Execute(&rendered, request.envelope)
+					request.reply <- renderTemplateResponse{html: rendered.Bytes(), err: renderErr}
 				}
-				parsedTemplate := parsedTemplates[request.name]
-				if parsedTemplate == nil {
-					request.reply <- renderTemplateResponse{err: fmt.Errorf("template %s is not embedded", request.name)}
-					continue
-				}
-				var rendered bytes.Buffer
-				renderErr := parsedTemplate.Execute(&rendered, request.envelope)
-				request.reply <- renderTemplateResponse{html: rendered.Bytes(), err: renderErr}
 			}
-		}
-	}()
+		}()
+	}
 	return requests
 }
 

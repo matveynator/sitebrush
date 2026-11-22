@@ -192,7 +192,6 @@
           {{if $server.CapacityExceeded}}<div class="alert alert-danger mb-0">{{index $.T "expenses_capacity_exceeded"}}</div>{{end}}
           {{end}}
         </section>
-        {{if $server.Local}}<div class="server-overview-monetization"><button type="button" class="btn btn-outline-primary btn-sm" data-server-config-target="monetization">{{index $.T "server_ui_monetization"}}</button></div>{{end}}
             </section>
 
         {{if $server.Local}}
@@ -220,7 +219,7 @@
 
           </div>
             </section>
-            <section class="server-config-view" data-server-config-view="registration">
+            {{if eq $.SelectedServerSection "registration"}}<section class="server-config-view" data-server-config-view="registration">
           <div>
             <h2>{{index $.T "billing_registration_title"}}</h2>
             <p class="text-muted">{{index $.T "billing_registration_hint"}}</p>
@@ -233,8 +232,8 @@
             </div>
             {{end}}
           </div>
-            </section>
-            {{if $.AutoRegistrationEnabled}}<section class="server-config-view" data-server-config-view="demo">
+            </section>{{end}}
+            {{if and $.AutoRegistrationEnabled (eq $.SelectedServerSection "demo")}}<section class="server-config-view" data-server-config-view="demo">
           <div>
             <h2>{{index $.T "billing_demo_title"}}</h2>
             <p class="text-muted">{{index $.T "billing_demo_billing_blocked"}} {{index $.T "billing_demo_exclusion_hint"}}</p>
@@ -243,7 +242,7 @@
             </section>{{end}}
         {{end}}
 
-            <section class="server-config-view" data-server-config-view="clients">
+            {{if eq $.SelectedServerSection "clients"}}<section class="server-config-view" data-server-config-view="clients">
           <div class="billing-section-header">
             <div><h2>{{index $.T "billing_clients"}}</h2><p class="text-muted">{{index $.T "server_clients_hint"}}</p></div>
           </div>
@@ -328,8 +327,8 @@
             {{else}}<div class="empty">{{index $.T "expenses_clients_empty"}}</div>{{end}}
           </div>
           <p class="server-workspace-empty" data-clients-no-results hidden>{{index $.T "server_installations_no_results"}}</p>
-            </section>
-            <section class="server-config-view" data-server-config-view="billing">
+            </section>{{end}}
+            {{if eq $.SelectedServerSection "billing"}}<section class="server-config-view" data-server-config-view="billing">
               <header class="server-config-view-heading">
                 <h2>{{index $.T "server_billing_nav"}}</h2>
                 <p>{{index $.T "server_billing_hint"}}</p>
@@ -375,8 +374,8 @@
                 {{end}}
                 {{template "invoice-ledger" $}}
               </div>
-            </section>
-            {{if $server.Local}}
+            </section>{{end}}
+            {{if and $server.Local (eq $.SelectedServerSection "monetization")}}
             <section class="server-config-view" data-server-config-view="monetization">
               <header class="server-config-view-heading"><h2>{{index $.T "server_ui_monetization"}}</h2><p>{{index $.T "server_ui_monetization_hint"}}</p></header>
               <p class="server-monetization-purpose">{{index $.T "server_ui_monetization_purpose"}}</p>
@@ -510,11 +509,11 @@
       </div>
       <p class="server-workspace-empty" data-clients-no-results hidden>{{index .T "server_installations_no_results"}}</p>
     </section>
-    <section class="server-root-workspace" data-central-billing-container hidden>
+    <section class="server-root-workspace" data-central-billing-container data-billing-deferred="{{if .CentralBillingDeferred}}true{{else}}false{{end}}" hidden>
       <header class="server-workspace-header"><div><h2>{{index .T "server_central_invoices"}}</h2><p>{{index .T "server_central_invoices_hint"}}</p></div></header>
       {{template "invoice-ledger" .}}
     </section>
-    <section class="server-root-workspace" data-server-installations-container hidden>
+    <section class="server-root-workspace" data-server-installations-container data-installations-deferred="{{if .CentralInstallationsDeferred}}true{{else}}false{{end}}" hidden>
       <header class="server-workspace-header">
         <div><h2>{{index .T "billing_installations"}}</h2><p>{{index .T "server_installations_description"}}</p></div>
         <span class="server-workspace-count">{{if .InstallationCatalog}}{{len .InstallationCatalog}}{{else}}0{{end}} {{index .T "server_installations_total"}}</span>

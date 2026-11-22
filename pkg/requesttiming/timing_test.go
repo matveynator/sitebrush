@@ -144,3 +144,27 @@ func TestRouteLatencyIncludesCompletedResponseAndStatus(t *testing.T) {
 		t.Fatal("entry was also counted as a backend request")
 	}
 }
+
+func TestUpgradedSessionDoesNotInflateProxyRequestLatency(t *testing.T) {
+	stop := make(chan struct{})
+	defer close(stop)
+	collector := New(stop)
+	handler := collector.Middleware(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		Route(request, ProxyApplication)
+		writer.WriteHeader(http.StatusSwitchingProtocols)
+		time.Sleep(2 * time.Millisecond)
+	}))
+	request := httptest.NewRequest(http.MethodGet, "http://site.test/?server_profiler_ws", nil)
+	request.Header.Set("Upgrade", "websocket")
+	handler.ServeHTTP(httptest.NewRecorder(), request)
+	report, err := collector.Snapshot(stop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Stages[ProxyApplication].Count != 0 || report.Stages[UpgradeSessionLifetime].Count != 1 {
+		t.Fatalf("websocket lifetime was counted as an HTTP request: proxy=%+v upgrade=%+v", report.Stages[ProxyApplication], report.Stages[UpgradeSessionLifetime])
+	}
+	if report.HTTP.Requests != 0 {
+		t.Fatal("upgraded websocket counted as ordinary HTTP traffic")
+	}
+}

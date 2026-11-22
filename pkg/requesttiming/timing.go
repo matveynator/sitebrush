@@ -40,6 +40,10 @@ const (
 	UnknownHost
 	LocalIPEntry
 	ProxyApplication
+	UpgradeSessionLifetime
+	ServerSettingsSnapshot
+	ServerSettingsView
+	ServerSettingsRender
 	ControlDBQueue
 	ControlDBExecution
 	SiteDBQueue
@@ -48,7 +52,7 @@ const (
 )
 
 func (stage Stage) String() string {
-	return [...]string{"accepted_to_request", "front_state", "domain", "policy", "attack_guard", "throttle_guard", "public_handler", "first_write", "certificate", "attack_queue", "attack_work", "throttle_queue", "throttle_work", "proxy_metadata", "proxy_backend", "handler_complete", "body_write", "http1_response_complete", "public_static_ram", "public_static_file", "unknown_host", "local_ip_entry", "proxy_application", "control_db_queue", "control_db_execution", "site_db_queue", "site_db_execution"}[stage]
+	return [...]string{"accepted_to_request", "front_state", "domain", "policy", "attack_guard", "throttle_guard", "public_handler", "first_write", "certificate", "attack_queue", "attack_work", "throttle_queue", "throttle_work", "proxy_metadata", "proxy_backend", "handler_complete", "body_write", "http1_response_complete", "public_static_ram", "public_static_file", "unknown_host", "local_ip_entry", "proxy_application", "upgrade_session_lifetime", "server_settings_snapshot", "server_settings_view", "server_settings_render", "control_db_queue", "control_db_execution", "site_db_queue", "site_db_execution"}[stage]
 }
 
 type HTTPMetrics struct {
@@ -419,6 +423,14 @@ func (collector *Collector) Middleware(next http.Handler) http.Handler {
 		next.ServeHTTP(&responseWriter{ResponseWriter: writer, measurement: measurement}, request)
 		if request.Header.Get("Upgrade") != "" {
 			measurement.event.HTTP = HTTPMetrics{}
+			if measurement.event.Status == http.StatusSwitchingProtocols {
+				// ReverseProxy returns only when a hijacked WebSocket closes.
+				// That interval is session lifetime, not HTTP response latency.
+				measurement.event.Present &^= 1 << ProxyApplication
+				measurement.route = 0
+				measurement.event.Durations[UpgradeSessionLifetime] = time.Since(measurement.started)
+				measurement.event.Present |= 1 << UpgradeSessionLifetime
+			}
 		} else {
 			measurement.event.at = time.Now()
 			measurement.event.started = measurement.started

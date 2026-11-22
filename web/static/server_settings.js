@@ -88,9 +88,8 @@
     }
     for (const button of rootTabs?.querySelectorAll("[data-server-root-target]") || []) {
       const shortcut = button.dataset.serverConfigShortcut;
-      // A remote installation cannot expose local-only controls.
-      button.hidden = Boolean(shortcut && !Array.from(targetPanel.querySelectorAll("[data-server-config-view]"))
-        .some(view => view.dataset.serverConfigView === shortcut));
+      // A section may be intentionally absent until selected. Authorization
+      // and local/remote availability were already decided by the server.
       const active = button.dataset.serverRootTarget === selected &&
         (selected !== "servers" || shortcut === selectedServerSection);
       button.classList.toggle("is-active", active);
@@ -245,18 +244,27 @@
     const target = serverPanels.find(panel => panel.dataset.serverId === navigation.serverID) || localPanel();
 
     const needClients = navigation.workspace === "clients" && centralClients?.dataset.clientsDeferred === "true";
-    const needServerClients = navigation.workspace === "servers" &&
-      ["clients", "billing"].includes(navigation.section) && target.dataset.serverClientsDeferred === "true";
-    if (needClients || needServerClients) {
+    const needBilling = navigation.workspace === "billing" && centralBilling?.dataset.billingDeferred === "true";
+    const needInstallations = navigation.workspace === "installations" && installationsWorkspace?.dataset.installationsDeferred === "true";
+    const requestedSection = navigation.section;
+    const serverShortcutAvailable = Array.from(rootTabs?.querySelectorAll("[data-server-config-shortcut]") || [])
+      .some(button => button.dataset.serverConfigShortcut === requestedSection);
+    const serverSectionLoaded = Array.from(target.querySelectorAll("[data-server-config-view]"))
+      .some(view => view.dataset.serverConfigView === requestedSection);
+    const needServerSection = navigation.workspace === "servers" && serverShortcutAvailable && !serverSectionLoaded;
+    if (needClients || needBilling || needInstallations || needServerSection) {
       const url = new URL(window.location.href);
-      if (needClients) url.searchParams.set("workspace", "clients");
-      if (needServerClients) {
-        url.searchParams.set("section", navigation.section);
-        url.searchParams.delete("workspace");
+      if (needServerSection) {
+        url.searchParams.set("section", requestedSection);
         url.searchParams.set("installation", target.dataset.serverId);
+        url.searchParams.delete("workspace");
+      } else {
+        url.searchParams.set("workspace", navigation.workspace);
+        url.searchParams.delete("section");
+        url.searchParams.delete("installation");
       }
       if (url.href !== window.location.href) {
-        window.location.replace(url.href);
+        window.location.assign(url.href);
         return;
       }
     }

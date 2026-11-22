@@ -3164,7 +3164,7 @@ func TestRegistrationSettingsScopeTrialAndDemoNavigation(t *testing.T) {
 		`{{if or (and .AutoRegistrationEnabled .PublicTrialEnabled) .ActivePublicTrialSites .CleanupPendingTrialSites .ArchivedPublicTrialSites}}<button type="button" data-server-root-target="temporary-sites"`,
 		`{{if or (and .AutoRegistrationEnabled .PublicTrialEnabled) .ActivePublicTrialSites .CleanupPendingTrialSites .ArchivedPublicTrialSites}}` + "\n" + `    <section class="server-root-workspace" data-hosting-installation-panel="temporary-sites"`,
 		`{{if $.AutoRegistrationEnabled}}<button type="button" class="btn btn-outline-secondary" data-server-config-target="demo"`,
-		`{{if $.AutoRegistrationEnabled}}<section class="server-config-view" data-server-config-view="demo"`,
+		`{{if and $.AutoRegistrationEnabled (eq $.SelectedServerSection "demo")}}<section class="server-config-view" data-server-config-view="demo"`,
 		`{{if .CleanupPendingTrialSites}}`,
 		`{{range .CleanupPendingTrialSites}}`,
 		`{{if .DeletedAt}}`,
@@ -3321,6 +3321,7 @@ func TestHostingAndSupportTemplateRendersServerView(t *testing.T) {
 		"Backups":                     nil,
 		"DemoSettings":                demo.Settings{Domain: "demo.sitebrush.com", Enabled: true},
 		"AutoRegistrationEnabled":     true,
+		"SelectedServerSection":      "clients",
 		"PublicTrialEmbedHTML":        "",
 		"CurrentDomain":               "sitebrush.com",
 	}
@@ -3342,15 +3343,28 @@ func TestHostingAndSupportTemplateRendersServerView(t *testing.T) {
 	if !strings.Contains(renderedHTML, `data-certificate-renew="example.com"`) || !strings.Contains(renderedHTML, "2026-09-01 12:00:00 UTC") {
 		t.Fatal("server domain certificate status and renewal control did not render")
 	}
-	if !strings.Contains(renderedHTML, `data-server-config-target="demo"`) ||
-		!strings.Contains(renderedHTML, `data-server-config-view="demo"`) {
-		t.Fatal("registration does not expose the demo subview")
+	if strings.Contains(renderedHTML, `class="billing-demo-settings-form"`) || strings.Contains(renderedHTML, `class="billing-registration-settings-form"`) {
+		t.Fatal("clients workspace eagerly rendered unrelated settings")
 	}
-	if strings.Count(renderedHTML, `class="billing-demo-settings-form"`) != 1 {
-		t.Fatal("demo settings form must have one source of truth")
+	view["SelectedServerSection"] = "registration"
+	var registrationHTML bytes.Buffer
+	if err := parsedTemplate.Execute(&registrationHTML, view); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(renderedHTML, "Демо-сайты не участвуют в биллинге.") ||
-		!strings.Contains(renderedHTML, "Они не создают клиентов, счетов, оплат и покрытия расходов хостинга.") {
+	if !strings.Contains(registrationHTML.String(), `data-server-config-target="demo"`) {
+		t.Fatal("registration does not link to the demo subview")
+	}
+	view["SelectedServerSection"] = "demo"
+	var demoHTML bytes.Buffer
+	if err := parsedTemplate.Execute(&demoHTML, view); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(demoHTML.String(), `data-server-config-view="demo"`) ||
+		strings.Count(demoHTML.String(), `class="billing-demo-settings-form"`) != 1 {
+		t.Fatal("demo section must have one source of truth")
+	}
+	if !strings.Contains(demoHTML.String(), "Демо-сайты не участвуют в биллинге.") ||
+		!strings.Contains(demoHTML.String(), "Они не создают клиентов, счетов, оплат и покрытия расходов хостинга.") {
 		t.Fatal("demo tab does not explain its billing exclusion")
 	}
 }
@@ -3382,8 +3396,9 @@ func TestExpensesTemplateShowsOnlyLocalServerAndEnabledDemoOutsideSitebrushCom(t
 			Enabled: false,
 		},
 	}
-	renderSnapshot := func(snapshot hostingAndSupportPanelSnapshot) string {
+	renderSnapshot := func(snapshot hostingAndSupportPanelSnapshot, section, workspace string) string {
 		t.Helper()
+		request = httptest.NewRequest(http.MethodGet, "https://owner.example/?server-settings&section="+url.QueryEscape(section)+"&workspace="+url.QueryEscape(workspace), nil)
 		view := application.hostingAndSupportPanelView(request, snapshot)
 		view["Domain"] = snapshot.MainDomain
 		view["CompileVersion"] = CompileVersion
@@ -3394,7 +3409,7 @@ func TestExpensesTemplateShowsOnlyLocalServerAndEnabledDemoOutsideSitebrushCom(t
 		return rendered.String()
 	}
 
-	disabledDemoHTML := renderSnapshot(baseSnapshot)
+	disabledDemoHTML := renderSnapshot(baseSnapshot, "overview", "")
 	if !strings.Contains(disabledDemoHTML, "Настройки сервера") {
 		t.Fatal("regular server did not render the singular expenses title")
 	}
@@ -3414,16 +3429,21 @@ func TestExpensesTemplateShowsOnlyLocalServerAndEnabledDemoOutsideSitebrushCom(t
 	if !strings.Contains(disabledDemoHTML, "owner.example") || !strings.Contains(disabledDemoHTML, `data-expense-server-panel="0"`) {
 		t.Fatal("regular server did not render its local server")
 	}
-	if !strings.Contains(disabledDemoHTML, `name="monthly_server_expense"`) {
-		t.Fatal("simplified expenses did not render the monthly server price")
+	monetizationHTML := renderSnapshot(baseSnapshot, "monetization", "")
+	if !strings.Contains(monetizationHTML, `name="monthly_server_expense"`) {
+		t.Fatal("monetization workspace did not render the monthly server price")
 	}
+	registrationHTML := renderSnapshot(baseSnapshot, "registration", "")
 	for _, settingsFragment := range []string{
 		`name="auto_registration_enabled"`,
 		`name="public_trial_enabled"`,
 	} {
-		if !strings.Contains(disabledDemoHTML, settingsFragment) {
-			t.Fatalf("disabled demo settings missing recoverable fragment %q", settingsFragment)
+		if !strings.Contains(registrationHTML, settingsFragment) {
+			t.Fatalf("registration settings missing recoverable fragment %q", settingsFragment)
 		}
+	}
+	if strings.Contains(disabledDemoHTML, `name="monthly_server_expense"`) || strings.Contains(disabledDemoHTML, `name="auto_registration_enabled"`) {
+		t.Fatal("overview must not render financial or registration forms")
 	}
 	// A disabled prerequisite must remove the public demo controls entirely.
 	if strings.Contains(disabledDemoHTML, `name="demo_site_enabled"`) ||
@@ -3451,7 +3471,7 @@ func TestExpensesTemplateShowsOnlyLocalServerAndEnabledDemoOutsideSitebrushCom(t
 	enabledDemoSnapshot := baseSnapshot
 	enabledDemoSnapshot.AutoRegistrationEnabled = true
 	enabledDemoSnapshot.DemoSettings.Enabled = true
-	enabledDemoHTML := renderSnapshot(enabledDemoSnapshot)
+	enabledDemoHTML := renderSnapshot(enabledDemoSnapshot, "demo", "")
 	if !strings.Contains(enabledDemoHTML, `class="billing-demo-settings-form"`) ||
 		!strings.Contains(enabledDemoHTML, `name="demo_site_enabled" value="1" checked`) {
 		t.Fatal("enabled local demo did not render its enabled settings form")
@@ -3471,7 +3491,7 @@ func TestExpensesTemplateShowsOnlyLocalServerAndEnabledDemoOutsideSitebrushCom(t
 		}},
 	}}
 	centralSnapshot.ArchivedHostings = []hostingandsupport.ClientHosting{{InstallationID: "archive-1", LastSeenAt: "2026-07-20"}}
-	centralHTML := renderSnapshot(centralSnapshot)
+	centralHTML := renderSnapshot(centralSnapshot, "overview", "installations")
 	for _, expectedFragment := range []string{
 		`data-server-root-target="installations"`,
 		`data-installation-id="desktop-1"`,
