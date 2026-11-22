@@ -6786,7 +6786,8 @@ func (a *App) browserAnalyticsView(r *http.Request, domain string) browserAnalyt
 		return dashboard
 	}
 	dashboard.Report, dashboard.Available = reports[strconv.Itoa(days)]
-	dashboard.Stale = dashboard.Available && !dashboard.Report.Generated.IsZero() && time.Since(dashboard.Report.Generated) > 10*time.Minute
+	// A freshly regenerated report can still contain only old events.
+	dashboard.Stale = dashboard.Available && !dashboard.Report.LastEvent.IsZero() && time.Since(dashboard.Report.LastEvent) > 10*time.Minute
 	dashboard.Cards, dashboard.ReturnSections, dashboard.ContentSections = browserAnalyticsSections(dashboard.Report, translationsForRequest(r))
 	dashboard.Age = fmt.Sprintf("%s UTC · %s", dashboard.Report.Generated.UTC().Format("2006-01-02 15:04:05"), time.Since(dashboard.Report.Generated).Round(time.Second))
 	return dashboard

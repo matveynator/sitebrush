@@ -16556,10 +16556,23 @@ func TestSimplifiedExpensesShowsTestDriveUnderRegistrationAfterExplicitPermissio
 	if err := parsedTemplate.Execute(&cleanupRendered, view); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(cleanupRendered.String(), "cleanup.sitebrush.example") || !strings.Contains(cleanupRendered.String(), "deleted.sitebrush.example") || !strings.Contains(cleanupRendered.String(), `name="demo_site_enabled"`) {
+	if !strings.Contains(cleanupRendered.String(), "cleanup.sitebrush.example") || !strings.Contains(cleanupRendered.String(), "deleted.sitebrush.example") {
 		t.Fatal("registration enabled with Test Drive disabled hid cleanup records")
 	}
-	view["AutoRegistrationEnabled"] = true
+	// Demo is a separate deferred section: opening Registration must not render
+	// its form, but direct navigation to Demo must render exactly one.
+	if strings.Contains(cleanupRendered.String(), `name="demo_site_enabled"`) {
+		t.Fatal("registration eagerly rendered the demo form")
+	}
+	view["SelectedServerSection"] = "demo"
+	var demoRendered bytes.Buffer
+	if err := parsedTemplate.Execute(&demoRendered, view); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(demoRendered.String(), `name="demo_site_enabled"`) != 1 {
+		t.Fatal("enabled registration did not expose the deferred demo settings")
+	}
+	view["SelectedServerSection"] = "registration"
 	view["PublicTrialEnabled"] = true
 	var unavailableRendered bytes.Buffer
 	if err := parsedTemplate.Execute(&unavailableRendered, view); err != nil {
@@ -16572,7 +16585,7 @@ func TestSimplifiedExpensesShowsTestDriveUnderRegistrationAfterExplicitPermissio
 		`trial.sitebrush.example`,
 		`https://copied.example/`,
 		`deleted.sitebrush.example`,
-		`name="demo_site_enabled"`,
+		`data-server-config-target="demo"`,
 	} {
 		if !strings.Contains(unavailableBody, expected) {
 			t.Fatalf("enabled registration and Test Drive missing %q", expected)

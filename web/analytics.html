@@ -749,7 +749,7 @@
     {{else}}
     <p class="small text-muted" data-analytics-last-event>{{if eq .LanguageCode "ru"}}Последнее принятое событие{{else}}Last accepted event{{end}}: {{.BrowserAnalytics.Report.LastEvent.UTC.Format "2006-01-02 15:04:05"}} UTC</p>
     {{end}}
-    {{if .BrowserAnalytics.Stale}}<p class="alert alert-warning" role="status" data-analytics-stale>{{if eq .LanguageCode "ru"}}Отчёт не обновлялся более 10 минут. Возможно, остановились сбор данных или запись в хранилище; проверьте подключение событий и журнал сервера.{{else}}The report has not updated for over 10 minutes. Collection or persistence may be stalled; check event delivery and the server log.{{end}}</p>{{end}}
+    {{if .BrowserAnalytics.Stale}}<p class="alert alert-warning" role="status" data-analytics-stale>{{if eq .LanguageCode "ru"}}Последнее принятое событие было более 10 минут назад. Возможно, сейчас нет посетителей либо остановились доставка или сохранение аналитики; проверьте журнал сервера.{{else}}The last accepted event is over 10 minutes old. Traffic may be quiet, or delivery or persistence may be stalled; check the server log.{{end}}</p>{{end}}
     {{else if not .BrowserAnalytics.Error}}<p class="alert alert-secondary" data-analytics-no-report>{{if eq .LanguageCode "ru"}}Сохранённых отчётов пока нет. Это не подтверждает исправность сбора событий.{{else}}No saved analytics report yet. This does not confirm that event collection is working.{{end}}</p>{{end}}
     {{if .AnalyticsQuotaBlocked}}<p class="alert alert-warning">{{index .T "cx_storage_paused"}}</p>{{end}}
     {{if .Conversion.Incomplete}}<p class="alert alert-warning">{{index .T "ax_incomplete"}}</p>{{end}}
