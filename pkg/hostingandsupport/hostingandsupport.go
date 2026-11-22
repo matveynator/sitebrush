@@ -1482,6 +1482,11 @@ func (store Store) SaveRegistrationSettings(ctx context.Context, autoRegistratio
 	if err = saveBooleanSetting(ctx, transaction, "auto_registration_enabled", autoRegistrationEnabled); err == nil {
 		err = saveBooleanSetting(ctx, transaction, "public_trial_enabled", publicTrialEnabled)
 	}
+	if err == nil && !autoRegistrationEnabled {
+		// Public demo sessions require registration; retain their source/domain
+		// configuration, but require explicit re-enabling after registration resumes.
+		err = saveBooleanSetting(ctx, transaction, "demo_site_enabled", false)
+	}
 	if err != nil {
 		_ = transaction.Rollback()
 		return err
