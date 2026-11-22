@@ -306,6 +306,10 @@ func mergeLocalAndRemoteServerViews(localServer ServerView, remoteServer ServerV
 	// The running installation owns its site list, quotas, tariff and invoices.
 	// A registry snapshot can be stale and must never replace local billing.
 	merged := localServer
+	merged.Local = true
+	merged.Qualified = true
+	merged.Archived = false
+	merged.QualificationReasons = nil
 	merged.LastSeenAt = remoteServer.LastSeenAt
 	merged.Subtitle = firstNonEmpty(remoteServer.Subtitle, localServer.Subtitle)
 	merged.OwnerEmail = firstNonEmpty(localServer.OwnerEmail, remoteServer.OwnerEmail)
