@@ -3041,6 +3041,39 @@ func TestServerSettingsNavigationPreservesExistingControls(t *testing.T) {
 	}
 }
 
+// Dependent public onboarding controls must not be rendered when the
+// server owner has disabled the prerequisite registration policy.
+func TestRegistrationSettingsScopeTrialAndDemoNavigation(t *testing.T) {
+	pageBytes, err := fs.ReadFile(embeddedWebFiles, "web/expenses.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(pageBytes)
+	for _, fragment := range []string{
+		`{{if and .AutoRegistrationEnabled .PublicTrialEnabled}}<button type="button" data-server-root-target="temporary-sites"`,
+		`{{if and .AutoRegistrationEnabled .PublicTrialEnabled}}` + "\n" + `    <section class="server-root-workspace" data-hosting-installation-panel="temporary-sites"`,
+		`{{if $.AutoRegistrationEnabled}}<button type="button" data-server-config-target="demo"`,
+		`{{if $.AutoRegistrationEnabled}}<section class="server-config-view" data-server-config-view="demo"`,
+		`{{if .CleanupPendingTrialSites}}`,
+		`{{range .CleanupPendingTrialSites}}`,
+		`{{if .DeletedAt}}`,
+	} {
+		if !strings.Contains(page, fragment) {
+			t.Errorf("registration-dependent interface is missing guard %q", fragment)
+		}
+	}
+	for _, language := range []string{"en", "fr", "ru", "ja", "it", "sv", "fi", "mn", "zh", "he", "fa", "de", "tr", "kk", "es", "pt"} {
+		for _, key := range []string{"billing_temporary_sites_cleanup_pending", "billing_temporary_sites_history"} {
+			if strings.TrimSpace(translationsForLanguageCode(language)[key]) == "" {
+				t.Errorf("missing %s translation for %s", key, language)
+			}
+		}
+	}
+	if _, err := parseEmbeddedPageTemplate("expenses.html", pageBytes); err != nil {
+		t.Fatalf("conditional server settings template is invalid: %v", err)
+	}
+}
+
 func TestCentralInstallationCatalogReplacesDuplicateServerSelector(t *testing.T) {
 	source, err := fs.ReadFile(embeddedWebFiles, "web/expenses.html")
 	if err != nil {
@@ -3280,12 +3313,17 @@ func TestExpensesTemplateShowsOnlyLocalServerAndEnabledDemoOutsideSitebrushCom(t
 		t.Fatal("simplified expenses did not render the monthly server price")
 	}
 	for _, settingsFragment := range []string{
+		`name="auto_registration_enabled"`,
 		`name="public_trial_enabled"`,
-		`name="demo_site_enabled"`,
 	} {
 		if !strings.Contains(disabledDemoHTML, settingsFragment) {
 			t.Fatalf("disabled demo settings missing recoverable fragment %q", settingsFragment)
 		}
+	}
+	// A disabled prerequisite must remove the public demo controls entirely.
+	if strings.Contains(disabledDemoHTML, `name="demo_site_enabled"`) ||
+		strings.Contains(disabledDemoHTML, `data-server-config-target="demo"`) {
+		t.Fatal("demo controls are visible when self-registration is disabled")
 	}
 	for _, removedFragment := range []string{
 		`name="disk_rate_per_100_gb"`,
@@ -3306,6 +3344,7 @@ func TestExpensesTemplateShowsOnlyLocalServerAndEnabledDemoOutsideSitebrushCom(t
 	}
 
 	enabledDemoSnapshot := baseSnapshot
+	enabledDemoSnapshot.AutoRegistrationEnabled = true
 	enabledDemoSnapshot.DemoSettings.Enabled = true
 	enabledDemoHTML := renderSnapshot(enabledDemoSnapshot)
 	if !strings.Contains(enabledDemoHTML, `class="billing-demo-settings-form"`) ||
@@ -16280,17 +16319,21 @@ func TestSimplifiedExpensesShowsTestDriveUnderRegistrationAfterExplicitPermissio
 	body := rendered.String()
 	for _, expectedFragment := range []string{
 		`data-server-root-target="servers"`,
-		`data-server-root-target="temporary-sites"`,
-		`data-hosting-installation-panel="temporary-sites"`,
-		`trial.sitebrush.example`,
-		`https://copied.example/`,
-		`deleted.sitebrush.example`,
 		`name="auto_registration_enabled"`,
 		`name="public_trial_enabled"`,
-		`name="demo_site_enabled"`,
 	} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("simplified settings missing %q", expectedFragment)
+		}
+	}
+	for _, hiddenFragment := range []string{
+		`data-server-root-target="temporary-sites"`,
+		`data-hosting-installation-panel="temporary-sites"`,
+		`trial.sitebrush.example`,
+		`name="demo_site_enabled"`,
+	} {
+		if strings.Contains(body, hiddenFragment) {
+			t.Fatalf("disabled registration exposed dependent control %q", hiddenFragment)
 		}
 	}
 	if strings.Contains(body, `data-server-root-target="installations"`) || strings.Contains(body, `data-server-installations-container`) {
@@ -16300,13 +16343,34 @@ func TestSimplifiedExpensesShowsTestDriveUnderRegistrationAfterExplicitPermissio
 		t.Fatalf("test drive without explicit permission rendered DNS instructions, form or preview: %s", body)
 	}
 
+	// Demo is available after enabling registration, even if Test Drive is not.
 	view["AutoRegistrationEnabled"] = true
+	var registrationOnly bytes.Buffer
+	if err := parsedTemplate.Execute(&registrationOnly, view); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(registrationOnly.String(), `name="demo_site_enabled"`) ||
+		strings.Contains(registrationOnly.String(), `data-server-root-target="temporary-sites"`) {
+		t.Fatal("registration-only policy exposed Test Drive or hid demo configuration")
+	}
 	view["PublicTrialEnabled"] = true
 	var unavailableRendered bytes.Buffer
 	if err := parsedTemplate.Execute(&unavailableRendered, view); err != nil {
 		t.Fatal(err)
 	}
 	unavailableBody := unavailableRendered.String()
+	for _, expected := range []string{
+		`data-server-root-target="temporary-sites"`,
+		`data-hosting-installation-panel="temporary-sites"`,
+		`trial.sitebrush.example`,
+		`https://copied.example/`,
+		`deleted.sitebrush.example`,
+		`name="demo_site_enabled"`,
+	} {
+		if !strings.Contains(unavailableBody, expected) {
+			t.Fatalf("enabled registration and Test Drive missing %q", expected)
+		}
+	}
 	if !strings.Contains(unavailableBody, `data-public-trial-disabled-section`) || strings.Contains(unavailableBody, `id="publicTrialEmbedHTML"`) {
 		t.Fatalf("permitted test drive without DNS did not render only its DNS instructions: %s", unavailableBody)
 	}

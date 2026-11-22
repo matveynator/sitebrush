@@ -1482,6 +1482,11 @@ func (store Store) SaveRegistrationSettings(ctx context.Context, autoRegistratio
 	if err = saveBooleanSetting(ctx, transaction, "auto_registration_enabled", autoRegistrationEnabled); err == nil {
 		err = saveBooleanSetting(ctx, transaction, "public_trial_enabled", publicTrialEnabled)
 	}
+	if err == nil && !autoRegistrationEnabled {
+		// Public demo sessions require registration; retain their source/domain
+		// configuration, but require explicit re-enabling after registration resumes.
+		err = saveBooleanSetting(ctx, transaction, "demo_site_enabled", false)
+	}
 	if err != nil {
 		_ = transaction.Rollback()
 		return err
@@ -1561,7 +1566,7 @@ func (store Store) PublicTrialSitesWithError(ctx context.Context) ([]PublicTrial
 }
 
 func (store Store) BackfillPublicTrialSites(ctx context.Context) error {
-	rows, err := store.DB.QueryContext(ctx, `SELECT assignments.domain,assignments.updated_at FROM site_service_assignments assignments WHERE assignments.service_status IN ('trial','free') AND NOT EXISTS (SELECT 1 FROM public_trial_sites trials WHERE trials.domain=assignments.domain AND trials.status IN ('active','private','email_pending','email_verified','activated'))`)
+	rows, err := store.DB.QueryContext(ctx, `SELECT assignments.domain,assignments.updated_at FROM site_service_assignments assignments WHERE assignments.service_status='trial' AND NOT EXISTS (SELECT 1 FROM public_trial_sites trials WHERE trials.domain=assignments.domain)`)
 	if err != nil {
 		return err
 	}
@@ -1596,7 +1601,7 @@ func (store Store) SavePublicTrialCleanupError(ctx context.Context, trialSiteID 
 	if cleanupError != nil {
 		errorText = cleanupError.Error()
 	}
-	_, _ = store.DB.ExecContext(ctx, `UPDATE public_trial_sites SET last_error=? WHERE id=? AND status='active'`, errorText, trialSiteID)
+	_, _ = store.DB.ExecContext(ctx, `UPDATE public_trial_sites SET last_error=? WHERE id=? AND status IN ('active','private','email_pending','email_verified','expiring')`, errorText, trialSiteID)
 }
 
 func (store Store) ArchivePublicTrialSite(ctx context.Context, trialSiteID int64, deletedAt time.Time) error {

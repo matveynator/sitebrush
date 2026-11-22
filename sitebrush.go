@@ -443,6 +443,7 @@ type hostingAndSupportPanelSnapshot struct {
 	DesktopHostingGroups     []hostingandsupport.DesktopHostingGroup
 	ArchivedHostings         []hostingandsupport.ClientHosting
 	ActivePublicTrialSites   []hostingandsupport.PublicTrialSite
+	CleanupPendingTrialSites []hostingandsupport.PublicTrialSite
 	ArchivedPublicTrialSites []hostingandsupport.PublicTrialSite
 	Servers                  []hostingandsupport.ServerView
 	RegistrySyncEvents       []hostingandsupport.RegistrySyncEvent
@@ -21327,9 +21328,23 @@ func (a *App) renderLoginPage(w http.ResponseWriter, r *http.Request, returnPath
 
 // Only the exact domain enabled by the server operator is publicly editable.
 // A demo-looking hostname alone never grants access to another installation.
+// An unavailable registration policy must never grant public demo editing.
+func (a *App) publicDemoRegistrationAllowed(ctx context.Context) bool {
+	allowed := false
+	err := a.withServerControlDatabaseRead(ctx, "public-demo-registration", func(database *sql.DB) error {
+		var enabled string
+		if err := database.QueryRowContext(ctx, `SELECT value FROM server_settings WHERE name='auto_registration_enabled'`).Scan(&enabled); err != nil {
+			return err
+		}
+		allowed = strings.TrimSpace(enabled) == "1"
+		return nil
+	})
+	return err == nil && allowed
+}
+
 func (a *App) publicDemoState(r *http.Request, domain string) (demoSiteRuntimeState, bool) {
 	state, found := a.runtimeDemoSiteState(r.Context())
-	return state, found && state.Settings.Enabled && normalizeDomainName(state.Settings.Domain) == normalizeDomainName(domain) && normalizeDomainName(domainFromRequest(r)) == normalizeDomainName(domain)
+	return state, found && a.publicDemoRegistrationAllowed(r.Context()) && state.Settings.Enabled && normalizeDomainName(state.Settings.Domain) == normalizeDomainName(domain) && normalizeDomainName(domainFromRequest(r)) == normalizeDomainName(domain)
 }
 
 func (a *App) publicDemoAISession(r *http.Request, domain string) (aicapability.Session, aicapability.Capability, error) {
@@ -21352,7 +21367,7 @@ func (a *App) maybeStartDemoSite(w http.ResponseWriter, r *http.Request, request
 		return false
 	}
 	state, found := a.runtimeDemoSiteState(r.Context())
-	if !found || normalizeDomainName(state.Settings.Domain) != normalizeDomainName(requestDomain) {
+	if !found || normalizeDomainName(state.Settings.Domain) != normalizeDomainName(requestDomain) || !a.publicDemoRegistrationAllowed(r.Context()) {
 		return false
 	}
 	if !httpsecurity.IsLocalRequest(r) && !httpsecurity.UsesHTTPS(r) {
@@ -21421,6 +21436,9 @@ func (a *App) loadDemoSiteRuntimeState(ctx context.Context) demoSiteRuntimeState
 	err := a.withServerControlDatabaseRead(ctx, "demo-runtime-load", func(database *sql.DB) error {
 		store := hostingandsupport.Store{DB: database}
 		settings = (demo.Store{DB: database}).Settings(ctx)
+		if !store.AutomaticRegistrationAllowed(ctx) {
+			settings.Enabled = false
+		}
 		ownerDomain, ownerFound = store.OwnerDomain(ctx)
 		return nil
 	})
@@ -29757,15 +29775,12 @@ func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, control
 		registrySyncEvents = nil
 	}
 	clientHostings, desktopHostingGroups, archivedHostings := hostingandsupport.ClassifyClientHostings(allClientHostings, time.Now().UTC())
-	activePublicTrialSites := make([]hostingandsupport.PublicTrialSite, 0, len(publicTrialSites))
-	archivedPublicTrialSites := make([]hostingandsupport.PublicTrialSite, 0, len(publicTrialSites))
-	for _, publicTrialSite := range publicTrialSites {
-		if strings.EqualFold(publicTrialSite.Status, "deleted") || strings.EqualFold(publicTrialSite.Status, "expired") {
-			archivedPublicTrialSites = append(archivedPublicTrialSites, publicTrialSite)
-			continue
-		}
-		activePublicTrialSites = append(activePublicTrialSites, publicTrialSite)
-	}
+	// Completed registrations are ordinary websites, not active temporary
+	// sites. An overdue trial stays visible until deletion actually commits.
+	trialGroups := hostingandsupport.GroupPublicTrialSites(publicTrialSites, time.Now().UTC())
+	activePublicTrialSites := trialGroups.Active
+	cleanupPendingTrialSites := trialGroups.CleanupPending
+	archivedPublicTrialSites := trialGroups.History
 	hostingAndSupportDemoDomain := ""
 	if demoSettings.Enabled {
 		hostingAndSupportDemoDomain = demoSettings.Domain
@@ -29909,6 +29924,7 @@ func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, control
 		DesktopHostingGroups:     desktopHostingGroups,
 		ArchivedHostings:         archivedHostings,
 		ActivePublicTrialSites:   activePublicTrialSites,
+		CleanupPendingTrialSites: cleanupPendingTrialSites,
 		ArchivedPublicTrialSites: archivedPublicTrialSites,
 		Servers:                  servers,
 		RegistrySyncEvents:       registrySyncEvents,
@@ -30145,6 +30161,7 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 		"DesktopHostingGroups":     snapshot.DesktopHostingGroups,
 		"ArchivedHostings":         snapshot.ArchivedHostings,
 		"ActivePublicTrialSites":   snapshot.ActivePublicTrialSites,
+		"CleanupPendingTrialSites": snapshot.CleanupPendingTrialSites,
 		"ArchivedPublicTrialSites": snapshot.ArchivedPublicTrialSites,
 		"Servers":                  snapshot.Servers,
 		"RegistrySyncEvents":       snapshot.RegistrySyncEvents,
@@ -30193,7 +30210,7 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 		"CommissionPercent":          fmt.Sprintf("%.2f", float64(snapshot.CommissionBPS)/100),
 		"ShowCommissionSetting":      snapshot.ShowCentralRegistry,
 		"ShowCentralRegistry":        snapshot.ShowCentralRegistry,
-		"ShowDemo":                   snapshot.DemoSettings.Enabled && normalizeDomainName(snapshot.DemoSettings.Domain) != "",
+		"ShowDemo":                   snapshot.AutoRegistrationEnabled && snapshot.DemoSettings.Enabled && normalizeDomainName(snapshot.DemoSettings.Domain) != "",
 		"SimplifiedExpenses":         true,
 		"CanConfigurePublicIPs":      a.updateAuthorized(r),
 		"ExpenseServers":             expenseServers,
@@ -31459,23 +31476,15 @@ func siteAdminEmailsFromDatabase(ctx context.Context, database *sql.DB, domain s
 }
 
 func (a *App) saveHostingAndSupportSettingsFromForm(r *http.Request) string {
-	if err := a.withServerControlDatabaseWrite(r.Context(), "save-hosting-settings", func(database *sql.DB) error {
-		store := hostingandsupport.Store{DB: database}
-		limits := store.SiteSizeLimits(r.Context())
-		var err error
-		limits.Registration, err = parseCreationSize(r.FormValue("registration_max_site_size"), limits.Registration)
-		if err != nil {
-			return err
-		}
-		limits.TestDrive, err = parseCreationSize(r.FormValue("public_trial_max_site_size"), limits.TestDrive)
-		if err != nil {
-			return err
-		}
-		return store.SaveRegistrationSettingsWithLimits(r.Context(), r.FormValue("auto_registration_enabled") == "1", r.FormValue("public_trial_enabled") == "1", limits)
-	}); err != nil {
-		return err.Error()
+	// Legacy combined form follows the same registration owner boundary.
+	// Disabling registration must not re-enable demo in a second step.
+	status := a.saveHostingAndSupportRegistrationSettingsFromForm(r)
+	if status != translationOrDefault(translationsForRequest(r), "billing_status_settings_saved", "Billing settings saved.") {
+		return status
 	}
-	a.invalidatePublicTrialAvailability()
+	if r.FormValue("auto_registration_enabled") != "1" {
+		return status
+	}
 	return a.saveHostingAndSupportDemoSettings(r)
 }
 
@@ -31497,6 +31506,16 @@ func (a *App) saveHostingAndSupportRegistrationSettingsFromForm(r *http.Request)
 		return err.Error()
 	}
 	a.invalidatePublicTrialAvailability()
+	// Public demo state is channel-owned. Refresh it after the policy commit;
+	// disabling registration must stop subsequent public demo sessions as well.
+	a.updateRuntimeDemoSiteState(r.Context(), a.loadDemoSiteRuntimeState(r.Context()))
+	if r.FormValue("auto_registration_enabled") != "1" && a.aiCapabilities != nil {
+		if settings, _ := a.demoSiteSettings(r.Context()); settings.Domain != "" {
+			if err := a.aiCapabilities.RevokeDomain(settings.Domain); err != nil {
+				log.Printf("registration disabled: demo capability revoke failed: %v", err)
+			}
+		}
+	}
 	return translationOrDefault(translationsForRequest(r), "billing_status_settings_saved", "Billing settings saved.")
 }
 
@@ -31688,6 +31707,9 @@ func (a *App) saveHostingAndSupportDemoSettings(r *http.Request) string {
 	err := a.withServerControlDatabaseRead(r.Context(), "validate-demo-settings", func(database *sql.DB) error {
 		store := hostingandsupport.Store{DB: database}
 		previousDemoSettings = (demo.Store{DB: database}).Settings(r.Context())
+		if demoEnabled && !store.AutomaticRegistrationAllowed(r.Context()) {
+			return errors.New("public demo requires self-registration to be enabled")
+		}
 		if demoDomain != "" {
 			if ownerDomain, found := store.OwnerDomain(r.Context()); found && normalizeDomainName(ownerDomain) == demoDomain {
 				return errors.New(translationOrDefault(translations, "billing_status_demo_owner_blocked", "The owner site cannot be used as the public demo site."))
@@ -31731,7 +31753,10 @@ func (a *App) saveHostingAndSupportDemoSettings(r *http.Request) string {
 		if !sameDemoSiteSettings(store.Settings(r.Context()), previousDemoSettings) {
 			return errors.New("demo settings changed; reload and retry")
 		}
-		// Owner assignment can change while the site participant revokes grants.
+		// Registration and owner assignment can change while this request waits.
+		if demoEnabled && !(hostingandsupport.Store{DB: database}).AutomaticRegistrationAllowed(r.Context()) {
+			return errors.New("public demo requires self-registration to be enabled")
+		}
 		if demoDomain != "" {
 			if ownerDomain, found := (hostingandsupport.Store{DB: database}).OwnerDomain(r.Context()); found && normalizeDomainName(ownerDomain) == demoDomain {
 				return errors.New(translationOrDefault(translations, "billing_status_demo_owner_blocked", "The owner site cannot be used as the public demo site."))

@@ -1,5 +1,7 @@
 {
   "en": {
+    "billing_temporary_sites_cleanup_pending": "Needs cleanup",
+    "billing_temporary_sites_history": "Temporary site history",
     "server_ui_server_settings": "Server settings",
     "server_monetization_state": "Monetization",
     "server_monetization_on": "Enabled",
@@ -1904,6 +1906,8 @@
     "site_copy_use_found": "Use downloaded content"
   },
   "fr": {
+    "billing_temporary_sites_cleanup_pending": "En attente de nettoyage",
+    "billing_temporary_sites_history": "Historique des sites temporaires",
     "server_ui_server_settings": "Paramètres du serveur",
     "server_monetization_state": "Monétisation",
     "server_monetization_on": "Activée",
@@ -3573,6 +3577,8 @@
     "site_copy_use_found": "Utiliser le contenu téléchargé"
   },
   "ru": {
+    "billing_temporary_sites_cleanup_pending": "Ожидают очистки",
+    "billing_temporary_sites_history": "История временных сайтов",
     "server_ui_server_settings": "Настройки сервера",
     "server_monetization_state": "Монетизация",
     "server_monetization_on": "Включена",
@@ -5477,6 +5483,8 @@
     "site_copy_use_found": "Использовать скачанное"
   },
   "ja": {
+    "billing_temporary_sites_cleanup_pending": "削除待ち",
+    "billing_temporary_sites_history": "一時サイトの履歴",
     "server_ui_server_settings": "Server settings",
     "server_monetization_state": "Monetization",
     "server_monetization_on": "Enabled",
@@ -7142,6 +7150,8 @@
     "site_copy_use_found": "ダウンロード済みの内容を使用"
   },
   "it": {
+    "billing_temporary_sites_cleanup_pending": "In attesa di pulizia",
+    "billing_temporary_sites_history": "Cronologia dei siti temporanei",
     "server_ui_server_settings": "Server settings",
     "server_monetization_state": "Monetization",
     "server_monetization_on": "Enabled",
@@ -8807,6 +8817,8 @@
     "site_copy_use_found": "Usa i contenuti scaricati"
   },
   "sv": {
+    "billing_temporary_sites_cleanup_pending": "Väntar på rensning",
+    "billing_temporary_sites_history": "Historik för tillfälliga webbplatser",
     "server_ui_server_settings": "Server settings",
     "server_monetization_state": "Monetization",
     "server_monetization_on": "Enabled",
@@ -10472,6 +10484,8 @@
     "site_copy_use_found": "Använd hämtat innehåll"
   },
   "fi": {
+    "billing_temporary_sites_cleanup_pending": "Odottaa siivousta",
+    "billing_temporary_sites_history": "Väliaikaisten sivustojen historia",
     "server_ui_server_settings": "Server settings",
     "server_monetization_state": "Monetization",
     "server_monetization_on": "Enabled",
@@ -12137,6 +12151,8 @@
     "site_copy_use_found": "Käytä ladattua sisältöä"
   },
   "mn": {
+    "billing_temporary_sites_cleanup_pending": "Цэвэрлэгээ хүлээж буй",
+    "billing_temporary_sites_history": "Түр сайтуудын түүх",
     "server_ui_server_settings": "Server settings",
     "server_monetization_state": "Monetization",
     "server_monetization_on": "Enabled",
@@ -13802,6 +13818,8 @@
     "site_copy_use_found": "Татсан агуулгыг ашиглах"
   },
   "zh": {
+    "billing_temporary_sites_cleanup_pending": "等待清理",
+    "billing_temporary_sites_history": "临时网站历史",
     "server_ui_server_settings": "Server settings",
     "server_monetization_state": "Monetization",
     "server_monetization_on": "Enabled",
@@ -15467,6 +15485,8 @@
     "site_copy_use_found": "使用已下载的内容"
   },
   "he": {
+    "billing_temporary_sites_cleanup_pending": "ממתינים לניקוי",
+    "billing_temporary_sites_history": "היסטוריית אתרים זמניים",
     "server_ui_server_settings": "Server settings",
     "server_monetization_state": "Monetization",
     "server_monetization_on": "Enabled",
@@ -17132,6 +17152,8 @@
     "site_copy_use_found": "שימוש בתוכן שהורד"
   },
   "fa": {
+    "billing_temporary_sites_cleanup_pending": "در انتظار پاک‌سازی",
+    "billing_temporary_sites_history": "تاریخچه سایت‌های موقت",
     "server_ui_server_settings": "Server settings",
     "server_monetization_state": "Monetization",
     "server_monetization_on": "Enabled",
@@ -18797,6 +18819,8 @@
     "site_copy_use_found": "استفاده از محتوای دریافت‌شده"
   },
   "de": {
+    "billing_temporary_sites_cleanup_pending": "Bereinigung ausstehend",
+    "billing_temporary_sites_history": "Verlauf temporärer Websites",
     "server_ui_server_settings": "Servereinstellungen",
     "server_monetization_state": "Monetarisierung",
     "server_monetization_on": "Aktiviert",
@@ -20462,6 +20486,8 @@
     "site_copy_use_found": "Heruntergeladene Inhalte verwenden"
   },
   "tr": {
+    "billing_temporary_sites_cleanup_pending": "Temizlenmeyi bekliyor",
+    "billing_temporary_sites_history": "Geçici sitelerin geçmişi",
     "server_ui_server_settings": "Server settings",
     "server_monetization_state": "Monetization",
     "server_monetization_on": "Enabled",
@@ -22127,6 +22153,8 @@
     "site_copy_use_found": "İndirilen içeriği kullan"
   },
   "kk": {
+    "billing_temporary_sites_cleanup_pending": "Тазалауды күтуде",
+    "billing_temporary_sites_history": "Уақытша сайттар тарихы",
     "server_ui_server_settings": "Server settings",
     "server_monetization_state": "Monetization",
     "server_monetization_on": "Enabled",
@@ -23792,6 +23820,8 @@
     "site_copy_use_found": "Жүктелген мазмұнды пайдалану"
   },
   "es": {
+    "billing_temporary_sites_cleanup_pending": "Pendientes de limpieza",
+    "billing_temporary_sites_history": "Historial de sitios temporales",
     "server_ui_server_settings": "Ajustes del servidor",
     "server_monetization_state": "Monetización",
     "server_monetization_on": "Activada",
@@ -25457,6 +25487,8 @@
     "site_copy_use_found": "Usar el contenido descargado"
   },
   "pt": {
+    "billing_temporary_sites_cleanup_pending": "Aguardando limpeza",
+    "billing_temporary_sites_history": "Histórico de sites temporários",
     "server_ui_server_settings": "Server settings",
     "server_monetization_state": "Monetization",
     "server_monetization_on": "Enabled",
