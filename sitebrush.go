@@ -30046,7 +30046,39 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 		}
 		panelServers = localServers
 	}
-	expenseServers := simplifiedExpenseServerViews(panelServers, snapshot.Clients)
+	// Build the selected installation only. The central directory remains
+	// available on demand, but does not inflate every server settings response.
+	centralClientsDeferred := snapshot.ShowCentralRegistry && r.URL.Query().Get("workspace") != "clients"
+	var centralClients []simplifiedExpenseClientView
+	if snapshot.ShowCentralRegistry && !centralClientsDeferred {
+		centralClients = centralExpenseClients(simplifiedExpenseServerViews(panelServers, snapshot.Clients))
+	}
+	selectedPanelServers := panelServers
+	if snapshot.ShowCentralRegistry {
+		installationID := strings.TrimSpace(r.URL.Query().Get("installation"))
+		selected := slices.IndexFunc(panelServers, func(server hostingandsupport.ServerView) bool {
+			return installationID != "" && server.ID == installationID
+		})
+		if selected < 0 {
+			selected = slices.IndexFunc(panelServers, func(server hostingandsupport.ServerView) bool { return server.Local })
+		}
+		if selected < 0 && len(panelServers) != 0 {
+			selected = 0
+		}
+		if selected >= 0 {
+			selectedPanelServers = panelServers[selected : selected+1]
+		}
+	}
+	expenseServers := simplifiedExpenseServerViews(selectedPanelServers, snapshot.Clients)
+	// Large client forms are a dedicated workspace, not hidden markup on
+	// every overview request. The URL selects the server workspace explicitly.
+	section := r.URL.Query().Get("section")
+	serverClientsDeferred := section != "clients" && section != "billing"
+	if serverClientsDeferred {
+		for index := range expenseServers {
+			expenseServers[index].Clients = nil
+		}
+	}
 	selectedMailServer := strings.TrimSpace(r.URL.Query().Get("mail_server"))
 	selectedMailServerFound := false
 	for _, server := range expenseServers {
@@ -30163,33 +30195,11 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 			sites[siteIndex].AdminAccounts = append(sites[siteIndex].AdminAccounts, hostingandsupport.SiteAccountView{Email: email, Protected: protected})
 		}
 	}
-	_ = a.withServerControlDatabaseRead(r.Context(), "hosting-panel-deletion-state", func(database *sql.DB) error {
-		for siteIndex := range sites {
-			state, err := readSiteDeletionState(r.Context(), database, sites[siteIndex].Domain)
-			if err == nil && state.Status == "pending" {
-				sites[siteIndex].DeletionReason = state.Reason
-				sites[siteIndex].DeletionDeadline = state.DeleteAfter
-			}
-			rows, err := database.QueryContext(r.Context(), `SELECT email,delete_after FROM site_account_deletion_queue WHERE domain=? ORDER BY email`, sites[siteIndex].Domain)
-			if err != nil {
-				return err
-			}
-			for rows.Next() {
-				var account hostingandsupport.SiteAccountView
-				if err := rows.Scan(&account.Email, &account.DeleteAfter); err != nil {
-					rows.Close()
-					return err
-				}
-				sites[siteIndex].AdminAccounts = append(sites[siteIndex].AdminAccounts, account)
-			}
-			if err := rows.Err(); err != nil {
-				rows.Close()
-				return err
-			}
-			rows.Close()
-		}
-		return nil
-	})
+	if err := a.withServerControlDatabaseRead(r.Context(), "hosting-panel-deletion-state", func(database *sql.DB) error {
+		return hostingandsupport.PopulateSiteDeletionViews(r.Context(), database, sites)
+	}); err != nil {
+		log.Printf("hosting-panel deletion read failed: %s", diagnosticlog.SafeLogValue(err.Error()))
+	}
 	applySimplifiedSiteDeletionControls(expenseServers, sites)
 	// The cross-installation financial catalog is materialized exclusively for
 	// the authenticated SiteBrush.com registry owner.
@@ -30198,9 +30208,7 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 		installationCatalog = hostingandsupport.InstallationCatalogViews(panelServers, nil, nil)
 	}
 	var ledgerInvoices []hostingandsupport.ServerInvoiceView
-	var centralClients []simplifiedExpenseClientView
 	if snapshot.ShowCentralRegistry {
-		centralClients = centralExpenseClients(expenseServers)
 		ledgerInvoices = hostingandsupport.ServerInvoiceViews(snapshot.Invoices, nil, nil)
 	} else {
 		for _, server := range panelServers {
@@ -30210,6 +30218,8 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 	return map[string]any{
 		"LedgerInvoices":           ledgerInvoices,
 		"CentralClients":           centralClients,
+		"CentralClientsDeferred":   centralClientsDeferred,
+		"ServerClientsDeferred":    serverClientsDeferred,
 		"T":                        translations,
 		"Title":                    expensesTitle,
 		"Sites":                    sites,
