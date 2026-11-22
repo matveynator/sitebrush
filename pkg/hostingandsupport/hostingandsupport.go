@@ -1561,7 +1561,7 @@ func (store Store) PublicTrialSitesWithError(ctx context.Context) ([]PublicTrial
 }
 
 func (store Store) BackfillPublicTrialSites(ctx context.Context) error {
-	rows, err := store.DB.QueryContext(ctx, `SELECT assignments.domain,assignments.updated_at FROM site_service_assignments assignments WHERE assignments.service_status IN ('trial','free') AND NOT EXISTS (SELECT 1 FROM public_trial_sites trials WHERE trials.domain=assignments.domain AND trials.status IN ('active','private','email_pending','email_verified','activated'))`)
+	rows, err := store.DB.QueryContext(ctx, `SELECT assignments.domain,assignments.updated_at FROM site_service_assignments assignments WHERE assignments.service_status IN ('trial','free') AND NOT EXISTS (SELECT 1 FROM public_trial_sites trials WHERE trials.domain=assignments.domain)`)
 	if err != nil {
 		return err
 	}
