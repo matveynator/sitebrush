@@ -681,7 +681,7 @@
       <input type="hidden" name="domain" data-client-delete-domain>
       <div class="modal-header"><h2 class="modal-title h5"><span data-client-delete-title></span></h2><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index .T "tree_close"}}"></button></div>
       <div class="modal-body">
-        <p class="alert alert-warning" data-client-delete-pending hidden><span data-client-delete-deadline></span></p>
+        <p class="alert alert-warning" data-client-delete-pending hidden>{{index .T "server_delete_pending"}} <span data-client-delete-deadline></span>. {{index .T "server_delete_reason"}} <span data-client-delete-reason data-reason-nonpayment="{{index .T "server_delete_nonpayment"}}" data-reason-request="{{index .T "server_delete_request"}}"></span>.</p>
         <p><strong>{{index .T "server_delete_size"}}</strong> <span data-client-delete-size></span>. {{index .T "server_delete_no_backup"}}</p>
         <label>{{index .T "server_delete_action"}}
           <select name="billing_action" class="form-select" data-client-delete-action required>
