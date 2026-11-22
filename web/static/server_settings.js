@@ -118,7 +118,9 @@
       } else {
         const serverName = targetPanel?.dataset.serverName || '';
         const title = contextLabel.dataset.serverContextLocal || '';
-        contextLabel.textContent = serverName ? serverName + ' · ' + title : title;
+        const nodeLabel = contextLabel.dataset.serverContextNodeLabel || title;
+        contextLabel.textContent = targetPanel?.dataset.serverLocal === "true"
+          ? title : (serverName ? serverName + ' · ' + nodeLabel : nodeLabel);
       }
     }
     document.body.dataset.serverSettingsScope = ["installations", "clients", "billing"].includes(selected) ? "central" : "node";
