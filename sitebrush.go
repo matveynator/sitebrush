@@ -30254,12 +30254,35 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 		}
 		applySimplifiedSiteDeletionControls(expenseServers, sites)
 	}
-	// The cross-installation financial catalog is materialized exclusively for
-	// the authenticated SiteBrush.com registry owner.
+	// Only the central owner may page through the full catalog. Keep the
+	// response bounded even when thousands of installations are archived.
 	centralInstallationsDeferred := snapshot.ShowCentralRegistry && r.URL.Query().Get("workspace") != "installations"
-	var installationCatalog []hostingandsupport.InstallationCatalogView
+	catalogPage := hostingandsupport.InstallationPage{Filter: "active", Sort: "sites", Page: 1, Pages: 1}
+	catalogPreviousURL, catalogNextURL := "", ""
 	if snapshot.ShowCentralRegistry && !centralInstallationsDeferred {
-		installationCatalog = hostingandsupport.InstallationCatalogViews(panelServers, nil, nil)
+		number, _ := strconv.Atoi(r.URL.Query().Get("catalog_page"))
+		catalogPage = hostingandsupport.PaginateInstallations(
+			hostingandsupport.InstallationCatalogViews(panelServers, nil, nil),
+			r.URL.Query().Get("catalog_filter"),
+			r.URL.Query().Get("catalog_sort"),
+			r.URL.Query().Get("catalog_query"), number, 40)
+		link := func(page int) string {
+			values := url.Values{
+				"server-settings": {""},
+				"workspace": {"installations"},
+				"catalog_filter": {catalogPage.Filter},
+				"catalog_sort": {catalogPage.Sort},
+				"catalog_query": {catalogPage.Query},
+				"catalog_page": {strconv.Itoa(page)},
+			}
+			return "/?" + values.Encode()
+		}
+		if catalogPage.Page > 1 {
+			catalogPreviousURL = link(catalogPage.Page - 1)
+		}
+		if catalogPage.Page < catalogPage.Pages {
+			catalogNextURL = link(catalogPage.Page + 1)
+		}
 	}
 	centralBillingDeferred := snapshot.ShowCentralRegistry && r.URL.Query().Get("workspace") != "billing"
 	var ledgerInvoices []hostingandsupport.ServerInvoiceView
@@ -30352,7 +30375,16 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 		"SimplifiedExpenses":         true,
 		"CanConfigurePublicIPs":      a.updateAuthorized(r),
 		"ExpenseServers":             expenseServers,
-		"InstallationCatalog":        installationCatalog,
+		"InstallationCatalog":        catalogPage.Rows,
+		"InstallationCatalogTotal":   catalogPage.Total,
+		"InstallationCatalogCount":   catalogPage.Matching,
+		"InstallationCatalogPage":    catalogPage.Page,
+		"InstallationCatalogPages":   catalogPage.Pages,
+		"InstallationCatalogFilter":  catalogPage.Filter,
+		"InstallationCatalogSort":    catalogPage.Sort,
+		"InstallationCatalogQuery":   catalogPage.Query,
+		"InstallationCatalogPrevious": catalogPreviousURL,
+		"InstallationCatalogNext":   catalogNextURL,
 		"MailJournalLabelsJSON":      mailJournalLabelsJSON(translations),
 	}
 }
