@@ -231,7 +231,10 @@
     <label class="d-block">{{index $.T "public_ip_manual_label"}}<textarea class="form-control" rows="3" data-public-ip-manual></textarea></label>
     <p class="small text-muted">{{index $.T "public_ip_manual_hint"}}</p>
     <label class="d-block">{{index $.T "public_ip_primary_label"}}<select class="form-select" data-public-ip-preferred></select></label>
-    <p>{{index $.T "public_ip_primary_label"}}: <strong data-public-ip-primary></strong></p>
+    <div class="server-primary-ip">{{index $.T "public_ip_primary_label"}}: <strong data-public-ip-primary></strong>
+      <button type="button" class="btn btn-outline-secondary btn-sm" data-public-ip-copy disabled>{{if eq $.LanguageCode "ru"}}Скопировать{{else}}Copy{{end}}</button>
+    </div>
+    <p class="small text-muted">{{if eq $.LanguageCode "ru"}}Предпочитаемый IP выбирает основной публичный адрес для настроек сайтов и проверки DNS. Это не меняет системную маршрутизацию или исходный адрес внешних соединений.{{else}}The preferred IP selects the primary public address for site settings and DNS checks. It does not change OS routing or the source IP of outbound connections.{{end}}</p>
     <div class="d-flex gap-2"><button type="button" class="btn btn-primary" data-public-ip-save>{{index $.T "billing_save"}}</button><button type="button" class="btn btn-outline-secondary" data-public-ip-refresh>{{index $.T "public_ip_refresh"}}</button></div>
     <p role="status" aria-live="polite" data-public-ip-status></p>
     <script type="application/json" data-public-ip-labels>{"ready":{{index $.T "public_ip_ready"}},"auto":{{index $.T "public_ip_auto"}},"manual":{{index $.T "public_ip_manual_label"}},"outgoing":{{index $.T "public_ip_outgoing"}},"local":{{index $.T "public_ip_local"}},"inactive":{{index $.T "public_ip_inactive"}},"missing":{{index $.T "public_ip_missing"}},"working":{{index $.T "public_ip_working"}},"disconnected":{{index $.T "public_ip_disconnected"}}}</script>
@@ -732,22 +735,39 @@
   const createSiteEmbedElement = document.getElementById('createSiteEmbedHTML');
   const createSiteCopyButtonElement = document.querySelector('[data-create-site-copy-html]');
   const previewButtonElement = document.querySelector('[data-public-trial-preview]');
+  const createSitePreviewButtonElement = document.querySelector('[data-create-site-preview]');
   const previewFrameElement = document.getElementById('publicTrialPreviewFrame');
 
   if (!embedTextAreaElement) {
     return;
   }
 
+  const copyTimers = new WeakMap();
   function connectCopyButton(buttonElement, textAreaElement) {
     if (!buttonElement || !textAreaElement) return;
-    buttonElement.addEventListener('click', function copyEmbedHTML() {
-      if (navigator.clipboard) {
-        navigator.clipboard.writeText(textAreaElement.value);
-        return;
-      }
-      textAreaElement.focus();
-      textAreaElement.select();
-      document.execCommand('copy');
+    const feedback = buttonElement.querySelector('[data-copy-label]');
+    const original = feedback ? feedback.textContent : '';
+    buttonElement.addEventListener('click', async function copyEmbedHTML() {
+      let copied = false;
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(textAreaElement.value);
+          copied = true;
+        } else {
+          textAreaElement.focus();
+          textAreaElement.select();
+          copied = document.execCommand('copy');
+        }
+      } catch (copyError) { copied = false; }
+      if (!feedback) return;
+      feedback.textContent = copied
+        ? {{if eq .LanguageCode "ru"}}'Скопировано ✓'{{else}}'Copied ✓'{{end}}
+        : {{if eq .LanguageCode "ru"}}'Не удалось скопировать'{{else}}'Copy failed'{{end}};
+      if (copyTimers.has(buttonElement)) window.clearTimeout(copyTimers.get(buttonElement));
+      copyTimers.set(buttonElement, window.setTimeout(function restoreCopyText() {
+        feedback.textContent = original;
+        copyTimers.delete(buttonElement);
+      }, 2000));
     });
   }
   connectCopyButton(copyButtonElement, embedTextAreaElement);
@@ -770,12 +790,15 @@
     return localizedHTML;
   }
 
-  if (previewButtonElement && previewFrameElement) {
-    previewButtonElement.addEventListener('click', function renderPublicTrialEmbedPreview() {
-      const previewHTML = localizePublicTrialPreviewHTML(embedTextAreaElement.value.replace(/<script\b[\s\S]*?<\/script>/gi, ''));
-      previewFrameElement.srcdoc = '<!doctype html><html><head><base href="' + window.location.origin + '/"><meta name="viewport" content="width=device-width, initial-scale=1"></head><body>' + previewHTML + '</body></html>';
-    });
+  function showEmbedPreview(input, localize) {
+    if (!input || !previewFrameElement) return;
+    // Untrusted HTML remains in a sandboxed, scripts-disabled preview iframe.
+    const rawHTML = input.value.replace(/<script\b[\s\S]*?<\/script>/gi, '');
+    const previewHTML = localize ? localizePublicTrialPreviewHTML(rawHTML) : rawHTML;
+    previewFrameElement.srcdoc = '<!doctype html><html><head><base href="' + window.location.origin + '/"><meta name="viewport" content="width=device-width, initial-scale=1"></head><body>' + previewHTML + '</body></html>';
   }
+  if (previewButtonElement) previewButtonElement.addEventListener('click', function previewTrial() { showEmbedPreview(embedTextAreaElement, true); });
+  if (createSitePreviewButtonElement) createSitePreviewButtonElement.addEventListener('click', function previewCreate() { showEmbedPreview(createSiteEmbedElement, false); });
 })();
 
 (function initializeSitebrushComPublicKeyCopy() {
@@ -794,6 +817,28 @@
     publicKeyElement.select();
     document.execCommand('copy');
   });
+})();
+
+(function initializeDemoSiteVisit() {
+  const form = document.querySelector('.billing-demo-settings-form');
+  const link = document.querySelector('[data-demo-site-visit]');
+  const input = form && form.querySelector('[name="demo_site_domain"]');
+  if (!input || !link) return;
+  const label = {{if eq .LanguageCode "ru"}}'Открыть демо-сайт'{{else}}'Open demo website'{{end}};
+  function updateLink() {
+    const domain = input.value.trim().toLowerCase();
+    // Only syntactically valid domain names may be turned into an external link.
+    const labels = domain.split('.');
+    const valid = domain.length <= 253 && labels.length >= 2 &&
+      labels.every(part => part.length >= 1 && part.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(part));
+    link.hidden = !valid;
+    if (valid) {
+      link.href = 'https://' + domain + '/';
+      link.textContent = label + ': ' + domain + ' ↗';
+    } else link.removeAttribute('href');
+  }
+  input.addEventListener('input', updateLink);
+  updateLink();
 })();
 
 (function setupDemoRefreshPreview() {
@@ -1301,6 +1346,7 @@
   <input type="hidden" name="refresh_demo_site" value="0" data-refresh-demo-site-input>
   <label>{{index .T "billing_demo_max_site_size"}} <input name="demo_site_max_size" class="form-control" value="{{.DemoMaxSize}}" required></label>
   <label>{{index .T "billing_demo_domain"}} <input name="demo_site_domain" type="text" class="form-control" value="{{.DemoSettings.Domain}}" placeholder="demo.example.com"></label>
+  <p class="small server-demo-visit"><a href="#" data-demo-site-visit target="_blank" rel="noopener noreferrer" hidden></a></p>
   <label>{{index .T "billing_demo_source_url"}} <input name="demo_site_source_url" type="text" class="form-control" value="{{.DemoSettings.SourceURL}}" placeholder="example.com or https://example.com/"></label>
   <fieldset class="billing-demo-copy-scope">
     <legend>{{.DemoCopyScopeLabel}}</legend>
@@ -1326,14 +1372,17 @@
 <div data-public-trial-embed-section>
   <h3>{{index .T "test_drive_title"}}</h3>
   <div class="d-flex flex-wrap gap-2 mb-3">
-    <button type="button" class="btn btn-outline-primary" data-public-trial-copy-html><img src="/p/static/copy.png" alt="">{{index .T "public_trial_copy_html"}}</button>
+    <button type="button" class="btn btn-outline-primary" data-public-trial-copy-html><img src="/p/static/copy.png" alt=""><span data-copy-label>{{index .T "public_trial_copy_html"}}</span></button>
     <button type="button" class="btn btn-outline-primary" data-bs-toggle="modal" data-bs-target="#publicTrialPreviewModal" data-public-trial-preview><img src="/p/static/publish.png" alt="">{{index .T "public_trial_preview"}}</button>
   </div>
   <textarea id="publicTrialEmbedHTML" class="form-control" rows="5" readonly>{{.TestDriveEmbedHTML}}</textarea>
 </div>
 <div data-create-site-embed-section class="mt-4">
   <h3>{{index .T "public_trial_new_site_title"}}</h3>
-  <button type="button" class="btn btn-outline-primary mb-3" data-create-site-copy-html><img src="/p/static/copy.png" alt="">{{index .T "public_trial_copy_html"}}</button>
+  <div class="d-flex flex-wrap gap-2 mb-3">
+    <button type="button" class="btn btn-outline-primary" data-create-site-copy-html><img src="/p/static/copy.png" alt=""><span data-copy-label>{{index .T "public_trial_copy_html"}}</span></button>
+    <button type="button" class="btn btn-outline-primary" data-bs-toggle="modal" data-bs-target="#publicTrialPreviewModal" data-create-site-preview><img src="/p/static/publish.png" alt="">{{index .T "public_trial_preview"}}</button>
+  </div>
   <textarea id="createSiteEmbedHTML" class="form-control" rows="10" readonly>{{.CreateSiteEmbedHTML}}</textarea>
 </div>
 {{else}}
