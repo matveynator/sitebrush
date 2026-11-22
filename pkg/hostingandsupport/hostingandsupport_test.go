@@ -671,7 +671,7 @@ func TestBuildServerViewsMergesDuplicateLocalAndRemoteServer(t *testing.T) {
 		MainDomain: "sitebrush.com",
 	})
 	remoteHosting := ClientHosting{
-		InstallationID:       "installation-1",
+		InstallationID:       "local:sitebrush.com",
 		ServerDomain:         "sitebrush.com",
 		ServerStatus:         "IP 203.0.113.10",
 		OSName:               "linux",
@@ -707,7 +707,7 @@ func TestBuildServerViewsMergesDuplicateLocalAndRemoteServer(t *testing.T) {
 	if len(servers) != 1 {
 		t.Fatalf("servers = %d, want 1: %#v", len(servers), servers)
 	}
-	if !servers[0].Local || servers[0].ID != "installation-1" || servers[0].OSLabel != "linux Debian" {
+	if !servers[0].Local || servers[0].ID != "local:sitebrush.com" || servers[0].OSLabel != "linux Debian" {
 		t.Fatalf("merged server did not keep local badge and remote metrics: %#v", servers[0])
 	}
 	if len(servers[0].SystemMetrics) == 0 || servers[0].SystemMetrics[0].Name != "CPU" {

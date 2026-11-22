@@ -3,6 +3,7 @@ package hostingandsupport
 import (
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/matveynator/sitebrush/v2/pkg/expenses"
 )
@@ -10,26 +11,31 @@ import (
 // InstallationCatalogView is a read-only, server-scoped snapshot for the
 // central administrator. All device kinds share one catalog and one identity.
 type InstallationCatalogView struct {
-	ID                    string
-	Name                  string
-	OwnerEmail            string
-	OSLabel               string
-	SiteCount             int
-	MonetizationEnabled   bool
-	MonthlyForecastMinor  int64
-	MonthlyForecastLabel  string
-	PaidThisMonthMinor    int64
-	PaidThisMonthLabel    string
-	Currency              string
-	LastSeenAt            string
-	Archived              bool
-	Qualified             bool
+	ID                   string
+	Name                 string
+	OwnerEmail           string
+	OSLabel              string
+	SiteCount            int
+	MonetizationEnabled  bool
+	MonthlyForecastMinor int64
+	MonthlyForecastLabel string
+	PaidThisMonthMinor   int64
+	PaidThisMonthLabel   string
+	Currency             string
+	LastSeenAt           string
+	Archived             bool
+	Qualified            bool
+	ConnectionStatus     string
 }
 
 // InstallationCatalogViews unifies qualified servers, desktops and archive
 // entries without merging by email, IP or domain. InstallationID is the key.
 // The caller must check central-registry authorization before rendering these.
 func InstallationCatalogViews(servers []ServerView, desktopGroups []DesktopHostingGroup, archived []ClientHosting) []InstallationCatalogView {
+	return installationCatalogViewsAt(servers, desktopGroups, archived, time.Now().UTC())
+}
+
+func installationCatalogViewsAt(servers []ServerView, desktopGroups []DesktopHostingGroup, archived []ClientHosting, now time.Time) []InstallationCatalogView {
 	views := make([]InstallationCatalogView, 0, len(servers))
 	seen := make(map[string]struct{})
 	add := func(view InstallationCatalogView) {
@@ -45,15 +51,20 @@ func InstallationCatalogViews(servers []ServerView, desktopGroups []DesktopHosti
 	}
 	for _, server := range servers {
 		currency := firstNonEmpty(server.BillingCurrency, "EUR")
+		forecast := server.MonthlyForecastMinor
+		if server.Archived {
+			forecast = 0
+		}
 		add(InstallationCatalogView{
 			ID: server.ID, Name: firstNonEmpty(server.Name, server.ID),
 			OwnerEmail: server.OwnerEmail, OSLabel: server.OSLabel,
-			SiteCount: server.SiteCount, MonetizationEnabled: server.MonetizationEnabled,
-			MonthlyForecastMinor: server.MonthlyForecastMinor,
-			MonthlyForecastLabel: MoneyLabel(server.MonthlyForecastMinor, currency),
-			PaidThisMonthMinor: server.PaidThisMonthMinor,
-			PaidThisMonthLabel: MoneyLabel(server.PaidThisMonthMinor, currency),
-			Currency: currency, Qualified: true, LastSeenAt: server.SyncStatusLabel,
+			SiteCount: server.SiteCount, MonetizationEnabled: server.MonetizationEnabled && !server.Archived,
+			MonthlyForecastMinor: forecast,
+			MonthlyForecastLabel: MoneyLabel(forecast, currency),
+			PaidThisMonthMinor:   server.PaidThisMonthMinor,
+			PaidThisMonthLabel:   MoneyLabel(server.PaidThisMonthMinor, currency),
+			Currency:             currency, Qualified: server.Local || server.Qualified, LastSeenAt: server.LastSeenAt,
+			Archived: server.Archived, ConnectionStatus: installationConnectionStatus(server.Local, server.Qualified, server.Archived, server.LastSeenAt, now),
 		})
 	}
 	fromHosting := func(hosting ClientHosting, isArchived bool) InstallationCatalogView {
@@ -82,6 +93,7 @@ func InstallationCatalogViews(servers []ServerView, desktopGroups []DesktopHosti
 			MonthlyForecastMinor: forecast, MonthlyForecastLabel: MoneyLabel(forecast, currency),
 			PaidThisMonthLabel: MoneyLabel(0, currency), Currency: currency,
 			LastSeenAt: hosting.LastSeenAt, Archived: isArchived, Qualified: hosting.Qualified,
+			ConnectionStatus: installationConnectionStatus(false, hosting.Qualified, isArchived, hosting.LastSeenAt, now),
 		}
 	}
 	for _, group := range desktopGroups {
@@ -110,4 +122,23 @@ func InstallationCatalogViews(servers []ServerView, desktopGroups []DesktopHosti
 		return views[i].ID < views[j].ID
 	})
 	return views
+}
+
+// Connectivity and qualification are independent of monetization. The same
+// freshness interval is used by snapshot qualification and by this catalog.
+func installationConnectionStatus(local, qualified, archived bool, lastSeenAt string, now time.Time) string {
+	if archived {
+		return "archived"
+	}
+	if local {
+		return "connected"
+	}
+	seenAt, valid := parseHostingTime(lastSeenAt)
+	if !valid || now.Sub(seenAt) > HostingSnapshotFreshness {
+		return "disconnected"
+	}
+	if !qualified {
+		return "unqualified"
+	}
+	return "connected"
 }
