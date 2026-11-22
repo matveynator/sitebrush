@@ -34,13 +34,17 @@
     const pageQuery = new URLSearchParams(window.location.search);
     if (["installations", "temporary-sites", "clients", "billing"].includes(fragment)) parameters.set("workspace", fragment);
     if (fragment.startsWith("server-") && !parameters.has("server-id")) parameters.set("section", fragment === "server-update" ? "updates" : fragment.slice(7));
-    // A direct URL must select the same workspace as a click. Query parameters
-    // also survive reloads used to hydrate the deferred client/server workspace.
-    if (!parameters.has("workspace") && ["installations", "temporary-sites", "clients", "billing"].includes(pageQuery.get("workspace"))) {
-      parameters.set("workspace", pageQuery.get("workspace"));
+    // Query parameters select the initial lazy-loaded HTML only. Once a
+    // sidebar click writes a route in the hash, stale query values must never
+    // pull navigation back to the previous workspace.
+    const explicitRoute = parameters.has("workspace") || parameters.has("server-id") || parameters.has("section");
+    if (!explicitRoute) {
+      if (["installations", "temporary-sites", "clients", "billing"].includes(pageQuery.get("workspace"))) {
+        parameters.set("workspace", pageQuery.get("workspace"));
+      }
+      if (pageQuery.has("installation")) parameters.set("server-id", pageQuery.get("installation"));
+      if (pageQuery.has("section")) parameters.set("section", pageQuery.get("section"));
     }
-    if (!parameters.has("server-id") && pageQuery.has("installation")) parameters.set("server-id", pageQuery.get("installation"));
-    if (!parameters.has("section") && pageQuery.has("section")) parameters.set("section", pageQuery.get("section"));
     return {
       workspace: parameters.get("workspace") || "servers",
       serverID: parameters.get("server-id") || "",
