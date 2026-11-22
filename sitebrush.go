@@ -30054,7 +30054,10 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 		centralClients = centralExpenseClients(simplifiedExpenseServerViews(panelServers, snapshot.Clients))
 	}
 	selectedPanelServers := panelServers
-	if snapshot.ShowCentralRegistry {
+	// Only the server settings page is scoped to a selected installation.
+	// The security journal is a separate cross-installation workspace and
+	// must retain remote rows when filtering by mail_server.
+	if snapshot.ShowCentralRegistry && !mailJournalSecurityView(r) {
 		installationID := strings.TrimSpace(r.URL.Query().Get("installation"))
 		selected := slices.IndexFunc(panelServers, func(server hostingandsupport.ServerView) bool {
 			return installationID != "" && server.ID == installationID
