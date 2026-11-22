@@ -26,7 +26,7 @@
   <header class="page-header server-settings-header mb-4">
     <div class="server-settings-heading">
       <h1 class="section-heading"><img src="/p/static/sitebrush-app-icon.png" class="section-icon" alt=""><a href="/">{{.Domain}}</a></h1>
-      <p class="server-settings-context" aria-live="polite" data-server-context data-server-context-local="{{.Title}}" data-server-context-central="{{if eq .LanguageCode "ru"}}Центр управления{{else}}Control center{{end}}">{{.Title}}</p>
+      <p class="server-settings-context" aria-live="polite" data-server-context data-server-context-local="{{.Domain}} · {{if eq .LanguageCode "ru"}}Настройки сервера{{else}}Server settings{{end}}" data-server-context-central="{{if eq .LanguageCode "ru"}}Центральный узел{{else}}Central node{{end}}">{{.Title}}</p>
     </div>
     <div class="server-settings-actions">
       <a href="/" class="btn btn-outline-secondary btn-sm" target="_blank" rel="noopener noreferrer">{{if eq .LanguageCode "ru"}}Открыть сайт{{else}}Open website{{end}} ↗</a>
@@ -305,7 +305,7 @@
                   {{end}}
                   <div class="expense-simple-sites" data-client-sites>
                     {{range $siteIndex, $site := $client.Sites}}
-                    <article class="expense-simple-site" data-client-site-row data-client-site-domain="{{$site.Domain}}" data-client-site-used="{{$site.UsedBytes}}" data-client-site-limit="{{$site.LimitLabel}}" data-client-site-problem="{{if or $site.OverLimit $site.DeletionReason}}true{{else}}false{{end}}">
+                    <article class="expense-simple-site" data-client-site-row data-client-site-domain="{{$site.Domain}}" data-client-site-used="{{$site.UsedBytes}}" data-client-site-limit="{{$site.LimitLabel}}" data-client-site-problem="{{if $site.DeletionReason}}true{{else}}false{{end}}">
                       <div class="server-client-site-identity">
                         <strong>{{if $site.URL}}<a href="{{$site.URL}}" target="_blank" rel="noopener noreferrer">{{$site.Domain}}</a>{{else}}{{$site.Domain}}{{end}}</strong>
                         {{if $site.DeletionReason}}<small class="status-bad">{{index $.T "server_delete_pending"}} {{$site.DeletionDeadline}}</small>{{end}}
@@ -573,7 +573,7 @@
       {{template "client-filters" .}}
       <div class="expense-simple-clients">
         {{range .CentralClients}}
-        <details class="expense-simple-client" data-server-client-row data-client-search="{{.SearchText}}" data-client-unpaid="{{.HasUnpaid}}" data-client-overdue="{{.HasOverdue}}" data-client-over-limit="{{.OverLimit}}" data-client-attention="{{.NeedsAttention}}">
+        <details class="expense-simple-client" data-server-client-row data-client-search="{{.SearchText}}" data-customer-email="{{.Email}}" data-client-site-count="{{.SiteCount}}" data-client-debt-label="{{.DebtLabel}}" data-client-unpaid="{{.HasUnpaid}}" data-client-overdue="{{.HasOverdue}}" data-client-over-limit="{{.OverLimit}}" data-client-attention="{{.NeedsAttention}}">
           <summary><span class="expense-simple-client-head"><strong>{{.Email}}</strong><small>{{.SiteCount}} {{index $.T "billing_client_sites"}} · {{.InstallationNames}}</small></span><span>{{.TotalStorageLabel}}</span><span>{{.PaidThisMonthLabel}}</span><span>{{.DebtLabel}}{{if .HasOverdue}}<small class="d-block status-bad">{{index $.T "server_billing_overdue"}}</small>{{end}}</span></summary>
           <div class="expense-simple-client-body">
             {{range .Sites}}<div class="expense-simple-site"><span>{{.Domain}}</span><span>{{.UsedLabel}}</span><button type="button" class="btn btn-outline-primary btn-sm" data-open-server-id="{{.InstallationID}}" data-open-server-section="clients">{{.InstallationName}}</button></div>{{end}}
