@@ -83,15 +83,19 @@
         <nav class="server-root-tabs" aria-label="{{index .T "server_ui_navigation"}}" data-server-root-tabs>
           <span class="server-nav-group">{{index .T "server_ui_server_settings"}}</span>
           <button type="button" class="is-active" data-server-root-target="servers" data-server-config-shortcut="overview" aria-current="page">{{index .T "server_ui_overview"}}</button>
-          <button type="button" data-server-root-target="servers" data-server-config-shortcut="network">{{index .T "server_ui_network"}}</button>
+          {{if .SelectedServerLocal}}
+          {{if .CanConfigurePublicIPs}}<button type="button" data-server-root-target="servers" data-server-config-shortcut="network">{{index .T "server_ui_network"}}</button>{{end}}
           <button type="button" data-server-root-target="servers" data-server-config-shortcut="updates">{{index .T "update_title"}}</button>
+          {{end}}
           <span class="server-nav-group">{{index .T "server_nav_customers"}}</span>
+          {{if .SelectedServerLocal}}
           <button type="button" data-server-root-target="servers" data-server-config-shortcut="registration">{{index .T "billing_registration_title"}}</button>
-          <button type="button" data-server-root-target="servers" data-server-config-shortcut="demo">{{index .T "billing_demo_title"}}</button>
+          {{if .AutoRegistrationEnabled}}<button type="button" data-server-root-target="servers" data-server-config-shortcut="demo">{{index .T "billing_demo_title"}}</button>{{end}}
+          {{end}}
           {{if or (and .AutoRegistrationEnabled .PublicTrialEnabled) .ActivePublicTrialSites .CleanupPendingTrialSites .ArchivedPublicTrialSites}}<button type="button" data-server-root-target="temporary-sites">{{index .T "billing_temporary_sites"}}</button>{{end}}
           <button type="button" data-server-root-target="servers" data-server-config-shortcut="clients">{{index .T "billing_clients"}}</button>
           <span class="server-nav-group">{{index .T "server_nav_finances"}}</span>
-          <button type="button" data-server-root-target="servers" data-server-config-shortcut="monetization">{{index .T "server_ui_monetization"}}</button>
+          {{if .SelectedServerLocal}}<button type="button" data-server-root-target="servers" data-server-config-shortcut="monetization">{{index .T "server_ui_monetization"}}</button>{{end}}
           <button type="button" data-server-root-target="servers" data-server-config-shortcut="billing">{{index .T "server_billing_nav"}}</button>
           {{if .ShowCentralRegistry}}
           <span class="server-nav-group">SiteBrush.com</span>
