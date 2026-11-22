@@ -3071,6 +3071,85 @@ func TestServerSettingsNavigationPreservesExistingControls(t *testing.T) {
 	}
 }
 
+// Server-only actions are excluded at render time, not merely hidden by JS.
+func TestServerSidebarCapabilitiesAreScopedBeforeJavascript(t *testing.T) {
+	pageBytes, err := fs.ReadFile(embeddedWebFiles, "web/expenses.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := parseEmbeddedPageTemplate("expenses.html", pageBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name         string
+		local        bool
+		autoRegister bool
+		publicIPs    bool
+		central      bool
+		visible      []string
+		hidden       []string
+	}{
+		{
+			name: "local prerequisites disabled", local: true, publicIPs: true,
+			visible: []string{"network", "updates", "registration", "monetization", "clients", "billing"},
+			hidden: []string{"demo"},
+		},
+		{
+			name: "local registration enabled", local: true, autoRegister: true,
+			visible: []string{"updates", "registration", "demo", "monetization", "clients", "billing"},
+			hidden: []string{"network"},
+		},
+		{
+			name: "central remote installation", central: true,
+			visible: []string{"clients", "billing"},
+			hidden: []string{"network", "updates", "registration", "demo", "monetization"},
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			view := map[string]any{
+				"T": translationsForLanguageCode("en"),
+				"SelectedServerLocal": testCase.local,
+				"AutoRegistrationEnabled": testCase.autoRegister,
+				"CanConfigurePublicIPs": testCase.publicIPs,
+				"ShowCentralRegistry": testCase.central,
+				"ExpenseServers": []simplifiedExpenseServerView{{
+					Server: hostingandsupport.ServerView{ID: "test-installation", Local: testCase.local},
+					MailSelected: true,
+				}},
+			}
+			var rendered bytes.Buffer
+			if err := page.Execute(&rendered, view); err != nil {
+				t.Fatal(err)
+			}
+			html := rendered.String()
+			start := strings.Index(html, `<nav class="server-root-tabs"`)
+			if start < 0 {
+				t.Fatal("sidebar not rendered")
+			}
+			end := strings.Index(html[start:], "</nav>")
+			if end < 0 {
+				t.Fatal("sidebar is not closed")
+			}
+			navigation := html[start : start+end]
+			for _, section := range testCase.visible {
+				if !strings.Contains(navigation, `data-server-config-shortcut="`+section+`"`) {
+					t.Errorf("missing allowed sidebar section %s", section)
+				}
+			}
+			for _, section := range testCase.hidden {
+				if strings.Contains(navigation, `data-server-config-shortcut="`+section+`"`) {
+					t.Errorf("forbidden or unavailable sidebar section %s", section)
+				}
+			}
+			if strings.Contains(navigation, `data-server-root-target="installations"`) != testCase.central {
+				t.Error("central installation directory visibility does not match authorization")
+			}
+		})
+	}
+}
+
 // Dependent public onboarding controls must not be rendered when the
 // server owner has disabled the prerequisite registration policy.
 func TestRegistrationSettingsScopeTrialAndDemoNavigation(t *testing.T) {
