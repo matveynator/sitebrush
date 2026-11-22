@@ -124,6 +124,7 @@ const quotaDialog = new Element();
 for (const name of ['domain','title','value']) quotaDialog.one['[data-client-quota-'+name+']'] = new Element();
 const deleteDialog = new Element();
 for (const name of ['domain','title','size','pending','deadline','confirm']) deleteDialog.one['[data-client-delete-'+name+']'] = new Element();
+deleteDialog.one['[data-client-delete-reason]'] = new Element({reasonNonpayment:'Nonpayment',reasonRequest:'Request'});
 const deleteAction = new Element();
 deleteAction.options = ['queue_site','suspend_site_nonpayment','restore_site','delete_site_now']
   .map(value => ({value,disabled:false,hidden:false}));
@@ -221,6 +222,7 @@ document.events.click({target:{closest:selector=>selector==='[data-client-site-d
   {dataset:{domain:'aika.sitebrush.com',deletionReason:'nonpayment',deletionDeadline:'2026-12-01',deletionSize:'42 MB'}}:null}});
 assert.equal(deleteAction.value,'restore_site','queued site must offer restoration');
 assert.equal(deleteDialog.one['[data-client-delete-pending]'].hidden,false);
+assert.equal(deleteDialog.one['[data-client-delete-reason]'].textContent,'Nonpayment');
 assert.equal(deleteAction.options.find(option=>option.value==='queue_site').disabled,true);
 
 console.log('Server client workspace: 32-site search, filters, account safety and shared dialogs passed');
