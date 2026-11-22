@@ -484,3 +484,29 @@
   .server-settings-page .server-temporary-row { grid-template-columns: minmax(0,1fr); }
   .server-settings-page .server-temporary-status { text-align: start; justify-items: start; }
 }
+
+/* Group labels expose responsibility without adding another navigation step. */
+.server-settings-page .server-nav-group {
+  display: block; margin: 18px 12px 5px; font-size: 11px;
+  font-weight: 650; color: var(--theme-muted-foreground);
+}
+.server-settings-page button.server-billing-stat {
+  color: inherit; text-align: start; cursor: pointer;
+}
+.server-settings-page button.server-billing-stat:hover {
+  border-color: var(--theme-primary); background: var(--theme-muted);
+}
+.server-settings-page button.server-billing-stat:focus-visible {
+  outline: 2px solid var(--theme-ring); outline-offset: 2px;
+}
+.server-settings-page .server-ledger-pages {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: 12px; margin-top: 16px; font-size: 12px;
+}
+.server-settings-page [data-invoice-ledger] { display: grid; gap: 14px; }
+.server-settings-page [data-invoice-ledger] [hidden] { display: none !important; }
+.server-settings-page [data-client-overdue="true"] { border-inline-start: 3px solid var(--theme-destructive); }
+@media (max-width: 850px) {
+  .server-settings-page .server-nav-group { display: none; }
+}
+.server-settings-page .server-root-tabs { max-width: 100%; flex-wrap: wrap; }

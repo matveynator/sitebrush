@@ -54,6 +54,10 @@ type ServerView struct {
 	ID                     string
 	Name                   string
 	Subtitle               string
+	LastSeenAt             string
+	Qualified              bool
+	Archived               bool
+	QualificationReasons   []string
 	Local                  bool
 	OwnerEmail             string
 	OSLabel                string
@@ -162,6 +166,10 @@ type ServerClientView struct {
 }
 
 type ServerInvoiceView struct {
+	ID             int
+	InstallationID string
+	ServerName     string
+	Overdue        bool
 	Number         string
 	Status         string
 	Currency       string
@@ -205,6 +213,7 @@ type ServerDiagnosticView struct {
 }
 
 type LocalServerViewInput struct {
+	InstallationID string
 	Sites          []Site
 	Invoices       []Invoice
 	Plans          []Plan
@@ -289,66 +298,51 @@ func BuildServerViews(localServer ServerView, clientHostings []ClientHosting, in
 }
 
 func serverViewsLookDuplicate(localServer ServerView, remoteServer ServerView) bool {
-	localName := normalizeDomainName(localServer.Name)
-	remoteName := normalizeDomainName(remoteServer.Name)
-	if localName != "" && remoteName != "" && localName == remoteName {
-		return true
-	}
-	localDomains := serverDomains(localServer.Sites)
-	if len(localDomains) == 0 {
-		return false
-	}
-	overlap := 0
-	for _, remoteSite := range remoteServer.Sites {
-		if _, found := localDomains[normalizeDomainName(remoteSite.Domain)]; found {
-			overlap++
-		}
-	}
-	return overlap > 0 && overlap == len(remoteServer.Sites)
+	return localServer.ID != "" && localServer.ID == remoteServer.ID ||
+		(remoteServer.ID == "local:"+normalizeDomainName(localServer.Name) && localServer.Name != "")
 }
 
 func mergeLocalAndRemoteServerViews(localServer ServerView, remoteServer ServerView) ServerView {
-	merged := remoteServer
+	// The running installation owns its site list, quotas, tariff and invoices.
+	// A registry snapshot can be stale and must never replace local billing.
+	merged := localServer
 	merged.Local = true
-	if merged.ID == "" {
-		merged.ID = localServer.ID
+	merged.Qualified = true
+	merged.Archived = false
+	merged.QualificationReasons = nil
+	// Local quotas remain editable even if a caller assembled a minimal view.
+	merged.Sites = append([]ServerSiteView(nil), localServer.Sites...)
+	for index := range merged.Sites {
+		merged.Sites[index].CanEditQuota = true
 	}
+	merged.Clients = serverClientViewsFromSites(merged.Sites)
+	merged.ClientCount = len(merged.Clients)
+	merged.LastSeenAt = remoteServer.LastSeenAt
 	merged.Subtitle = firstNonEmpty(remoteServer.Subtitle, localServer.Subtitle)
-	if len(merged.Sites) == 0 {
-		merged.Sites = localServer.Sites
-		merged.Clients = localServer.Clients
-		merged.SiteCount = localServer.SiteCount
-		merged.ClientCount = localServer.ClientCount
-		merged.TotalUsedLabel = localServer.TotalUsedLabel
-	} else {
-		localSitesByDomain := make(map[string]ServerSiteView, len(localServer.Sites))
-		for _, localSite := range localServer.Sites {
-			localSitesByDomain[normalizeDomainName(localSite.Domain)] = localSite
-		}
-		for siteIndex := range merged.Sites {
-			localSite, found := localSitesByDomain[normalizeDomainName(merged.Sites[siteIndex].Domain)]
-			if !found {
-				continue
-			}
-			merged.Sites[siteIndex].LimitLabel = localSite.LimitLabel
-			merged.Sites[siteIndex].QuotaInput = localSite.QuotaInput
-			merged.Sites[siteIndex].CanEditQuota = true
-			merged.Sites[siteIndex].CertificateValid = localSite.CertificateValid
-			merged.Sites[siteIndex].CertificateExpiresAt = localSite.CertificateExpiresAt
-			merged.Sites[siteIndex].CertificateRemaining = localSite.CertificateRemaining
-			merged.Sites[siteIndex].CertificateLastError = localSite.CertificateLastError
-			merged.Sites[siteIndex].CertificateCanRenew = localSite.CertificateCanRenew
-			merged.Sites[siteIndex].CertificateDomains = localSite.CertificateDomains
-		}
-		merged.Clients = serverClientViewsFromSites(merged.Sites)
+	merged.OwnerEmail = firstNonEmpty(localServer.OwnerEmail, remoteServer.OwnerEmail)
+	if remoteServer.OSLabel != "" {
+		merged.OSLabel = remoteServer.OSLabel
 	}
-	if len(merged.Invoices) == 0 {
-		merged.Invoices = localServer.Invoices
-		merged.InvoiceCount = localServer.InvoiceCount
-		merged.BillableCount = localServer.BillableCount
-		merged.UnpaidInvoiceCount = localServer.UnpaidInvoiceCount
-		merged.InvoiceActionLabel = localServer.InvoiceActionLabel
-		merged.InvoiceActionClass = localServer.InvoiceActionClass
+	if remoteServer.CPULabel != "" {
+		merged.CPULabel = remoteServer.CPULabel
+	}
+	if remoteServer.NetworkStatusLabel != "" {
+		merged.NetworkStatusLabel = remoteServer.NetworkStatusLabel
+		merged.NetworkStatusClass = remoteServer.NetworkStatusClass
+	}
+	if len(remoteServer.SystemMetrics) > 0 {
+		merged.SystemMetrics = make([]ServerMetricView, len(remoteServer.SystemMetrics))
+		for index, metric := range remoteServer.SystemMetrics {
+			metric.Processes = append([]HostingSnapshotProcess(nil), metric.Processes...)
+			merged.SystemMetrics[index] = metric
+		}
+	}
+	if merged.DiskTotalLabel == "" {
+		merged.DiskTotalLabel = remoteServer.DiskTotalLabel
+		merged.DiskFreeLabel = remoteServer.DiskFreeLabel
+		merged.DiskUsedLabel = remoteServer.DiskUsedLabel
+		merged.DiskUsedPercent = remoteServer.DiskUsedPercent
+		merged.DiskStatusClass = remoteServer.DiskStatusClass
 	}
 	return merged
 }
@@ -357,10 +351,11 @@ func BuildLocalServerView(input LocalServerViewInput) ServerView {
 	serverName := firstNonEmpty(normalizeDomainName(input.MainDomain), normalizeDomainName(input.CurrentHost), "SiteBrush.com")
 	compileVersion := firstNonEmpty(strings.TrimSpace(input.CompileVersion), "unknown")
 	server := ServerView{
-		ID:                    "local",
+		ID:                    firstNonEmpty(input.InstallationID, "local"),
 		Name:                  serverName,
 		Subtitle:              "локальный сервер SiteBrush",
 		Local:                 true,
+		Qualified:             true,
 		SyncStatusLabel:       "локальные данные",
 		SyncStatusClass:       "billing-sync-ok",
 		NetworkStatusLabel:    "проверяется фоновым мониторингом",
@@ -375,6 +370,7 @@ func BuildLocalServerView(input LocalServerViewInput) ServerView {
 		}
 	}
 	server.OSLabel, server.CPULabel = serverIdentityLabelsFromMetrics(server.SystemMetrics)
+	localInvoices := InvoicesForServer(input.Invoices, server)
 	for _, siteRow := range input.Sites {
 		if siteRow.IsDemo {
 			continue
@@ -401,7 +397,7 @@ func BuildLocalServerView(input LocalServerViewInput) ServerView {
 			QuotaInput:           siteRow.QuotaInput,
 			CanEditQuota:         true,
 			OverLimit:            siteRow.UsedPercent >= 100,
-			InvoiceLabel:         InvoiceLabelForDomain(input.Invoices, siteRow.Domain),
+			InvoiceLabel:         InvoiceLabelForDomain(localInvoices, siteRow.Domain),
 			BillingPriceLabel:    siteRow.BillingPriceLabel,
 			BillingStatusText:    siteRow.BillingStatusText,
 			BillingAmount:        siteRow.BillingAmount,
@@ -420,7 +416,7 @@ func BuildLocalServerView(input LocalServerViewInput) ServerView {
 	server.SiteCount = len(server.Sites)
 	server.Clients = serverClientViewsFromSites(server.Sites)
 	server.ClientCount = len(server.Clients)
-	server.Invoices = ServerInvoiceViews(input.Invoices, serverDomains(server.Sites), nil)
+	server.Invoices = ServerInvoiceViews(localInvoices, nil, nil)
 	server.InvoiceCount = len(server.Invoices)
 	server.BillableCount = BillableSiteCount(server.Sites)
 	server.UnpaidInvoiceCount = UnpaidInvoiceCount(server.Invoices)
@@ -440,6 +436,10 @@ func BuildRemoteServerView(clientHosting ClientHosting, invoices []Invoice, late
 	server := ServerView{
 		ID:                    strings.TrimSpace(clientHosting.InstallationID),
 		Name:                  firstNonEmpty(clientHosting.ServerDomain, clientHosting.InstallationID),
+		LastSeenAt:            clientHosting.LastSeenAt,
+		Qualified:             clientHosting.Qualified,
+		Archived:              clientHosting.Archived,
+		QualificationReasons:  append([]string(nil), clientHosting.QualificationReasons...),
 		Subtitle:              firstNonEmpty(clientHosting.ServerStatus, clientHosting.ServerIP, "удалённый сервер SiteBrush"),
 		OwnerEmail:            clientHosting.OwnerEmail,
 		OSLabel:               firstNonEmpty(strings.TrimSpace(clientHosting.OSName+" "+clientHosting.OSVersion), "ОС не передана"),
@@ -457,7 +457,8 @@ func BuildRemoteServerView(clientHosting ClientHosting, invoices []Invoice, late
 		SitebrushVersionClass: sitebrushVersionClass,
 		SystemMetrics:         ServerSystemMetricViews(clientHosting),
 	}
-	stale := HostingSyncIsStale(clientHosting.LastSeenAt, time.Now().UTC())
+	seenAt, validSeenAt := parseHostingTime(clientHosting.LastSeenAt)
+	stale := !validSeenAt || time.Since(seenAt) > HostingSnapshotFreshness
 	if strings.TrimSpace(clientHosting.LastSeenAt) == "" {
 		server.SyncStatusLabel = "нет синхронизации"
 		server.SyncStatusClass = "billing-sync-stale"
@@ -639,8 +640,8 @@ func ApplyServerCostView(server *ServerView, policy expenses.ServerPolicy, invoi
 	coveredMinor := int64(0)
 	reserveMinor := int64(0)
 	for _, invoice := range invoices {
-		installationMatches := invoice.InstallationID == server.ID || (server.Local && strings.HasPrefix(invoice.InstallationID, "local:"))
-		if !installationMatches || invoice.Status != "paid" {
+		installationMatches := InvoiceBelongsToServer(invoice, *server)
+		if !installationMatches || invoice.Status != "paid" || !strings.EqualFold(invoice.Currency, server.BillingCurrency) {
 			continue
 		}
 		reserveMinor += invoice.ReserveMinor
@@ -665,20 +666,25 @@ func ApplyServerCostView(server *ServerView, policy expenses.ServerPolicy, invoi
 func applyServerBillingDashboard(server *ServerView) {
 	paid, open, overdue := int64(0), int64(0), int64(0)
 	otherCurrency := 0
-	today := time.Now().UTC().Format("2006-01-02")
 	month := time.Now().UTC().Format("2006-01")
 	for _, invoice := range server.Invoices {
-		if invoice.AmountMinor <= 0 { continue }
+		if invoice.AmountMinor <= 0 {
+			continue
+		}
 		if !strings.EqualFold(invoice.Currency, server.BillingCurrency) {
 			otherCurrency++
 			continue
 		}
 		switch invoice.Status {
 		case "paid":
-			if strings.HasPrefix(invoice.PaidAt, month) { paid += invoice.AmountMinor }
+			if strings.HasPrefix(invoice.PaidAt, month) {
+				paid += invoice.AmountMinor
+			}
 		case "issued", "payment_error":
 			open += invoice.AmountMinor
-			if len(invoice.DueAt) >= len(today) && invoice.DueAt[:len(today)] < today { overdue += invoice.AmountMinor }
+			if InvoiceIsOverdue(invoice.Status, invoice.DueAt, time.Now().UTC()) {
+				overdue += invoice.AmountMinor
+			}
 		}
 	}
 	server.PaidThisMonthMinor = paid
@@ -863,9 +869,6 @@ func ClassifyClientHostings(clientHostings []ClientHosting, now time.Time) ([]Cl
 		}
 		if clientHosting.Qualified {
 			production = append(production, clientHosting)
-			continue
-		}
-		if clientHosting.InstallationKind == InstallationKindServer {
 			continue
 		}
 		temporary = append(temporary, clientHosting)
@@ -1182,7 +1185,14 @@ func ServerInvoiceViews(invoices []Invoice, domains map[string]struct{}, emails 
 			continue
 		}
 		statusLabel := InvoiceStatusLabel(invoice.Status)
+		if invoice.AmountMinor == 0 {
+			invoice.AmountMinor = parseMoneyMinor(invoice.Amount)
+		}
 		views = append(views, ServerInvoiceView{
+			ID:             invoice.ID,
+			InstallationID: invoice.InstallationID,
+			ServerName:     invoice.ServerName,
+			Overdue:        InvoiceIsOverdue(invoice.Status, invoice.DueAt, time.Now().UTC()),
 			Number:         invoice.Number,
 			Status:         invoice.Status,
 			Currency:       invoice.Currency,
@@ -1192,7 +1202,7 @@ func ServerInvoiceViews(invoices []Invoice, domains map[string]struct{}, emails 
 			CustomerEmail:  invoice.CustomerEmail,
 			Domain:         invoice.Domain,
 			PlanName:       firstNonEmpty(invoice.PlanName, "обслуживание сайта"),
-			AmountLabel:    strings.TrimSpace(invoice.Amount + " " + invoice.Currency),
+			AmountLabel:    MoneyLabel(invoice.AmountMinor, invoice.Currency),
 			StatusLabel:    statusLabel,
 			PaymentURL:     invoice.PaymentURL,
 			PeriodLabel:    InvoicePeriodLabel(invoice),
@@ -1244,6 +1254,17 @@ func InvoiceStatusLabel(status string) string {
 	default:
 		return firstNonEmpty(status, "неизвестно")
 	}
+}
+
+func InvoiceIsOverdue(status, dueAt string, now time.Time) bool {
+	if status != "issued" && status != "payment_error" {
+		return false
+	}
+	if len(dueAt) < 10 {
+		return false
+	}
+	dueDate, err := time.Parse("2006-01-02", dueAt[:10])
+	return err == nil && dueDate.Format("2006-01-02") < now.UTC().Format("2006-01-02")
 }
 
 func InvoicePeriodLabel(invoice Invoice) string {

@@ -671,7 +671,7 @@ func TestBuildServerViewsMergesDuplicateLocalAndRemoteServer(t *testing.T) {
 		MainDomain: "sitebrush.com",
 	})
 	remoteHosting := ClientHosting{
-		InstallationID:       "installation-1",
+		InstallationID:       "local:sitebrush.com",
 		ServerDomain:         "sitebrush.com",
 		ServerStatus:         "IP 203.0.113.10",
 		OSName:               "linux",
@@ -707,7 +707,7 @@ func TestBuildServerViewsMergesDuplicateLocalAndRemoteServer(t *testing.T) {
 	if len(servers) != 1 {
 		t.Fatalf("servers = %d, want 1: %#v", len(servers), servers)
 	}
-	if !servers[0].Local || servers[0].ID != "installation-1" || servers[0].OSLabel != "linux Debian" {
+	if !servers[0].Local || servers[0].ID != "local" || servers[0].OSLabel != "linux Debian" {
 		t.Fatalf("merged server did not keep local badge and remote metrics: %#v", servers[0])
 	}
 	if len(servers[0].SystemMetrics) == 0 || servers[0].SystemMetrics[0].Name != "CPU" {
@@ -715,6 +715,51 @@ func TestBuildServerViewsMergesDuplicateLocalAndRemoteServer(t *testing.T) {
 	}
 	if len(servers[0].Sites) != 1 || !servers[0].Sites[0].CanEditQuota || servers[0].Sites[0].QuotaInput != "40gb" || servers[0].Sites[0].LimitLabel != "40 GB" {
 		t.Fatalf("merged local quota is not editable: %#v", servers[0].Sites)
+	}
+}
+
+
+func TestBuildServerViewsPreservesLocalAliasInvoicesOnRegistryMerge(t *testing.T) {
+	// Automatic invoices use the historical local:<domain> alias and manual
+	// invoices use the permanent installation ID. Both belong to this server.
+	now := time.Now().UTC()
+	invoices := []Invoice{
+		{ID: 1, Number: "automatic", InstallationID: "local:sitebrush.com", CustomerEmail: "owner@example.com", Domain: "sitebrush.com", Currency: "EUR", AmountMinor: 550, Amount: "5.50", Status: "paid", PaidAt: now.Format(time.RFC3339)},
+		{ID: 2, Number: "manual", InstallationID: "canonical-local", CustomerEmail: "owner@example.com", Domain: "sitebrush.com", Currency: "EUR", AmountMinor: 300, Amount: "3.00", Status: "issued"},
+	}
+	local := BuildLocalServerView(LocalServerViewInput{
+		InstallationID: "canonical-local",
+		MainDomain:     "sitebrush.com",
+		Sites: []Site{
+			{Domain: "sitebrush.com", AdminEmails: "owner@example.com", UsedBytes: 1_000_000_000},
+			{Domain: "new.example.com", AdminEmails: "new@example.com", UsedBytes: 1_000_000_000},
+		},
+		Invoices: invoices,
+		CostPolicy: expenses.ServerPolicy{
+			InstallationID: "local", Mode: expenses.ModeActual,
+			ActualMonthlyExpenseMinor: 1250, Currency: "EUR", DiskTotalBytes: 10_000_000_000,
+		},
+	})
+	if len(local.Invoices) != 2 {
+		t.Fatalf("local invoices were lost before registry merge: %#v", local.Invoices)
+	}
+	remote := ClientHosting{InstallationID: "canonical-local", ServerDomain: "sitebrush.com", BillingCurrency: "EUR", Sites: []ClientHostingSite{{Domain: "sitebrush.com", OwnerEmail: "owner@example.com"}}}
+	servers := BuildServerViews(local, []ClientHosting{remote}, invoices, "v1")
+	if len(servers) != 1 {
+		t.Fatalf("same installation was not merged: %#v", servers)
+	}
+	merged := servers[0]
+	if !merged.Local || len(merged.Invoices) != 2 || merged.InvoiceCount != 2 || merged.UnpaidInvoiceCount != 1 {
+		t.Fatalf("merge lost the automatic or manual invoice: %#v", merged)
+	}
+	if merged.PaidThisMonthMinor != 550 || merged.BillingOpenLabel != MoneyLabel(300, "EUR") {
+		t.Fatalf("merged financial totals are incomplete: paid=%d open=%s", merged.PaidThisMonthMinor, merged.BillingOpenLabel)
+	}
+	if merged.SiteCount != 2 || len(merged.Sites) != 2 || merged.Sites[1].Domain != "new.example.com" {
+		t.Fatalf("registry snapshot removed a locally created site: %#v", merged.Sites)
+	}
+	if merged.MonthlyCostLabel != local.MonthlyCostLabel || merged.AllocatedMonthLabel != local.AllocatedMonthLabel || merged.MonetizationEnabled != local.MonetizationEnabled {
+		t.Fatalf("stale registry policy replaced the local tariff: local=%#v merged=%#v", local, merged)
 	}
 }
 
