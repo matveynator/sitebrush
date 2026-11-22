@@ -3062,6 +3062,13 @@ func TestRegistrationSettingsScopeTrialAndDemoNavigation(t *testing.T) {
 			t.Errorf("registration-dependent interface is missing guard %q", fragment)
 		}
 	}
+	for _, language := range []string{"en", "fr", "ru", "ja", "it", "sv", "fi", "mn", "zh", "he", "fa", "de", "tr", "kk", "es", "pt"} {
+		for _, key := range []string{"billing_temporary_sites_cleanup_pending", "billing_temporary_sites_history"} {
+			if strings.TrimSpace(translationsForLanguageCode(language)[key]) == "" {
+				t.Errorf("missing %s translation for %s", key, language)
+			}
+		}
+	}
 	if _, err := parseEmbeddedPageTemplate("expenses.html", pageBytes); err != nil {
 		t.Fatalf("conditional server settings template is invalid: %v", err)
 	}
