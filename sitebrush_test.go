@@ -3041,6 +3041,52 @@ func TestServerSettingsNavigationPreservesExistingControls(t *testing.T) {
 	}
 }
 
+func TestCentralInstallationCatalogReplacesDuplicateServerSelector(t *testing.T) {
+	source, err := fs.ReadFile(embeddedWebFiles, "web/expenses.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := parseEmbeddedPageTemplate("expenses.html", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	servers := []hostingandsupport.ServerView{
+		{ID: "local:sitebrush.com", Name: "SiteBrush.com", Local: true},
+		{ID: "remote:one", Name: "Remote installation"},
+	}
+	expenseServers := []simplifiedExpenseServerView{
+		{Server: servers[0], MailSelected: true},
+		{Server: servers[1]},
+	}
+	render := func(central bool) string {
+		t.Helper()
+		data := map[string]any{
+			"Domain": "sitebrush.com", "Title": "Settings",
+			"T": translationsForLanguageCode("en"),
+			"SimplifiedExpenses": true, "ShowCentralRegistry": central,
+			"Servers": servers, "ExpenseServers": expenseServers,
+			"DemoSettings": demo.Settings{}, "DemoStatus": demoSiteStatusView{},
+		}
+		var html bytes.Buffer
+		if err := page.Execute(&html, data); err != nil {
+			t.Fatal(err)
+		}
+		return html.String()
+	}
+	centralHTML := render(true)
+	if strings.Contains(centralHTML, "data-expense-server-select") ||
+		!strings.Contains(centralHTML, `data-server-root-target="installations"`) ||
+		!strings.Contains(centralHTML, `data-server-local="true"`) ||
+		!strings.Contains(centralHTML, `data-server-id="remote:one"`) {
+		t.Fatal("central navigation must show a unified catalogue without a duplicate server selector")
+	}
+	ownerHTML := render(false)
+	if !strings.Contains(ownerHTML, "data-expense-server-select") ||
+		strings.Contains(ownerHTML, `data-server-root-target="installations"`) {
+		t.Fatal("ordinary server owner must retain server selection without the central registry")
+	}
+}
+
 func TestHostingAndSupportTemplateRendersServerView(t *testing.T) {
 	templateBytes, err := fs.ReadFile(embeddedWebFiles, "web/expenses.html")
 	if err != nil {
@@ -3894,6 +3940,40 @@ func TestAutomaticBillingCreatesInvoicesForClientAndServerOwner(t *testing.T) {
 	if invoicesAfterOptOut := store.Invoices(context.Background(), 10); len(invoicesAfterOptOut) != 2 {
 		t.Fatalf("opt-out altered issued invoices or created new ones: %#v", invoicesAfterOptOut)
 	}
+
+	// An already prepared, enabled snapshot must not override a newer
+	// opt-out committed at the database owner's transaction boundary.
+	persisted := snapshot.LocalCostPolicy
+	persisted.MonetizationMode = "disabled"
+	if _, err := store.SaveServerExpensePolicy(context.Background(), persisted); err != nil {
+		t.Fatal(err)
+	}
+	application.runAutomaticBillingOnce(context.Background(), store, snapshot, time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC))
+	if stale := store.Invoices(context.Background(), 10); len(stale) != 2 {
+		t.Fatalf("stale enabled snapshot issued invoices after opt-out: %+v", stale)
+	}
+
+	// A newly enabled persisted tariff wins over an old prepared price for
+	// future periods, while previous invoices remain immutable.
+	persisted.MonetizationMode = "enabled"
+	persisted.ActualMonthlyExpenseMinor *= 2
+	if _, err := store.SaveServerExpensePolicy(context.Background(), persisted); err != nil {
+		t.Fatal(err)
+	}
+	application.runAutomaticBillingOnce(context.Background(), store, snapshot, time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC))
+	repriced := store.Invoices(context.Background(), 10)
+	if len(repriced) != 4 {
+		t.Fatalf("re-enabling the persisted tariff did not create new-period invoices: %+v", repriced)
+	}
+	repricedClient := int64(0)
+	for _, invoice := range repriced {
+		if invoice.CustomerEmail == "client@example.com" && strings.HasPrefix(invoice.PeriodStart, "2026-10") {
+			repricedClient = invoice.AmountMinor
+		}
+	}
+	if repricedClient <= clientInvoice.AmountMinor {
+		t.Fatalf("future invoice used stale tariff: old=%d new=%d", clientInvoice.AmountMinor, repricedClient)
+	}
 }
 
 func TestSaveServerExpensePolicyUsesOnlyMonthlyServerPrice(t *testing.T) {
@@ -3926,6 +4006,61 @@ func TestSaveServerExpensePolicyUsesOnlyMonthlyServerPrice(t *testing.T) {
 	after, found := (hostingandsupport.Store{DB: controlDatabase}).ServerExpensePolicy(context.Background(), "local", 500*expenses.DecimalGigabyte)
 	if !found || after.BillingCapacityPercent != 45 {
 		t.Fatalf("invalid save replaced existing tariff: %+v found=%t", after, found)
+	}
+}
+
+func TestDisablingMonetizationPreservesTariffEvenWithHiddenInvalidFields(t *testing.T) {
+	application, _ := newTestApplication(t)
+	database := setupBillingOwnerForTest(t, application, "localhost", "owner@example.com", false)
+	defer database.Close()
+	store := hostingandsupport.Store{DB: database}
+
+	save := func(values url.Values) string {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodPost, "http://localhost/?server-settings", strings.NewReader(values.Encode()))
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		return application.saveServerExpensePolicyFromForm(request)
+	}
+	expectedSaved := translationsForLanguageCode("ru")["expenses_server_policy_saved"]
+	configured := url.Values{
+		"monetization_mode": {"enabled"},
+		"monthly_server_expense": {"83.21"},
+		"currency": {"EUR"},
+		"free_site_threshold_mb": {"250"},
+		"billing_capacity_percent": {"45"},
+	}
+	if got := save(configured); got != expectedSaved {
+		t.Fatalf("enable monetization: %q", got)
+	}
+	before, found := store.ServerExpensePolicy(context.Background(), "local", 500*expenses.DecimalGigabyte)
+	if !found || !before.MonetizationEnabled() || before.ActualMonthlyExpenseMinor != 8321 {
+		t.Fatalf("enabled policy: %+v found=%v", before, found)
+	}
+	// The browser disables invisible inputs. A malicious or stale caller may
+	// also submit invalid unused values; neither may reset the stored tariff.
+	if got := save(url.Values{
+		"monetization_mode": {"disabled"},
+		"monthly_server_expense": {"not-a-price"},
+		"currency": {"INVALID"},
+		"free_site_threshold_mb": {"broken"},
+		"billing_capacity_percent": {"500"},
+	}); got != expectedSaved {
+		t.Fatalf("opt-out with irrelevant hidden inputs: %q", got)
+	}
+	after, found := store.ServerExpensePolicy(context.Background(), "local", 500*expenses.DecimalGigabyte)
+	if !found || after.MonetizationEnabled() || after.Mode != before.Mode ||
+		after.ActualMonthlyExpenseMinor != before.ActualMonthlyExpenseMinor ||
+		after.BillingCapacityPercent != before.BillingCapacityPercent ||
+		after.FreeSiteThresholdBytes != before.FreeSiteThresholdBytes ||
+		after.Currency != before.Currency || after.EffectiveAt == before.EffectiveAt {
+		t.Fatalf("opt-out lost tariff or history: before=%+v after=%+v found=%v", before, after, found)
+	}
+	if got := save(url.Values{"monetization_mode": {"maybe"}}); got == expectedSaved {
+		t.Fatal("invalid monetization mode was accepted")
+	}
+	unchanged, found := store.ServerExpensePolicy(context.Background(), "local", 500*expenses.DecimalGigabyte)
+	if !found || unchanged.EffectiveAt != after.EffectiveAt {
+		t.Fatalf("invalid mode replaced the persisted policy: %+v", unchanged)
 	}
 }
 
@@ -4792,6 +4927,27 @@ func TestDomainSettingsNavigationPreservesExistingActions(t *testing.T) {
 		if !strings.Contains(markup, "<details class=\"settings-disclosure "+disclosure+"\"") {
 			t.Errorf("missing progressive disclosure for %s", disclosure)
 		}
+	}
+}
+
+func TestDomainAliasDeletionRequiresDeliberateDisclosure(t *testing.T) {
+	content, err := fs.ReadFile(embeddedWebFiles, "web/domain_settings.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(content)
+	disclosure := strings.Index(page, `<details class="settings-alias-delete">`)
+	if disclosure < 0 {
+		t.Fatal("deleting a domain alias must require an explicit disclosure")
+	}
+	summary := strings.Index(page[disclosure:], "<summary")
+	action := strings.Index(page[disclosure:], `name="action" value="delete_alias"`)
+	ending := strings.Index(page[disclosure:], "</details>")
+	if summary < 0 || action <= summary || ending <= action {
+		t.Fatal("alias removal action must be inside its confirmation disclosure")
+	}
+	if !strings.Contains(page[disclosure:disclosure+ending], `{{.Domain}}`) {
+		t.Fatal("alias removal confirmation must identify the affected domain")
 	}
 }
 

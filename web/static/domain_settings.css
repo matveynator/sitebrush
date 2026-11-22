@@ -51,3 +51,23 @@
  .site-settings .settings-summary-card { padding: 14px; }
  .site-settings .settings-domain-attention a { margin-inline-start: 0; }
 }
+
+
+/* Destructive alias management is available only after an explicit disclosure. */
+.site-settings .settings-alias-delete { position: relative; min-width: 0; }
+.site-settings .settings-alias-delete > summary {
+  display: inline-flex; align-items: center; min-height: 44px; padding: 8px 12px;
+  border: 1px solid var(--border-cyan); border-radius: var(--theme-radius);
+  font-size: 13px; font-weight: 600; cursor: pointer; list-style: none;
+}
+.site-settings .settings-alias-delete > summary::-webkit-details-marker { display: none; }
+.site-settings .settings-alias-delete > summary:focus-visible,
+.site-settings .settings-alias-delete button:focus-visible {
+  outline: 2px solid var(--theme-ring); outline-offset: 2px;
+}
+.site-settings .settings-alias-delete[open] {
+  flex-basis: 100%; padding: 12px; border: 1px solid var(--border-cyan);
+  border-radius: var(--theme-radius); background: var(--panel-soft);
+}
+.site-settings .settings-alias-delete[open] form { margin-top: 10px; }
+.site-settings .settings-alias-delete[open] button { min-height: 44px; }

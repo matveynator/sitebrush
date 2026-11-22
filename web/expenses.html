@@ -86,7 +86,7 @@
     </nav>
 
     <section data-hosting-installation-panel="servers">
-      {{if gt (len .ExpenseServers) 1}}
+      {{if and (gt (len .ExpenseServers) 1) (not .ShowCentralRegistry)}}
       <div class="expense-simple-toolbar mb-3">
         <label>{{index .T "expenses_server_select"}}
           <select class="form-select" data-expense-server-select>
@@ -97,7 +97,7 @@
       {{end}}
       {{range $serverIndex, $expenseServer := .ExpenseServers}}
       {{$server := $expenseServer.Server}}
-      <div data-expense-server-panel="{{$serverIndex}}" data-server-id="{{$server.ID}}" {{if not $expenseServer.MailSelected}}hidden{{end}}>
+      <div data-expense-server-panel="{{$serverIndex}}" data-server-id="{{$server.ID}}" data-server-local="{{if $server.Local}}true{{else}}false{{end}}" {{if not $expenseServer.MailSelected}}hidden{{end}}>
         <div class="server-config-layout" data-server-config-layout>
           <nav class="server-config-nav" aria-label="{{index $.T "server_ui_navigation"}}" hidden>
             <button type="button" data-server-config-target="overview" aria-current="page">{{index $.T "server_ui_overview"}}</button>

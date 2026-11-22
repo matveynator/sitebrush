@@ -162,7 +162,7 @@
     const state = fromHash();
     let target = state.id ? serverPanels.find(panel => panel.dataset.serverId === state.id) : null;
     if (!target && selector) target = serverPanels.find(panel => panel.dataset.expenseServerPanel === selector.value);
-    if (!target) target = serverPanels.find(panel => !panel.hidden) || serverPanels[0];
+    if (!target) target = serverPanels.find(panel => panel.dataset.serverLocal === "true") || serverPanels.find(panel => !panel.hidden) || serverPanels[0];
     if (!target) return;
     for (const panel of serverPanels) panel.hidden = panel !== target;
     if (selector) selector.value = target.dataset.expenseServerPanel;
@@ -175,7 +175,10 @@
       if (!button || !rootTabs.contains(button)) return;
       const section = button.dataset.serverRootTarget;
       if (section === "servers") {
-        const selected = selector ? serverPanels.find(panel => panel.dataset.expenseServerPanel === selector.value) : serverPanels.find(panel => !panel.hidden);
+        // The central catalogue owns navigation to remote installations.
+        // Root server settings always return to the installation running here.
+        const local = serverPanels.find(panel => panel.dataset.serverLocal === "true");
+        const selected = installationsWorkspace ? local : (selector ? serverPanels.find(panel => panel.dataset.expenseServerPanel === selector.value) : local);
         writeHash(selected || serverPanels[0], "overview");
       } else {
         history.replaceState(null, "", "#" + section);
@@ -273,6 +276,11 @@
     function render() {
       const enabled = mode() === "enabled";
       form.dataset.monetizationEnabled = String(enabled);
+      // Hidden controls must not block opt-out with native constraint validation.
+      // The server restores the persisted tariff when the mode alone is saved.
+      for (const field of form.querySelectorAll(".server-tariff-fields input, .server-tariff-fields select, .server-tariff-fields textarea")) {
+        field.disabled = !enabled;
+      }
       cost.min = enabled ? "0.01" : "0";
       const diskGB = Number(form.dataset.diskBytes) / 1000000000;
       const portion = Number(percent.value);

@@ -99,6 +99,11 @@ func InstallationCatalogViews(servers []ServerView, desktopGroups []DesktopHosti
 		if views[i].SiteCount != views[j].SiteCount {
 			return views[i].SiteCount > views[j].SiteCount
 		}
+		// Monetary amounts are comparable only within the same currency.
+		// Keep the initial server order consistent with the client-side sorter.
+		if views[i].Currency != views[j].Currency {
+			return views[i].Currency < views[j].Currency
+		}
 		if views[i].MonthlyForecastMinor != views[j].MonthlyForecastMinor {
 			return views[i].MonthlyForecastMinor > views[j].MonthlyForecastMinor
 		}

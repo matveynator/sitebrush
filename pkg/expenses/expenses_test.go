@@ -132,3 +132,32 @@ func TestConfigurableBillingCapacityPercent(t *testing.T) {
 		t.Fatalf("legacy percent = %d", got)
 	}
 }
+
+func TestAllocateMonthlyExpenseLargeDiskAvoidsIntermediateOverflow(t *testing.T) {
+	policy := DefaultServerPolicy("local", 100_000*DecimalGigabyte)
+	if got := CalculateMonthlyExpense(policy); got != 1_500_000 {
+		t.Fatalf("monthly expense = %d, want 1500000", got)
+	}
+	tests := []struct {
+		name      string
+		firstGB   int64
+		secondGB  int64
+		wantFirst int64
+		wantLast  int64
+		wantTotal int64
+	}{
+		{name: "below capacity", firstGB: 5_000, secondGB: 10_000, wantFirst: 250_000, wantLast: 500_000, wantTotal: 750_000},
+		{name: "above capacity", firstGB: 20_000, secondGB: 40_000, wantFirst: 500_000, wantLast: 1_000_000, wantTotal: 1_500_000},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := AllocateMonthlyExpense(policy, []SiteUsage{
+				{Key: "first", UsedBytes: tt.firstGB * DecimalGigabyte},
+				{Key: "last", UsedBytes: tt.secondGB * DecimalGigabyte},
+			})
+			if got.AllocatedMinor != tt.wantTotal || got.Sites["first"].ExpenseShareMinor != tt.wantFirst || got.Sites["last"].ExpenseShareMinor != tt.wantLast {
+				t.Fatalf("large disk allocation = %+v, want first=%d last=%d total=%d", got, tt.wantFirst, tt.wantLast, tt.wantTotal)
+			}
+		})
+	}
+}

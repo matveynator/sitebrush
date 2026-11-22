@@ -1698,15 +1698,31 @@ func (store Store) SaveServerExpensePolicy(ctx context.Context, policy expenses.
 	return policy, err
 }
 
-func (store Store) ServerExpensePolicy(ctx context.Context, installationID string, diskTotalBytes int64) (expenses.ServerPolicy, bool) {
+// CurrentServerExpensePolicy reports SQL errors separately so invoice owners
+// fail closed instead of charging from a stale prepared policy.
+func (store Store) CurrentServerExpensePolicy(ctx context.Context, installationID string, diskTotalBytes int64) (expenses.ServerPolicy, bool, error) {
 	policy := expenses.DefaultServerPolicy(installationID, diskTotalBytes)
 	var mode string
 	err := store.DB.QueryRowContext(ctx, `SELECT installation_id,COALESCE(expense_mode,''),COALESCE(disk_rate_per_100_gb_minor,1500),COALESCE(actual_monthly_expense_minor,0),COALESCE(currency,'EUR'),COALESCE(free_site_threshold_bytes,100000000),COALESCE(billing_capacity_percent,30),COALESCE(monetization_mode,'enabled'),COALESCE(effective_at,''),COALESCE(created_at,'') FROM server_expense_policies WHERE installation_id=? ORDER BY effective_at DESC,id DESC LIMIT 1`,
 		strings.TrimSpace(installationID)).Scan(&policy.InstallationID, &mode, &policy.DiskRatePer100GBMinor, &policy.ActualMonthlyExpenseMinor, &policy.Currency, &policy.FreeSiteThresholdBytes, &policy.BillingCapacityPercent, &policy.MonetizationMode, &policy.EffectiveAt, &policy.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return policy, false, nil
+	}
+	if err != nil {
+		return expenses.ServerPolicy{}, false, err
+	}
 	policy.Mode = expenses.Mode(mode)
 	policy.DiskTotalBytes = diskTotalBytes
 	policy = expenses.NormalizePolicy(policy)
-	return policy, err == nil
+	if err := policy.Validate(); err != nil {
+		return expenses.ServerPolicy{}, false, err
+	}
+	return policy, true, nil
+}
+
+func (store Store) ServerExpensePolicy(ctx context.Context, installationID string, diskTotalBytes int64) (expenses.ServerPolicy, bool) {
+	policy, found, err := store.CurrentServerExpensePolicy(ctx, installationID, diskTotalBytes)
+	return policy, err == nil && found
 }
 
 func (store Store) EnsureBillingCustomer(ctx context.Context, primaryEmail string, relatedEmails []string) (BillingCustomer, error) {

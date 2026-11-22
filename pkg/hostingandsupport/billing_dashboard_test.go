@@ -16,11 +16,30 @@ func TestServerInvoiceViewsDoNotMixInstallations(t *testing.T) {
 	}
 	domains := map[string]struct{}{"a.example": {}}
 	views := ServerInvoiceViewsForInstallation(invoices, "server-a", domains)
-	if len(views) != 2 || views[0].Number != "MATCH" || views[1].Number != "LEGACY-MATCH" {
-		t.Fatalf("invoice data leaked from another server: %+v", views)
+	if len(views) != 1 || views[0].Number != "MATCH" {
+		t.Fatalf("invoice data leaked from another server or an unassigned legacy record: %+v", views)
 	}
 	if ServerInvoiceViewsForInstallation(invoices, "", domains) != nil {
 		t.Fatal("missing installation ID must fail closed")
+	}
+}
+
+func TestRemoteSiteInvoiceBadgeIgnoresInvoicesFromOtherInstallations(t *testing.T) {
+	invoices := []Invoice{
+		{Number: "PAID-OTHER", InstallationID: "server-b", CustomerEmail: "same@example.com", Domain: "shared.example", Status: "paid"},
+		{Number: "UNASSIGNED", CustomerEmail: "same@example.com", Domain: "shared.example", Status: "paid"},
+	}
+	hosting := ClientHosting{
+		InstallationID: "server-a",
+		ServerDomain: "site-a.example",
+		Sites: []ClientHostingSite{{Domain: "shared.example", UsedBytes: 1000}},
+	}
+	server := BuildRemoteServerView(hosting, invoices, "1")
+	if len(server.Sites) != 1 || server.Sites[0].InvoiceLabel != InvoiceLabelForDomain(nil, "shared.example") {
+		t.Fatalf("site badge leaked a different installation's invoice: %+v", server.Sites)
+	}
+	if len(server.Invoices) != 0 {
+		t.Fatalf("remote server inherited unassigned or foreign invoices: %+v", server.Invoices)
 	}
 }
 
