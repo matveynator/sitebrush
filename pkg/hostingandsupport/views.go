@@ -310,6 +310,13 @@ func mergeLocalAndRemoteServerViews(localServer ServerView, remoteServer ServerV
 	merged.Qualified = true
 	merged.Archived = false
 	merged.QualificationReasons = nil
+	// Local quotas remain editable even if a caller assembled a minimal view.
+	merged.Sites = append([]ServerSiteView(nil), localServer.Sites...)
+	for index := range merged.Sites {
+		merged.Sites[index].CanEditQuota = true
+	}
+	merged.Clients = serverClientViewsFromSites(merged.Sites)
+	merged.ClientCount = len(merged.Clients)
 	merged.LastSeenAt = remoteServer.LastSeenAt
 	merged.Subtitle = firstNonEmpty(remoteServer.Subtitle, localServer.Subtitle)
 	merged.OwnerEmail = firstNonEmpty(localServer.OwnerEmail, remoteServer.OwnerEmail)
