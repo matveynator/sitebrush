@@ -145,7 +145,11 @@
       const counter = footer.querySelector("[data-client-site-count]");
       if (counter) counter.textContent = visible + " / " + matching;
       const more = footer.querySelector("[data-client-show-all]");
-      if (more) more.hidden = showAll;
+      if (more) {
+        more.hidden = showAll;
+        more.textContent = document.documentElement.lang.toLowerCase().startsWith("ru")
+          ? "Показать все " + matching + " сайтов" : "Show all " + matching + " sites";
+      }
     }
     const empty = row.querySelector("[data-client-no-sites]");
     if (empty) empty.hidden = matching !== 0;
