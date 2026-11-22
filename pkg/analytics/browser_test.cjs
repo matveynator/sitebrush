@@ -59,6 +59,7 @@ function browser(localStorage, sessionStorage, pathname, automaticAcknowledgemen
  fallback.sockets[0].close();
  fallback.sockets[0].listeners.close();
  fallback.advance(10000);
+ fallback.intervals[0]();
  fallback.runTimers();
  await new Promise(resolve => setImmediate(resolve));
  assert.equal(fallback.posts.length, 1, 'closed WebSocket must trigger HTTP analytics fallback');
@@ -72,6 +73,7 @@ function browser(localStorage, sessionStorage, pathname, automaticAcknowledgemen
  refused.sockets[0].close();
  refused.sockets[0].listeners.close();
  refused.advance(10000);
+ refused.intervals[0]();
  refused.runTimers();
  await new Promise(resolve => setImmediate(resolve));
  assert.equal(refused.posts.length, 1);
