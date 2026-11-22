@@ -304,6 +304,10 @@
       const pending = Boolean(deletion.dataset.deletionReason);
       dialog.querySelector("[data-client-delete-pending]").hidden = !pending;
       dialog.querySelector("[data-client-delete-deadline]").textContent = deletion.dataset.deletionDeadline || "";
+      const reason = dialog.querySelector("[data-client-delete-reason]");
+      if (reason) reason.textContent = pending
+        ? (deletion.dataset.deletionReason === "nonpayment" ? reason.dataset.reasonNonpayment : reason.dataset.reasonRequest)
+        : "";
       const action = dialog.querySelector("[data-client-delete-action]");
       for (const option of action.options) {
         option.disabled = option.value === "restore_site" ? !pending :
