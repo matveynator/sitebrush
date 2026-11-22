@@ -7,11 +7,11 @@ function storage() {
     const contents = new Map();
     return {getItem: key => contents.get(key) || null, setItem: (key, text) => contents.set(key, String(text)), removeItem: key => contents.delete(key)};
 }
-function browser(localStorage, sessionStorage, pathname, automaticAcknowledgement = true, beaconAccepted = true) {
+function browser(localStorage, sessionStorage, pathname, automaticAcknowledgement = true, beaconAccepted = true, httpAccepted = true) {
     let clock = 2000;
     let identity = 0;
     let timerIdentity = 0;
-    const timers = [], windows = {}, documents = {}, sockets = [], intervals = [], beacons = [];
+    const timers = [], windows = {}, documents = {}, sockets = [], intervals = [], beacons = [], posts = [];
     class Socket {
         static OPEN = 1; static CLOSING = 2;
         constructor() {this.readyState=0;this.bufferedAmount=0;this.listeners={};this.sent=[];sockets.push(this);}
@@ -24,9 +24,10 @@ function browser(localStorage, sessionStorage, pathname, automaticAcknowledgemen
     const window={WebSocket:Socket,crypto:{getRandomValues:bytes=>bytes.fill(++identity)},setTimeout:(callback,delay)=>{timers.push({callback,delay,at:clock+delay,identifier:++timerIdentity});return timerIdentity;},setInterval:callback=>{intervals.push(callback);return intervals.length;},clearTimeout:identifier=>{const scheduledTimer=timers.find(timer=>timer.identifier===identifier);if(scheduledTimer)scheduledTimer.cancelled=true;},addEventListener:(name,callback)=>{windows[name]=callback;},innerHeight:600,innerWidth:1200,scrollY:0};
     const document={readyState:'complete',visibilityState:'visible',referrer:'https://github.com/project?token=referrer-secret',documentElement:{scrollHeight:1200},body:{scrollHeight:1200},querySelectorAll:()=>[],addEventListener:(name,callback)=>{const previousCallback=documents[name];documents[name]=previousCallback?function documentCallbacks(event){previousCallback(event);callback(event);}:callback;}};
     const location={href:'https://site.example'+pathname+'?token=url-secret&utm_source=github&utm_campaign=launch',pathname,search:'?token=url-secret&utm_source=github&utm_campaign=launch',origin:'https://site.example',host:'site.example',protocol:'https:'};
-    vm.runInNewContext(source,{window,document,localStorage,sessionStorage,navigator:{sendBeacon:(address,blob)=>{beacons.push(blob);return beaconAccepted;}},location,URL,URLSearchParams,performance:{now:()=>clock},crypto:window.crypto,WebSocket:Socket,Uint8Array,TextEncoder,Date,console,Blob});
+    const fetch = async function deliverHTTP(address, options) { posts.push({address, options}); return {status: httpAccepted ? 204 : 503}; };
+    vm.runInNewContext(source,{window,document,localStorage,sessionStorage,fetch,navigator:{sendBeacon:(address,blob)=>{beacons.push(blob);return beaconAccepted;}},location,URL,URLSearchParams,performance:{now:()=>clock},crypto:window.crypto,WebSocket:Socket,Uint8Array,TextEncoder,Date,console,Blob});
     timers.shift().callback();
-    return {window,document,documents,windows,sockets,intervals,beacons,timers,advance:milliseconds=>{clock+=milliseconds;},runTimers:()=>{for(const scheduledTimer of [...timers]){if(!scheduledTimer.cancelled&&!scheduledTimer.finished&&scheduledTimer.at<=clock){scheduledTimer.finished=true;scheduledTimer.callback();}}}};
+    return {window,document,documents,windows,sockets,intervals,beacons,posts,timers,advance:milliseconds=>{clock+=milliseconds;},runTimers:()=>{for(const scheduledTimer of [...timers]){if(!scheduledTimer.cancelled&&!scheduledTimer.finished&&scheduledTimer.at<=clock){scheduledTimer.finished=true;scheduledTimer.callback();}}}};
 }
 (async function validateCollector() {
  const local=storage(),session=storage();const first=browser(local,session,'/');first.sockets[0].open();
@@ -51,6 +52,31 @@ function browser(localStorage, sessionStorage, pathname, automaticAcknowledgemen
  assert.ok(finalBatch.signals.some(signal=>signal.kind==='form-submit'));
  assert.ok(finalBatch.signals.some(signal=>signal.kind==='form-success'));
  assert.ok(!JSON.stringify(finalBatch).includes('password-secret'));
+ // Reproduce a proxy rejecting WebSocket upgrades; HTTP POST must still
+ // deliver the initial visit and clear the local retry journal only on 204.
+ const fallbackSession = storage();
+ const fallback = browser(storage(), fallbackSession, '/websocket-rejected', false, false);
+ fallback.sockets[0].close();
+ fallback.sockets[0].listeners.close();
+ fallback.advance(10000);
+ fallback.runTimers();
+ await new Promise(resolve => setImmediate(resolve));
+ assert.equal(fallback.posts.length, 1, 'closed WebSocket must trigger HTTP analytics fallback');
+ assert.equal(fallback.posts[0].address, '/?request=analytics');
+ assert.equal(fallback.posts[0].options.method, 'POST');
+ assert.equal(fallback.posts[0].options.credentials, 'same-origin');
+ assert.equal(JSON.parse(fallback.posts[0].options.body).signals[0].kind, 'page');
+ assert.equal(fallbackSession.getItem('sitebrush.analytics.pending.v2'), null, 'HTTP 204 must acknowledge the batch');
+ const refusedSession = storage();
+ const refused = browser(storage(), refusedSession, '/storage-rejected', false, false, false);
+ refused.sockets[0].close();
+ refused.sockets[0].listeners.close();
+ refused.advance(10000);
+ refused.runTimers();
+ await new Promise(resolve => setImmediate(resolve));
+ assert.equal(refused.posts.length, 1);
+ assert.ok(refusedSession.getItem('sitebrush.analytics.pending.v2'), 'HTTP rejection must retain batch for retry');
+ console.log('browser analytics: POST fallback preserves events across rejected WebSocket upgrades');
  console.log('browser analytics: batching, safe acquisition, forms, beacon and privacy passed');
 })().catch(error=>{console.error(error);process.exitCode=1;});
 
