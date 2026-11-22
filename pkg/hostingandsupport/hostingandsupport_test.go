@@ -1054,6 +1054,69 @@ func TestPublicTrialSitesUseCreationDeadlineAndBackfillLegacyAssignments(t *test
 	}
 }
 
+func TestBackfillDoesNotResurrectDeletedOrRegisteredTrial(t *testing.T) {
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "billing.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	ctx := context.Background()
+	if err := Migrate(ctx, database); err != nil {
+		t.Fatal(err)
+	}
+	store := Store{DB: database}
+	created := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
+	for _, status := range []string{"deleted", "expired", "registered", "activated", "importing"} {
+		domain := status + ".example"
+		if err := store.AssignSite(ctx, domain, 0, "trial"); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.CreatePublicTrialSite(ctx, domain, "https://source.example/", created); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := database.ExecContext(ctx, `UPDATE public_trial_sites SET status=? WHERE domain=?`, status, domain); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.BackfillPublicTrialSites(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BackfillPublicTrialSites(ctx); err != nil {
+		t.Fatal(err)
+	}
+	sites := store.PublicTrialSites(ctx)
+	if len(sites) != 5 {
+		t.Fatalf("backfill resurrected completed or deleted trial records: %+v", sites)
+	}
+	for _, site := range sites {
+		if site.Status == "active" {
+			t.Fatalf("completed trial incorrectly reactivated: %+v", site)
+		}
+	}
+}
+
+func TestBackfillNeverClassifiesOrdinaryFreeSiteAsTrial(t *testing.T) {
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "billing.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	ctx := context.Background()
+	if err := Migrate(ctx, database); err != nil {
+		t.Fatal(err)
+	}
+	store := Store{DB: database}
+	if err := store.AssignSite(ctx, "ordinary.example", 0, "free"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BackfillPublicTrialSites(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if sites := store.PublicTrialSites(ctx); len(sites) != 0 {
+		t.Fatalf("ordinary free site became a new temporary site: %+v", sites)
+	}
+}
+
 func TestPublicTrialSiteReusePreservesArchivedRun(t *testing.T) {
 	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "billing.db"))
 	if err != nil {

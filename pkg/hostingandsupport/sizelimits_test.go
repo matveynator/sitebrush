@@ -45,8 +45,14 @@ func TestCreationSizeLimitsPersistAndPolicyRollsBackTogether(t *testing.T) {
 	if err := store.SaveRegistrationSettingsWithLimits(ctx, false, false, SiteSizeLimits{}); err == nil || store.SiteSizeLimits(ctx) != limits {
 		t.Fatal("invalid limit changed the saved policy")
 	}
+	if _, err := database.ExecContext(ctx, `INSERT INTO server_settings(name,value,updated_at) VALUES('demo_site_enabled','1','2026-11-22T12:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.SaveRegistrationSettingsWithLimits(ctx, false, true, limits); err != nil || store.PublicTrialAllowed(ctx) {
 		t.Fatalf("closed registration must close Test Drive too: %v", err)
+	}
+	if SettingBool(ctx, database, "demo_site_enabled", true) {
+		t.Fatal("closed registration left public demo enabled")
 	}
 	for _, rejectedSetting := range []string{"auto_registration_enabled", "public_trial_enabled", "public_trial_max_site_bytes"} {
 		if _, err := database.Exec(`CREATE TRIGGER reject_creation_limit BEFORE UPDATE ON server_settings WHEN NEW.name='` + rejectedSetting + `' BEGIN SELECT RAISE(ABORT,'limit rejected'); END`); err != nil {
