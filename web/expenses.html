@@ -516,31 +516,32 @@
     <section class="server-root-workspace" data-server-installations-container data-installations-deferred="{{if .CentralInstallationsDeferred}}true{{else}}false{{end}}" hidden>
       <header class="server-workspace-header">
         <div><h2>{{index .T "billing_installations"}}</h2><p>{{index .T "server_installations_description"}}</p></div>
-        <span class="server-workspace-count">{{if .InstallationCatalog}}{{len .InstallationCatalog}}{{else}}0{{end}} {{index .T "server_installations_total"}}</span>
+        <span class="server-workspace-count">{{.InstallationCatalogCount}} / {{.InstallationCatalogTotal}} {{index .T "server_installations_total"}}</span>
       </header>
-      <div class="server-installation-toolbar">
+      <form class="server-installation-toolbar" method="get" action="/" data-installations-query-form><input type="hidden" name="server-settings" value=""><input type="hidden" name="workspace" value="installations">
         <label>{{index .T "server_installations_search"}}
-          <input type="search" class="form-control" data-installations-search autocomplete="off" placeholder="{{index .T "server_installations_search_placeholder"}}">
+          <input type="search" class="form-control" name="catalog_query" value="{{.InstallationCatalogQuery}}" data-installations-search autocomplete="off" placeholder="{{index .T "server_installations_search_placeholder"}}">
         </label>
         <label>{{index .T "server_installations_sort"}}
-          <select class="form-select" data-installations-sort>
-            <option value="sites">{{index .T "server_installations_sort_sites"}}</option>
-            <option value="forecast">{{index .T "server_installations_sort_forecast"}}</option>
-            <option value="paid">{{index .T "server_installations_sort_paid"}}</option>
-            <option value="name">{{index .T "server_installations_sort_name"}}</option>
+          <select class="form-select" name="catalog_sort" data-installations-sort>
+            <option value="sites" {{if eq .InstallationCatalogSort "sites"}}selected{{end}}>{{index .T "server_installations_sort_sites"}}</option>
+            <option value="forecast" {{if eq .InstallationCatalogSort "forecast"}}selected{{end}}>{{index .T "server_installations_sort_forecast"}}</option>
+            <option value="paid" {{if eq .InstallationCatalogSort "paid"}}selected{{end}}>{{index .T "server_installations_sort_paid"}}</option>
+            <option value="name" {{if eq .InstallationCatalogSort "name"}}selected{{end}}>{{index .T "server_installations_sort_name"}}</option>
           </select>
         </label>
         <label>{{index .T "server_installations_filter"}}
-          <select class="form-select" data-installations-filter>
-            <option value="active">{{index .T "server_installations_filter_active"}}</option>
-            <option value="connected">{{index .T "server_installation_connected"}}</option><option value="disconnected">{{index .T "server_installation_disconnected"}}</option><option value="unqualified">{{index .T "server_installation_unqualified"}}</option>
-            <option value="monetized">{{index .T "server_installations_filter_enabled"}}</option>
-            <option value="not-monetized">{{index .T "server_installations_filter_disabled"}}</option>
-            <option value="archived">{{index .T "billing_archive"}}</option>
-            <option value="all">{{index .T "server_billing_all"}}</option>
+          <select class="form-select" name="catalog_filter" data-installations-filter>
+            <option value="active" {{if eq .InstallationCatalogFilter "active"}}selected{{end}}>{{index .T "server_installations_filter_active"}}</option>
+            <option value="connected" {{if eq .InstallationCatalogFilter "connected"}}selected{{end}}>{{index .T "server_installation_connected"}}</option><option value="disconnected" {{if eq .InstallationCatalogFilter "disconnected"}}selected{{end}}>{{index .T "server_installation_disconnected"}}</option><option value="unqualified" {{if eq .InstallationCatalogFilter "unqualified"}}selected{{end}}>{{index .T "server_installation_unqualified"}}</option>
+            <option value="monetized" {{if eq .InstallationCatalogFilter "monetized"}}selected{{end}}>{{index .T "server_installations_filter_enabled"}}</option>
+            <option value="not-monetized" {{if eq .InstallationCatalogFilter "not-monetized"}}selected{{end}}>{{index .T "server_installations_filter_disabled"}}</option>
+            <option value="archived" {{if eq .InstallationCatalogFilter "archived"}}selected{{end}}>{{index .T "billing_archive"}}</option>
+            <option value="all" {{if eq .InstallationCatalogFilter "all"}}selected{{end}}>{{index .T "server_billing_all"}}</option>
           </select>
         </label>
-      </div>
+        <button type="submit" class="btn btn-outline-primary server-installation-apply">{{if eq .LanguageCode "ru"}}Применить{{else}}Apply{{end}}</button>
+      </form>
       <div class="server-installation-head" aria-hidden="true">
         <span>{{index .T "server_installations_name"}}</span>
         <span>{{index .T "billing_client_sites"}}</span>
@@ -566,8 +567,11 @@
         </article>
       {{else}}<p class="server-workspace-empty">{{index .T "server_installations_empty"}}</p>{{end}}
       </div>
-      <p class="server-workspace-count" aria-live="polite" data-installations-count></p>
-      <p class="server-workspace-empty" data-installations-no-results hidden>{{index .T "server_installations_no_results"}}</p>
+      <nav class="server-installation-pages" aria-label="{{index .T "server_installations_total"}}">
+        {{if .InstallationCatalogPrevious}}<a class="btn btn-outline-secondary btn-sm" href="{{.InstallationCatalogPrevious}}">{{index .T "server_page_previous"}}</a>{{else}}<span></span>{{end}}
+        <span class="server-workspace-count" aria-live="polite" data-installations-count>{{.InstallationCatalogPage}} / {{.InstallationCatalogPages}} · {{.InstallationCatalogCount}} {{if eq .LanguageCode "ru"}}найдено{{else}}matching{{end}}</span>
+        {{if .InstallationCatalogNext}}<a class="btn btn-outline-secondary btn-sm" href="{{.InstallationCatalogNext}}">{{index .T "server_page_next"}}</a>{{else}}<span></span>{{end}}
+      </nav>
       <p class="server-workspace-footnote">{{index .T "server_installations_forecast_note"}}</p>
     </section>
     {{end}}
