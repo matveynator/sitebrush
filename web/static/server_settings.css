@@ -477,7 +477,8 @@
   .server-settings-page .server-installation-state { justify-items: end; }
 }
 @media (max-width: 650px) {
-  .server-settings-page .server-root-workspace { padding: 18px 14px; }
+  /* All workspaces share the page gutter; no inset pseudo-frame on mobile. */
+  .server-settings-page .server-root-workspace { padding: 0; }
   .server-settings-page .server-installation-toolbar { grid-template-columns: minmax(0,1fr); }
   .server-settings-page .server-installation-row { grid-template-columns: minmax(0,1fr) auto; }
   .server-settings-page .server-installation-row > .server-installation-identity { grid-column: 1 / -1; }
