@@ -8,6 +8,9 @@
   const primaryElement = panelElement.querySelector('[data-public-ip-primary]');
   const saveButtonElement = panelElement.querySelector('[data-public-ip-save]');
   const refreshButtonElement = panelElement.querySelector('[data-public-ip-refresh]');
+  const copyButtonElement = panelElement.querySelector('[data-public-ip-copy]');
+  const copyLabel = copyButtonElement ? copyButtonElement.textContent : '';
+  let copyTimer = null;
   const model = { snapshot: null, busy: true, message: '', failed: false, manual: '', preferred: '', primary: '' };
   const labels = JSON.parse(panelElement.querySelector('[data-public-ip-labels]').textContent);
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -21,6 +24,7 @@
     statusElement.textContent = model.message;
     statusElement.classList.toggle('text-danger', model.failed);
     primaryElement.textContent = model.primary || labels.missing;
+    if (copyButtonElement) copyButtonElement.disabled = !model.primary;
     primaryElement.classList.toggle('text-danger', Boolean(model.preferred && !model.primary));
     manualInputElement.value = model.manual;
     preferredSelectElement.replaceChildren(new Option(labels.auto, ''));
@@ -92,5 +96,34 @@
   preferredSelectElement.addEventListener('change', function choose() { model.preferred = preferredSelectElement.value; });
   saveButtonElement.addEventListener('click', function save() { submit('save'); });
   refreshButtonElement.addEventListener('click', function refresh() { submit('refresh'); });
+  if (copyButtonElement) {
+    copyButtonElement.addEventListener('click', async function copyActiveIP() {
+      if (!model.primary) return;
+      let copied = false;
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(model.primary);
+          copied = true;
+        } else {
+          const field = document.createElement('textarea');
+          field.value = model.primary;
+          field.style.position = 'fixed';
+          field.style.opacity = '0';
+          document.body.append(field);
+          field.select();
+          copied = document.execCommand('copy');
+          field.remove();
+        }
+      } catch (copyError) { copied = false; }
+      copyButtonElement.textContent = copied
+        ? (document.documentElement.lang.startsWith('ru') ? 'Скопировано ✓' : 'Copied ✓')
+        : (document.documentElement.lang.startsWith('ru') ? 'Ошибка копирования' : 'Copy failed');
+      if (copyTimer !== null) window.clearTimeout(copyTimer);
+      copyTimer = window.setTimeout(function restoreIPCopyLabel() {
+        copyButtonElement.textContent = copyLabel;
+        copyTimer = null;
+      }, 2000);
+    });
+  }
   render();
 })();
