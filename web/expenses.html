@@ -1246,6 +1246,7 @@
   });
 })();
 </script>
+{{if or (eq .SelectedServerSection "clients") (and .ShowCentralRegistry (not .CentralClientsDeferred))}}
 <script>
 (function setupServerCertificateRenewalControls() {
   const renewalButtonElements = document.querySelectorAll('[data-certificate-renew]');
@@ -1300,6 +1301,7 @@
   }
 })();
 </script>
+{{end}}
 </body>
 </html>
 
