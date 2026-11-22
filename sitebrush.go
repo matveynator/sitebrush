@@ -4623,18 +4623,18 @@ func (a *App) analyticsMiddleware(next http.Handler) http.Handler {
 		startedAt := time.Now()
 		writer := &statusCapturingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(writer, r)
-		if !publicsite.SecurityChecked(r) && a.securityAnalytics != nil && len(a.securityAnalytics) >= cap(a.securityAnalytics) {
-			select {
-			case a.securityLosses <- a.analyticsEventDomain(r, ""):
-			default:
-			}
-		}
-		if !publicsite.SecurityChecked(r) && a.securityAnalytics != nil && !isBrowserAnalyticsRequest(r) && len(a.securityAnalytics) < cap(a.securityAnalytics) {
+		if !publicsite.SecurityChecked(r) && a.securityAnalytics != nil && !isBrowserAnalyticsRequest(r) {
 			securityEvent := siteAnalyticsEvent{Bytes: writer.bytesWritten, Domain: a.analyticsEventDomain(r, ""), Path: analyticsBoundedString(r.URL.EscapedPath(), 512), Query: analyticsBoundedString(accountauth.SafeQuery(r.URL.RawQuery), 2048), Method: r.Method, StatusCode: writer.statusCode, OccurredAt: startedAt.UTC(), RemoteAddress: analyticsBoundedString(r.RemoteAddr, 64), Forwarded: analyticsBoundedString(r.Header.Get("Forwarded"), 256), ForwardedFor: analyticsBoundedString(r.Header.Get("X-Forwarded-For"), 256), UserAgent: analyticsBoundedString(r.UserAgent(), 256), AcceptLanguage: analyticsBoundedString(r.Header.Get("Accept-Language"), 64), TrustedPeer: !publicOrdinaryRequest(r) && a.sitebrushPeerRequestTrusted(r, startedAt.UTC()), IndexingCrawler: httpsecurity.IsIndexingCrawlerRequest(r), SecurityBlocked: writer.Header().Get("X-Sitebrush-Security-Incident") != "" || writer.statusCode == http.StatusTooManyRequests || writer.statusCode == http.StatusForbidden}
 			securityEvent.SecurityAlreadyBlocked = writer.Header().Get("X-Sitebrush-Security-Already-Blocked") == "1"
 			select {
 			case a.securityAnalytics <- securityEvent:
 			default:
+				// Queue ownership may change between a length check and send.
+				// Every dropped observation signals incomplete security statistics.
+				select {
+				case a.securityLosses <- securityEvent.Domain:
+				default:
+				}
 			}
 		}
 		// Security owns request observations; conversion owns browser observations.
