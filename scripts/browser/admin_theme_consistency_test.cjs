@@ -48,10 +48,19 @@ for (const action of ['delete_site', 'delete_account']) {
   assert.match(profile, new RegExp('name="profile_action" value="' + action + '"'),
     action + ' must preserve its POST action');
 }
-assert.match(shared, /\\.profile-delete-card \\.profile-account-card-header h2/);
-assert.match(shared, /var\\(--theme-destructive\\)/);
-assert.match(shared, /@media \\(max-width: 900px\\), \\(hover: none\\) and \\(pointer: coarse\\)/);
-assert.doesNotMatch(shared, /\\.profile-account-grid > \\.profile-ai-card \\{ grid-column: 2; \\}/,
-  'AI access must use auto placement when a deletion card occupies column two');
+assert.ok(shared.includes('.profile-delete-card .profile-account-card-header h2'),
+  'danger heading must be styled in the shared stylesheet');
+assert.ok(shared.includes('var(--theme-destructive)'),
+  'danger zone must use the canonical destructive token');
+assert.ok(shared.includes('grid-template-columns: minmax(0, 1fr);'),
+  'profile cards must stack into one column on phones');
+assert.ok(!shared.includes('.profile-account-grid > .profile-ai-card { grid-column: 2; }'),
+  'AI access must auto-place when deletion occupies column two');
 
-console.log('Admin theme consistency: palette, controls, profile grid, deletion danger zone, and profiler passed');
+const files = read('web/files.html');
+assert.ok(!files.includes('value="set_favicon"'),
+  'files manager must not offer the ambiguous favicon action');
+assert.ok(files.includes('value="save_access"') && files.includes('data-preview-image'),
+  'existing access and preview actions must remain available');
+
+console.log('Admin theme consistency: palette, controls, profile grid, deletion and files actions, and profiler passed');
