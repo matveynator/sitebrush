@@ -40,15 +40,21 @@ const (
 	UnknownHost
 	LocalIPEntry
 	ProxyApplication
+	UpgradeSessionLifetime
+	ServerSettingsSnapshot
+	ServerSettingsView
+	ServerSettingsRender
 	ControlDBQueue
 	ControlDBExecution
 	SiteDBQueue
 	SiteDBExecution
+	FilesList
+	FilesRender
 	stageCount
 )
 
 func (stage Stage) String() string {
-	return [...]string{"accepted_to_request", "front_state", "domain", "policy", "attack_guard", "throttle_guard", "public_handler", "first_write", "certificate", "attack_queue", "attack_work", "throttle_queue", "throttle_work", "proxy_metadata", "proxy_backend", "handler_complete", "body_write", "http1_response_complete", "public_static_ram", "public_static_file", "unknown_host", "local_ip_entry", "proxy_application", "control_db_queue", "control_db_execution", "site_db_queue", "site_db_execution"}[stage]
+	return [...]string{"accepted_to_request", "front_state", "domain", "policy", "attack_guard", "throttle_guard", "public_handler", "first_write", "certificate", "attack_queue", "attack_work", "throttle_queue", "throttle_work", "proxy_metadata", "proxy_backend", "handler_complete", "body_write", "http1_response_complete", "public_static_ram", "public_static_file", "unknown_host", "local_ip_entry", "proxy_application", "upgrade_session_lifetime", "server_settings_snapshot", "server_settings_view", "server_settings_render", "control_db_queue", "control_db_execution", "site_db_queue", "site_db_execution", "files_list", "files_render"}[stage]
 }
 
 type HTTPMetrics struct {
@@ -58,6 +64,22 @@ type HTTPMetrics struct {
 	Errors      uint64 `json:"errors"`
 	WriteErrors uint64 `json:"writeErrors"`
 }
+
+// HTTPCall records one request independently of CPU sampling. URLs keep only
+// allowlisted route selectors and omit arbitrary query values.
+type HTTPCall struct {
+	Started    time.Time `json:"started"`
+	Method     string    `json:"method"`
+	Host       string    `json:"host"`
+	Route      string    `json:"route"`
+	Status     int       `json:"status"`
+	DurationUS int64     `json:"durationUS"`
+	Sent       uint64    `json:"sent"`
+	Aborted    bool      `json:"aborted,omitempty"`
+}
+
+const httpCallsLimit = 512
+
 type Event struct {
 	Status     int
 	RAMReason  string
@@ -69,8 +91,9 @@ type Event struct {
 	started    time.Time
 	at         time.Time
 	HTTP       HTTPMetrics
+	Call       HTTPCall
 	Durations  [stageCount]time.Duration
-	Present    uint32
+	Present    uint64
 }
 
 type RAMMetrics struct {
@@ -89,18 +112,27 @@ type Counter struct {
 }
 
 type Report struct {
-	Started        time.Time
-	Finished       time.Time
-	RAM            RAMMetrics
-	HTTP           HTTPMetrics
-	Stages         [stageCount]Counter
-	DroppedMinimum uint64
-	Incomplete     bool
+	Started          time.Time
+	Finished         time.Time
+	RAM              RAMMetrics
+	HTTP             HTTPMetrics
+	Stages           [stageCount]Counter
+	DroppedMinimum   uint64
+	Incomplete       bool
+	HTTPCalls        []HTTPCall
+	HTTPCallsOmitted uint64
 }
 
 type reportRequest struct {
-	reply    chan *Report
-	interval bool
+	reply         chan<- reportResponse
+	interval      bool
+	capture       <-chan struct{}
+	finishCapture bool
+}
+
+type reportResponse struct {
+	report *Report
+	err    error
 }
 
 type Collector struct {
@@ -121,6 +153,9 @@ func (collector *Collector) run() {
 	interval := newReport(report.Started)
 	connections := make(map[net.Conn]connectionTiming)
 	var cutoff time.Time
+	var captureSession <-chan struct{}
+	var httpCalls []HTTPCall
+	var httpCallsOmitted uint64
 	// A lost transition must not pair one request with a later request's Idle.
 	// Discard queued correlations on loss; HTTP totals still report partial data.
 	lost := func() {
@@ -143,6 +178,18 @@ func (collector *Collector) run() {
 		}
 		report.record(event)
 		interval.record(event)
+		if captureSession != nil && event.Call.Method != "" {
+			if len(httpCalls) < httpCallsLimit {
+				call := event.Call
+				// Short substrings can keep a much larger request line alive.
+				call.Method = strings.Clone(call.Method)
+				call.Host = strings.Clone(call.Host)
+				call.Route = strings.Clone(call.Route)
+				httpCalls = append(httpCalls, call)
+			} else {
+				httpCallsOmitted++
+			}
+		}
 		if event.connection != nil && event.started.After(cutoff) {
 			if current, found := connections[event.connection]; found && !event.started.Before(current.active) {
 				current.started = event.started
@@ -158,6 +205,10 @@ func (collector *Collector) run() {
 			return
 		case <-collector.losses:
 			lost()
+		case <-captureSession:
+			captureSession = nil
+			httpCalls = nil
+			httpCallsOmitted = 0
 		case request := <-collector.reports:
 			for pending := len(collector.events); pending > 0; pending-- {
 				consume(<-collector.events)
@@ -171,11 +222,37 @@ func (collector *Collector) run() {
 			if request.interval {
 				interval.Finished = report.Finished
 				completed := interval
-				request.reply <- &completed
+				request.reply <- reportResponse{report: &completed}
 				interval = newReport(report.Finished)
 			} else {
 				completed := report
-				request.reply <- &completed
+				if request.capture != nil {
+					select {
+					case <-captureSession:
+						captureSession = nil
+						httpCalls = nil
+						httpCallsOmitted = 0
+					default:
+					}
+					if request.finishCapture {
+						if captureSession != request.capture {
+							request.reply <- reportResponse{err: errors.New("HTTP capture is unavailable")}
+							continue
+						}
+						completed.HTTPCalls = httpCalls
+						completed.HTTPCallsOmitted = httpCallsOmitted
+						captureSession = nil
+						httpCalls = nil
+						httpCallsOmitted = 0
+					} else {
+						if captureSession != nil {
+							request.reply <- reportResponse{err: errors.New("HTTP capture is already running")}
+							continue
+						}
+						captureSession = request.capture
+					}
+				}
+				request.reply <- reportResponse{report: &completed}
 			}
 		case event := <-collector.events:
 			consume(event)
@@ -289,27 +366,37 @@ func (collector *Collector) RecordResult(stage Stage, duration time.Duration, st
 }
 
 func (collector *Collector) Snapshot(stop <-chan struct{}) (Report, error) {
-	return collector.snapshot(stop, false)
+	return collector.snapshot(stop, reportRequest{})
 }
 
 // IntervalSnapshot has one consumer: the 30-second logger. Cumulative snapshots
 // used by profiler captures remain independent of interval resets.
 func (collector *Collector) IntervalSnapshot(stop <-chan struct{}) (Report, error) {
-	return collector.snapshot(stop, true)
+	return collector.snapshot(stop, reportRequest{interval: true})
 }
 
-func (collector *Collector) snapshot(stop <-chan struct{}, interval bool) (Report, error) {
-	reply := make(chan *Report, 1)
+// CaptureRequests opens or finishes the current profiler capture. The owner of
+// session closes it if recording is abandoned before the final snapshot.
+func (collector *Collector) CaptureRequests(session <-chan struct{}, finished bool, stop <-chan struct{}) (Report, error) {
+	return collector.snapshot(stop, reportRequest{capture: session, finishCapture: finished})
+}
+
+func (collector *Collector) snapshot(stop <-chan struct{}, request reportRequest) (Report, error) {
+	reply := make(chan reportResponse, 1)
+	request.reply = reply
 	select {
-	case collector.reports <- reportRequest{reply: reply, interval: interval}:
+	case collector.reports <- request:
 	case <-stop:
 		return Report{}, errors.New("timing subscriber stopped")
 	case <-collector.stop:
 		return Report{}, errors.New("timing collector stopped")
 	}
 	select {
-	case report := <-reply:
-		return *report, nil
+	case response := <-reply:
+		if response.err != nil {
+			return Report{}, response.err
+		}
+		return *response.report, nil
 	case <-stop:
 		return Report{}, errors.New("timing subscriber stopped")
 	case <-collector.stop:
@@ -320,9 +407,9 @@ func (collector *Collector) snapshot(stop <-chan struct{}, interval bool) (Repor
 // A trace belongs to one HTTP handler. Context is only the net/http adapter;
 // completed measurements transfer to their collector through its input channel.
 type trace struct {
-	started, first time.Time
-	event          Event
-	route          Stage
+	started, first, hijacked time.Time
+	event                    Event
+	route                    Stage
 }
 type traceKey struct{}
 type collectorKey struct{}
@@ -395,6 +482,40 @@ func Enabled(request *http.Request) bool {
 	return request.Context().Value(traceKey{}) != nil
 }
 
+func describeHTTPCall(request *http.Request, started time.Time) HTTPCall {
+	route := request.URL.EscapedPath()
+	if strings.HasPrefix(route, "/.well-known/acme-challenge/") {
+		route = "/.well-known/acme-challenge/…"
+	}
+	if route == "" {
+		route = "/"
+	}
+	route = boundedHTTPField(route, 128)
+	for query := range strings.SplitSeq(request.URL.RawQuery[:min(len(request.URL.RawQuery), 1024)], "&") {
+		selector, argument, _ := strings.Cut(query, "=")
+		switch selector {
+		case "files", "edit", "editraw", "visual", "save", "file", "login", "logout", "register", "recover", "profile", "settings", "properties",
+			"analytics", "request", "expenses", "server-settings", "server_update", "server_update_ws", "server_profiler_ws",
+			"sitebrush_menu_ws", "tree", "publish", "revisions", "copy_site", "site_copy", "mcp", "oauth", "native_pick_files", "prepare_image":
+			route += "?" + selector
+			if selector == "request" && argument == "analytics" {
+				route += "=analytics"
+			}
+		default:
+			continue
+		}
+		break
+	}
+	return HTTPCall{Started: started, Method: boundedHTTPField(request.Method, 12), Host: boundedHTTPField(request.Host, 96), Route: route}
+}
+
+func boundedHTTPField(field string, maxBytes int) string {
+	if len(field) > maxBytes {
+		return field[:maxBytes] + "…"
+	}
+	return field
+}
+
 func (collector *Collector) Middleware(next http.Handler) http.Handler {
 	if collector == nil {
 		return next
@@ -410,37 +531,75 @@ func (collector *Collector) Middleware(next http.Handler) http.Handler {
 			}
 		}
 		request = request.WithContext(context.WithValue(WithCollector(request.Context(), collector), traceKey{}, measurement))
-		if request.Header.Get("Upgrade") == "" {
-			measurement.event.HTTP.Requests = 1
-			if request.Body != nil {
-				request.Body = &countedBody{ReadCloser: request.Body, metrics: &measurement.event.HTTP}
+		upgrading := request.Header.Get("Upgrade") != ""
+		measurement.event.HTTP.Requests = 1
+		if request.Body != nil && request.Body != http.NoBody {
+			request.Body = &countedBody{ReadCloser: request.Body, metrics: &measurement.event.HTTP}
+		}
+		writerWithTiming := &responseWriter{ResponseWriter: writer, measurement: measurement}
+		if upgrading {
+			writerWithTiming.recordUpgrade = func() {
+				call := describeHTTPCall(request, measurement.started)
+				call.Status = http.StatusSwitchingProtocols
+				call.DurationUS = measurement.hijacked.Sub(measurement.started).Microseconds()
+				collector.Observe(Event{Call: call})
 			}
 		}
-		next.ServeHTTP(&responseWriter{ResponseWriter: writer, measurement: measurement}, request)
-		if request.Header.Get("Upgrade") != "" {
-			measurement.event.HTTP = HTTPMetrics{}
-		} else {
-			measurement.event.at = time.Now()
-			measurement.event.started = measurement.started
-			measurement.event.connection, _ = request.Context().Value(connectionKey{}).(net.Conn)
-			measurement.event.protocol = request.ProtoMajor
-			measurement.event.Durations[HandlerComplete] = measurement.event.at.Sub(measurement.started)
-			measurement.event.Present |= 1 << HandlerComplete
-		}
-		if measurement.event.Status == 0 {
-			measurement.event.Status = http.StatusOK
-		}
-		if measurement.route != 0 {
-			measurement.event.Present |= 1 << measurement.route
-			measurement.event.Durations[measurement.route] = time.Since(measurement.started)
-		}
-		collector.Observe(measurement.event)
+		returned := false
+		defer func() {
+			finished := time.Now()
+			event := &measurement.event
+			upgraded := upgrading && (!measurement.hijacked.IsZero() || event.Status == http.StatusSwitchingProtocols)
+			if event.Status == 0 && returned {
+				event.Status = http.StatusOK
+			}
+			if upgraded {
+				event.HTTP = HTTPMetrics{}
+				event.Status = http.StatusSwitchingProtocols
+				event.Present &^= 1 << ProxyApplication
+				if measurement.route == ProxyApplication {
+					measurement.route = 0
+				}
+				sessionStarted := measurement.hijacked
+				if sessionStarted.IsZero() {
+					sessionStarted = measurement.first
+				}
+				event.Durations[UpgradeSessionLifetime] = finished.Sub(sessionStarted)
+				event.Present |= 1 << UpgradeSessionLifetime
+			} else {
+				event.at = finished
+				event.started = measurement.started
+				event.connection, _ = request.Context().Value(connectionKey{}).(net.Conn)
+				event.protocol = request.ProtoMajor
+				event.Durations[HandlerComplete] = finished.Sub(measurement.started)
+				event.Present |= 1 << HandlerComplete
+			}
+			if measurement.hijacked.IsZero() || !upgraded {
+				event.Call = describeHTTPCall(request, measurement.started)
+				event.Call.Status = event.Status
+				event.Call.Aborted = !returned || request.Context().Err() != nil || event.HTTP.WriteErrors != 0
+				event.Call.Sent = event.HTTP.Sent
+				duration := finished.Sub(measurement.started)
+				if upgraded {
+					duration = measurement.first.Sub(measurement.started)
+				}
+				event.Call.DurationUS = duration.Microseconds()
+			}
+			if measurement.route != 0 {
+				event.Present |= 1 << measurement.route
+				event.Durations[measurement.route] = finished.Sub(measurement.started)
+			}
+			collector.Observe(*event)
+		}()
+		next.ServeHTTP(writerWithTiming, request)
+		returned = true
 	})
 }
 
 type responseWriter struct {
 	http.ResponseWriter
-	measurement *trace
+	measurement   *trace
+	recordUpgrade func()
 }
 
 func (writer *responseWriter) firstWrite() {
@@ -499,7 +658,12 @@ func (writer *responseWriter) Flush() {
 	_ = http.NewResponseController(writer.ResponseWriter).Flush()
 }
 func (writer *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	return http.NewResponseController(writer.ResponseWriter).Hijack()
+	connection, buffered, err := http.NewResponseController(writer.ResponseWriter).Hijack()
+	if err == nil && writer.recordUpgrade != nil {
+		writer.measurement.hijacked = time.Now()
+		writer.recordUpgrade()
+	}
+	return connection, buffered, err
 }
 
 // Each HTTP handler owns its byte counts; only the completed observation crosses the collector channel.

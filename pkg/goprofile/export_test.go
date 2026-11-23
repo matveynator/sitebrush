@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/matveynator/sitebrush/v2/pkg/publicsite"
+	"github.com/matveynator/sitebrush/v2/pkg/requesttiming"
 )
 
 func TestExportIncludesUnfilteredEvidenceAndBoundedUnicode(t *testing.T) {
@@ -16,10 +17,11 @@ func TestExportIncludesUnfilteredEvidenceAndBoundedUnicode(t *testing.T) {
 		Code:       []Function{{Name: "main.работа", File: "sitebrush.go", Line: 43, Self: 300, Total: 300}},
 		Memory:     []Function{{Name: "allocate", Self: 100, Total: 100}},
 		Stages:     []Stage{{Name: "front_state", Count: 1, MeanMS: 7, P95MS: 8}},
+		HTTPCalls:  []requesttiming.HTTPCall{{Method: "GET", Host: "localhost", Route: "/?files", Status: 200, DurationUS: 1520}},
 		Goroutines: "goroutine 1 [chan receive]:\nmain.wait(0xabc)\n\t/sitebrush.go:12 +0x1\n\n",
 	}
 	text := exportText(report)
-	for _, fragment := range []string{"measurement", "openbsd/amd64", "PID: 123", "_sitebrush", "main.работа", "sitebrush.go:42", "sitebrush.go:43", "front_state", "allocate", "[chan receive]", "main.wait @ /sitebrush.go:12"} {
+	for _, fragment := range []string{"measurement", "openbsd/amd64", "PID: 123", "_sitebrush", "main.работа", "sitebrush.go:42", "sitebrush.go:43", "front_state", "Журнал HTTP-вызовов", "/?files", "1.520", "allocate", "[chan receive]", "main.wait @ /sitebrush.go:12"} {
 		if !strings.Contains(text, fragment) {
 			t.Fatalf("export missing %q", fragment)
 		}

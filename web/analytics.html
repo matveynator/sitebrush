@@ -742,6 +742,15 @@
   {{if eq .AnalyticsTab "analytics"}}
   <main id="conversion-dashboard" data-csrf="{{.AccountCSRF}}">
     {{if .BrowserAnalytics.Error}}<p class="alert alert-danger" role="alert">{{index .T "cx_report_error"}}</p>{{end}}
+    {{if .BrowserAnalytics.Available}}
+    <p class="small text-muted" data-analytics-last-report>{{if eq .LanguageCode "ru"}}Отчёт сформирован{{else}}Report generated{{end}}: {{.BrowserAnalytics.Report.Generated.UTC.Format "2006-01-02 15:04:05"}} UTC</p>
+    {{if .BrowserAnalytics.Report.LastEvent.IsZero}}
+    <p class="alert alert-secondary" data-analytics-no-events>{{if eq .LanguageCode "ru"}}Нет подтверждённых событий посещений. Время формирования отчёта не подтверждает работу сбора данных.{{else}}No accepted visit events. Report generation time does not confirm that collection is working.{{end}}</p>
+    {{else}}
+    <p class="small text-muted" data-analytics-last-event>{{if eq .LanguageCode "ru"}}Последнее принятое событие{{else}}Last accepted event{{end}}: {{.BrowserAnalytics.Report.LastEvent.UTC.Format "2006-01-02 15:04:05"}} UTC</p>
+    {{end}}
+    {{if .BrowserAnalytics.Stale}}<p class="alert alert-warning" role="status" data-analytics-stale>{{if eq .LanguageCode "ru"}}Последнее принятое событие было более 10 минут назад. Возможно, сейчас нет посетителей либо остановились доставка или сохранение аналитики; проверьте журнал сервера.{{else}}The last accepted event is over 10 minutes old. Traffic may be quiet, or delivery or persistence may be stalled; check the server log.{{end}}</p>{{end}}
+    {{else if not .BrowserAnalytics.Error}}<p class="alert alert-secondary" data-analytics-no-report>{{if eq .LanguageCode "ru"}}Сохранённых отчётов пока нет. Это не подтверждает исправность сбора событий.{{else}}No saved analytics report yet. This does not confirm that event collection is working.{{end}}</p>{{end}}
     {{if .AnalyticsQuotaBlocked}}<p class="alert alert-warning">{{index .T "cx_storage_paused"}}</p>{{end}}
     {{if .Conversion.Incomplete}}<p class="alert alert-warning">{{index .T "ax_incomplete"}}</p>{{end}}
     <section class="card mb-4"><div class="card-body"><h2 class="h4">{{index .T "cx_visitor_map"}}</h2>
@@ -1000,6 +1009,10 @@ SiteBrushAnalytics.formResult('contact', true);</code></pre><p class="small">{{i
     <p>{{.Security.Suspicious}} · {{index .T "ax_security_independent"}}</p>
     <p class="small">{{index .T "ax_security_hint"}}</p>
     {{if .Security.Incomplete}}<p class="alert alert-warning">{{index .T "ax_incomplete"}}</p>{{end}}
+    {{if .SecurityAnalyticsReadError}}<p class="alert alert-danger" role="alert" data-security-analytics-error>{{if eq .LanguageCode "ru"}}Не удалось прочитать аналитику безопасности. Отсутствие событий не означает отсутствие атак; проверьте журнал сервера и хранилище.{{else}}Security analytics could not be read. Missing observations do not mean there were no attacks; check the server log and storage.{{end}}</p>
+    {{else if not .SecurityAnalyticsHasObservations}}<p class="alert alert-secondary" data-security-analytics-no-events>{{if eq .LanguageCode "ru"}}Ни одного сохранённого наблюдения безопасности. Проверьте, поступают ли HTTP-события.{{else}}No saved security observations. Check whether HTTP events are being received.{{end}}</p>
+    {{else}}<p class="small text-muted" data-security-analytics-last-event>{{if eq .LanguageCode "ru"}}Последний обработанный запрос{{else}}Last processed request{{end}}: {{.SecurityAnalyticsLastObserved.UTC.Format "2006-01-02 15:04:05"}} UTC</p>
+    {{if .SecurityAnalyticsStale}}<p class="alert alert-warning" role="status" data-security-analytics-stale>{{if eq .LanguageCode "ru"}}Новых наблюдений безопасности нет более 10 минут. Возможно, трафика не было, либо сбор или сохранение остановились.{{else}}No security observations for over 10 minutes. Traffic may have stopped, or collection or persistence may be stalled.{{end}}</p>{{end}}{{end}}
 
     <div class="row g-3 mb-3">
       <div class="col-md-4"><div class="security-status-card security-safe"><strong>Allowlist</strong><div class="small">Trusted IPs are never blocked or throttled.</div></div></div>

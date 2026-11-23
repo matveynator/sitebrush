@@ -10,6 +10,7 @@ import (
 	"os"
 	"runtime"
 	"runtime/pprof"
+	"slices"
 	"sort"
 	"time"
 
@@ -61,38 +62,41 @@ type Stage struct {
 	P99MS  float64 `json:"p99MS"`
 }
 type Report struct {
-	RAM             *RAMReport                `json:"ramCache,omitempty"`
-	Runtime         *RuntimeReport            `json:"runtime,omitempty"`
-	RunID           string                    `json:"runID"`
-	System          string                    `json:"system"`
-	Architecture    string                    `json:"architecture"`
-	GoVersion       string                    `json:"goVersion"`
-	User            string                    `json:"user"`
-	CaptureFinished time.Time                 `json:"captureFinished"`
-	Calls           []Call                    `json:"calls,omitempty"`
-	Groups          []Group                   `json:"groups,omitempty"`
-	Detail          *FunctionDetail           `json:"detail,omitempty"`
-	Matches         int                       `json:"matches"`
-	Code            []Function                `json:"code,omitempty"`
-	Network         requesttiming.HTTPMetrics `json:"network"`
-	Allocated       uint64                    `json:"allocated"`
-	ID              string                    `json:"id"`
-	Role            string                    `json:"role"`
-	PID             int                       `json:"pid"`
-	Version         string                    `json:"version"`
-	Started         time.Time                 `json:"started"`
-	Finished        time.Time                 `json:"finished"`
-	Expires         time.Time                 `json:"expires"`
-	CPU             int64                     `json:"cpu"`
-	Functions       []Function                `json:"functions,omitempty"`
-	Frames          []Frame                   `json:"frames,omitempty"`
-	Heap            uint64                    `json:"heap"`
-	GC              uint32                    `json:"gc"`
-	Memory          []Function                `json:"memory,omitempty"`
-	Goroutines      string                    `json:"goroutines,omitempty"`
-	Stages          []Stage                   `json:"stages,omitempty"`
-	Truncated       bool                      `json:"truncated"`
-	Error           string                    `json:"error,omitempty"`
+	RAM              *RAMReport                `json:"ramCache,omitempty"`
+	Runtime          *RuntimeReport            `json:"runtime,omitempty"`
+	RunID            string                    `json:"runID"`
+	System           string                    `json:"system"`
+	Architecture     string                    `json:"architecture"`
+	GoVersion        string                    `json:"goVersion"`
+	User             string                    `json:"user"`
+	CaptureFinished  time.Time                 `json:"captureFinished"`
+	Calls            []Call                    `json:"calls,omitempty"`
+	Groups           []Group                   `json:"groups,omitempty"`
+	Detail           *FunctionDetail           `json:"detail,omitempty"`
+	Matches          int                       `json:"matches"`
+	Code             []Function                `json:"code,omitempty"`
+	Network          requesttiming.HTTPMetrics `json:"network"`
+	HTTPCalls        []requesttiming.HTTPCall  `json:"httpCalls,omitempty"`
+	HTTPCallsOmitted uint64                    `json:"httpCallsOmitted,omitempty"`
+	TimingLosses     uint64                    `json:"timingLosses,omitempty"`
+	Allocated        uint64                    `json:"allocated"`
+	ID               string                    `json:"id"`
+	Role             string                    `json:"role"`
+	PID              int                       `json:"pid"`
+	Version          string                    `json:"version"`
+	Started          time.Time                 `json:"started"`
+	Finished         time.Time                 `json:"finished"`
+	Expires          time.Time                 `json:"expires"`
+	CPU              int64                     `json:"cpu"`
+	Functions        []Function                `json:"functions,omitempty"`
+	Frames           []Frame                   `json:"frames,omitempty"`
+	Heap             uint64                    `json:"heap"`
+	GC               uint32                    `json:"gc"`
+	Memory           []Function                `json:"memory,omitempty"`
+	Goroutines       string                    `json:"goroutines,omitempty"`
+	Stages           []Stage                   `json:"stages,omitempty"`
+	Truncated        bool                      `json:"truncated"`
+	Error            string                    `json:"error,omitempty"`
 }
 type State struct {
 	Protocol int       `json:"protocol"`
@@ -455,6 +459,7 @@ func collect(directory, role, version, runID string, started time.Time, timings 
 		record.meta.Memory = nil
 		record.meta.Goroutines = ""
 		record.meta.Stages = nil
+		record.meta.HTTPCalls = nil
 		record.meta.Runtime = nil
 		completed <- capture{artifact: record}
 	}()
@@ -468,11 +473,13 @@ func collect(directory, role, version, runID string, started time.Time, timings 
 	report.Runtime = &RuntimeReport{Supported: sampler.supported()}
 	var before runtime.MemStats
 	runtime.ReadMemStats(&before)
-	var first requesttiming.Report
+	var first, last requesttiming.Report
+	requestSession := make(chan struct{})
+	defer close(requestSession)
 	timingsReady := false
 	if timings != nil {
 		var snapshotErr error
-		first, snapshotErr = timings.Snapshot(stop)
+		first, snapshotErr = timings.CaptureRequests(requestSession, false, stop)
 		timingsReady = snapshotErr == nil
 	}
 	report.Started = time.Now()
@@ -505,6 +512,11 @@ recording:
 	report.Runtime.Samples = append(report.Runtime.Samples, sampler.sample(report.Started))
 	report.Runtime.Scheduler = sampler.scheduler()
 	report.CaptureFinished = time.Now()
+	if timingsReady && report.Error == "" {
+		var snapshotErr error
+		last, snapshotErr = timings.CaptureRequests(requestSession, true, stop)
+		timingsReady = snapshotErr == nil
+	}
 	pprof.StopCPUProfile()
 	if info, statErr := raw.Stat(); statErr == nil {
 		record.size = info.Size()
@@ -520,7 +532,13 @@ recording:
 	report.Allocated = after.TotalAlloc - before.TotalAlloc
 	// End traffic observations before allocating and decoding diagnostic reports.
 	if timings != nil {
-		if last, snapshotErr := timings.Snapshot(stop); snapshotErr == nil && timingsReady {
+		if timingsReady {
+			report.HTTPCalls = last.HTTPCalls
+			slices.SortStableFunc(report.HTTPCalls, func(left, right requesttiming.HTTPCall) int {
+				return left.Started.Compare(right.Started)
+			})
+			report.HTTPCallsOmitted = last.HTTPCallsOmitted
+			report.TimingLosses = last.DroppedMinimum - first.DroppedMinimum
 			report.Network = requesttiming.HTTPMetrics{Requests: last.HTTP.Requests - first.HTTP.Requests, Received: last.HTTP.Received - first.HTTP.Received, Sent: last.HTTP.Sent - first.HTTP.Sent, Errors: last.HTTP.Errors - first.HTTP.Errors, WriteErrors: last.HTTP.WriteErrors - first.HTTP.WriteErrors}
 			report.RAM = &RAMReport{Hits: last.RAM.Hits - first.RAM.Hits, Misses: last.RAM.Misses - first.RAM.Misses, MissReasons: make(map[string]uint64)}
 			for index, reason := range requesttiming.RAMMissReasons() {
@@ -541,7 +559,7 @@ recording:
 				}
 				report.Stages = append(report.Stages, Stage{Name: current.Stage, Count: count, MeanMS: float64(current.TotalNS-old.TotalNS) / float64(count) / 1e6, P90MS: float64(delta.PercentileUpperBound(90)) / 1e6, P95MS: float64(delta.PercentileUpperBound(95)) / 1e6, P99MS: float64(delta.PercentileUpperBound(99)) / 1e6})
 			}
-			if first.Incomplete || last.Incomplete {
+			if report.TimingLosses != 0 || report.HTTPCallsOmitted != 0 {
 				report.Truncated = true
 			}
 		} else {

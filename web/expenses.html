@@ -3,8 +3,11 @@
 <head>
   <script>
   (function applySystemThemeMode() {
+    let preference = 'system';
+    try { preference = localStorage.getItem('sitebrush.server-settings.theme') || 'system'; } catch (storageError) { /* Private browsing. */ }
+    if (!['system', 'light', 'dark'].includes(preference)) preference = 'system';
     const prefersDarkMode = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-    document.documentElement.setAttribute('data-bs-theme', prefersDarkMode ? 'dark' : 'light');
+    document.documentElement.setAttribute('data-bs-theme', preference === 'system' ? (prefersDarkMode ? 'dark' : 'light') : preference);
   })();
   </script>
   <meta charset="UTF-8">
@@ -13,18 +16,31 @@
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="/p/static/technical_pages.css" rel="stylesheet">
   <link href="/p/static/server_settings.css" rel="stylesheet">
+  {{if .ShowProfiler}}<link href="/p/static/server_profiler.css" rel="stylesheet"><script defer src="/p/static/server_profiler.js"></script>{{end}}
+  {{if .ShowServerUpdater}}<link rel="stylesheet" href="/p/static/server_update.css"><script defer src="/p/static/server_update.js"></script>{{end}}
   <script defer src="/p/static/server_settings.js"></script>
+  {{if or (eq .SelectedServerSection "clients") (and .ShowCentralRegistry (not .CentralClientsDeferred))}}<script defer src="/p/static/server_clients.js"></script>{{end}}
   {{if .CanConfigurePublicIPs}}<script defer src="/p/static/server_public_ips.js"></script>{{end}}
 <script defer src="/p/static/mail_journal.js"></script>
 </head>
 <body class="technical-page bg-body expenses-page server-settings-page">
 <main class="container billing-page">
-<script type="application/json" id="mail-journal-labels">{{.MailJournalLabelsJSON}}</script>
-<div data-mail-settings data-mode="statistics" data-csrf="{{.AccountCSRF}}" data-language="{{.LanguageCode}}"></div>
-<p class="small" data-mail-feedback role="status"></p>
   <header class="page-header server-settings-header mb-4">
-    <h1 class="section-heading"><img src="/p/static/sitebrush-app-icon.png" class="section-icon" alt=""><a href="/">{{.Domain}}</a> <small class="text-muted">| {{.Title}}</small></h1>
-    {{if .ShowProfiler}}{{template "server-profiler" .}}{{end}}
+    <div class="server-settings-heading">
+      <h1 class="section-heading"><img src="/p/static/sitebrush-app-icon.png" class="section-icon" alt=""><a href="/">{{.Domain}}</a></h1>
+      <p class="server-settings-context" aria-live="polite" data-server-context data-server-context-local="{{.Domain}} · {{if eq .LanguageCode "ru"}}Настройки сервера{{else}}Server settings{{end}}" data-server-context-node-label="{{if eq .LanguageCode "ru"}}Настройки сервера{{else}}Server settings{{end}}" data-server-context-central="{{if eq .LanguageCode "ru"}}Центральный узел{{else}}Central node{{end}}">{{.Title}}</p>
+    </div>
+    <div class="server-settings-actions">
+      <a href="/" class="btn btn-outline-secondary btn-sm" target="_blank" rel="noopener noreferrer">{{if eq .LanguageCode "ru"}}Открыть сайт{{else}}Open website{{end}} ↗</a>
+      <label class="server-theme-control"><span>{{if eq .LanguageCode "ru"}}Тема{{else}}Theme{{end}}</span>
+        <select class="form-select form-select-sm" data-server-theme aria-label="{{if eq .LanguageCode "ru"}}Тема интерфейса{{else}}Interface theme{{end}}">
+          <option value="system">{{if eq .LanguageCode "ru"}}Системная{{else}}System{{end}}</option>
+          <option value="light">{{if eq .LanguageCode "ru"}}Светлая{{else}}Light{{end}}</option>
+          <option value="dark">{{if eq .LanguageCode "ru"}}Тёмная{{else}}Dark{{end}}</option>
+        </select>
+      </label>
+      {{if .ShowProfiler}}{{template "server-profiler" .}}{{end}}
+    </div>
   </header>
 
   {{if .Status}}<div class="alert alert-info billing-status" role="alert">{{.Status}}</div>{{end}}
@@ -80,25 +96,25 @@
   <div class="expense-simple-page">
     <div class="server-admin-shell">
       <aside class="server-admin-sidebar">
-        <nav class="server-root-tabs" aria-label="{{index .T "server_ui_navigation"}}" data-server-root-tabs>
-          <span class="server-nav-group">{{index .T "server_ui_server_settings"}}</span>
+        <nav class="server-root-tabs" aria-label="{{index .T "server_ui_navigation"}}" data-server-root-tabs data-local-server-id="{{.LocalServerID}}">
+          <span class="server-nav-group">{{if eq .LanguageCode "ru"}}Текущий сервер{{else}}Current server{{end}}</span>
           <button type="button" class="is-active" data-server-root-target="servers" data-server-config-shortcut="overview" aria-current="page">{{index .T "server_ui_overview"}}</button>
-          {{if .SelectedServerLocal}}
+          {{if or .LocalServerID .SelectedServerLocal}}
           {{if .CanConfigurePublicIPs}}<button type="button" data-server-root-target="servers" data-server-config-shortcut="network">{{index .T "server_ui_network"}}</button>{{end}}
-          <button type="button" data-server-root-target="servers" data-server-config-shortcut="updates">{{index .T "update_title"}}</button>
+          {{if .CanConfigurePublicIPs}}<button type="button" data-server-root-target="servers" data-server-config-shortcut="updates">{{index .T "update_title"}}</button>{{end}}
           {{end}}
           <span class="server-nav-group">{{index .T "server_nav_customers"}}</span>
-          {{if .SelectedServerLocal}}
+          {{if or .LocalServerID .SelectedServerLocal}}
           <button type="button" data-server-root-target="servers" data-server-config-shortcut="registration">{{index .T "billing_registration_title"}}</button>
           {{if .AutoRegistrationEnabled}}<button type="button" data-server-root-target="servers" data-server-config-shortcut="demo">{{index .T "billing_demo_title"}}</button>{{end}}
           {{end}}
           {{if or (and .AutoRegistrationEnabled .PublicTrialEnabled) .ActivePublicTrialSites .CleanupPendingTrialSites .ArchivedPublicTrialSites}}<button type="button" data-server-root-target="temporary-sites">{{index .T "billing_temporary_sites"}}</button>{{end}}
           <button type="button" data-server-root-target="servers" data-server-config-shortcut="clients">{{index .T "billing_clients"}}</button>
-          <span class="server-nav-group">{{index .T "server_nav_finances"}}</span>
-          {{if .SelectedServerLocal}}<button type="button" data-server-root-target="servers" data-server-config-shortcut="monetization">{{index .T "server_ui_monetization"}}</button>{{end}}
+          <span class="server-nav-group">{{if eq .LanguageCode "ru"}}Биллинг узла{{else}}Node billing{{end}}</span>
+          {{if or .LocalServerID .SelectedServerLocal}}<button type="button" data-server-root-target="servers" data-server-config-shortcut="monetization">{{index .T "server_ui_monetization"}}</button>{{end}}
           <button type="button" data-server-root-target="servers" data-server-config-shortcut="billing">{{index .T "server_billing_nav"}}</button>
           {{if .ShowCentralRegistry}}
-          <span class="server-nav-group">SiteBrush.com</span>
+          <span class="server-nav-group server-nav-global-heading">{{if eq .LanguageCode "ru"}}Центр управления · SiteBrush.com{{else}}Control center · SiteBrush.com{{end}}</span>
           <button type="button" data-server-root-target="installations">{{index .T "billing_installations"}}</button>
           <button type="button" data-server-root-target="clients">{{index .T "server_central_clients"}}</button>
           <button type="button" data-server-root-target="billing">{{index .T "server_central_invoices"}}</button>
@@ -123,7 +139,10 @@
           <div class="server-config-content">
             <section class="server-config-view" data-server-config-view="overview">
               <header class="server-config-view-heading"><h2>{{index $.T "server_ui_overview"}}</h2><p>{{index $.T "server_ui_overview_hint"}}</p></header>
-        <section class="expense-simple-summary">
+        <div class="server-overview-blocks">
+          <section class="expense-simple-summary server-overview-system">
+            <h3>{{if eq $.LanguageCode "ru"}}Состояние системы{{else}}System health{{end}}</h3>
+
           <div class="expense-simple-summary-head">
             <div>
               <h2>{{$server.Name}}</h2>
@@ -140,7 +159,6 @@
               {{if $server.CPULabel}}<span>{{$server.CPULabel}}</span>{{end}}
               {{if $server.SyncStatusLabel}}<span class="{{$server.SyncStatusClass}}">{{$server.SyncStatusLabel}}</span>{{end}}
               {{if $server.NetworkStatusLabel}}<span class="{{$server.NetworkStatusClass}}">{{$server.NetworkStatusLabel}}</span>{{end}}
-              {{if $server.DiskUsedLabel}}<span class="{{$server.DiskStatusClass}}">{{$server.DiskUsedLabel}} / {{$server.DiskTotalLabel}}</span>{{end}}
               {{if $server.SitebrushVersionLabel}}<span class="{{$server.SitebrushVersionClass}}">SiteBrush {{$server.SitebrushVersionLabel}}</span>{{end}}
             </div>
             {{if $server.SystemMetrics}}
@@ -155,26 +173,9 @@
             </div>
             {{end}}
           </div>
-          <section class="expense-mail-monitor" id="mail-monitor-{{$serverIndex}}">
-            <strong>{{index $.T "mail_monitor_title"}}</strong>
-            {{if $expenseServer.MailAvailable}}
-            <div class="expense-mail-monitor-counts">
-              <span>{{index $.T "mail_monitor_queued_count"}}: <span data-mail-count="Queued" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.Queued}} / {{$expenseServer.MailLast90Days.Queued}}</span></span>
-              <span>{{index $.T "mail_monitor_accepted_count"}}: <span data-mail-count="Accepted" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.Accepted}} / {{$expenseServer.MailLast90Days.Accepted}}</span></span>
-              <span>{{index $.T "mail_monitor_failed_count"}}: <span data-mail-count="Failed" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.Failed}} / {{$expenseServer.MailLast90Days.Failed}}</span></span>
-              <span>{{index $.T "mail_monitor_registration_requested_count"}}: <span data-mail-count="RegistrationRequested" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.RegistrationRequested}} / {{$expenseServer.MailLast90Days.RegistrationRequested}}</span></span>
-              <span>{{index $.T "mail_monitor_registration_complete_count"}}: <span data-mail-count="RegistrationComplete" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.RegistrationComplete}} / {{$expenseServer.MailLast90Days.RegistrationComplete}}</span></span>
-              <span>{{index $.T "mail_monitor_recovery_requested_count"}}: <span data-mail-count="RecoveryRequested" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.RecoveryRequested}} / {{$expenseServer.MailLast90Days.RecoveryRequested}}</span></span>
-              <span>{{index $.T "mail_monitor_recovery_complete_count"}}: <span data-mail-count="RecoveryComplete" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.RecoveryComplete}} / {{$expenseServer.MailLast90Days.RecoveryComplete}}</span></span>
-            </div>
-              <span>{{index $.T "mail_journal_relay_count"}}: <span data-mail-count="RelayAccepted" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.RelayAccepted}} / {{$expenseServer.MailLast90Days.RelayAccepted}}</span></span>
-              <span>{{index $.T "mail_journal_cancelled_count"}}: <span data-mail-count="Cancelled" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.Cancelled}} / {{$expenseServer.MailLast90Days.Cancelled}}</span></span>
-            {{else}}<div class="text-danger">{{index $.T "mail_monitor_unavailable"}}</div>{{end}}
-            {{if $expenseServer.MailReceivedAt}}<small>{{index $.T "mail_monitor_received_at"}}: <time datetime="{{$expenseServer.MailReceivedAt}}">{{$expenseServer.MailReceivedAt}}</time></small>{{end}}
-            {{if not $server.Local}}<small class="text-muted">{{index $.T "mail_monitor_remote_note"}}</small>{{end}}
-            <small class="text-muted">{{index $.T "mail_monitor_boundary"}}</small>
-            <a class="btn btn-outline-primary btn-sm" href="{{$expenseServer.MailSecurityURL}}">{{index $.T "mail_journal_security_details"}}</a>
           </section>
+          <section class="expense-simple-summary server-overview-finance">
+            <h3>{{if eq $.LanguageCode "ru"}}Финансы и квота{{else}}Finances and quota{{end}}</h3>
           {{if not $server.DiskCapacityKnown}}
           <div class="alert alert-warning mb-0">{{index $.T "expenses_disk_unknown"}}</div>
           {{else}}
@@ -191,8 +192,36 @@
           </div>
           {{if $server.CapacityExceeded}}<div class="alert alert-danger mb-0">{{index $.T "expenses_capacity_exceeded"}}</div>{{end}}
           {{end}}
-        </section>
-        {{if $server.Local}}<div class="server-overview-monetization"><button type="button" class="btn btn-outline-primary btn-sm" data-server-config-target="monetization">{{index $.T "server_ui_monetization"}}</button></div>{{end}}
+          </section>
+          <section class="expense-simple-summary server-overview-mail">
+            <h3>{{if eq $.LanguageCode "ru"}}Почта и регистрации{{else}}Mail and registration{{end}}</h3>
+          <section class="expense-mail-monitor" id="mail-monitor-{{$serverIndex}}">
+            <strong>{{index $.T "mail_monitor_title"}}</strong>
+            {{if $expenseServer.MailAvailable}}
+            <div class="expense-mail-monitor-counts">
+              <span>{{index $.T "mail_monitor_queued_count"}}: <span data-mail-count="Queued" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.Queued}} / {{$expenseServer.MailLast90Days.Queued}}</span></span>
+              <span>{{index $.T "mail_monitor_accepted_count"}}: <span data-mail-count="Accepted" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.Accepted}} / {{$expenseServer.MailLast90Days.Accepted}}</span></span>
+              <span class="{{if gt $expenseServer.MailLastDay.Failed 0}}server-mail-error{{else if gt $expenseServer.MailLast90Days.Failed 0}}server-mail-warning{{end}}">{{index $.T "mail_monitor_failed_count"}}: <span data-mail-count="Failed" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.Failed}} / {{$expenseServer.MailLast90Days.Failed}}</span></span>
+            </div>
+            <details class="server-mail-details">
+              <summary>{{if eq $.LanguageCode "ru"}}Дополнительные показатели · 24 часа / 90 дней{{else}}Additional metrics · 24 hours / 90 days{{end}}</summary>
+              <div class="expense-mail-monitor-counts">
+              <span>{{index $.T "mail_monitor_registration_requested_count"}}: <span data-mail-count="RegistrationRequested" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.RegistrationRequested}} / {{$expenseServer.MailLast90Days.RegistrationRequested}}</span></span>
+              <span>{{index $.T "mail_monitor_registration_complete_count"}}: <span data-mail-count="RegistrationComplete" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.RegistrationComplete}} / {{$expenseServer.MailLast90Days.RegistrationComplete}}</span></span>
+              <span>{{index $.T "mail_monitor_recovery_requested_count"}}: <span data-mail-count="RecoveryRequested" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.RecoveryRequested}} / {{$expenseServer.MailLast90Days.RecoveryRequested}}</span></span>
+              <span>{{index $.T "mail_monitor_recovery_complete_count"}}: <span data-mail-count="RecoveryComplete" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.RecoveryComplete}} / {{$expenseServer.MailLast90Days.RecoveryComplete}}</span></span>
+              <span>{{index $.T "mail_journal_relay_count"}}: <span data-mail-count="RelayAccepted" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.RelayAccepted}} / {{$expenseServer.MailLast90Days.RelayAccepted}}</span></span>
+              <span>{{index $.T "mail_journal_cancelled_count"}}: <span data-mail-count="Cancelled" data-mail-server="{{$server.ID}}">{{$expenseServer.MailLastDay.Cancelled}} / {{$expenseServer.MailLast90Days.Cancelled}}</span></span>
+              </div>
+            </details>
+            {{else}}<div class="text-danger">{{index $.T "mail_monitor_unavailable"}}</div>{{end}}
+            {{if $expenseServer.MailReceivedAt}}<small>{{index $.T "mail_monitor_received_at"}}: <time datetime="{{$expenseServer.MailReceivedAt}}">{{$expenseServer.MailReceivedAt}}</time></small>{{end}}
+            {{if not $server.Local}}<small class="text-muted">{{index $.T "mail_monitor_remote_note"}}</small>{{end}}
+            <small class="text-muted">{{index $.T "mail_monitor_boundary"}}</small>
+            <a class="btn btn-outline-primary btn-sm" href="{{$expenseServer.MailSecurityURL}}">{{index $.T "mail_journal_security_details"}}</a>
+          </section>
+          </section>
+        </div>
             </section>
 
         {{if $server.Local}}
@@ -204,37 +233,35 @@
     <label class="d-block">{{index $.T "public_ip_manual_label"}}<textarea class="form-control" rows="3" data-public-ip-manual></textarea></label>
     <p class="small text-muted">{{index $.T "public_ip_manual_hint"}}</p>
     <label class="d-block">{{index $.T "public_ip_primary_label"}}<select class="form-select" data-public-ip-preferred></select></label>
-    <p>{{index $.T "public_ip_primary_label"}}: <strong data-public-ip-primary></strong></p>
+    <div class="server-primary-ip">{{index $.T "public_ip_primary_label"}}: <strong data-public-ip-primary></strong>
+      <button type="button" class="btn btn-outline-secondary btn-sm" data-public-ip-copy disabled>{{if eq $.LanguageCode "ru"}}Скопировать{{else}}Copy{{end}}</button>
+    </div>
+    <p class="small text-muted">{{if eq $.LanguageCode "ru"}}Предпочитаемый IP выбирает основной публичный адрес для настроек сайтов и проверки DNS. Это не меняет системную маршрутизацию или исходный адрес внешних соединений.{{else}}The preferred IP selects the primary public address for site settings and DNS checks. It does not change OS routing or the source IP of outbound connections.{{end}}</p>
     <div class="d-flex gap-2"><button type="button" class="btn btn-primary" data-public-ip-save>{{index $.T "billing_save"}}</button><button type="button" class="btn btn-outline-secondary" data-public-ip-refresh>{{index $.T "public_ip_refresh"}}</button></div>
     <p role="status" aria-live="polite" data-public-ip-status></p>
     <script type="application/json" data-public-ip-labels>{"ready":{{index $.T "public_ip_ready"}},"auto":{{index $.T "public_ip_auto"}},"manual":{{index $.T "public_ip_manual_label"}},"outgoing":{{index $.T "public_ip_outgoing"}},"local":{{index $.T "public_ip_local"}},"inactive":{{index $.T "public_ip_inactive"}},"missing":{{index $.T "public_ip_missing"}},"working":{{index $.T "public_ip_working"}},"disconnected":{{index $.T "public_ip_disconnected"}}}</script>
   </section>
             </section>
             {{end}}
+            {{if and (eq $.SelectedServerSection "updates") $.ShowServerUpdater}}
             <section class="server-config-view" data-server-config-view="updates">
-          <div id="server-update" class="mb-4">
-            <h2>{{index $.T "update_title"}}</h2>
-            <p role="status" data-server-update-frame-loading>{{index $.T "update_connecting"}}</p>
-            <iframe title="{{index $.T "update_title"}}" data-src="/?server_update&embedded" class="server-update-embed" data-server-update-frame hidden></iframe>
-            <p role="alert" class="alert alert-danger" data-server-update-frame-error hidden>{{index $.T "update_unavailable"}} · <a href="/?server_update">{{index $.T "update_title"}}</a></p>
-
-          </div>
+              <h2>{{index $.T "update_title"}}</h2>
+              {{template "server-updater" $}}
             </section>
-            <section class="server-config-view" data-server-config-view="registration">
+            {{end}}
+            {{if eq $.SelectedServerSection "registration"}}<section class="server-config-view" data-server-config-view="registration">
           <div>
             <h2>{{index $.T "billing_registration_title"}}</h2>
             <p class="text-muted">{{index $.T "billing_registration_hint"}}</p>
             {{template "registration-settings-form" $}}
-            {{if $.AutoRegistrationEnabled}}<button type="button" class="btn btn-outline-secondary" data-server-config-target="demo">{{index $.T "billing_demo_title"}}</button>{{end}}
             {{if and $.AutoRegistrationEnabled $.PublicTrialEnabled}}
             <div class="mt-4">
               {{template "public-trial-settings" $}}
-              <p class="mt-3 mb-0"><a href="#temporary-sites">{{index $.T "billing_temporary_sites"}}</a></p>
             </div>
             {{end}}
           </div>
-            </section>
-            {{if $.AutoRegistrationEnabled}}<section class="server-config-view" data-server-config-view="demo">
+            </section>{{end}}
+            {{if and $.AutoRegistrationEnabled (eq $.SelectedServerSection "demo")}}<section class="server-config-view" data-server-config-view="demo">
           <div>
             <h2>{{index $.T "billing_demo_title"}}</h2>
             <p class="text-muted">{{index $.T "billing_demo_billing_blocked"}} {{index $.T "billing_demo_exclusion_hint"}}</p>
@@ -243,93 +270,139 @@
             </section>{{end}}
         {{end}}
 
-            <section class="server-config-view" data-server-config-view="clients">
+            {{if eq $.SelectedServerSection "clients"}}<section class="server-config-view" data-server-config-view="clients">
           <div class="billing-section-header">
             <div><h2>{{index $.T "billing_clients"}}</h2><p class="text-muted">{{index $.T "server_clients_hint"}}</p></div>
           </div>
           {{template "client-filters" $}}
           <div class="expense-simple-clients" data-server-clients-list>
             {{range $clientIndex, $client := $expenseServer.Clients}}
-            <details class="expense-simple-client" data-server-client-row data-customer-email="{{$client.Email}}" data-client-search="{{$client.SearchText}}" data-client-unpaid="{{$client.HasUnpaid}}" data-client-overdue="{{$client.HasOverdue}}" data-client-over-limit="{{$client.OverLimit}}" data-client-attention="{{$client.NeedsAttention}}">
+            <details class="expense-simple-client" data-server-client-row data-customer-email="{{$client.Email}}" data-client-search="{{$client.SearchText}}" data-client-site-count="{{$client.SiteCount}}" data-client-used-bytes="{{$client.TotalStorageBytes}}" data-client-unpaid="{{$client.HasUnpaid}}" data-client-overdue="{{$client.HasOverdue}}" data-client-over-limit="{{$client.OverLimit}}" data-client-attention="{{$client.NeedsAttention}}">
               <summary>
-                <span class="expense-simple-client-head"><strong>{{$client.Email}}</strong><small class="text-muted">{{$client.SiteCount}} {{index $.T "billing_client_sites"}}</small></span>
-                <span><strong>{{$client.TotalStorageLabel}}</strong><br><small>{{index $.T "billing_client_storage"}}</small></span>
-                <span><strong>{{$client.PaidThisMonthLabel}}</strong><br><small>{{index $.T "server_billing_paid"}}</small></span>
-                <span><strong>{{$client.DebtLabel}}</strong><br><small>{{if $client.HasOverdue}}{{index $.T "server_billing_overdue"}}{{else if $client.OverLimit}}{{index $.T "server_clients_over_limit"}}{{else if $client.NeedsAttention}}{{index $.T "server_clients_attention"}}{{else}}{{index $.T "server_billing_open"}}{{end}}</small></span>
+                <span class="expense-simple-client-head">
+                  <strong>{{$client.Email}}</strong>
+                  <span class="server-client-problems">
+                    {{if $client.HasOverdue}}<span class="server-client-problem is-error">{{index $.T "server_billing_overdue"}} · {{$client.DebtLabel}}</span>{{else if $client.OverLimit}}<span class="server-client-problem is-warning">{{index $.T "server_clients_over_limit"}}</span>{{else if $client.NeedsAttention}}<span class="server-client-problem is-warning">{{index $.T "server_clients_attention"}}</span>{{end}}
+                    <span class="server-client-problem is-warning" data-client-ssl-problems hidden></span>
+                  </span>
+                  <small class="text-muted">{{$client.SiteCount}} {{index $.T "billing_client_sites"}} · <span data-client-quota-summary>{{$client.TotalStorageLabel}}</span></small>
+                </span>
+                <span class="server-client-head-cost"><strong>{{$client.DebtLabel}}</strong><small>{{index $.T "server_billing_open"}}</small><small>{{index $.T "server_billing_paid"}}: {{$client.PaidThisMonthLabel}}</small></span>
               </summary>
+              <script type="application/json" data-client-debt-model>{{$client.DebtByCurrency}}</script>
               <div class="expense-simple-client-body">
-                <div class="expense-simple-sites">
-                  {{range $siteIndex, $site := $client.Sites}}
-                  <div class="expense-simple-site">
-                    <span>{{if $site.URL}}<a href="{{$site.URL}}" target="_blank" rel="noopener noreferrer">{{$site.Domain}}</a>{{else}}{{$site.Domain}}{{end}}{{if $site.DeletionReason}}<small class="d-block text-warning">{{index $.T "server_delete_pending"}} {{$site.DeletionDeadline}}</small>{{end}}{{range $certificate := $site.CertificateDomains}}<br><small>{{if $certificate.Valid}}<span class="status-ok">{{$certificate.Domain}} · {{index $.T "domain_settings_ssl_valid"}} · {{$certificate.ExpiresAt}} ({{$certificate.Remaining}})</span>{{else}}<span class="status-bad">{{$certificate.Domain}} · {{index $.T "domain_settings_ssl_invalid"}}{{if $certificate.LastError}} · {{$certificate.LastError}}{{end}}</span>{{end}} {{if $certificate.CanRenew}}<button type="button" class="btn btn-outline-primary btn-sm" data-certificate-renew="{{$certificate.Domain}}">{{index $.T "domain_settings_ssl_renew_now"}}</button><span data-certificate-renew-status="{{$certificate.Domain}}" aria-live="polite"></span>{{end}}</small>{{end}}</span>
-                    <span>{{$site.UsedLabel}} · {{$site.BillingPriceLabel}}{{if $site.AnalyticsLabel}}<small class="d-block">{{index $.T "cx_storage"}}: {{$site.AnalyticsLabel}}</small>{{end}}</span>
-                    <span class="expense-simple-site-actions">
-                      {{if $site.CanEditQuota}}<button type="button" class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#simpleQuota{{$serverIndex}}_{{$clientIndex}}_{{$siteIndex}}">{{index $.T "billing_quota"}}: {{$site.LimitLabel}}</button>
-                      {{else}}{{index $.T "billing_quota"}}: {{$site.LimitLabel}}{{end}}
-                      {{if $site.CanDelete}}<button type="button" class="btn btn-outline-danger btn-sm" data-bs-toggle="modal" data-bs-target="#simpleDelete{{$serverIndex}}_{{$clientIndex}}_{{$siteIndex}}">{{index $.T "server_site_actions"}}</button>{{end}}
-                    </span>
+                <nav class="server-client-tabs" aria-label="{{if eq $.LanguageCode "ru"}}Разделы клиента{{else}}Client sections{{end}}">
+                  <button type="button" data-client-tab="sites" class="is-active" aria-pressed="true">{{if eq $.LanguageCode "ru"}}Сайты{{else}}Sites{{end}} ({{$client.SiteCount}})</button>
+                  <button type="button" data-client-tab="billing" aria-pressed="false">{{if eq $.LanguageCode "ru"}}Биллинг и расписание{{else}}Billing and schedule{{end}}</button>
+                  <button type="button" data-client-tab="account" aria-pressed="false">{{if eq $.LanguageCode "ru"}}Аккаунт клиента{{else}}Client account{{end}}</button>
+                </nav>
+                <section data-client-pane="sites">
+                  {{if gt $client.SiteCount 5}}
+                  <div class="server-client-site-controls">
+                    <label>{{if eq $.LanguageCode "ru"}}Найти сайт клиента{{else}}Find client site{{end}}<input class="form-control form-control-sm" type="search" data-client-domain-search placeholder="{{if eq $.LanguageCode "ru"}}Поиск по домену{{else}}Search domain{{end}}" autocomplete="off"></label>
+                    <label class="server-client-error-filter"><input type="checkbox" data-client-errors-only> {{if eq $.LanguageCode "ru"}}Только с ошибками{{else}}Problems only{{end}} (<span data-client-error-count>0</span>)</label>
                   </div>
-                  {{if $site.CanEditQuota}}
-                  <div class="modal fade" id="simpleQuota{{$serverIndex}}_{{$clientIndex}}_{{$siteIndex}}" tabindex="-1" aria-hidden="true">
-                    <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
-                      <form method="post" action="?server-settings"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
-                        <div class="modal-header"><h2 class="modal-title h5">{{index $.T "billing_quota_change_title"}}</h2><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button></div>
-                        <div class="modal-body">
-                          <p><strong>{{$site.Domain}}</strong></p>
-                          <input type="hidden" name="billing_action" value="update_site_quota">
-                          <input type="hidden" name="domain" value="{{$site.Domain}}">
-                          <label>{{index $.T "billing_quota"}} <input name="quota" type="text" class="form-control" value="{{$site.QuotaInput}}" required></label>
+                  {{end}}
+                  <div class="expense-simple-sites" data-client-sites>
+                    {{range $siteIndex, $site := $client.Sites}}
+                    <article class="expense-simple-site" data-client-site-row data-client-site-domain="{{$site.Domain}}" data-client-site-used="{{$site.UsedBytes}}" data-client-site-limit="{{$site.LimitLabel}}" data-client-site-problem="{{if $site.DeletionReason}}true{{else}}false{{end}}">
+                      <div class="server-client-site-identity">
+                        <strong>{{if $site.URL}}<a href="{{$site.URL}}" target="_blank" rel="noopener noreferrer">{{$site.Domain}}</a>{{else}}{{$site.Domain}}{{end}}</strong>
+                        {{if $site.DeletionReason}}<small class="status-bad">{{index $.T "server_delete_pending"}} {{$site.DeletionDeadline}}</small>{{end}}
+                        {{range $certificate := $site.CertificateDomains}}
+                        <div class="server-client-certificate" data-client-certificate data-client-certificate-valid="{{if $certificate.Valid}}true{{else}}false{{end}}" data-client-certificate-domain="{{$certificate.Domain}}" data-client-certificate-expires="{{$certificate.ExpiresAt}}" data-client-certificate-remaining="{{$certificate.Remaining}}">
+                          {{if $certificate.Valid}}<small class="status-ok">{{$certificate.Domain}} · {{index $.T "domain_settings_ssl_valid"}} · {{$certificate.ExpiresAt}} ({{$certificate.Remaining}})</small>{{else}}
+                          <small class="status-bad" data-client-ssl-invalid>{{$certificate.Domain}} · {{index $.T "domain_settings_ssl_invalid"}}{{if $certificate.LastError}} · {{$certificate.LastError}}{{end}}</small>
+                          {{if $certificate.CanRenew}}<button type="button" class="btn btn-outline-primary btn-sm" data-certificate-renew="{{$certificate.Domain}}">{{index $.T "domain_settings_ssl_renew_now"}}</button>{{end}}
+                          {{end}}
+                          <span data-client-ssl-inline></span><span data-certificate-renew-status="{{$certificate.Domain}}" aria-live="polite"></span>
                         </div>
-                        <div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">{{index $.T "edit_cancel"}}</button><button type="submit" class="btn btn-primary">{{index $.T "billing_apply"}}</button></div>
-                      </form>
-                    </div></div>
-                  </div>
-                  {{end}}
-                  {{if $site.CanDelete}}
-                  <div class="modal fade" id="simpleDelete{{$serverIndex}}_{{$clientIndex}}_{{$siteIndex}}" tabindex="-1" aria-hidden="true">
-                    <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
-                      <form method="post" action="?server-settings"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}"><input type="hidden" name="domain" value="{{$site.Domain}}">
-                        <div class="modal-header"><h2 class="modal-title h5">{{index $.T "server_site_label"}} {{$site.Domain}}</h2><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button></div>
-                        <div class="modal-body">
-                          {{if $site.DeletionReason}}<p class="alert alert-warning">{{index $.T "server_delete_pending"}} {{$site.DeletionDeadline}}. {{index $.T "server_delete_reason"}} {{if eq $site.DeletionReason "nonpayment"}}{{index $.T "server_delete_nonpayment"}}{{else}}{{index $.T "server_delete_request"}}{{end}}.</p>{{end}}
-                          <p><strong>{{index $.T "server_delete_size"}}</strong> {{$site.DeletionSizeLabel}}. {{index $.T "server_delete_no_backup"}}</p>
-                          <label>{{index $.T "server_delete_action"}}<select name="billing_action" class="form-select" required>{{if $site.DeletionReason}}<option value="restore_site">{{index $.T "server_delete_restore"}}</option>{{else}}<option value="queue_site">{{index $.T "server_delete_queue"}}</option><option value="suspend_site_nonpayment">{{index $.T "server_delete_suspend"}}</option>{{end}}<option value="delete_site_now">{{index $.T "server_delete_now"}}</option></select></label>
-                          <label class="mt-3">{{index $.T "server_delete_confirm_domain"}}<input name="confirm_domain" type="text" class="form-control" placeholder="{{$site.Domain}}" autocomplete="off" required></label>
+                        {{end}}
+                      </div>
+                      <div class="server-client-site-usage">
+                        {{if $site.CanEditQuota}}
+                        <button type="button" class="server-client-quota-trigger" data-client-quota-edit data-domain="{{$site.Domain}}" data-quota="{{$site.QuotaInput}}" data-bs-toggle="modal" data-bs-target="#clientQuotaModal" aria-label="{{index $.T "billing_quota"}} · {{$site.Domain}}">{{$site.UsedLabel}} / {{$site.LimitLabel}}</button>
+                        {{else}}<span>{{$site.UsedLabel}} / {{$site.LimitLabel}}</span>{{end}}
+                        <div class="server-client-site-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" data-client-site-progress><span></span></div>
+                        {{if $site.AnalyticsLabel}}<small>{{index $.T "cx_storage"}}: {{$site.AnalyticsLabel}}</small>{{end}}
+                      </div>
+                      <div class="expense-simple-site-actions">
+                        {{if or $site.CanDelete $site.CertificateDomains}}
+                        <div class="dropdown">
+                          <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-toggle="dropdown" aria-expanded="false" aria-label="{{if eq $.LanguageCode "ru"}}Действия с сайтом{{else}}Site actions{{end}}">⋮</button>
+                          <div class="dropdown-menu dropdown-menu-end">
+                            {{range $certificate := $site.CertificateDomains}}{{if and $certificate.Valid $certificate.CanRenew}}
+                            <button type="button" class="dropdown-item" data-client-valid-ssl-action data-certificate-renew="{{$certificate.Domain}}">{{if eq $.LanguageCode "ru"}}Обновить SSL принудительно{{else}}Force SSL renewal{{end}} · {{$certificate.Domain}}</button>
+                            {{end}}{{end}}
+                            {{if $site.CanDelete}}
+                            <button type="button" class="dropdown-item text-danger" data-client-site-delete data-domain="{{$site.Domain}}" data-deletion-reason="{{$site.DeletionReason}}" data-deletion-deadline="{{$site.DeletionDeadline}}" data-deletion-size="{{$site.DeletionSizeLabel}}" data-bs-toggle="modal" data-bs-target="#clientDeleteModal">{{if $site.DeletionReason}}{{index $.T "server_delete_restore"}}{{else}}{{index $.T "server_delete_now"}}{{end}}</button>
+                            {{end}}
+                          </div>
                         </div>
-                        <div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">{{index $.T "edit_cancel"}}</button><button type="submit" class="btn btn-outline-danger">{{index $.T "server_delete_execute"}}</button></div>
-                      </form>
-                    </div></div>
+                        {{end}}
+                      </div>
+                    </article>
+                    {{end}}
                   </div>
+                  <div class="server-client-site-footer" data-client-site-footer hidden>
+                    <span data-client-site-count aria-live="polite"></span>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-client-show-all>{{if eq $.LanguageCode "ru"}}Показать все сайты{{else}}Show all sites{{end}}</button>
+                  </div>
+                  <p class="server-workspace-empty" data-client-no-sites hidden>{{index $.T "server_installations_no_results"}}</p>
+                </section>
+                <section data-client-pane="billing" hidden>
+                  {{if $client.BillingCustomerID}}
+                  <form method="post" action="?server-settings" class="billing-plan-form">
+                    <input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+                    <input type="hidden" name="billing_action" value="billing_customer_schedule">
+                    <input type="hidden" name="customer_id" value="{{$client.BillingCustomerID}}">
+                    <label>{{index $.T "billing_invoice_day"}} <input type="number" name="invoice_day" class="form-control" min="1" max="28" value="{{$client.InvoiceDay}}" required></label>
+                    <label>{{index $.T "billing_payment_term_days"}} <input type="number" name="payment_term_days" class="form-control" min="1" max="60" value="{{$client.PaymentTermDays}}" required></label>
+                    <label>{{index $.T "billing_timezone"}} <input type="text" name="timezone" class="form-control" value="{{$client.BillingTimezone}}" list="billingTimezoneList" required></label>
+                    <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">{{index $.T "billing_save"}}</button>
+                  </form>
                   {{end}}
-                  {{if $site.AdminAccounts}}<details class="expense-simple-site-accounts"><summary>{{index $.T "server_admin_accounts"}} {{$site.Domain}}</summary>
-                    {{range $site.AdminAccounts}}<form method="post" action="?server-settings" class="border rounded p-2 mt-2"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}"><input type="hidden" name="domain" value="{{$site.Domain}}"><input type="hidden" name="confirm_domain" value="{{$site.Domain}}"><input type="hidden" name="email" value="{{.Email}}">
-                      <strong>{{.Email}}</strong>{{if .DeleteAfter}} <span class="text-warning">{{index $.T "server_delete_pending"}} {{.DeleteAfter}}</span>{{end}}
-                      {{if .Protected}}<p class="text-muted mb-0">{{index $.T "server_account_protected"}}</p>{{else}}<label class="d-block mt-2">{{index $.T "server_delete_action"}}<select name="billing_action" class="form-select form-select-sm">{{if .DeleteAfter}}<option value="restore_account">{{index $.T "server_account_restore"}}</option>{{else}}<option value="queue_account">{{index $.T "server_account_queue"}}</option>{{end}}<option value="delete_account_now">{{index $.T "server_account_delete_now"}}</option></select></label><label class="d-block mt-2">{{index $.T "server_account_confirm_email"}}<input name="confirm_email" type="email" class="form-control form-control-sm" autocomplete="off" required></label><button type="submit" class="btn btn-outline-danger btn-sm mt-2">{{index $.T "server_action_confirm"}}</button>{{end}}
-                    </form>{{end}}
-                  </details>{{end}}
-                  {{end}}
-                </div>
-                {{if $client.BillingCustomerID}}
-                <form method="post" action="?server-settings" class="billing-plan-form"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
-                  <input type="hidden" name="billing_action" value="billing_customer_schedule">
-                  <input type="hidden" name="customer_id" value="{{$client.BillingCustomerID}}">
-                  <label>{{index $.T "billing_invoice_day"}} <input type="number" name="invoice_day" class="form-control" min="1" max="28" value="{{$client.InvoiceDay}}" required></label>
-                  <label>{{index $.T "billing_payment_term_days"}} <input type="number" name="payment_term_days" class="form-control" min="1" max="60" value="{{$client.PaymentTermDays}}" required></label>
-                  <label>{{index $.T "billing_timezone"}} <input type="text" name="timezone" class="form-control" value="{{$client.BillingTimezone}}" list="billingTimezoneList" required></label>
-                  <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">{{index $.T "billing_save"}}</button>
-                </form>
-                {{end}}
-                <div class="server-client-invoices-link">
-                  <button type="button" class="btn btn-outline-primary btn-sm" data-server-config-target="billing" data-billing-client-open="{{$client.Email}}">{{index $.T "server_clients_view_invoices"}}</button>
-                  <small class="text-muted">{{index $.T "server_clients_view_invoices_hint"}}</small>
-                </div>
+                  <div class="server-client-invoices-link">
+                    <button type="button" class="btn btn-outline-primary btn-sm" data-server-config-target="billing" data-billing-client-open="{{$client.Email}}">{{index $.T "server_clients_view_invoices"}} · {{$client.DebtLabel}}</button>
+                    <small class="text-muted">{{index $.T "server_clients_view_invoices_hint"}}</small>
+                  </div>
+                </section>
+                <section data-client-pane="account" hidden>
+                  <p class="small text-muted">{{if eq $.LanguageCode "ru"}}Действия применяются к выбранной учётной записи на конкретном сайте. Удаление доступа на одном сайте не удаляет другие сайты клиента.{{else}}Actions apply to the selected account on one site. Removing access on a site does not remove the client's other websites.{{end}}</p>
+                  <form method="post" action="?server-settings" class="server-client-account-form" data-client-account-form>
+                    <input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+                    <input type="hidden" name="domain" data-client-account-domain>
+                    <input type="hidden" name="confirm_domain" data-client-account-confirm-domain>
+                    <input type="hidden" name="email" data-client-account-email>
+                    <label>{{index $.T "server_admin_accounts"}}
+                      <select class="form-select" data-client-account-select required>
+                        <option value="">{{if eq $.LanguageCode "ru"}}Выберите сайт и аккаунт{{else}}Choose a site and account{{end}}</option>
+                        {{range $site := $client.Sites}}{{range $account := $site.AdminAccounts}}
+                        <option value="{{$site.Domain}} · {{$account.Email}}" data-domain="{{$site.Domain}}" data-email="{{$account.Email}}" data-protected="{{if $account.Protected}}true{{else}}false{{end}}" data-pending="{{if $account.DeleteAfter}}true{{else}}false{{end}}">{{$account.Email}} · {{$site.Domain}}{{if $account.DeleteAfter}} ({{index $.T "server_delete_pending"}} {{$account.DeleteAfter}}){{end}}</option>
+                        {{end}}{{end}}
+                      </select>
+                    </label>
+                    <p class="small text-muted" data-client-account-protected hidden>{{index $.T "server_account_protected"}}</p>
+                    <div data-client-account-actions hidden>
+                      <label>{{index $.T "server_delete_action"}}
+                        <select name="billing_action" class="form-select" data-client-account-action>
+                          <option value="queue_account">{{index $.T "server_account_queue"}}</option>
+                          <option value="restore_account">{{index $.T "server_account_restore"}}</option>
+                          <option value="delete_account_now">{{index $.T "server_account_delete_now"}}</option>
+                        </select>
+                      </label>
+                      <label>{{index $.T "server_account_confirm_email"}}<input type="email" name="confirm_email" class="form-control" autocomplete="off" required disabled data-client-account-confirm></label>
+                      <button type="submit" class="btn btn-outline-danger btn-sm">{{index $.T "server_action_confirm"}}</button>
+                    </div>
+                  </form>
+                </section>
               </div>
             </details>
             {{else}}<div class="empty">{{index $.T "expenses_clients_empty"}}</div>{{end}}
           </div>
           <p class="server-workspace-empty" data-clients-no-results hidden>{{index $.T "server_installations_no_results"}}</p>
-            </section>
-            <section class="server-config-view" data-server-config-view="billing">
+            </section>{{end}}
+            {{if eq $.SelectedServerSection "billing"}}<section class="server-config-view" data-server-config-view="billing">
               <header class="server-config-view-heading">
                 <h2>{{index $.T "server_billing_nav"}}</h2>
                 <p>{{index $.T "server_billing_hint"}}</p>
@@ -375,8 +448,8 @@
                 {{end}}
                 {{template "invoice-ledger" $}}
               </div>
-            </section>
-            {{if $server.Local}}
+            </section>{{end}}
+            {{if and $server.Local (eq $.SelectedServerSection "monetization")}}
             <section class="server-config-view" data-server-config-view="monetization">
               <header class="server-config-view-heading"><h2>{{index $.T "server_ui_monetization"}}</h2><p>{{index $.T "server_ui_monetization_hint"}}</p></header>
               <p class="server-monetization-purpose">{{index $.T "server_ui_monetization_purpose"}}</p>
@@ -499,10 +572,11 @@
       {{template "client-filters" .}}
       <div class="expense-simple-clients">
         {{range .CentralClients}}
-        <details class="expense-simple-client" data-server-client-row data-client-search="{{.SearchText}}" data-client-unpaid="{{.HasUnpaid}}" data-client-overdue="{{.HasOverdue}}" data-client-over-limit="{{.OverLimit}}" data-client-attention="{{.NeedsAttention}}">
+        <details class="expense-simple-client" data-server-client-row data-client-search="{{.SearchText}}" data-customer-email="{{.Email}}" data-client-site-count="{{.SiteCount}}" data-client-used-bytes="{{.TotalStorageBytes}}" data-client-unpaid="{{.HasUnpaid}}" data-client-overdue="{{.HasOverdue}}" data-client-over-limit="{{.OverLimit}}" data-client-attention="{{.NeedsAttention}}">
           <summary><span class="expense-simple-client-head"><strong>{{.Email}}</strong><small>{{.SiteCount}} {{index $.T "billing_client_sites"}} · {{.InstallationNames}}</small></span><span>{{.TotalStorageLabel}}</span><span>{{.PaidThisMonthLabel}}</span><span>{{.DebtLabel}}{{if .HasOverdue}}<small class="d-block status-bad">{{index $.T "server_billing_overdue"}}</small>{{end}}</span></summary>
+          <script type="application/json" data-client-debt-model>{{.DebtByCurrency}}</script>
           <div class="expense-simple-client-body">
-            {{range .Sites}}<div class="expense-simple-site"><span>{{.Domain}}</span><span>{{.UsedLabel}}</span><button type="button" class="btn btn-outline-primary btn-sm" data-open-server-id="{{.InstallationID}}" data-open-server-section="clients">{{.InstallationName}}</button></div>{{end}}
+            {{range .Sites}}<div class="expense-simple-site" data-client-site-row data-client-site-domain="{{.Domain}}"><span>{{.Domain}}</span><span>{{.UsedLabel}}</span><button type="button" class="btn btn-outline-primary btn-sm" data-open-server-id="{{.InstallationID}}" data-open-server-section="clients">{{.InstallationName}}</button></div>{{end}}
             <button type="button" class="btn btn-outline-primary btn-sm" data-central-client-invoices="{{.Email}}">{{index $.T "server_clients_view_invoices"}}</button>
           </div>
         </details>
@@ -510,38 +584,39 @@
       </div>
       <p class="server-workspace-empty" data-clients-no-results hidden>{{index .T "server_installations_no_results"}}</p>
     </section>
-    <section class="server-root-workspace" data-central-billing-container hidden>
+    <section class="server-root-workspace" data-central-billing-container data-billing-deferred="{{if .CentralBillingDeferred}}true{{else}}false{{end}}" hidden>
       <header class="server-workspace-header"><div><h2>{{index .T "server_central_invoices"}}</h2><p>{{index .T "server_central_invoices_hint"}}</p></div></header>
       {{template "invoice-ledger" .}}
     </section>
-    <section class="server-root-workspace" data-server-installations-container hidden>
+    <section class="server-root-workspace" data-server-installations-container data-installations-deferred="{{if .CentralInstallationsDeferred}}true{{else}}false{{end}}" hidden>
       <header class="server-workspace-header">
         <div><h2>{{index .T "billing_installations"}}</h2><p>{{index .T "server_installations_description"}}</p></div>
-        <span class="server-workspace-count">{{if .InstallationCatalog}}{{len .InstallationCatalog}}{{else}}0{{end}} {{index .T "server_installations_total"}}</span>
+        <span class="server-workspace-count">{{.InstallationCatalogCount}} / {{.InstallationCatalogTotal}} {{index .T "server_installations_total"}}</span>
       </header>
-      <div class="server-installation-toolbar">
+      <form class="server-installation-toolbar" method="get" action="/" data-installations-query-form><input type="hidden" name="server-settings" value=""><input type="hidden" name="workspace" value="installations">
         <label>{{index .T "server_installations_search"}}
-          <input type="search" class="form-control" data-installations-search autocomplete="off" placeholder="{{index .T "server_installations_search_placeholder"}}">
+          <input type="search" class="form-control" name="catalog_query" value="{{.InstallationCatalogQuery}}" data-installations-search autocomplete="off" placeholder="{{index .T "server_installations_search_placeholder"}}">
         </label>
         <label>{{index .T "server_installations_sort"}}
-          <select class="form-select" data-installations-sort>
-            <option value="sites">{{index .T "server_installations_sort_sites"}}</option>
-            <option value="forecast">{{index .T "server_installations_sort_forecast"}}</option>
-            <option value="paid">{{index .T "server_installations_sort_paid"}}</option>
-            <option value="name">{{index .T "server_installations_sort_name"}}</option>
+          <select class="form-select" name="catalog_sort" data-installations-sort>
+            <option value="sites" {{if eq .InstallationCatalogSort "sites"}}selected{{end}}>{{index .T "server_installations_sort_sites"}}</option>
+            <option value="forecast" {{if eq .InstallationCatalogSort "forecast"}}selected{{end}}>{{index .T "server_installations_sort_forecast"}}</option>
+            <option value="paid" {{if eq .InstallationCatalogSort "paid"}}selected{{end}}>{{index .T "server_installations_sort_paid"}}</option>
+            <option value="name" {{if eq .InstallationCatalogSort "name"}}selected{{end}}>{{index .T "server_installations_sort_name"}}</option>
           </select>
         </label>
         <label>{{index .T "server_installations_filter"}}
-          <select class="form-select" data-installations-filter>
-            <option value="active">{{index .T "server_installations_filter_active"}}</option>
-            <option value="connected">{{index .T "server_installation_connected"}}</option><option value="disconnected">{{index .T "server_installation_disconnected"}}</option><option value="unqualified">{{index .T "server_installation_unqualified"}}</option>
-            <option value="monetized">{{index .T "server_installations_filter_enabled"}}</option>
-            <option value="not-monetized">{{index .T "server_installations_filter_disabled"}}</option>
-            <option value="archived">{{index .T "billing_archive"}}</option>
-            <option value="all">{{index .T "server_billing_all"}}</option>
+          <select class="form-select" name="catalog_filter" data-installations-filter>
+            <option value="active" {{if eq .InstallationCatalogFilter "active"}}selected{{end}}>{{index .T "server_installations_filter_active"}}</option>
+            <option value="connected" {{if eq .InstallationCatalogFilter "connected"}}selected{{end}}>{{index .T "server_installation_connected"}}</option><option value="disconnected" {{if eq .InstallationCatalogFilter "disconnected"}}selected{{end}}>{{index .T "server_installation_disconnected"}}</option><option value="unqualified" {{if eq .InstallationCatalogFilter "unqualified"}}selected{{end}}>{{index .T "server_installation_unqualified"}}</option>
+            <option value="monetized" {{if eq .InstallationCatalogFilter "monetized"}}selected{{end}}>{{index .T "server_installations_filter_enabled"}}</option>
+            <option value="not-monetized" {{if eq .InstallationCatalogFilter "not-monetized"}}selected{{end}}>{{index .T "server_installations_filter_disabled"}}</option>
+            <option value="archived" {{if eq .InstallationCatalogFilter "archived"}}selected{{end}}>{{index .T "billing_archive"}}</option>
+            <option value="all" {{if eq .InstallationCatalogFilter "all"}}selected{{end}}>{{index .T "server_billing_all"}}</option>
           </select>
         </label>
-      </div>
+        <button type="submit" class="btn btn-outline-primary server-installation-apply">{{if eq .LanguageCode "ru"}}Применить{{else}}Apply{{end}}</button>
+      </form>
       <div class="server-installation-head" aria-hidden="true">
         <span>{{index .T "server_installations_name"}}</span>
         <span>{{index .T "billing_client_sites"}}</span>
@@ -567,8 +642,11 @@
         </article>
       {{else}}<p class="server-workspace-empty">{{index .T "server_installations_empty"}}</p>{{end}}
       </div>
-      <p class="server-workspace-count" aria-live="polite" data-installations-count></p>
-      <p class="server-workspace-empty" data-installations-no-results hidden>{{index .T "server_installations_no_results"}}</p>
+      <nav class="server-installation-pages" aria-label="{{index .T "server_installations_total"}}">
+        {{if .InstallationCatalogPrevious}}<a class="btn btn-outline-secondary btn-sm" href="{{.InstallationCatalogPrevious}}">{{index .T "server_page_previous"}}</a>{{else}}<span></span>{{end}}
+        <span class="server-workspace-count" aria-live="polite" data-installations-count>{{.InstallationCatalogPage}} / {{.InstallationCatalogPages}} · {{.InstallationCatalogCount}} {{if eq .LanguageCode "ru"}}найдено{{else}}matching{{end}}</span>
+        {{if .InstallationCatalogNext}}<a class="btn btn-outline-secondary btn-sm" href="{{.InstallationCatalogNext}}">{{index .T "server_page_next"}}</a>{{else}}<span></span>{{end}}
+      </nav>
       <p class="server-workspace-footnote">{{index .T "server_installations_forecast_note"}}</p>
     </section>
     {{end}}
@@ -579,6 +657,47 @@
   </div>
 
 </main>
+{{if eq .SelectedServerSection "clients"}}
+<!-- Shared client dialogs: exactly two, regardless of site count. -->
+<div class="modal fade" id="clientQuotaModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+    <form method="post" action="?server-settings">
+      <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
+      <input type="hidden" name="billing_action" value="update_site_quota">
+      <input type="hidden" name="domain" data-client-quota-domain>
+      <div class="modal-header"><h2 class="modal-title h5">{{index .T "billing_quota_change_title"}}</h2><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index .T "tree_close"}}"></button></div>
+      <div class="modal-body">
+        <p><strong data-client-quota-title></strong></p>
+        <label>{{index .T "billing_quota"}} <input name="quota" type="text" class="form-control" data-client-quota-value required></label>
+      </div>
+      <div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">{{index .T "edit_cancel"}}</button><button type="submit" class="btn btn-primary">{{index .T "billing_apply"}}</button></div>
+    </form>
+  </div></div>
+</div>
+<div class="modal fade" id="clientDeleteModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+    <form method="post" action="?server-settings">
+      <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
+      <input type="hidden" name="domain" data-client-delete-domain>
+      <div class="modal-header"><h2 class="modal-title h5"><span data-client-delete-title></span></h2><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index .T "tree_close"}}"></button></div>
+      <div class="modal-body">
+        <p class="alert alert-warning" data-client-delete-pending hidden>{{index .T "server_delete_pending"}} <span data-client-delete-deadline></span>. {{index .T "server_delete_reason"}} <span data-client-delete-reason data-reason-nonpayment="{{index .T "server_delete_nonpayment"}}" data-reason-request="{{index .T "server_delete_request"}}"></span>.</p>
+        <p><strong>{{index .T "server_delete_size"}}</strong> <span data-client-delete-size></span>. {{index .T "server_delete_no_backup"}}</p>
+        <label>{{index .T "server_delete_action"}}
+          <select name="billing_action" class="form-select" data-client-delete-action required>
+            <option value="queue_site">{{index .T "server_delete_queue"}}</option>
+            <option value="suspend_site_nonpayment">{{index .T "server_delete_suspend"}}</option>
+            <option value="restore_site">{{index .T "server_delete_restore"}}</option>
+            <option value="delete_site_now">{{index .T "server_delete_now"}}</option>
+          </select>
+        </label>
+        <label class="mt-3">{{index .T "server_delete_confirm_domain"}}<input name="confirm_domain" type="text" class="form-control" autocomplete="off" data-client-delete-confirm required></label>
+      </div>
+      <div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">{{index .T "edit_cancel"}}</button><button type="submit" class="btn btn-outline-danger">{{index .T "server_delete_execute"}}</button></div>
+    </form>
+  </div></div>
+</div>
+{{end}}
 <div class="modal fade" id="demoRefreshModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg demo-refresh-modal-dialog"><div class="modal-content">
     <div class="modal-header">
@@ -605,6 +724,9 @@
   <option value="UTC"><option value="Europe/Moscow"><option value="Europe/Berlin"><option value="Europe/London">
   <option value="Asia/Almaty"><option value="Asia/Dubai"><option value="Asia/Tokyo"><option value="America/New_York"><option value="America/Los_Angeles">
 </datalist>
+<script type="application/json" id="mail-journal-labels">{{.MailJournalLabelsJSON}}</script>
+<div data-mail-settings data-mode="statistics" data-csrf="{{.AccountCSRF}}" data-language="{{.LanguageCode}}" hidden></div>
+<p class="small" data-mail-feedback role="status"></p>
 <script type="application/json" data-invoice-model>{{.LedgerInvoices}}</script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
@@ -700,22 +822,39 @@
   const createSiteEmbedElement = document.getElementById('createSiteEmbedHTML');
   const createSiteCopyButtonElement = document.querySelector('[data-create-site-copy-html]');
   const previewButtonElement = document.querySelector('[data-public-trial-preview]');
+  const createSitePreviewButtonElement = document.querySelector('[data-create-site-preview]');
   const previewFrameElement = document.getElementById('publicTrialPreviewFrame');
 
   if (!embedTextAreaElement) {
     return;
   }
 
+  const copyTimers = new WeakMap();
   function connectCopyButton(buttonElement, textAreaElement) {
     if (!buttonElement || !textAreaElement) return;
-    buttonElement.addEventListener('click', function copyEmbedHTML() {
-      if (navigator.clipboard) {
-        navigator.clipboard.writeText(textAreaElement.value);
-        return;
-      }
-      textAreaElement.focus();
-      textAreaElement.select();
-      document.execCommand('copy');
+    const feedback = buttonElement.querySelector('[data-copy-label]');
+    const original = feedback ? feedback.textContent : '';
+    buttonElement.addEventListener('click', async function copyEmbedHTML() {
+      let copied = false;
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(textAreaElement.value);
+          copied = true;
+        } else {
+          textAreaElement.focus();
+          textAreaElement.select();
+          copied = document.execCommand('copy');
+        }
+      } catch (copyError) { copied = false; }
+      if (!feedback) return;
+      feedback.textContent = copied
+        ? {{if eq .LanguageCode "ru"}}'Скопировано ✓'{{else}}'Copied ✓'{{end}}
+        : {{if eq .LanguageCode "ru"}}'Не удалось скопировать'{{else}}'Copy failed'{{end}};
+      if (copyTimers.has(buttonElement)) window.clearTimeout(copyTimers.get(buttonElement));
+      copyTimers.set(buttonElement, window.setTimeout(function restoreCopyText() {
+        feedback.textContent = original;
+        copyTimers.delete(buttonElement);
+      }, 2000));
     });
   }
   connectCopyButton(copyButtonElement, embedTextAreaElement);
@@ -738,12 +877,15 @@
     return localizedHTML;
   }
 
-  if (previewButtonElement && previewFrameElement) {
-    previewButtonElement.addEventListener('click', function renderPublicTrialEmbedPreview() {
-      const previewHTML = localizePublicTrialPreviewHTML(embedTextAreaElement.value.replace(/<script\b[\s\S]*?<\/script>/gi, ''));
-      previewFrameElement.srcdoc = '<!doctype html><html><head><base href="' + window.location.origin + '/"><meta name="viewport" content="width=device-width, initial-scale=1"></head><body>' + previewHTML + '</body></html>';
-    });
+  function showEmbedPreview(input, localize) {
+    if (!input || !previewFrameElement) return;
+    // Untrusted HTML remains in a sandboxed, scripts-disabled preview iframe.
+    const rawHTML = input.value.replace(/<script\b[\s\S]*?<\/script>/gi, '');
+    const previewHTML = localize ? localizePublicTrialPreviewHTML(rawHTML) : rawHTML;
+    previewFrameElement.srcdoc = '<!doctype html><html><head><base href="' + window.location.origin + '/"><meta name="viewport" content="width=device-width, initial-scale=1"></head><body>' + previewHTML + '</body></html>';
   }
+  if (previewButtonElement) previewButtonElement.addEventListener('click', function previewTrial() { showEmbedPreview(embedTextAreaElement, true); });
+  if (createSitePreviewButtonElement) createSitePreviewButtonElement.addEventListener('click', function previewCreate() { showEmbedPreview(createSiteEmbedElement, false); });
 })();
 
 (function initializeSitebrushComPublicKeyCopy() {
@@ -762,6 +904,28 @@
     publicKeyElement.select();
     document.execCommand('copy');
   });
+})();
+
+(function initializeDemoSiteVisit() {
+  const form = document.querySelector('.billing-demo-settings-form');
+  const link = document.querySelector('[data-demo-site-visit]');
+  const input = form && form.querySelector('[name="demo_site_domain"]');
+  if (!input || !link) return;
+  const label = {{if eq .LanguageCode "ru"}}'Открыть демо-сайт'{{else}}'Open demo website'{{end}};
+  function updateLink() {
+    const domain = input.value.trim().toLowerCase();
+    // Only syntactically valid domain names may be turned into an external link.
+    const labels = domain.split('.');
+    const valid = domain.length <= 253 && labels.length >= 2 &&
+      labels.every(part => part.length >= 1 && part.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(part));
+    link.hidden = !valid;
+    if (valid) {
+      link.href = 'https://' + domain + '/';
+      link.textContent = label + ': ' + domain + ' ↗';
+    } else link.removeAttribute('href');
+  }
+  input.addEventListener('input', updateLink);
+  updateLink();
 })();
 
 (function setupDemoRefreshPreview() {
@@ -1169,6 +1333,7 @@
   });
 })();
 </script>
+{{if or (eq .SelectedServerSection "clients") (and .ShowCentralRegistry (not .CentralClientsDeferred))}}
 <script>
 (function setupServerCertificateRenewalControls() {
   const renewalButtonElements = document.querySelectorAll('[data-certificate-renew]');
@@ -1223,6 +1388,7 @@
   }
 })();
 </script>
+{{end}}
 </body>
 </html>
 
@@ -1269,6 +1435,7 @@
   <input type="hidden" name="refresh_demo_site" value="0" data-refresh-demo-site-input>
   <label>{{index .T "billing_demo_max_site_size"}} <input name="demo_site_max_size" class="form-control" value="{{.DemoMaxSize}}" required></label>
   <label>{{index .T "billing_demo_domain"}} <input name="demo_site_domain" type="text" class="form-control" value="{{.DemoSettings.Domain}}" placeholder="demo.example.com"></label>
+  <p class="small server-demo-visit"><a href="#" data-demo-site-visit target="_blank" rel="noopener noreferrer" hidden></a></p>
   <label>{{index .T "billing_demo_source_url"}} <input name="demo_site_source_url" type="text" class="form-control" value="{{.DemoSettings.SourceURL}}" placeholder="example.com or https://example.com/"></label>
   <fieldset class="billing-demo-copy-scope">
     <legend>{{.DemoCopyScopeLabel}}</legend>
@@ -1294,14 +1461,17 @@
 <div data-public-trial-embed-section>
   <h3>{{index .T "test_drive_title"}}</h3>
   <div class="d-flex flex-wrap gap-2 mb-3">
-    <button type="button" class="btn btn-outline-primary" data-public-trial-copy-html><img src="/p/static/copy.png" alt="">{{index .T "public_trial_copy_html"}}</button>
+    <button type="button" class="btn btn-outline-primary" data-public-trial-copy-html><img src="/p/static/copy.png" alt=""><span data-copy-label>{{index .T "public_trial_copy_html"}}</span></button>
     <button type="button" class="btn btn-outline-primary" data-bs-toggle="modal" data-bs-target="#publicTrialPreviewModal" data-public-trial-preview><img src="/p/static/publish.png" alt="">{{index .T "public_trial_preview"}}</button>
   </div>
   <textarea id="publicTrialEmbedHTML" class="form-control" rows="5" readonly>{{.TestDriveEmbedHTML}}</textarea>
 </div>
 <div data-create-site-embed-section class="mt-4">
   <h3>{{index .T "public_trial_new_site_title"}}</h3>
-  <button type="button" class="btn btn-outline-primary mb-3" data-create-site-copy-html><img src="/p/static/copy.png" alt="">{{index .T "public_trial_copy_html"}}</button>
+  <div class="d-flex flex-wrap gap-2 mb-3">
+    <button type="button" class="btn btn-outline-primary" data-create-site-copy-html><img src="/p/static/copy.png" alt=""><span data-copy-label>{{index .T "public_trial_copy_html"}}</span></button>
+    <button type="button" class="btn btn-outline-primary" data-bs-toggle="modal" data-bs-target="#publicTrialPreviewModal" data-create-site-preview><img src="/p/static/publish.png" alt="">{{index .T "public_trial_preview"}}</button>
+  </div>
   <textarea id="createSiteEmbedHTML" class="form-control" rows="10" readonly>{{.CreateSiteEmbedHTML}}</textarea>
 </div>
 {{else}}
@@ -1333,9 +1503,24 @@
 {{end}}
 
 {{define "client-filters"}}
-<div class="server-billing-filters">
-  <label>{{index .T "server_clients_search"}}<input class="form-control" type="search" data-server-clients-search placeholder="{{index .T "server_clients_search_placeholder"}}" autocomplete="off"></label>
-  <label>{{index .T "server_installations_filter"}}<select class="form-select" data-server-clients-filter><option value="all">{{index .T "server_clients_all"}}</option><option value="attention">{{index .T "server_clients_attention"}}</option><option value="unpaid">{{index .T "server_billing_open"}}</option><option value="overdue">{{index .T "server_billing_overdue"}}</option><option value="over-limit">{{index .T "server_clients_over_limit"}}</option></select></label>
+<div class="server-client-filter-bar">
+  <div class="server-client-filter-top">
+    <label>{{index .T "server_clients_search"}}<input class="form-control" type="search" data-server-clients-search placeholder="{{index .T "server_clients_search_placeholder"}}" autocomplete="off"></label>
+    <label>{{if eq .LanguageCode "ru"}}Сортировка{{else}}Sort by{{end}}
+      <select class="form-select" data-server-clients-sort>
+        <option value="debt">{{if eq .LanguageCode "ru"}}По долгу{{else}}Debt{{end}}</option>
+        <option value="storage">{{if eq .LanguageCode "ru"}}По занятому месту{{else}}Storage used{{end}}</option>
+        <option value="sites">{{if eq .LanguageCode "ru"}}По количеству сайтов{{else}}Site count{{end}}</option>
+        <option value="email">{{if eq .LanguageCode "ru"}}По email{{else}}Email{{end}}</option>
+      </select>
+    </label>
+  </div>
+  <div class="server-client-filter-chips" role="group" aria-label="{{index .T "server_installations_filter"}}">
+    <button type="button" class="is-active" data-server-client-filter="all" aria-pressed="true">{{index .T "server_clients_all"}} <span data-client-filter-count="all">0</span></button>
+    <button type="button" data-server-client-filter="attention" aria-pressed="false">{{index .T "server_clients_attention"}} <span data-client-filter-count="attention">0</span></button>
+    <button type="button" data-server-client-filter="overdue" aria-pressed="false">{{index .T "server_billing_overdue"}} <span data-client-filter-count="overdue">0</span></button>
+    <button type="button" data-server-client-filter="over-limit" aria-pressed="false">{{index .T "server_clients_over_limit"}} <span data-client-filter-count="over-limit">0</span></button>
+  </div>
 </div>
 {{end}}
 

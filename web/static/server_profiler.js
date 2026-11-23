@@ -568,9 +568,31 @@
   appendStatistic(output,'Ошибок записи',network.writeErrors||0);
   appendParagraph(output,'Учтены тела HTTP-запросов и ответов. Заголовки, TLS и повторные TCP-передачи не входят. Трафик публичного сервера и приложения нельзя складывать: проксируемые запросы проходят обе границы.');
   content.appendChild(output);
+  if (report.httpCallsOmitted || report.timingLosses) {
+   appendParagraph(content,'Пропущено за пределами журнала: '+(report.httpCallsOmitted||0)+' · Потеряно событий измерения: не менее '+(report.timingLosses||0));
+  }
+  if (!report.httpCalls?.length) {
+   appendParagraph(content,'В этой записи нет строк HTTP-журнала.');
+   return;
+  }
+  const calls = table(['Начало','Метод','Домен','Маршрут','Статус','Обработка, мс','Отправлено']);
+  const callsBody = document.createElement('tbody');
+  for (const call of report.httpCalls) {
+   const row = document.createElement('tr');
+   textCell(row,new Date(call.started).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit',second:'2-digit',fractionalSecondDigits:3}));
+   textCell(row,call.method);
+   textCell(row,call.host);
+   textCell(row,call.route);
+   textCell(row,(call.status||'—')+(call.aborted?' · прерван':''));
+   textCell(row,(call.durationUS/1000).toFixed(3),'profiler-number');
+   textCell(row,formatBytes(call.sent),'profiler-number');
+   callsBody.appendChild(row);
+  }
+  calls.appendChild(callsBody);
+  content.appendChild(calls);
  }
  function stageLabel(name) {
-  return {accepted_to_request:'Приём соединения → запрос',front_state:'Ожидание состояния публичного сервера',domain:'Проверка домена',policy:'Политика доступа',attack_guard:'Защита от атак',throttle_guard:'Ограничение нагрузки',public_handler:'Публичная обработка до первого ответа',first_write:'До первого ответа',certificate:'TLS-сертификат',attack_queue:'Очередь защиты от атак',attack_work:'Работа защиты от атак',throttle_queue:'Очередь ограничения нагрузки',throttle_work:'Работа ограничения нагрузки',proxy_metadata:'Метаданные прокси',proxy_backend:'Ожидание приложения за прокси',handler_complete:'Завершение обработчика',body_write:'Вызовы записи тела',http1_response_complete:'HTTP/1 keep-alive: завершение ответа после flush'}[name]||name;
+  return {accepted_to_request:'Приём соединения → запрос',front_state:'Ожидание состояния публичного сервера',domain:'Проверка домена',policy:'Политика доступа',attack_guard:'Защита от атак',throttle_guard:'Ограничение нагрузки',public_handler:'Публичная обработка до первого ответа',first_write:'До первого ответа',certificate:'TLS-сертификат',files_list:'Файлы: подготовка списка',files_render:'Файлы: шаблон до ответа',upgrade_session_lifetime:'Время жизни соединения WebSocket',attack_queue:'Очередь защиты от атак',attack_work:'Работа защиты от атак',throttle_queue:'Очередь ограничения нагрузки',throttle_work:'Работа ограничения нагрузки',proxy_metadata:'Метаданные прокси',proxy_backend:'Ожидание приложения за прокси',handler_complete:'Завершение обработчика',body_write:'Вызовы записи тела',http1_response_complete:'HTTP/1 keep-alive: завершение ответа после flush'}[name]||name;
  }
  function renderStages(content,report) {
   const output=table(['Этап обработки','Наблюдений','Среднее, мс','p90 ≤ мс','p95 ≤ мс','p99 ≤ мс']);
@@ -728,7 +750,7 @@
   element('[data-profiler-minimum]').disabled=model.view==='memory';
   element('[data-profiler-unit]').disabled=model.view==='memory';
   element('[data-profiler-filters]').hidden=!tabularView();
-  element('[data-profiler-pagination]').hidden=!tabularView()||!report;
+  element('[data-profiler-pagination]').hidden=(!tabularView()&&model.view!=='network')||!report;
   renderSummary(model.selectedRun?summary:null);
   renderOverview(summary);
   root.querySelectorAll('[data-view]').forEach(function tab(button){button.setAttribute('aria-selected',String(button.dataset.view===model.view));});
@@ -744,7 +766,7 @@
    renderRuntime(content,report);
   } else if(model.view==='stages')renderStages(content,report);
   else renderFunctions(content,report);
-  element('[data-profiler-count]').textContent='Функций по фильтру: '+(report.matches||0);
+  element('[data-profiler-count]').textContent=(model.view==='network'?'Записано вызовов: ':'Функций по фильтру: ')+(report.matches||0);
   element('[data-profiler-page]').textContent='Страница '+(model.page+1);
   element('[data-profiler-back]').disabled=model.page===0;
   element('[data-profiler-next]').disabled=!model.more;

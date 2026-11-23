@@ -55,6 +55,8 @@ func functionGroups(functions []Function) []Group {
 func reportPage(report Report, command Command, more *bool) Report {
 	functions, frames, memory := report.Functions, report.Frames, report.Memory
 	code, goroutines, stages, calls := report.Code, report.Goroutines, report.Stages, report.Calls
+	httpCalls := report.HTTPCalls
+	report.HTTPCalls = nil
 	report.Code, report.Functions, report.Frames, report.Memory, report.Calls = nil, nil, nil, nil, nil
 	report.Goroutines, report.Stages, report.Detail = "", nil, nil
 	*more = false
@@ -77,6 +79,13 @@ func reportPage(report Report, command Command, more *bool) Report {
 		report.Stages = stages
 		return report
 	case "network":
+		report.Matches = len(httpCalls)
+		start := min(max(command.Page, 0), len(httpCalls)/50+1) * 50
+		if start < len(httpCalls) {
+			end := min(start+50, len(httpCalls))
+			report.HTTPCalls = httpCalls[start:end]
+			*more = end < len(httpCalls)
+		}
 		return report
 	case "code":
 		functions = code

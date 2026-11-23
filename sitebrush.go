@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -312,7 +313,7 @@ type App struct {
 	hostingSnapshotDeliveries chan hostingSnapshotNetChanDeliveryTask
 	hostingAndSupportPanel    chan hostingAndSupportPanelRequest
 	billingInvoices           chan billingInvoiceProcessRequest
-	renderTemplates           chan renderTemplateRequest
+	renderTemplates           renderTemplateProcess
 	controlDatabase           *serverControlDatabaseDispatcher
 	hostingSupportEvents      chan hostingandsupport.HostingSnapshotEvent
 	demoSiteRuntime           chan demoSiteRuntimeRequest
@@ -398,10 +399,17 @@ type billingInvoiceProcessRequest struct {
 	kind string
 }
 
+type renderTemplateProcess struct {
+	jobs chan<- renderTemplateRequest
+	stop <-chan struct{}
+}
+
 type renderTemplateRequest struct {
 	name     string
 	envelope map[string]any
-	reply    chan renderTemplateResponse
+	session  <-chan struct{}
+	started  chan<- struct{}
+	reply    chan<- renderTemplateResponse
 }
 
 type renderTemplateResponse struct {
@@ -3962,6 +3970,7 @@ type ManagedFile struct {
 	CreatedAt         string
 	CreatedUnix       int64
 	IsImage           bool
+	InlinePreview     bool
 	AccessMode        string
 	Token             string
 	ExpiresAt         string
@@ -4623,18 +4632,18 @@ func (a *App) analyticsMiddleware(next http.Handler) http.Handler {
 		startedAt := time.Now()
 		writer := &statusCapturingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(writer, r)
-		if !publicsite.SecurityChecked(r) && a.securityAnalytics != nil && len(a.securityAnalytics) >= cap(a.securityAnalytics) {
-			select {
-			case a.securityLosses <- a.analyticsEventDomain(r, ""):
-			default:
-			}
-		}
-		if !publicsite.SecurityChecked(r) && a.securityAnalytics != nil && !isBrowserAnalyticsRequest(r) && len(a.securityAnalytics) < cap(a.securityAnalytics) {
+		if !publicsite.SecurityChecked(r) && a.securityAnalytics != nil && !isBrowserAnalyticsRequest(r) {
 			securityEvent := siteAnalyticsEvent{Bytes: writer.bytesWritten, Domain: a.analyticsEventDomain(r, ""), Path: analyticsBoundedString(r.URL.EscapedPath(), 512), Query: analyticsBoundedString(accountauth.SafeQuery(r.URL.RawQuery), 2048), Method: r.Method, StatusCode: writer.statusCode, OccurredAt: startedAt.UTC(), RemoteAddress: analyticsBoundedString(r.RemoteAddr, 64), Forwarded: analyticsBoundedString(r.Header.Get("Forwarded"), 256), ForwardedFor: analyticsBoundedString(r.Header.Get("X-Forwarded-For"), 256), UserAgent: analyticsBoundedString(r.UserAgent(), 256), AcceptLanguage: analyticsBoundedString(r.Header.Get("Accept-Language"), 64), TrustedPeer: !publicOrdinaryRequest(r) && a.sitebrushPeerRequestTrusted(r, startedAt.UTC()), IndexingCrawler: httpsecurity.IsIndexingCrawlerRequest(r), SecurityBlocked: writer.Header().Get("X-Sitebrush-Security-Incident") != "" || writer.statusCode == http.StatusTooManyRequests || writer.statusCode == http.StatusForbidden}
 			securityEvent.SecurityAlreadyBlocked = writer.Header().Get("X-Sitebrush-Security-Already-Blocked") == "1"
 			select {
 			case a.securityAnalytics <- securityEvent:
 			default:
+				// Queue ownership may change between a length check and send.
+				// Every dropped observation signals incomplete security statistics.
+				select {
+				case a.securityLosses <- securityEvent.Domain:
+				default:
+				}
 			}
 		}
 		// Security owns request observations; conversion owns browser observations.
@@ -4729,8 +4738,15 @@ func (a *App) resolveAnalyticsDomain(domain string, resolutions map[string]analy
 	if err == nil && strings.TrimSpace(primary) != "" {
 		resolved.domain = primary
 	} else if err != nil {
-		// Do not create an alias checkpoint on a transient lookup failure.
-		resolved.domain = ""
+		// A failing alias lookup must not discard observations for a known
+		// primary site. Never create an analytics database for an unknown host.
+		primaryFile := siteDatabaseFile(siteDatabaseRootPath(a.serverControlDBPath()), domain)
+		if info, statErr := os.Stat(primaryFile); statErr == nil && info.Mode().IsRegular() {
+			resolved.domain = domain
+		} else {
+			resolved.domain = ""
+		}
+		// Retry alias resolution promptly once the control database recovers.
 		resolved.expires = now.Add(time.Second)
 	}
 	if resolved.domain != "" && !a.analyticsSiteAvailable(resolved.domain) {
@@ -5685,6 +5701,7 @@ func (a *App) runSecurityAnalytics(stop <-chan struct{}) {
 		}
 		result := a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.SaveSecurity, Domain: domain, State: string(encoded), Stop: cancellation})
 		if result.Err != nil {
+			log.Printf("security analytics save failed domain=%q error=%s", domain, diagnosticlog.SafeLogValue(result.Err.Error()))
 			return false
 		}
 		dirty[domain] = false
@@ -5710,10 +5727,14 @@ func (a *App) runSecurityAnalytics(stop <-chan struct{}) {
 			loaded := a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.ReadSecurity, Domain: domain, Limit: 2 << 20, Stop: stop})
 			state = &browserstats.SecurityState{}
 			if loaded.Err != nil && !errors.Is(loaded.Err, sql.ErrNoRows) {
+				log.Printf("security analytics restore failed domain=%q error=%s", domain, diagnosticlog.SafeLogValue(loaded.Err.Error()))
 				return nil
 			}
-			if loaded.Err == nil && json.Unmarshal([]byte(loaded.Text), state) != nil {
-				return nil
+			if loaded.Err == nil {
+				if err := json.Unmarshal([]byte(loaded.Text), state); err != nil {
+					log.Printf("security analytics checkpoint invalid domain=%q error=%s", domain, diagnosticlog.SafeLogValue(err.Error()))
+					return nil
+				}
 			}
 			state.Incomplete = state.Incomplete || lost[domain]
 			delete(lost, domain)
@@ -6745,6 +6766,7 @@ type browserAnalyticsDashboard struct {
 	Report          browserstats.Report
 	Available       bool
 	Error           bool
+	Stale           bool
 	Days            int
 	Age             string
 	Cards           []analyticsMetricCard
@@ -6773,6 +6795,8 @@ func (a *App) browserAnalyticsView(r *http.Request, domain string) browserAnalyt
 		return dashboard
 	}
 	dashboard.Report, dashboard.Available = reports[strconv.Itoa(days)]
+	// A freshly regenerated report can still contain only old events.
+	dashboard.Stale = dashboard.Available && !dashboard.Report.LastEvent.IsZero() && time.Since(dashboard.Report.LastEvent) > 10*time.Minute
 	dashboard.Cards, dashboard.ReturnSections, dashboard.ContentSections = browserAnalyticsSections(dashboard.Report, translationsForRequest(r))
 	dashboard.Age = fmt.Sprintf("%s UTC · %s", dashboard.Report.Generated.UTC().Format("2006-01-02 15:04:05"), time.Since(dashboard.Report.Generated).Round(time.Second))
 	return dashboard
@@ -8691,13 +8715,21 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		securityThrottles, _ = a.throttleGuard.Snapshot(time.Now().UTC())
 	}
 	loadedSecurity := a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.ReadSecurity, Domain: domain, Limit: 2 << 20, Stop: r.Context().Done()})
+	securityLastObserved := time.Time{}
+	securityReadError := loadedSecurity.Err != nil && !errors.Is(loadedSecurity.Err, sql.ErrNoRows)
 	if loadedSecurity.Err == nil {
 		state := browserstats.SecurityState{}
-		if json.Unmarshal([]byte(loadedSecurity.Text), &state) == nil {
+		if err := json.Unmarshal([]byte(loadedSecurity.Text), &state); err == nil {
+			securityLastObserved = state.Updated
 			securityNow := time.Now().UTC()
 			state.Prune(securityNow)
 			security = state.Report(securityNow, browserDashboard.Days)
+		} else {
+			securityReadError = true
+			log.Printf("security analytics report invalid domain=%q error=%s", domain, diagnosticlog.SafeLogValue(err.Error()))
 		}
+	} else if securityReadError {
+		log.Printf("security analytics report unavailable domain=%q error=%s", domain, diagnosticlog.SafeLogValue(loadedSecurity.Err.Error()))
 	}
 	securityIncidents := make(map[string]browserstats.Incident, len(security.Incidents))
 	attackTypesByIP := map[string]map[string]bool{}
@@ -8957,9 +8989,13 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		"AnalyticsQuotaBlocked": a.storedDomainStorageUsage(r.Context(), domain).AnalyticsLimited,
 		"InitialGoalsError":     initialGoalsError != nil, "SuggestedGoalsJSON": template.JS(analyticsGoalsJSON(browserstats.InitialGoals(catalog.Pages, translationsForRequest(r)))),
 		"Conversion": browserDashboard.Report.Conversion, "GoalsJSON": template.JS(analyticsGoalsJSON(goals)), "ConversionJSON": analyticsConversionJSON(browserDashboard.Report.Conversion),
-		"Report":           analyticsReportView(report, translationsForRequest(r)),
-		"BrowserAnalytics": browserDashboard,
-		"Experience":       experience, "ExperienceFilter": filter, "Security": security, "SecurityTypeAxes": analyticsSecurityTypeAxes(), "SecurityBlocks": securityBlocks, "SecurityLocalBlocks": securityLocalBlocks, "SecurityGlobalBlocks": securityGlobalBlocks, "SecurityAllowlist": securityAllowlist, "SecurityThrottles": securityThrottles, "SecuritySettings": securitySettings, "GoalsText": strings.Join(goalLines, "\n"), "SessionMapJSON": template.JS(mapJSON), "PeriodOptions": []int{1, 7, 30, 90}, "UnknownGeo": unknownGeo, "ServerRequests": serverRequests, "ServerLocalHours": serverLocalHours, "ServerHoursJSON": template.JS(serverHoursJSON), "SecurityHoursJSON": template.JS(securityHoursJSON), "SecurityCountriesJSON": template.JS(securityCountriesJSON), "SecurityTypesJSON": template.JS(securityTypesJSON), "ActivityDaysJSON": template.JS(activityDaysJSON), "ActivityHoursJSON": template.JS(activityHoursJSON), "SecurityActivityDaysJSON": template.JS(securityActivityDaysJSON), "SecurityActivityHoursJSON": template.JS(securityActivityHoursJSON), "SecurityActivityTypesJSON": template.JS(securityActivityTypesJSON), "SecurityActivitySeverityJSON": template.JS(securityActivitySeverityJSON), "ActivitySessionsJSON": template.JS(activitySessionsJSON), "SecurityIncidentsJSON": template.JS(securityIncidentsJSON), "ServerTimezone": time.Local.String(), "ServerNowRFC3339": serverNow.Format(time.RFC3339), "ServerNowDisplay": serverNow.Format("02 Jan 2006 15:04:05"), "ServerTimezoneOffsetSeconds": serverTimezoneOffsetSeconds,
+		"Report":                           analyticsReportView(report, translationsForRequest(r)),
+		"BrowserAnalytics":                 browserDashboard,
+		"SecurityAnalyticsReadError":       securityReadError,
+		"SecurityAnalyticsLastObserved":    securityLastObserved,
+		"SecurityAnalyticsHasObservations": !securityLastObserved.IsZero(),
+		"SecurityAnalyticsStale":           !securityLastObserved.IsZero() && time.Since(securityLastObserved) > 10*time.Minute,
+		"Experience":                       experience, "ExperienceFilter": filter, "Security": security, "SecurityTypeAxes": analyticsSecurityTypeAxes(), "SecurityBlocks": securityBlocks, "SecurityLocalBlocks": securityLocalBlocks, "SecurityGlobalBlocks": securityGlobalBlocks, "SecurityAllowlist": securityAllowlist, "SecurityThrottles": securityThrottles, "SecuritySettings": securitySettings, "GoalsText": strings.Join(goalLines, "\n"), "SessionMapJSON": template.JS(mapJSON), "PeriodOptions": []int{1, 7, 30, 90}, "UnknownGeo": unknownGeo, "ServerRequests": serverRequests, "ServerLocalHours": serverLocalHours, "ServerHoursJSON": template.JS(serverHoursJSON), "SecurityHoursJSON": template.JS(securityHoursJSON), "SecurityCountriesJSON": template.JS(securityCountriesJSON), "SecurityTypesJSON": template.JS(securityTypesJSON), "ActivityDaysJSON": template.JS(activityDaysJSON), "ActivityHoursJSON": template.JS(activityHoursJSON), "SecurityActivityDaysJSON": template.JS(securityActivityDaysJSON), "SecurityActivityHoursJSON": template.JS(securityActivityHoursJSON), "SecurityActivityTypesJSON": template.JS(securityActivityTypesJSON), "SecurityActivitySeverityJSON": template.JS(securityActivitySeverityJSON), "ActivitySessionsJSON": template.JS(activitySessionsJSON), "SecurityIncidentsJSON": template.JS(securityIncidentsJSON), "ServerTimezone": time.Local.String(), "ServerNowRFC3339": serverNow.Format(time.RFC3339), "ServerNowDisplay": serverNow.Format("02 Jan 2006 15:04:05"), "ServerTimezoneOffsetSeconds": serverTimezoneOffsetSeconds,
 	})
 }
 
@@ -28929,8 +28965,16 @@ func (a *App) expensesPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	view["Status"] = status
-	view["ShowProfiler"] = a.profiler != nil && a.updateAuthorized(r)
+	updateAllowed := view["CanConfigurePublicIPs"] == true
+	view["ShowProfiler"] = a.profiler != nil && updateAllowed
+	if updateAllowed && view["SelectedServerSection"] == "updates" && view["SelectedServerLocal"] == true {
+		_, announcementErr := a.centralAnnouncementIdentity()
+		view["ShowServerUpdater"] = true
+		view["CentralAnnouncements"] = announcementErr == nil
+	}
+	renderStarted := requesttiming.Start(r)
 	a.render(w, r, "expenses.html", view)
+	requesttiming.Finish(r, requesttiming.ServerSettingsRender, renderStarted)
 }
 
 func (a *App) startHostingAndSupportPanelProcess(stop <-chan struct{}) chan hostingAndSupportPanelRequest {
@@ -29011,6 +29055,7 @@ func (a *App) runHostingAndSupportPanelProcess(stop <-chan struct{}, requests <-
 			case "expense_policy_changed":
 				snapshotGeneration++
 				snapshot.LocalCostPolicy = request.costPolicy
+				snapshot.Servers = slices.Clone(snapshot.Servers)
 				for serverIndex := range snapshot.Servers {
 					if snapshot.Servers[serverIndex].Local {
 						hostingandsupport.ApplyServerCostView(&snapshot.Servers[serverIndex], request.costPolicy, snapshot.Invoices)
@@ -29715,15 +29760,21 @@ func (a *App) hostingAndSupportCanShowCentralServers(_ context.Context, ownerDom
 }
 
 func (a *App) expensesView(ctx context.Context, r *http.Request) (map[string]any, error) {
+	snapshotStarted := requesttiming.Start(r)
 	snapshot, found := a.preparedHostingAndSupportPanelSnapshot()
 	if !found {
 		var err error
 		snapshot, err = a.collectHostingAndSupportPanelSnapshot(ctx, nil)
 		if err != nil {
+			requesttiming.Finish(r, requesttiming.ServerSettingsSnapshot, snapshotStarted)
 			return nil, err
 		}
 	}
-	return a.hostingAndSupportPanelView(r, snapshot), nil
+	requesttiming.Finish(r, requesttiming.ServerSettingsSnapshot, snapshotStarted)
+	viewStarted := requesttiming.Start(r)
+	view := a.hostingAndSupportPanelView(r, snapshot)
+	requesttiming.Finish(r, requesttiming.ServerSettingsView, viewStarted)
+	return view, nil
 }
 
 func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, controlDatabase *sql.DB) (hostingAndSupportPanelSnapshot, error) {
@@ -29978,6 +30029,8 @@ func (a *App) applyHostingAndSupportPanelMetrics(snapshot hostingAndSupportPanel
 }
 
 func (a *App) applyHostingAndSupportPanelQuotaChange(snapshot hostingAndSupportPanelSnapshot, quotaChange siteQuotaRow) hostingAndSupportPanelSnapshot {
+	// Published snapshots stay immutable for renderers and the snapshot saver.
+	snapshot.Sites = slices.Clone(snapshot.Sites)
 	domain := normalizeQuotaDomainName(quotaChange.Domain)
 	for siteIndex := range snapshot.Sites {
 		if normalizeQuotaDomainName(snapshot.Sites[siteIndex].Domain) != domain {
@@ -30015,8 +30068,15 @@ func (a *App) applyHostingAndSupportPanelQuotaChange(snapshot hostingAndSupportP
 
 func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSupportPanelSnapshot) map[string]any {
 	translations := translationsForRequest(r)
+	query := r.URL.Query()
+	workspace := strings.TrimSpace(query.Get("workspace"))
 	panelServers := append([]hostingandsupport.ServerView(nil), snapshot.Servers...)
 	if snapshot.ShowCentralRegistry {
+		// Only the central catalog/clients (and the security journal) need
+		// every remote view. Opening the local overview should not allocate
+		// thousands of archived remote server, billing or client graphs.
+		selectedID := strings.TrimSpace(query.Get("installation"))
+		includeAll := workspace == "installations" || workspace == "clients" || mailJournalSecurityView(r)
 		knownServerIDs := make(map[string]bool)
 		for _, server := range panelServers {
 			knownServerIDs[server.ID] = true
@@ -30025,16 +30085,21 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 			if hosting.InstallationID == "" || knownServerIDs[hosting.InstallationID] {
 				return
 			}
+			if !includeAll && hosting.InstallationID != selectedID {
+				return
+			}
 			knownServerIDs[hosting.InstallationID] = true
 			panelServers = append(panelServers, hostingandsupport.BuildRemoteServerView(hosting, snapshot.Invoices, CompileVersion))
 		}
-		for _, group := range snapshot.DesktopHostingGroups {
-			for _, hosting := range group.Hostings {
+		if includeAll || selectedID != "" && !knownServerIDs[selectedID] {
+			for _, group := range snapshot.DesktopHostingGroups {
+				for _, hosting := range group.Hostings {
+					addHosting(hosting)
+				}
+			}
+			for _, hosting := range snapshot.ArchivedHostings {
 				addHosting(hosting)
 			}
-		}
-		for _, hosting := range snapshot.ArchivedHostings {
-			addHosting(hosting)
 		}
 	}
 	if !snapshot.ShowCentralRegistry {
@@ -30048,22 +30113,27 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 	}
 	// Build the selected installation only. The central directory remains
 	// available on demand, but does not inflate every server settings response.
-	centralClientsDeferred := snapshot.ShowCentralRegistry && r.URL.Query().Get("workspace") != "clients"
+	centralClientsDeferred := snapshot.ShowCentralRegistry && workspace != "clients"
 	var centralClients []simplifiedExpenseClientView
 	if snapshot.ShowCentralRegistry && !centralClientsDeferred {
 		centralClients = centralExpenseClients(simplifiedExpenseServerViews(panelServers, snapshot.Clients))
+	}
+	localServerIndex := slices.IndexFunc(panelServers, func(server hostingandsupport.ServerView) bool { return server.Local })
+	localServerID := ""
+	if localServerIndex >= 0 {
+		localServerID = panelServers[localServerIndex].ID
 	}
 	selectedPanelServers := panelServers
 	// Only the server settings page is scoped to a selected installation.
 	// The security journal is a separate cross-installation workspace and
 	// must retain remote rows when filtering by mail_server.
 	if snapshot.ShowCentralRegistry && !mailJournalSecurityView(r) {
-		installationID := strings.TrimSpace(r.URL.Query().Get("installation"))
+		installationID := strings.TrimSpace(query.Get("installation"))
 		selected := slices.IndexFunc(panelServers, func(server hostingandsupport.ServerView) bool {
 			return installationID != "" && server.ID == installationID
 		})
 		if selected < 0 {
-			selected = slices.IndexFunc(panelServers, func(server hostingandsupport.ServerView) bool { return server.Local })
+			selected = localServerIndex
 		}
 		if selected < 0 && len(panelServers) != 0 {
 			selected = 0
@@ -30072,17 +30142,25 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 			selectedPanelServers = panelServers[selected : selected+1]
 		}
 	}
-	expenseServers := simplifiedExpenseServerViews(selectedPanelServers, snapshot.Clients)
-	// Large client forms are a dedicated workspace, not hidden markup on
-	// every overview request. The URL selects the server workspace explicitly.
-	section := r.URL.Query().Get("section")
-	serverClientsDeferred := section != "clients" && section != "billing"
-	if serverClientsDeferred {
-		for index := range expenseServers {
-			expenseServers[index].Clients = nil
-		}
+	// Do not construct client/site/invoice view graphs just to discard them.
+	// The overview needs only already prepared server summaries.
+	section := strings.TrimSpace(query.Get("section"))
+	switch section {
+	case "overview", "network", "updates", "registration", "demo", "clients", "billing", "monetization":
+	default:
+		section = "overview"
 	}
-	selectedMailServer := strings.TrimSpace(r.URL.Query().Get("mail_server"))
+	serverClientsDeferred := section != "clients" && section != "billing"
+	var expenseServers []simplifiedExpenseServerView
+	if serverClientsDeferred {
+		expenseServers = make([]simplifiedExpenseServerView, 0, len(selectedPanelServers))
+		for _, server := range selectedPanelServers {
+			expenseServers = append(expenseServers, simplifiedExpenseServerView{Server: server})
+		}
+	} else {
+		expenseServers = simplifiedExpenseServerViews(selectedPanelServers, snapshot.Clients)
+	}
+	selectedMailServer := strings.TrimSpace(query.Get("mail_server"))
 	selectedMailServerFound := false
 	for _, server := range expenseServers {
 		if server.Server.ID == selectedMailServer {
@@ -30093,21 +30171,21 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 	if !selectedMailServerFound {
 		selectedMailServer = ""
 	}
-	mailDays, _ := strconv.Atoi(r.URL.Query().Get("mail_days"))
+	mailDays, _ := strconv.Atoi(query.Get("mail_days"))
 	if mailDays != 1 && mailDays != 7 && mailDays != 30 && mailDays != 90 {
 		mailDays = 90
 	}
-	mailStage := strings.TrimSpace(r.URL.Query().Get("mail_stage"))
+	mailStage := strings.TrimSpace(query.Get("mail_stage"))
 	switch mailStage {
 	case "", "mail_blocked", "mail_unblocked", "transport_sent", "queued", "attempt", "retry", "accepted", "failed", "cancelled", "cancel_requested", "cancel_too_late", "relay_accepted", "registration_requested", "registration_verified", "registration_complete", "registration_failed", "registration_rejected", "recovery_requested", "recovery_complete", "recovery_failed", "recovery_skipped", "recovery_mail_failed":
 	default:
 		mailStage = ""
 	}
-	mailKind := strings.TrimSpace(r.URL.Query().Get("mail_kind"))
+	mailKind := strings.TrimSpace(query.Get("mail_kind"))
 	if len(mailKind) > 60 {
 		mailKind = ""
 	}
-	mailRecipient := strings.TrimSpace(r.URL.Query().Get("mail_recipient"))
+	mailRecipient := strings.TrimSpace(query.Get("mail_recipient"))
 	if len(mailRecipient) > 254 {
 		mailRecipient = ""
 	}
@@ -30173,10 +30251,15 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 		}
 		log.Printf("MAIL monitor panel read failed error=%s", diagnosticlog.SafeLogValue(readErr.Error()))
 	}
-	trialAvailability := a.publicTrialAvailabilityForSettings(r.Context(), snapshot.MainDomain, snapshot.AutoRegistrationEnabled, snapshot.PublicTrialEnabled)
+	// Wildcard DNS / external-IP probing is only needed in the registration
+	// workspace. It must never hold up an overview or billing navigation.
+	trialAvailability := publicTrialAvailability{}
 	trialUnavailableText := ""
-	if !trialAvailability.Enabled {
-		trialUnavailableText = translationOrDefault(translations, trialAvailability.ReasonKey, "Test drive is unavailable until automatic registration and wildcard DNS are configured.")
+	if section == "registration" && len(expenseServers) > 0 && expenseServers[0].Server.Local {
+		trialAvailability = a.publicTrialAvailabilityForSettings(r.Context(), snapshot.MainDomain, snapshot.AutoRegistrationEnabled, snapshot.PublicTrialEnabled)
+		if !trialAvailability.Enabled {
+			trialUnavailableText = translationOrDefault(translations, trialAvailability.ReasonKey, "Test drive is unavailable until automatic registration and wildcard DNS are configured.")
+		}
 	}
 	publicTrialEmbedHTML := ""
 	testDriveEmbedHTML := ""
@@ -30190,66 +30273,101 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 	if normalizeDomainName(snapshot.MainDomain) == "sitebrush.com" {
 		expensesTitle = translationOrDefault(translations, "expenses_central_title", "Server settings")
 	}
-	sites := append([]hostingandsupport.Site(nil), snapshot.Sites...)
-	ownerDomain := a.serverOwnerDomain(r.Context())
-	for siteIndex := range sites {
-		for _, email := range hostingandsupport.SplitEmailList(sites[siteIndex].AdminEmails) {
-			protected := sites[siteIndex].Domain == ownerDomain && slices.ContainsFunc(snapshot.OwnerEmails, func(ownerEmail string) bool { return strings.EqualFold(ownerEmail, email) })
-			sites[siteIndex].AdminAccounts = append(sites[siteIndex].AdminAccounts, hostingandsupport.SiteAccountView{Email: email, Protected: protected})
+	sites := snapshot.Sites
+	if section == "clients" {
+		sites = slices.Clone(sites)
+		ownerDomain := a.serverOwnerDomain(r.Context())
+		for siteIndex := range sites {
+			sites[siteIndex].AdminAccounts = slices.Clone(sites[siteIndex].AdminAccounts)
+			for _, email := range hostingandsupport.SplitEmailList(sites[siteIndex].AdminEmails) {
+				protected := sites[siteIndex].Domain == ownerDomain && slices.ContainsFunc(snapshot.OwnerEmails, func(ownerEmail string) bool { return strings.EqualFold(ownerEmail, email) })
+				sites[siteIndex].AdminAccounts = append(sites[siteIndex].AdminAccounts, hostingandsupport.SiteAccountView{Email: email, Protected: protected})
+			}
+		}
+		if err := a.withServerControlDatabaseRead(r.Context(), "hosting-panel-deletion-state", func(database *sql.DB) error {
+			return hostingandsupport.PopulateSiteDeletionViews(r.Context(), database, sites)
+		}); err != nil {
+			log.Printf("hosting-panel deletion read failed: %s", diagnosticlog.SafeLogValue(err.Error()))
+		}
+		applySimplifiedSiteDeletionControls(expenseServers, sites)
+	}
+	// Only the central owner may page through the full catalog. Keep the
+	// response bounded even when thousands of installations are archived.
+	centralInstallationsDeferred := snapshot.ShowCentralRegistry && workspace != "installations"
+	catalogPage := hostingandsupport.InstallationPage{Filter: "active", Sort: "sites", Page: 1, Pages: 1}
+	catalogPreviousURL, catalogNextURL := "", ""
+	if snapshot.ShowCentralRegistry && !centralInstallationsDeferred {
+		number, _ := strconv.Atoi(query.Get("catalog_page"))
+		catalogPage = hostingandsupport.PaginateInstallations(
+			hostingandsupport.InstallationCatalogViews(panelServers, nil, nil),
+			query.Get("catalog_filter"),
+			query.Get("catalog_sort"),
+			query.Get("catalog_query"), number, 40)
+		link := func(page int) string {
+			values := url.Values{
+				"server-settings": {""},
+				"workspace":       {"installations"},
+				"catalog_filter":  {catalogPage.Filter},
+				"catalog_sort":    {catalogPage.Sort},
+				"catalog_query":   {catalogPage.Query},
+				"catalog_page":    {strconv.Itoa(page)},
+			}
+			return "/?" + values.Encode()
+		}
+		if catalogPage.Page > 1 {
+			catalogPreviousURL = link(catalogPage.Page - 1)
+		}
+		if catalogPage.Page < catalogPage.Pages {
+			catalogNextURL = link(catalogPage.Page + 1)
 		}
 	}
-	if err := a.withServerControlDatabaseRead(r.Context(), "hosting-panel-deletion-state", func(database *sql.DB) error {
-		return hostingandsupport.PopulateSiteDeletionViews(r.Context(), database, sites)
-	}); err != nil {
-		log.Printf("hosting-panel deletion read failed: %s", diagnosticlog.SafeLogValue(err.Error()))
-	}
-	applySimplifiedSiteDeletionControls(expenseServers, sites)
-	// The cross-installation financial catalog is materialized exclusively for
-	// the authenticated SiteBrush.com registry owner.
-	var installationCatalog []hostingandsupport.InstallationCatalogView
-	if snapshot.ShowCentralRegistry {
-		installationCatalog = hostingandsupport.InstallationCatalogViews(panelServers, nil, nil)
-	}
+	centralBillingDeferred := snapshot.ShowCentralRegistry && workspace != "billing"
 	var ledgerInvoices []hostingandsupport.ServerInvoiceView
-	if snapshot.ShowCentralRegistry {
-		ledgerInvoices = hostingandsupport.ServerInvoiceViews(snapshot.Invoices, nil, nil)
-	} else {
-		for _, server := range panelServers {
-			ledgerInvoices = append(ledgerInvoices, server.Invoices...)
+	if section == "billing" || !centralBillingDeferred && snapshot.ShowCentralRegistry {
+		if snapshot.ShowCentralRegistry {
+			ledgerInvoices = hostingandsupport.ServerInvoiceViews(snapshot.Invoices, nil, nil)
+		} else {
+			for _, server := range panelServers {
+				ledgerInvoices = append(ledgerInvoices, server.Invoices...)
+			}
 		}
 	}
 	return map[string]any{
-		"LedgerInvoices":           ledgerInvoices,
-		"CentralClients":           centralClients,
-		"CentralClientsDeferred":   centralClientsDeferred,
-		"ServerClientsDeferred":    serverClientsDeferred,
-		"SelectedServerLocal":      len(expenseServers) > 0 && expenseServers[0].Server.Local,
-		"T":                        translations,
-		"Title":                    expensesTitle,
-		"Sites":                    sites,
-		"Plans":                    snapshot.Plans,
-		"PaymentProviders":         hostingandsupport.DemoPaymentProviders(absoluteURLForPath(r, "/?hosting_and_support_demo_payment&invoice={invoice}")),
-		"Invoices":                 snapshot.Invoices,
-		"SiteRequests":             snapshot.SiteRequests,
-		"ServiceMailInstallations": nil,
-		"ServiceMailEvents":        nil,
-		"ClientHostings":           snapshot.ClientHostings,
-		"DesktopHostingGroups":     snapshot.DesktopHostingGroups,
-		"ArchivedHostings":         snapshot.ArchivedHostings,
-		"ActivePublicTrialSites":   snapshot.ActivePublicTrialSites,
-		"CleanupPendingTrialSites": snapshot.CleanupPendingTrialSites,
-		"ArchivedPublicTrialSites": snapshot.ArchivedPublicTrialSites,
-		"Servers":                  snapshot.Servers,
-		"RegistrySyncEvents":       snapshot.RegistrySyncEvents,
-		"SitebrushComKey":          snapshot.SitebrushComKey,
-		"ShowServers":              true,
-		"Clients":                  snapshot.Clients,
-		"ClientCount":              len(snapshot.Clients),
-		"ClientSiteCount":          len(snapshot.Sites),
-		"ClientInstallationCount":  len(snapshot.Servers),
-		"ServiceMailBlocks":        nil,
-		"ServiceMailRelayEnabled":  snapshot.ServiceMailRelayEnabled,
-		"Overview":                 snapshot.Overview,
+		"LedgerInvoices":               ledgerInvoices,
+		"CentralClients":               centralClients,
+		"CentralClientsDeferred":       centralClientsDeferred,
+		"CentralBillingDeferred":       centralBillingDeferred,
+		"CentralInstallationsDeferred": centralInstallationsDeferred,
+		"ServerClientsDeferred":        serverClientsDeferred,
+		"SelectedServerSection":        section,
+		"SelectedServerLocal":          len(expenseServers) > 0 && expenseServers[0].Server.Local,
+		"LocalServerID":                localServerID,
+		"T":                            translations,
+		"Title":                        expensesTitle,
+		"Sites":                        sites,
+		"Plans":                        snapshot.Plans,
+		"PaymentProviders":             hostingandsupport.DemoPaymentProviders(absoluteURLForPath(r, "/?hosting_and_support_demo_payment&invoice={invoice}")),
+		"Invoices":                     snapshot.Invoices,
+		"SiteRequests":                 snapshot.SiteRequests,
+		"ServiceMailInstallations":     nil,
+		"ServiceMailEvents":            nil,
+		"ClientHostings":               snapshot.ClientHostings,
+		"DesktopHostingGroups":         snapshot.DesktopHostingGroups,
+		"ArchivedHostings":             snapshot.ArchivedHostings,
+		"ActivePublicTrialSites":       snapshot.ActivePublicTrialSites,
+		"CleanupPendingTrialSites":     snapshot.CleanupPendingTrialSites,
+		"ArchivedPublicTrialSites":     snapshot.ArchivedPublicTrialSites,
+		"Servers":                      snapshot.Servers,
+		"RegistrySyncEvents":           snapshot.RegistrySyncEvents,
+		"SitebrushComKey":              snapshot.SitebrushComKey,
+		"ShowServers":                  true,
+		"Clients":                      snapshot.Clients,
+		"ClientCount":                  len(snapshot.Clients),
+		"ClientSiteCount":              len(snapshot.Sites),
+		"ClientInstallationCount":      len(snapshot.Servers),
+		"ServiceMailBlocks":            nil,
+		"ServiceMailRelayEnabled":      snapshot.ServiceMailRelayEnabled,
+		"Overview":                     snapshot.Overview,
 		"ServiceMailLimits": map[string]int{
 			"InstallationHour":    serviceMailPerInstallationHourLimit,
 			"NewInstallationHour": serviceMailNewInstallationHourLimit,
@@ -30259,39 +30377,53 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 			"RecipientHour":       serviceMailPerRecipientHourLimit,
 			"RecipientDomainHour": serviceMailPerRecipientDomainHourLimit,
 		},
-		"Backups":                    nil,
-		"DemoSettings":               snapshot.DemoSettings,
-		"DemoStatus":                 a.demoSiteStatusView(r.Context(), snapshot.DemoSettings),
-		"DemoCopyScopeLabel":         translationOrDefault(translations, "billing_demo_copy_scope", "Content to download"),
-		"DemoCopyPageLabel":          translationOrDefault(translations, "billing_demo_copy_single_page", "Only the specified page"),
-		"DemoSnapshotLabel":          translationOrDefault(translations, "billing_demo_snapshot", "Current demo copy"),
-		"DemoSnapshotMissingLabel":   translationOrDefault(translations, "billing_demo_snapshot_missing", "The copy has not been created yet"),
-		"DemoLastRestoredLabel":      translationOrDefault(translations, "billing_demo_last_restored", "Last content reset"),
-		"DemoNeverRestoredLabel":     translationOrDefault(translations, "billing_demo_never_restored", "No resets yet"),
-		"AutoRegistrationEnabled":    snapshot.AutoRegistrationEnabled,
-		"PublicTrialEnabled":         snapshot.PublicTrialEnabled,
-		"RegistrationMaxSize":        hostingandsupport.FormatQuotaInput(snapshot.CreationLimits.Registration),
-		"TestDriveMaxSize":           hostingandsupport.FormatQuotaInput(snapshot.CreationLimits.TestDrive),
-		"DemoMaxSize":                hostingandsupport.FormatQuotaInput(snapshot.DemoSettings.MaxSiteBytes),
-		"PublicTrialAvailable":       trialAvailability.Enabled,
-		"PublicTrialUnavailableText": trialUnavailableText,
-		"PublicTrialWildcardDomain":  trialAvailability.WildcardDomain,
-		"PublicTrialExternalIP":      trialAvailability.ExternalIP,
-		"PublicTrialEmbedHTML":       publicTrialEmbedHTML,
-		"TestDriveEmbedHTML":         testDriveEmbedHTML,
-		"CreateSiteEmbedHTML":        createSiteEmbedHTML,
-		"CurrentDomain":              domainFromRequest(r),
-		"PanelSnapshotBuiltAt":       snapshot.BuiltAt,
-		"CommissionBPS":              snapshot.CommissionBPS,
-		"CommissionPercent":          fmt.Sprintf("%.2f", float64(snapshot.CommissionBPS)/100),
-		"ShowCommissionSetting":      snapshot.ShowCentralRegistry,
-		"ShowCentralRegistry":        snapshot.ShowCentralRegistry,
-		"ShowDemo":                   snapshot.AutoRegistrationEnabled && snapshot.DemoSettings.Enabled && normalizeDomainName(snapshot.DemoSettings.Domain) != "",
-		"SimplifiedExpenses":         true,
-		"CanConfigurePublicIPs":      a.updateAuthorized(r),
-		"ExpenseServers":             expenseServers,
-		"InstallationCatalog":        installationCatalog,
-		"MailJournalLabelsJSON":      mailJournalLabelsJSON(translations),
+		"Backups":      nil,
+		"DemoSettings": snapshot.DemoSettings,
+		"DemoStatus": func() demoSiteStatusView {
+			if section == "demo" && len(expenseServers) > 0 && expenseServers[0].Server.Local {
+				return a.demoSiteStatusView(r.Context(), snapshot.DemoSettings)
+			}
+			return demoSiteStatusView{}
+		}(),
+		"DemoCopyScopeLabel":          translationOrDefault(translations, "billing_demo_copy_scope", "Content to download"),
+		"DemoCopyPageLabel":           translationOrDefault(translations, "billing_demo_copy_single_page", "Only the specified page"),
+		"DemoSnapshotLabel":           translationOrDefault(translations, "billing_demo_snapshot", "Current demo copy"),
+		"DemoSnapshotMissingLabel":    translationOrDefault(translations, "billing_demo_snapshot_missing", "The copy has not been created yet"),
+		"DemoLastRestoredLabel":       translationOrDefault(translations, "billing_demo_last_restored", "Last content reset"),
+		"DemoNeverRestoredLabel":      translationOrDefault(translations, "billing_demo_never_restored", "No resets yet"),
+		"AutoRegistrationEnabled":     snapshot.AutoRegistrationEnabled,
+		"PublicTrialEnabled":          snapshot.PublicTrialEnabled,
+		"RegistrationMaxSize":         hostingandsupport.FormatQuotaInput(snapshot.CreationLimits.Registration),
+		"TestDriveMaxSize":            hostingandsupport.FormatQuotaInput(snapshot.CreationLimits.TestDrive),
+		"DemoMaxSize":                 hostingandsupport.FormatQuotaInput(snapshot.DemoSettings.MaxSiteBytes),
+		"PublicTrialAvailable":        trialAvailability.Enabled,
+		"PublicTrialUnavailableText":  trialUnavailableText,
+		"PublicTrialWildcardDomain":   trialAvailability.WildcardDomain,
+		"PublicTrialExternalIP":       trialAvailability.ExternalIP,
+		"PublicTrialEmbedHTML":        publicTrialEmbedHTML,
+		"TestDriveEmbedHTML":          testDriveEmbedHTML,
+		"CreateSiteEmbedHTML":         createSiteEmbedHTML,
+		"CurrentDomain":               domainFromRequest(r),
+		"PanelSnapshotBuiltAt":        snapshot.BuiltAt,
+		"CommissionBPS":               snapshot.CommissionBPS,
+		"CommissionPercent":           fmt.Sprintf("%.2f", float64(snapshot.CommissionBPS)/100),
+		"ShowCommissionSetting":       snapshot.ShowCentralRegistry,
+		"ShowCentralRegistry":         snapshot.ShowCentralRegistry,
+		"ShowDemo":                    snapshot.AutoRegistrationEnabled && snapshot.DemoSettings.Enabled && normalizeDomainName(snapshot.DemoSettings.Domain) != "",
+		"SimplifiedExpenses":          true,
+		"CanConfigurePublicIPs":       a.updateAuthorized(r),
+		"ExpenseServers":              expenseServers,
+		"InstallationCatalog":         catalogPage.Rows,
+		"InstallationCatalogTotal":    catalogPage.Total,
+		"InstallationCatalogCount":    catalogPage.Matching,
+		"InstallationCatalogPage":     catalogPage.Page,
+		"InstallationCatalogPages":    catalogPage.Pages,
+		"InstallationCatalogFilter":   catalogPage.Filter,
+		"InstallationCatalogSort":     catalogPage.Sort,
+		"InstallationCatalogQuery":    catalogPage.Query,
+		"InstallationCatalogPrevious": catalogPreviousURL,
+		"InstallationCatalogNext":     catalogNextURL,
+		"MailJournalLabelsJSON":       mailJournalLabelsJSON(translations),
 	}
 }
 
@@ -43579,22 +43711,33 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 		httpsecurity.RedirectLocal(w, r, redirectPath, http.StatusFound)
 		return
 	}
-	usage := a.storedDomainStorageUsage(r.Context(), a.siteDomain(r.Context(), r))
+	listStarted := requesttiming.Start(r)
+	domain := a.siteDomain(r.Context(), r)
+	usage := a.storedDomainStorageUsage(r.Context(), domain)
 	availableUploadBytes := usage.LimitBytes - usage.totalBytes()
 	if availableUploadBytes < 0 {
 		availableUploadBytes = 0
 	}
 	fileList, listErr := a.listManagedFiles(r.Context(), r, currentPath, showAllFiles)
 	if listErr != nil {
-		a.render(w, r, "files.html", map[string]any{"Path": currentPath, "Files": []ManagedFile{}, "ShowAllFiles": showAllFiles, "NativeFileDialog": a.nativeFileDialog, "AvailableUploadBytes": availableUploadBytes, "AvailableUploadSize": formatFileSize(availableUploadBytes)})
+		requesttiming.Finish(r, requesttiming.FilesList, listStarted)
+		log.Printf("file manager list failed: %s", diagnosticlog.SafeLogValue(listErr.Error()))
+		http.Error(w, "File list unavailable", http.StatusInternalServerError)
 		return
 	}
-	servicePages, serviceErr := a.listManagedServicePages(r.Context(), a.siteDomain(r.Context(), r))
+	servicePages, serviceErr := a.listManagedServicePages(r.Context(), domain)
 	if serviceErr != nil {
+		requesttiming.Finish(r, requesttiming.FilesList, listStarted)
 		http.Error(w, serviceErr.Error(), http.StatusInternalServerError)
 		return
 	}
-	accessRulesByName := a.fileAccessRulesByName(r.Context(), r)
+	accessRulesByName, accessErr := a.fileAccessRulesByName(r.Context(), domain)
+	if accessErr != nil {
+		requesttiming.Finish(r, requesttiming.FilesList, listStarted)
+		log.Printf("file manager access rules unavailable: %s", diagnosticlog.SafeLogValue(accessErr.Error()))
+		http.Error(w, "File access rules unavailable", http.StatusInternalServerError)
+		return
+	}
 	for index := range fileList {
 		accessRule := accessRulesByName[fileList[index].Name]
 		if strings.TrimSpace(accessRule.AccessMode) == "" {
@@ -43603,12 +43746,16 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 		fileList[index].AssetPath = "/p/" + fileList[index].Name
 		fileList[index].ProtectedPagePath = accessRule.ProtectedPagePath
 		fileList[index].AccessMode = accessRule.AccessMode
+		fileList[index].InlinePreview = fileList[index].InlinePreview && accessRule.AccessMode == "public"
 		fileList[index].Token = accessRule.Token
 		fileList[index].ExpiresAt = accessRule.ExpiresAt
 		fileList[index].SingleUseLeft = accessRule.SingleUseLeft
 		fileList[index].TokenUseCount = accessRule.TokenUseCount
 	}
+	requesttiming.Finish(r, requesttiming.FilesList, listStarted)
+	renderStarted := requesttiming.Start(r)
 	a.render(w, r, "files.html", map[string]any{"Path": currentPath, "Files": fileList, "ServicePages": servicePages, "ShowAllFiles": showAllFiles, "NativeFileDialog": a.nativeFileDialog, "AvailableUploadBytes": availableUploadBytes, "AvailableUploadSize": formatFileSize(availableUploadBytes)})
+	requesttiming.Finish(r, requesttiming.FilesRender, renderStarted)
 }
 
 func (a *App) listManagedServicePages(ctx context.Context, domain string) ([]managedServicePageView, error) {
@@ -43829,13 +43976,32 @@ func (a *App) servePublicAsset(w http.ResponseWriter, r *http.Request) {
 	a.serveAssetFile(w, r, domain, fileName)
 }
 
+// Large originals are opened only by a deliberate preview action.
+const managedFileInlinePreviewLimit = 128 << 10
+
 func (a *App) listManagedFiles(ctx context.Context, r *http.Request, currentPath string, allFiles ...bool) ([]ManagedFile, error) {
 	fileList := make([]ManagedFile, 0, 32)
-	rootPath := a.domainFilesDir(r)
-	if _, err := a.existingPathInsideStorage(rootPath); err != nil {
+	requestDomain := a.siteDomain(ctx, r)
+	jail, relativeDirectory, err := a.storageJailForPath(a.domainFilesDirForDomain(requestDomain))
+	if err != nil {
+		return nil, err
+	}
+	storageRoot, err := jail.OpenRoot()
+	if err != nil {
+		return nil, err
+	}
+	defer storageRoot.Close()
+	// The file tree is confined to the storage root even if a directory
+	// changes while the listing is being prepared.
+	directory, err := storageRoot.OpenRoot(relativeDirectory)
+	if errors.Is(err, fs.ErrNotExist) {
 		return fileList, nil
 	}
-	domain := domainStorageName(a.siteDomain(ctx, r))
+	if err != nil {
+		return nil, err
+	}
+	defer directory.Close()
+	domain := domainStorageName(requestDomain)
 	metadata := a.fileMetadataByName(ctx, domain)
 	originsByName := make(map[string][]string)
 	pagesByName := make(map[string][]string)
@@ -43872,30 +44038,21 @@ func (a *App) listManagedFiles(ctx context.Context, r *http.Request, currentPath
 	}
 	currentPath = cleanPath(currentPath)
 	showAll := len(allFiles) > 0 && allFiles[0]
-	// #nosec G703 -- rootPath is an application-owned directory validated by the storage jail.
-	walkErr := filepath.WalkDir(rootPath, func(filePath string, currentEntry fs.DirEntry, entryErr error) error {
-		if entryErr != nil || currentEntry.IsDir() {
-			return nil
+	addFile := func(name string) {
+		if hidden["files\x00"+name] || safeRelativeAssetPath(name) != name {
+			return
 		}
-		relativePath, relErr := filepath.Rel(rootPath, filePath)
-		if relErr != nil {
-			return nil
-		}
-		normalizedPath := filepath.ToSlash(relativePath)
-		if hidden["files\x00"+normalizedPath] || safeRelativeAssetPath(normalizedPath) == "" {
-			return nil
-		}
-		fileInfo, statErr := a.statInsideStorage(filePath)
-		if statErr != nil {
-			return nil
-		}
-		meta := metadata[normalizedPath]
-		usedByPaths := pagesByName[normalizedPath]
+		meta := metadata[name]
+		usedByPaths := pagesByName[name]
 		if len(usedByPaths) == 0 && meta.PagePath != "" {
 			usedByPaths = []string{meta.PagePath}
 		}
 		if !showAll && !slices.Contains(usedByPaths, currentPath) {
-			return nil
+			return
+		}
+		fileInfo, statErr := directory.Stat(filepath.FromSlash(name))
+		if statErr != nil || !fileInfo.Mode().IsRegular() {
+			return
 		}
 		size := fileInfo.Size()
 		if meta.Size > 0 {
@@ -43911,31 +44068,64 @@ func (a *App) listManagedFiles(ctx context.Context, r *http.Request, currentPath
 		}
 		mimeType := meta.MimeType
 		if mimeType == "" {
-			mimeType = mime.TypeByExtension(path.Ext(normalizedPath))
+			mimeType = mime.TypeByExtension(path.Ext(name))
 		}
 		fileList = append(fileList, ManagedFile{
-			Name:          normalizedPath,
+			Name:          name,
 			Size:          size,
 			SizeLabel:     formatFileSize(size),
 			PagePath:      meta.PagePath,
-			OriginalURIs:  append([]string(nil), originsByName[normalizedPath]...),
+			OriginalURIs:  append([]string(nil), originsByName[name]...),
 			UsedByPaths:   append([]string(nil), usedByPaths...),
-			PublicPaths:   append([]string(nil), publicPathsByName[normalizedPath]...),
-			IsFavicon:     slices.Contains(publicPathsByName[normalizedPath], "/favicon.ico"),
+			PublicPaths:   append([]string(nil), publicPathsByName[name]...),
+			IsFavicon:     slices.Contains(publicPathsByName[name], "/favicon.ico"),
 			MimeType:      mimeType,
-			Extension:     fileExtensionLabel(normalizedPath),
+			Extension:     fileExtensionLabel(name),
 			CreatedAt:     createdAt,
 			CreatedUnix:   createdUnix,
-			IsImage:       isImageFile(normalizedPath, mimeType),
+			IsImage:       isImageFile(name, mimeType),
+			InlinePreview: fileInfo.Size() <= managedFileInlinePreviewLimit,
 			DownloadCount: meta.DownloadCount,
 		})
-		return nil
-	})
-	if walkErr != nil {
-		return nil, walkErr
 	}
-	sort.Slice(fileList, func(leftIndex, rightIndex int) bool {
-		return fileList[leftIndex].CreatedUnix > fileList[rightIndex].CreatedUnix
+	if showAll {
+		walkErr := fs.WalkDir(directory.FS(), ".", func(name string, entry fs.DirEntry, entryErr error) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if entryErr == nil && !entry.IsDir() {
+				addFile(name)
+			}
+			return nil
+		})
+		if walkErr != nil {
+			return nil, walkErr
+		}
+	} else {
+		// The database already identifies every file that can appear on a
+		// single page. Avoid walking unrelated uploads or checking them on disk.
+		for name, usedByPaths := range pagesByName {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if slices.Contains(usedByPaths, currentPath) {
+				addFile(name)
+			}
+		}
+		for name, meta := range metadata {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if meta.PagePath == currentPath && len(pagesByName[name]) == 0 {
+				addFile(name)
+			}
+		}
+	}
+	slices.SortFunc(fileList, func(left, right ManagedFile) int {
+		if timeOrder := cmp.Compare(right.CreatedUnix, left.CreatedUnix); timeOrder != 0 {
+			return timeOrder
+		}
+		return strings.Compare(left.Name, right.Name)
 	})
 	return fileList, nil
 }
@@ -46644,28 +46834,25 @@ func (a *App) removePrivateUpload(ctx context.Context, domain string, names []st
 	}, func(error) {})
 }
 
-func (a *App) fileAccessRulesByName(ctx context.Context, r *http.Request) map[string]ManagedFileAccess {
+func (a *App) fileAccessRulesByName(ctx context.Context, domain string) (map[string]ManagedFileAccess, error) {
 	accessRulesByName := make(map[string]ManagedFileAccess)
-	rows, err := a.db.QueryContext(ctx, `SELECT file_name,access_mode,token,expires_at,single_use_left,token_use_count,protected_page_path FROM file_access_rules WHERE domain=?`, domainStorageName(a.siteDomain(ctx, r)))
+	rows, err := a.db.QueryContext(ctx, `SELECT file_name,COALESCE(access_mode,''),COALESCE(token,''),COALESCE(expires_at,''),COALESCE(single_use_left,0),COALESCE(token_use_count,0),COALESCE(protected_page_path,'') FROM file_access_rules WHERE domain=?`, domainStorageName(domain))
 	if err != nil {
-		return accessRulesByName
+		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var fileName string
 		var accessRule ManagedFileAccess
-		if scanErr := rows.Scan(&fileName, &accessRule.AccessMode, &accessRule.Token, &accessRule.ExpiresAt, &accessRule.SingleUseLeft, &accessRule.TokenUseCount, &accessRule.ProtectedPagePath); scanErr != nil {
-			continue
+		if err = rows.Scan(&fileName, &accessRule.AccessMode, &accessRule.Token, &accessRule.ExpiresAt, &accessRule.SingleUseLeft, &accessRule.TokenUseCount, &accessRule.ProtectedPagePath); err != nil {
+			return nil, err
 		}
 		if safeRelativeAssetPath(fileName) == "" {
 			continue
 		}
-		if strings.TrimSpace(accessRule.AccessMode) == "" {
-			accessRule.AccessMode = "public"
-		}
 		accessRulesByName[fileName] = accessRule
 	}
-	return accessRulesByName
+	return accessRulesByName, rows.Err()
 }
 
 func (a *App) fileAccessRule(ctx context.Context, r *http.Request, fileName string) ManagedFileAccess {
@@ -49817,10 +50004,34 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, templateName string
 		envelope["VisualEditorAssetVersion"] = assetVersion
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	}
-	if a != nil && a.renderTemplates != nil {
+	if a != nil && a.renderTemplates.jobs != nil {
+		session := r.Context().Done()
+		started := make(chan struct{})
 		reply := make(chan renderTemplateResponse, 1)
-		a.renderTemplates <- renderTemplateRequest{name: templateName, envelope: envelope, reply: reply}
+		select {
+		case <-session:
+			return
+		case <-a.renderTemplates.stop:
+			http.Error(w, "template rendering unavailable", http.StatusServiceUnavailable)
+			return
+		case a.renderTemplates.jobs <- renderTemplateRequest{name: templateName, envelope: envelope, session: session, started: started, reply: reply}:
+		}
+		select {
+		case <-session:
+			return
+		case <-a.renderTemplates.stop:
+			http.Error(w, "template rendering unavailable", http.StatusServiceUnavailable)
+			return
+		case <-started:
+		}
+		// The envelope can contain borrowed values. Once the worker has
+		// accepted them, join it before the handler may release them.
 		response := <-reply
+		select {
+		case <-session:
+			return
+		default:
+		}
 		if response.err != nil {
 			http.Error(w, response.err.Error(), http.StatusInternalServerError)
 			return
@@ -49857,12 +50068,16 @@ func parseEmbeddedPageTemplate(templateName string, source []byte) (*template.Te
 		return nil, err
 	}
 	if templateName == "expenses.html" {
-		fragment, readErr := fs.ReadFile(embeddedWebFiles, "web/server_profiler.html")
-		if readErr != nil {
-			return nil, readErr
+		for _, fragmentName := range []string{"server_profiler.html", "server_update.html"} {
+			fragment, readErr := fs.ReadFile(embeddedWebFiles, "web/"+fragmentName)
+			if readErr != nil {
+				return nil, readErr
+			}
+			if _, parseErr := parsedTemplate.New(fragmentName).Parse(string(fragment)); parseErr != nil {
+				return nil, parseErr
+			}
 		}
-		_, parseErr := parsedTemplate.New("server_profiler.html").Parse(string(fragment))
-		return parsedTemplate, parseErr
+		return parsedTemplate, nil
 	}
 	if templateName != "edit.html" {
 		return parsedTemplate, nil
@@ -49878,12 +50093,27 @@ func parseEmbeddedPageTemplate(templateName string, source []byte) (*template.Te
 	return parsedTemplate, nil
 }
 
-func startRenderTemplateProcess(stop <-chan struct{}) chan renderTemplateRequest {
-	requests := make(chan renderTemplateRequest, 32)
+func startRenderTemplateProcess(stop <-chan struct{}) renderTemplateProcess {
+	jobs := make(chan renderTemplateRequest, 32)
+	workers := min(4, max(1, runtime.GOMAXPROCS(0)))
+	for worker := 0; worker < workers; worker++ {
+		go runRenderTemplateWorker(stop, jobs)
+	}
+	return renderTemplateProcess{jobs: jobs, stop: stop}
+}
+
+func runRenderTemplateWorker(stop <-chan struct{}, jobs <-chan renderTemplateRequest) {
+	// Each worker owns its templates, including the escaping state initialized
+	// by html/template on first execution.
 	parsedTemplates := make(map[string]*template.Template)
 	parseErrors := make(map[string]error)
 	templatePaths, _ := fs.Glob(embeddedWebFiles, "web/*.html")
 	for _, templatePath := range templatePaths {
+		select {
+		case <-stop:
+			return
+		default:
+		}
 		templateName := filepath.Base(templatePath)
 		fileBytes, readErr := fs.ReadFile(embeddedWebFiles, templatePath)
 		if readErr != nil {
@@ -49897,28 +50127,52 @@ func startRenderTemplateProcess(stop <-chan struct{}) chan renderTemplateRequest
 		}
 		parsedTemplates[templateName] = parsedTemplate
 	}
-	go func() {
-		for {
+	for {
+		select {
+		case <-stop:
+			return
+		case request, open := <-jobs:
+			if !open {
+				return
+			}
 			select {
 			case <-stop:
 				return
-			case request := <-requests:
-				if parseErr := parseErrors[request.name]; parseErr != nil {
-					request.reply <- renderTemplateResponse{err: parseErr}
-					continue
-				}
+			case <-request.session:
+				continue
+			case request.started <- struct{}{}:
+			}
+			response := renderTemplateResponse{err: parseErrors[request.name]}
+			if response.err == nil {
 				parsedTemplate := parsedTemplates[request.name]
 				if parsedTemplate == nil {
-					request.reply <- renderTemplateResponse{err: fmt.Errorf("template %s is not embedded", request.name)}
-					continue
+					response.err = fmt.Errorf("template %s is not embedded", request.name)
+				} else {
+					rendered := renderTemplateBuffer{stop: stop, session: request.session}
+					response.err = parsedTemplate.Execute(&rendered, request.envelope)
+					response.html = rendered.buffer.Bytes()
 				}
-				var rendered bytes.Buffer
-				renderErr := parsedTemplate.Execute(&rendered, request.envelope)
-				request.reply <- renderTemplateResponse{html: rendered.Bytes(), err: renderErr}
 			}
+			request.reply <- response
 		}
-	}()
-	return requests
+	}
+}
+
+type renderTemplateBuffer struct {
+	buffer  bytes.Buffer
+	stop    <-chan struct{}
+	session <-chan struct{}
+}
+
+func (rendered *renderTemplateBuffer) Write(content []byte) (int, error) {
+	select {
+	case <-rendered.stop:
+		return 0, errors.New("template rendering stopped")
+	case <-rendered.session:
+		return 0, errors.New("template client disconnected")
+	default:
+		return rendered.buffer.Write(content)
+	}
 }
 
 func injectTemplatePropagationProgressModal(pageHTML []byte) []byte {
@@ -60083,11 +60337,11 @@ func (a *App) serverUpdatePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !hasQueryFlag(r, "embedded") {
-		httpsecurity.RedirectLocal(w, r, "/?server-settings#server-update", http.StatusSeeOther)
+		httpsecurity.RedirectLocal(w, r, "/?server-settings&section=updates#server-update", http.StatusSeeOther)
 		return
 	}
 	_, centralErr := a.centralAnnouncementIdentity()
-	view := map[string]any{"T": translationsForRequest(r), "AccountCSRF": accountCSRF(r), "CentralAnnouncements": centralErr == nil, "ServerVersion": CompileVersion, "Embedded": true}
+	view := map[string]any{"T": translationsForRequest(r), "AccountCSRF": accountCSRF(r), "CentralAnnouncements": centralErr == nil, "Embedded": true}
 	page := &serverUpdatePageBuffer{headers: make(http.Header)}
 	a.render(page, r, "server_update.html", view)
 	if page.status >= http.StatusBadRequest || page.body.Len() == 0 {
@@ -63042,7 +63296,7 @@ func newPublicHTTPFront(application *App, secret string, stop <-chan struct{}) *
 			}
 			application.securityResponseHeadersMiddleware(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 				writer.Header().Set("Referrer-Policy", "no-referrer")
-				application.render(writer, request, "server_update.html", map[string]any{"Domain": decision.Domain, "AccountCSRF": accountCSRF(request), "ServerVersion": CompileVersion, "CentralAnnouncements": false})
+				application.render(writer, request, "server_update.html", map[string]any{"Domain": decision.Domain, "AccountCSRF": accountCSRF(request), "CentralAnnouncements": false})
 			})).ServeHTTP(w, r)
 			return true
 		}

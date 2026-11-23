@@ -202,7 +202,20 @@
     (journalModel.snapshot.Servers || []).forEach(function renderServer(server) {
       document.querySelectorAll('[data-mail-journal]').forEach(function updateJournal(containerElement) { if (containerElement.dataset.mailJournal === server.Server.ID) containerElement.replaceChildren(renderOperations(server.MailOperations || [])); });
       document.querySelectorAll('[data-mail-pagination]').forEach(function updatePagination(containerElement) { if (containerElement.dataset.mailPagination === server.Server.ID) renderPagination(containerElement, server.MailPagination); });
-      document.querySelectorAll('[data-mail-count]').forEach(function updateCounter(counterElement) { if (counterElement.dataset.mailServer === server.Server.ID) counterElement.textContent = server.MailLastDay[counterElement.dataset.mailCount] + ' / ' + server.MailLast90Days[counterElement.dataset.mailCount]; });
+      document.querySelectorAll('[data-mail-count]').forEach(function updateCounter(counterElement) {
+        if (counterElement.dataset.mailServer !== server.Server.ID) return;
+        const key = counterElement.dataset.mailCount;
+        const day = Number(server.MailLastDay[key]) || 0;
+        const history = Number(server.MailLast90Days[key]) || 0;
+        counterElement.textContent = day + ' / ' + history;
+        if (key === 'Failed') {
+          const badge = counterElement.closest('span');
+          if (badge) {
+            badge.classList.toggle('server-mail-error', day > 0);
+            badge.classList.toggle('server-mail-warning', day === 0 && history > 0);
+          }
+        }
+      });
     });
     if (securityView) renderSecurity();
     showFeedback();

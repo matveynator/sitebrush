@@ -67,6 +67,15 @@ function fixture(options = {}) {
       if (command.action === 'export') response.text = 'Report for ' + command.role;
       if (options.publicUnavailable && command.role === 'public') {response.error = 'Public contact unavailable'; response.reports = [];}
       if (command.action === 'report') {
+        if (command.view === 'network') {
+          report.matches = 51;
+          report.httpCalls = [{
+            started: new Date().toISOString(), method: 'GET', host: 'owner.example',
+            route: command.page === 0 ? '/?files' : '/p/photo.png',
+            status: 200, durationUS: 1520, sent: 1080
+          }];
+          response.more = command.page === 0;
+        }
         if (command.view === 'function') {
           report.detail = {
             function: report.functions[command.function - 1],
@@ -160,6 +169,15 @@ function fixture(options = {}) {
   assert.equal(details.at(-1).function, 2, 'Following a relationship opens the related function');
   tablePanel.nodes.get('[data-profiler-unit]').onchange({target: {value: 'ms'}});
   assert.ok(tablePanel.findButton('Собственное CPU'), 'Changing units keeps the table usable');
+  tablePanel.tabs.find(button => button.dataset.view === 'network').onclick();
+  await tablePanel.settle();
+  assert.ok(tablePanel.descendants(tablePanel.nodes.get('[data-profiler-content]')).some(node => node.textContent === '/?files'));
+  assert.equal(tablePanel.nodes.get('[data-profiler-pagination]').hidden, false);
+  assert.equal(tablePanel.nodes.get('[data-profiler-next]').disabled, false);
+  tablePanel.nodes.get('[data-profiler-next]').onclick();
+  await tablePanel.settle();
+  assert.ok(tablePanel.descendants(tablePanel.nodes.get('[data-profiler-content]')).some(node => node.textContent === '/p/photo.png'));
+  assert.equal(tablePanel.nodes.get('[data-profiler-next]').disabled, true);
   tablePanel.tabs.find(button=>button.dataset.view==='goroutines').onclick();
   await tablePanel.settle();
   assert.ok(tablePanel.descendants(tablePanel.nodes.get('[data-profiler-content]')).some(node=>node.textContent==='Готовы к выполнению'),'Runtime samples are available with goroutine states');

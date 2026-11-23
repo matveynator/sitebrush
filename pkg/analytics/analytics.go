@@ -138,6 +138,7 @@ type Report struct {
 	PeriodStart         time.Time
 	PeriodEnd           time.Time
 	Generated           time.Time
+	LastEvent           time.Time
 	Started             time.Time
 	Days                int
 	Views               int
@@ -552,10 +553,10 @@ func merge(target, source map[string]int) {
 
 func (site *Site) Report(now time.Time, days int) Report {
 	if site.Conversion != nil {
-		return Report{Conversion: site.conversionReport(now, days), Generated: now, Days: days, PeriodStart: dayStart(now.UTC()).AddDate(0, 0, -days+1), PeriodEnd: now, Incomplete: site.Conversion.Incomplete}
+		return Report{Conversion: site.conversionReport(now, days), Generated: now, LastEvent: site.LastEvent, Days: days, PeriodStart: dayStart(now.UTC()).AddDate(0, 0, -days+1), PeriodEnd: now, Incomplete: site.Conversion.Incomplete}
 	}
 	start := dayStart(now.UTC()).AddDate(0, 0, -days+1)
-	report := Report{ProcessingLagMS: site.ProcessingLagMS, QueuePercent: site.QueuePercent, EstimatedBytes: site.Used, ComparisonAvailable: days*2 <= RetentionDays && !site.Started.After(start.AddDate(0, 0, -days)), PeriodStart: start, PeriodEnd: now, Generated: now, Started: site.Started, Days: days, Incomplete: site.Incomplete, HistoryLimited: site.HistoryLimited}
+	report := Report{ProcessingLagMS: site.ProcessingLagMS, QueuePercent: site.QueuePercent, EstimatedBytes: site.Used, ComparisonAvailable: days*2 <= RetentionDays && !site.Started.After(start.AddDate(0, 0, -days)), PeriodStart: start, PeriodEnd: now, Generated: now, LastEvent: site.LastEvent, Started: site.Started, Days: days, Incomplete: site.Incomplete, HistoryLimited: site.HistoryLimited}
 	pages, sources, entries, exits, transitions, insights := map[string]int{}, map[string]int{}, map[string]int{}, map[string]int{}, map[string]int{}, map[string]int{}
 	activeDays, intervals := map[string]int{}, map[string]int{}
 	firstSources, returnSources := map[string]int{}, map[string]int{}
