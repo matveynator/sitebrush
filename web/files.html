@@ -242,7 +242,6 @@
               </details>
             </td>
             <td>
-              {{if .IsImage}}<form method="post" action="{{$.Path}}?files&amp;files_scope=all" class="file-delete-form"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}"><input type="hidden" name="action" value="set_favicon"><input type="hidden" name="name" value="{{.Name}}"><button class="btn btn-outline-primary btn-sm" type="submit" title="{{if eq $.LanguageCode "ru"}}Сделать favicon{{else}}Use as favicon{{end}}">{{if eq $.LanguageCode "ru"}}Favicon{{else}}Favicon{{end}}</button></form>{{end}}
               <form method="post" action="{{$.Path}}?files{{if $.ShowAllFiles}}&amp;files_scope=all{{end}}" class="file-delete-form"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
                 <input type="hidden" name="name" value="{{.Name}}">
                 <button class="btn btn-outline-danger btn-sm file-icon-button" type="submit" title="{{index $.T "files_delete"}}" aria-label="{{index $.T "files_delete"}}"><img src="/p/static/cross.png" alt=""></button>

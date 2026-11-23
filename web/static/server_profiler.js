@@ -543,7 +543,7 @@
  function renderGraph(content,report){
   const frames=report.frames||[];if(!frames.length){content.textContent='Нет образцов CPU';return;}
   const focus=frames[model.focus]||frames[0];const descendants=new Set([model.focus]);const depth={};const offsets={};const placed={};depth[model.focus]=0;offsets[model.focus]=0;
-  const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');let height=30;
+  const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.classList.add('profiler-frame-graph');let height=30;
   frames.forEach(function draw(frame,index){
    if(index!==model.focus){if(!descendants.has(frame.parent))return;descendants.add(index);depth[index]=depth[frame.parent]+1;offsets[index]=offsets[frame.parent]+(placed[frame.parent]||0);placed[frame.parent]=(placed[frame.parent]||0)+frame.total;}
    const width=1000*frame.total/(focus.total||1);const left=1000*offsets[index]/(focus.total||1);const top=depth[index]*28;height=Math.max(height,top+28);

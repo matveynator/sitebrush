@@ -3478,9 +3478,109 @@ body.technical-page.analytics-page {
  .technical-page .profile-account-grid > .profile-sessions-card { grid-column: 1; }
  .technical-page .profile-account-grid > .profile-admin-ip-card { grid-column: 2; }
  .technical-page .profile-account-grid > .profile-ai-connect-card { grid-column: 1; }
- .technical-page .profile-account-grid > .profile-ai-card { grid-column: 2; }
+ /* AI access follows the deletion card; auto placement avoids empty cells when both exist. */
 }
 
 .account-captcha { display: grid; gap: .5rem; margin: 1rem 0; max-width: 100%; }
 .account-captcha input { max-width: 20rem; text-transform: uppercase; letter-spacing: .15em; }
 .account-captcha img { max-width: 100%; height: auto; border: 1px solid var(--theme-border, #aaa); border-radius: .3rem; }
+
+/* Unified admin shell: shared by the domain settings and every technical ?controller page. */
+.technical-page .page-header {
+    min-width: 0;
+    padding: 18px 22px;
+    border: 1px solid var(--theme-border);
+    background: var(--theme-card) !important;
+    box-shadow: var(--shadow);
+}
+.technical-page .page-header h1,
+.technical-page h1.section-heading {
+    font-size: clamp(22px, 2.6vw, 30px);
+    font-weight: 650;
+    letter-spacing: -.025em;
+    line-height: 1.2;
+    overflow-wrap: anywhere;
+}
+.technical-page .section-icon {
+    flex: 0 0 auto;
+    border-color: var(--theme-border);
+    background: var(--theme-muted);
+}
+.technical-page :is(.settings-nav, .server-admin-sidebar) {
+    border: 1px solid var(--theme-border);
+    border-radius: var(--theme-radius);
+    background: var(--theme-card);
+    box-shadow: var(--shadow);
+}
+.technical-page :is(.settings-nav a, .server-root-tabs button, .server-config-nav button) {
+    transition: background-color .15s ease, color .15s ease;
+}
+.technical-page :is(.settings-nav a, .server-root-tabs button, .server-config-nav button):focus-visible {
+    outline: 2px solid var(--theme-ring);
+    outline-offset: 2px;
+}
+.technical-page :is(.card, .dns-box, .settings-summary-card, .expense-simple-summary) {
+    border-color: var(--theme-border);
+}
+@media (max-width: 760px) {
+    .technical-page .page-header { padding: 16px; }
+}
+
+/* Destructive account/site operations stay in the profile grid, paired with AI · SiteBrush.
+   The shared card geometry remains intact; red is reserved for the danger zone. */
+.technical-page .profile-page .profile-delete-card {
+    border-color: var(--theme-destructive) !important;
+    background: var(--theme-card) !important;
+    box-shadow: inset 4px 0 0 var(--theme-destructive), var(--shadow) !important;
+}
+.technical-page .profile-delete-card .profile-account-card-header {
+    min-height: 0;
+}
+.technical-page .profile-delete-card .profile-account-card-header h2 {
+    color: var(--theme-destructive);
+}
+.technical-page .profile-delete-card .profile-account-card-header p {
+    color: var(--theme-muted-foreground);
+}
+.technical-page .profile-delete-option {
+    display: grid;
+    gap: 14px;
+    min-width: 0;
+}
+.technical-page .profile-delete-option + .profile-delete-option {
+    padding-top: 20px;
+    border-top: 1px solid var(--theme-border);
+}
+.technical-page .profile-delete-form {
+    display: grid;
+    align-content: start;
+    justify-items: start;
+    gap: 12px;
+    min-width: 0;
+    margin: 0;
+}
+.technical-page .profile-delete-form label {
+    display: grid;
+    gap: 8px;
+    width: 100%;
+    min-width: 0;
+    margin: 0;
+}
+.technical-page .profile-delete-form input {
+    width: 100%;
+}
+body.technical-page .profile-delete-card .btn-outline-danger {
+    border-color: var(--theme-destructive) !important;
+    background: color-mix(in srgb, var(--theme-destructive) 10%, var(--theme-card)) !important;
+    color: var(--theme-destructive) !important;
+    font-weight: 650 !important;
+}
+body.technical-page .profile-delete-card .btn-outline-danger:hover:not(:disabled) {
+    background: var(--theme-destructive) !important;
+    color: var(--theme-destructive-foreground) !important;
+}
+@media (max-width: 900px), (hover: none) and (pointer: coarse) {
+    .technical-page .profile-page .profile-account-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}

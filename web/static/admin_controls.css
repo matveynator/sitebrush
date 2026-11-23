@@ -12,7 +12,7 @@ body.technical-page :where(.btn, button:not(.btn-close):not(.file-preview-trigge
     font-size: 14px !important;
     font-weight: 500 !important;
     line-height: 20px !important;
-    background: var(--theme-background) !important;
+    background: var(--theme-card) !important;
     color: var(--theme-foreground) !important;
     box-shadow: 0 1px 2px rgb(0 0 0 / 5%) !important;
     transition: background-color .15s, border-color .15s, box-shadow .15s;
@@ -136,10 +136,9 @@ body.technical-page :is(input, select, textarea)[aria-invalid="true"] {
 body.technical-page :is(button, input, select, textarea):disabled,
 body.technical-page .btn.disabled { opacity: .5 !important; pointer-events: none; }
 
-@media (prefers-color-scheme: dark) {
-    body.technical-page :is(.form-control, .form-select, input:not([type="checkbox"]):not([type="radio"]):not([type="submit"]):not([type="hidden"]), textarea) {
-        background-color: color-mix(in srgb, var(--theme-input) 30%, transparent) !important;
-    }
+/* Fields use the same surface under system and explicit light/dark modes. */
+body.technical-page :is(.form-control, .form-select, select, input:not([type="checkbox"]):not([type="radio"]):not([type="submit"]):not([type="hidden"]), textarea) {
+    background-color: var(--theme-card) !important;
 }
 @media (max-width: 767px) {
     /* Matches shadcn's text-base/md:text-sm inputs and prevents iOS focus zoom. */
