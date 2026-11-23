@@ -192,7 +192,7 @@
           <tr data-file-row data-name="{{.Name}}" data-uri="{{.PagePath}}" data-size="{{.Size}}" data-date="{{.CreatedUnix}}" id="file-{{printf "%x" .Name}}">
             <td>
               {{if .IsImage}}
-              <button class="file-preview-trigger" type="button" data-preview-image data-preview-src="{{.AssetPath}}" data-preview-name="{{.Name}}" data-preview-size="{{.SizeLabel}}" data-preview-date="{{.CreatedAt}}" data-preview-access="{{if eq .AccessMode "timer"}}{{index $.T "files_access_timer"}}{{else if eq .AccessMode "token"}}{{index $.T "files_access_token"}}{{else if eq .AccessMode "page_password"}}{{index $.T "files_access_page_password"}}{{else}}{{index $.T "files_access_public"}}{{end}}" data-preview-page-path="{{.PagePath}}" aria-label="{{index $.T "files_preview_title"}} {{.Name}}"><img class="file-thumb" src="{{.AssetPath}}" alt="" loading="lazy"></button>
+              <button class="file-preview-trigger" type="button" data-preview-image {{if .InlinePreview}}data-preview-on-hover{{end}} data-preview-src="{{.AssetPath}}" data-preview-name="{{.Name}}" data-preview-size="{{.SizeLabel}}" data-preview-date="{{.CreatedAt}}" data-preview-access="{{if eq .AccessMode "timer"}}{{index $.T "files_access_timer"}}{{else if eq .AccessMode "token"}}{{index $.T "files_access_token"}}{{else if eq .AccessMode "page_password"}}{{index $.T "files_access_page_password"}}{{else}}{{index $.T "files_access_public"}}{{end}}" data-preview-page-path="{{.PagePath}}" aria-label="{{index $.T "files_preview_title"}} {{.Name}}">{{if .InlinePreview}}<img class="file-thumb" src="{{.AssetPath}}" alt="" loading="lazy" decoding="async">{{else}}{{.Extension}}{{end}}</button>
               {{else}}
               <div class="file-icon">{{.Extension}}</div>
               {{end}}
@@ -828,7 +828,7 @@
       showPreview(index);
     });
     previewTriggerElement.addEventListener('mouseenter', function onPreviewEnter() {
-      if (!hoverPreviewMedia.matches) { return; }
+      if (!hoverPreviewMedia.matches || !previewTriggerElement.hasAttribute('data-preview-on-hover')) { return; }
       window.clearTimeout(previewHoverTimer);
       previewHoverTimer = window.setTimeout(function showHoveredPreview() { showPreview(index); }, 300);
     });

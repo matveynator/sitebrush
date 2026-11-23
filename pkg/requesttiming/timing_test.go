@@ -193,3 +193,81 @@ func TestUpgradedSessionDoesNotInflateProxyRequestLatency(t *testing.T) {
 		t.Fatalf("only the rejected upgrade should count as HTTP traffic: %+v", report.HTTP)
 	}
 }
+
+func TestRequestCaptureIncludesStatusAndOpenWebSocket(t *testing.T) {
+	stop := make(chan struct{})
+	defer close(stop)
+	collector := New(stop)
+	capture := make(chan struct{})
+	defer close(capture)
+	httpHandler := collector.Middleware(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(http.StatusForbidden)
+	}))
+	request := httptest.NewRequest(http.MethodGet, "http://test.example/docs?files&token=secret", nil)
+	httpHandler.ServeHTTP(httptest.NewRecorder(), request)
+	if _, err := collector.CaptureRequests(capture, false, stop); err != nil {
+		t.Fatal(err)
+	}
+	otherCapture := make(chan struct{})
+	defer close(otherCapture)
+	if _, err := collector.CaptureRequests(otherCapture, false, stop); err == nil {
+		t.Fatal("overlapping capture replaced the active owner")
+	}
+	httpHandler.ServeHTTP(httptest.NewRecorder(), request)
+	connection, peer := net.Pipe()
+	defer peer.Close()
+	defer connection.Close()
+	upgraded := make(chan struct{})
+	resume := make(chan struct{})
+	defer close(resume)
+	socketHandler := collector.Middleware(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		Route(request, ProxyApplication)
+		if _, _, err := http.NewResponseController(writer).Hijack(); err != nil {
+			t.Error(err)
+		}
+		close(upgraded)
+		<-resume
+	}))
+	socketRequest := httptest.NewRequest(http.MethodGet, "http://test.example/?server_update_ws", nil)
+	socketRequest.Header.Set("Upgrade", "websocket")
+	go socketHandler.ServeHTTP(hijackRecorder{httptest.NewRecorder(), connection}, socketRequest)
+	<-upgraded
+
+	report, err := collector.CaptureRequests(capture, true, stop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.HTTPCalls) != 2 {
+		t.Fatalf("capture contains %d requests: %+v", len(report.HTTPCalls), report.HTTPCalls)
+	}
+	files, socket := report.HTTPCalls[0], report.HTTPCalls[1]
+	if files.Route != "/docs?files" || files.Status != http.StatusForbidden || socket.Route != "/?server_update_ws" || socket.Status != http.StatusSwitchingProtocols {
+		t.Fatalf("unexpected HTTP capture: %+v", report.HTTPCalls)
+	}
+	if report.Stages[ProxyApplication].Count != 0 || report.HTTP.Requests != 2 {
+		t.Fatal("open WebSocket contributed to HTTP traffic or proxy latency")
+	}
+}
+
+func TestRequestCaptureReportsDetailLimitWithoutDroppingHTTPTotals(t *testing.T) {
+	stop := make(chan struct{})
+	defer close(stop)
+	collector := New(stop)
+	capture := make(chan struct{})
+	defer close(capture)
+	if _, err := collector.CaptureRequests(capture, false, stop); err != nil {
+		t.Fatal(err)
+	}
+	for range httpCallsLimit + 3 {
+		if !collector.Observe(Event{Call: HTTPCall{Method: "GET", Route: "/"}, HTTP: HTTPMetrics{Requests: 1}}) {
+			t.Fatal("unexpected queue overflow")
+		}
+	}
+	report, err := collector.CaptureRequests(capture, true, stop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.HTTPCalls) != httpCallsLimit || report.HTTPCallsOmitted != 3 || report.HTTP.Requests != httpCallsLimit+3 {
+		t.Fatalf("wrong capture totals: %d captured, %d omitted, %d HTTP requests", len(report.HTTPCalls), report.HTTPCallsOmitted, report.HTTP.Requests)
+	}
+}

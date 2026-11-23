@@ -16963,6 +16963,48 @@ func TestManagedFilesVisibleForCurrentURIAndSharedDescendantResources(t *testing
 	}
 }
 
+func BenchmarkManagedFilesListing(b *testing.B) {
+	storagePath := b.TempDir()
+	database, err := sql.Open("sqlite", filepath.Join(storagePath, "sitebrush.db"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { _ = database.Close() })
+	application := &App{db: database, storagePath: storagePath}
+	if err := application.migrate(context.Background()); err != nil {
+		b.Fatal(err)
+	}
+	directory := application.domainFilesDirForDomain("localhost")
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		b.Fatal(err)
+	}
+	for index := range 2000 {
+		fileName := fmt.Sprintf("upload-%04d.bin", index)
+		if err := os.WriteFile(filepath.Join(directory, fileName), nil, 0o644); err != nil {
+			b.Fatal(err)
+		}
+		if index < 12 {
+			application.upsertFileMetadata(context.Background(), "localhost", fileName, "/", 0, "", "test")
+		}
+	}
+	for _, scope := range []struct {
+		name string
+		all  bool
+		want int
+	}{{"page", false, 12}, {"site", true, 2000}} {
+		b.Run(scope.name, func(b *testing.B) {
+			request := httptest.NewRequest(http.MethodGet, "http://localhost/?files", nil)
+			b.ReportAllocs()
+			for b.Loop() {
+				files, err := application.listManagedFiles(request.Context(), request, "/", scope.all)
+				if err != nil || len(files) != scope.want {
+					b.Fatalf("listed %d files, want %d: %v", len(files), scope.want, err)
+				}
+			}
+		})
+	}
+}
+
 func TestFilesPageDoesNotAutoLoadImageAssets(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
@@ -16979,18 +17021,56 @@ func TestFilesPageDoesNotAutoLoadImageAssets(t *testing.T) {
 	}
 	application.upsertFileMetadata(context.Background(), "localhost", "imported.png", "/docs", 3, "image/png", "import")
 
+	for _, fileName := range []string{"large.png", "protected.png"} {
+		fileBytes := []byte("png")
+		if fileName == "large.png" {
+			fileBytes = make([]byte, managedFileInlinePreviewLimit+1)
+		}
+		if err := os.WriteFile(filepath.Join(domainDir, fileName), fileBytes, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// Older metadata can report fewer bytes than the on-disk file.
+		application.upsertFileMetadata(context.Background(), "localhost", fileName, "/docs", 3, "image/png", "import")
+	}
+	if _, err := rawDB.Exec(`INSERT INTO file_access_rules(domain,file_name,access_mode,token) VALUES('localhost','protected.png','token','test')`); err != nil {
+		t.Fatal(err)
+	}
+
 	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs?files", nil)
 	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	stop := make(chan struct{})
+	defer close(stop)
+	capture := make(chan struct{})
+	defer close(capture)
+	timings := requesttiming.New(stop)
+	if _, err := timings.CaptureRequests(capture, false, stop); err != nil {
+		t.Fatal(err)
+	}
 	response := httptest.NewRecorder()
-	application.route(response, request)
+	timings.Middleware(http.HandlerFunc(application.route)).ServeHTTP(response, request)
+	report, err := timings.CaptureRequests(capture, true, stop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.HTTPCalls) != 1 || report.HTTPCalls[0].Route != "/docs?files" ||
+		report.Stages[requesttiming.FilesList].Count != 1 || report.Stages[requesttiming.FilesRender].Count != 1 {
+		t.Fatal("file manager call or its timing stages were missing from the profile")
+	}
 	if response.Code != http.StatusOK {
 		t.Fatalf("files page status = %d, body=%q", response.Code, response.Body.String())
 	}
 
 	body := response.Body.String()
-	if !strings.Contains(body, `<img class="file-thumb" src="/p/imported.png" alt="" loading="lazy">`) {
+	if !strings.Contains(body, `<img class="file-thumb" src="/p/imported.png" alt="" loading="lazy" decoding="async">`) {
 		t.Fatalf("files page thumbnail is not lazy-loaded: %s", body)
 	}
+	for _, fileName := range []string{"large.png", "protected.png"} {
+		if strings.Contains(body, `<img class="file-thumb" src="/p/`+fileName+`"`) ||
+			!strings.Contains(body, `data-preview-src="/p/`+fileName+`"`) {
+			t.Fatalf("%s must load only after opening its preview", fileName)
+		}
+	}
+
 	for _, expectedFragment := range []string{`class="file-preview-trigger"`, `data-preview-src="/p/imported.png"`} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("files page missing %q in %s", expectedFragment, body)

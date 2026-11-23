@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -3969,6 +3970,7 @@ type ManagedFile struct {
 	CreatedAt         string
 	CreatedUnix       int64
 	IsImage           bool
+	InlinePreview     bool
 	AccessMode        string
 	Token             string
 	ExpiresAt         string
@@ -43709,22 +43711,33 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 		httpsecurity.RedirectLocal(w, r, redirectPath, http.StatusFound)
 		return
 	}
-	usage := a.storedDomainStorageUsage(r.Context(), a.siteDomain(r.Context(), r))
+	listStarted := requesttiming.Start(r)
+	domain := a.siteDomain(r.Context(), r)
+	usage := a.storedDomainStorageUsage(r.Context(), domain)
 	availableUploadBytes := usage.LimitBytes - usage.totalBytes()
 	if availableUploadBytes < 0 {
 		availableUploadBytes = 0
 	}
 	fileList, listErr := a.listManagedFiles(r.Context(), r, currentPath, showAllFiles)
 	if listErr != nil {
-		a.render(w, r, "files.html", map[string]any{"Path": currentPath, "Files": []ManagedFile{}, "ShowAllFiles": showAllFiles, "NativeFileDialog": a.nativeFileDialog, "AvailableUploadBytes": availableUploadBytes, "AvailableUploadSize": formatFileSize(availableUploadBytes)})
+		requesttiming.Finish(r, requesttiming.FilesList, listStarted)
+		log.Printf("file manager list failed: %s", diagnosticlog.SafeLogValue(listErr.Error()))
+		http.Error(w, "File list unavailable", http.StatusInternalServerError)
 		return
 	}
-	servicePages, serviceErr := a.listManagedServicePages(r.Context(), a.siteDomain(r.Context(), r))
+	servicePages, serviceErr := a.listManagedServicePages(r.Context(), domain)
 	if serviceErr != nil {
+		requesttiming.Finish(r, requesttiming.FilesList, listStarted)
 		http.Error(w, serviceErr.Error(), http.StatusInternalServerError)
 		return
 	}
-	accessRulesByName := a.fileAccessRulesByName(r.Context(), r)
+	accessRulesByName, accessErr := a.fileAccessRulesByName(r.Context(), domain)
+	if accessErr != nil {
+		requesttiming.Finish(r, requesttiming.FilesList, listStarted)
+		log.Printf("file manager access rules unavailable: %s", diagnosticlog.SafeLogValue(accessErr.Error()))
+		http.Error(w, "File access rules unavailable", http.StatusInternalServerError)
+		return
+	}
 	for index := range fileList {
 		accessRule := accessRulesByName[fileList[index].Name]
 		if strings.TrimSpace(accessRule.AccessMode) == "" {
@@ -43733,12 +43746,16 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 		fileList[index].AssetPath = "/p/" + fileList[index].Name
 		fileList[index].ProtectedPagePath = accessRule.ProtectedPagePath
 		fileList[index].AccessMode = accessRule.AccessMode
+		fileList[index].InlinePreview = fileList[index].InlinePreview && accessRule.AccessMode == "public"
 		fileList[index].Token = accessRule.Token
 		fileList[index].ExpiresAt = accessRule.ExpiresAt
 		fileList[index].SingleUseLeft = accessRule.SingleUseLeft
 		fileList[index].TokenUseCount = accessRule.TokenUseCount
 	}
+	requesttiming.Finish(r, requesttiming.FilesList, listStarted)
+	renderStarted := requesttiming.Start(r)
 	a.render(w, r, "files.html", map[string]any{"Path": currentPath, "Files": fileList, "ServicePages": servicePages, "ShowAllFiles": showAllFiles, "NativeFileDialog": a.nativeFileDialog, "AvailableUploadBytes": availableUploadBytes, "AvailableUploadSize": formatFileSize(availableUploadBytes)})
+	requesttiming.Finish(r, requesttiming.FilesRender, renderStarted)
 }
 
 func (a *App) listManagedServicePages(ctx context.Context, domain string) ([]managedServicePageView, error) {
@@ -43959,13 +43976,32 @@ func (a *App) servePublicAsset(w http.ResponseWriter, r *http.Request) {
 	a.serveAssetFile(w, r, domain, fileName)
 }
 
+// Large originals are opened only by a deliberate preview action.
+const managedFileInlinePreviewLimit = 128 << 10
+
 func (a *App) listManagedFiles(ctx context.Context, r *http.Request, currentPath string, allFiles ...bool) ([]ManagedFile, error) {
 	fileList := make([]ManagedFile, 0, 32)
-	rootPath := a.domainFilesDir(r)
-	if _, err := a.existingPathInsideStorage(rootPath); err != nil {
+	requestDomain := a.siteDomain(ctx, r)
+	jail, relativeDirectory, err := a.storageJailForPath(a.domainFilesDirForDomain(requestDomain))
+	if err != nil {
+		return nil, err
+	}
+	storageRoot, err := jail.OpenRoot()
+	if err != nil {
+		return nil, err
+	}
+	defer storageRoot.Close()
+	// The file tree is confined to the storage root even if a directory
+	// changes while the listing is being prepared.
+	directory, err := storageRoot.OpenRoot(relativeDirectory)
+	if errors.Is(err, fs.ErrNotExist) {
 		return fileList, nil
 	}
-	domain := domainStorageName(a.siteDomain(ctx, r))
+	if err != nil {
+		return nil, err
+	}
+	defer directory.Close()
+	domain := domainStorageName(requestDomain)
 	metadata := a.fileMetadataByName(ctx, domain)
 	originsByName := make(map[string][]string)
 	pagesByName := make(map[string][]string)
@@ -44002,30 +44038,21 @@ func (a *App) listManagedFiles(ctx context.Context, r *http.Request, currentPath
 	}
 	currentPath = cleanPath(currentPath)
 	showAll := len(allFiles) > 0 && allFiles[0]
-	// #nosec G703 -- rootPath is an application-owned directory validated by the storage jail.
-	walkErr := filepath.WalkDir(rootPath, func(filePath string, currentEntry fs.DirEntry, entryErr error) error {
-		if entryErr != nil || currentEntry.IsDir() {
-			return nil
+	addFile := func(name string) {
+		if hidden["files\x00"+name] || safeRelativeAssetPath(name) != name {
+			return
 		}
-		relativePath, relErr := filepath.Rel(rootPath, filePath)
-		if relErr != nil {
-			return nil
-		}
-		normalizedPath := filepath.ToSlash(relativePath)
-		if hidden["files\x00"+normalizedPath] || safeRelativeAssetPath(normalizedPath) == "" {
-			return nil
-		}
-		fileInfo, statErr := a.statInsideStorage(filePath)
-		if statErr != nil {
-			return nil
-		}
-		meta := metadata[normalizedPath]
-		usedByPaths := pagesByName[normalizedPath]
+		meta := metadata[name]
+		usedByPaths := pagesByName[name]
 		if len(usedByPaths) == 0 && meta.PagePath != "" {
 			usedByPaths = []string{meta.PagePath}
 		}
 		if !showAll && !slices.Contains(usedByPaths, currentPath) {
-			return nil
+			return
+		}
+		fileInfo, statErr := directory.Stat(filepath.FromSlash(name))
+		if statErr != nil || !fileInfo.Mode().IsRegular() {
+			return
 		}
 		size := fileInfo.Size()
 		if meta.Size > 0 {
@@ -44041,31 +44068,64 @@ func (a *App) listManagedFiles(ctx context.Context, r *http.Request, currentPath
 		}
 		mimeType := meta.MimeType
 		if mimeType == "" {
-			mimeType = mime.TypeByExtension(path.Ext(normalizedPath))
+			mimeType = mime.TypeByExtension(path.Ext(name))
 		}
 		fileList = append(fileList, ManagedFile{
-			Name:          normalizedPath,
+			Name:          name,
 			Size:          size,
 			SizeLabel:     formatFileSize(size),
 			PagePath:      meta.PagePath,
-			OriginalURIs:  append([]string(nil), originsByName[normalizedPath]...),
+			OriginalURIs:  append([]string(nil), originsByName[name]...),
 			UsedByPaths:   append([]string(nil), usedByPaths...),
-			PublicPaths:   append([]string(nil), publicPathsByName[normalizedPath]...),
-			IsFavicon:     slices.Contains(publicPathsByName[normalizedPath], "/favicon.ico"),
+			PublicPaths:   append([]string(nil), publicPathsByName[name]...),
+			IsFavicon:     slices.Contains(publicPathsByName[name], "/favicon.ico"),
 			MimeType:      mimeType,
-			Extension:     fileExtensionLabel(normalizedPath),
+			Extension:     fileExtensionLabel(name),
 			CreatedAt:     createdAt,
 			CreatedUnix:   createdUnix,
-			IsImage:       isImageFile(normalizedPath, mimeType),
+			IsImage:       isImageFile(name, mimeType),
+			InlinePreview: fileInfo.Size() <= managedFileInlinePreviewLimit,
 			DownloadCount: meta.DownloadCount,
 		})
-		return nil
-	})
-	if walkErr != nil {
-		return nil, walkErr
 	}
-	sort.Slice(fileList, func(leftIndex, rightIndex int) bool {
-		return fileList[leftIndex].CreatedUnix > fileList[rightIndex].CreatedUnix
+	if showAll {
+		walkErr := fs.WalkDir(directory.FS(), ".", func(name string, entry fs.DirEntry, entryErr error) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if entryErr == nil && !entry.IsDir() {
+				addFile(name)
+			}
+			return nil
+		})
+		if walkErr != nil {
+			return nil, walkErr
+		}
+	} else {
+		// The database already identifies every file that can appear on a
+		// single page. Avoid walking unrelated uploads or checking them on disk.
+		for name, usedByPaths := range pagesByName {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if slices.Contains(usedByPaths, currentPath) {
+				addFile(name)
+			}
+		}
+		for name, meta := range metadata {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if meta.PagePath == currentPath && len(pagesByName[name]) == 0 {
+				addFile(name)
+			}
+		}
+	}
+	slices.SortFunc(fileList, func(left, right ManagedFile) int {
+		if timeOrder := cmp.Compare(right.CreatedUnix, left.CreatedUnix); timeOrder != 0 {
+			return timeOrder
+		}
+		return strings.Compare(left.Name, right.Name)
 	})
 	return fileList, nil
 }
@@ -46774,28 +46834,25 @@ func (a *App) removePrivateUpload(ctx context.Context, domain string, names []st
 	}, func(error) {})
 }
 
-func (a *App) fileAccessRulesByName(ctx context.Context, r *http.Request) map[string]ManagedFileAccess {
+func (a *App) fileAccessRulesByName(ctx context.Context, domain string) (map[string]ManagedFileAccess, error) {
 	accessRulesByName := make(map[string]ManagedFileAccess)
-	rows, err := a.db.QueryContext(ctx, `SELECT file_name,access_mode,token,expires_at,single_use_left,token_use_count,protected_page_path FROM file_access_rules WHERE domain=?`, domainStorageName(a.siteDomain(ctx, r)))
+	rows, err := a.db.QueryContext(ctx, `SELECT file_name,COALESCE(access_mode,''),COALESCE(token,''),COALESCE(expires_at,''),COALESCE(single_use_left,0),COALESCE(token_use_count,0),COALESCE(protected_page_path,'') FROM file_access_rules WHERE domain=?`, domainStorageName(domain))
 	if err != nil {
-		return accessRulesByName
+		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var fileName string
 		var accessRule ManagedFileAccess
-		if scanErr := rows.Scan(&fileName, &accessRule.AccessMode, &accessRule.Token, &accessRule.ExpiresAt, &accessRule.SingleUseLeft, &accessRule.TokenUseCount, &accessRule.ProtectedPagePath); scanErr != nil {
-			continue
+		if err = rows.Scan(&fileName, &accessRule.AccessMode, &accessRule.Token, &accessRule.ExpiresAt, &accessRule.SingleUseLeft, &accessRule.TokenUseCount, &accessRule.ProtectedPagePath); err != nil {
+			return nil, err
 		}
 		if safeRelativeAssetPath(fileName) == "" {
 			continue
 		}
-		if strings.TrimSpace(accessRule.AccessMode) == "" {
-			accessRule.AccessMode = "public"
-		}
 		accessRulesByName[fileName] = accessRule
 	}
-	return accessRulesByName
+	return accessRulesByName, rows.Err()
 }
 
 func (a *App) fileAccessRule(ctx context.Context, r *http.Request, fileName string) ManagedFileAccess {

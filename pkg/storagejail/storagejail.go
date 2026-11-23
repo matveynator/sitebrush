@@ -43,6 +43,11 @@ func (root Root) RelativePath(candidatePath string) (string, error) {
 	return relativePath, nil
 }
 
+// OpenRoot lets a caller reuse one confined descriptor for a batch of reads.
+func (root Root) OpenRoot() (*os.Root, error) {
+	return os.OpenRoot(root.path)
+}
+
 func (root Root) withOpenRoot(operation func(*os.Root) error) error {
 	openRoot, err := os.OpenRoot(root.path)
 	if err != nil {

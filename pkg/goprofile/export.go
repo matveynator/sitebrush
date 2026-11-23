@@ -55,6 +55,19 @@ func exportText(report Report) string {
 	text.line("HTTP-трафик приложения за прокси внутренний: его нельзя складывать с внешним трафиком.")
 	text.line("Данные частичные: %t; ошибка записи: %s", report.Truncated, report.Error)
 	text.line("CPU — выборка процессорной работы, не время ожидания. Образцы — не число вызовов. Живая память — выборка удерживаемой памяти; это не RSS процесса.")
+	if len(report.HTTPCalls) != 0 || report.HTTPCallsOmitted != 0 || report.TimingLosses != 0 {
+		text.line("\n### Журнал HTTP-вызовов")
+		text.line("Записано: %d; за пределами журнала: %d; потеряно событий измерения: не менее %d.", len(report.HTTPCalls), report.HTTPCallsOmitted, report.TimingLosses)
+		text.line("Момент начала | Метод | Домен | Маршрут | Статус | Обработка, мс | Отправлено байт")
+		for _, call := range report.HTTPCalls {
+			status := strconv.Itoa(call.Status)
+			if call.Aborted {
+				status += " (прерван)"
+			}
+			text.line("%s | %q | %q | %q | %s | %.3f | %d", call.Started.Format("15:04:05.000"), call.Method, call.Host, call.Route, status, float64(call.DurationUS)/1000, call.Sent)
+		}
+		text.line("Успешное переключение протокола 101 фиксируется при передаче соединения WebSocket и не включает время жизни сессии. Обычный HTTP-вызов фиксируется при завершении обработчика.")
+	}
 	if report.RAM != nil {
 		text.line("\n### Готовые RAM-ответы")
 		text.line("Бюджет: %d байт; занято: %d байт; уникальных тел: %d; попаданий: %d; промахов: %d", report.RAM.Limit, report.RAM.Bytes, report.RAM.Bodies, report.RAM.Hits, report.RAM.Misses)
