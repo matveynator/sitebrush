@@ -17,6 +17,7 @@
   <link href="/p/static/technical_pages.css" rel="stylesheet">
   <link href="/p/static/server_settings.css" rel="stylesheet">
   {{if .ShowProfiler}}<link href="/p/static/server_profiler.css" rel="stylesheet"><script defer src="/p/static/server_profiler.js"></script>{{end}}
+  {{if .ShowServerUpdater}}<link rel="stylesheet" href="/p/static/server_update.css"><script defer src="/p/static/server_update.js"></script>{{end}}
   <script defer src="/p/static/server_settings.js"></script>
   {{if or (eq .SelectedServerSection "clients") (and .ShowCentralRegistry (not .CentralClientsDeferred))}}<script defer src="/p/static/server_clients.js"></script>{{end}}
   {{if .CanConfigurePublicIPs}}<script defer src="/p/static/server_public_ips.js"></script>{{end}}
@@ -95,22 +96,22 @@
   <div class="expense-simple-page">
     <div class="server-admin-shell">
       <aside class="server-admin-sidebar">
-        <nav class="server-root-tabs" aria-label="{{index .T "server_ui_navigation"}}" data-server-root-tabs>
+        <nav class="server-root-tabs" aria-label="{{index .T "server_ui_navigation"}}" data-server-root-tabs data-local-server-id="{{.LocalServerID}}">
           <span class="server-nav-group">{{if eq .LanguageCode "ru"}}Текущий сервер{{else}}Current server{{end}}</span>
           <button type="button" class="is-active" data-server-root-target="servers" data-server-config-shortcut="overview" aria-current="page">{{index .T "server_ui_overview"}}</button>
-          {{if .SelectedServerLocal}}
+          {{if or .LocalServerID .SelectedServerLocal}}
           {{if .CanConfigurePublicIPs}}<button type="button" data-server-root-target="servers" data-server-config-shortcut="network">{{index .T "server_ui_network"}}</button>{{end}}
-          <button type="button" data-server-root-target="servers" data-server-config-shortcut="updates">{{index .T "update_title"}}</button>
+          {{if .CanConfigurePublicIPs}}<button type="button" data-server-root-target="servers" data-server-config-shortcut="updates">{{index .T "update_title"}}</button>{{end}}
           {{end}}
           <span class="server-nav-group">{{index .T "server_nav_customers"}}</span>
-          {{if .SelectedServerLocal}}
+          {{if or .LocalServerID .SelectedServerLocal}}
           <button type="button" data-server-root-target="servers" data-server-config-shortcut="registration">{{index .T "billing_registration_title"}}</button>
           {{if .AutoRegistrationEnabled}}<button type="button" data-server-root-target="servers" data-server-config-shortcut="demo">{{index .T "billing_demo_title"}}</button>{{end}}
           {{end}}
           {{if or (and .AutoRegistrationEnabled .PublicTrialEnabled) .ActivePublicTrialSites .CleanupPendingTrialSites .ArchivedPublicTrialSites}}<button type="button" data-server-root-target="temporary-sites">{{index .T "billing_temporary_sites"}}</button>{{end}}
           <button type="button" data-server-root-target="servers" data-server-config-shortcut="clients">{{index .T "billing_clients"}}</button>
           <span class="server-nav-group">{{if eq .LanguageCode "ru"}}Биллинг узла{{else}}Node billing{{end}}</span>
-          {{if .SelectedServerLocal}}<button type="button" data-server-root-target="servers" data-server-config-shortcut="monetization">{{index .T "server_ui_monetization"}}</button>{{end}}
+          {{if or .LocalServerID .SelectedServerLocal}}<button type="button" data-server-root-target="servers" data-server-config-shortcut="monetization">{{index .T "server_ui_monetization"}}</button>{{end}}
           <button type="button" data-server-root-target="servers" data-server-config-shortcut="billing">{{index .T "server_billing_nav"}}</button>
           {{if .ShowCentralRegistry}}
           <span class="server-nav-group server-nav-global-heading">{{if eq .LanguageCode "ru"}}Центр управления · SiteBrush.com{{else}}Control center · SiteBrush.com{{end}}</span>
@@ -242,15 +243,12 @@
   </section>
             </section>
             {{end}}
+            {{if and (eq $.SelectedServerSection "updates") $.ShowServerUpdater}}
             <section class="server-config-view" data-server-config-view="updates">
-          <div id="server-update" class="mb-4">
-            <h2>{{index $.T "update_title"}}</h2>
-            <p role="status" data-server-update-loading hidden>{{index $.T "update_connecting"}}</p>
-            <div data-server-update-content></div>
-            <p role="alert" class="alert alert-danger" data-server-update-error hidden>{{index $.T "update_unavailable"}} · <a href="/?server_update">{{index $.T "update_title"}}</a></p>
-
-          </div>
+              <h2>{{index $.T "update_title"}}</h2>
+              {{template "server-updater" $}}
             </section>
+            {{end}}
             {{if eq $.SelectedServerSection "registration"}}<section class="server-config-view" data-server-config-view="registration">
           <div>
             <h2>{{index $.T "billing_registration_title"}}</h2>
@@ -279,7 +277,7 @@
           {{template "client-filters" $}}
           <div class="expense-simple-clients" data-server-clients-list>
             {{range $clientIndex, $client := $expenseServer.Clients}}
-            <details class="expense-simple-client" data-server-client-row data-customer-email="{{$client.Email}}" data-client-search="{{$client.SearchText}}" data-client-site-count="{{$client.SiteCount}}" data-client-debt-label="{{$client.DebtLabel}}" data-client-unpaid="{{$client.HasUnpaid}}" data-client-overdue="{{$client.HasOverdue}}" data-client-over-limit="{{$client.OverLimit}}" data-client-attention="{{$client.NeedsAttention}}">
+            <details class="expense-simple-client" data-server-client-row data-customer-email="{{$client.Email}}" data-client-search="{{$client.SearchText}}" data-client-site-count="{{$client.SiteCount}}" data-client-used-bytes="{{$client.TotalStorageBytes}}" data-client-unpaid="{{$client.HasUnpaid}}" data-client-overdue="{{$client.HasOverdue}}" data-client-over-limit="{{$client.OverLimit}}" data-client-attention="{{$client.NeedsAttention}}">
               <summary>
                 <span class="expense-simple-client-head">
                   <strong>{{$client.Email}}</strong>
@@ -291,6 +289,7 @@
                 </span>
                 <span class="server-client-head-cost"><strong>{{$client.DebtLabel}}</strong><small>{{index $.T "server_billing_open"}}</small><small>{{index $.T "server_billing_paid"}}: {{$client.PaidThisMonthLabel}}</small></span>
               </summary>
+              <script type="application/json" data-client-debt-model>{{$client.DebtByCurrency}}</script>
               <div class="expense-simple-client-body">
                 <nav class="server-client-tabs" aria-label="{{if eq $.LanguageCode "ru"}}Разделы клиента{{else}}Client sections{{end}}">
                   <button type="button" data-client-tab="sites" class="is-active" aria-pressed="true">{{if eq $.LanguageCode "ru"}}Сайты{{else}}Sites{{end}} ({{$client.SiteCount}})</button>
@@ -573,10 +572,11 @@
       {{template "client-filters" .}}
       <div class="expense-simple-clients">
         {{range .CentralClients}}
-        <details class="expense-simple-client" data-server-client-row data-client-search="{{.SearchText}}" data-customer-email="{{.Email}}" data-client-site-count="{{.SiteCount}}" data-client-debt-label="{{.DebtLabel}}" data-client-unpaid="{{.HasUnpaid}}" data-client-overdue="{{.HasOverdue}}" data-client-over-limit="{{.OverLimit}}" data-client-attention="{{.NeedsAttention}}">
+        <details class="expense-simple-client" data-server-client-row data-client-search="{{.SearchText}}" data-customer-email="{{.Email}}" data-client-site-count="{{.SiteCount}}" data-client-used-bytes="{{.TotalStorageBytes}}" data-client-unpaid="{{.HasUnpaid}}" data-client-overdue="{{.HasOverdue}}" data-client-over-limit="{{.OverLimit}}" data-client-attention="{{.NeedsAttention}}">
           <summary><span class="expense-simple-client-head"><strong>{{.Email}}</strong><small>{{.SiteCount}} {{index $.T "billing_client_sites"}} · {{.InstallationNames}}</small></span><span>{{.TotalStorageLabel}}</span><span>{{.PaidThisMonthLabel}}</span><span>{{.DebtLabel}}{{if .HasOverdue}}<small class="d-block status-bad">{{index $.T "server_billing_overdue"}}</small>{{end}}</span></summary>
+          <script type="application/json" data-client-debt-model>{{.DebtByCurrency}}</script>
           <div class="expense-simple-client-body">
-            {{range .Sites}}<div class="expense-simple-site"><span>{{.Domain}}</span><span>{{.UsedLabel}}</span><button type="button" class="btn btn-outline-primary btn-sm" data-open-server-id="{{.InstallationID}}" data-open-server-section="clients">{{.InstallationName}}</button></div>{{end}}
+            {{range .Sites}}<div class="expense-simple-site" data-client-site-row data-client-site-domain="{{.Domain}}"><span>{{.Domain}}</span><span>{{.UsedLabel}}</span><button type="button" class="btn btn-outline-primary btn-sm" data-open-server-id="{{.InstallationID}}" data-open-server-section="clients">{{.InstallationName}}</button></div>{{end}}
             <button type="button" class="btn btn-outline-primary btn-sm" data-central-client-invoices="{{.Email}}">{{index $.T "server_clients_view_invoices"}}</button>
           </div>
         </details>

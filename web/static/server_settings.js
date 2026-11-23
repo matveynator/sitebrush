@@ -48,10 +48,13 @@
   function localPanel() {
     return serverPanels.find(panel => panel.dataset.serverLocal === "true") || serverPanels[0];
   }
-  function readNavigation() {
-    const fragment = window.location.hash.slice(1);
+  function localServerID() {
+    return rootTabs?.dataset?.localServerId || localPanel().dataset.serverId;
+  }
+  function readNavigation(routeURL = window.location) {
+    const fragment = routeURL.hash.slice(1);
     const parameters = new URLSearchParams(fragment);
-    const pageQuery = new URLSearchParams(window.location.search);
+    const pageQuery = new URLSearchParams(routeURL.search);
     if (["installations", "temporary-sites", "clients", "billing"].includes(fragment)) parameters.set("workspace", fragment);
     if (fragment.startsWith("server-") && !parameters.has("server-id")) parameters.set("section", fragment === "server-update" ? "updates" : fragment.slice(7));
     // Query parameters select the initial lazy-loaded HTML only. Once a
@@ -79,7 +82,7 @@
   function writeNavigation(next, replace) {
     const parameters = new URLSearchParams();
     if (next.workspace === "servers") {
-      parameters.set("server-id", next.serverID || localPanel().dataset.serverId);
+      parameters.set("server-id", next.serverID || localServerID());
       parameters.set("section", next.section || "overview");
     } else parameters.set("workspace", next.workspace);
     if (next.status && next.status !== "all") parameters.set("status", next.status);
@@ -87,23 +90,16 @@
     if (next.query) parameters.set("query", next.query);
     if (next.installation && next.installation !== "all") parameters.set("installation", next.installation);
     if (next.page > 1) parameters.set("page", String(next.page));
-    const fragment = "#" + parameters.toString();
-    if (fragment !== window.location.hash) history[replace ? "replaceState" : "pushState"](null, "", fragment);
-    displayNavigation();
+    const routeURL = new URL(window.location.href);
+    routeURL.hash = parameters.toString();
+    displayNavigation(routeURL, () => {
+      if (routeURL.hash !== window.location.hash) {
+        history[replace ? "replaceState" : "pushState"](null, "", routeURL.hash);
+      }
+    });
   }
   function openServer(serverID, section) {
-    const selectedSection = section || "overview";
-    if (!serverPanels.some(panel => panel.dataset.serverId === serverID)) {
-      // Installation details are requested only when opened from the catalogue.
-      const url = new URL(window.location.href);
-      url.searchParams.set("installation", serverID);
-      url.searchParams.delete("workspace");
-      url.searchParams.set("section", selectedSection);
-      url.hash = new URLSearchParams({"server-id": serverID, section: selectedSection}).toString();
-      window.location.assign(url.href);
-      return;
-    }
-    writeNavigation({workspace: "servers", serverID, section: selectedSection});
+    writeNavigation({workspace: "servers", serverID, section});
   }
   function showRoot(section, selectedServerSection, targetPanel) {
     const selected = rootWorkspaces[section] ? section : "servers";
@@ -135,51 +131,6 @@
       else button.removeAttribute("aria-current");
     }
   }
-  // Load the authenticated updater into the page instead of nesting an iframe.
-  // Its own command channel and authorization are unchanged.
-  function openUpdater(layout) {
-    const host = layout.querySelector("[data-server-update-content]");
-    if (!host || host.dataset.loading === "true" || host.dataset.loaded === "true") return;
-    const loading = layout.querySelector("[data-server-update-loading]");
-    const error = layout.querySelector("[data-server-update-error]");
-    host.dataset.loading = "true";
-    loading.hidden = false;
-    error.hidden = true;
-    const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), 20000);
-    fetch("/?server_update&embedded", {
-      credentials: "same-origin", headers: {"Accept": "text/html"}, signal: controller.signal
-    }).then(async response => {
-      if (!response.ok) throw new Error("Updater responded with HTTP " + response.status);
-      const page = new DOMParser().parseFromString(await response.text(), "text/html");
-      const updateRoot = page.querySelector("[data-server-update]");
-      if (!updateRoot || !updateRoot.dataset.csrf) throw new Error("Updater response is unavailable");
-      host.replaceChildren(document.importNode(updateRoot, true));
-      if (!document.querySelector('link[href="/p/static/server_update.css"]')) {
-        const stylesheet = document.createElement("link");
-        stylesheet.rel = "stylesheet";
-        stylesheet.href = "/p/static/server_update.css";
-        document.head.appendChild(stylesheet);
-      }
-      await new Promise((resolve, reject) => {
-        const script = document.createElement("script");
-        script.src = "/p/static/server_update.js";
-        script.onload = resolve;
-        script.onerror = () => reject(new Error("Updater script is unavailable"));
-        document.head.appendChild(script);
-      });
-      host.dataset.loaded = "true";
-      loading.hidden = true;
-    }).catch(loadError => {
-      console.error("Unable to open updater", loadError);
-      host.replaceChildren();
-      error.hidden = false;
-      loading.hidden = true;
-    }).finally(() => {
-      window.clearTimeout(timeout);
-      host.dataset.loading = "false";
-    });
-  }
   function choose(panel, wanted) {
     const layout = panel.querySelector("[data-server-config-layout]");
     if (!layout) return;
@@ -195,7 +146,6 @@
       button.classList.toggle("is-active", active);
     }
     layout.dataset.serverConfigSelected = section;
-    if (loaded && section === "updates") openUpdater(layout);
     return loaded;
   }
 
@@ -281,8 +231,8 @@
       if (event.target.closest("[data-invoice-customer-clear]")) updateLedgerNavigation(ledger, {customer: ""});
     });
   }
-  function displayNavigation() {
-    const navigation = readNavigation();
+  function displayNavigation(routeURL = new URL(window.location.href), commitHistory = () => {}) {
+    const navigation = readNavigation(routeURL);
     const requestedPanel = serverPanels.find(panel => panel.dataset.serverId === navigation.serverID);
     // A direct link to an unloaded installation must hydrate that installation.
     // Falling back to the local panel here would silently show the wrong server.
@@ -304,29 +254,37 @@
     const invalidServerSection = navigation.workspace === "servers" &&
       !knownServerSection && !missingRequestedServer;
     if (needClients || needBilling || needInstallations || needServerSection || missingRequestedServer || invalidServerSection) {
-      const url = new URL(window.location.href);
-      if (needServerSection || missingRequestedServer) {
-        url.searchParams.set("section", requestedSection);
-        url.searchParams.set("installation", missingRequestedServer ? navigation.serverID : target.dataset.serverId);
-        url.searchParams.delete("workspace");
-      } else {
-        url.searchParams.set("workspace", navigation.workspace);
-        url.searchParams.delete("section");
-        url.searchParams.delete("installation");
-      }
-      if (!invalidServerSection && url.href !== window.location.href) {
+      const url = new URL(routeURL.href);
+      const serverRoute = navigation.workspace === "servers";
+      const requestedServerID = navigation.serverID || target.dataset.serverId;
+      const routeAlreadyRequested = serverRoute
+        ? !url.searchParams.has("workspace") &&
+          (url.searchParams.get("section") || "overview") === requestedSection &&
+          (url.searchParams.get("installation") || localServerID()) === requestedServerID
+        : url.searchParams.get("workspace") === navigation.workspace;
+      if (!invalidServerSection && !routeAlreadyRequested) {
+        if (serverRoute) {
+          url.searchParams.set("section", requestedSection);
+          url.searchParams.set("installation", requestedServerID);
+          url.searchParams.delete("workspace");
+        } else {
+          url.searchParams.set("workspace", navigation.workspace);
+          url.searchParams.delete("section");
+          url.searchParams.delete("installation");
+        }
         window.location.assign(url.href);
         return;
       }
       // A section still missing after the correct lazy request is an error,
       // not a reason to silently substitute the overview.
+      commitHistory();
       const destination = rootWorkspaces[navigation.workspace] || rootWorkspaces.servers;
-      for (const panel of serverPanels) panel.hidden = panel !== target;
+      for (const panel of serverPanels) panel.hidden = missingRequestedServer || panel !== target;
       for (const workspace of Object.values(rootWorkspaces)) {
         if (workspace) workspace.hidden = workspace !== destination;
       }
       // Keep an unavailable view blank rather than exposing a stale Overview.
-      if (navigation.workspace === "servers") choose(target, requestedSection);
+      if (navigation.workspace === "servers" && !missingRequestedServer) choose(target, requestedSection);
       let notice = destination.querySelector("[data-server-navigation-error]");
       if (!notice) {
         notice = document.createElement("p");
@@ -340,9 +298,10 @@
         ? "Не удалось загрузить раздел настроек. Обновите страницу или проверьте журнал сервера."
         : "The settings section could not be loaded. Reload the page or check the server log.";
       notice.hidden = false;
-      showRoot(navigation.workspace, navigation.section, target);
+      showRoot(navigation.workspace, navigation.section, requestedPanel);
       return;
     }
+    commitHistory();
     for (const notice of document.querySelectorAll("[data-server-navigation-error]")) notice.hidden = true;
 
     for (const panel of serverPanels) panel.hidden = panel !== target;
@@ -368,11 +327,7 @@
     const rootButton = event.target.closest("[data-server-root-target]");
     if (rootButton) {
       const shortcut = rootButton.dataset.serverConfigShortcut;
-      const activePanel = serverPanels.find(panel => !panel.hidden) || localPanel();
-      // Sidebar shortcuts describe the local installation; a previously viewed
-      // remote installation must never redirect local network/update controls.
-      const shortcutPanel = shortcut ? localPanel() : activePanel;
-      writeNavigation({workspace: rootButton.dataset.serverRootTarget, serverID: shortcutPanel.dataset.serverId, section: shortcut || "overview"});
+      writeNavigation({workspace: rootButton.dataset.serverRootTarget, serverID: localServerID(), section: shortcut || "overview"});
       return;
     }
     const panel = event.target.closest("[data-expense-server-panel]");
@@ -412,8 +367,8 @@
     const panel = serverPanels.find(candidate => candidate.dataset.expenseServerPanel === selector.value);
     if (panel) openServer(panel.dataset.serverId);
   });
-  window.addEventListener("hashchange", displayNavigation);
-  window.addEventListener("popstate", displayNavigation);
+  window.addEventListener("hashchange", () => displayNavigation());
+  window.addEventListener("popstate", () => displayNavigation());
   displayNavigation();
 
   // The central catalog is filtered, sorted and paged on the server. Never

@@ -6,7 +6,7 @@ const path = require('node:path');
 
 const source = fs.readFileSync(path.join(__dirname, '../../web/static/server_settings.js'), 'utf8');
 
-function navigationFixture({ hash = '', query = '?server-settings', includeNetwork = true } = {}) {
+function navigationFixture({ hash = '', query = '?server-settings', includeNetwork = true, servedID = 'local' } = {}) {
   const location = new URL('https://example.test/' + query + hash);
   const events = {};
   const notices = [];
@@ -30,7 +30,7 @@ function navigationFixture({ hash = '', query = '?server-settings', includeNetwo
     querySelector() { return null; }
   };
   const panel = {
-    dataset: { serverLocal: 'true', serverId: 'local', serverName: 'local' },
+    dataset: { serverLocal: String(servedID === 'local'), serverId: servedID, serverName: servedID },
     hidden: false,
     querySelector(selector) {
       return selector === '[data-server-config-layout]' ? layout : null;
@@ -47,7 +47,7 @@ function navigationFixture({ hash = '', query = '?server-settings', includeNetwo
     },
     prepend(element) { notices.unshift(element); }
   };
-  const tabs = { querySelectorAll: () => buttons };
+  const tabs = { dataset: {localServerId: 'local'}, querySelectorAll: () => buttons };
   const document = {
     documentElement: { lang: 'ru' },
     body: { dataset: {} },
@@ -83,7 +83,7 @@ function navigationFixture({ hash = '', query = '?server-settings', includeNetwo
     window, document, history, URL, URLSearchParams, console
   );
   return {
-    views, notices,
+    views, notices, panel,
     open(section) {
       const button = buttons.find(item => item.dataset.serverConfigShortcut === section);
       events.click({
@@ -123,4 +123,18 @@ assert.equal(unknown.assignedURL, '', 'unknown route must not be loaded repeated
 assert.equal(unknown.notices.length, 1);
 assert.ok(unknown.views.every(view => view.hidden), 'unknown route must not fall back to Overview');
 
-console.log('Server-settings navigation: 4 scenarios passed');
+const lazyClick = navigationFixture({includeNetwork: false});
+lazyClick.open('network');
+assert.equal(lazyClick.hash, '', 'lazy navigation must leave the prior history entry intact');
+assert.equal(new URL(lazyClick.assignedURL).searchParams.get('section'), 'network');
+
+const remote = navigationFixture({query: '?server-settings&installation=remote', servedID: 'remote'});
+remote.open('overview');
+assert.equal(new URL(remote.assignedURL).searchParams.get('installation'), 'local');
+
+const missingRemote = navigationFixture({query: '?server-settings&installation=unknown'});
+assert.equal(missingRemote.assignedURL, '');
+assert.equal(missingRemote.panel.hidden, true, 'do not show the local panel for a missing remote server');
+assert.equal(missingRemote.notices.length, 1);
+
+console.log('Server-settings navigation: 7 scenarios passed');

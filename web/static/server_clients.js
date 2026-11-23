@@ -18,17 +18,16 @@
   function clientRows(workspace) {
     return Array.from(workspace.querySelectorAll("[data-server-client-row]"));
   }
-  function numberFromLabel(label) {
-    // Monetary labels may have different currencies. Compare totals only
-    // within currency groups; never sum EUR and USD as one amount.
-    const value = String(label || "").replace(/[^0-9,.\-]/g, "");
-    const lastComma = value.lastIndexOf(",");
-    const lastDot = value.lastIndexOf(".");
-    const decimal = Math.max(lastComma, lastDot);
-    const normalized = decimal >= 0 && value.length - decimal <= 3
-      ? value.slice(0, decimal).replace(/[^0-9\-]/g, "") + "." + value.slice(decimal + 1).replace(/[^0-9]/g, "")
-      : value.replace(/[^0-9\-]/g, "");
-    return Number(normalized) || 0;
+  const clientModels = new WeakMap();
+
+  function compareDebt(left, right) {
+    for (let index = 0; index < Math.min(left.length, right.length); index++) {
+      const currencyOrder = left[index][0].localeCompare(right[index][0]);
+      if (currencyOrder) return currencyOrder;
+      const amountOrder = right[index][1] - left[index][1];
+      if (amountOrder) return amountOrder;
+    }
+    return right.length - left.length;
   }
   function bytesFromLabel(label) {
     const match = String(label || "").match(/(\d+(?:[.,]\d+)?)\s*(TiB|GiB|MiB|KiB|TB|GB|MB|KB|B)\b/i);
@@ -40,14 +39,14 @@
   }
   function formatStorage(bytes) {
     if (!Number.isFinite(bytes) || bytes < 0) return "—";
-    let value = bytes;
+    let scaledBytes = bytes;
     let unit = "B";
     for (const next of ["KB", "MB", "GB", "TB"]) {
-      if (value < 1000) break;
-      value /= 1000;
+      if (scaledBytes < 1000) break;
+      scaledBytes /= 1000;
       unit = next;
     }
-    return new Intl.NumberFormat(document.documentElement.lang || "en", {maximumFractionDigits: 1}).format(value) + " " + unit;
+    return new Intl.NumberFormat(document.documentElement.lang || "en", {maximumFractionDigits: 1}).format(scaledBytes) + " " + unit;
   }
   function activateClientTab(row, selected) {
     for (const pane of row.querySelectorAll("[data-client-pane]")) {
@@ -73,7 +72,20 @@
   }
   function initializeClientRow(row) {
     const sites = Array.from(row.querySelectorAll("[data-client-site-row]"));
-    let totalUsed = 0, totalQuota = 0, knownQuotas = 0, problemSites = 0;
+    const client = {
+      siteSearch: "", errorsOnly: false, showAll: false, problems: new Set(), sites, debt: []
+    };
+    const debtSource = row.querySelector("[data-client-debt-model]");
+    if (debtSource) {
+      try {
+        client.debt = Object.entries(JSON.parse(debtSource.textContent) || {}).sort(([leftCurrency], [rightCurrency]) =>
+          leftCurrency.localeCompare(rightCurrency));
+      } catch (parseError) {
+        console.error("Unable to read client balances", parseError);
+      }
+    }
+    clientModels.set(row, client);
+    let totalUsed = 0, totalQuota = 0, knownQuotas = 0;
     for (const site of sites) {
       const used = Number(site.dataset.clientSiteUsed) || 0;
       const quota = bytesFromLabel(site.dataset.clientSiteLimit);
@@ -86,12 +98,12 @@
         progress.querySelector("span").style.width = percent + "%";
         if (used > quota) {
           progress.classList.add("is-over");
-          site.dataset.clientSiteProblem = "true";
+          client.problems.add(site);
         }
       }
       const invalid = site.querySelector("[data-client-ssl-invalid]");
-      if (invalid) site.dataset.clientSiteProblem = "true";
-      if (site.dataset.clientSiteProblem === "true") problemSites++;
+      if (invalid) client.problems.add(site);
+      if (site.dataset.clientSiteProblem === "true") client.problems.add(site);
       // Valid certificates remain in the rare-actions menu unless due in
       // fourteen days. Move the existing button, never clone its listener.
       for (const certificate of site.querySelectorAll("[data-client-certificate]")) {
@@ -118,35 +130,29 @@
       sslBadge.textContent = document.documentElement.lang.toLowerCase().startsWith("ru") ? "Ошибка SSL: " + sslCount : "SSL errors: " + sslCount;
     }
     const errorCount = row.querySelector("[data-client-error-count]");
-    if (errorCount) errorCount.textContent = String(problemSites);
-    row.dataset.clientProblemCount = String(problemSites);
-    row.dataset.clientCurrency = (row.dataset.clientDebtLabel || "").replace(/[\d\s.,\-]/g, "").trim();
+    if (errorCount) errorCount.textContent = String(client.problems.size);
   }
   function updateClientSites(row, globalSearch) {
-    const input = row.querySelector("[data-client-domain-search]");
-    const siteSearch = (input?.value || "").trim().toLocaleLowerCase();
+    const client = clientModels.get(row);
     const customerEmail = (row.dataset.customerEmail || "").toLocaleLowerCase();
-    const search = siteSearch || (globalSearch && !customerEmail.includes(globalSearch) ? globalSearch : "");
-    const errorsOnly = row.querySelector("[data-client-errors-only]")?.checked || false;
-    const showAll = row.dataset.clientShowAll === "true";
-    const sites = Array.from(row.querySelectorAll("[data-client-site-row]"));
+    const search = client.siteSearch || (globalSearch && !customerEmail.includes(globalSearch) ? globalSearch : "");
+    const footer = row.querySelector("[data-client-site-footer]");
     let matching = 0, visible = 0;
-    for (const site of sites) {
+    for (const site of client.sites) {
       const matches = (!search || site.dataset.clientSiteDomain.toLocaleLowerCase().includes(search)) &&
-        (!errorsOnly || site.dataset.clientSiteProblem === "true");
+        (!client.errorsOnly || client.problems.has(site));
       if (matches) matching++;
-      const show = matches && (showAll || visible < 10);
+      const show = matches && (!footer || client.showAll || visible < 10);
       site.hidden = !show;
       if (show) visible++;
     }
-    const footer = row.querySelector("[data-client-site-footer]");
     if (footer) {
       footer.hidden = matching <= 10;
       const counter = footer.querySelector("[data-client-site-count]");
       if (counter) counter.textContent = visible + " / " + matching;
       const more = footer.querySelector("[data-client-show-all]");
       if (more) {
-        more.hidden = showAll;
+        more.hidden = client.showAll;
         more.textContent = document.documentElement.lang.toLowerCase().startsWith("ru")
           ? "Показать все " + matching + " сайтов" : "Show all " + matching + " sites";
       }
@@ -154,32 +160,25 @@
     const empty = row.querySelector("[data-client-no-sites]");
     if (empty) empty.hidden = matching !== 0;
   }
-  function filterClients(workspace) {
-    const searchElement = workspace.querySelector("[data-server-clients-search]");
-    if (!searchElement) return;
-    const query = searchElement.value.trim().toLocaleLowerCase();
-    const selected = workspace.querySelector("[data-server-client-filter].is-active")?.dataset.serverClientFilter || "all";
+  function filterClients(workspace, model) {
+    const {query, selected, sorter, rows} = model;
     const statusFields = {overdue:"clientOverdue", "over-limit":"clientOverLimit", attention:"clientAttention"};
-    const rows = clientRows(workspace);
     const counts = {all: rows.length, attention:0, overdue:0, "over-limit":0};
     for (const row of rows) {
       for (const [name, field] of Object.entries(statusFields)) {
-        if (row.dataset[field] === "true" || (name === "attention" && Number(row.dataset.clientProblemCount) > 0)) counts[name]++;
+        if (row.dataset[field] === "true" || (name === "attention" && clientModels.get(row).problems.size > 0)) counts[name]++;
       }
     }
     for (const badge of workspace.querySelectorAll("[data-client-filter-count]")) {
       badge.textContent = String(counts[badge.dataset.clientFilterCount] || 0);
     }
-    const sorter = workspace.querySelector("[data-server-clients-sort]")?.value || "debt";
     rows.sort((left, right) => {
       if (sorter === "storage") return Number(right.dataset.clientUsedBytes || 0) - Number(left.dataset.clientUsedBytes || 0) ||
         left.dataset.clientSearch.localeCompare(right.dataset.clientSearch);
       if (sorter === "sites") return Number(right.dataset.clientSiteCount || 0) - Number(left.dataset.clientSiteCount || 0) ||
         left.dataset.clientSearch.localeCompare(right.dataset.clientSearch);
       if (sorter === "email") return (left.dataset.customerEmail || left.dataset.clientSearch).localeCompare(right.dataset.customerEmail || right.dataset.clientSearch);
-      const leftCurrency = left.dataset.clientCurrency || "", rightCurrency = right.dataset.clientCurrency || "";
-      return leftCurrency.localeCompare(rightCurrency) ||
-        numberFromLabel(right.dataset.clientDebtLabel) - numberFromLabel(left.dataset.clientDebtLabel) ||
+      return compareDebt(clientModels.get(left).debt, clientModels.get(right).debt) ||
         (left.dataset.customerEmail || left.dataset.clientSearch).localeCompare(right.dataset.customerEmail || right.dataset.clientSearch);
     });
     const list = workspace.querySelector("[data-server-clients-list], .expense-simple-clients");
@@ -187,9 +186,8 @@
     let visibleCount = 0;
     for (const row of rows) {
       const matchesStatus = selected === "all" || row.dataset[statusFields[selected]] === "true" ||
-        (selected === "attention" && Number(row.dataset.clientProblemCount) > 0);
-      const matchingSite = Array.from(row.querySelectorAll("[data-client-site-row]"))
-        .some(site => site.dataset.clientSiteDomain.toLocaleLowerCase().includes(query));
+        (selected === "attention" && clientModels.get(row).problems.size > 0);
+      const matchingSite = clientModels.get(row).sites.some(site => site.dataset.clientSiteDomain.toLocaleLowerCase().includes(query));
       const matchesSearch = !query || (row.dataset.customerEmail || "").toLocaleLowerCase().includes(query) ||
         matchingSite || (row.dataset.clientSearch || "").toLocaleLowerCase().includes(query);
       row.hidden = !matchesStatus || !matchesSearch;
@@ -229,19 +227,38 @@
     confirmation.value = "";
   }
   for (const workspace of [...serverPanels, centralClients].filter(Boolean)) {
-    if (!workspace.querySelector("[data-server-clients-search]")) continue;
-    for (const row of clientRows(workspace)) initializeClientRow(row);
+    const searchField = workspace.querySelector("[data-server-clients-search]");
+    if (!searchField) continue;
+    const model = {
+      rows: clientRows(workspace),
+      query: searchField.value.trim().toLocaleLowerCase(),
+      selected: "all",
+      sorter: workspace.querySelector("[data-server-clients-sort]")?.value || "debt"
+    };
+    for (const row of model.rows) initializeClientRow(row);
     workspace.addEventListener("input", event => {
-      if (event.target.matches("[data-server-clients-search]")) filterClients(workspace);
+      if (event.target.matches("[data-server-clients-search]")) {
+        model.query = searchField.value.trim().toLocaleLowerCase();
+        filterClients(workspace, model);
+      }
       if (event.target.matches("[data-client-domain-search]")) {
         const row = event.target.closest("[data-server-client-row]");
-        row.dataset.clientShowAll = "false";
-        updateClientSites(row, workspace.querySelector("[data-server-clients-search]")?.value.trim().toLocaleLowerCase() || "");
+        const client = clientModels.get(row);
+        client.siteSearch = event.target.value.trim().toLocaleLowerCase();
+        client.showAll = false;
+        updateClientSites(row, model.query);
       }
     });
     workspace.addEventListener("change", event => {
-      if (event.target.matches("[data-server-clients-sort], [data-server-clients-filter]")) filterClients(workspace);
-      if (event.target.matches("[data-client-errors-only]")) updateClientSites(event.target.closest("[data-server-client-row]"), "");
+      if (event.target.matches("[data-server-clients-sort]")) {
+        model.sorter = event.target.value;
+        filterClients(workspace, model);
+      }
+      if (event.target.matches("[data-client-errors-only]")) {
+        const row = event.target.closest("[data-server-client-row]");
+        clientModels.get(row).errorsOnly = event.target.checked;
+        updateClientSites(row, model.query);
+      }
       if (event.target.matches("[data-client-account-select]")) updateClientAccountForm(event.target.closest("[data-client-account-form]"));
     });
     workspace.addEventListener("click", event => {
@@ -252,15 +269,16 @@
           button.classList.toggle("is-active", active);
           button.setAttribute("aria-pressed", String(active));
         }
-        filterClients(workspace);
+        model.selected = chip.dataset.serverClientFilter;
+        filterClients(workspace, model);
       }
       const tab = event.target.closest("[data-client-tab]");
       if (tab) activateClientTab(tab.closest("[data-server-client-row]"), tab.dataset.clientTab);
       const more = event.target.closest("[data-client-show-all]");
       if (more) {
         const row = more.closest("[data-server-client-row]");
-        row.dataset.clientShowAll = "true";
-        updateClientSites(row, "");
+        clientModels.get(row).showAll = true;
+        updateClientSites(row, model.query);
       }
     });
     for (const form of workspace.querySelectorAll("[data-client-account-form]")) {
@@ -270,7 +288,7 @@
             form.querySelector("[data-client-account-confirm]").disabled) event.preventDefault();
       });
     }
-    filterClients(workspace);
+    filterClients(workspace, model);
   }
   // The shared dialogs live after <main>, unlike the former per-site dialogs.
   // Keep the selected server workspace in the redirect fragment after POST.

@@ -324,9 +324,9 @@ func (collector *Collector) snapshot(stop <-chan struct{}, interval bool) (Repor
 // A trace belongs to one HTTP handler. Context is only the net/http adapter;
 // completed measurements transfer to their collector through its input channel.
 type trace struct {
-	started, first time.Time
-	event          Event
-	route          Stage
+	started, first, hijacked time.Time
+	event                    Event
+	route                    Stage
 }
 type traceKey struct{}
 type collectorKey struct{}
@@ -414,23 +414,28 @@ func (collector *Collector) Middleware(next http.Handler) http.Handler {
 			}
 		}
 		request = request.WithContext(context.WithValue(WithCollector(request.Context(), collector), traceKey{}, measurement))
-		if request.Header.Get("Upgrade") == "" {
-			measurement.event.HTTP.Requests = 1
-			if request.Body != nil {
-				request.Body = &countedBody{ReadCloser: request.Body, metrics: &measurement.event.HTTP}
-			}
+		measurement.event.HTTP.Requests = 1
+		if request.Body != nil {
+			request.Body = &countedBody{ReadCloser: request.Body, metrics: &measurement.event.HTTP}
 		}
 		next.ServeHTTP(&responseWriter{ResponseWriter: writer, measurement: measurement}, request)
-		if request.Header.Get("Upgrade") != "" {
+		upgraded := request.Header.Get("Upgrade") != "" &&
+			(measurement.event.Status == http.StatusSwitchingProtocols || !measurement.hijacked.IsZero())
+		if upgraded {
 			measurement.event.HTTP = HTTPMetrics{}
-			if measurement.event.Status == http.StatusSwitchingProtocols {
-				// ReverseProxy returns only when a hijacked WebSocket closes.
-				// That interval is session lifetime, not HTTP response latency.
-				measurement.event.Present &^= 1 << ProxyApplication
+			measurement.event.Status = http.StatusSwitchingProtocols
+			// ReverseProxy writes the 101 directly to the hijacked connection.
+			// The proxy returns when the upgraded session closes.
+			measurement.event.Present &^= 1 << ProxyApplication
+			if measurement.route == ProxyApplication {
 				measurement.route = 0
-				measurement.event.Durations[UpgradeSessionLifetime] = time.Since(measurement.started)
-				measurement.event.Present |= 1 << UpgradeSessionLifetime
 			}
+			sessionStarted := measurement.hijacked
+			if sessionStarted.IsZero() {
+				sessionStarted = measurement.first
+			}
+			measurement.event.Durations[UpgradeSessionLifetime] = time.Since(sessionStarted)
+			measurement.event.Present |= 1 << UpgradeSessionLifetime
 		} else {
 			measurement.event.at = time.Now()
 			measurement.event.started = measurement.started
@@ -511,7 +516,11 @@ func (writer *responseWriter) Flush() {
 	_ = http.NewResponseController(writer.ResponseWriter).Flush()
 }
 func (writer *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	return http.NewResponseController(writer.ResponseWriter).Hijack()
+	connection, buffered, err := http.NewResponseController(writer.ResponseWriter).Hijack()
+	if err == nil {
+		writer.measurement.hijacked = time.Now()
+	}
+	return connection, buffered, err
 }
 
 // Each HTTP handler owns its byte counts; only the completed observation crosses the collector channel.

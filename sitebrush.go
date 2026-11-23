@@ -312,7 +312,7 @@ type App struct {
 	hostingSnapshotDeliveries chan hostingSnapshotNetChanDeliveryTask
 	hostingAndSupportPanel    chan hostingAndSupportPanelRequest
 	billingInvoices           chan billingInvoiceProcessRequest
-	renderTemplates           chan renderTemplateRequest
+	renderTemplates           renderTemplateProcess
 	controlDatabase           *serverControlDatabaseDispatcher
 	hostingSupportEvents      chan hostingandsupport.HostingSnapshotEvent
 	demoSiteRuntime           chan demoSiteRuntimeRequest
@@ -398,10 +398,17 @@ type billingInvoiceProcessRequest struct {
 	kind string
 }
 
+type renderTemplateProcess struct {
+	jobs chan<- renderTemplateRequest
+	stop <-chan struct{}
+}
+
 type renderTemplateRequest struct {
 	name     string
 	envelope map[string]any
-	reply    chan renderTemplateResponse
+	session  <-chan struct{}
+	started  chan<- struct{}
+	reply    chan<- renderTemplateResponse
 }
 
 type renderTemplateResponse struct {
@@ -8980,13 +8987,13 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		"AnalyticsQuotaBlocked": a.storedDomainStorageUsage(r.Context(), domain).AnalyticsLimited,
 		"InitialGoalsError":     initialGoalsError != nil, "SuggestedGoalsJSON": template.JS(analyticsGoalsJSON(browserstats.InitialGoals(catalog.Pages, translationsForRequest(r)))),
 		"Conversion": browserDashboard.Report.Conversion, "GoalsJSON": template.JS(analyticsGoalsJSON(goals)), "ConversionJSON": analyticsConversionJSON(browserDashboard.Report.Conversion),
-		"Report":           analyticsReportView(report, translationsForRequest(r)),
-		"BrowserAnalytics": browserDashboard,
-		"SecurityAnalyticsReadError": securityReadError,
-		"SecurityAnalyticsLastObserved": securityLastObserved,
+		"Report":                           analyticsReportView(report, translationsForRequest(r)),
+		"BrowserAnalytics":                 browserDashboard,
+		"SecurityAnalyticsReadError":       securityReadError,
+		"SecurityAnalyticsLastObserved":    securityLastObserved,
 		"SecurityAnalyticsHasObservations": !securityLastObserved.IsZero(),
-		"SecurityAnalyticsStale": !securityLastObserved.IsZero() && time.Since(securityLastObserved) > 10*time.Minute,
-		"Experience":       experience, "ExperienceFilter": filter, "Security": security, "SecurityTypeAxes": analyticsSecurityTypeAxes(), "SecurityBlocks": securityBlocks, "SecurityLocalBlocks": securityLocalBlocks, "SecurityGlobalBlocks": securityGlobalBlocks, "SecurityAllowlist": securityAllowlist, "SecurityThrottles": securityThrottles, "SecuritySettings": securitySettings, "GoalsText": strings.Join(goalLines, "\n"), "SessionMapJSON": template.JS(mapJSON), "PeriodOptions": []int{1, 7, 30, 90}, "UnknownGeo": unknownGeo, "ServerRequests": serverRequests, "ServerLocalHours": serverLocalHours, "ServerHoursJSON": template.JS(serverHoursJSON), "SecurityHoursJSON": template.JS(securityHoursJSON), "SecurityCountriesJSON": template.JS(securityCountriesJSON), "SecurityTypesJSON": template.JS(securityTypesJSON), "ActivityDaysJSON": template.JS(activityDaysJSON), "ActivityHoursJSON": template.JS(activityHoursJSON), "SecurityActivityDaysJSON": template.JS(securityActivityDaysJSON), "SecurityActivityHoursJSON": template.JS(securityActivityHoursJSON), "SecurityActivityTypesJSON": template.JS(securityActivityTypesJSON), "SecurityActivitySeverityJSON": template.JS(securityActivitySeverityJSON), "ActivitySessionsJSON": template.JS(activitySessionsJSON), "SecurityIncidentsJSON": template.JS(securityIncidentsJSON), "ServerTimezone": time.Local.String(), "ServerNowRFC3339": serverNow.Format(time.RFC3339), "ServerNowDisplay": serverNow.Format("02 Jan 2006 15:04:05"), "ServerTimezoneOffsetSeconds": serverTimezoneOffsetSeconds,
+		"SecurityAnalyticsStale":           !securityLastObserved.IsZero() && time.Since(securityLastObserved) > 10*time.Minute,
+		"Experience":                       experience, "ExperienceFilter": filter, "Security": security, "SecurityTypeAxes": analyticsSecurityTypeAxes(), "SecurityBlocks": securityBlocks, "SecurityLocalBlocks": securityLocalBlocks, "SecurityGlobalBlocks": securityGlobalBlocks, "SecurityAllowlist": securityAllowlist, "SecurityThrottles": securityThrottles, "SecuritySettings": securitySettings, "GoalsText": strings.Join(goalLines, "\n"), "SessionMapJSON": template.JS(mapJSON), "PeriodOptions": []int{1, 7, 30, 90}, "UnknownGeo": unknownGeo, "ServerRequests": serverRequests, "ServerLocalHours": serverLocalHours, "ServerHoursJSON": template.JS(serverHoursJSON), "SecurityHoursJSON": template.JS(securityHoursJSON), "SecurityCountriesJSON": template.JS(securityCountriesJSON), "SecurityTypesJSON": template.JS(securityTypesJSON), "ActivityDaysJSON": template.JS(activityDaysJSON), "ActivityHoursJSON": template.JS(activityHoursJSON), "SecurityActivityDaysJSON": template.JS(securityActivityDaysJSON), "SecurityActivityHoursJSON": template.JS(securityActivityHoursJSON), "SecurityActivityTypesJSON": template.JS(securityActivityTypesJSON), "SecurityActivitySeverityJSON": template.JS(securityActivitySeverityJSON), "ActivitySessionsJSON": template.JS(activitySessionsJSON), "SecurityIncidentsJSON": template.JS(securityIncidentsJSON), "ServerTimezone": time.Local.String(), "ServerNowRFC3339": serverNow.Format(time.RFC3339), "ServerNowDisplay": serverNow.Format("02 Jan 2006 15:04:05"), "ServerTimezoneOffsetSeconds": serverTimezoneOffsetSeconds,
 	})
 }
 
@@ -28956,7 +28963,13 @@ func (a *App) expensesPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	view["Status"] = status
-	view["ShowProfiler"] = a.profiler != nil && a.updateAuthorized(r)
+	updateAllowed := view["CanConfigurePublicIPs"] == true
+	view["ShowProfiler"] = a.profiler != nil && updateAllowed
+	if updateAllowed && view["SelectedServerSection"] == "updates" && view["SelectedServerLocal"] == true {
+		_, announcementErr := a.centralAnnouncementIdentity()
+		view["ShowServerUpdater"] = true
+		view["CentralAnnouncements"] = announcementErr == nil
+	}
 	renderStarted := requesttiming.Start(r)
 	a.render(w, r, "expenses.html", view)
 	requesttiming.Finish(r, requesttiming.ServerSettingsRender, renderStarted)
@@ -29040,6 +29053,7 @@ func (a *App) runHostingAndSupportPanelProcess(stop <-chan struct{}, requests <-
 			case "expense_policy_changed":
 				snapshotGeneration++
 				snapshot.LocalCostPolicy = request.costPolicy
+				snapshot.Servers = slices.Clone(snapshot.Servers)
 				for serverIndex := range snapshot.Servers {
 					if snapshot.Servers[serverIndex].Local {
 						hostingandsupport.ApplyServerCostView(&snapshot.Servers[serverIndex], request.costPolicy, snapshot.Invoices)
@@ -30013,6 +30027,8 @@ func (a *App) applyHostingAndSupportPanelMetrics(snapshot hostingAndSupportPanel
 }
 
 func (a *App) applyHostingAndSupportPanelQuotaChange(snapshot hostingAndSupportPanelSnapshot, quotaChange siteQuotaRow) hostingAndSupportPanelSnapshot {
+	// Published snapshots stay immutable for renderers and the snapshot saver.
+	snapshot.Sites = slices.Clone(snapshot.Sites)
 	domain := normalizeQuotaDomainName(quotaChange.Domain)
 	for siteIndex := range snapshot.Sites {
 		if normalizeQuotaDomainName(snapshot.Sites[siteIndex].Domain) != domain {
@@ -30050,13 +30066,14 @@ func (a *App) applyHostingAndSupportPanelQuotaChange(snapshot hostingAndSupportP
 
 func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSupportPanelSnapshot) map[string]any {
 	translations := translationsForRequest(r)
+	query := r.URL.Query()
+	workspace := strings.TrimSpace(query.Get("workspace"))
 	panelServers := append([]hostingandsupport.ServerView(nil), snapshot.Servers...)
 	if snapshot.ShowCentralRegistry {
 		// Only the central catalog/clients (and the security journal) need
 		// every remote view. Opening the local overview should not allocate
 		// thousands of archived remote server, billing or client graphs.
-		workspace := strings.TrimSpace(r.URL.Query().Get("workspace"))
-		selectedID := strings.TrimSpace(r.URL.Query().Get("installation"))
+		selectedID := strings.TrimSpace(query.Get("installation"))
 		includeAll := workspace == "installations" || workspace == "clients" || mailJournalSecurityView(r)
 		knownServerIDs := make(map[string]bool)
 		for _, server := range panelServers {
@@ -30072,13 +30089,15 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 			knownServerIDs[hosting.InstallationID] = true
 			panelServers = append(panelServers, hostingandsupport.BuildRemoteServerView(hosting, snapshot.Invoices, CompileVersion))
 		}
-		for _, group := range snapshot.DesktopHostingGroups {
-			for _, hosting := range group.Hostings {
+		if includeAll || selectedID != "" && !knownServerIDs[selectedID] {
+			for _, group := range snapshot.DesktopHostingGroups {
+				for _, hosting := range group.Hostings {
+					addHosting(hosting)
+				}
+			}
+			for _, hosting := range snapshot.ArchivedHostings {
 				addHosting(hosting)
 			}
-		}
-		for _, hosting := range snapshot.ArchivedHostings {
-			addHosting(hosting)
 		}
 	}
 	if !snapshot.ShowCentralRegistry {
@@ -30092,22 +30111,27 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 	}
 	// Build the selected installation only. The central directory remains
 	// available on demand, but does not inflate every server settings response.
-	centralClientsDeferred := snapshot.ShowCentralRegistry && r.URL.Query().Get("workspace") != "clients"
+	centralClientsDeferred := snapshot.ShowCentralRegistry && workspace != "clients"
 	var centralClients []simplifiedExpenseClientView
 	if snapshot.ShowCentralRegistry && !centralClientsDeferred {
 		centralClients = centralExpenseClients(simplifiedExpenseServerViews(panelServers, snapshot.Clients))
+	}
+	localServerIndex := slices.IndexFunc(panelServers, func(server hostingandsupport.ServerView) bool { return server.Local })
+	localServerID := ""
+	if localServerIndex >= 0 {
+		localServerID = panelServers[localServerIndex].ID
 	}
 	selectedPanelServers := panelServers
 	// Only the server settings page is scoped to a selected installation.
 	// The security journal is a separate cross-installation workspace and
 	// must retain remote rows when filtering by mail_server.
 	if snapshot.ShowCentralRegistry && !mailJournalSecurityView(r) {
-		installationID := strings.TrimSpace(r.URL.Query().Get("installation"))
+		installationID := strings.TrimSpace(query.Get("installation"))
 		selected := slices.IndexFunc(panelServers, func(server hostingandsupport.ServerView) bool {
 			return installationID != "" && server.ID == installationID
 		})
 		if selected < 0 {
-			selected = slices.IndexFunc(panelServers, func(server hostingandsupport.ServerView) bool { return server.Local })
+			selected = localServerIndex
 		}
 		if selected < 0 && len(panelServers) != 0 {
 			selected = 0
@@ -30118,7 +30142,7 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 	}
 	// Do not construct client/site/invoice view graphs just to discard them.
 	// The overview needs only already prepared server summaries.
-	section := strings.TrimSpace(r.URL.Query().Get("section"))
+	section := strings.TrimSpace(query.Get("section"))
 	switch section {
 	case "overview", "network", "updates", "registration", "demo", "clients", "billing", "monetization":
 	default:
@@ -30134,7 +30158,7 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 	} else {
 		expenseServers = simplifiedExpenseServerViews(selectedPanelServers, snapshot.Clients)
 	}
-	selectedMailServer := strings.TrimSpace(r.URL.Query().Get("mail_server"))
+	selectedMailServer := strings.TrimSpace(query.Get("mail_server"))
 	selectedMailServerFound := false
 	for _, server := range expenseServers {
 		if server.Server.ID == selectedMailServer {
@@ -30145,21 +30169,21 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 	if !selectedMailServerFound {
 		selectedMailServer = ""
 	}
-	mailDays, _ := strconv.Atoi(r.URL.Query().Get("mail_days"))
+	mailDays, _ := strconv.Atoi(query.Get("mail_days"))
 	if mailDays != 1 && mailDays != 7 && mailDays != 30 && mailDays != 90 {
 		mailDays = 90
 	}
-	mailStage := strings.TrimSpace(r.URL.Query().Get("mail_stage"))
+	mailStage := strings.TrimSpace(query.Get("mail_stage"))
 	switch mailStage {
 	case "", "mail_blocked", "mail_unblocked", "transport_sent", "queued", "attempt", "retry", "accepted", "failed", "cancelled", "cancel_requested", "cancel_too_late", "relay_accepted", "registration_requested", "registration_verified", "registration_complete", "registration_failed", "registration_rejected", "recovery_requested", "recovery_complete", "recovery_failed", "recovery_skipped", "recovery_mail_failed":
 	default:
 		mailStage = ""
 	}
-	mailKind := strings.TrimSpace(r.URL.Query().Get("mail_kind"))
+	mailKind := strings.TrimSpace(query.Get("mail_kind"))
 	if len(mailKind) > 60 {
 		mailKind = ""
 	}
-	mailRecipient := strings.TrimSpace(r.URL.Query().Get("mail_recipient"))
+	mailRecipient := strings.TrimSpace(query.Get("mail_recipient"))
 	if len(mailRecipient) > 254 {
 		mailRecipient = ""
 	}
@@ -30247,10 +30271,12 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 	if normalizeDomainName(snapshot.MainDomain) == "sitebrush.com" {
 		expensesTitle = translationOrDefault(translations, "expenses_central_title", "Server settings")
 	}
-	sites := append([]hostingandsupport.Site(nil), snapshot.Sites...)
+	sites := snapshot.Sites
 	if section == "clients" {
+		sites = slices.Clone(sites)
 		ownerDomain := a.serverOwnerDomain(r.Context())
 		for siteIndex := range sites {
+			sites[siteIndex].AdminAccounts = slices.Clone(sites[siteIndex].AdminAccounts)
 			for _, email := range hostingandsupport.SplitEmailList(sites[siteIndex].AdminEmails) {
 				protected := sites[siteIndex].Domain == ownerDomain && slices.ContainsFunc(snapshot.OwnerEmails, func(ownerEmail string) bool { return strings.EqualFold(ownerEmail, email) })
 				sites[siteIndex].AdminAccounts = append(sites[siteIndex].AdminAccounts, hostingandsupport.SiteAccountView{Email: email, Protected: protected})
@@ -30265,24 +30291,24 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 	}
 	// Only the central owner may page through the full catalog. Keep the
 	// response bounded even when thousands of installations are archived.
-	centralInstallationsDeferred := snapshot.ShowCentralRegistry && r.URL.Query().Get("workspace") != "installations"
+	centralInstallationsDeferred := snapshot.ShowCentralRegistry && workspace != "installations"
 	catalogPage := hostingandsupport.InstallationPage{Filter: "active", Sort: "sites", Page: 1, Pages: 1}
 	catalogPreviousURL, catalogNextURL := "", ""
 	if snapshot.ShowCentralRegistry && !centralInstallationsDeferred {
-		number, _ := strconv.Atoi(r.URL.Query().Get("catalog_page"))
+		number, _ := strconv.Atoi(query.Get("catalog_page"))
 		catalogPage = hostingandsupport.PaginateInstallations(
 			hostingandsupport.InstallationCatalogViews(panelServers, nil, nil),
-			r.URL.Query().Get("catalog_filter"),
-			r.URL.Query().Get("catalog_sort"),
-			r.URL.Query().Get("catalog_query"), number, 40)
+			query.Get("catalog_filter"),
+			query.Get("catalog_sort"),
+			query.Get("catalog_query"), number, 40)
 		link := func(page int) string {
 			values := url.Values{
 				"server-settings": {""},
-				"workspace": {"installations"},
-				"catalog_filter": {catalogPage.Filter},
-				"catalog_sort": {catalogPage.Sort},
-				"catalog_query": {catalogPage.Query},
-				"catalog_page": {strconv.Itoa(page)},
+				"workspace":       {"installations"},
+				"catalog_filter":  {catalogPage.Filter},
+				"catalog_sort":    {catalogPage.Sort},
+				"catalog_query":   {catalogPage.Query},
+				"catalog_page":    {strconv.Itoa(page)},
 			}
 			return "/?" + values.Encode()
 		}
@@ -30293,7 +30319,7 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 			catalogNextURL = link(catalogPage.Page + 1)
 		}
 	}
-	centralBillingDeferred := snapshot.ShowCentralRegistry && r.URL.Query().Get("workspace") != "billing"
+	centralBillingDeferred := snapshot.ShowCentralRegistry && workspace != "billing"
 	var ledgerInvoices []hostingandsupport.ServerInvoiceView
 	if section == "billing" || !centralBillingDeferred && snapshot.ShowCentralRegistry {
 		if snapshot.ShowCentralRegistry {
@@ -30313,6 +30339,7 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 		"ServerClientsDeferred":        serverClientsDeferred,
 		"SelectedServerSection":        section,
 		"SelectedServerLocal":          len(expenseServers) > 0 && expenseServers[0].Server.Local,
+		"LocalServerID":                localServerID,
 		"T":                            translations,
 		"Title":                        expensesTitle,
 		"Sites":                        sites,
@@ -30348,53 +30375,53 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 			"RecipientHour":       serviceMailPerRecipientHourLimit,
 			"RecipientDomainHour": serviceMailPerRecipientDomainHourLimit,
 		},
-		"Backups":                    nil,
-		"DemoSettings":               snapshot.DemoSettings,
-		"DemoStatus":                 func() demoSiteStatusView {
+		"Backups":      nil,
+		"DemoSettings": snapshot.DemoSettings,
+		"DemoStatus": func() demoSiteStatusView {
 			if section == "demo" && len(expenseServers) > 0 && expenseServers[0].Server.Local {
 				return a.demoSiteStatusView(r.Context(), snapshot.DemoSettings)
 			}
 			return demoSiteStatusView{}
 		}(),
-		"DemoCopyScopeLabel":         translationOrDefault(translations, "billing_demo_copy_scope", "Content to download"),
-		"DemoCopyPageLabel":          translationOrDefault(translations, "billing_demo_copy_single_page", "Only the specified page"),
-		"DemoSnapshotLabel":          translationOrDefault(translations, "billing_demo_snapshot", "Current demo copy"),
-		"DemoSnapshotMissingLabel":   translationOrDefault(translations, "billing_demo_snapshot_missing", "The copy has not been created yet"),
-		"DemoLastRestoredLabel":      translationOrDefault(translations, "billing_demo_last_restored", "Last content reset"),
-		"DemoNeverRestoredLabel":     translationOrDefault(translations, "billing_demo_never_restored", "No resets yet"),
-		"AutoRegistrationEnabled":    snapshot.AutoRegistrationEnabled,
-		"PublicTrialEnabled":         snapshot.PublicTrialEnabled,
-		"RegistrationMaxSize":        hostingandsupport.FormatQuotaInput(snapshot.CreationLimits.Registration),
-		"TestDriveMaxSize":           hostingandsupport.FormatQuotaInput(snapshot.CreationLimits.TestDrive),
-		"DemoMaxSize":                hostingandsupport.FormatQuotaInput(snapshot.DemoSettings.MaxSiteBytes),
-		"PublicTrialAvailable":       trialAvailability.Enabled,
-		"PublicTrialUnavailableText": trialUnavailableText,
-		"PublicTrialWildcardDomain":  trialAvailability.WildcardDomain,
-		"PublicTrialExternalIP":      trialAvailability.ExternalIP,
-		"PublicTrialEmbedHTML":       publicTrialEmbedHTML,
-		"TestDriveEmbedHTML":         testDriveEmbedHTML,
-		"CreateSiteEmbedHTML":        createSiteEmbedHTML,
-		"CurrentDomain":              domainFromRequest(r),
-		"PanelSnapshotBuiltAt":       snapshot.BuiltAt,
-		"CommissionBPS":              snapshot.CommissionBPS,
-		"CommissionPercent":          fmt.Sprintf("%.2f", float64(snapshot.CommissionBPS)/100),
-		"ShowCommissionSetting":      snapshot.ShowCentralRegistry,
-		"ShowCentralRegistry":        snapshot.ShowCentralRegistry,
-		"ShowDemo":                   snapshot.AutoRegistrationEnabled && snapshot.DemoSettings.Enabled && normalizeDomainName(snapshot.DemoSettings.Domain) != "",
-		"SimplifiedExpenses":         true,
-		"CanConfigurePublicIPs":      a.updateAuthorized(r),
-		"ExpenseServers":             expenseServers,
-		"InstallationCatalog":        catalogPage.Rows,
-		"InstallationCatalogTotal":   catalogPage.Total,
-		"InstallationCatalogCount":   catalogPage.Matching,
-		"InstallationCatalogPage":    catalogPage.Page,
-		"InstallationCatalogPages":   catalogPage.Pages,
-		"InstallationCatalogFilter":  catalogPage.Filter,
-		"InstallationCatalogSort":    catalogPage.Sort,
-		"InstallationCatalogQuery":   catalogPage.Query,
+		"DemoCopyScopeLabel":          translationOrDefault(translations, "billing_demo_copy_scope", "Content to download"),
+		"DemoCopyPageLabel":           translationOrDefault(translations, "billing_demo_copy_single_page", "Only the specified page"),
+		"DemoSnapshotLabel":           translationOrDefault(translations, "billing_demo_snapshot", "Current demo copy"),
+		"DemoSnapshotMissingLabel":    translationOrDefault(translations, "billing_demo_snapshot_missing", "The copy has not been created yet"),
+		"DemoLastRestoredLabel":       translationOrDefault(translations, "billing_demo_last_restored", "Last content reset"),
+		"DemoNeverRestoredLabel":      translationOrDefault(translations, "billing_demo_never_restored", "No resets yet"),
+		"AutoRegistrationEnabled":     snapshot.AutoRegistrationEnabled,
+		"PublicTrialEnabled":          snapshot.PublicTrialEnabled,
+		"RegistrationMaxSize":         hostingandsupport.FormatQuotaInput(snapshot.CreationLimits.Registration),
+		"TestDriveMaxSize":            hostingandsupport.FormatQuotaInput(snapshot.CreationLimits.TestDrive),
+		"DemoMaxSize":                 hostingandsupport.FormatQuotaInput(snapshot.DemoSettings.MaxSiteBytes),
+		"PublicTrialAvailable":        trialAvailability.Enabled,
+		"PublicTrialUnavailableText":  trialUnavailableText,
+		"PublicTrialWildcardDomain":   trialAvailability.WildcardDomain,
+		"PublicTrialExternalIP":       trialAvailability.ExternalIP,
+		"PublicTrialEmbedHTML":        publicTrialEmbedHTML,
+		"TestDriveEmbedHTML":          testDriveEmbedHTML,
+		"CreateSiteEmbedHTML":         createSiteEmbedHTML,
+		"CurrentDomain":               domainFromRequest(r),
+		"PanelSnapshotBuiltAt":        snapshot.BuiltAt,
+		"CommissionBPS":               snapshot.CommissionBPS,
+		"CommissionPercent":           fmt.Sprintf("%.2f", float64(snapshot.CommissionBPS)/100),
+		"ShowCommissionSetting":       snapshot.ShowCentralRegistry,
+		"ShowCentralRegistry":         snapshot.ShowCentralRegistry,
+		"ShowDemo":                    snapshot.AutoRegistrationEnabled && snapshot.DemoSettings.Enabled && normalizeDomainName(snapshot.DemoSettings.Domain) != "",
+		"SimplifiedExpenses":          true,
+		"CanConfigurePublicIPs":       a.updateAuthorized(r),
+		"ExpenseServers":              expenseServers,
+		"InstallationCatalog":         catalogPage.Rows,
+		"InstallationCatalogTotal":    catalogPage.Total,
+		"InstallationCatalogCount":    catalogPage.Matching,
+		"InstallationCatalogPage":     catalogPage.Page,
+		"InstallationCatalogPages":    catalogPage.Pages,
+		"InstallationCatalogFilter":   catalogPage.Filter,
+		"InstallationCatalogSort":     catalogPage.Sort,
+		"InstallationCatalogQuery":    catalogPage.Query,
 		"InstallationCatalogPrevious": catalogPreviousURL,
-		"InstallationCatalogNext":   catalogNextURL,
-		"MailJournalLabelsJSON":      mailJournalLabelsJSON(translations),
+		"InstallationCatalogNext":     catalogNextURL,
+		"MailJournalLabelsJSON":       mailJournalLabelsJSON(translations),
 	}
 }
 
@@ -49920,10 +49947,34 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, templateName string
 		envelope["VisualEditorAssetVersion"] = assetVersion
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	}
-	if a != nil && a.renderTemplates != nil {
+	if a != nil && a.renderTemplates.jobs != nil {
+		session := r.Context().Done()
+		started := make(chan struct{})
 		reply := make(chan renderTemplateResponse, 1)
-		a.renderTemplates <- renderTemplateRequest{name: templateName, envelope: envelope, reply: reply}
+		select {
+		case <-session:
+			return
+		case <-a.renderTemplates.stop:
+			http.Error(w, "template rendering unavailable", http.StatusServiceUnavailable)
+			return
+		case a.renderTemplates.jobs <- renderTemplateRequest{name: templateName, envelope: envelope, session: session, started: started, reply: reply}:
+		}
+		select {
+		case <-session:
+			return
+		case <-a.renderTemplates.stop:
+			http.Error(w, "template rendering unavailable", http.StatusServiceUnavailable)
+			return
+		case <-started:
+		}
+		// The envelope can contain borrowed values. Once the worker has
+		// accepted them, join it before the handler may release them.
 		response := <-reply
+		select {
+		case <-session:
+			return
+		default:
+		}
 		if response.err != nil {
 			http.Error(w, response.err.Error(), http.StatusInternalServerError)
 			return
@@ -49960,12 +50011,16 @@ func parseEmbeddedPageTemplate(templateName string, source []byte) (*template.Te
 		return nil, err
 	}
 	if templateName == "expenses.html" {
-		fragment, readErr := fs.ReadFile(embeddedWebFiles, "web/server_profiler.html")
-		if readErr != nil {
-			return nil, readErr
+		for _, fragmentName := range []string{"server_profiler.html", "server_update.html"} {
+			fragment, readErr := fs.ReadFile(embeddedWebFiles, "web/"+fragmentName)
+			if readErr != nil {
+				return nil, readErr
+			}
+			if _, parseErr := parsedTemplate.New(fragmentName).Parse(string(fragment)); parseErr != nil {
+				return nil, parseErr
+			}
 		}
-		_, parseErr := parsedTemplate.New("server_profiler.html").Parse(string(fragment))
-		return parsedTemplate, parseErr
+		return parsedTemplate, nil
 	}
 	if templateName != "edit.html" {
 		return parsedTemplate, nil
@@ -49981,12 +50036,27 @@ func parseEmbeddedPageTemplate(templateName string, source []byte) (*template.Te
 	return parsedTemplate, nil
 }
 
-func startRenderTemplateProcess(stop <-chan struct{}) chan renderTemplateRequest {
-	requests := make(chan renderTemplateRequest, 32)
+func startRenderTemplateProcess(stop <-chan struct{}) renderTemplateProcess {
+	jobs := make(chan renderTemplateRequest, 32)
+	workers := min(4, max(1, runtime.GOMAXPROCS(0)))
+	for worker := 0; worker < workers; worker++ {
+		go runRenderTemplateWorker(stop, jobs)
+	}
+	return renderTemplateProcess{jobs: jobs, stop: stop}
+}
+
+func runRenderTemplateWorker(stop <-chan struct{}, jobs <-chan renderTemplateRequest) {
+	// Each worker owns its templates, including the escaping state initialized
+	// by html/template on first execution.
 	parsedTemplates := make(map[string]*template.Template)
 	parseErrors := make(map[string]error)
 	templatePaths, _ := fs.Glob(embeddedWebFiles, "web/*.html")
 	for _, templatePath := range templatePaths {
+		select {
+		case <-stop:
+			return
+		default:
+		}
 		templateName := filepath.Base(templatePath)
 		fileBytes, readErr := fs.ReadFile(embeddedWebFiles, templatePath)
 		if readErr != nil {
@@ -50000,35 +50070,52 @@ func startRenderTemplateProcess(stop <-chan struct{}) chan renderTemplateRequest
 		}
 		parsedTemplates[templateName] = parsedTemplate
 	}
-	// Templates and parse errors are immutable after initialization. Executing
-	// templates is safe concurrently; independent, bounded channel workers
-	// prevent one large admin page from blocking unrelated login/editor pages.
-	// Each worker exclusively owns the request envelope and its output bytes.
-	workers := min(4, max(1, runtime.GOMAXPROCS(0)))
-	for worker := 0; worker < workers; worker++ {
-		go func() {
-			for {
-				select {
-				case <-stop:
-					return
-				case request := <-requests:
-					if parseErr := parseErrors[request.name]; parseErr != nil {
-						request.reply <- renderTemplateResponse{err: parseErr}
-						continue
-					}
-					parsedTemplate := parsedTemplates[request.name]
-					if parsedTemplate == nil {
-						request.reply <- renderTemplateResponse{err: fmt.Errorf("template %s is not embedded", request.name)}
-						continue
-					}
-					var rendered bytes.Buffer
-					renderErr := parsedTemplate.Execute(&rendered, request.envelope)
-					request.reply <- renderTemplateResponse{html: rendered.Bytes(), err: renderErr}
+	for {
+		select {
+		case <-stop:
+			return
+		case request, open := <-jobs:
+			if !open {
+				return
+			}
+			select {
+			case <-stop:
+				return
+			case <-request.session:
+				continue
+			case request.started <- struct{}{}:
+			}
+			response := renderTemplateResponse{err: parseErrors[request.name]}
+			if response.err == nil {
+				parsedTemplate := parsedTemplates[request.name]
+				if parsedTemplate == nil {
+					response.err = fmt.Errorf("template %s is not embedded", request.name)
+				} else {
+					rendered := renderTemplateBuffer{stop: stop, session: request.session}
+					response.err = parsedTemplate.Execute(&rendered, request.envelope)
+					response.html = rendered.buffer.Bytes()
 				}
 			}
-		}()
+			request.reply <- response
+		}
 	}
-	return requests
+}
+
+type renderTemplateBuffer struct {
+	buffer  bytes.Buffer
+	stop    <-chan struct{}
+	session <-chan struct{}
+}
+
+func (rendered *renderTemplateBuffer) Write(content []byte) (int, error) {
+	select {
+	case <-rendered.stop:
+		return 0, errors.New("template rendering stopped")
+	case <-rendered.session:
+		return 0, errors.New("template client disconnected")
+	default:
+		return rendered.buffer.Write(content)
+	}
 }
 
 func injectTemplatePropagationProgressModal(pageHTML []byte) []byte {
@@ -60193,11 +60280,11 @@ func (a *App) serverUpdatePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !hasQueryFlag(r, "embedded") {
-		httpsecurity.RedirectLocal(w, r, "/?server-settings#server-update", http.StatusSeeOther)
+		httpsecurity.RedirectLocal(w, r, "/?server-settings&section=updates#server-update", http.StatusSeeOther)
 		return
 	}
 	_, centralErr := a.centralAnnouncementIdentity()
-	view := map[string]any{"T": translationsForRequest(r), "AccountCSRF": accountCSRF(r), "CentralAnnouncements": centralErr == nil, "ServerVersion": CompileVersion, "Embedded": true}
+	view := map[string]any{"T": translationsForRequest(r), "AccountCSRF": accountCSRF(r), "CentralAnnouncements": centralErr == nil, "Embedded": true}
 	page := &serverUpdatePageBuffer{headers: make(http.Header)}
 	a.render(page, r, "server_update.html", view)
 	if page.status >= http.StatusBadRequest || page.body.Len() == 0 {
@@ -63152,7 +63239,7 @@ func newPublicHTTPFront(application *App, secret string, stop <-chan struct{}) *
 			}
 			application.securityResponseHeadersMiddleware(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 				writer.Header().Set("Referrer-Policy", "no-referrer")
-				application.render(writer, request, "server_update.html", map[string]any{"Domain": decision.Domain, "AccountCSRF": accountCSRF(request), "ServerVersion": CompileVersion, "CentralAnnouncements": false})
+				application.render(writer, request, "server_update.html", map[string]any{"Domain": decision.Domain, "AccountCSRF": accountCSRF(request), "CentralAnnouncements": false})
 			})).ServeHTTP(w, r)
 			return true
 		}

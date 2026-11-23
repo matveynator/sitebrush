@@ -1,8 +1,10 @@
 package requesttiming
 
 import (
+	"bufio"
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -145,26 +147,49 @@ func TestRouteLatencyIncludesCompletedResponseAndStatus(t *testing.T) {
 	}
 }
 
+// The reverse proxy writes its 101 to the raw connection after hijacking.
+type hijackRecorder struct {
+	*httptest.ResponseRecorder
+	connection net.Conn
+}
+
+func (recorder hijackRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return recorder.connection, bufio.NewReadWriter(bufio.NewReader(recorder.connection), bufio.NewWriter(recorder.connection)), nil
+}
+
 func TestUpgradedSessionDoesNotInflateProxyRequestLatency(t *testing.T) {
 	stop := make(chan struct{})
 	defer close(stop)
 	collector := New(stop)
-	handler := collector.Middleware(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	connection, peer := net.Pipe()
+	defer peer.Close()
+	upgradedHandler := collector.Middleware(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		Route(request, ProxyApplication)
-		writer.WriteHeader(http.StatusSwitchingProtocols)
-		time.Sleep(2 * time.Millisecond)
+		hijacked, _, err := http.NewResponseController(writer).Hijack()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = hijacked.Close()
 	}))
 	request := httptest.NewRequest(http.MethodGet, "http://site.test/?server_profiler_ws", nil)
 	request.Header.Set("Upgrade", "websocket")
-	handler.ServeHTTP(httptest.NewRecorder(), request)
+	upgradedHandler.ServeHTTP(hijackRecorder{httptest.NewRecorder(), connection}, request)
+
+	rejectedHandler := collector.Middleware(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		Route(request, ProxyApplication)
+		writer.WriteHeader(http.StatusForbidden)
+	}))
+	rejectedHandler.ServeHTTP(httptest.NewRecorder(), request)
 	report, err := collector.Snapshot(stop)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Stages[ProxyApplication].Count != 0 || report.Stages[UpgradeSessionLifetime].Count != 1 {
-		t.Fatalf("websocket lifetime was counted as an HTTP request: proxy=%+v upgrade=%+v", report.Stages[ProxyApplication], report.Stages[UpgradeSessionLifetime])
+	proxy := report.Stages[ProxyApplication]
+	upgrade := report.Stages[UpgradeSessionLifetime]
+	if proxy.Count != 1 || proxy.Statuses[http.StatusForbidden] != 1 || upgrade.Count != 1 || upgrade.Statuses[http.StatusSwitchingProtocols] != 1 {
+		t.Fatalf("wrong proxy or upgrade counts: proxy=%d, upgrade=%d", proxy.Count, upgrade.Count)
 	}
-	if report.HTTP.Requests != 0 {
-		t.Fatal("upgraded websocket counted as ordinary HTTP traffic")
+	if report.HTTP.Requests != 1 || report.HTTP.Errors != 1 {
+		t.Fatalf("only the rejected upgrade should count as HTTP traffic: %+v", report.HTTP)
 	}
 }

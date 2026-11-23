@@ -59,13 +59,15 @@ function createSite(domain, usedBytes, invalidSSL = false) {
   site.all['[data-client-certificate]'] = [];
   return site;
 }
-function createClient(email, sites, debt, isOverdue) {
+function createClient(email, sites, debtInCents, isOverdue) {
   const row = new Element({
     customerEmail: email, clientSearch: email + ' ' + sites.map(s => s.dataset.clientSiteDomain).join(' '),
-    clientSiteCount: String(sites.length), clientDebtLabel: debt,
+    clientSiteCount: String(sites.length),
+    clientUsedBytes: String(sites.reduce((totalBytes, site) => totalBytes + Number(site.dataset.clientSiteUsed), 0)),
     clientAttention: String(isOverdue), clientOverdue: String(isOverdue),
     clientOverLimit: 'false'
   });
+  row.one['[data-client-debt-model]'] = {textContent: JSON.stringify(debtInCents ? {EUR: debtInCents} : {})};
   row.all['[data-client-site-row]'] = sites;
   row.all['[data-client-pane]'] = ['sites','billing','account'].map(clientPane => new Element({clientPane}));
   row.all['[data-client-tab]'] = ['sites','billing','account'].map(clientTab => new Element({clientTab}));
@@ -84,8 +86,8 @@ function createClient(email, sites, debt, isOverdue) {
 const sites = Array.from({length: 32}, (_, index) =>
   createSite(index === 12 ? 'aika.sitebrush.com' : 'sample' + index + '.sitebrush.com',
     index === 2 ? 12000000000 : 1000000, index === 3));
-const alice = createClient('alice@example.com', sites, '94.03 EUR', true);
-const bob = createClient('bob@example.com', [createSite('bob.example.com', 1000000)], '0.00 EUR', false);
+const alice = createClient('alice@example.com', sites, 9403, true);
+const bob = createClient('bob@example.com', [createSite('bob.example.com', 1000000)], 0, false);
 const search = new Element();
 const sort = new Element();
 sort.value = 'debt';
@@ -146,11 +148,15 @@ new Function('document','window','URLSearchParams','HTMLFormElement',script)(
 const visibleSites = () => sites.filter(site => !site.hidden).length;
 assert.equal(visibleSites(),10,'32 sites should show just 10 initially');
 assert.equal(alice.one['[data-client-site-footer]'].one['[data-client-site-count]'].textContent,'10 / 32');
-assert.equal(alice.dataset.clientProblemCount,'2','quota overage and SSL failure must be counted');
+assert.equal(alice.one['[data-client-error-count]'].textContent,'2','quota overage and SSL failure must be counted');
 assert.match(alice.one['[data-client-quota-summary]'].textContent,/ \/ /);
 assert.equal(badges.find(b=>b.dataset.clientFilterCount==='all').textContent,'2');
 assert.equal(badges.find(b=>b.dataset.clientFilterCount==='overdue').textContent,'1');
 assert.equal(list.items[0],alice,'debt sort should put the overdue client first');
+sort.value = 'storage';
+list.items.length = 0;
+workspace.events.change({target: {matches: selector => selector === '[data-server-clients-sort]', value: sort.value}});
+assert.equal(list.items[0],alice,'storage sort must use the numeric byte count');
 
 search.value = 'aika';
 workspace.events.input({target:{matches:selector=>selector==='[data-server-clients-search]'}});
@@ -171,6 +177,7 @@ const errors = new Element();
 errors.checked = true;
 alice.one['[data-client-errors-only]'] = errors;
 workspace.events.change({target:{
+  checked: true,
   matches: selector => selector==='[data-client-errors-only]',
   closest: () => alice
 }});

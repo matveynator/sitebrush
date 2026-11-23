@@ -2967,7 +2967,7 @@ func TestServerSettingsNavigationPreservesExistingControls(t *testing.T) {
 		`data-expense-server-select`,
 		`data-public-ip-panel`,
 		`{{template "server-profiler" .}}`,
-		`data-server-update-content`,
+		`{{template "server-updater" $}}`,
 		`data-billing-ajax-save`,
 		`value="update_site_quota"`,
 		`value="save_server_expense_policy"`,
@@ -3093,31 +3093,31 @@ func TestServerSidebarCapabilitiesAreScopedBeforeJavascript(t *testing.T) {
 		{
 			name: "local prerequisites disabled", local: true, publicIPs: true,
 			visible: []string{"network", "updates", "registration", "monetization", "clients", "billing"},
-			hidden: []string{"demo"},
+			hidden:  []string{"demo"},
 		},
 		{
 			name: "local registration enabled", local: true, autoRegister: true,
 			visible: []string{"updates", "registration", "demo", "monetization", "clients", "billing"},
-			hidden: []string{"network"},
+			hidden:  []string{"network"},
 		},
 		{
 			name: "central remote installation", central: true,
 			visible: []string{"clients", "billing"},
-			hidden: []string{"network", "updates", "registration", "demo", "monetization"},
+			hidden:  []string{"network", "updates", "registration", "demo", "monetization"},
 		},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			view := map[string]any{
-				"T": translationsForLanguageCode("en"),
-				"SelectedServerLocal": testCase.local,
+				"T":                       translationsForLanguageCode("en"),
+				"SelectedServerLocal":     testCase.local,
 				"AutoRegistrationEnabled": testCase.autoRegister,
-				"CanConfigurePublicIPs": testCase.publicIPs,
-				"ShowCentralRegistry": testCase.central,
-				"DemoSettings": demo.Settings{},
-				"DemoStatus": map[string]any{"SnapshotAvailable": false, "LastRestoredAt": ""},
+				"CanConfigurePublicIPs":   testCase.publicIPs,
+				"ShowCentralRegistry":     testCase.central,
+				"DemoSettings":            demo.Settings{},
+				"DemoStatus":              map[string]any{"SnapshotAvailable": false, "LastRestoredAt": ""},
 				"ExpenseServers": []simplifiedExpenseServerView{{
-					Server: hostingandsupport.ServerView{ID: "test-installation", Local: testCase.local},
+					Server:       hostingandsupport.ServerView{ID: "test-installation", Local: testCase.local},
 					MailSelected: true,
 				}},
 			}
@@ -3242,6 +3242,7 @@ func TestHostingAndSupportTemplateRendersServerView(t *testing.T) {
 	}
 	view := map[string]any{
 		"Domain":         "sitebrush.com",
+		"LanguageCode":   "ru",
 		"Title":          "Хостинг и поддержка",
 		"T":              translationsForLanguageCode("ru"),
 		"CompileVersion": CompileVersion,
@@ -3322,7 +3323,7 @@ func TestHostingAndSupportTemplateRendersServerView(t *testing.T) {
 		"Backups":                     nil,
 		"DemoSettings":                demo.Settings{Domain: "demo.sitebrush.com", Enabled: true},
 		"AutoRegistrationEnabled":     true,
-		"SelectedServerSection":      "clients",
+		"SelectedServerSection":       "clients",
 		"PublicTrialEmbedHTML":        "",
 		"CurrentDomain":               "sitebrush.com",
 	}
@@ -3332,13 +3333,13 @@ func TestHostingAndSupportTemplateRendersServerView(t *testing.T) {
 		t.Fatal(err)
 	}
 	renderedHTML := rendered.String()
-	if !strings.Contains(renderedHTML, "Настройки сервера") || !strings.Contains(renderedHTML, "sitebrush.com") || !strings.Contains(renderedHTML, "Счета") {
+	if !strings.Contains(renderedHTML, "Настройки сервера") || !strings.Contains(renderedHTML, "sitebrush.com") || !strings.Contains(renderedHTML, "owner@example.com") {
 		t.Fatal("server-first hosting view did not render expected content")
 	}
-	if !strings.Contains(renderedHTML, `data-bs-target="#simpleQuota0_0_0"`) || !strings.Contains(renderedHTML, "Изменение квоты") || !strings.Contains(renderedHTML, "Применить") {
+	if !strings.Contains(renderedHTML, `data-bs-target="#clientQuotaModal"`) || !strings.Contains(renderedHTML, "Изменение квоты") || !strings.Contains(renderedHTML, "Применить") {
 		t.Fatal("editable server quota confirmation did not render")
 	}
-	if !strings.Contains(renderedHTML, `name="billing_action" value="update_site_quota"`) {
+	if strings.Count(renderedHTML, `id="clientQuotaModal"`) != 1 || !strings.Contains(renderedHTML, `name="billing_action" value="update_site_quota"`) {
 		t.Fatal("server quota form does not use the isolated quota action")
 	}
 	if !strings.Contains(renderedHTML, `data-certificate-renew="example.com"`) || !strings.Contains(renderedHTML, "2026-09-01 12:00:00 UTC") {
@@ -3668,12 +3669,12 @@ func TestSimplifiedExpensesShowsLocalSiteDeletionControls(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := rendered.String()
-	for _, expected := range []string{`data-bs-target="#simpleDelete0_0_0"`, `value="restore_site"`, `value="delete_site_now"`, `value="queue_account"`, `value="delete_account_now"`, `name="confirm_domain"`} {
+	for _, expected := range []string{`data-bs-target="#clientDeleteModal"`, `value="restore_site"`, `value="delete_site_now"`, `value="queue_account"`, `value="delete_account_now"`, `name="confirm_domain"`} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("simplified site row is missing %s", expected)
 		}
 	}
-	if strings.Contains(body, `id="simpleDelete1_0_0"`) || strings.Count(body, `data-bs-target="#simpleDelete`) != 1 {
+	if strings.Count(body, `id="clientDeleteModal"`) != 1 || strings.Count(body, `data-bs-target="#clientDeleteModal"`) != 1 {
 		t.Fatal("remote site received a local deletion control")
 	}
 }
@@ -3752,6 +3753,9 @@ func TestApplyHostingAndSupportPanelQuotaChangeUpdatesServerView(t *testing.T) {
 		LimitBytes: 30 * 1024 * 1024 * 1024,
 	})
 
+	if snapshot.Sites[0].QuotaInput != "20gb" {
+		t.Fatalf("earlier snapshot was changed: %#v", snapshot.Sites[0])
+	}
 	if len(updatedSnapshot.Sites) != 1 || updatedSnapshot.Sites[0].QuotaInput != "30gb" || updatedSnapshot.Sites[0].LimitLabel != "30.0 GB" || updatedSnapshot.Sites[0].UsedPercent != 80 {
 		t.Fatalf("updated site quota = %#v", updatedSnapshot.Sites)
 	}
@@ -3764,8 +3768,9 @@ func TestRenderTemplateProcessUsesPreparedTemplate(t *testing.T) {
 	stop := make(chan struct{})
 	requests := startRenderTemplateProcess(stop)
 	t.Cleanup(func() { close(stop) })
+	started := make(chan struct{})
 	reply := make(chan renderTemplateResponse, 1)
-	requests <- renderTemplateRequest{
+	requests.jobs <- renderTemplateRequest{
 		name: "login.html",
 		envelope: map[string]any{
 			"Domain":         "sitebrush.com",
@@ -3773,14 +3778,50 @@ func TestRenderTemplateProcessUsesPreparedTemplate(t *testing.T) {
 			"CompileVersion": CompileVersion,
 			"ShowForm":       true,
 		},
-		reply: reply,
+		started: started,
+		reply:   reply,
 	}
+	<-started
 	response := <-reply
 	if response.err != nil {
 		t.Fatal(response.err)
 	}
 	if !bytes.Contains(response.html, []byte("<html")) {
 		t.Fatalf("rendered template does not contain html: %q", response.html)
+	}
+}
+
+func TestTemplateRenderCancellationSkipsQueuedWork(t *testing.T) {
+	jobs := make(chan renderTemplateRequest, 1)
+	stop := make(chan struct{})
+	defer close(stop)
+	application := &App{renderTemplates: renderTemplateProcess{jobs: jobs, stop: stop}}
+	request := httptest.NewRequest(http.MethodGet, "https://sitebrush.com/?login", nil)
+	boundary, cancel := context.WithCancel(request.Context())
+	defer cancel()
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		application.render(httptest.NewRecorder(), request.WithContext(boundary), "login.html", map[string]any{"Domain": "sitebrush.com"})
+	}()
+	select {
+	case job := <-jobs:
+		if job.session == nil {
+			t.Fatal("template job lost its request session")
+		}
+		cancel()
+		select {
+		case <-job.session:
+		default:
+			t.Fatal("disconnect did not end the template session")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("template job was not queued")
+	}
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("request waited for a worker after its session ended")
 	}
 }
 
@@ -4309,7 +4350,6 @@ func TestAutomaticBillingDistributesServerCostByStorage(t *testing.T) {
 		t.Fatalf("cost shares = %#v, total = %d", shares, totalCostMinor)
 	}
 }
-
 
 func TestAutomaticBillingSkipsOwnInstallationInCentralRegistry(t *testing.T) {
 	ctx := context.Background()
@@ -14837,8 +14877,10 @@ func TestPrivateTestDriveConfirmationEscapesUntrustedFields(t *testing.T) {
 		if renderErr := parsedTemplate.Execute(&directHTML, envelope); renderErr != nil {
 			t.Fatal(renderErr)
 		}
+		started := make(chan struct{})
 		reply := make(chan renderTemplateResponse, 1)
-		requests <- renderTemplateRequest{name: templateName, envelope: envelope, reply: reply}
+		requests.jobs <- renderTemplateRequest{name: templateName, envelope: envelope, started: started, reply: reply}
+		<-started
 		response := <-reply
 		if response.err != nil {
 			t.Fatal(response.err)
@@ -28649,7 +28691,7 @@ func TestServerUpdateRequiresServerOwnerAndNeverMutatesOnGET(t *testing.T) {
 			result := httptest.NewRecorder()
 			application.serverUpdatePage(result, request)
 			if email == "owner@example.com" {
-				if result.Code != http.StatusSeeOther || result.Header().Get("Location") != "/?server-settings#server-update" {
+				if result.Code != http.StatusSeeOther || result.Header().Get("Location") != "/?server-settings&section=updates#server-update" {
 					t.Fatalf("owner redirect=%d %s", result.Code, result.Header().Get("Location"))
 				}
 				embedded := httptest.NewRequest(http.MethodGet, "http://localhost/?server_update&embedded", nil)
@@ -28659,6 +28701,14 @@ func TestServerUpdateRequiresServerOwnerAndNeverMutatesOnGET(t *testing.T) {
 				application.serverUpdatePage(embeddedResult, embedded)
 				if embeddedResult.Code != http.StatusOK || !strings.Contains(embeddedResult.Body.String(), "data-server-update") {
 					t.Fatalf("embedded owner page=%d %s", embeddedResult.Code, embeddedResult.Body.String())
+				}
+				settings := httptest.NewRequest(http.MethodGet, "http://localhost/?server-settings&section=updates", nil)
+				settings.AddCookie(cookie)
+				settings = settings.WithContext(contextWithDomain(settings.Context(), "localhost"))
+				settingsResult := httptest.NewRecorder()
+				application.expensesPage(settingsResult, settings)
+				if settingsResult.Code != http.StatusOK || !strings.Contains(settingsResult.Body.String(), "data-server-update data-csrf=") {
+					t.Fatalf("update workspace did not render for its owner: HTTP %d", settingsResult.Code)
 				}
 			} else if result.Code != http.StatusForbidden {
 				t.Fatalf("site admin status=%d", result.Code)
@@ -38216,7 +38266,7 @@ func TestServerSettingsNativeUpdatesAndSidebarNavigation(t *testing.T) {
 		t.Fatal("server updater must no longer be embedded in an iframe")
 	}
 	for _, required := range []string{
-		"data-server-update-content",
+		`{{template "server-updater" $}}`,
 		"data-server-config-shortcut=\"overview\"",
 		"data-server-config-shortcut=\"network\"",
 	} {
@@ -38225,8 +38275,7 @@ func TestServerSettingsNativeUpdatesAndSidebarNavigation(t *testing.T) {
 		}
 	}
 	for _, required := range []string{
-		"fetch(\"/?server_update&embedded\"",
-		"const shortcutPanel = shortcut ? localPanel() : activePanel",
+		"serverID: localServerID()",
 		"window.location.assign(url.href)",
 		"data-server-navigation-error",
 	} {
