@@ -174,6 +174,8 @@
 .profiler-content pre { margin: 0; padding: 16px; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .profiler-content svg { display: block; width: 100%; min-width: 650px; }
 .profiler-content svg text { fill: var(--theme-foreground); font: 11px var(--theme-font-sans); pointer-events: none; }
+/* Flame graph frames retain light HSL/yellow fills in both themes; their labels need dark ink. */
+.profiler-content svg.profiler-frame-graph text { fill: #1b3545; }
 .profiler-content svg rect { cursor: pointer; stroke: var(--theme-card); stroke-width: 1; }
 .profiler-detail { padding: 12px; background: var(--theme-muted); font-size: 12px; overflow-wrap: anywhere; }
 .profiler-network { display: grid; grid-template-columns: repeat(auto-fit,minmax(170px,1fr)); gap: 14px; padding: 20px; }

@@ -33,6 +33,16 @@ assert.match(profiler, /var\(--theme-font-sans\)/);
 assert.match(profiler, /var\(--theme-card\)/);
 assert.doesNotMatch(profiler, /Arial,Helvetica/,
   'profiler must not introduce a separate font family');
+const profilerJS = read('web/static/server_profiler.js');
+assert.match(profilerJS, /svg\.classList\.add\('profiler-frame-graph'\)/,
+  'flame graph should have a dedicated class for its light rectangles');
+assert.match(profiler, /\.profiler-content svg text \{ fill: var\(--theme-foreground\)/,
+  'other profiler SVGs should still use theme foreground');
+assert.match(profiler, /\.profiler-content svg\.profiler-frame-graph text \{ fill: #1b3545; \}/,
+  'flame graph labels need contrasting dark ink on pastel and yellow fills');
+assert.match(profilerJS, /'#ffcb60':'hsl\('/,
+  'light graph fills must retain their original palette');
+
 // Deletion must remain a real grid child beside AI · SiteBrush, never after </main>.
 const profile = read('web/profile.html');
 const aiConnect = profile.indexOf('class="authentication-card profile-form profile-account-card profile-ai-connect-card"');
