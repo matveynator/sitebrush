@@ -3484,3 +3484,44 @@ body.technical-page.analytics-page {
 .account-captcha { display: grid; gap: .5rem; margin: 1rem 0; max-width: 100%; }
 .account-captcha input { max-width: 20rem; text-transform: uppercase; letter-spacing: .15em; }
 .account-captcha img { max-width: 100%; height: auto; border: 1px solid var(--theme-border, #aaa); border-radius: .3rem; }
+
+/* Unified admin shell: shared by the domain settings and every technical ?controller page. */
+.technical-page .page-header {
+    min-width: 0;
+    padding: 18px 22px;
+    border: 1px solid var(--theme-border);
+    background: var(--theme-card) !important;
+    box-shadow: var(--shadow);
+}
+.technical-page .page-header h1,
+.technical-page h1.section-heading {
+    font-size: clamp(22px, 2.6vw, 30px);
+    font-weight: 650;
+    letter-spacing: -.025em;
+    line-height: 1.2;
+    overflow-wrap: anywhere;
+}
+.technical-page .section-icon {
+    flex: 0 0 auto;
+    border-color: var(--theme-border);
+    background: var(--theme-muted);
+}
+.technical-page :is(.settings-nav, .server-admin-sidebar) {
+    border: 1px solid var(--theme-border);
+    border-radius: var(--theme-radius);
+    background: var(--theme-card);
+    box-shadow: var(--shadow);
+}
+.technical-page :is(.settings-nav a, .server-root-tabs button, .server-config-nav button) {
+    transition: background-color .15s ease, color .15s ease;
+}
+.technical-page :is(.settings-nav a, .server-root-tabs button, .server-config-nav button):focus-visible {
+    outline: 2px solid var(--theme-ring);
+    outline-offset: 2px;
+}
+.technical-page :is(.card, .dns-box, .settings-summary-card, .expense-simple-summary) {
+    border-color: var(--theme-border);
+}
+@media (max-width: 760px) {
+    .technical-page .page-header { padding: 16px; }
+}

@@ -890,3 +890,98 @@ body.server-settings-page[data-server-settings-scope="central"] .server-settings
     grid-column: 1; grid-row: auto; justify-content: start;
   }
 }
+
+/* Match the canonical website settings shell, including the sidebar's active state.
+   These intentional important rules win over the generic legacy button reset. */
+.server-settings-page .billing-page {
+  width: min(1180px, calc(100% - 32px));
+}
+.server-settings-page .server-settings-header {
+  padding: 18px 22px;
+  border: 1px solid var(--theme-border);
+  border-radius: var(--theme-radius);
+  background: var(--theme-card) !important;
+  box-shadow: var(--shadow);
+}
+.server-settings-page .server-admin-shell {
+  grid-template-columns: 224px minmax(0, 1fr);
+  gap: 28px;
+}
+.server-settings-page .server-admin-sidebar {
+  position: sticky;
+  top: 20px;
+  padding: 8px;
+}
+.server-settings-page .server-root-tabs {
+  gap: 4px;
+}
+.server-settings-page .server-root-tabs .server-nav-group {
+  margin: 16px 12px 6px;
+  font-size: 11px;
+  line-height: 1.5;
+  font-weight: 700;
+  letter-spacing: .025em;
+  color: var(--theme-muted-foreground);
+}
+body.technical-page.server-settings-page .server-root-tabs button,
+body.technical-page.server-settings-page .server-config-nav button {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  min-height: 44px !important;
+  padding: 9px 13px !important;
+  border: 0 !important;
+  border-radius: calc(var(--theme-radius) - 2px) !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: var(--theme-foreground) !important;
+  font-size: 14px !important;
+  font-weight: 500 !important;
+  line-height: 1.3 !important;
+  text-align: start;
+}
+body.technical-page.server-settings-page .server-root-tabs button:hover:not(:disabled),
+body.technical-page.server-settings-page .server-config-nav button:hover:not(:disabled) {
+  background: var(--theme-muted) !important;
+  color: var(--theme-foreground) !important;
+}
+body.technical-page.server-settings-page .server-root-tabs button.is-active,
+body.technical-page.server-settings-page .server-root-tabs button[aria-current="page"],
+body.technical-page.server-settings-page .server-config-nav button.is-active {
+  background: var(--theme-accent) !important;
+  color: var(--theme-accent-foreground) !important;
+  box-shadow: none !important;
+  font-weight: 700 !important;
+}
+body.technical-page.server-settings-page .server-root-tabs button:focus-visible,
+body.technical-page.server-settings-page .server-config-nav button:focus-visible {
+  outline: 2px solid var(--theme-ring) !important;
+  outline-offset: 2px !important;
+}
+body.technical-page.server-settings-page :is(.server-installation-kinds, .server-client-tabs, .server-client-filter-chips) button.is-active,
+body.technical-page.server-settings-page .server-installation-kinds button.active {
+  background: var(--theme-accent) !important;
+  color: var(--theme-accent-foreground) !important;
+  border-color: var(--theme-border) !important;
+  box-shadow: none !important;
+}
+.server-settings-page .server-overview-blocks > .expense-simple-summary {
+  border-radius: var(--theme-radius);
+  border: 1px solid var(--theme-border);
+  background: var(--theme-card);
+}
+@media (max-width: 900px) {
+  .server-settings-page .server-admin-shell {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 18px;
+  }
+  .server-settings-page .server-admin-sidebar {
+    position: static;
+    min-width: 0;
+  }
+}
+@media (max-width: 600px) {
+  .server-settings-page .billing-page { width: calc(100% - 24px); }
+  .server-settings-page .server-settings-header { padding: 16px; }
+  .server-settings-page .server-root-tabs { grid-template-columns: minmax(0, 1fr); }
+}
