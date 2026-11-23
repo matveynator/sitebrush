@@ -1,4 +1,4 @@
-/* Each workspace filters immutable server snapshots; forms retain server authorization. */
+/* Each workspace filters its server snapshot and submits changes through the existing forms. */
 (function initializeServerSettingsNavigation() {
   "use strict";
   const serverPanels = Array.from(document.querySelectorAll("[data-expense-server-panel]"));
@@ -12,10 +12,12 @@
     let selected = 'system';
     try { selected = localStorage.getItem(key) || 'system'; } catch (storageError) { /* Private browsing. */ }
     if (!['light', 'dark', 'system'].includes(selected)) selected = 'system';
-    themeChoice.value = selected;
     const media = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
-    const applyTheme = () => document.documentElement.setAttribute('data-bs-theme',
-      selected === 'system' ? (media && media.matches ? 'dark' : 'light') : selected);
+    const applyTheme = () => {
+      const theme = selected === 'system' ? (media && media.matches ? 'dark' : 'light') : selected;
+      themeChoice.value = theme;
+      document.documentElement.setAttribute('data-bs-theme', theme);
+    };
     themeChoice.addEventListener('change', () => {
       selected = themeChoice.value;
       if (!['light', 'dark', 'system'].includes(selected)) selected = 'system';
@@ -28,9 +30,9 @@
   const installationsWorkspace = document.querySelector("[data-server-installations-container]");
   const centralClients = document.querySelector("[data-central-clients-container]");
   const centralBilling = document.querySelector("[data-central-billing-container]");
+  const centralNavigation = document.querySelector("[data-central-settings-nav]");
   const rootWorkspaces = {
     servers: document.querySelector('[data-hosting-installation-panel="servers"]'),
-    "temporary-sites": document.querySelector('[data-hosting-installation-panel="temporary-sites"]'),
     installations: installationsWorkspace, clients: centralClients, billing: centralBilling
   };
   const ledgers = [];
@@ -51,6 +53,14 @@
   function localServerID() {
     return rootTabs?.dataset?.localServerId || localPanel().dataset.serverId;
   }
+  function serverSection(section) {
+    switch (section) {
+      case "updates": return "network";
+      case "demo": return "registration";
+      case "monetization": return "billing";
+      default: return section || "overview";
+    }
+  }
   function readNavigation(routeURL = window.location) {
     const fragment = routeURL.hash.slice(1);
     const parameters = new URLSearchParams(fragment);
@@ -68,10 +78,16 @@
       if (pageQuery.has("installation")) parameters.set("server-id", pageQuery.get("installation"));
       if (pageQuery.has("section")) parameters.set("section", pageQuery.get("section"));
     }
+    // The old temporary-sites workspace now belongs to local registration.
+    if (parameters.get("workspace") === "temporary-sites") {
+      parameters.set("workspace", "servers");
+      parameters.set("server-id", localServerID());
+      parameters.set("section", "registration");
+    }
     return {
       workspace: parameters.get("workspace") || "servers",
       serverID: parameters.get("server-id") || "",
-      section: parameters.get("section") || "overview",
+      section: serverSection(parameters.get("section")),
       status: parameters.get("status") || "all",
       customer: parameters.get("customer") || "",
       query: parameters.get("query") || "",
@@ -103,32 +119,37 @@
   }
   function showRoot(section, selectedServerSection, targetPanel) {
     const selected = rootWorkspaces[section] ? section : "servers";
+    const central = selected !== "servers";
     for (const [workspaceName, workspaceElement] of Object.entries(rootWorkspaces)) {
       if (workspaceElement) workspaceElement.hidden = workspaceName !== selected;
     }
     if (contextLabel) {
-      if (["installations", "clients", "billing"].includes(selected)) {
-        const tab = Array.from(rootTabs?.querySelectorAll("[data-server-root-target]") || [])
-          .find(button => button.dataset.serverRootTarget === selected);
+      if (central) {
+        const tab = centralNavigation?.querySelector('[data-server-root-target="' + selected + '"]');
         contextLabel.textContent = contextLabel.dataset.serverContextCentral + ' · ' + (tab?.textContent?.trim() || selected);
       } else {
         const serverName = targetPanel?.dataset.serverName || '';
-        const title = contextLabel.dataset.serverContextLocal || '';
-        const nodeLabel = contextLabel.dataset.serverContextNodeLabel || title;
-        contextLabel.textContent = targetPanel?.dataset.serverLocal === "true"
-          ? title : (serverName ? serverName + ' · ' + nodeLabel : nodeLabel);
+        contextLabel.textContent = serverName && targetPanel?.dataset.serverLocal !== "true"
+          ? serverName + ' · ' + contextLabel.dataset.serverContextNodeLabel : '';
       }
+      contextLabel.hidden = contextLabel.textContent === "";
     }
-    document.body.dataset.serverSettingsScope = ["installations", "clients", "billing"].includes(selected) ? "central" : "node";
+    document.body.dataset.serverSettingsScope = central ? "central" : "node";
     for (const button of rootTabs?.querySelectorAll("[data-server-root-target]") || []) {
-      const shortcut = button.dataset.serverConfigShortcut;
-      // A section may be intentionally absent until selected. Authorization
-      // and local/remote availability were already decided by the server.
-      const active = button.dataset.serverRootTarget === selected &&
-        (selected !== "servers" || shortcut === selectedServerSection);
+      const active = central ? button.dataset.serverRootTarget === "installations" :
+        button.dataset.serverConfigShortcut === selectedServerSection;
       button.classList.toggle("is-active", active);
       if (active) button.setAttribute("aria-current", "page");
       else button.removeAttribute("aria-current");
+    }
+    if (centralNavigation) {
+      centralNavigation.hidden = !central;
+      for (const button of centralNavigation.querySelectorAll("[data-server-root-target]")) {
+        const active = button.dataset.serverRootTarget === selected;
+        button.classList.toggle("active", active);
+        if (active) button.setAttribute("aria-current", "page");
+        else button.removeAttribute("aria-current");
+      }
     }
   }
   function choose(panel, wanted) {
@@ -140,11 +161,6 @@
     const section = wanted || "overview";
     const loaded = views.some(view => view.dataset.serverConfigView === section);
     for (const view of views) view.hidden = !loaded || view.dataset.serverConfigView !== section;
-    for (const button of layout.querySelectorAll("[data-server-config-target]")) {
-      const active = button.dataset.serverConfigTarget === section;
-      button.setAttribute("aria-current", active ? "page" : "false");
-      button.classList.toggle("is-active", active);
-    }
     layout.dataset.serverConfigSelected = section;
     return loaded;
   }
@@ -245,7 +261,7 @@
     const requestedSection = navigation.section;
     // Lazy views must be resolvable by direct URL as well as by sidebar click.
     // Unknown sections fail visibly without a reload loop.
-    const validServerSections = ["overview", "network", "updates", "registration", "demo", "clients", "billing", "monetization"];
+    const validServerSections = ["overview", "network", "registration", "clients", "billing"];
     const knownServerSection = validServerSections.includes(requestedSection);
     const serverSectionLoaded = Array.from(target.querySelectorAll("[data-server-config-view]"))
       .some(view => view.dataset.serverConfigView === requestedSection);
@@ -259,7 +275,7 @@
       const requestedServerID = navigation.serverID || target.dataset.serverId;
       const routeAlreadyRequested = serverRoute
         ? !url.searchParams.has("workspace") &&
-          (url.searchParams.get("section") || "overview") === requestedSection &&
+          serverSection(url.searchParams.get("section")) === requestedSection &&
           (url.searchParams.get("installation") || localServerID()) === requestedServerID
         : url.searchParams.get("workspace") === navigation.workspace;
       if (!invalidServerSection && !routeAlreadyRequested) {
@@ -315,8 +331,10 @@
       ? !ledger.panel
       : navigation.workspace === "servers" && activeSection === "billing" && ledger.panel === target);
     if (activeLedger) {
+      const openedCustomer = navigation.customer && activeLedger.model.customer !== navigation.customer;
       activeLedger.model = {query: navigation.query, customer: navigation.customer, status: navigation.status, installation: navigation.installation, page: navigation.page};
       renderLedger(activeLedger);
+      if (openedCustomer) activeLedger.element.scrollIntoView({block: "start"});
     }
   }
   document.addEventListener("click", event => {
@@ -359,8 +377,11 @@
     panel.addEventListener("submit", event => {
       const form = event.target;
       if (!(form instanceof HTMLFormElement) || form.method.toLowerCase() !== "post") return;
-      const parameters = new URLSearchParams({"server-id": panel.dataset.serverId, section: layout.dataset.serverConfigSelected || "overview"});
-      form.action = form.action.split("#", 1)[0] + "#" + parameters.toString();
+      const section = layout.dataset.serverConfigSelected || "overview";
+      const actionURL = new URL(form.action, window.location.href);
+      actionURL.searchParams.set("section", section);
+      actionURL.searchParams.set("installation", panel.dataset.serverId);
+      form.action = actionURL.href;
     });
   }
   if (selector) selector.addEventListener("change", () => {

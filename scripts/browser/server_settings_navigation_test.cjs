@@ -6,13 +6,13 @@ const path = require('node:path');
 
 const source = fs.readFileSync(path.join(__dirname, '../../web/static/server_settings.js'), 'utf8');
 
-function navigationFixture({ hash = '', query = '?server-settings', includeNetwork = true, servedID = 'local' } = {}) {
+function navigationFixture({ hash = '', query = '?server-settings', includeNetwork = true, servedID = 'local', additionalViews = [] } = {}) {
   const location = new URL('https://example.test/' + query + hash);
   const events = {};
   const notices = [];
   let assignedURL = '';
 
-  const views = ['overview', ...(includeNetwork ? ['network'] : [])].map(name => ({
+  const views = ['overview', ...(includeNetwork ? ['network'] : []), ...additionalViews].map(name => ({
     dataset: { serverConfigView: name }, hidden: false
   }));
   const buttons = ['overview', 'network'].map(section => ({
@@ -137,4 +137,18 @@ assert.equal(missingRemote.assignedURL, '');
 assert.equal(missingRemote.panel.hidden, true, 'do not show the local panel for a missing remote server');
 assert.equal(missingRemote.notices.length, 1);
 
-console.log('Server-settings navigation: 7 scenarios passed');
+const legacyRoutes = [
+  {query: '?server-settings&section=updates', section: 'network'},
+  {query: '?server-settings&section=demo', section: 'registration'},
+  {hash: '#temporary-sites', section: 'registration'},
+  {query: '?server-settings&workspace=temporary-sites', section: 'registration'},
+  {hash: '#server-monetization', section: 'billing'}
+];
+for (const {query, hash, section} of legacyRoutes) {
+  const page = navigationFixture({query, hash, includeNetwork: false, additionalViews: [section]});
+  assert.equal(page.assignedURL, '', 'rendered combined sections must not trigger a second request');
+  assert.equal(page.views[0].hidden, true);
+  assert.equal(page.views[1].hidden, false);
+}
+
+console.log('Server-settings navigation: lazy and legacy routes passed');

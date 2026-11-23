@@ -13,7 +13,9 @@ for (const action of ['update_site_quota', 'delete_site_now', 'billing_customer_
 }
 assert.match(template, /data-client-account-form/);
 assert.match(template, /data-client-site-row/);
-assert.match(template, /data-server-clients-sort/);
+assert.doesNotMatch(template, /data-server-clients-sort|data-client-tab|data-client-errors-only/);
+assert.match(template, /data-client-schedule-toggle/);
+assert.match(template, /data-client-ssl-retry/);
 assert.match(template, /data-client-filter-count="attention"/);
 assert.match(template, /data-server-context-node-label/);
 assert.match(template, /server_clients\.js/);
@@ -23,7 +25,6 @@ class Element {
     this.dataset = dataset;
     this.hidden = false;
     this.open = false;
-    this.style = {};
     this.value = '';
     this.textContent = '';
     this.one = {};
@@ -44,62 +45,46 @@ class Element {
   querySelectorAll(selector) { return this.all[selector] || []; }
   setAttribute(name, value) { this[name] = value; }
   addEventListener(name, callback) { this.events[name] = callback; }
-  appendChild(element) { this.items?.push(element); }
 }
-function createSite(domain, usedBytes, invalidSSL = false) {
-  const site = new Element({
-    clientSiteDomain: domain, clientSiteUsed: String(usedBytes),
-    clientSiteLimit: '10 GB', clientSiteProblem: 'false'
-  });
-  const progress = new Element();
-  progress.one.span = {style: {}};
-  progress.querySelector = selector => selector === 'span' ? progress.one.span : null;
-  site.one['[data-client-site-progress]'] = progress;
-  if (invalidSSL) site.one['[data-client-ssl-invalid]'] = new Element();
-  site.all['[data-client-certificate]'] = [];
+function createSite(domain, invalidSSL = false) {
+  const site = new Element({clientSiteDomain: domain});
+  if (invalidSSL) {
+    const certificate = new Element({clientCertificate: domain});
+    site.all['[data-client-ssl-invalid]'] = [{closest: () => certificate}];
+  }
   return site;
 }
-function createClient(email, sites, debtInCents, isOverdue) {
+function createClient(email, sites, {overdue = false, overLimit = false} = {}) {
   const row = new Element({
-    customerEmail: email, clientSearch: email + ' ' + sites.map(s => s.dataset.clientSiteDomain).join(' '),
-    clientSiteCount: String(sites.length),
-    clientUsedBytes: String(sites.reduce((totalBytes, site) => totalBytes + Number(site.dataset.clientSiteUsed), 0)),
-    clientAttention: String(isOverdue), clientOverdue: String(isOverdue),
-    clientOverLimit: 'false'
+    customerEmail: email, clientOverdue: String(overdue), clientOverLimit: String(overLimit)
   });
-  row.one['[data-client-debt-model]'] = {textContent: JSON.stringify(debtInCents ? {EUR: debtInCents} : {})};
   row.all['[data-client-site-row]'] = sites;
-  row.all['[data-client-pane]'] = ['sites','billing','account'].map(clientPane => new Element({clientPane}));
-  row.all['[data-client-tab]'] = ['sites','billing','account'].map(clientTab => new Element({clientTab}));
-  const footer = new Element();
-  footer.one['[data-client-site-count]'] = new Element();
-  footer.one['[data-client-show-all]'] = new Element();
-  row.one['[data-client-site-footer]'] = footer;
+  if (sites.length > 10) row.one['[data-client-show-all]'] = new Element();
   row.one['[data-client-no-sites]'] = new Element();
-  row.one['[data-client-quota-summary]'] = new Element();
-  row.one['[data-client-ssl-problems]'] = new Element();
-  row.one['[data-client-error-count]'] = new Element();
-  row.one['[data-client-domain-search]'] = new Element();
+  row.one['[data-client-site-total]'] = new Element();
+  row.one['[data-client-schedule]'] = new Element();
+  row.one['[data-client-schedule]'].hidden = true;
   return row;
 }
 
 const sites = Array.from({length: 32}, (_, index) =>
-  createSite(index === 12 ? 'aika.sitebrush.com' : 'sample' + index + '.sitebrush.com',
-    index === 2 ? 12000000000 : 1000000, index === 3));
-const alice = createClient('alice@example.com', sites, 9403, true);
-const bob = createClient('bob@example.com', [createSite('bob.example.com', 1000000)], 0, false);
+  createSite(index === 12 ? 'aika.sitebrush.com' : 'sample' + index + '.sitebrush.com'));
+const alice = createClient('alice@example.com', sites, {overdue: true});
+const bob = createClient('bob@example.com', [createSite('bob.example.com')]);
+const carol = createClient('carol@example.com', [createSite('carol.example.com')], {overLimit: true});
+const sslSite = createSite('dan.example.com', true);
+const dan = createClient('dan@example.com', [sslSite]);
 const search = new Element();
-const sort = new Element();
-sort.value = 'debt';
-const badgeNames = ['all','attention','overdue','over-limit'];
-const badges = badgeNames.map(clientFilterCount => new Element({clientFilterCount}));
-const chip = new Element({serverClientFilter: 'all'});
-chip.classList.add('is-active');
-const list = new Element();
-list.items = [];
+search.matches = () => false;
+const allCount = new Element();
+const problemCount = new Element();
+const allButton = new Element({serverClientFilter: 'all'});
+const problemButton = new Element({serverClientFilter: 'attention'});
 const workspace = new Element();
-workspace.all['[data-server-client-row]'] = [alice,bob];
-workspace.all['[data-client-filter-count]'] = badges;
+workspace.all['[data-server-client-row]'] = [alice, bob, carol, dan];
+workspace.all['[data-server-client-filter]'] = [allButton, problemButton];
+workspace.one['[data-client-filter-count="all"]'] = allCount;
+workspace.one['[data-client-filter-count="attention"]'] = problemCount;
 const accountForm = new Element();
 const accountSelect = new Element();
 accountSelect.selectedOptions = [{dataset:{}}];
@@ -118,9 +103,6 @@ accountForm.one['[data-client-account-protected]'] = accountNotice;
 accountForm.one['[data-client-account-actions]'] = accountActions;
 workspace.all['[data-client-account-form]'] = [accountForm];
 workspace.one['[data-server-clients-search]'] = search;
-workspace.one['[data-server-client-filter].is-active'] = chip;
-workspace.one['[data-server-clients-sort]'] = sort;
-workspace.one['[data-server-clients-list], .expense-simple-clients'] = list;
 workspace.one['[data-clients-no-results]'] = new Element();
 const quotaDialog = new Element();
 for (const name of ['domain','title','value']) quotaDialog.one['[data-client-quota-'+name+']'] = new Element();
@@ -147,41 +129,51 @@ new Function('document','window','URLSearchParams','HTMLFormElement',script)(
 );
 const visibleSites = () => sites.filter(site => !site.hidden).length;
 assert.equal(visibleSites(),10,'32 sites should show just 10 initially');
-assert.equal(alice.one['[data-client-site-footer]'].one['[data-client-site-count]'].textContent,'10 / 32');
-assert.equal(alice.one['[data-client-error-count]'].textContent,'2','quota overage and SSL failure must be counted');
-assert.match(alice.one['[data-client-quota-summary]'].textContent,/ \/ /);
-assert.equal(badges.find(b=>b.dataset.clientFilterCount==='all').textContent,'2');
-assert.equal(badges.find(b=>b.dataset.clientFilterCount==='overdue').textContent,'1');
-assert.equal(list.items[0],alice,'debt sort should put the overdue client first');
-sort.value = 'storage';
-list.items.length = 0;
-workspace.events.change({target: {matches: selector => selector === '[data-server-clients-sort]', value: sort.value}});
-assert.equal(list.items[0],alice,'storage sort must use the numeric byte count');
+assert.equal(alice.one['[data-client-site-total]'].textContent, '32 сайта');
+assert.equal(allCount.textContent, '4');
+assert.equal(problemCount.textContent, '3', 'overdue, quota and SSL must each flag a client');
 
 search.value = 'aika';
-workspace.events.input({target:{matches:selector=>selector==='[data-server-clients-search]'}});
-assert.equal(visibleSites(),1,'global search should isolate a matching domain inside a large client');
-assert.equal(alice.open,true,'domain search should expand its client');
-assert.equal(bob.hidden,true);
+workspace.events.input({target: search});
+assert.equal(visibleSites(), 1, 'global search should isolate a matching domain inside a large client');
+assert.equal(alice.open, true, 'domain search should expand its client');
+assert.equal(bob.hidden, true);
+
+search.value = 'alice@example.com';
+workspace.events.input({target: search});
+assert.equal(visibleSites(), 10, 'email search should keep the client site list');
+assert.equal(bob.hidden, true);
+
+const moreButton = alice.one['[data-client-show-all]'];
+assert.equal(moreButton.textContent, 'Показать все 32 сайта ▾');
+workspace.events.click({target: {closest: selector => {
+  if (selector === '[data-client-show-all]') return moreButton;
+  return selector === '[data-server-client-row]' ? alice : null;
+}}});
+assert.equal(visibleSites(), 32, 'Show all must expand the complete list');
+workspace.events.input({target: {
+  matches: selector => selector === '[data-client-domain-search]',
+  closest: () => alice, value: 'sample31'
+}});
+assert.equal(visibleSites(), 1, 'local domain search includes sites outside the first ten');
 
 search.value = '';
-workspace.events.input({target:{matches:selector=>selector==='[data-server-clients-search]'}});
-assert.equal(visibleSites(),10);
-const more = {closest: selector => selector==='[data-client-show-all]' ? {
-  closest: () => alice
-} : null};
-workspace.events.click({target:more});
-assert.equal(visibleSites(),32,'Show all must expand the complete list');
-
-const errors = new Element();
-errors.checked = true;
-alice.one['[data-client-errors-only]'] = errors;
-workspace.events.change({target:{
-  checked: true,
-  matches: selector => selector==='[data-client-errors-only]',
-  closest: () => alice
+workspace.events.input({target: search});
+workspace.events.click({target: {closest: selector =>
+  selector === '[data-server-client-filter]' ? problemButton : null
 }});
-assert.equal(visibleSites(),2,'only problems must show over-quota and invalid-SSL sites');
+assert.equal(bob.hidden, true);
+assert.ok([alice, carol, dan].every(row => !row.hidden));
+workspace.events['site-certificate-renewed']({target: Object.assign(sslSite, {closest: () => dan}),
+  detail: 'dan.example.com'});
+assert.equal(dan.hidden, true, 'renewed SSL must clear the only problem');
+assert.equal(problemCount.textContent, '2');
+
+const scheduleButton = new Element();
+scheduleButton.closest = () => alice;
+workspace.events.click({target: {closest: selector => selector === '[data-client-schedule-toggle]' ? scheduleButton : null}});
+assert.equal(alice.one['[data-client-schedule]'].hidden, false);
+assert.equal(scheduleButton['aria-expanded'], 'true');
 
 accountSelect.selectedOptions = [{dataset:{
   domain:'aika.sitebrush.com',email:'alice@example.com',protected:'false',pending:'false'

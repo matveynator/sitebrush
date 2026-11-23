@@ -15,194 +15,91 @@
 
   // All client interactions are delegated to the workspace. There are no
   // event listeners or modal instances per website, even for large customers.
-  function clientRows(workspace) {
-    return Array.from(workspace.querySelectorAll("[data-server-client-row]"));
-  }
   const clientModels = new WeakMap();
+  const russian = document.documentElement.lang.toLowerCase().startsWith("ru");
+  const siteCountRules = new Intl.PluralRules(document.documentElement.lang || "en");
 
-  function compareDebt(left, right) {
-    for (let index = 0; index < Math.min(left.length, right.length); index++) {
-      const currencyOrder = left[index][0].localeCompare(right[index][0]);
-      if (currencyOrder) return currencyOrder;
-      const amountOrder = right[index][1] - left[index][1];
-      if (amountOrder) return amountOrder;
-    }
-    return right.length - left.length;
+  function siteCountText(count) {
+    const plural = siteCountRules.select(count);
+    const siteWord = russian ? ({one: "сайт", few: "сайта"}[plural] || "сайтов") :
+      (plural === "one" ? "site" : "sites");
+    return count + " " + siteWord;
   }
-  function bytesFromLabel(label) {
-    const match = String(label || "").match(/(\d+(?:[.,]\d+)?)\s*(TiB|GiB|MiB|KiB|TB|GB|MB|KB|B)\b/i);
-    if (!match) return 0;
-    const power = {b:0,kb:1,mb:2,gb:3,tb:4,kib:1,mib:2,gib:3,tib:4};
-    const unit = match[2].toLowerCase();
-    const factor = unit.endsWith("ib") ? 1024 : 1000;
-    return Number(match[1].replace(",", ".")) * Math.pow(factor, power[unit]);
-  }
-  function formatStorage(bytes) {
-    if (!Number.isFinite(bytes) || bytes < 0) return "—";
-    let scaledBytes = bytes;
-    let unit = "B";
-    for (const next of ["KB", "MB", "GB", "TB"]) {
-      if (scaledBytes < 1000) break;
-      scaledBytes /= 1000;
-      unit = next;
-    }
-    return new Intl.NumberFormat(document.documentElement.lang || "en", {maximumFractionDigits: 1}).format(scaledBytes) + " " + unit;
-  }
-  function activateClientTab(row, selected) {
-    for (const pane of row.querySelectorAll("[data-client-pane]")) {
-      pane.hidden = pane.dataset.clientPane !== selected;
-    }
-    for (const tab of row.querySelectorAll("[data-client-tab]")) {
-      const active = tab.dataset.clientTab === selected;
-      tab.classList.toggle("is-active", active);
-      tab.setAttribute("aria-pressed", String(active));
-    }
-  }
-  function certificateNeedsRenewal(certificate) {
-    if (certificate.dataset.clientCertificateValid !== "true") return false;
-    const expireText = certificate.dataset.clientCertificateExpires || "";
-    let expiry = Date.parse(expireText);
-    // Localized DD.MM.YYYY dates must not depend on browser Date.parse.
-    const european = expireText.match(/\b(\d{1,2})\.(\d{1,2})\.(\d{4})\b/);
-    if (european) expiry = Date.UTC(Number(european[3]), Number(european[2])-1, Number(european[1]));
-    if (Number.isFinite(expiry)) return expiry - Date.now() <= 14 * 86400000;
-    const remaining = certificate.dataset.clientCertificateRemaining || "";
-    const days = remaining.match(/(\d+)\s*(?:дн|day|d\b)/i);
-    return Boolean(days && Number(days[1]) <= 14);
-  }
-  function initializeClientRow(row) {
-    const sites = Array.from(row.querySelectorAll("[data-client-site-row]"));
+
+  function initializeClient(row) {
+    const sites = Array.from(row.querySelectorAll("[data-client-site-row]"), element => ({
+      element,
+      domain: element.dataset.clientSiteDomain.toLocaleLowerCase(),
+      snapshotSSLError: element.dataset.clientSiteSslError === "true",
+      invalidCertificates: new Set(Array.from(element.querySelectorAll("[data-client-ssl-invalid]"),
+        label => label.closest("[data-client-certificate]").dataset.clientCertificate))
+    }));
     const client = {
-      siteSearch: "", errorsOnly: false, showAll: false, problems: new Set(), sites, debt: []
+      email: row.dataset.customerEmail.toLocaleLowerCase(),
+      overdue: row.dataset.clientOverdue === "true",
+      overLimit: row.dataset.clientOverLimit === "true",
+      sites,
+      query: "",
+      showAll: false,
+      scheduleOpen: false,
+      moreButton: row.querySelector("[data-client-show-all]"),
+      emptyMessage: row.querySelector("[data-client-no-sites]")
     };
-    const debtSource = row.querySelector("[data-client-debt-model]");
-    if (debtSource) {
-      try {
-        client.debt = Object.entries(JSON.parse(debtSource.textContent) || {}).sort(([leftCurrency], [rightCurrency]) =>
-          leftCurrency.localeCompare(rightCurrency));
-      } catch (parseError) {
-        console.error("Unable to read client balances", parseError);
-      }
-    }
+    const siteCount = row.querySelector("[data-client-site-total]");
+    if (siteCount && russian) siteCount.textContent = siteCountText(sites.length);
     clientModels.set(row, client);
-    let totalUsed = 0, totalQuota = 0, knownQuotas = 0;
-    for (const site of sites) {
-      const used = Number(site.dataset.clientSiteUsed) || 0;
-      const quota = bytesFromLabel(site.dataset.clientSiteLimit);
-      totalUsed += used;
-      if (quota > 0) { totalQuota += quota; knownQuotas++; }
-      const progress = site.querySelector("[data-client-site-progress]");
-      if (progress && quota > 0) {
-        const percent = Math.max(0, Math.min(100, Math.round(used / quota * 100)));
-        progress.setAttribute("aria-valuenow", String(percent));
-        progress.querySelector("span").style.width = percent + "%";
-        if (used > quota) {
-          progress.classList.add("is-over");
-          client.problems.add(site);
-        }
-      }
-      const invalid = site.querySelector("[data-client-ssl-invalid]");
-      if (invalid) client.problems.add(site);
-      if (site.dataset.clientSiteProblem === "true") client.problems.add(site);
-      // Valid certificates remain in the rare-actions menu unless due in
-      // fourteen days. Move the existing button, never clone its listener.
-      for (const certificate of site.querySelectorAll("[data-client-certificate]")) {
-        if (!certificateNeedsRenewal(certificate)) continue;
-        const renewal = Array.from(site.querySelectorAll("[data-client-valid-ssl-action]"))
-          .find(button => button.dataset.certificateRenew === certificate.dataset.clientCertificateDomain);
-        const inline = certificate.querySelector("[data-client-ssl-inline]");
-        if (renewal && inline) {
-          renewal.classList.remove("dropdown-item");
-          renewal.classList.add("btn", "btn-outline-primary", "btn-sm");
-          inline.appendChild(renewal);
-        }
-      }
-    }
-    row.dataset.clientUsedBytes = String(totalUsed);
-    if (knownQuotas === sites.length && sites.length) {
-      const summary = row.querySelector("[data-client-quota-summary]");
-      if (summary) summary.textContent = formatStorage(totalUsed) + " / " + formatStorage(totalQuota);
-    }
-    const sslCount = sites.filter(site => Boolean(site.querySelector("[data-client-ssl-invalid]"))).length;
-    const sslBadge = row.querySelector("[data-client-ssl-problems]");
-    if (sslBadge) {
-      sslBadge.hidden = sslCount === 0;
-      sslBadge.textContent = document.documentElement.lang.toLowerCase().startsWith("ru") ? "Ошибка SSL: " + sslCount : "SSL errors: " + sslCount;
-    }
-    const errorCount = row.querySelector("[data-client-error-count]");
-    if (errorCount) errorCount.textContent = String(client.problems.size);
   }
-  function updateClientSites(row, globalSearch) {
-    const client = clientModels.get(row);
-    const customerEmail = (row.dataset.customerEmail || "").toLocaleLowerCase();
-    const search = client.siteSearch || (globalSearch && !customerEmail.includes(globalSearch) ? globalSearch : "");
-    const footer = row.querySelector("[data-client-site-footer]");
-    let matching = 0, visible = 0;
+
+  function clientHasProblems(client) {
+    return client.overdue || client.overLimit || client.sites.some(site =>
+      site.snapshotSSLError || site.invalidCertificates.size > 0);
+  }
+
+  function renderClientSites(client, clientSearch) {
+    const domainSearch = client.email.includes(clientSearch) ? "" : clientSearch;
+    let matching = 0;
     for (const site of client.sites) {
-      const matches = (!search || site.dataset.clientSiteDomain.toLocaleLowerCase().includes(search)) &&
-        (!client.errorsOnly || client.problems.has(site));
+      const matches = site.domain.includes(domainSearch) && site.domain.includes(client.query);
       if (matches) matching++;
-      const show = matches && (!footer || client.showAll || visible < 10);
-      site.hidden = !show;
-      if (show) visible++;
+      site.element.hidden = !matches || Boolean(client.moreButton && !client.showAll && matching > 10);
     }
-    if (footer) {
-      footer.hidden = matching <= 10;
-      const counter = footer.querySelector("[data-client-site-count]");
-      if (counter) counter.textContent = visible + " / " + matching;
-      const more = footer.querySelector("[data-client-show-all]");
-      if (more) {
-        more.hidden = client.showAll;
-        more.textContent = document.documentElement.lang.toLowerCase().startsWith("ru")
-          ? "Показать все " + matching + " сайтов" : "Show all " + matching + " sites";
-      }
+    if (client.moreButton) {
+      client.moreButton.hidden = matching <= 10;
+      client.moreButton.setAttribute("aria-expanded", String(client.showAll));
+      client.moreButton.textContent = client.showAll
+        ? (russian ? "Свернуть ▴" : "Show fewer ▴")
+        : (russian ? "Показать все " : "Show all ") + siteCountText(matching) + " ▾";
     }
-    const empty = row.querySelector("[data-client-no-sites]");
-    if (empty) empty.hidden = matching !== 0;
+    if (client.emptyMessage) client.emptyMessage.hidden = matching !== 0;
   }
-  function filterClients(workspace, model) {
-    const {query, selected, sorter, rows} = model;
-    const statusFields = {overdue:"clientOverdue", "over-limit":"clientOverLimit", attention:"clientAttention"};
-    const counts = {all: rows.length, attention:0, overdue:0, "over-limit":0};
-    for (const row of rows) {
-      for (const [name, field] of Object.entries(statusFields)) {
-        if (row.dataset[field] === "true" || (name === "attention" && clientModels.get(row).problems.size > 0)) counts[name]++;
-      }
-    }
-    for (const badge of workspace.querySelectorAll("[data-client-filter-count]")) {
-      badge.textContent = String(counts[badge.dataset.clientFilterCount] || 0);
-    }
-    rows.sort((left, right) => {
-      if (sorter === "storage") return Number(right.dataset.clientUsedBytes || 0) - Number(left.dataset.clientUsedBytes || 0) ||
-        left.dataset.clientSearch.localeCompare(right.dataset.clientSearch);
-      if (sorter === "sites") return Number(right.dataset.clientSiteCount || 0) - Number(left.dataset.clientSiteCount || 0) ||
-        left.dataset.clientSearch.localeCompare(right.dataset.clientSearch);
-      if (sorter === "email") return (left.dataset.customerEmail || left.dataset.clientSearch).localeCompare(right.dataset.customerEmail || right.dataset.clientSearch);
-      return compareDebt(clientModels.get(left).debt, clientModels.get(right).debt) ||
-        (left.dataset.customerEmail || left.dataset.clientSearch).localeCompare(right.dataset.customerEmail || right.dataset.clientSearch);
-    });
-    const list = workspace.querySelector("[data-server-clients-list], .expense-simple-clients");
-    if (list) for (const row of rows) list.appendChild(row);
+
+  function renderClientList(workspace, model) {
+    let problemCount = 0;
     let visibleCount = 0;
-    for (const row of rows) {
-      const matchesStatus = selected === "all" || row.dataset[statusFields[selected]] === "true" ||
-        (selected === "attention" && clientModels.get(row).problems.size > 0);
-      const matchingSite = clientModels.get(row).sites.some(site => site.dataset.clientSiteDomain.toLocaleLowerCase().includes(query));
-      const matchesSearch = !query || (row.dataset.customerEmail || "").toLocaleLowerCase().includes(query) ||
-        matchingSite || (row.dataset.clientSearch || "").toLocaleLowerCase().includes(query);
-      row.hidden = !matchesStatus || !matchesSearch;
-      if (!row.hidden) {
+    for (const row of model.rows) {
+      const client = clientModels.get(row);
+      const hasProblems = clientHasProblems(client);
+      if (hasProblems) problemCount++;
+      const emailMatches = client.email.includes(model.query);
+      const domainMatches = client.sites.some(site => site.domain.includes(model.query));
+      const visible = (emailMatches || domainMatches) && (!model.problemsOnly || hasProblems);
+      row.hidden = !visible;
+      if (visible) {
         visibleCount++;
-        updateClientSites(row, query);
-        if (query && matchingSite && !(row.dataset.customerEmail || "").toLocaleLowerCase().includes(query)) {
-          row.open = true;
-          activateClientTab(row, "sites");
-        }
+        if (domainMatches && !emailMatches) row.open = true;
+        renderClientSites(client, model.query);
       }
     }
-    const empty = workspace.querySelector("[data-clients-no-results]");
-    if (empty) empty.hidden = visibleCount > 0;
+    workspace.querySelector('[data-client-filter-count="all"]').textContent = String(model.rows.length);
+    workspace.querySelector('[data-client-filter-count="attention"]').textContent = String(problemCount);
+    workspace.querySelector("[data-clients-no-results]").hidden = visibleCount > 0 || model.rows.length === 0;
+    for (const button of workspace.querySelectorAll("[data-server-client-filter]")) {
+      const active = (button.dataset.serverClientFilter === "attention") === model.problemsOnly;
+      button.classList.toggle("is-active", active);
+      button.setAttribute("aria-pressed", String(active));
+    }
   }
+
   function updateClientAccountForm(form) {
     const selection = form.querySelector("[data-client-account-select]")?.selectedOptions[0];
     const domain = selection?.dataset.domain || "";
@@ -230,56 +127,53 @@
     const searchField = workspace.querySelector("[data-server-clients-search]");
     if (!searchField) continue;
     const model = {
-      rows: clientRows(workspace),
+      rows: workspace.querySelectorAll("[data-server-client-row]"),
       query: searchField.value.trim().toLocaleLowerCase(),
-      selected: "all",
-      sorter: workspace.querySelector("[data-server-clients-sort]")?.value || "debt"
+      problemsOnly: false
     };
-    for (const row of model.rows) initializeClientRow(row);
+    for (const row of model.rows) initializeClient(row);
     workspace.addEventListener("input", event => {
-      if (event.target.matches("[data-server-clients-search]")) {
+      if (event.target === searchField) {
         model.query = searchField.value.trim().toLocaleLowerCase();
-        filterClients(workspace, model);
+        renderClientList(workspace, model);
       }
       if (event.target.matches("[data-client-domain-search]")) {
-        const row = event.target.closest("[data-server-client-row]");
-        const client = clientModels.get(row);
-        client.siteSearch = event.target.value.trim().toLocaleLowerCase();
+        const client = clientModels.get(event.target.closest("[data-server-client-row]"));
+        client.query = event.target.value.trim().toLocaleLowerCase();
         client.showAll = false;
-        updateClientSites(row, model.query);
+        renderClientSites(client, model.query);
       }
     });
     workspace.addEventListener("change", event => {
-      if (event.target.matches("[data-server-clients-sort]")) {
-        model.sorter = event.target.value;
-        filterClients(workspace, model);
+      if (event.target.matches("[data-client-account-select]")) {
+        updateClientAccountForm(event.target.closest("[data-client-account-form]"));
       }
-      if (event.target.matches("[data-client-errors-only]")) {
-        const row = event.target.closest("[data-server-client-row]");
-        clientModels.get(row).errorsOnly = event.target.checked;
-        updateClientSites(row, model.query);
-      }
-      if (event.target.matches("[data-client-account-select]")) updateClientAccountForm(event.target.closest("[data-client-account-form]"));
     });
     workspace.addEventListener("click", event => {
-      const chip = event.target.closest("[data-server-client-filter]");
-      if (chip) {
-        for (const button of workspace.querySelectorAll("[data-server-client-filter]")) {
-          const active = button === chip;
-          button.classList.toggle("is-active", active);
-          button.setAttribute("aria-pressed", String(active));
-        }
-        model.selected = chip.dataset.serverClientFilter;
-        filterClients(workspace, model);
+      const filterButton = event.target.closest("[data-server-client-filter]");
+      if (filterButton) {
+        model.problemsOnly = filterButton.dataset.serverClientFilter === "attention";
+        renderClientList(workspace, model);
       }
-      const tab = event.target.closest("[data-client-tab]");
-      if (tab) activateClientTab(tab.closest("[data-server-client-row]"), tab.dataset.clientTab);
-      const more = event.target.closest("[data-client-show-all]");
-      if (more) {
-        const row = more.closest("[data-server-client-row]");
-        clientModels.get(row).showAll = true;
-        updateClientSites(row, model.query);
+      if (event.target.closest("[data-client-show-all]")) {
+        const client = clientModels.get(event.target.closest("[data-server-client-row]"));
+        client.showAll = !client.showAll;
+        renderClientSites(client, model.query);
       }
+      const scheduleButton = event.target.closest("[data-client-schedule-toggle]");
+      if (scheduleButton) {
+        const row = scheduleButton.closest("[data-server-client-row]");
+        const client = clientModels.get(row);
+        client.scheduleOpen = !client.scheduleOpen;
+        row.querySelector("[data-client-schedule]").hidden = !client.scheduleOpen;
+        scheduleButton.setAttribute("aria-expanded", String(client.scheduleOpen));
+      }
+    });
+    workspace.addEventListener("site-certificate-renewed", event => {
+      const client = clientModels.get(event.target.closest("[data-server-client-row]"));
+      const site = client.sites.find(candidate => candidate.element === event.target);
+      site.invalidCertificates.delete(event.detail);
+      renderClientList(workspace, model);
     });
     for (const form of workspace.querySelectorAll("[data-client-account-form]")) {
       updateClientAccountForm(form);
@@ -288,20 +182,19 @@
             form.querySelector("[data-client-account-confirm]").disabled) event.preventDefault();
       });
     }
-    filterClients(workspace, model);
+    renderClientList(workspace, model);
   }
   // The shared dialogs live after <main>, unlike the former per-site dialogs.
-  // Keep the selected server workspace in the redirect fragment after POST.
+  // Keep the selected server workspace in the query after POST.
   for (const dialog of ["clientQuotaModal", "clientDeleteModal"]) {
     document.getElementById(dialog)?.addEventListener("submit", event => {
       const form = event.target;
       if (!(form instanceof HTMLFormElement)) return;
       const navigation = readNavigation();
-      const parameters = new URLSearchParams({
-        "server-id": navigation.serverID || localPanel().dataset.serverId,
-        section: "clients"
-      });
-      form.action = form.action.split("#", 1)[0] + "#" + parameters.toString();
+      const actionURL = new URL(form.action, window.location.href);
+      actionURL.searchParams.set("section", "clients");
+      actionURL.searchParams.set("installation", navigation.serverID || localPanel().dataset.serverId);
+      form.action = actionURL.href;
     });
   }
   // Shared Bootstrap dialogs retain the original POST names, domain and CSRF.

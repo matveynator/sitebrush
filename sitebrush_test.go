@@ -2954,7 +2954,7 @@ func TestServerSettingsNavigationPreservesExistingControls(t *testing.T) {
 			t.Fatalf("missing settings asset %s: %v", asset, err)
 		}
 	}
-	for _, section := range []string{"overview", "monetization", "network", "updates", "registration", "demo", "clients"} {
+	for _, section := range []string{"overview", "clients", "registration", "billing", "network"} {
 		if !strings.Contains(page, `data-server-config-shortcut="`+section+`"`) {
 			t.Errorf("missing sidebar section navigation for %q", section)
 		}
@@ -2963,7 +2963,7 @@ func TestServerSettingsNavigationPreservesExistingControls(t *testing.T) {
 		}
 	}
 	for _, fragment := range []string{
-		`data-hosting-installation-panel="temporary-sites"`,
+		`data-registration-temporary-sites`,
 		`data-expense-server-select`,
 		`data-public-ip-panel`,
 		`{{template "server-profiler" .}}`,
@@ -2984,7 +2984,7 @@ func TestServerSettingsNavigationPreservesExistingControls(t *testing.T) {
 	}
 	for _, fragment := range []string{
 		`{{if $server.Local}}`,
-		`{{if $.CanConfigurePublicIPs}}`,
+		`{{if and $.CanConfigurePublicIPs (eq $.SelectedServerSection "network")}}`,
 		`data-server-root-tabs`,
 		`data-server-installations-container`,
 		`data-server-config-layout`,
@@ -3019,23 +3019,35 @@ func TestServerSettingsNavigationPreservesExistingControls(t *testing.T) {
 		t.Error("navigation must live in the left sidebar")
 	}
 	previousPosition := -1
-	for _, section := range []string{"overview", "network", "updates", "registration", "demo", "clients", "monetization", "billing"} {
+	for _, section := range []string{"overview", "clients", "registration", "billing", "network"} {
 		position := strings.Index(navigation, `data-server-config-shortcut="`+section+`"`)
 		if position <= previousPosition {
 			t.Errorf("sidebar section %q is missing or appears out of order", section)
 		}
 		previousPosition = position
 	}
+	dividerPosition := strings.Index(navigation, `class="server-nav-divider"`)
+	catalogPosition := strings.Index(navigation, `data-server-root-target="installations"`)
+	if strings.Count(navigation, `data-server-root-target=`) != 6 || dividerPosition <= previousPosition || catalogPosition <= dividerPosition {
+		t.Error("sidebar must have five node entries and one central entry below the divider")
+	}
+	centralNavigation := strings.SplitN(page, `data-central-settings-nav`, 2)
+	if len(centralNavigation) != 2 {
+		t.Fatal("central workspace navigation is missing")
+	}
 	for _, workspace := range []string{"installations", "clients", "billing"} {
-		if !strings.Contains(navigation, `data-server-root-target="`+workspace+`"`) {
-			t.Errorf("missing global workspace %q", workspace)
+		if !strings.Contains(strings.SplitN(centralNavigation[1], "</nav>", 2)[0], `data-server-root-target="`+workspace+`"`) {
+			t.Errorf("missing central workspace %q", workspace)
 		}
 	}
 	if !strings.Contains(navigation, `{{if .ShowCentralRegistry}}`) {
 		t.Error("central installation workspaces must be authorized")
 	}
-	if strings.Index(page, `data-server-config-view="monetization"`) <= strings.Index(page, `data-server-config-view="clients"`) {
-		t.Error("monetization view must be the final server section")
+	billingPosition := strings.Index(page, `data-server-config-view="billing"`)
+	tariffPosition := strings.Index(page, `data-server-tariff data-disk-bytes`)
+	ledgerPosition := strings.Index(page, `{{template "invoice-ledger" $}}`)
+	if billingPosition < 0 || tariffPosition <= billingPosition || ledgerPosition <= tariffPosition {
+		t.Error("the billing view must show tariffs before the invoice ledger")
 	}
 	if !strings.Contains(page, `server_ui_monetization_purpose`) {
 		t.Error("monetization purpose is missing from the template")
@@ -3051,7 +3063,7 @@ func TestServerSettingsNavigationPreservesExistingControls(t *testing.T) {
 	}
 	for _, authorized := range []bool{false, true} {
 		view := map[string]any{
-			"T": translationsForLanguageCode("en"), "CanConfigurePublicIPs": authorized,
+			"T": translationsForLanguageCode("en"), "CanConfigurePublicIPs": authorized, "SelectedServerSection": "network",
 			"ExpenseServers": []simplifiedExpenseServerView{
 				{Server: hostingandsupport.ServerView{ID: "local", Local: true}},
 				{Server: hostingandsupport.ServerView{ID: "remote"}},
@@ -3082,29 +3094,28 @@ func TestServerSidebarCapabilitiesAreScopedBeforeJavascript(t *testing.T) {
 		t.Fatal(err)
 	}
 	cases := []struct {
-		name         string
-		local        bool
-		localID      string
-		autoRegister bool
-		publicIPs    bool
-		central      bool
-		visible      []string
-		hidden       []string
+		name      string
+		local     bool
+		localID   string
+		publicIPs bool
+		central   bool
+		visible   []string
+		hidden    []string
 	}{
 		{
 			name: "local prerequisites disabled", local: true, publicIPs: true,
-			visible: []string{"network", "updates", "registration", "monetization", "clients", "billing"},
-			hidden:  []string{"demo"},
+			visible: []string{"network", "registration", "clients", "billing"},
+			hidden:  []string{"updates", "demo", "monetization"},
 		},
 		{
-			name: "local registration enabled with restricted permissions", local: true, autoRegister: true,
-			visible: []string{"registration", "demo", "monetization", "clients", "billing"},
-			hidden:  []string{"network", "updates"},
+			name: "local registration enabled with restricted permissions", local: true,
+			visible: []string{"registration", "clients", "billing"},
+			hidden:  []string{"network", "updates", "demo", "monetization"},
 		},
 		{
 			name: "local owner viewing a remote installation", central: true, localID: "local", publicIPs: true,
-			visible: []string{"overview", "network", "updates", "registration", "monetization", "clients", "billing"},
-			hidden:  []string{"demo"},
+			visible: []string{"overview", "network", "registration", "clients", "billing"},
+			hidden:  []string{"updates", "demo", "monetization"},
 		},
 		{
 			name: "central remote installation without a local menu target", central: true,
@@ -3115,14 +3126,13 @@ func TestServerSidebarCapabilitiesAreScopedBeforeJavascript(t *testing.T) {
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			view := map[string]any{
-				"T":                       translationsForLanguageCode("en"),
-				"SelectedServerLocal":     testCase.local,
-				"LocalServerID":           testCase.localID,
-				"AutoRegistrationEnabled": testCase.autoRegister,
-				"CanConfigurePublicIPs":   testCase.publicIPs,
-				"ShowCentralRegistry":     testCase.central,
-				"DemoSettings":            demo.Settings{},
-				"DemoStatus":              map[string]any{"SnapshotAvailable": false, "LastRestoredAt": ""},
+				"T":                     translationsForLanguageCode("en"),
+				"SelectedServerLocal":   testCase.local,
+				"LocalServerID":         testCase.localID,
+				"CanConfigurePublicIPs": testCase.publicIPs,
+				"ShowCentralRegistry":   testCase.central,
+				"DemoSettings":          demo.Settings{},
+				"DemoStatus":            map[string]any{"SnapshotAvailable": false, "LastRestoredAt": ""},
 				"ExpenseServers": []simplifiedExpenseServerView{{
 					Server:       hostingandsupport.ServerView{ID: "test-installation", Local: testCase.local},
 					MailSelected: true,
@@ -3168,10 +3178,11 @@ func TestRegistrationSettingsScopeTrialAndDemoNavigation(t *testing.T) {
 	}
 	page := string(pageBytes)
 	for _, fragment := range []string{
-		`{{if or (and .AutoRegistrationEnabled .PublicTrialEnabled) .ActivePublicTrialSites .CleanupPendingTrialSites .ArchivedPublicTrialSites}}<button type="button" data-server-root-target="temporary-sites"`,
-		`{{if or (and .AutoRegistrationEnabled .PublicTrialEnabled) .ActivePublicTrialSites .CleanupPendingTrialSites .ArchivedPublicTrialSites}}` + "\n" + `    <section class="server-root-workspace" data-hosting-installation-panel="temporary-sites"`,
-		`{{if .AutoRegistrationEnabled}}<button type="button" data-server-root-target="servers" data-server-config-shortcut="demo"`,
-		`{{if and $.AutoRegistrationEnabled (eq $.SelectedServerSection "demo")}}<section class="server-config-view" data-server-config-view="demo"`,
+		`{{if eq $.SelectedServerSection "registration"}}`,
+		`{{if $.AutoRegistrationEnabled}}`,
+		`{{template "demo-settings-form" $}}`,
+		`{{template "registration-temporary-sites" $}}`,
+		`data-registration-temporary-sites`,
 		`{{if .CleanupPendingTrialSites}}`,
 		`{{range .CleanupPendingTrialSites}}`,
 		`{{if .DeletedAt}}`,
@@ -3360,22 +3371,15 @@ func TestHostingAndSupportTemplateRendersServerView(t *testing.T) {
 	if err := parsedTemplate.Execute(&registrationHTML, view); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(registrationHTML.String(), `data-server-config-shortcut="demo"`) ||
-		strings.Contains(registrationHTML.String(), `data-server-config-target="demo"`) {
-		t.Fatal("demo settings must have one sidebar route without a duplicate button")
+	registrationBody := registrationHTML.String()
+	if !strings.Contains(registrationBody, `data-server-config-view="registration"`) ||
+		strings.Contains(registrationBody, `data-server-config-shortcut="demo"`) ||
+		strings.Count(registrationBody, `class="billing-demo-settings-form"`) != 1 {
+		t.Fatal("registration must include exactly one demo form in its own view")
 	}
-	view["SelectedServerSection"] = "demo"
-	var demoHTML bytes.Buffer
-	if err := parsedTemplate.Execute(&demoHTML, view); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(demoHTML.String(), `data-server-config-view="demo"`) ||
-		strings.Count(demoHTML.String(), `class="billing-demo-settings-form"`) != 1 {
-		t.Fatal("demo section must have one source of truth")
-	}
-	if !strings.Contains(demoHTML.String(), "Демо-сайты не участвуют в биллинге.") ||
-		!strings.Contains(demoHTML.String(), "Они не создают клиентов, счетов, оплат и покрытия расходов хостинга.") {
-		t.Fatal("demo tab does not explain its billing exclusion")
+	if !strings.Contains(registrationBody, "Демо-сайты не участвуют в биллинге.") ||
+		!strings.Contains(registrationBody, "Они не создают клиентов, счетов, оплат и покрытия расходов хостинга.") {
+		t.Fatal("registration view does not explain the demo billing exclusion")
 	}
 }
 
@@ -3472,7 +3476,7 @@ func TestExpensesTemplateShowsOnlyLocalServerAndEnabledDemoOutsideSitebrushCom(t
 			t.Fatalf("simplified expenses rendered technical fragment %q", removedFragment)
 		}
 	}
-	for _, monitoringFragment := range []string{"локальный сервер SiteBrush", "Linux", "AMD64", "CPU", "12%", "доступен"} {
+	for _, monitoringFragment := range []string{"Linux", "AMD64", "CPU", "12%", "доступен"} {
 		if !strings.Contains(disabledDemoHTML, monitoringFragment) {
 			t.Fatalf("simplified expenses missing server monitoring fragment %q", monitoringFragment)
 		}
@@ -16611,20 +16615,9 @@ func TestSimplifiedExpensesShowsTestDriveUnderRegistrationAfterExplicitPermissio
 	if !strings.Contains(cleanupRendered.String(), "cleanup.sitebrush.example") || !strings.Contains(cleanupRendered.String(), "deleted.sitebrush.example") {
 		t.Fatal("registration enabled with Test Drive disabled hid cleanup records")
 	}
-	// Demo is a separate deferred section: opening Registration must not render
-	// its form, but direct navigation to Demo must render exactly one.
-	if strings.Contains(cleanupRendered.String(), `name="demo_site_enabled"`) {
-		t.Fatal("registration eagerly rendered the demo form")
+	if strings.Count(cleanupRendered.String(), `name="demo_site_enabled"`) != 1 {
+		t.Fatal("enabled registration must render exactly one demo form even when Test Drive is disabled")
 	}
-	view["SelectedServerSection"] = "demo"
-	var demoRendered bytes.Buffer
-	if err := parsedTemplate.Execute(&demoRendered, view); err != nil {
-		t.Fatal(err)
-	}
-	if strings.Count(demoRendered.String(), `name="demo_site_enabled"`) != 1 {
-		t.Fatal("enabled registration did not expose the deferred demo settings")
-	}
-	view["SelectedServerSection"] = "registration"
 	view["PublicTrialEnabled"] = true
 	var unavailableRendered bytes.Buffer
 	if err := parsedTemplate.Execute(&unavailableRendered, view); err != nil {
@@ -16632,12 +16625,12 @@ func TestSimplifiedExpensesShowsTestDriveUnderRegistrationAfterExplicitPermissio
 	}
 	unavailableBody := unavailableRendered.String()
 	for _, expected := range []string{
-		`data-server-root-target="temporary-sites"`,
-		`data-hosting-installation-panel="temporary-sites"`,
+		`data-server-config-view="registration"`,
+		`data-registration-temporary-sites`,
 		`trial.sitebrush.example`,
 		`https://copied.example/`,
 		`deleted.sitebrush.example`,
-		`data-server-config-shortcut="demo"`,
+		`name="demo_site_enabled"`,
 	} {
 		if !strings.Contains(unavailableBody, expected) {
 			t.Fatalf("enabled registration and Test Drive missing %q", expected)

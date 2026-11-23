@@ -28967,7 +28967,7 @@ func (a *App) expensesPage(w http.ResponseWriter, r *http.Request) {
 	view["Status"] = status
 	updateAllowed := view["CanConfigurePublicIPs"] == true
 	view["ShowProfiler"] = a.profiler != nil && updateAllowed
-	if updateAllowed && view["SelectedServerSection"] == "updates" && view["SelectedServerLocal"] == true {
+	if updateAllowed && view["SelectedServerSection"] == "network" && view["SelectedServerLocal"] == true {
 		_, announcementErr := a.centralAnnouncementIdentity()
 		view["ShowServerUpdater"] = true
 		view["CentralAnnouncements"] = announcementErr == nil
@@ -30145,8 +30145,18 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 	// Do not construct client/site/invoice view graphs just to discard them.
 	// The overview needs only already prepared server summaries.
 	section := strings.TrimSpace(query.Get("section"))
+	// Keep bookmarked settings routes working after the sidebar consolidation.
+	if workspace == "temporary-sites" {
+		section = "registration"
+	}
 	switch section {
-	case "overview", "network", "updates", "registration", "demo", "clients", "billing", "monetization":
+	case "updates":
+		section = "network"
+	case "demo":
+		section = "registration"
+	case "monetization":
+		section = "billing"
+	case "overview", "network", "registration", "clients", "billing":
 	default:
 		section = "overview"
 	}
@@ -30380,7 +30390,7 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 		"Backups":      nil,
 		"DemoSettings": snapshot.DemoSettings,
 		"DemoStatus": func() demoSiteStatusView {
-			if section == "demo" && len(expenseServers) > 0 && expenseServers[0].Server.Local {
+			if section == "registration" && snapshot.AutoRegistrationEnabled && len(expenseServers) > 0 && expenseServers[0].Server.Local {
 				return a.demoSiteStatusView(r.Context(), snapshot.DemoSettings)
 			}
 			return demoSiteStatusView{}
