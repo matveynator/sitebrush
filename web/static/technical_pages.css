@@ -3478,7 +3478,7 @@ body.technical-page.analytics-page {
  .technical-page .profile-account-grid > .profile-sessions-card { grid-column: 1; }
  .technical-page .profile-account-grid > .profile-admin-ip-card { grid-column: 2; }
  .technical-page .profile-account-grid > .profile-ai-connect-card { grid-column: 1; }
- .technical-page .profile-account-grid > .profile-ai-card { grid-column: 2; }
+ /* AI access follows the deletion card; auto placement avoids empty cells when both exist. */
 }
 
 .account-captcha { display: grid; gap: .5rem; margin: 1rem 0; max-width: 100%; }
@@ -3524,4 +3524,63 @@ body.technical-page.analytics-page {
 }
 @media (max-width: 760px) {
     .technical-page .page-header { padding: 16px; }
+}
+
+/* Destructive account/site operations stay in the profile grid, paired with AI · SiteBrush.
+   The shared card geometry remains intact; red is reserved for the danger zone. */
+.technical-page .profile-page .profile-delete-card {
+    border-color: var(--theme-destructive) !important;
+    background: var(--theme-card) !important;
+    box-shadow: inset 4px 0 0 var(--theme-destructive), var(--shadow) !important;
+}
+.technical-page .profile-delete-card .profile-account-card-header {
+    min-height: 0;
+}
+.technical-page .profile-delete-card .profile-account-card-header h2 {
+    color: var(--theme-destructive);
+}
+.technical-page .profile-delete-card .profile-account-card-header p {
+    color: var(--theme-muted-foreground);
+}
+.technical-page .profile-delete-option {
+    display: grid;
+    gap: 14px;
+    min-width: 0;
+}
+.technical-page .profile-delete-option + .profile-delete-option {
+    padding-top: 20px;
+    border-top: 1px solid var(--theme-border);
+}
+.technical-page .profile-delete-form {
+    display: grid;
+    align-content: start;
+    justify-items: start;
+    gap: 12px;
+    min-width: 0;
+    margin: 0;
+}
+.technical-page .profile-delete-form label {
+    display: grid;
+    gap: 8px;
+    width: 100%;
+    min-width: 0;
+    margin: 0;
+}
+.technical-page .profile-delete-form input {
+    width: 100%;
+}
+body.technical-page .profile-delete-card .btn-outline-danger {
+    border-color: var(--theme-destructive) !important;
+    background: color-mix(in srgb, var(--theme-destructive) 10%, var(--theme-card)) !important;
+    color: var(--theme-destructive) !important;
+    font-weight: 650 !important;
+}
+body.technical-page .profile-delete-card .btn-outline-danger:hover:not(:disabled) {
+    background: var(--theme-destructive) !important;
+    color: var(--theme-destructive-foreground) !important;
+}
+@media (max-width: 900px), (hover: none) and (pointer: coarse) {
+    .technical-page .profile-page .profile-account-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
 }

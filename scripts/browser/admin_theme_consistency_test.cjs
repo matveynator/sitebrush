@@ -33,4 +33,25 @@ assert.match(profiler, /var\(--theme-font-sans\)/);
 assert.match(profiler, /var\(--theme-card\)/);
 assert.doesNotMatch(profiler, /Arial,Helvetica/,
   'profiler must not introduce a separate font family');
-console.log('Admin theme consistency: shared palette, controls, settings, and profiler passed');
+// Deletion must remain a real grid child beside AI · SiteBrush, never after </main>.
+const profile = read('web/profile.html');
+const aiConnect = profile.indexOf('class="authentication-card profile-form profile-account-card profile-ai-connect-card"');
+const danger = profile.indexOf('class="authentication-card profile-form profile-account-card profile-delete-card"');
+const aiAccess = profile.indexOf('class="authentication-card profile-form profile-account-card profile-ai-card"');
+const gridClose = profile.indexOf('</div>\n</main>', danger);
+assert.ok(aiConnect >= 0 && danger > aiConnect && aiAccess > danger,
+  'destructive card must be after AI · SiteBrush and before AI-access card');
+assert.ok(gridClose > danger, 'destructive card must appear inside the profile grid');
+assert.equal(profile.match(/class="authentication-card profile-form profile-account-card profile-delete-card"/g).length, 1,
+  'both account and website deletion must occupy one grid cell');
+for (const action of ['delete_site', 'delete_account']) {
+  assert.match(profile, new RegExp('name="profile_action" value="' + action + '"'),
+    action + ' must preserve its POST action');
+}
+assert.match(shared, /\\.profile-delete-card \\.profile-account-card-header h2/);
+assert.match(shared, /var\\(--theme-destructive\\)/);
+assert.match(shared, /@media \\(max-width: 900px\\), \\(hover: none\\) and \\(pointer: coarse\\)/);
+assert.doesNotMatch(shared, /\\.profile-account-grid > \\.profile-ai-card \\{ grid-column: 2; \\}/,
+  'AI access must use auto placement when a deletion card occupies column two');
+
+console.log('Admin theme consistency: palette, controls, profile grid, deletion danger zone, and profiler passed');
