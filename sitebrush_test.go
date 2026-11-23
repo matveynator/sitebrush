@@ -3084,6 +3084,7 @@ func TestServerSidebarCapabilitiesAreScopedBeforeJavascript(t *testing.T) {
 	cases := []struct {
 		name         string
 		local        bool
+		localID      string
 		autoRegister bool
 		publicIPs    bool
 		central      bool
@@ -3096,12 +3097,17 @@ func TestServerSidebarCapabilitiesAreScopedBeforeJavascript(t *testing.T) {
 			hidden:  []string{"demo"},
 		},
 		{
-			name: "local registration enabled", local: true, autoRegister: true,
-			visible: []string{"updates", "registration", "demo", "monetization", "clients", "billing"},
-			hidden:  []string{"network"},
+			name: "local registration enabled with restricted permissions", local: true, autoRegister: true,
+			visible: []string{"registration", "demo", "monetization", "clients", "billing"},
+			hidden:  []string{"network", "updates"},
 		},
 		{
-			name: "central remote installation", central: true,
+			name: "local owner viewing a remote installation", central: true, localID: "local", publicIPs: true,
+			visible: []string{"overview", "network", "updates", "registration", "monetization", "clients", "billing"},
+			hidden:  []string{"demo"},
+		},
+		{
+			name: "central remote installation without a local menu target", central: true,
 			visible: []string{"clients", "billing"},
 			hidden:  []string{"network", "updates", "registration", "demo", "monetization"},
 		},
@@ -3111,6 +3117,7 @@ func TestServerSidebarCapabilitiesAreScopedBeforeJavascript(t *testing.T) {
 			view := map[string]any{
 				"T":                       translationsForLanguageCode("en"),
 				"SelectedServerLocal":     testCase.local,
+				"LocalServerID":           testCase.localID,
 				"AutoRegistrationEnabled": testCase.autoRegister,
 				"CanConfigurePublicIPs":   testCase.publicIPs,
 				"ShowCentralRegistry":     testCase.central,
